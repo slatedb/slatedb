@@ -1,0 +1,17 @@
+name: Run Clippy
+
+on: [push, pull_request]  # Run on pushes and pull requests
+
+jobs:
+  clippy_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable 
+          components: clippy
+      - uses: actions-rs/clippy-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Optional: Use '--all-targets --all-features' for comprehensive checks
