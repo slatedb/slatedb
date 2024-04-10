@@ -6,7 +6,6 @@ use crate::db::DbInner;
 impl DbInner {
   pub(crate) fn flush(&self) {
     if let Some(imm_memtable) = self.freeze_memtable() {
-
       // TODO write memtable to disk
       // TODO upload memtable to obj storage
 
@@ -33,7 +32,7 @@ impl DbInner {
     snapshot.imm_memtables.insert(0, old_memtable.clone());
     // Update the snapshot.
     *guard = Arc::new(snapshot);
-    return Some(old_memtable);
+    Some(old_memtable)
   }
 
   pub(crate) fn spawn_flush_thread(
