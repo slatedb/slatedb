@@ -12,7 +12,6 @@ pub struct SsTable {
   #[allow(dead_code)]
   object_store: Arc<dyn ObjectStore>,
   pub(crate) first_key: Bytes,
-  pub(crate) last_key: Bytes,
   block_meta: Vec<BlockMeta>,
 }
 
@@ -22,7 +21,6 @@ impl PartialEq for SsTable {
     self.id == other.id
       && self.path == other.path
       && self.first_key == other.first_key
-      && self.last_key == other.last_key
       && self.block_meta == other.block_meta
   }
 }
@@ -55,7 +53,6 @@ impl SsTable {
       path,
       object_store,
       first_key: block_meta.first().unwrap().first_key.clone(),
-      last_key: block_meta.last().unwrap().last_key.clone(),
       block_meta,
     }
   }
@@ -65,7 +62,6 @@ impl SsTable {
 pub struct SsTableBuilder {
   builder: BlockBuilder,
   first_key: Vec<u8>,
-  last_key: Vec<u8>,
   block_meta: Vec<BlockMeta>,
   data: Vec<u8>,
   block_size: usize,
@@ -78,7 +74,6 @@ impl SsTableBuilder {
       data: Vec::new(),
       block_meta: Vec::new(),
       first_key: Vec::new(),
-      last_key: Vec::new(),
       block_size,
       builder: BlockBuilder::new(block_size),
     }
@@ -89,18 +84,14 @@ impl SsTableBuilder {
       self.first_key = key.to_vec();
     }
 
-    if self.builder.add(key, value) {
-      self.last_key = key.to_vec();
-      return;
+    if !self.builder.add(key, value) {
+      // Create a new block builder and append block data
+      self.finish_block();
+
+      // New block must always accept the first KV pair
+      assert!(self.builder.add(key, value));
+      self.first_key = key.to_vec();
     }
-
-    // Create a new block builder and append block data
-    self.finish_block();
-
-    // New block must always accept the first KV pair
-    assert!(self.builder.add(key, value));
-    self.first_key = key.to_vec();
-    self.last_key = key.to_vec();
   }
 
   pub fn estimated_size(&self) -> usize {
@@ -113,7 +104,6 @@ impl SsTableBuilder {
     self.block_meta.push(BlockMeta {
       offset: self.data.len(),
       first_key: std::mem::take(&mut self.first_key).into(),
-      last_key: std::mem::take(&mut self.last_key).into(),
     });
     let checksum = crc32fast::hash(&encoded_block);
     self.data.extend(encoded_block);
@@ -137,7 +127,6 @@ impl SsTableBuilder {
       path,
       object_store,
       first_key: self.block_meta.first().unwrap().first_key.clone(),
-      last_key: self.block_meta.last().unwrap().last_key.clone(),
       block_meta: self.block_meta,
     }
   }

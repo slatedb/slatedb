@@ -102,7 +102,6 @@ impl BlockBuilder {
 pub(crate) struct BlockMeta {
   pub(crate) offset: usize,
   pub(crate) first_key: Bytes,
-  pub(crate) last_key: Bytes,
 }
 
 impl BlockMeta {
@@ -113,8 +112,6 @@ impl BlockMeta {
       estimated_size += std::mem::size_of::<u32>();      // u32 = size of offset
       estimated_size += std::mem::size_of::<u16>();      // u16 = size of key length
       estimated_size += meta.first_key.len();
-      estimated_size += std::mem::size_of::<u16>();      // u16 = size of key length
-      estimated_size += meta.last_key.len();
     }
     estimated_size += std::mem::size_of::<u32>();        // u32 = checksum
     // Reserve the space to improve performance
@@ -125,8 +122,6 @@ impl BlockMeta {
       buf.put_u32(meta.offset as u32);
       buf.put_u16(meta.first_key.len() as u16);
       buf.put(meta.first_key.as_ref());
-      buf.put_u16(meta.last_key.len() as u16);
-      buf.put(meta.last_key.as_ref());
     }
     buf.put_u32(crc32fast::hash(&buf[original_len + 4..]));
     assert_eq!(estimated_size, buf.len() - original_len);
@@ -141,12 +136,9 @@ impl BlockMeta {
       let offset = buf.get_u32() as usize;
       let first_key_len = buf.get_u16() as usize;
       let first_key = buf.copy_to_bytes(first_key_len);
-      let last_key_len = buf.get_u16() as usize;
-      let last_key = buf.copy_to_bytes(last_key_len);
       block_meta.push(BlockMeta {
         offset,
         first_key,
-        last_key,
       });
     }
     if buf.get_u32() != checksum {
@@ -179,12 +171,10 @@ mod tests {
     block_meta.push(BlockMeta {
       offset: 0,
       first_key: Bytes::from("key1"),
-      last_key: Bytes::from("key2"),
     });
     block_meta.push(BlockMeta {
       offset: 99,
       first_key: Bytes::from("key3"),
-      last_key: Bytes::from("key4"),
     });
     let mut buf = Vec::new();
     BlockMeta::encode_block_meta(&block_meta, &mut buf);
