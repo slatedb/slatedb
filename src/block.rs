@@ -167,15 +167,16 @@ mod tests {
 
   #[test]
   fn test_block_meta() {
-    let mut block_meta = Vec::new();
-    block_meta.push(BlockMeta {
-      offset: 0,
-      first_key: Bytes::from("key1"),
-    });
-    block_meta.push(BlockMeta {
-      offset: 99,
-      first_key: Bytes::from("key3"),
-    });
+    let block_meta = vec![
+      BlockMeta {
+        offset: 0,
+        first_key: Bytes::from("key1"),
+      },
+      BlockMeta {
+        offset: 99,
+        first_key: Bytes::from("key2"),
+      },
+    ];
     let mut buf = Vec::new();
     BlockMeta::encode_block_meta(&block_meta, &mut buf);
     let decoded = BlockMeta::decode_block_meta(&buf);
