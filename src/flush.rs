@@ -1,18 +1,40 @@
 use std::sync::Arc;
 use std::time::Duration;
 use crate::mem_table::MemTable;
-use crate::db::DbInner;
+use crate::db::{DbInner, DbState};
+use crate::sst::{EncodedSsTableBuilder, SsTableInfo};
 
 impl DbInner {
   pub(crate) fn flush(&self) {
-    if let Some(imm_memtable) = self.freeze_memtable() {
-      // TODO write memtable to disk
-      // TODO upload memtable to obj storage
+    self.freeze_memtable();
+    self.runtime.block_on(self.flush_imms());
+  }
 
-      // Notify clients that their writes have been flushed.
-      imm_memtable.flush_notify.notify_waiters();
+  async fn flush_imm(&self, imm: &Arc<MemTable>, id: usize) -> SsTableInfo {
+    let mut sst_builder = EncodedSsTableBuilder::new(4096);
+    for kv in imm.iter() {
+      sst_builder.add(kv.key(), kv.value());
+    }
+    let encoded_sst = sst_builder.build(id);
+    self.table_store.write_sst(&encoded_sst).await;
+    encoded_sst.info
+  }
 
-      // TODO remove memtable from imm_memtables
+  async fn flush_imms(&self) {
+    while let Some((imm, id)) = {
+      let rguard = self.state.read();
+      let snapshot: DbState = rguard.as_ref().clone();
+      snapshot.imm_memtables.last().map(|imm| (imm.clone(), snapshot.next_sst_id))
+    } {
+      let sst = self.flush_imm(&imm, id).await;
+      let mut wguard = self.state.write();
+      let mut snapshot = wguard.as_ref().clone();
+      snapshot.imm_memtables.pop();
+      // always put the new sst at the front of l0
+      snapshot.l0.insert(0, sst);
+      snapshot.next_sst_id += 1;
+      *wguard = Arc::new(snapshot);
+      imm.flush_notify.notify_waiters();
     }
   }
 

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use crossbeam_skiplist::map::Iter;
 use crossbeam_skiplist::SkipMap;
 use tokio::sync::Notify;
 
@@ -19,6 +20,10 @@ impl MemTable {
 
   pub(crate) fn get(&self, key: &[u8]) -> Option<Bytes> {
     self.map.get(key).map(|entry| entry.value().clone())
+  }
+
+  pub(crate) fn iter(&self) -> Iter<Bytes, Bytes> {
+    self.map.iter()
   }
 
   pub(crate) async fn put(&self, key: &[u8], value: &[u8]) {

@@ -1,9 +1,16 @@
 use std::{path::{Path, PathBuf}, sync::Arc};
 
 use bytes::Bytes;
+use object_store::memory::InMemory;
+use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
+use tokio::runtime::Runtime;
+use crate::block::Block;
+use crate::block_iterator::BlockIterator;
 
 use crate::mem_table::MemTable;
+use crate::sst::SsTableInfo;
+use crate::tablestore::TableStore;
 
 pub struct DbOptions {
   pub flush_ms: usize,
@@ -13,6 +20,8 @@ pub struct DbOptions {
 pub(crate) struct DbState {
   pub(crate) memtable: Arc<MemTable>,
   pub(crate) imm_memtables: Vec<Arc<MemTable>>,
+  pub(crate) l0: Vec<SsTableInfo>,
+  pub(crate) next_sst_id: usize,
 }
 
 impl DbState {
@@ -20,6 +29,8 @@ impl DbState {
     Self {
       memtable: Arc::new(MemTable::new()),
       imm_memtables: Vec::new(),
+      l0: Vec::new(),
+      next_sst_id: 0,
     }
   }
 }
@@ -29,11 +40,13 @@ pub(crate) struct DbInner {
   #[allow(dead_code)]  // TODO remove this once we write SSTs to disk
   pub(crate) path: PathBuf,
   pub(crate) options: DbOptions,
+  pub(crate) table_store: TableStore,
+  pub(crate) runtime: Arc<Runtime>,
 }
 
 // TODO Return Result<> for get/put/delete everything... ?
 impl DbInner {
-  pub fn new(path: impl AsRef<Path>, options: DbOptions) -> Self {
+  pub fn new(path: impl AsRef<Path>, options: DbOptions, runtime: &Arc<Runtime>) -> Self {
     let path_buf = path.as_ref().to_path_buf();
 
     if !path_buf.exists() {
@@ -42,10 +55,13 @@ impl DbInner {
       });
     }
 
+    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     Self {
       state: Arc::new(RwLock::new(Arc::new(DbState::create()))),
       path: path_buf,
       options,
+      table_store: TableStore::new(&object_store),
+      runtime: runtime.clone()
     }
   }
 
@@ -63,10 +79,43 @@ impl DbInner {
       });
 
     // Filter is needed to remove tombstone deletes.
-    maybe_bytes.filter(|value| !value.is_empty())
+    if let Some(val) = maybe_bytes.filter(|value| !value.is_empty()) {
+      return Some(val);
+    }
 
-    // TODO look in SSTs on disk
-    // TODO look in SSTs on object storage
+    for sst in &snapshot.as_ref().l0 {
+      if let Some(block_index) = self.find_block_for_key(&sst, key) {
+        let block = self.table_store.read_block(&sst, block_index).await;
+        if let Some(val) = self.find_val_in_block(&block, key) {
+          if val.is_empty() {
+            return None;
+          }
+          return Some(Bytes::from(val));
+        }
+      }
+    }
+    None
+  }
+
+  fn find_block_for_key(&self, sst: &SsTableInfo, key: &[u8]) -> Option<usize> {
+    let block_idx = sst.block_meta.partition_point(|bm| bm.first_key > key);
+    if block_idx == sst.block_meta.len() {
+      return None
+    }
+    Some(block_idx)
+  }
+
+  fn find_val_in_block(&self, block: &Block, key: &[u8]) -> Option<Vec<u8>> {
+    let mut iter = BlockIterator::from_first_key(block);
+    while let Some(current_key) = iter.key() {
+      if current_key == key {
+        // TODO: there should be some way to do this without copying the buffer, but
+        //       rust won't let me because iter goes out of scope
+        return Some(Vec::from(iter.val().unwrap()))
+      }
+      iter.advance();
+    }
+    None
   }
 
   /// Put a key-value pair into the database. Key and value must not be empty.
@@ -106,8 +155,8 @@ pub struct Db {
 }
 
 impl Db {
-  pub fn open(path: impl AsRef<Path>, options: DbOptions) -> Self {
-    let inner = Arc::new(DbInner::new(path, options));
+  pub fn open(path: impl AsRef<Path>, options: DbOptions, runtime: &Arc<Runtime>) -> Self {
+    let inner = Arc::new(DbInner::new(path, options, runtime));
     let (tx, rx) = crossbeam_channel::unbounded();
     let flush_thread = inner.spawn_flush_thread(rx);
     Self {
@@ -155,9 +204,9 @@ mod tests {
 
   #[test]
   fn test_put_get_delete() {
-    let rt = Runtime::new().unwrap();
+    let rt = Arc::new(Runtime::new().unwrap());
     rt.block_on(async {
-      let kv_store = Db::open("/tmp/test_kv_store", DbOptions { flush_ms: 100 });
+      let kv_store = Db::open("/tmp/test_kv_store", DbOptions { flush_ms: 100 }, &rt);
       let key = b"test_key";
       let value = b"test_value";
       kv_store.put(key, value).await;
