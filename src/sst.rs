@@ -32,7 +32,7 @@ impl SsTableInfo {
       id,
       first_key: block_meta.first().unwrap().first_key.clone(),
       block_meta,
-      block_meta_offset: block_meta_offset,
+      block_meta_offset,
     }
   }
 }
@@ -109,7 +109,7 @@ impl EncodedSsTableBuilder {
     }
     EncodedSsTable {
       info: SsTableInfo {
-        id: id,
+        id,
         first_key,
         block_meta: self.block_meta,
         block_meta_offset: meta_offset,
