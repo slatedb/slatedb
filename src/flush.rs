@@ -10,7 +10,7 @@ impl DbInner {
     self.runtime.block_on(self.flush_imms());
   }
 
-  async fn flush_imm(&self, imm: &Arc<MemTable>, id: usize) -> SsTableInfo {
+  async fn flush_imm(&self, imm: Arc<MemTable>, id: usize) -> SsTableInfo {
     let mut sst_builder = EncodedSsTableBuilder::new(4096);
     for kv in imm.iter() {
       sst_builder.add(kv.key(), kv.value());
@@ -26,7 +26,7 @@ impl DbInner {
       let snapshot: DbState = rguard.as_ref().clone();
       snapshot.imm_memtables.last().map(|imm| (imm.clone(), snapshot.next_sst_id))
     } {
-      let sst = self.flush_imm(&imm, id).await;
+      let sst = self.flush_imm(imm.clone(), id).await;
       let mut wguard = self.state.write();
       let mut snapshot = wguard.as_ref().clone();
       snapshot.imm_memtables.pop();

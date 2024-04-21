@@ -46,7 +46,12 @@ pub(crate) struct DbInner {
 
 // TODO Return Result<> for get/put/delete everything... ?
 impl DbInner {
-  pub fn new(path: impl AsRef<Path>, options: DbOptions, runtime: &Arc<Runtime>) -> Self {
+  pub fn new(
+    path: impl AsRef<Path>,
+    options: DbOptions,
+    table_store: TableStore,
+    runtime: Arc<Runtime>
+  ) -> Self {
     let path_buf = path.as_ref().to_path_buf();
 
     if !path_buf.exists() {
@@ -55,12 +60,12 @@ impl DbInner {
       });
     }
 
-    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    //let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     Self {
       state: Arc::new(RwLock::new(Arc::new(DbState::create()))),
       path: path_buf,
       options,
-      table_store: TableStore::new(&object_store),
+      table_store,
       runtime: runtime.clone()
     }
   }
@@ -155,8 +160,13 @@ pub struct Db {
 }
 
 impl Db {
-  pub fn open(path: impl AsRef<Path>, options: DbOptions, runtime: &Arc<Runtime>) -> Self {
-    let inner = Arc::new(DbInner::new(path, options, runtime));
+  pub fn open(
+    path: impl AsRef<Path>,
+    options: DbOptions,
+    table_store: TableStore,
+    runtime: Arc<Runtime>
+  ) -> Self {
+    let inner = Arc::new(DbInner::new(path, options, table_store, runtime));
     let (tx, rx) = crossbeam_channel::unbounded();
     let flush_thread = inner.spawn_flush_thread(rx);
     Self {
@@ -206,7 +216,9 @@ mod tests {
   fn test_put_get_delete() {
     let rt = Arc::new(Runtime::new().unwrap());
     rt.block_on(async {
-      let kv_store = Db::open("/tmp/test_kv_store", DbOptions { flush_ms: 100 }, &rt);
+      let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+      let table_store = TableStore::new(object_store);
+      let kv_store = Db::open("/tmp/test_kv_store", DbOptions { flush_ms: 100 }, table_store, rt);
       let key = b"test_key";
       let value = b"test_value";
       kv_store.put(key, value).await;

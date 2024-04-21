@@ -4,12 +4,12 @@ use object_store::path::Path;
 use crate::block::{Block};
 use crate::sst::{EncodedSsTable, SsTableInfo};
 
-pub(crate) struct TableStore {
+pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
 }
 
 impl TableStore {
-    pub fn new(object_store: &Arc<dyn ObjectStore>) -> TableStore {
+    pub fn new(object_store: Arc<dyn ObjectStore>) -> TableStore {
         TableStore{
             object_store: object_store.clone()
         }

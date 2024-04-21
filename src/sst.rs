@@ -6,7 +6,7 @@ use object_store::{ObjectStore};
 use crate::block::{BlockBuilder, BlockMeta};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SsTableInfo {
+pub(crate) struct SsTableInfo {
   pub(crate) id: usize,
   pub(crate) first_key: Bytes,
   // todo: we probably dont want to keep this here, and instead store this in block cache
@@ -133,7 +133,7 @@ mod tests {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
       let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-      let table_store = TableStore::new(&object_store);
+      let table_store = TableStore::new(object_store);
       let mut builder = EncodedSsTableBuilder::new(4096);
       builder.add(b"key1", b"value1");
       builder.add(b"key2", b"value2");
