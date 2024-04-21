@@ -15,7 +15,7 @@ impl TableStore {
         }
     }
 
-    pub async fn write_sst(&self, encoded_sst: &EncodedSsTable) {
+    pub(crate) async fn write_sst(&self, encoded_sst: &EncodedSsTable) {
         let result = self.object_store.put(&self.path(encoded_sst.info.id), encoded_sst.raw.clone()).await;
         if result.is_err() {
             panic!("put to store failed")
@@ -24,7 +24,7 @@ impl TableStore {
 
     // todo: wrap info in some handle object that cleans up stuff like open file handles when
     //       handle is cleaned up
-    pub async fn open_sst(&self, id: usize) -> SsTableInfo {
+    pub(crate) async fn open_sst(&self, id: usize) -> SsTableInfo {
         // Read the entire file into memory for now.
         let path = self.path(id);
         let file = self.object_store.get(&path).await.unwrap();
@@ -32,7 +32,7 @@ impl TableStore {
         SsTableInfo::decode(id, &bytes)
     }
 
-    pub async fn read_block(&self, info: &SsTableInfo, block: usize) -> Block {
+    pub(crate) async fn read_block(&self, info: &SsTableInfo, block: usize) -> Block {
         let path = self.path(info.id);
         // todo: range read
         let file = self.object_store.get(&path).await.unwrap();

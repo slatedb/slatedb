@@ -218,7 +218,7 @@ mod tests {
     rt.block_on(async {
       let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
       let table_store = TableStore::new(object_store);
-      let kv_store = Db::open("/tmp/test_kv_store", DbOptions { flush_ms: 100 }, table_store, rt);
+      let kv_store = Db::open("/tmp/test_kv_store", DbOptions { flush_ms: 100 }, table_store, rt.clone());
       let key = b"test_key";
       let value = b"test_value";
       kv_store.put(key, value).await;
