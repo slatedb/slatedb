@@ -24,6 +24,8 @@ impl TableStore {
 
     // todo: wrap info in some handle object that cleans up stuff like open file handles when
     //       handle is cleaned up
+    // todo: clean up the warning suppression when we start using open_sst outside tests
+    #[allow(dead_code)]
     pub(crate) async fn open_sst(&self, id: usize) -> SsTableInfo {
         // Read the entire file into memory for now.
         let path = self.path(id);

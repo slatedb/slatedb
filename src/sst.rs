@@ -1,7 +1,4 @@
-use std::sync::Arc;
-
 use bytes::{Buf, BufMut, Bytes};
-use object_store::{ObjectStore};
 
 use crate::block::{BlockBuilder, BlockMeta};
 
@@ -78,6 +75,7 @@ impl EncodedSsTableBuilder {
     }
   }
 
+  #[allow(dead_code)]
   pub fn estimated_size(&self) -> usize {
     self.data.len()
   }
@@ -122,7 +120,9 @@ impl EncodedSsTableBuilder {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::Arc;
   use object_store::memory::InMemory;
+  use object_store::ObjectStore;
   use tokio::runtime::Runtime;
   use crate::tablestore::TableStore;
 

@@ -128,7 +128,7 @@ impl BlockMeta {
   }
 
   /// Decode a vector of block metadatas from a buffer.
-  pub fn decode_block_meta(mut buf: &[u8]) -> Vec<BlockMeta> {
+  pub(crate) fn decode_block_meta(mut buf: &[u8]) -> Vec<BlockMeta> {
     let mut block_meta = Vec::new();
     let num = buf.get_u32() as usize;
     let checksum = crc32fast::hash(&buf[..buf.remaining() - 4]);

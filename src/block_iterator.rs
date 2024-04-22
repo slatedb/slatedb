@@ -1,5 +1,5 @@
 use bytes::Buf;
-use crate::block::{Block, BlockBuilder};
+use crate::block::Block;
 
 pub struct BlockIterator<'a> {
     block: &'a Block,
@@ -57,23 +57,29 @@ impl BlockIterator<'_> {
     }
 }
 
-#[test]
-fn test_iterator() {
-    let mut block_builder = BlockBuilder::new(1024);
-    assert!(block_builder.add("super".as_ref(), "mario".as_ref()));
-    assert!(block_builder.add("donkey".as_ref(), "kong".as_ref()));
-    assert!(block_builder.add("kratos".as_ref(), "atreus".as_ref()));
-    let block = block_builder.build();
-    let mut iter = BlockIterator::from_first_key(&block);
-    assert_eq!(iter.key().unwrap(), <str as AsRef<[u8]>>::as_ref("super"));
-    assert_eq!(iter.val().unwrap(), <str as AsRef<[u8]>>::as_ref("mario"));
-    iter.advance();
-    assert_eq!(iter.key().unwrap(), <str as AsRef<[u8]>>::as_ref("donkey"));
-    assert_eq!(iter.val().unwrap(), <str as AsRef<[u8]>>::as_ref("kong"));
-    iter.advance();
-    assert_eq!(iter.key().unwrap(), <str as AsRef<[u8]>>::as_ref("kratos"));
-    assert_eq!(iter.val().unwrap(), <str as AsRef<[u8]>>::as_ref("atreus"));
-    iter.advance();
-    assert_eq!(iter.key(), None);
-    assert_eq!(iter.val(), None);
+#[cfg(test)]
+mod tests {
+    use crate::block::BlockBuilder;
+    use crate::block_iterator::BlockIterator;
+
+    #[test]
+    fn test_iterator() {
+        let mut block_builder = BlockBuilder::new(1024);
+        assert!(block_builder.add("super".as_ref(), "mario".as_ref()));
+        assert!(block_builder.add("donkey".as_ref(), "kong".as_ref()));
+        assert!(block_builder.add("kratos".as_ref(), "atreus".as_ref()));
+        let block = block_builder.build();
+        let mut iter = BlockIterator::from_first_key(&block);
+        assert_eq!(iter.key().unwrap(), <str as AsRef<[u8]>>::as_ref("super"));
+        assert_eq!(iter.val().unwrap(), <str as AsRef<[u8]>>::as_ref("mario"));
+        iter.advance();
+        assert_eq!(iter.key().unwrap(), <str as AsRef<[u8]>>::as_ref("donkey"));
+        assert_eq!(iter.val().unwrap(), <str as AsRef<[u8]>>::as_ref("kong"));
+        iter.advance();
+        assert_eq!(iter.key().unwrap(), <str as AsRef<[u8]>>::as_ref("kratos"));
+        assert_eq!(iter.val().unwrap(), <str as AsRef<[u8]>>::as_ref("atreus"));
+        iter.advance();
+        assert_eq!(iter.key(), None);
+        assert_eq!(iter.val(), None);
+    }
 }

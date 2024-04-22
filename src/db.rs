@@ -1,8 +1,6 @@
 use std::{path::{Path, PathBuf}, sync::Arc};
 
 use bytes::Bytes;
-use object_store::memory::InMemory;
-use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Runtime;
 use crate::block::Block;
@@ -210,6 +208,8 @@ impl Db {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use object_store::memory::InMemory;
+  use object_store::ObjectStore;
   use tokio::runtime::Runtime;
 
   #[test]
