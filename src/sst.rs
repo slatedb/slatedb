@@ -1,46 +1,23 @@
-use std::sync::Arc;
-
 use bytes::{Buf, BufMut, Bytes};
-use object_store::{path::Path, ObjectStore};
 
 use crate::block::{BlockBuilder, BlockMeta};
 
-#[derive(Clone, Debug)]
-pub struct SsTable {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SsTableInfo {
   pub(crate) id: usize,
-  pub(crate) path: Path,
-  #[allow(dead_code)]
-  object_store: Arc<dyn ObjectStore>,
   pub(crate) first_key: Bytes,
-  block_meta: Vec<BlockMeta>,
+  // todo: we probably dont want to keep this here, and instead store this in block cache
+  //       and load it from there (ditto for bloom filter when that's implemented)
+  pub(crate) block_meta: Vec<BlockMeta>,
+  pub(crate) block_meta_offset: usize,
 }
 
-// Have to manually implement this since object_store doesn't support comparison.
-impl PartialEq for SsTable {
-  fn eq(&self, other: &Self) -> bool {
-    self.id == other.id
-      && self.path == other.path
-      && self.first_key == other.first_key
-      && self.block_meta == other.block_meta
-  }
-}
-
-impl Eq for SsTable {}
-
-impl SsTable {
-  pub async fn open(
-    id: usize,
-    path: Path,
-    object_store: Arc<dyn ObjectStore>,
-  ) -> Self {
-    // Read the entire file into memory for now.
+impl SsTableInfo {
+  pub(crate) fn decode(id: usize, bytes: &Bytes) -> SsTableInfo {
     // TODO Read the last 4 bytes to get the meta offset. Then read the metadata.
     // TODO Optimization: Try and guess the block metadata size and the last 4 bytes in one fetch.
     //      (A missed guess would require a secnod fetch to get the rest of the metadata block.)
-    let file = object_store.get(&path).await.unwrap();
-    let bytes = file.bytes().await.unwrap();
-
-    // Read the last 4 bytes to get the offset of the block meta
+    // TODO: return an error if the buffer doesn't have enough data
     let len = bytes.len();
     let block_meta_offset = (&bytes[len - 4..]).get_u32() as usize;
 
@@ -48,18 +25,22 @@ impl SsTable {
     let raw_meta = &bytes[block_meta_offset..len - 4].to_vec();
     let block_meta = BlockMeta::decode_block_meta(&raw_meta[..]);
 
-    Self {
+    SsTableInfo {
       id,
-      path,
-      object_store,
       first_key: block_meta.first().unwrap().first_key.clone(),
       block_meta,
+      block_meta_offset,
     }
   }
 }
 
+pub struct EncodedSsTable {
+  pub(crate) info: SsTableInfo,
+  pub(crate) raw: Bytes,
+}
+
 /// Builds an SSTable from key-value pairs.
-pub struct SsTableBuilder {
+pub struct EncodedSsTableBuilder {
   builder: BlockBuilder,
   first_key: Vec<u8>,
   block_meta: Vec<BlockMeta>,
@@ -67,7 +48,7 @@ pub struct SsTableBuilder {
   block_size: usize,
 }
 
-impl SsTableBuilder {
+impl EncodedSsTableBuilder {
   /// Create a builder based on target block size.
   pub fn new(block_size: usize) -> Self {
     Self {
@@ -94,6 +75,7 @@ impl SsTableBuilder {
     }
   }
 
+  #[allow(dead_code)]
   pub fn estimated_size(&self) -> usize {
     self.data.len()
   }
@@ -110,24 +92,27 @@ impl SsTableBuilder {
     self.data.put_u32(checksum);
   }
 
-  pub async fn build(
+  pub fn build(
     mut self,
     id: usize,
-    path: Path,
-    object_store: Arc<dyn ObjectStore>,
-  ) -> SsTable {
+  ) -> EncodedSsTable {
     self.finish_block();
     let mut buf = self.data;
     let meta_offset = buf.len();
     BlockMeta::encode_block_meta(&self.block_meta, &mut buf);
     buf.put_u32(meta_offset as u32);
-    object_store.put(&path, Bytes::from(buf)).await.unwrap();
-    SsTable {
-      id,
-      path,
-      object_store,
-      first_key: self.block_meta.first().unwrap().first_key.clone(),
-      block_meta: self.block_meta,
+    let mut first_key = Bytes::new();
+    if let Some(first_block_meta) = self.block_meta.first() {
+      first_key = first_block_meta.first_key.clone();
+    }
+    EncodedSsTable {
+      info: SsTableInfo {
+        id,
+        first_key,
+        block_meta: self.block_meta,
+        block_meta_offset: meta_offset,
+      },
+      raw: Bytes::from(buf),
     }
   }
 }
@@ -135,8 +120,11 @@ impl SsTableBuilder {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::Arc;
   use object_store::memory::InMemory;
+  use object_store::ObjectStore;
   use tokio::runtime::Runtime;
+  use crate::tablestore::TableStore;
 
   use super::*;
 
@@ -144,13 +132,15 @@ mod tests {
   fn test_sstable() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-      let object_store = Arc::new(InMemory::new());
-      let mut builder = SsTableBuilder::new(4096);
+      let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+      let table_store = TableStore::new(object_store);
+      let mut builder = EncodedSsTableBuilder::new(4096);
       builder.add(b"key1", b"value1");
       builder.add(b"key2", b"value2");
-      let encoded = builder.build(0, Path::from("test"), object_store.clone()).await;
-      let decoded = SsTable::open(0, Path::from("test"), object_store.clone()).await;
-      assert_eq!(encoded, decoded);
+      let encoded = builder.build(0);
+      table_store.write_sst(&encoded).await;
+      let sst_info = table_store.open_sst(0).await;
+      assert_eq!(encoded.info, sst_info);
     });
   }
 }
