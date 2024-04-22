@@ -93,7 +93,7 @@ impl DbInner {
           if val.is_empty() {
             return None;
           }
-          return Some(Bytes::from(val));
+          return Some(Bytes::copy_from_slice(val));
         }
       }
     }
@@ -108,15 +108,13 @@ impl DbInner {
     Some(block_idx)
   }
 
-  fn find_val_in_block(&self, block: &Block, key: &[u8]) -> Option<Vec<u8>> {
+  fn find_val_in_block<'a>(&self, block: &'a Block, key: &[u8]) -> Option<&'a [u8]> {
     let mut iter = BlockIterator::from_first_key(block);
     while let Some(current_key) = iter.key() {
-      if current_key == key {
-        // TODO: there should be some way to do this without copying the buffer, but
-        //       rust won't let me because iter goes out of scope
-        return Some(Vec::from(iter.val().unwrap()))
-      }
-      iter.advance();
+        if current_key == key {
+            return iter.val();
+        }
+        iter.advance();
     }
     None
   }
