@@ -9,8 +9,8 @@ pub struct BlockIterator<'a> {
     off_off: usize,
 }
 
-impl BlockIterator<'_> {
-    pub fn from_first_key(block: &Block) -> BlockIterator {
+impl <'a> BlockIterator<'a> {
+    pub fn from_first_key(block: &'a Block) -> BlockIterator {
         let mut i = BlockIterator{
             block,
             key: None,
@@ -22,14 +22,14 @@ impl BlockIterator<'_> {
         i
     }
 
-    pub fn key(&self) -> Option<&[u8]> {
+    pub fn key(&self) -> Option<&'a [u8]> {
         if self.off_off < self.block.offsets.len() {
             return self.key;
         }
         None
     }
 
-    pub fn val(&self) -> Option<&[u8]> {
+    pub fn val(&self) -> Option<&'a [u8]> {
         if self.off_off < self.block.offsets.len() {
             return self.val;
         }
