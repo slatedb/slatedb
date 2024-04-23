@@ -1,13 +1,14 @@
 use std::sync::Arc;
 use std::time::Duration;
+use futures::executor::block_on;
 use crate::mem_table::MemTable;
 use crate::db::{DbInner, DbState};
 use crate::sst::{EncodedSsTableBuilder, SsTableInfo};
 
 impl DbInner {
-  pub(crate) fn flush(&self) {
+  pub(crate) async fn flush(&self) {
     self.freeze_memtable();
-    self.runtime.block_on(self.flush_imms());
+    self.flush_imms().await;
   }
 
   async fn flush_imm(&self, imm: Arc<MemTable>, id: usize) -> SsTableInfo {
@@ -67,7 +68,7 @@ impl DbInner {
       loop {
         crossbeam_channel::select! {
           // Tick to freeze and flush the memtable
-          recv(ticker) -> _ => this.flush(),
+          recv(ticker) -> _ => block_on(this.flush()),
           // Stop the thread.
           recv(rx) -> _ => return
         }
