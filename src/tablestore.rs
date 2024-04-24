@@ -1,8 +1,8 @@
-use std::sync::Arc;
-use object_store::ObjectStore;
-use object_store::path::Path;
-use crate::block::{Block};
+use crate::block::Block;
 use crate::sst::{EncodedSsTable, SsTableInfo};
+use object_store::path::Path;
+use object_store::ObjectStore;
+use std::sync::Arc;
 
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
@@ -10,13 +10,16 @@ pub struct TableStore {
 
 impl TableStore {
     pub fn new(object_store: Arc<dyn ObjectStore>) -> TableStore {
-        TableStore{
-            object_store: object_store.clone()
+        TableStore {
+            object_store: object_store.clone(),
         }
     }
 
     pub(crate) async fn write_sst(&self, encoded_sst: &EncodedSsTable) {
-        let result = self.object_store.put(&self.path(encoded_sst.info.id), encoded_sst.raw.clone()).await;
+        let result = self
+            .object_store
+            .put(&self.path(encoded_sst.info.id), encoded_sst.raw.clone())
+            .await;
         if result.is_err() {
             panic!("put to store failed")
         }
