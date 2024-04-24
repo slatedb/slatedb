@@ -1,3 +1,4 @@
+use crate::error::SlateDBError;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
@@ -87,14 +88,14 @@ impl BlockBuilder {
         self.offsets.is_empty()
     }
 
-    pub fn build(self) -> Block {
+    pub fn build(self) -> Result<Block, SlateDBError> {
         if self.is_empty() {
-            panic!("Block should not be empty");
+            return Err(SlateDBError::EmptyBlock);
         }
-        Block {
+        Ok(Block {
             data: Bytes::from(self.data),
             offsets: self.offsets,
-        }
+        })
     }
 }
 
@@ -128,7 +129,7 @@ impl BlockMeta {
     }
 
     /// Decode a vector of block metadatas from a buffer.
-    pub(crate) fn decode_block_meta(mut buf: &[u8]) -> Vec<BlockMeta> {
+    pub(crate) fn decode_block_meta(mut buf: &[u8]) -> Result<Vec<BlockMeta>, SlateDBError> {
         let mut block_meta = Vec::new();
         let num = buf.get_u32() as usize;
         let checksum = crc32fast::hash(&buf[..buf.remaining() - 4]);
@@ -139,10 +140,9 @@ impl BlockMeta {
             block_meta.push(BlockMeta { offset, first_key });
         }
         if buf.get_u32() != checksum {
-            // TODO use anyhow to handle errors
-            panic!("meta checksum mismatched");
+            return Err(SlateDBError::ChecksumMismatch);
         }
-        block_meta
+        Ok(block_meta)
     }
 }
 
@@ -155,7 +155,7 @@ mod tests {
         let mut builder = BlockBuilder::new(4096);
         assert!(builder.add(b"key1", b"value1"));
         assert!(builder.add(b"key2", b"value2"));
-        let block = builder.build();
+        let block = builder.build().unwrap();
         let encoded = block.encode();
         let decoded = Block::decode(&encoded);
         assert_eq!(block.data, decoded.data);
@@ -176,7 +176,7 @@ mod tests {
         ];
         let mut buf = Vec::new();
         BlockMeta::encode_block_meta(&block_meta, &mut buf);
-        let decoded = BlockMeta::decode_block_meta(&buf);
+        let decoded = BlockMeta::decode_block_meta(&buf).unwrap();
         assert_eq!(block_meta, decoded);
     }
 }

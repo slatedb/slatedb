@@ -1,6 +1,8 @@
+use crate::{
+    block::{BlockBuilder, BlockMeta},
+    error::SlateDBError,
+};
 use bytes::{Buf, BufMut, Bytes};
-
-use crate::block::{BlockBuilder, BlockMeta};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SsTableInfo {
@@ -13,7 +15,7 @@ pub(crate) struct SsTableInfo {
 }
 
 impl SsTableInfo {
-    pub(crate) fn decode(id: usize, bytes: &Bytes) -> SsTableInfo {
+    pub(crate) fn decode(id: usize, bytes: &Bytes) -> Result<SsTableInfo, SlateDBError> {
         // TODO Read the last 4 bytes to get the meta offset. Then read the metadata.
         // TODO Optimization: Try and guess the block metadata size and the last 4 bytes in one fetch.
         //      (A missed guess would require a secnod fetch to get the rest of the metadata block.)
@@ -23,14 +25,18 @@ impl SsTableInfo {
 
         // Read the block meta
         let raw_meta = &bytes[block_meta_offset..len - 4].to_vec();
-        let block_meta = BlockMeta::decode_block_meta(&raw_meta[..]);
+        let block_meta = BlockMeta::decode_block_meta(&raw_meta[..])?;
 
-        SsTableInfo {
+        Ok(SsTableInfo {
             id,
-            first_key: block_meta.first().unwrap().first_key.clone(),
+            first_key: block_meta
+                .first()
+                .ok_or(SlateDBError::EmptyBlockMeta)?
+                .first_key
+                .clone(),
             block_meta,
             block_meta_offset,
-        }
+        })
     }
 }
 
@@ -60,19 +66,21 @@ impl EncodedSsTableBuilder {
         }
     }
 
-    pub fn add(&mut self, key: &[u8], value: &[u8]) {
+    pub fn add(&mut self, key: &[u8], value: &[u8]) -> Result<(), SlateDBError> {
         if self.first_key.is_empty() {
             self.first_key = key.to_vec();
         }
 
         if !self.builder.add(key, value) {
             // Create a new block builder and append block data
-            self.finish_block();
+            self.finish_block()?;
 
             // New block must always accept the first KV pair
             assert!(self.builder.add(key, value));
             self.first_key = key.to_vec();
         }
+
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -80,9 +88,9 @@ impl EncodedSsTableBuilder {
         self.data.len()
     }
 
-    fn finish_block(&mut self) {
+    fn finish_block(&mut self) -> Result<(), SlateDBError> {
         let builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
-        let encoded_block = builder.build().encode();
+        let encoded_block = builder.build()?.encode();
         self.block_meta.push(BlockMeta {
             offset: self.data.len(),
             first_key: std::mem::take(&mut self.first_key).into(),
@@ -90,10 +98,11 @@ impl EncodedSsTableBuilder {
         let checksum = crc32fast::hash(&encoded_block);
         self.data.extend(encoded_block);
         self.data.put_u32(checksum);
+        Ok(())
     }
 
-    pub fn build(mut self, id: usize) -> EncodedSsTable {
-        self.finish_block();
+    pub fn build(mut self, id: usize) -> Result<EncodedSsTable, SlateDBError> {
+        self.finish_block()?;
         let mut buf = self.data;
         let meta_offset = buf.len();
         BlockMeta::encode_block_meta(&self.block_meta, &mut buf);
@@ -102,7 +111,7 @@ impl EncodedSsTableBuilder {
         if let Some(first_block_meta) = self.block_meta.first() {
             first_key = first_block_meta.first_key.clone();
         }
-        EncodedSsTable {
+        Ok(EncodedSsTable {
             info: SsTableInfo {
                 id,
                 first_key,
@@ -110,7 +119,7 @@ impl EncodedSsTableBuilder {
                 block_meta_offset: meta_offset,
             },
             raw: Bytes::from(buf),
-        }
+        })
     }
 }
 
@@ -131,11 +140,11 @@ mod tests {
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let table_store = TableStore::new(object_store);
             let mut builder = EncodedSsTableBuilder::new(4096);
-            builder.add(b"key1", b"value1");
-            builder.add(b"key2", b"value2");
-            let encoded = builder.build(0);
-            table_store.write_sst(&encoded).await;
-            let sst_info = table_store.open_sst(0).await;
+            builder.add(b"key1", b"value1").unwrap();
+            builder.add(b"key2", b"value2").unwrap();
+            let encoded = builder.build(0).unwrap();
+            table_store.write_sst(&encoded).await.unwrap();
+            let sst_info = table_store.open_sst(0).await.unwrap();
             assert_eq!(encoded.info, sst_info);
         });
     }

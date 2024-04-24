@@ -1,4 +1,5 @@
 use crate::block::Block;
+use crate::error::SlateDBError;
 use crate::sst::{EncodedSsTable, SsTableInfo};
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -15,33 +16,39 @@ impl TableStore {
         }
     }
 
-    pub(crate) async fn write_sst(&self, encoded_sst: &EncodedSsTable) {
-        let result = self
-            .object_store
+    pub(crate) async fn write_sst(&self, encoded_sst: &EncodedSsTable) -> Result<(), SlateDBError> {
+        self.object_store
             .put(&self.path(encoded_sst.info.id), encoded_sst.raw.clone())
-            .await;
-        if result.is_err() {
-            panic!("put to store failed")
-        }
+            .await
+            .map_err(SlateDBError::ObjectStoreError)?;
+        Ok(())
     }
 
     // todo: wrap info in some handle object that cleans up stuff like open file handles when
     //       handle is cleaned up
     // todo: clean up the warning suppression when we start using open_sst outside tests
     #[allow(dead_code)]
-    pub(crate) async fn open_sst(&self, id: usize) -> SsTableInfo {
+    pub(crate) async fn open_sst(&self, id: usize) -> Result<SsTableInfo, SlateDBError> {
         // Read the entire file into memory for now.
         let path = self.path(id);
-        let file = self.object_store.get(&path).await.unwrap();
-        let bytes = file.bytes().await.unwrap();
+        let file = self
+            .object_store
+            .get(&path)
+            .await
+            .map_err(SlateDBError::ObjectStoreError)?;
+        let bytes = file.bytes().await.map_err(SlateDBError::ObjectStoreError)?;
         SsTableInfo::decode(id, &bytes)
     }
 
-    pub(crate) async fn read_block(&self, info: &SsTableInfo, block: usize) -> Block {
+    pub(crate) async fn read_block(
+        &self,
+        info: &SsTableInfo,
+        block: usize,
+    ) -> Result<Block, SlateDBError> {
         let path = self.path(info.id);
         // todo: range read
-        let file = self.object_store.get(&path).await.unwrap();
-        let bytes = file.bytes().await.unwrap();
+        let file = self.object_store.get(&path).await?;
+        let bytes = file.bytes().await.map_err(SlateDBError::ObjectStoreError)?;
         let block_meta = &info.block_meta[block];
         let mut end = info.block_meta_offset;
         if block < info.block_meta.len() - 1 {
@@ -51,7 +58,7 @@ impl TableStore {
         // account for checksum
         end -= 4;
         let raw_block = bytes.slice(block_meta.offset..end);
-        Block::decode(raw_block.as_ref())
+        Ok(Block::decode(raw_block.as_ref()))
     }
 
     fn path(&self, id: usize) -> Path {
