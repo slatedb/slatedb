@@ -7,7 +7,6 @@ use crate::block_iterator::BlockIterator;
 use crate::{block::Block, error::SlateDBError};
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
-use tokio::runtime::Runtime;
 
 use crate::mem_table::MemTable;
 use crate::sst::SsTableInfo;
@@ -42,7 +41,6 @@ pub(crate) struct DbInner {
     pub(crate) path: PathBuf,
     pub(crate) options: DbOptions,
     pub(crate) table_store: TableStore,
-    pub(crate) runtime: Arc<Runtime>,
 }
 
 impl DbInner {
@@ -50,12 +48,13 @@ impl DbInner {
         path: impl AsRef<Path>,
         options: DbOptions,
         table_store: TableStore,
-        runtime: Arc<Runtime>,
     ) -> Result<Self, SlateDBError> {
         let path_buf = path.as_ref().to_path_buf();
 
         if !path_buf.exists() {
-            std::fs::create_dir_all(path)?;
+            std::fs::create_dir_all(path).unwrap_or_else(|_| {
+                panic!("Failed to create directory: {}", path_buf.display());
+            });
         }
 
         //let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -64,7 +63,6 @@ impl DbInner {
             path: path_buf,
             options,
             table_store,
-            runtime: runtime.clone(),
         })
     }
 
@@ -158,9 +156,8 @@ impl Db {
         path: impl AsRef<Path>,
         options: DbOptions,
         table_store: TableStore,
-        runtime: Arc<Runtime>,
     ) -> Result<Self, SlateDBError> {
-        let inner = Arc::new(DbInner::new(path, options, table_store, runtime)?);
+        let inner = Arc::new(DbInner::new(path, options, table_store)?);
         let (tx, rx) = crossbeam_channel::unbounded();
         let flush_thread = inner.spawn_flush_thread(rx);
         Ok(Self {
@@ -170,18 +167,21 @@ impl Db {
         })
     }
 
-    pub fn close(&self) {
+    pub async fn close(&self) {
         // Tell the notifier thread to shut down.
         self.flush_notifier.send(()).ok();
 
-        // Wait for the flush thread to finish.
-        let mut flush_thread = self.flush_thread.lock();
-        if let Some(flush_thread) = flush_thread.take() {
-            flush_thread.join().expect("Failed to join flush thread");
+        // Scope the flush_thread lock so its lock isn't held while awaiting the final flush below.
+        {
+            // Wait for the flush thread to finish.
+            let mut flush_thread = self.flush_thread.lock();
+            if let Some(flush_thread) = flush_thread.take() {
+                flush_thread.join().expect("Failed to join flush thread");
+            }
         }
 
         // Force a final flush on the mutable memtable
-        self.inner.flush();
+        self.inner.flush().await;
     }
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
@@ -216,7 +216,6 @@ mod tests {
                 "/tmp/test_kv_store",
                 DbOptions { flush_ms: 100 },
                 table_store,
-                rt.clone(),
             )
             .unwrap();
             let key = b"test_key";

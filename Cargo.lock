@@ -538,6 +538,7 @@ dependencies = [
  "crc32fast",
  "crossbeam-channel",
  "crossbeam-skiplist",
+ "futures",
  "object_store",
  "parking_lot",
  "thiserror",
