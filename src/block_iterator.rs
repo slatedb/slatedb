@@ -1,5 +1,5 @@
-use bytes::Buf;
 use crate::block::Block;
+use bytes::Buf;
 
 pub struct BlockIterator<'a> {
     block: &'a Block,
@@ -9,9 +9,9 @@ pub struct BlockIterator<'a> {
     off_off: usize,
 }
 
-impl <'a> BlockIterator<'a> {
+impl<'a> BlockIterator<'a> {
     pub fn from_first_key(block: &'a Block) -> BlockIterator {
-        let mut i = BlockIterator{
+        let mut i = BlockIterator {
             block,
             key: None,
             val: None,
@@ -41,7 +41,7 @@ impl <'a> BlockIterator<'a> {
         self.load_at_current_off();
     }
 
-    fn load_at_current_off(& mut self) {
+    fn load_at_current_off(&mut self) {
         if self.off_off >= self.block.offsets.len() {
             return;
         }
