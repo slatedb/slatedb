@@ -2,7 +2,6 @@ use std::{path::{Path, PathBuf}, sync::Arc};
 
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
-use tokio::runtime::Runtime;
 use crate::block::Block;
 use crate::block_iterator::BlockIterator;
 
@@ -39,7 +38,6 @@ pub(crate) struct DbInner {
   pub(crate) path: PathBuf,
   pub(crate) options: DbOptions,
   pub(crate) table_store: TableStore,
-  pub(crate) runtime: Arc<Runtime>,
 }
 
 // TODO Return Result<> for get/put/delete everything... ?
@@ -48,7 +46,6 @@ impl DbInner {
     path: impl AsRef<Path>,
     options: DbOptions,
     table_store: TableStore,
-    runtime: Arc<Runtime>
   ) -> Self {
     let path_buf = path.as_ref().to_path_buf();
 
@@ -64,7 +61,6 @@ impl DbInner {
       path: path_buf,
       options,
       table_store,
-      runtime: runtime.clone()
     }
   }
 
@@ -160,9 +156,8 @@ impl Db {
     path: impl AsRef<Path>,
     options: DbOptions,
     table_store: TableStore,
-    runtime: Arc<Runtime>
   ) -> Self {
-    let inner = Arc::new(DbInner::new(path, options, table_store, runtime));
+    let inner = Arc::new(DbInner::new(path, options, table_store));
     let (tx, rx) = crossbeam_channel::unbounded();
     let flush_thread = inner.spawn_flush_thread(rx);
     Self {
@@ -172,20 +167,23 @@ impl Db {
     }
   }
 
-  pub fn close(&self) {
+  pub async fn close(&self) {
     // Tell the notifier thread to shut down.
     self.flush_notifier.send(()).ok();
 
-    // Wait for the flush thread to finish.
-    let mut flush_thread = self.flush_thread.lock();
-    if let Some(flush_thread) = flush_thread.take() {
+    // Scope the flush_thread lock so its lock isn't held while awaiting the final flush below.
+    {
+      // Wait for the flush thread to finish.
+      let mut flush_thread = self.flush_thread.lock();
+      if let Some(flush_thread) = flush_thread.take() {
         flush_thread
-            .join()
-            .expect("Failed to join flush thread");
+          .join()
+          .expect("Failed to join flush thread");
+      }
     }
 
     // Force a final flush on the mutable memtable
-    self.inner.flush();
+    self.inner.flush().await;
   }
 
   pub async fn get(&self, key: &[u8]) -> Option<Bytes> {
@@ -216,7 +214,7 @@ mod tests {
     rt.block_on(async {
       let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
       let table_store = TableStore::new(object_store);
-      let kv_store = Db::open("/tmp/test_kv_store", DbOptions { flush_ms: 100 }, table_store, rt.clone());
+      let kv_store = Db::open("/tmp/test_kv_store", DbOptions { flush_ms: 100 }, table_store);
       let key = b"test_key";
       let value = b"test_value";
       kv_store.put(key, value).await;
