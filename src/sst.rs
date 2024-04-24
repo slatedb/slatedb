@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 
-use crate::block::{BlockBuilder, BlockMeta};
+use crate::{block::{BlockBuilder, BlockMeta}, error::SlateDBError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SsTableInfo {
@@ -13,7 +13,7 @@ pub(crate) struct SsTableInfo {
 }
 
 impl SsTableInfo {
-  pub(crate) fn decode(id: usize, bytes: &Bytes) -> SsTableInfo {
+  pub(crate) fn decode(id: usize, bytes: &Bytes) -> Result<SsTableInfo, SlateDBError> {
     // TODO Read the last 4 bytes to get the meta offset. Then read the metadata.
     // TODO Optimization: Try and guess the block metadata size and the last 4 bytes in one fetch.
     //      (A missed guess would require a secnod fetch to get the rest of the metadata block.)
@@ -23,14 +23,14 @@ impl SsTableInfo {
 
     // Read the block meta
     let raw_meta = &bytes[block_meta_offset..len - 4].to_vec();
-    let block_meta = BlockMeta::decode_block_meta(&raw_meta[..]);
+    let block_meta = BlockMeta::decode_block_meta(&raw_meta[..])?;
 
-    SsTableInfo {
+    Ok(SsTableInfo {
       id,
-      first_key: block_meta.first().unwrap().first_key.clone(),
+      first_key: block_meta.first().ok_or(SlateDBError::EmptyBlockMeta)?.first_key.clone(),
       block_meta,
       block_meta_offset,
-    }
+    })
   }
 }
 
@@ -139,7 +139,7 @@ mod tests {
       builder.add(b"key2", b"value2");
       let encoded = builder.build(0);
       table_store.write_sst(&encoded).await;
-      let sst_info = table_store.open_sst(0).await;
+      let sst_info = table_store.open_sst(0).await.unwrap();
       assert_eq!(encoded.info, sst_info);
     });
   }

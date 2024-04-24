@@ -3,7 +3,7 @@ use std::{path::{Path, PathBuf}, sync::Arc};
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Runtime;
-use crate::block::Block;
+use crate::{block::Block, error::SlateDBError};
 use crate::block_iterator::BlockIterator;
 
 use crate::mem_table::MemTable;
@@ -42,34 +42,31 @@ pub(crate) struct DbInner {
   pub(crate) runtime: Arc<Runtime>,
 }
 
-// TODO Return Result<> for get/put/delete everything... ?
 impl DbInner {
   pub fn new(
     path: impl AsRef<Path>,
     options: DbOptions,
     table_store: TableStore,
     runtime: Arc<Runtime>
-  ) -> Self {
+  ) -> Result<Self, SlateDBError> {
     let path_buf = path.as_ref().to_path_buf();
 
     if !path_buf.exists() {
-      std::fs::create_dir_all(path).unwrap_or_else(|_| {
-        panic!("Failed to create directory: {}", path_buf.display());
-      });
+      std::fs::create_dir_all(path)?;
     }
 
     //let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    Self {
+    Ok(Self {
       state: Arc::new(RwLock::new(Arc::new(DbState::create()))),
       path: path_buf,
       options,
       table_store,
       runtime: runtime.clone()
-    }
+    })
   }
 
   /// Get the value for a given key.
-  pub async fn get(&self, key: &[u8]) -> Option<Bytes> {
+  pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
     let snapshot = {
       let guard = self.state.read();
       Arc::clone(&guard)
@@ -83,21 +80,21 @@ impl DbInner {
 
     // Filter is needed to remove tombstone deletes.
     if let Some(val) = maybe_bytes.filter(|value| !value.is_empty()) {
-      return Some(val);
+      return Ok(Some(val));
     }
 
     for sst in &snapshot.as_ref().l0 {
       if let Some(block_index) = self.find_block_for_key(sst, key) {
-        let block = self.table_store.read_block(sst, block_index).await;
+        let block = self.table_store.read_block(sst, block_index).await?;
         if let Some(val) = self.find_val_in_block(&block, key) {
           if val.is_empty() {
-            return None;
+            return Ok(None);
           }
-          return Some(Bytes::copy_from_slice(val));
+          return Ok(Some(Bytes::copy_from_slice(val)));
         }
       }
     }
-    None
+    Ok(None)
   }
 
   fn find_block_for_key(&self, sst: &SsTableInfo, key: &[u8]) -> Option<usize> {
@@ -161,15 +158,15 @@ impl Db {
     options: DbOptions,
     table_store: TableStore,
     runtime: Arc<Runtime>
-  ) -> Self {
-    let inner = Arc::new(DbInner::new(path, options, table_store, runtime));
+  ) -> Result<Self, SlateDBError> {
+    let inner = Arc::new(DbInner::new(path, options, table_store, runtime)?);
     let (tx, rx) = crossbeam_channel::unbounded();
     let flush_thread = inner.spawn_flush_thread(rx);
-    Self {
+    Ok(Self {
       inner,
       flush_notifier: tx,
       flush_thread: Mutex::new(flush_thread),
-    }
+    })
   }
 
   pub fn close(&self) {
@@ -188,7 +185,7 @@ impl Db {
     self.inner.flush();
   }
 
-  pub async fn get(&self, key: &[u8]) -> Option<Bytes> {
+  pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
     self.inner.get(key).await
   }
 
@@ -216,13 +213,13 @@ mod tests {
     rt.block_on(async {
       let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
       let table_store = TableStore::new(object_store);
-      let kv_store = Db::open("/tmp/test_kv_store", DbOptions { flush_ms: 100 }, table_store, rt.clone());
+      let kv_store = Db::open("/tmp/test_kv_store", DbOptions { flush_ms: 100 }, table_store, rt.clone()).unwrap();
       let key = b"test_key";
       let value = b"test_value";
       kv_store.put(key, value).await;
-      assert_eq!(kv_store.get(key).await, Some(Bytes::from_static(value)));
+      assert_eq!(kv_store.get(key).await.unwrap(), Some(Bytes::from_static(value)));
       kv_store.delete(key).await;
-      assert!(kv_store.get(key).await.is_none());
+      assert!(kv_store.get(key).await.unwrap().is_none());
     });
   }
 }
