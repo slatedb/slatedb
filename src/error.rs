@@ -9,6 +9,9 @@ pub enum SlateDBError {
     #[error("Empty block meta")]
     EmptyBlockMeta,
 
+    #[error("Empty block")]
+    EmptyBlock,
+
     #[error("Object store error")]
     ObjectStoreError(#[from] object_store::Error),
 }

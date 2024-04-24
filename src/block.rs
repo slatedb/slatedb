@@ -88,14 +88,14 @@ impl BlockBuilder {
         self.offsets.is_empty()
     }
 
-    pub fn build(self) -> Block {
+    pub fn build(self) -> Result<Block, SlateDBError> {
         if self.is_empty() {
-            panic!("Block should not be empty");
+            return Err(SlateDBError::EmptyBlock);
         }
-        Block {
+        Ok(Block {
             data: Bytes::from(self.data),
             offsets: self.offsets,
-        }
+        })
     }
 }
 
@@ -155,7 +155,7 @@ mod tests {
         let mut builder = BlockBuilder::new(4096);
         assert!(builder.add(b"key1", b"value1"));
         assert!(builder.add(b"key2", b"value2"));
-        let block = builder.build();
+        let block = builder.build().unwrap();
         let encoded = block.encode();
         let decoded = Block::decode(&encoded);
         assert_eq!(block.data, decoded.data);

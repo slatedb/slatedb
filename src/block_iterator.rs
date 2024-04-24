@@ -68,7 +68,7 @@ mod tests {
         assert!(block_builder.add("super".as_ref(), "mario".as_ref()));
         assert!(block_builder.add("donkey".as_ref(), "kong".as_ref()));
         assert!(block_builder.add("kratos".as_ref(), "atreus".as_ref()));
-        let block = block_builder.build();
+        let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_first_key(&block);
         assert_eq!(iter.key().unwrap(), <str as AsRef<[u8]>>::as_ref("super"));
         assert_eq!(iter.val().unwrap(), <str as AsRef<[u8]>>::as_ref("mario"));

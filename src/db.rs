@@ -52,9 +52,7 @@ impl DbInner {
         let path_buf = path.as_ref().to_path_buf();
 
         if !path_buf.exists() {
-            std::fs::create_dir_all(path).unwrap_or_else(|_| {
-                panic!("Failed to create directory: {}", path_buf.display());
-            });
+            std::fs::create_dir_all(path).map_err(SlateDBError::IoError)?;
         }
 
         //let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -167,7 +165,7 @@ impl Db {
         })
     }
 
-    pub async fn close(&self) {
+    pub async fn close(&self) -> Result<(), SlateDBError> {
         // Tell the notifier thread to shut down.
         self.flush_notifier.send(()).ok();
 
@@ -181,7 +179,8 @@ impl Db {
         }
 
         // Force a final flush on the mutable memtable
-        self.inner.flush().await;
+        self.inner.flush().await?;
+        Ok(())
     }
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {

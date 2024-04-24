@@ -16,14 +16,12 @@ impl TableStore {
         }
     }
 
-    pub(crate) async fn write_sst(&self, encoded_sst: &EncodedSsTable) {
-        let result = self
-            .object_store
+    pub(crate) async fn write_sst(&self, encoded_sst: &EncodedSsTable) -> Result<(), SlateDBError> {
+        self.object_store
             .put(&self.path(encoded_sst.info.id), encoded_sst.raw.clone())
-            .await;
-        if result.is_err() {
-            panic!("put to store failed")
-        }
+            .await
+            .map_err(SlateDBError::ObjectStoreError)?;
+        Ok(())
     }
 
     // todo: wrap info in some handle object that cleans up stuff like open file handles when
