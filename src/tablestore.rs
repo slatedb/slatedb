@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use object_store::ObjectStore;
-use object_store::path::Path;
 use crate::block::Block;
 use crate::error::SlateDBError;
 use crate::sst::{EncodedSsTable, SsTableInfo};
+use object_store::path::Path;
+use object_store::ObjectStore;
+use std::sync::Arc;
 
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
@@ -11,13 +11,16 @@ pub struct TableStore {
 
 impl TableStore {
     pub fn new(object_store: Arc<dyn ObjectStore>) -> TableStore {
-        TableStore{
-            object_store: object_store.clone()
+        TableStore {
+            object_store: object_store.clone(),
         }
     }
 
     pub(crate) async fn write_sst(&self, encoded_sst: &EncodedSsTable) {
-        let result = self.object_store.put(&self.path(encoded_sst.info.id), encoded_sst.raw.clone()).await;
+        let result = self
+            .object_store
+            .put(&self.path(encoded_sst.info.id), encoded_sst.raw.clone())
+            .await;
         if result.is_err() {
             panic!("put to store failed")
         }
@@ -30,12 +33,20 @@ impl TableStore {
     pub(crate) async fn open_sst(&self, id: usize) -> Result<SsTableInfo, SlateDBError> {
         // Read the entire file into memory for now.
         let path = self.path(id);
-        let file = self.object_store.get(&path).await.map_err(SlateDBError::ObjectStoreError)?;
+        let file = self
+            .object_store
+            .get(&path)
+            .await
+            .map_err(SlateDBError::ObjectStoreError)?;
         let bytes = file.bytes().await.map_err(SlateDBError::ObjectStoreError)?;
         SsTableInfo::decode(id, &bytes)
     }
 
-    pub(crate) async fn read_block(&self, info: &SsTableInfo, block: usize) -> Result<Block, SlateDBError> {
+    pub(crate) async fn read_block(
+        &self,
+        info: &SsTableInfo,
+        block: usize,
+    ) -> Result<Block, SlateDBError> {
         let path = self.path(info.id);
         // todo: range read
         let file = self.object_store.get(&path).await?;
