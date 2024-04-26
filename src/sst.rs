@@ -2,7 +2,7 @@ use crate::{
     block::{BlockBuilder, BlockMeta},
     error::SlateDBError,
 };
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SsTableInfo {
@@ -15,17 +15,17 @@ pub(crate) struct SsTableInfo {
 }
 
 impl SsTableInfo {
-    pub(crate) fn decode(id: usize, bytes: &Bytes) -> Result<SsTableInfo, SlateDBError> {
-        // TODO Read the last 4 bytes to get the meta offset. Then read the metadata.
-        // TODO Optimization: Try and guess the block metadata size and the last 4 bytes in one fetch.
-        //      (A missed guess would require a secnod fetch to get the rest of the metadata block.)
-        // TODO: return an error if the buffer doesn't have enough data
-        let len = bytes.len();
-        let block_meta_offset = (&bytes[len - 4..]).get_u32() as usize;
+    pub(crate) fn decode(
+        id: usize,
+        raw_block_meta: &[u8],
+        block_meta_offset: usize,
+    ) -> Result<SsTableInfo, SlateDBError> {
+        if raw_block_meta.len() <= 4 {
+            return Err(SlateDBError::EmptyBlockMeta);
+        }
 
         // Read the block meta
-        let raw_meta = &bytes[block_meta_offset..len - 4].to_vec();
-        let block_meta = BlockMeta::decode_block_meta(&raw_meta[..])?;
+        let block_meta = BlockMeta::decode_block_meta(raw_block_meta)?;
 
         Ok(SsTableInfo {
             id,
