@@ -3,8 +3,8 @@ use std::{
     sync::Arc,
 };
 
-use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
 use crate::{block::Block, error::SlateDBError};
+use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 

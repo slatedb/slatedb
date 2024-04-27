@@ -1,5 +1,6 @@
 use crate::db::{DbInner, DbState};
 use crate::error::SlateDBError;
+use crate::iter::KeyValueIterator;
 use crate::mem_table::MemTable;
 use crate::sst::{EncodedSsTableBuilder, SsTableInfo};
 use futures::executor::block_on;
@@ -15,9 +16,12 @@ impl DbInner {
 
     async fn flush_imm(&self, imm: Arc<MemTable>, id: usize) -> Result<SsTableInfo, SlateDBError> {
         let mut sst_builder = EncodedSsTableBuilder::new(4096);
-        for kv in imm.iter() {
-            sst_builder.add(kv.key(), kv.value())?;
+
+        let mut iter = imm.iter();
+        while let Some(kv) = iter.next() {
+            sst_builder.add(&kv.key, &kv.value)?;
         }
+
         let encoded_sst = sst_builder.build(id)?;
         self.table_store.write_sst(&encoded_sst).await?;
         Ok(encoded_sst.info)

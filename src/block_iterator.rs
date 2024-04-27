@@ -1,4 +1,7 @@
-use crate::{block::Block, iter::{KeyValue, KeyValueIterator}};
+use crate::{
+    block::Block,
+    iter::{KeyValue, KeyValueIterator},
+};
 use bytes::{Buf, Bytes};
 
 pub struct BlockIterator<'a> {
@@ -74,14 +77,14 @@ mod tests {
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_first_key(&block);
         let kv = iter.next().unwrap();
-        assert_eq!(kv.key.to_vec(), b"super".to_vec());
-        assert_eq!(kv.value.to_vec(), b"mario");
+        assert_eq!(kv.key, b"super".as_slice());
+        assert_eq!(kv.value, b"mario".as_slice());
         let kv = iter.next().unwrap();
-        assert_eq!(kv.key.to_vec(), b"donkey".to_vec());
-        assert_eq!(kv.value.to_vec(), b"kong".to_vec());
+        assert_eq!(kv.key, b"donkey".as_slice());
+        assert_eq!(kv.value, b"kong".as_slice());
         let kv = iter.next().unwrap();
-        assert_eq!(kv.key.to_vec(), b"kratos".to_vec());
-        assert_eq!(kv.value.to_vec(), b"atreus".to_vec());
+        assert_eq!(kv.key, b"kratos".as_slice());
+        assert_eq!(kv.value, b"atreus".as_slice());
         assert!(iter.next().is_none());
     }
 }
