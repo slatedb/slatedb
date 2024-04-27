@@ -18,8 +18,7 @@ impl SsTableInfo {
     pub(crate) fn decode(id: usize, bytes: &Bytes) -> Result<SsTableInfo, SlateDBError> {
         // TODO Read the last 4 bytes to get the meta offset. Then read the metadata.
         // TODO Optimization: Try and guess the block metadata size and the last 4 bytes in one fetch.
-        //      (A missed guess would require a secnod fetch to get the rest of the metadata block.)
-        // TODO: return an error if the buffer doesn't have enough data
+        //      (A missed guess would require a second fetch to get the rest of the metadata block.)
         let len = bytes.len();
         let block_meta_offset = (&bytes[len - 4..]).get_u32() as usize;
 

@@ -1,10 +1,10 @@
 use crate::block::Block;
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 
 pub struct BlockIterator<'a> {
     block: &'a Block,
-    key: Option<&'a [u8]>,
-    val: Option<&'a [u8]>,
+    key: Option<Bytes>,
+    val: Option<Bytes>,
     off: u16,
     off_off: usize,
 }
@@ -22,16 +22,16 @@ impl<'a> BlockIterator<'a> {
         i
     }
 
-    pub fn key(&self) -> Option<&'a [u8]> {
+    pub fn key(&self) -> Option<Bytes> {
         if self.off_off < self.block.offsets.len() {
-            return self.key;
+            return self.key.clone();
         }
         None
     }
 
-    pub fn val(&self) -> Option<&'a [u8]> {
+    pub fn val(&self) -> Option<Bytes> {
         if self.off_off < self.block.offsets.len() {
-            return self.val;
+            return self.val.clone();
         }
         None
     }
@@ -46,14 +46,16 @@ impl<'a> BlockIterator<'a> {
             return;
         }
         self.off = self.block.offsets[self.off_off];
-        // TODO: how do we do this without having to get a mutable ref to the data?
         let off_usz = self.off as usize;
-        let mut data_from_off: &[u8] = &self.block.data[off_usz..];
-        let key_len = data_from_off.get_u16() as usize;
-        self.key = Some(&data_from_off[..key_len]);
-        data_from_off.advance(key_len);
-        let val_len = data_from_off.get_u32() as usize;
-        self.val = Some(&data_from_off[..val_len]);
+        // TODO: bounds checks to avoid panics? (paulgb)
+        let mut cursor = self.block.data.slice(off_usz..);
+        let key_len = cursor.get_u16() as usize;
+        let key = cursor.slice(..key_len);
+        cursor.advance(key_len);
+        let val_len = cursor.get_u32() as usize;
+        let val = cursor.slice(..val_len);
+        self.key = Some(key);
+        self.val = Some(val);
     }
 }
 
@@ -70,14 +72,14 @@ mod tests {
         assert!(block_builder.add("kratos".as_ref(), "atreus".as_ref()));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_first_key(&block);
-        assert_eq!(iter.key().unwrap(), <str as AsRef<[u8]>>::as_ref("super"));
-        assert_eq!(iter.val().unwrap(), <str as AsRef<[u8]>>::as_ref("mario"));
+        assert_eq!(iter.key().unwrap().to_vec(), b"super".to_vec());
+        assert_eq!(iter.val().unwrap().to_vec(), b"mario");
         iter.advance();
-        assert_eq!(iter.key().unwrap(), <str as AsRef<[u8]>>::as_ref("donkey"));
-        assert_eq!(iter.val().unwrap(), <str as AsRef<[u8]>>::as_ref("kong"));
+        assert_eq!(iter.key().unwrap().to_vec(), b"donkey".to_vec());
+        assert_eq!(iter.val().unwrap().to_vec(), b"kong".to_vec());
         iter.advance();
-        assert_eq!(iter.key().unwrap(), <str as AsRef<[u8]>>::as_ref("kratos"));
-        assert_eq!(iter.val().unwrap(), <str as AsRef<[u8]>>::as_ref("atreus"));
+        assert_eq!(iter.key().unwrap().to_vec(), b"kratos".to_vec());
+        assert_eq!(iter.val().unwrap().to_vec(), b"atreus".to_vec());
         iter.advance();
         assert_eq!(iter.key(), None);
         assert_eq!(iter.val(), None);

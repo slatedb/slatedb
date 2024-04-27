@@ -87,7 +87,7 @@ impl DbInner {
                     if val.is_empty() {
                         return Ok(None);
                     }
-                    return Ok(Some(Bytes::copy_from_slice(val)));
+                    return Ok(Some(val));
                 }
             }
         }
@@ -102,7 +102,7 @@ impl DbInner {
         Some(block_idx)
     }
 
-    fn find_val_in_block<'a>(&self, block: &'a Block, key: &[u8]) -> Option<&'a [u8]> {
+    fn find_val_in_block<'a>(&self, block: &'a Block, key: &[u8]) -> Option<Bytes> {
         let mut iter = BlockIterator::from_first_key(block);
         while let Some(current_key) = iter.key() {
             if current_key == key {
