@@ -47,7 +47,7 @@ impl<'a> BlockIterator<'a> {
         cursor.advance(key_len);
         let value_len = cursor.get_u32() as usize;
         let value = cursor.slice(..value_len);
-        return Some(KeyValue { key, value });
+        Some(KeyValue { key, value })
     }
 }
 
