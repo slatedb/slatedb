@@ -102,7 +102,7 @@ impl DbInner {
         Some(block_idx)
     }
 
-    fn find_val_in_block<'a>(&self, block: &'a Block, key: &[u8]) -> Option<Bytes> {
+    fn find_val_in_block(&self, block: &Block, key: &[u8]) -> Option<Bytes> {
         let mut iter = BlockIterator::from_first_key(block);
         while let Some(current_key_value) = iter.next() {
             if current_key_value.key == key {
