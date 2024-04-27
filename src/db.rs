@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::block_iterator::BlockIterator;
+use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
 use crate::{block::Block, error::SlateDBError};
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
@@ -104,11 +104,10 @@ impl DbInner {
 
     fn find_val_in_block<'a>(&self, block: &'a Block, key: &[u8]) -> Option<Bytes> {
         let mut iter = BlockIterator::from_first_key(block);
-        while let Some(current_key) = iter.key() {
-            if current_key == key {
-                return iter.val();
+        while let Some(current_key_value) = iter.next() {
+            if current_key_value.key == key {
+                return Some(current_key_value.value);
             }
-            iter.advance();
         }
         None
     }

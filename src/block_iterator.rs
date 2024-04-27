@@ -1,4 +1,4 @@
-use crate::block::Block;
+use crate::{block::Block, iter::{KeyValue, KeyValueIterator}};
 use bytes::{Buf, Bytes};
 
 pub struct BlockIterator<'a> {
@@ -7,6 +7,18 @@ pub struct BlockIterator<'a> {
     val: Option<Bytes>,
     off: u16,
     off_off: usize,
+}
+
+impl<'a> KeyValueIterator for BlockIterator<'a> {
+    fn next(&mut self) -> Option<KeyValue> {
+        self.load_at_current_off();
+        let key_value = KeyValue {
+            key: self.key.clone()?,
+            value: self.val.clone()?,
+        };
+        self.advance();
+        Some(key_value)
+    }
 }
 
 impl<'a> BlockIterator<'a> {
@@ -22,27 +34,15 @@ impl<'a> BlockIterator<'a> {
         i
     }
 
-    pub fn key(&self) -> Option<Bytes> {
-        if self.off_off < self.block.offsets.len() {
-            return self.key.clone();
-        }
-        None
-    }
-
-    pub fn val(&self) -> Option<Bytes> {
-        if self.off_off < self.block.offsets.len() {
-            return self.val.clone();
-        }
-        None
-    }
-
-    pub fn advance(&mut self) {
+    fn advance(&mut self) {
         self.off_off += 1;
         self.load_at_current_off();
     }
 
     fn load_at_current_off(&mut self) {
         if self.off_off >= self.block.offsets.len() {
+            self.key = None;
+            self.val = None;
             return;
         }
         self.off = self.block.offsets[self.off_off];
@@ -63,6 +63,7 @@ impl<'a> BlockIterator<'a> {
 mod tests {
     use crate::block::BlockBuilder;
     use crate::block_iterator::BlockIterator;
+    use crate::iter::KeyValueIterator;
 
     #[test]
     fn test_iterator() {
@@ -72,16 +73,15 @@ mod tests {
         assert!(block_builder.add("kratos".as_ref(), "atreus".as_ref()));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_first_key(&block);
-        assert_eq!(iter.key().unwrap().to_vec(), b"super".to_vec());
-        assert_eq!(iter.val().unwrap().to_vec(), b"mario");
-        iter.advance();
-        assert_eq!(iter.key().unwrap().to_vec(), b"donkey".to_vec());
-        assert_eq!(iter.val().unwrap().to_vec(), b"kong".to_vec());
-        iter.advance();
-        assert_eq!(iter.key().unwrap().to_vec(), b"kratos".to_vec());
-        assert_eq!(iter.val().unwrap().to_vec(), b"atreus".to_vec());
-        iter.advance();
-        assert_eq!(iter.key(), None);
-        assert_eq!(iter.val(), None);
+        let kv = iter.next().unwrap();
+        assert_eq!(kv.key.to_vec(), b"super".to_vec());
+        assert_eq!(kv.value.to_vec(), b"mario");
+        let kv = iter.next().unwrap();
+        assert_eq!(kv.key.to_vec(), b"donkey".to_vec());
+        assert_eq!(kv.value.to_vec(), b"kong".to_vec());
+        let kv = iter.next().unwrap();
+        assert_eq!(kv.key.to_vec(), b"kratos".to_vec());
+        assert_eq!(kv.value.to_vec(), b"atreus".to_vec());
+        assert!(iter.next().is_none());
     }
 }
