@@ -2,23 +2,17 @@ use crate::{
     block::Block,
     iter::{KeyValue, KeyValueIterator},
 };
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 
 pub struct BlockIterator<'a> {
     block: &'a Block,
-    key: Option<Bytes>,
-    val: Option<Bytes>,
     off: u16,
     off_off: usize,
 }
 
 impl<'a> KeyValueIterator for BlockIterator<'a> {
     fn next(&mut self) -> Option<KeyValue> {
-        self.load_at_current_off();
-        let key_value = KeyValue {
-            key: self.key.clone()?,
-            value: self.val.clone()?,
-        };
+        let key_value = self.load_at_current_off()?;
         self.advance();
         Some(key_value)
     }
@@ -28,8 +22,6 @@ impl<'a> BlockIterator<'a> {
     pub fn from_first_key(block: &'a Block) -> BlockIterator {
         let mut i = BlockIterator {
             block,
-            key: None,
-            val: None,
             off: 0,
             off_off: 0,
         };
@@ -42,11 +34,9 @@ impl<'a> BlockIterator<'a> {
         self.load_at_current_off();
     }
 
-    fn load_at_current_off(&mut self) {
+    fn load_at_current_off(&mut self) -> Option<KeyValue> {
         if self.off_off >= self.block.offsets.len() {
-            self.key = None;
-            self.val = None;
-            return;
+            return None;
         }
         self.off = self.block.offsets[self.off_off];
         let off_usz = self.off as usize;
@@ -55,10 +45,9 @@ impl<'a> BlockIterator<'a> {
         let key_len = cursor.get_u16() as usize;
         let key = cursor.slice(..key_len);
         cursor.advance(key_len);
-        let val_len = cursor.get_u32() as usize;
-        let val = cursor.slice(..val_len);
-        self.key = Some(key);
-        self.val = Some(val);
+        let value_len = cursor.get_u32() as usize;
+        let value = cursor.slice(..value_len);
+        return Some(KeyValue { key, value });
     }
 }
 
