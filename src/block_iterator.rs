@@ -6,7 +6,6 @@ use bytes::Buf;
 
 pub struct BlockIterator<'a> {
     block: &'a Block,
-    off: u16,
     off_off: usize,
 }
 
@@ -20,12 +19,7 @@ impl<'a> KeyValueIterator for BlockIterator<'a> {
 
 impl<'a> BlockIterator<'a> {
     pub fn from_first_key(block: &'a Block) -> BlockIterator {
-        let mut i = BlockIterator {
-            block,
-            off: 0,
-            off_off: 0,
-        };
-        i.load_at_current_off();
+        let i = BlockIterator { block, off_off: 0 };
         i
     }
 
@@ -34,12 +28,12 @@ impl<'a> BlockIterator<'a> {
         self.load_at_current_off();
     }
 
-    fn load_at_current_off(&mut self) -> Option<KeyValue> {
+    fn load_at_current_off(&self) -> Option<KeyValue> {
         if self.off_off >= self.block.offsets.len() {
             return None;
         }
-        self.off = self.block.offsets[self.off_off];
-        let off_usz = self.off as usize;
+        let off = self.block.offsets[self.off_off];
+        let off_usz = off as usize;
         // TODO: bounds checks to avoid panics? (paulgb)
         let mut cursor = self.block.data.slice(off_usz..);
         let key_len = cursor.get_u16() as usize;
