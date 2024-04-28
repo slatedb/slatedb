@@ -3,6 +3,7 @@
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
 
+mod blob;
 mod block;
 mod block_iterator;
 pub mod db;
