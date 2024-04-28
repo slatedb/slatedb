@@ -6,7 +6,10 @@ pub enum SlateDBError {
     #[error("Checksum mismatch")]
     ChecksumMismatch,
 
-    #[error("Empty block meta")]
+    #[error("Empty SSTable")]
+    EmptySSTable,
+
+    #[error("Empty block metadata")]
     EmptyBlockMeta,
 
     #[error("Empty block")]

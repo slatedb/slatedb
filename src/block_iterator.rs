@@ -19,8 +19,7 @@ impl<'a> KeyValueIterator for BlockIterator<'a> {
 
 impl<'a> BlockIterator<'a> {
     pub fn from_first_key(block: &'a Block) -> BlockIterator {
-        let i = BlockIterator { block, off_off: 0 };
-        i
+        BlockIterator { block, off_off: 0 }
     }
 
     fn advance(&mut self) {

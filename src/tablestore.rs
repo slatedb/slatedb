@@ -1,6 +1,7 @@
 use crate::block::Block;
 use crate::error::SlateDBError;
 use crate::sst::{EncodedSsTable, SsTableInfo};
+use bytes::Buf;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use std::sync::Arc;
@@ -29,15 +30,32 @@ impl TableStore {
     // todo: clean up the warning suppression when we start using open_sst outside tests
     #[allow(dead_code)]
     pub(crate) async fn open_sst(&self, id: usize) -> Result<SsTableInfo, SlateDBError> {
-        // Read the entire file into memory for now.
         let path = self.path(id);
-        let file = self
+        // Get the size of the object
+        let object_metadata = self
             .object_store
-            .get(&path)
+            .head(&path)
             .await
             .map_err(SlateDBError::ObjectStoreError)?;
-        let bytes = file.bytes().await.map_err(SlateDBError::ObjectStoreError)?;
-        SsTableInfo::decode(id, &bytes)
+        if object_metadata.size <= 4 {
+            return Err(SlateDBError::EmptySSTable);
+        }
+        // Get the size of the metadata
+        let sst_metadata_offset_range = (object_metadata.size - 4)..object_metadata.size;
+        let sst_metadata_offset = self
+            .object_store
+            .get_range(&path, sst_metadata_offset_range)
+            .await
+            .map_err(SlateDBError::ObjectStoreError)?
+            .get_u32() as usize;
+        // Get the metadata
+        let sst_metadata_range = sst_metadata_offset..object_metadata.size - 4;
+        let sst_metadata_bytes = self
+            .object_store
+            .get_range(&path, sst_metadata_range)
+            .await
+            .map_err(SlateDBError::ObjectStoreError)?;
+        SsTableInfo::decode(id, &sst_metadata_bytes, sst_metadata_offset)
     }
 
     pub(crate) async fn read_block(
