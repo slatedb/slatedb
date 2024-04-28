@@ -24,7 +24,6 @@ impl<'a> BlockIterator<'a> {
 
     fn advance(&mut self) {
         self.off_off += 1;
-        self.load_at_current_off();
     }
 
     fn load_at_current_off(&self) -> Option<KeyValue> {
