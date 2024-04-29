@@ -10,11 +10,12 @@ pub struct Block {
 }
 
 impl Block {
+    #[rustfmt::skip]
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(
             self.data.len()                   // data byte length
-      + self.offsets.len() * SIZEOF_U16 // offsets as u16's
-      + SIZEOF_U16, // number of offsets in the block
+            + self.offsets.len() * SIZEOF_U16 // offsets as u16's
+            + SIZEOF_U16                      // number of offsets in the block
         );
         buf.put_slice(&self.data);
         for offset in &self.offsets {
@@ -28,8 +29,9 @@ impl Block {
         // Get number of elements in the block
         let entry_offsets_len = (&data[data.len() - SIZEOF_U16..]).get_u16() as usize;
         let data_end = data.len()
-      - SIZEOF_U16 // Entry u16 length
-      - entry_offsets_len * SIZEOF_U16; // Offset byte array length
+            - SIZEOF_U16                                            // Entry u16 length
+            - entry_offsets_len * SIZEOF_U16                        // Offset byte array length
+        ;
         let offsets_raw = &data[data_end..data.len() - SIZEOF_U16]; // Entry u16
         let offsets = offsets_raw
             .chunks(SIZEOF_U16)
@@ -55,10 +57,11 @@ impl BlockBuilder {
         }
     }
 
+    #[rustfmt::skip]
     fn estimated_size(&self) -> usize {
-        SIZEOF_U16 // number of key-value pairs in the block
-    + self.offsets.len() // offsets
-    + self.data.len() // key-value pairs
+        SIZEOF_U16           // number of key-value pairs in the block
+        + self.offsets.len() // offsets
+        + self.data.len()    // key-value pairs
     }
 
     #[must_use]
@@ -67,11 +70,11 @@ impl BlockBuilder {
         // If adding the key-value pair would exceed the block size limit, don't add it.
         // (Unless the block is empty, in which case, allow the block to exceed the limit.)
         if self.estimated_size()
-      + key.len()
-      + value.len()
-      + SIZEOF_U16 * 2 // key size and offset size
-      + SIZEOF_U32 // value size
-      > self.block_size
+            + key.len()
+            + value.len()
+            + SIZEOF_U16 * 2 // key size and offset size
+            + SIZEOF_U32 // value size
+            > self.block_size
             && !self.is_empty()
         {
             return false;
@@ -115,7 +118,8 @@ impl BlockMeta {
             estimated_size += meta.first_key.len();
         }
         estimated_size += std::mem::size_of::<u32>(); // u32 = checksum
-                                                      // Reserve the space to improve performance
+
+        // Reserve the space to improve performance
         buf.reserve(estimated_size);
         let original_len = buf.len();
         buf.put_u32(block_meta.len() as u32);
