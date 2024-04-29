@@ -10,7 +10,7 @@ pub struct BlockIterator<'a> {
 }
 
 impl<'a> KeyValueIterator for BlockIterator<'a> {
-    fn next(&mut self) -> Option<KeyValue> {
+    async fn next(&mut self) -> Option<KeyValue> {
         let key_value = self.load_at_current_off()?;
         self.advance();
         Some(key_value)
@@ -49,23 +49,23 @@ mod tests {
     use crate::block_iterator::BlockIterator;
     use crate::iter::KeyValueIterator;
 
-    #[test]
-    fn test_iterator() {
+    #[tokio::test]
+    async fn test_iterator() {
         let mut block_builder = BlockBuilder::new(1024);
         assert!(block_builder.add("super".as_ref(), "mario".as_ref()));
         assert!(block_builder.add("donkey".as_ref(), "kong".as_ref()));
         assert!(block_builder.add("kratos".as_ref(), "atreus".as_ref()));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_first_key(&block);
-        let kv = iter.next().unwrap();
+        let kv = iter.next().await.unwrap();
         assert_eq!(kv.key, b"super".as_slice());
         assert_eq!(kv.value, b"mario".as_slice());
-        let kv = iter.next().unwrap();
+        let kv = iter.next().await.unwrap();
         assert_eq!(kv.key, b"donkey".as_slice());
         assert_eq!(kv.value, b"kong".as_slice());
-        let kv = iter.next().unwrap();
+        let kv = iter.next().await.unwrap();
         assert_eq!(kv.key, b"kratos".as_slice());
         assert_eq!(kv.value, b"atreus".as_slice());
-        assert!(iter.next().is_none());
+        assert!(iter.next().await.is_none());
     }
 }

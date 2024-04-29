@@ -17,7 +17,7 @@ impl DbInner {
     async fn flush_imm(&self, imm: Arc<MemTable>, id: usize) -> Result<SsTableInfo, SlateDBError> {
         let mut sst_builder = EncodedSsTableBuilder::new(4096);
         let mut iter = imm.iter();
-        while let Some(kv) = iter.next() {
+        while let Some(kv) = iter.next().await {
             sst_builder.add(&kv.key, &kv.value)?;
         }
 

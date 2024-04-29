@@ -83,7 +83,7 @@ impl DbInner {
         for sst in &snapshot.as_ref().l0 {
             if let Some(block_index) = self.find_block_for_key(sst, key) {
                 let block = self.table_store.read_block(sst, block_index).await?;
-                if let Some(val) = self.find_val_in_block(&block, key) {
+                if let Some(val) = self.find_val_in_block(&block, key).await {
                     if val.is_empty() {
                         return Ok(None);
                     }
@@ -102,9 +102,9 @@ impl DbInner {
         Some(block_idx)
     }
 
-    fn find_val_in_block(&self, block: &Block, key: &[u8]) -> Option<Bytes> {
+    async fn find_val_in_block(&self, block: &Block, key: &[u8]) -> Option<Bytes> {
         let mut iter = BlockIterator::from_first_key(block);
-        while let Some(current_key_value) = iter.next() {
+        while let Some(current_key_value) = iter.next().await {
             if current_key_value.key == key {
                 return Some(current_key_value.value);
             }

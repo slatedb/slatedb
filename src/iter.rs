@@ -11,5 +11,5 @@ pub struct KeyValue {
 /// the network.
 /// See: https://github.com/slatedb/slatedb/issues/12
 pub trait KeyValueIterator {
-    fn next(&mut self) -> Option<KeyValue>;
+    async fn next(&mut self) -> Option<KeyValue>;
 }

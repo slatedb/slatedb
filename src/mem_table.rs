@@ -14,7 +14,7 @@ pub(crate) struct MemTable {
 pub struct MemTableIterator<'a>(Iter<'a, Bytes, Bytes>);
 
 impl<'a> KeyValueIterator for MemTableIterator<'a> {
-    fn next(&mut self) -> Option<KeyValue> {
+    async fn next(&mut self) -> Option<KeyValue> {
         self.0.next().map(|entry| KeyValue {
             key: entry.key().clone(),
             value: entry.value().clone(),
