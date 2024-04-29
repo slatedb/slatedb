@@ -129,23 +129,19 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use std::sync::Arc;
-    use tokio::runtime::Runtime;
 
     use super::*;
 
-    #[test]
-    fn test_sstable() {
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async {
-            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let table_store = TableStore::new(object_store);
-            let mut builder = EncodedSsTableBuilder::new(4096);
-            builder.add(b"key1", b"value1").unwrap();
-            builder.add(b"key2", b"value2").unwrap();
-            let encoded = builder.build(0).unwrap();
-            table_store.write_sst(&encoded).await.unwrap();
-            let sst_info = table_store.open_sst(0).await.unwrap();
-            assert_eq!(encoded.info, sst_info);
-        });
+    #[tokio::test]
+    async fn test_sstable() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let table_store = TableStore::new(object_store);
+        let mut builder = EncodedSsTableBuilder::new(4096);
+        builder.add(b"key1", b"value1").unwrap();
+        builder.add(b"key2", b"value2").unwrap();
+        let encoded = builder.build(0).unwrap();
+        table_store.write_sst(&encoded).await.unwrap();
+        let sst_info = table_store.open_sst(0).await.unwrap();
+        assert_eq!(encoded.info, sst_info);
     }
 }

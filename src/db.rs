@@ -202,29 +202,25 @@ mod tests {
     use super::*;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
-    use tokio::runtime::Runtime;
 
-    #[test]
-    fn test_put_get_delete() {
-        let rt = Arc::new(Runtime::new().unwrap());
-        rt.block_on(async {
-            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let table_store = TableStore::new(object_store);
-            let kv_store = Db::open(
-                "/tmp/test_kv_store",
-                DbOptions { flush_ms: 100 },
-                table_store,
-            )
-            .unwrap();
-            let key = b"test_key";
-            let value = b"test_value";
-            kv_store.put(key, value).await;
-            assert_eq!(
-                kv_store.get(key).await.unwrap(),
-                Some(Bytes::from_static(value))
-            );
-            kv_store.delete(key).await;
-            assert!(kv_store.get(key).await.unwrap().is_none());
-        });
+    #[tokio::test]
+    async fn test_put_get_delete() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let table_store = TableStore::new(object_store);
+        let kv_store = Db::open(
+            "/tmp/test_kv_store",
+            DbOptions { flush_ms: 100 },
+            table_store,
+        )
+        .unwrap();
+        let key = b"test_key";
+        let value = b"test_value";
+        kv_store.put(key, value).await;
+        assert_eq!(
+            kv_store.get(key).await.unwrap(),
+            Some(Bytes::from_static(value))
+        );
+        kv_store.delete(key).await;
+        assert!(kv_store.get(key).await.unwrap().is_none());
     }
 }
