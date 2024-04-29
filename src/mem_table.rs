@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::error::SlateDBError;
 use crate::iter::{KeyValue, KeyValueIterator};
 use bytes::Bytes;
 use crossbeam_skiplist::map::Iter;
@@ -14,11 +15,11 @@ pub(crate) struct MemTable {
 pub struct MemTableIterator<'a>(Iter<'a, Bytes, Bytes>);
 
 impl<'a> KeyValueIterator for MemTableIterator<'a> {
-    fn next(&mut self) -> Option<KeyValue> {
-        self.0.next().map(|entry| KeyValue {
+    async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+        Ok(self.0.next().map(|entry| KeyValue {
             key: entry.key().clone(),
             value: entry.value().clone(),
-        })
+        }))
     }
 }
 

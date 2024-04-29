@@ -1,5 +1,7 @@
 use bytes::Bytes;
 
+use crate::error::SlateDBError;
+
 #[derive(Debug)]
 pub struct KeyValue {
     pub key: Bytes,
@@ -11,5 +13,5 @@ pub struct KeyValue {
 /// the network.
 /// See: https://github.com/slatedb/slatedb/issues/12
 pub trait KeyValueIterator {
-    fn next(&mut self) -> Option<KeyValue>;
+    async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError>;
 }
