@@ -25,13 +25,13 @@ impl Block {
         buf.into()
     }
 
+    #[rustfmt::skip]
     pub fn decode(data: &[u8]) -> Self {
         // Get number of elements in the block
         let entry_offsets_len = (&data[data.len() - SIZEOF_U16..]).get_u16() as usize;
         let data_end = data.len()
             - SIZEOF_U16                                            // Entry u16 length
-            - entry_offsets_len * SIZEOF_U16                        // Offset byte array length
-        ;
+            - entry_offsets_len * SIZEOF_U16;                       // Offset byte array length
         let offsets_raw = &data[data_end..data.len() - SIZEOF_U16]; // Entry u16
         let offsets = offsets_raw
             .chunks(SIZEOF_U16)
