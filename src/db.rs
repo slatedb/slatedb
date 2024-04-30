@@ -55,7 +55,6 @@ impl DbInner {
             std::fs::create_dir_all(path).map_err(SlateDBError::IoError)?;
         }
 
-        //let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         Ok(Self {
             state: Arc::new(RwLock::new(Arc::new(DbState::create()))),
             path: path_buf,
