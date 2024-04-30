@@ -54,12 +54,13 @@ Writer and compactor will have an epoch. New instances will increment the epoch 
 * Writers periodically read `_metadata/current_manifest` file and shutsdown if there has been an update to the writer epoch.
 
 **CompactorEpoch**
+* SlateDB expectes to have only one compactor running at any point. Below section helps towards that goal.
 * An integer stored in `_metadata/current_manifest.compactor_epoch`.
 * On startup, compactor reads, increments and conditionally writes it.
 * Modifications done by the compactor are tagged with compactor's epoch number `c`.
 
 **Manifest**
-* Contains state of the DB at some point in time.
+* Contains snapshot prefix of the DB at some point in time.
 * Updated by compactor.
 * Has the following
     * version: A integer version to handle potential behaviour changes in the future.
@@ -74,7 +75,7 @@ Writer and compactor will have an epoch. New instances will increment the epoch 
     * compactor_epoch: integer
         - this is only for debugging purposes.
 
-* Has the following naming convention `_metadata/manifests/manifest.compactorepoch.<randomid>`
+* Has the following naming convention `_metadata/manifests/manifest.<compactorepoch>.<randomid>`
 * Written to the store with `put-if-absent` semantics, i.e. write should fail if there is another entry.
 
 **Current Manifest**
@@ -114,7 +115,7 @@ Writer and compactor will have an epoch. New instances will increment the epoch 
 * Has this naming convention - `{writer epoch}.{sst number}.sst`
     - SST number starts at 0 and increments by 1. It is continuous across writer epochs.
 * On startup, writer does the following.
-    - writes writes the epoch as shared in *current manifest* section.
+    - writes the epoch as shared in *current manifest* section.
     - lists all the L0 files, learns the last sst_number.
     - More on this in **recovery** section.
 
@@ -131,6 +132,9 @@ Writer and compactor will have an epoch. New instances will increment the epoch 
     - Track the `last_compacted_l0`.
 3. List all the files under `l0/` folder. Sort them by `{18 digit writer epoch}.{18 digit sst number}` in descending order.
     - Add the files to the list of SST files to read.
+    - If uploads happened in parallel, it is possible that there are gaps. On such cases.
+        - Wait for a configurable period of time (which can be zero).
+        - After the wait, if the file is still not there, remove files added so far and start from the next item in the list.
     - Updates writer epoch as described in *WriterEpoch* section.
     - As it iterates the list, 
         - reject files that are less than `last_compacted_l0.sstnumber`. Assume this is `1.1` for the example later.
@@ -203,7 +207,7 @@ Summary:
 |P|Size of new blockMeta in 1 minute in kb|O * E /1024| 800kb
 |Q|Metadata writes per month by compactor| 24 * 3600 * 30 * 2 / J|86400
 |R| Cost per 10k writes for object store in $|R|0.065
-|S|Cost for compactor metadata writes in $|Q * R /1000| 0.56
+|S|Cost for compactor metadata writes in $ per month|Q * R /1000| 0.56
 
 
 ## Create and read snapshot
@@ -212,6 +216,7 @@ Summary:
 2. Run step 5 of *Open DB in read/write mode*, get the last L0 file.
 3. Write a `_metadata/snapshots/manifest.compactorepoch7.100.<random_snapshot_id>` file, marking that a snapshot exists. Write the following in the file.
     - last L0 file to include: string, file retreived in step 2.
+    - expiry: integer, epochseconds after which the snapshot may be deleted.
 4. Open DB in read only mode, pass above manifest, a last L0 file and disable `get_changes`.
 5. Delete the snapshot file when done.
 
@@ -219,9 +224,11 @@ Summary:
 
 Deletes the SST files that are not part of the table any more.
 
-1. Read `_metadata/current_manifest` and all the manifests in `_metadata/snapshots/` to construct the files are part of the table.
-2. Delete data files that are marked for deletion and are not part of any snapshots. Also skip the files that are less than a configurable period, to avoid deleting files that are part of in progress compaction.
-3. List the files under `_metadata/manifests/` and delete the ones that are not part of snapshots, is not the current manifest, and created before a configurable interval.
+1. List `_metadata/snapshots/` and delete the ones that have expired. Add a configurable buffer to account for clock skews.
+2. Read `_metadata/current_manifest` and all the manifests in `_metadata/snapshots/` to construct the files are part of the table.
+3. For L1+ files, Delete data files that are marked for deletion and are not part of any snapshots. 
+4. For L0 files, delete all files lower than the lowest one refered to by current_manifest or a snapshot.
+5. List the files under `_metadata/manifests/` and delete the ones that are not part of snapshots, is not the current manifest, and created before a configurable interval.
 
 ## Consistency semantics
 
