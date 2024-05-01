@@ -76,7 +76,6 @@ Writer and compactor will have an epoch. New instances will increment the epoch 
         - this is only for debugging purposes.
 
 * Has the following naming convention `_metadata/manifests/manifest.<compactorepoch>.<randomid>`
-* Written to the store with `put-if-absent` semantics, i.e. write should fail if there is another entry.
 
 **Current Manifest**
 * Contains pointer to the current manifest file.
@@ -113,7 +112,7 @@ Writer and compactor will have an epoch. New instances will increment the epoch 
 ### L0 SSTs
 * Are in `l0/` folder.
 * Has this naming convention - `{writer epoch}.{sst number}.sst`
-    - SST number starts at 0 and increments by 1. It is continuous across writer epochs.
+    - SST number starts at 0 for each writer epoch and increments by 1.
 * On startup, writer does the following.
     - writes the epoch as shared in *current manifest* section.
     - lists all the L0 files, learns the last sst_number.
@@ -122,6 +121,7 @@ Writer and compactor will have an epoch. New instances will increment the epoch 
 ### Other SST files
 * These files are under `ssts/` folder.
 * There is an optional naming convention, for debugging purposes - `{compactor epoch}.{random sst number}.sst`.
+* TODO:- Consider taking advantage of prefix based throughput [improvement](https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance.html).
 
 ## Recovery
 
