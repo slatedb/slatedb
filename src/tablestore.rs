@@ -1,6 +1,7 @@
 use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::error::SlateDBError;
+use crate::filter::BloomFilter;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat, SsTableInfo};
 use bytes::Bytes;
 use object_store::path::Path;
@@ -45,6 +46,11 @@ impl ReadOnlyBlob for ReadOnlyObject {
 pub struct SSTableHandle {
     pub id: usize,
     pub info: SsTableInfo,
+    // we stash the filter in the handle for now, as a way to cache it so that
+    // the db doesn't need to reload it for each read. Once we've put in a proper
+    // cache, we should instead cache the filter block in the cache and get rid
+    // of this reference.
+    filter: Option<Arc<BloomFilter>>,
 }
 
 impl TableStore {
@@ -71,6 +77,7 @@ impl TableStore {
         Ok(SSTableHandle {
             id,
             info: encoded_sst.info,
+            filter: encoded_sst.filter,
         })
     }
 
@@ -83,7 +90,15 @@ impl TableStore {
             path,
         };
         let info = self.sst_format.read_info(&obj).await?;
-        Ok(SSTableHandle { id, info })
+        let filter = self.sst_format.read_filter(&info, &obj).await?;
+        Ok(SSTableHandle { id, info, filter })
+    }
+
+    pub(crate) async fn read_filter(
+        &self,
+        handle: &SSTableHandle,
+    ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
+        Ok(handle.filter.clone())
     }
 
     pub(crate) async fn read_block(

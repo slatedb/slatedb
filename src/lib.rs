@@ -8,6 +8,7 @@ mod block;
 mod block_iterator;
 pub mod db;
 mod error;
+mod filter;
 mod flush;
 mod iter;
 mod mem_table;
