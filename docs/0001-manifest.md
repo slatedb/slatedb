@@ -1,4 +1,4 @@
-# Alternative Manifest Design
+# Manifest Design
 
 ## File Structure
 
@@ -8,7 +8,7 @@ some-bucket/
 │  ├─ current
 │  ├─ 000000000000000000.manifest
 │  ├─ 000000000000000001.manifest
-│  ├─ ...
+│  ├─ 000000000000000002.manifest
 ├─ level_0/
 │  ├─ 000000000000000000.sst
 │  ├─ 000000000000000001.sst
@@ -19,62 +19,289 @@ some-bucket/
 │  ├─ ...
 ```
 
-## Files
-
 ### `manifest/current`
 
-A single line string pointing to the current manifest file:
+A file that contains a pointer to the current manifest file.
+
+For example, if `current` contains:
 
 ```
-000000000000000001.manifest
+1
 ```
 
-### `manifest/000000000000000001.manifest`
+Then `manifest/000000000000000001.manifest` is the current manifest.
 
-A file containing commpaction and snapshot information:
+All mutations to `manifest/current` must be done using CAS. AWS users will need to use a DynamoDB implementation for manifest management.
 
-```json
-{
-  "last_compacted_l0_sst": "000000000000000000.sst",
-  "compacted": [
-    // SsTableInfo, ...
-  ],
-  "snapshots": {
-    "10727630-0f47-49b6-840d-e2d16412ff9b": {
-      "manifest": "000000000000000000.manifest",
-      "utc_timestamp": 1231714598526
-    },
-    // ...
-  }
+### `manifest/000000000000000000.manifest`
+
+A file containing writer, commpaction, and snapshot information--the state of the database at a point in time.
+
+#### Structure
+
+_NOTE: Described as proto3, but the manifest could be any format we choose._
+
+```proto
+syntax = "proto3";
+
+message Manifest {
+  // The current writer's epoch.
+  uint64 writer_epoch = 1;
+
+  // The current compactor's epoch.
+  uint64 compactor_epoch = 1;
+
+  // The most recent `level_0` SST that's been compacted. Note that keeping
+  // just the `level_0` low-water mark means `level_0` compaction must be
+  // sequetional not random. Also note that this SST must alwyas exist in
+  // `level-0`; the commpactor must not remove it.
+  uint64 last_compacted_l0_sst = 2;
+
+  // A list of the SST IDs that are valid to read in the `compacted` folder.
+  repeated uint64 compacted_ssts = 3;
+
+  // A list of snapshots that are currently open.
+  repeated Snapshot snapshots = 4;
+}
+
+message Snapshot {
+  // A random ID that must be unique across all open snapshots.
+  uint32 id = 1;
+
+  // The manifest ID that this snapshot is using as its `DbState`.
+  uint64 manifest = 2;
+
+  // The UTC seconds timestamp that this snapshot was created at.
+  uint32 timestamp_ms = 3;
 }
 ```
 
-_NOTE: Described as JSON, but the manifest files will be binary to reduce size._
+#### Size
 
-### `level_0/000000000000000000.sst`
+Manifest size is important because manifest updates must be done transactionally. In object storage, this is done using a compare-and-swap (CAS). The longer the read-modify-write takes, the more likely there is to be a conflict. Consequently, we want our manifest to be as small as possible.
 
-Standard SSTs with SsTableInfo, block metadata, bloom filters, and so on.
+The size calculation (in bytes) for the manifest is:
 
-Each SST will have the following [user-defined metadata fields](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html#UserMetadata) set:
+```
+  8                         // writer_epoch
++ 8                         // compactor_epoch
++ 8                         // last_compacted_l0_sst
++ 4 + 8 * compacted_ssts    // array length + compacted_ssts
++ 4 + 16 * snapshots        // array length + snapshots (16 bytes each)
+```
 
-* writer_epoch: This is a u64. Writers will set this when the put a new SST into `level_0`.
-* crc32: This is a u32 checksum for the file. It's also used to de-duplicate writes if two zombies have the same writer_epoch (see below).
+Conservatively, a manifest with 1000 snapshots and 100,000 compacted SSTs would be:
 
-### `compacted/000000000000000000.sst`
+```
+  8                         // writer_epoch
++ 8                         // compactor_epoch
++ 8                         // last_compacted_l0_sst
++ 4 + 8 * 100000            // array length + compacted_ssts
++ 4 + 16 * 1000             // array length + snapshots (16 bytes each)
+= 816032
+```
 
-Standard SSTs in the same format as `level_0` SSTs. Commpacted SSTs have the same user-defined metadata fields as `level_0` SSTs.
+This comes out to 816032 bytes, or ~796KiB. Whether this is reasonable or not depends on how frequently manifests are updated. As we'll see below, updates should be infrequent enough that a 1 MiB manifest isn't a problem.
 
-The compaction processes should set `writer_epoch` metadata field to the max of the `writer_epoch`s for the SSTs it used as inputs for the compacted SST. For example, if a compactor is merging the following SSTs:
+## Updates
 
-* 000000000000000000.sst, writer_epoch=1
-* 000000000000000003.sst, writer_epoch=7
-* 000000000000000042.sst, writer_epoch=3
+A full read-modify-write Manifest update contains the following steps:
 
-The resulting `.sst` file would have `writer_epoch=7` (max(1, 7, 3)).
+1. Read `manifest/current` to find the current manifest. Let's say it's `3` in this example.
+2. Read `manifest/000000000000000003.manifest` to read the current manifest.
+3. Update the manifest in memory.
+4. Write the updated manifest to `manifest/000000000000000004.manifest` using a "create-if-not-exists" `PUT`.
+5. If (4) was successful, write `4` to `manifest/current` using compare-and-swap (CAS) with the `manifest/current` version from (1).
+
+Three different processes update the manifest:
+
+* **Readers**: Readers can update `snapshots` to create or remove a state snapshot. 
+* **Writers**: Writers must update `writer_epoch` once on startup.
+* **Compactors**: Compactors must update `compactor_epoch` once on startup. Compactors must also update `last_compacted_l0_sst` and `compacted_ssts` after each compaction pass.
+
+The union of these three processes means the manifest is updated whenever:
+
+1. A new snapshot is created
+2. An existing snapshot is removed
+3. A new writer is starts
+4. A new compactor starts
+5. A compactor finishes compaction
+
+Let's look at each of these
+
+## Snapshots
+
+SlateDB's state on object storage is constantly changing. The writer is adding new SSTs to `level_0`. The compactor is adding/removing SSTs in `compacted` and removing them SSTs from `level_0`. SlateDB clients keep their in-memory state in a `DbState` object. The client's in-memory state might end up referencing an SST that's been deleted by the compactor.
+
+Clients can ensure SSTs aren't deleted by writing a new manifest with a snapshot containing the current manifest ID. The snapshot's manifest ID signals that the SSTs contained in that manifest are still in use.
+
+A manifest is considered active as long as:
+
+* It's the current manifest
+* It's referenced by a snapshot in the current manifest
+
+A compactor may not delete SSTs that are still in use by any active manifest.
+
+The set of SSTs that are considered in use by an active manifest are:
+
+* All `compacted` SST files with IDs listed in the manifest's `compacted_ssts`
+* All `level_0` SST files with IDs >= the manifest's `last_compacted_l0_sst`
+
+_NOTE: The inclusive `>=` for `last_compacted_l0_sst` is required so we can get the `writer_epoch` of the `last_compacted_l0_sst` file. This is important to know for the recover process detailed in the Read-only section below._
+
+### Lifecycle
+
+Any client may create a snapshot. Only two processe may remove a snapshot:
+
+* The client that created it
+* The compactor
+
+A client that creates a snapshot may remove it at any time by writing a new manifest with the snapshot removed.
+
+The compactor may remove any snapshot from the manifest that has a `timestamp_ms` < now() - `snapshot_timeout_s` (a new compactor config). For example, a compactor with `snapshot_timeout_s` set to `120` is allowed to remove snapshots from the manifest that are older than 120 seconds.
+
+### Renewing
+
+Clients that want long-running snapshots may renew (or heartbeat) their snapshots by writing a new manifest that contains their existing snapshot with an updated `timestamp_ms`. As long as the client does this more frequently than `snapshot_timeout_s`, the SSTs in the manifest they're using will never be deleted.
+
+## Read-only
+
+On startup, a read-only process needs to find the currently available l0 and compacted SSTs in object storage. This requires the following steps:
+
+1. Read `manifest/current` to find the current manifest.
+2. Read the current manifest (e.g. `manifest/000000000000000003.manifest`).
+3. Store all SST IDs from `compacted_ssts` in memory.
+4. List all valid `level-0` SSTs into memory.
+
+To determine the valid SSTs in `level-0`, we run the following logic:
+
+```rust
+// Get the writer epoch from the most recently compacted level-0 SST file
+let mut current_writer_epoch = table_store.get_writer_epoch(manifest.last_compacted_l0_sst) or 0
+let mut current_sst_id = state.last_compacted_l0_sst or 0;
+
+// Read all contiguous SSTs starting from the first SST after last_compacted_l0_sst
+while Some(sst_info) = table_store.open_sst(current_sst_id + 1) {
+  // We've found a new writer_epoch, so seal all future writes from older ones
+  if sst_info.writer_epoch > current_writer_epoch:
+    current_writer_epoch = current_writer_epoch
+  // We've found a valid write, add the SST to the DbStat's l0
+  if sst_info.writer_epoch == current_writer_epoch:
+    state.l0.insert(0, sst_info);
+  // if sst_info.writer_epoch < current_writer_epoch:
+  //   ignore since this is a zombie write (a higher epoch has previously written an SST)
+
+  // Advance to the next contigous SST ID
+  current_sst_id += 1;
+}
+```
+
+At this point, the client has a list of all compacted SST IDs and all valid uncompacted `level-0` SSTs.
+
+From here, read-only processes get to decide how they want to manage their in-memory state using any combination of:
+
+* Creating a snapshot (as described above)
+* Re-running (1-5) lazily when an object_store SST read results in a 404 (the SST was deleted)
+* Re-running (1-5) periodically
+* Periodically listing `level-0` to detect new `level-0` SSTs
+
+## Read-write
+
+On startup, a read-writer process needs to increment the `writer_epoch` in the manifest and create a new read snapshot:
+
+1. Read `manifest/current` to find the current manifest.
+2. Read the current manifest (e.g. `manifest/000000000000000003.manifest`).
+3. Update the `writer_epoch` and `snapshot` manifest sections in memory.
+4. Write the updated manifest to the next manifest (e.g. `manifest/000000000000000004.manifest`) using a "create-if-not-exists" `PUT`.
+5. If (4) was successful, write the next manifest ID (e.g. `4`) to `manifest/current` using compare-and-swap (CAS) with the `manifest/current` version from (1).
+
+At this point, the `writer_epoch` in the manifest has been transactionally incremented and a snapshot has been reserved for consistent reads.
+
+Next, the writer must fence all previous writers. It does this by writing an empty SST (with its `writer_epoch`) to next open SST ID slot starting from `last_compacted_l0_sst`.
+
+_NOTE: Sorry about the horrible pseudocode. You get the idea._
+
+```rust
+// Get the writer epoch from the most recently compacted level-0 SST file
+let mut current_writer_epoch = manifest.writer_epoch
+let mut current_sst_id = manifest.last_compacted_l0_sst + 1
+
+// Try and write the SST (using put-if-absent CAS or S3 versioned-based first-writer-wins)
+while table_store.write_sst(current_sst_id, empty_sst) match {
+  file:
+    if file.metadata.writer_epoch > current_writer_epoch:
+      panic!("We've been fenced");
+    else:
+    // If the file was from an older writer, so simply go to the next slot
+    current_sst_id += 1;
+  none:
+    // We found an open slot
+    break;
+}
+
+next_sst_id = current_sst_id + 1
+```
+
+We've now fenced all previous writers. The SSTs are contiguious and monotonically increasing up to the writer's `next_sst_id`.
+
+Now the writer must load the valid `compacted` and `level-0` SSTs from 
+
+1. Following the steps in 
+
+There might still be SSTs ahead of `next_sst_id`; this is unavoidable. Zombie writers might have had parallel writes outstanding, or a subsequent writer might have fenced the current writer out already. We'll deal with this now.
+
+If a writer tries to write an SST, but the SST already exists,  
+
+### Getting Fenced
+
+### Zombie Writers
+
+### Ack'ing
+
+## Compactors
+
+Updates 1-4 will be relatively in frequent (on the order of minutes, or longer).
+
+Compactor updates are important to consider because `level_0` compactions must happen frequently to keep startup times down. SSTs can be created in `level_0` write volume frequently exceeds `flush_bytes` ([#30](https://github.com/slatedb/slatedb/issues/30)) or if `flush_ms` is very low. A writer with a `flush_ms` set to 1 would create 1000 SSTs per-second.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## Writer
 
 ### Startup
+
+On startup, a writer process needs to do several things:
+
+1. Establish a snapshot of the current manifest.
+2. Load snapshotted manifest into `DbState`.
+3. Recover unsnapshotted `DbState` from the remaining`level_0` SSTs.
+4. Fence all previous writers.
+
+#### Snapshotting the Current Manifest
+
+Before the writer can do anything, it needs to snapshot the manifest. Doing so will ensure that the `level_0` SSTs won't be deleted by the garbage collector while we're reading them. Snapshotting requires these steps:
+
+1. Loads `manifest/current` (if it exists)
+2. Loads `manifest/<manifest-id>.json` that `manifest/current` points to if (1) exists, else create an empty manifest
+3. Add a new entry to the `snapshots` field in the manifest loaded in (2)
+4. Write the new manifest from (3) into `manifest/<manifest-id + 1>.json` (or `0.json` if it's the first)
+5. Update `manifest/current`
+
+Object stores that support CAS will use CAS for steps (4) and (5).
 
 On startup a writer process:
 
@@ -86,7 +313,7 @@ On startup a writer process:
 
 ```rust
 let mut current_writer_epoch = state.compacted.map(SsTableInfo::writer_epoch).max();
-let mut current_sst_id = state.last_compacted_l0_sst;
+let mut current_sst_id = state.last_compacted_l0_sst or 0;
 
 // Read all contiguous SSTs starting from the first SST after last_compacted_l0_sst
 while Some(sst_info) = table_store.open_sst(current_sst_id + 1) {
