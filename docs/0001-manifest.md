@@ -4,6 +4,7 @@
 
 * Only one writer client is allowed at a time
 * Multiple reader clients are allowed at the same time
+* Only one compactor client is allowed at a time
 * Compactor, writer, and readers may all be on different machines
 * Writer does not send parallel writes to the object store
 * Manifest on object store requires compare-and-swap (CAS) or transactional store (DynamoDB)
@@ -27,7 +28,7 @@ In the mutable case (2), an object store can't be used to keep reads and writes 
 
 In the immutable case (1), we can emulate CAS if the bucket has versioning enabled. Versioning allows multiple versions of an object to be stored. AWS stores versions [in insertion order](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html#API_ListObjectVersions_Example_3). We can leverage this property as well as AWS's [read-after-write](https://aws.amazon.com/blogs/aws/amazon-s3-update-strong-read-after-write-consistency/) to emulate CAS. Many writers can write to the same object path. Writers can then list all versions of the object. The first version (the earliest) is considered the winner. All other writers have failed the CAS operation. This does require a [ListObjectVersions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) after the write, but if CAS is needed, this is the best we can do.
 
-This document call out whether each CAS operation is immutable CAS and mutable CAS.
+This document calls out whether each CAS operation is immutable CAS and mutable CAS.
 
 ## File Structure
 
