@@ -198,6 +198,10 @@ impl Db {
         // TODO move the put into an async block by blocking on the memtable flush
         self.inner.delete(key).await;
     }
+
+    pub async fn flush(&self) -> Result<(), SlateDBError> {
+        self.inner.flush().await
+    }
 }
 
 #[cfg(test)]
@@ -219,11 +223,14 @@ mod tests {
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await;
+        kv_store.flush().await.unwrap();
+
         assert_eq!(
             kv_store.get(key).await.unwrap(),
             Some(Bytes::from_static(value))
         );
-        kv_store.delete(key).await;
-        assert!(kv_store.get(key).await.unwrap().is_none());
+        kv_store.delete(key).await;        
+        assert!(kv_store.get(key).await.unwrap().is_none()); 
+        kv_store.close().await.unwrap();       
     }
 }
