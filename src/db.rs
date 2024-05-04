@@ -6,11 +6,12 @@ use std::{
 use crate::{block::Block, error::SlateDBError};
 use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
 use bytes::Bytes;
+use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 
 use crate::mem_table::MemTable;
-use crate::sst::SsTableInfo;
-use crate::tablestore::TableStore;
+use crate::sst::SsTableFormat;
+use crate::tablestore::{SSTableHandle, TableStore};
 
 pub struct DbOptions {
     pub flush_ms: usize,
@@ -20,7 +21,7 @@ pub struct DbOptions {
 pub(crate) struct DbState {
     pub(crate) memtable: Arc<MemTable>,
     pub(crate) imm_memtables: Vec<Arc<MemTable>>,
-    pub(crate) l0: Vec<SsTableInfo>,
+    pub(crate) l0: Vec<SSTableHandle>,
     pub(crate) next_sst_id: usize,
 }
 
@@ -93,9 +94,9 @@ impl DbInner {
         Ok(None)
     }
 
-    fn find_block_for_key(&self, sst: &SsTableInfo, key: &[u8]) -> Option<usize> {
-        let block_idx = sst.block_meta.partition_point(|bm| bm.first_key > key);
-        if block_idx == sst.block_meta.len() {
+    fn find_block_for_key(&self, sst: &SSTableHandle, key: &[u8]) -> Option<usize> {
+        let block_idx = sst.info.block_meta.partition_point(|bm| bm.first_key > key);
+        if block_idx == sst.info.block_meta.len() {
             return None;
         }
         Some(block_idx)
@@ -155,8 +156,10 @@ impl Db {
     pub fn open(
         path: impl AsRef<Path>,
         options: DbOptions,
-        table_store: TableStore,
+        object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self, SlateDBError> {
+        let sst_format = SsTableFormat::new(4096);
+        let table_store = TableStore::new(object_store, sst_format);
         let inner = Arc::new(DbInner::new(path, options, table_store)?);
         let (tx, rx) = crossbeam_channel::unbounded();
         let flush_thread = inner.spawn_flush_thread(rx);
@@ -213,11 +216,10 @@ mod tests {
     #[tokio::test]
     async fn test_put_get_delete() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let table_store = TableStore::new(object_store);
         let kv_store = Db::open(
             "/tmp/test_kv_store",
             DbOptions { flush_ms: 100 },
-            table_store,
+            object_store,
         )
         .unwrap();
         let key = b"test_key";

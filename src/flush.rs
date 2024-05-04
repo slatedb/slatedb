@@ -2,7 +2,7 @@ use crate::db::{DbInner, DbState};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::MemTable;
-use crate::sst::{EncodedSsTableBuilder, SsTableInfo};
+use crate::tablestore::SSTableHandle;
 use futures::executor::block_on;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,16 +14,20 @@ impl DbInner {
         Ok(())
     }
 
-    async fn flush_imm(&self, imm: Arc<MemTable>, id: usize) -> Result<SsTableInfo, SlateDBError> {
-        let mut sst_builder = EncodedSsTableBuilder::new(4096);
+    async fn flush_imm(
+        &self,
+        imm: Arc<MemTable>,
+        id: usize,
+    ) -> Result<SSTableHandle, SlateDBError> {
+        let mut sst_builder = self.table_store.table_builder();
         let mut iter = imm.iter();
         while let Some(kv) = iter.next().await? {
             sst_builder.add(&kv.key, &kv.value)?;
         }
 
-        let encoded_sst = sst_builder.build(id)?;
-        self.table_store.write_sst(&encoded_sst).await?;
-        Ok(encoded_sst.info)
+        let encoded_sst = sst_builder.build()?;
+        let handle = self.table_store.write_sst(id, encoded_sst).await?;
+        Ok(handle)
     }
 
     async fn flush_imms(&self) -> Result<(), SlateDBError> {

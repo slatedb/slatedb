@@ -1,82 +1,102 @@
+use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::error::SlateDBError;
-use crate::sst::{EncodedSsTable, SsTableInfo};
-use bytes::Buf;
+use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat, SsTableInfo};
+use bytes::Bytes;
 use object_store::path::Path;
 use object_store::ObjectStore;
+use std::ops::Range;
 use std::sync::Arc;
 
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
+    sst_format: SsTableFormat,
+}
+
+struct ReadOnlyObject {
+    object_store: Arc<dyn ObjectStore>,
+    path: Path,
+}
+
+impl ReadOnlyBlob for ReadOnlyObject {
+    async fn len(&self) -> Result<usize, SlateDBError> {
+        let object_metadata = self
+            .object_store
+            .head(&self.path)
+            .await
+            .map_err(SlateDBError::ObjectStoreError)?;
+        Ok(object_metadata.size)
+    }
+
+    async fn read_range(&self, range: Range<usize>) -> Result<Bytes, SlateDBError> {
+        self.object_store
+            .get_range(&self.path, range)
+            .await
+            .map_err(SlateDBError::ObjectStoreError)
+    }
+
+    async fn read(&self) -> Result<Bytes, SlateDBError> {
+        let file = self.object_store.get(&self.path).await?;
+        file.bytes().await.map_err(SlateDBError::ObjectStoreError)
+    }
+}
+
+#[derive(Clone)]
+pub struct SSTableHandle {
+    pub id: usize,
+    pub info: SsTableInfo,
 }
 
 impl TableStore {
-    pub fn new(object_store: Arc<dyn ObjectStore>) -> TableStore {
+    pub fn new(object_store: Arc<dyn ObjectStore>, sst_format: SsTableFormat) -> TableStore {
         TableStore {
             object_store: object_store.clone(),
+            sst_format,
         }
     }
 
-    pub(crate) async fn write_sst(&self, encoded_sst: &EncodedSsTable) -> Result<(), SlateDBError> {
-        self.object_store
-            .put(&self.path(encoded_sst.info.id), encoded_sst.raw.clone())
-            .await
-            .map_err(SlateDBError::ObjectStoreError)?;
-        Ok(())
+    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
+        self.sst_format.table_builder()
     }
 
-    // todo: wrap info in some handle object that cleans up stuff like open file handles when
-    //       handle is cleaned up
+    pub(crate) async fn write_sst(
+        &self,
+        id: usize,
+        encoded_sst: EncodedSsTable,
+    ) -> Result<SSTableHandle, SlateDBError> {
+        self.object_store
+            .put(&self.path(id), encoded_sst.raw.clone())
+            .await
+            .map_err(SlateDBError::ObjectStoreError)?;
+        Ok(SSTableHandle {
+            id,
+            info: encoded_sst.info,
+        })
+    }
+
     // todo: clean up the warning suppression when we start using open_sst outside tests
     #[allow(dead_code)]
-    pub(crate) async fn open_sst(&self, id: usize) -> Result<SsTableInfo, SlateDBError> {
+    pub(crate) async fn open_sst(&self, id: usize) -> Result<SSTableHandle, SlateDBError> {
         let path = self.path(id);
-        // Get the size of the object
-        let object_metadata = self
-            .object_store
-            .head(&path)
-            .await
-            .map_err(SlateDBError::ObjectStoreError)?;
-        if object_metadata.size <= 4 {
-            return Err(SlateDBError::EmptySSTable);
-        }
-        // Get the size of the metadata
-        let sst_metadata_offset_range = (object_metadata.size - 4)..object_metadata.size;
-        let sst_metadata_offset = self
-            .object_store
-            .get_range(&path, sst_metadata_offset_range)
-            .await
-            .map_err(SlateDBError::ObjectStoreError)?
-            .get_u32() as usize;
-        // Get the metadata
-        let sst_metadata_range = sst_metadata_offset..object_metadata.size - 4;
-        let sst_metadata_bytes = self
-            .object_store
-            .get_range(&path, sst_metadata_range)
-            .await
-            .map_err(SlateDBError::ObjectStoreError)?;
-        SsTableInfo::decode(id, &sst_metadata_bytes, sst_metadata_offset)
+        let obj = ReadOnlyObject {
+            object_store: self.object_store.clone(),
+            path,
+        };
+        let info = self.sst_format.read_info(&obj).await?;
+        Ok(SSTableHandle { id, info })
     }
 
     pub(crate) async fn read_block(
         &self,
-        info: &SsTableInfo,
+        handle: &SSTableHandle,
         block: usize,
     ) -> Result<Block, SlateDBError> {
-        let path = self.path(info.id);
-        // todo: range read
-        let file = self.object_store.get(&path).await?;
-        let bytes = file.bytes().await.map_err(SlateDBError::ObjectStoreError)?;
-        let block_meta = &info.block_meta[block];
-        let mut end = info.block_meta_offset;
-        if block < info.block_meta.len() - 1 {
-            let next_block_meta = &info.block_meta[block + 1];
-            end = next_block_meta.offset;
-        }
-        // account for checksum
-        end -= 4;
-        let raw_block = bytes.slice(block_meta.offset..end);
-        Ok(Block::decode(raw_block.as_ref()))
+        let path = self.path(handle.id);
+        let obj = ReadOnlyObject {
+            object_store: self.object_store.clone(),
+            path,
+        };
+        self.sst_format.read_block(&handle.info, block, &obj).await
     }
 
     fn path(&self, id: usize) -> Path {

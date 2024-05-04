@@ -133,16 +133,21 @@ impl BlockMeta {
     }
 
     /// Decode a vector of block metadatas from a buffer.
-    pub(crate) fn decode_block_meta(mut buf: &[u8]) -> Result<Vec<BlockMeta>, SlateDBError> {
+    pub(crate) fn decode_block_meta(buf: &mut Bytes) -> Result<Vec<BlockMeta>, SlateDBError> {
         let mut block_meta = Vec::new();
         let num = buf.get_u32() as usize;
-        let checksum = crc32fast::hash(&buf[..buf.remaining() - 4]);
+        let meta_start = buf.slice(..);
+        let mut meta_len = 0;
         for _ in 0..num {
             let offset = buf.get_u32() as usize;
+            meta_len += std::mem::size_of::<u32>();
             let first_key_len = buf.get_u16() as usize;
+            meta_len += std::mem::size_of::<u16>();
             let first_key = buf.copy_to_bytes(first_key_len);
+            meta_len += first_key_len;
             block_meta.push(BlockMeta { offset, first_key });
         }
+        let checksum = crc32fast::hash(&meta_start[..meta_len]);
         if buf.get_u32() != checksum {
             return Err(SlateDBError::ChecksumMismatch);
         }
@@ -180,7 +185,8 @@ mod tests {
         ];
         let mut buf = Vec::new();
         BlockMeta::encode_block_meta(&block_meta, &mut buf);
-        let decoded = BlockMeta::decode_block_meta(&buf).unwrap();
+        let mut as_bytes = Bytes::copy_from_slice(buf.as_slice());
+        let decoded = BlockMeta::decode_block_meta(&mut as_bytes).unwrap();
         assert_eq!(block_meta, decoded);
     }
 }
