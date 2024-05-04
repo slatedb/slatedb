@@ -229,8 +229,8 @@ mod tests {
             kv_store.get(key).await.unwrap(),
             Some(Bytes::from_static(value))
         );
-        kv_store.delete(key).await;        
-        assert!(kv_store.get(key).await.unwrap().is_none()); 
-        kv_store.close().await.unwrap();       
+        kv_store.delete(key).await;
+        assert!(kv_store.get(key).await.unwrap().is_none());
+        kv_store.close().await.unwrap();
     }
 }
