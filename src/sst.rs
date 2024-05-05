@@ -1,18 +1,24 @@
 use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
+use crate::filter::{BloomFilter, BloomFilterBuilder};
 use crate::{
     block::{BlockBuilder, BlockMeta},
     error::SlateDBError,
 };
 use bytes::{Buf, BufMut, Bytes};
+use std::sync::Arc;
 
 pub(crate) struct SsTableFormat {
     block_size: usize,
+    min_filter_keys: u32,
 }
 
 impl SsTableFormat {
-    pub fn new(block_size: usize) -> Self {
-        Self { block_size }
+    pub fn new(block_size: usize, min_filter_keys: u32) -> Self {
+        Self {
+            block_size,
+            min_filter_keys,
+        }
     }
 
     pub(crate) async fn read_info(
@@ -33,6 +39,21 @@ impl SsTableFormat {
         SsTableInfo::decode(&mut sst_metadata_bytes)
     }
 
+    pub(crate) async fn read_filter(
+        &self,
+        info: &SsTableInfo,
+        obj: &impl ReadOnlyBlob,
+    ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
+        let mut filter = None;
+        if info.filter_len > 0 {
+            let filter_end = info.filter_offset + info.filter_len;
+            let filter_offset_range = info.filter_offset..filter_end;
+            let filter_bytes = obj.read_range(filter_offset_range).await?;
+            filter = Some(Arc::new(BloomFilter::decode(&filter_bytes)));
+        }
+        Ok(filter)
+    }
+
     pub(crate) async fn read_block(
         &self,
         info: &SsTableInfo,
@@ -42,7 +63,7 @@ impl SsTableFormat {
         // todo: range read
         let bytes = obj.read().await?;
         let block_meta = &info.block_meta[block];
-        let mut end = info.block_meta_offset;
+        let mut end = info.filter_offset;
         if block < info.block_meta.len() - 1 {
             let next_block_meta = &info.block_meta[block + 1];
             end = next_block_meta.offset;
@@ -54,7 +75,7 @@ impl SsTableFormat {
     }
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
-        EncodedSsTableBuilder::new(self.block_size)
+        EncodedSsTableBuilder::new(self.block_size, self.min_filter_keys)
     }
 }
 
@@ -64,12 +85,16 @@ pub(crate) struct SsTableInfo {
     // todo: we probably dont want to keep this here, and instead store this in block cache
     //       and load it from there
     pub(crate) block_meta: Vec<BlockMeta>,
+    pub(crate) filter_offset: usize,
+    pub(crate) filter_len: usize,
     pub(crate) block_meta_offset: usize,
 }
 
 impl SsTableInfo {
     fn encode(info: &SsTableInfo, buf: &mut Vec<u8>) {
         BlockMeta::encode_block_meta(&info.block_meta, buf);
+        buf.put_u32(info.filter_offset as u32);
+        buf.put_u32(info.filter_len as u32);
         buf.put_u32(info.block_meta_offset as u32);
     }
 
@@ -79,6 +104,8 @@ impl SsTableInfo {
         }
         // Read the block meta
         let block_meta = BlockMeta::decode_block_meta(raw_block_meta)?;
+        let filter_offset = raw_block_meta.get_u32() as usize;
+        let filter_len = raw_block_meta.get_u32() as usize;
         let block_meta_offset = raw_block_meta.get_u32() as usize;
         Ok(SsTableInfo {
             first_key: block_meta
@@ -87,6 +114,8 @@ impl SsTableInfo {
                 .first_key
                 .clone(),
             block_meta,
+            filter_offset,
+            filter_len,
             block_meta_offset,
         })
     }
@@ -94,6 +123,7 @@ impl SsTableInfo {
 
 pub(crate) struct EncodedSsTable {
     pub(crate) info: SsTableInfo,
+    pub(crate) filter: Option<Arc<BloomFilter>>,
     pub(crate) raw: Bytes,
 }
 
@@ -104,19 +134,23 @@ pub(crate) struct EncodedSsTableBuilder {
     block_meta: Vec<BlockMeta>,
     data: Vec<u8>,
     block_size: usize,
+    min_filter_keys: u32,
     num_keys: u32,
+    filter_builder: BloomFilterBuilder,
 }
 
 impl EncodedSsTableBuilder {
     /// Create a builder based on target block size.
-    fn new(block_size: usize) -> Self {
+    fn new(block_size: usize, min_filter_keys: u32) -> Self {
         Self {
             data: Vec::new(),
             block_meta: Vec::new(),
             first_key: Vec::new(),
             block_size,
             builder: BlockBuilder::new(block_size),
+            min_filter_keys,
             num_keys: 0,
+            filter_builder: BloomFilterBuilder::new(10),
         }
     }
 
@@ -135,6 +169,8 @@ impl EncodedSsTableBuilder {
             assert!(self.builder.add(key, value));
             self.first_key = key.to_vec();
         }
+
+        self.filter_builder.add_key(key);
 
         Ok(())
     }
@@ -160,6 +196,16 @@ impl EncodedSsTableBuilder {
     pub fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
         self.finish_block()?;
         let mut buf = self.data;
+        let mut maybe_filter = None;
+        let mut filter_len = 0;
+        let filter_offset = buf.len();
+        if self.num_keys >= self.min_filter_keys {
+            let filter = Arc::new(self.filter_builder.build());
+            let encoded_filter = filter.encode();
+            filter_len = encoded_filter.len();
+            buf.put(encoded_filter);
+            maybe_filter = Some(filter);
+        }
         let mut first_key = Bytes::new();
         if let Some(first_block_meta) = self.block_meta.first() {
             first_key = first_block_meta.first_key.clone();
@@ -168,12 +214,15 @@ impl EncodedSsTableBuilder {
         let info = SsTableInfo {
             first_key,
             block_meta: self.block_meta,
+            filter_offset,
+            filter_len,
             block_meta_offset: meta_offset,
         };
         // make sure to encode the info at the end so that the block meta offset is last
         SsTableInfo::encode(&info, &mut buf);
         Ok(EncodedSsTable {
             info,
+            filter: maybe_filter,
             raw: Bytes::from(buf),
         })
     }
@@ -191,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn test_sstable() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096);
+        let format = SsTableFormat::new(4096, 0);
         let table_store = TableStore::new(object_store, format);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", b"value1").unwrap();
@@ -201,5 +250,25 @@ mod tests {
         table_store.write_sst(0, encoded).await.unwrap();
         let sst_handle = table_store.open_sst(0).await.unwrap();
         assert_eq!(encoded_info, sst_handle.info);
+    }
+
+    #[tokio::test]
+    async fn test_sstable_no_filter() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(4096, 3);
+        let table_store = TableStore::new(object_store, format);
+        let mut builder = table_store.table_builder();
+        builder.add(b"key1", b"value1").unwrap();
+        builder.add(b"key2", b"value2").unwrap();
+        let encoded = builder.build().unwrap();
+        let encoded_info = encoded.info.clone();
+        table_store.write_sst(0, encoded).await.unwrap();
+        let sst_handle = table_store.open_sst(0).await.unwrap();
+        assert_eq!(encoded_info, sst_handle.info);
+        assert_eq!(
+            sst_handle.info.filter_offset,
+            sst_handle.info.block_meta_offset
+        );
+        assert_eq!(sst_handle.info.filter_len, 0);
     }
 }

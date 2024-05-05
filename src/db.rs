@@ -15,6 +15,7 @@ use crate::tablestore::{SSTableHandle, TableStore};
 
 pub struct DbOptions {
     pub flush_ms: usize,
+    pub min_filter_keys: u32,
 }
 
 #[derive(Clone)]
@@ -81,7 +82,7 @@ impl DbInner {
         }
 
         for sst in &snapshot.as_ref().l0 {
-            if let Some(block_index) = self.find_block_for_key(sst, key) {
+            if let Some(block_index) = self.find_block_for_key(sst, key).await? {
                 let block = self.table_store.read_block(sst, block_index).await?;
                 if let Some(val) = self.find_val_in_block(&block, key).await? {
                     if val.is_empty() {
@@ -94,12 +95,21 @@ impl DbInner {
         Ok(None)
     }
 
-    fn find_block_for_key(&self, sst: &SSTableHandle, key: &[u8]) -> Option<usize> {
+    async fn find_block_for_key(
+        &self,
+        sst: &SSTableHandle,
+        key: &[u8],
+    ) -> Result<Option<usize>, SlateDBError> {
+        if let Some(filter) = self.table_store.read_filter(sst).await? {
+            if !filter.has_key(key) {
+                return Ok(None);
+            }
+        }
         let block_idx = sst.info.block_meta.partition_point(|bm| bm.first_key > key);
         if block_idx == sst.info.block_meta.len() {
-            return None;
+            return Ok(None);
         }
-        Some(block_idx)
+        Ok(Some(block_idx))
     }
 
     async fn find_val_in_block(
@@ -158,7 +168,7 @@ impl Db {
         options: DbOptions,
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self, SlateDBError> {
-        let sst_format = SsTableFormat::new(4096);
+        let sst_format = SsTableFormat::new(4096, options.min_filter_keys);
         let table_store = TableStore::new(object_store, sst_format);
         let inner = Arc::new(DbInner::new(path, options, table_store)?);
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -218,7 +228,10 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::open(
             "/tmp/test_kv_store",
-            DbOptions { flush_ms: 100 },
+            DbOptions {
+                flush_ms: 100,
+                min_filter_keys: 0,
+            },
             object_store,
         )
         .unwrap();
