@@ -1,5 +1,18 @@
 # Manifest Design
 
+Status: "Under Discussion"
+
+Authors:
+
+* [Vignesh Chandramohan](https://github.com/vigneshc)
+* [Rohan Desai](https://github.com/rodesai)
+* [Chris Riccomini](https://github.com/criccomini)
+
+PRs:
+
+* [#24 Add manifest design document.](https://github.com/slatedb/slatedb/pull/24)
+* [#39 Add an alternative manifest design document](https://github.com/slatedb/slatedb/pull/39)
+
 ## Current Design
 
 SlateDB currently holds its state in an in-memory structure called `DbState`. `DbState` looks like this:
