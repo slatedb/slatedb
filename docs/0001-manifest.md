@@ -30,7 +30,7 @@ A `put()` is performed by inserting the key-value pair into `memtable`. Once `fl
 2. Insert the old `memtable` into index 0 of `imm_memtables`.
 3. For every immutable MemTable in `imm_memtables`.
   1. Encode the immutable MemTable as an SST.
-  2. Write the SST to object storage.
+  2. Write the SST to object storageat path `sst-{id}`.
   3. Remove the MemTable from `imm_memtables`.
   4. Insert the SST's metadata (`SsTableInfo`) into `l0`.
   5. Increment `next_sst_id`.
@@ -40,16 +40,19 @@ The `SsTableInfo` structure is returned when the SST is encoded in 3.1. It looks
 
 ```rust
 pub(crate) struct SsTableInfo {
-    pub(crate) id: usize,
     pub(crate) first_key: Bytes,
     // todo: we probably dont want to keep this here, and instead store this in block cache
-    //       and load it from there (ditto for bloom filter when that's implemented)
+    //       and load it from there
     pub(crate) block_meta: Vec<BlockMeta>,
+    pub(crate) filter_offset: usize,
+    pub(crate) filter_len: usize,
     pub(crate) block_meta_offset: usize,
 }
 ```
 
-_NOTE: The block meta information in the `SsTableInfo` struct stores the location and first key for each block in the SST. SSTs are broken into blocks (usually 4096 bytes); each block has a sorted list of key-value pairs. This data can get somewhat large; we'll probably move it out of the in-memory `SsTableInfo`_
+The structure contains the `first_key` in the SST, block locations and key information, and the bloom filter location and size.
+
+_NOTE: The block meta information in the `SsTableInfo` struct stores the location and first key for each block in the SST. SSTs are broken into blocks (usually 4096 bytes); each block has a sorted list of key-value pairs. This data can get somewhat large; we'll probably move it out of the in-memory `SsTableInfo`._
 
 ### Reads
 
@@ -61,26 +64,38 @@ Reads simply iterate over each MemTable and SST looking for the value for a key.
 
 ## Problem
 
-SlateDB loses the state of the database when the process stops.
+There are a couple of problems with the current design:
 
+1. SlateDB loses the state of the database when the process stops.
+2. SlateDB does not fence zombie writers.
 
+If the process SlateDB is running in stops, all data in `DbState` is lost since it's not persisted anywhere. SlateDB could read over every SST in object storage and reconstruct `l0`, but it does not. 
+
+Even if SlateDB were to recover its state by reading all SSTs in object storage, the process would be slow and could be wrong. Inaccurate `l0` state occurs if multiple writers write SSTs in parallel to the same SlateDB object store location. SlateDB assumes it's the only writer, but it currently does not implement fencing to keep other writers from corrupting its state.
 
 ## Solution
 
-## Assumptions
+### Assumptions
+
+This design assumes:
 
 * Only one writer client is allowed at a time
 * Multiple reader clients are allowed at the same time
 * Only one compactor client is allowed at a time
 * Compactor, writer, and readers may all be on different machines
-* Writer does not send parallel writes to the object store
-* Manifest on object store requires compare-and-swap (CAS) or transactional store (DynamoDB)
-* SSTs on object store require CAS or object versioning support
+* Writer clients may send parallel writes to the object store
+* Manifest mutations on object store require [compare-and-swap](https://en.wikipedia.org/wiki/Compare-and-swap) (CAS) or a transactional store (DynamoDB)
+* Object storage supports CAS or [object versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html)
 
-## Non-Goals
+### Proposal
 
-* Compaction dealts are out of scope
-* Supporting out of order/parellel writes is out of scope
+We propose persisting SlateDB's `DbState` in a manifest file to solve problem (1). Such a design is quite common in [log-structured merge-trees](https://en.wikipedia.org/wiki/Log-structured_merge-tree) (LSMs). In particular, RocksDB [follows this pattern](https://github.com/facebook/rocksdb/wiki/MANIFEST). In SlateDB, we will persist `DbState` in a manifest file, which readers and writers will load on startup. Manifest updates are described below.
+
+To prevent zombie writers, we propose using CAS to ensure each SST is written exactly one time. We introduce the concept of writer epochs to determine when the current writer is a zombie and halt the process. The full fencing protocol is described below.
+
+#### CAS on S3
+
+Changes to the manifest file and writes to the
 
 ## Compare-and-Swap and S3
 
