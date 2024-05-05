@@ -1,5 +1,72 @@
 # Manifest Design
 
+## Current Design
+
+SlateDB currently holds its state in an in-memory structure called `DbState`. `DbState` looks like this:
+
+```rust
+pub(crate) struct DbState {
+    pub(crate) memtable: Arc<MemTable>,
+    pub(crate) imm_memtables: Vec<Arc<MemTable>>,
+    pub(crate) l0: Vec<SsTableInfo>,
+    pub(crate) next_sst_id: usize,
+}
+```
+
+These fields act as follows:
+
+* `memtable`: The currently active mutable MemTable. `put()` calls insert key-value pairs into this field.
+* `imm_memtables`: An ordered list of MemTables that in the process of being written to objet storage.
+* `l0`: An ordered list of level-0 [sorted string tables](https://www.scylladb.com/glossary/sstable/) (SSTs). These SSTs are not range partitioned; they each contain a full range of key-value pairs.
+* `next_sst_id`: The SST ID to use when SlateDB decides to freeze `memtable`, move it to `imm_memtables`, and flush it to object storage. This will be come the MemTable's ID on object storage.
+
+SlateDB doesn't have compaction implemented at the moment. As such, we don't have an level-1+ SSTs in the database state.
+
+### Writes
+
+A `put()` is performed by inserting the key-value pair into `memtable`. Once `flush_ms` (a configuration value) has expired, a flusher thread (in `flush.rs`) locks `DbState` and performs the following operations:
+
+1. Replace `memtable` with a new (empty) MemTable.
+2. Insert the old `memtable` into index 0 of `imm_memtables`.
+3. For every immutable MemTable in `imm_memtables`.
+  1. Encode the immutable MemTable as an SST.
+  2. Write the SST to object storage.
+  3. Remove the MemTable from `imm_memtables`.
+  4. Insert the SST's metadata (`SsTableInfo`) into `l0`.
+  5. Increment `next_sst_id`.
+  6. Nofity listeners that are `await`'ing a `put()` in this MemTable.
+
+The `SsTableInfo` structure is returned when the SST is encoded in 3.1. It looks like this:
+
+```rust
+pub(crate) struct SsTableInfo {
+    pub(crate) id: usize,
+    pub(crate) first_key: Bytes,
+    // todo: we probably dont want to keep this here, and instead store this in block cache
+    //       and load it from there (ditto for bloom filter when that's implemented)
+    pub(crate) block_meta: Vec<BlockMeta>,
+    pub(crate) block_meta_offset: usize,
+}
+```
+
+_NOTE: The block meta information in the `SsTableInfo` struct stores the location and first key for each block in the SST. SSTs are broken into blocks (usually 4096 bytes); each block has a sorted list of key-value pairs. This data can get somewhat large; we'll probably move it out of the in-memory `SsTableInfo`_
+
+### Reads
+
+Reads simply iterate over each MemTable and SST looking for the value for a key. This is done by:
+
+1. Return `get(k)` from `memtable` if it exists.
+2. Iterate over each `imm_memtables` (starting from index 0) and return `get(k)` if it exists.
+3. Iterate over each `l0` SST (starting from index 0) and return `get(k)` if it exists.
+
+## Problem
+
+SlateDB loses the state of the database when the process stops.
+
+
+
+## Solution
+
 ## Assumptions
 
 * Only one writer client is allowed at a time
@@ -12,7 +79,7 @@
 
 ## Non-Goals
 
-* Level 1+ compaction is out of scope
+* Compaction dealts are out of scope
 * Supporting out of order/parellel writes is out of scope
 
 ## Compare-and-Swap and S3
@@ -30,6 +97,10 @@ In the immutable case (1), we can emulate CAS if the bucket has versioning enabl
 
 This document calls out whether each CAS operation is immutable CAS and mutable CAS.
 
+## Parallel Writes
+
+TODO: Link to Rohan's idea for parallel write fencing.
+
 ## File Structure
 
 ```
@@ -39,11 +110,11 @@ some-bucket/
 │  ├─ 000000000000000000.manifest
 │  ├─ 000000000000000001.manifest
 │  ├─ 000000000000000002.manifest
-├─ level_0/
+├─ wal/
 │  ├─ 000000000000000000.sst
 │  ├─ 000000000000000001.sst
 │  ├─ ...
-├─ compacted/
+├─ levels/
 │  ├─ 000000000000000000.sst
 │  ├─ 000000000000000001.sst
 │  ├─ ...
@@ -75,23 +146,36 @@ _NOTE: Described as proto3, but the manifest could be any format we choose._
 syntax = "proto3";
 
 message Manifest {
+  // Manifest format version to allow schema evolution.
+  uint16 manifest_format_version = 1;
+
   // The current writer's epoch.
-  uint64 writer_epoch = 1;
+  uint64 writer_epoch = 2;
 
   // The current compactor's epoch.
-  uint64 compactor_epoch = 1;
+  uint64 compactor_epoch = 3;
 
-  // The most recent `level_0` SST that's been compacted. Note that keeping
-  // just the `level_0` low-water mark means `level_0` compaction must be
-  // sequetional not random. Also note that this SST must alwyas exist in
-  // `level_0`; the commpactor must not remove it.
-  uint64 last_compacted_l0_sst = 2;
+  // The most recent SST in the WAL that's been commpacted.
+  uint64 wal_last_compacted_sst_id = 4;
 
-  // A list of the SST IDs that are valid to read in the `compacted` folder.
-  repeated uint64 compacted_ssts = 3;
+  // The most recent SST in the WAL at the time Manifest was updated.
+  uint64 wal_last_seen_sst_id = 5;
+
+  // A list of the SST table info that are valid to read in the `compacted` folder.
+  repeated SstInfo compacted_ssts = 6;
 
   // A list of snapshots that are currently open.
-  repeated Snapshot snapshots = 4;
+  repeated Snapshot snapshots = 7;
+}
+
+message SstInfo {
+  // Globally unique ID for an SST in the `compacted` folder.
+  uint64 id = 1;
+
+  // The first key in the SST file.
+  string first_key = 3;
+
+  // There could be other fields here depending on the compaction style ...
 }
 
 message Snapshot {
@@ -99,10 +183,7 @@ message Snapshot {
   uint32 id = 1;
 
   // The manifest ID that this snapshot is using as its `DbState`.
-  uint64 manifest = 2;
-
-  // The UTC seconds since this snapshot was last heartbeated.
-  uint32 heartbeat_s = 3;
+  uint64 manifest_id = 2;
 }
 ```
 
