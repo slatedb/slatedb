@@ -83,7 +83,7 @@ fn filter_hash(key: &[u8]) -> u64 {
     // sip hash is the default rust hash function, however its only
     // accessible by creating DefaultHasher. Direct use of SipHasher13 in
     // std is deprecated. We don't want to use DefaultHasher because the
-    // underlying algorithm could change. Therefore, we use SipHasher3 from
+    // underlying algorithm could change. Therefore, we use SipHasher13 from
     // the siphasher crate
     let hasher = SipHasher13::new();
     hasher.hash(key)
@@ -92,7 +92,7 @@ fn filter_hash(key: &[u8]) -> u64 {
 fn probes_for_key(key_hash: u64, num_probes: u16, filter_bits: u32) -> Vec<u32> {
     // implements enhanced double hashing from:
     // https://www.khoury.northeastern.edu/~pete/pub/bloom-filters-verification.pdf
-    // as suggested by the author for P. Dillinger for RocksDB's legacy filters here:
+    // as suggested by the author P. Dillinger for RocksDB's legacy filters here:
     // https://github.com/facebook/rocksdb/issues/4120
     let mut probes = vec![0u32; num_probes as usize];
     let filter_bits = filter_bits as u64;
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn test_set_specified_bit_only() {
         // some hard-coded test cases
-        let cases = vec![
+        let cases = [
             (
                 vec![0xF0u8, 0xABu8, 0x9Cu8],
                 vec![0xF8u8, 0xABu8, 0x9Cu8],
@@ -227,7 +227,7 @@ mod tests {
             let mut bytes = BytesMut::with_capacity(key_sz);
             bytes.reserve(key_sz);
             bytes.put_u32(i);
-            assert_eq!(filter.has_key(bytes.freeze().as_ref()), true);
+            assert!(filter.has_key(bytes.freeze().as_ref()));
         }
 
         // check false positives
