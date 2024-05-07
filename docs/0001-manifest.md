@@ -318,7 +318,7 @@ This design also does not expose writer epochs in WAL SST filenames (e.g. `[writ
 
 Each SST will have the following [user-defined metadata fields](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html#UserMetadata):
  
-* `writer_epoch`: This is a u64. Writers will set this on each SST written into `wal`.
+* `writer_epoch`: This is a `u64`. Writers will set this on each SST written into `wal`.
 
 ### Manifest Updates
 
@@ -365,13 +365,15 @@ A snapshot has three fields: `id`, `manifest_id`, and `last_access_s`.
 * `manifest_id`: The manifest ID that this snapshot is using as its `DbState`.
 * `last_access_s`: The UTC Unix epoch seconds that the snapshot was last accessed.
 
+**TODO: Do we want to have the `id` be a UUID/ULID/KSUID (or just a string) so we can make the ID globally unique across all time, not just currently open snapshots?**
+
 Each client will use a different `id` for each snapshot it creates. Similarly, no two clients will share the same `id` for any snapshot. Clients that wish to share the same view of a database will each define different snapshots with the same `manifest_id`.
 
 Clients set the `last_access_s` when the snapshot is created. Clients may update their snapshot's `last_access_s` at their discretion by writing a new manifest with the updated value.
 
 A snapshot is considered expired if both of the following are true:
 
-* `last_access_s` is < (now() - `snapshot_timeout_s`)
+* `last_access_s` < (now() - `snapshot_timeout_s`)
 * `last_access_s` > 0
 
 _NOTE: Clients that set `last_access_s` to 0 must guarantee that they will eventually remove their snapshot from the manifest. If they do not, the snapshot's SSTs will never be removed._
@@ -385,16 +387,16 @@ A manifest is considered active if either:
 * It's the current manifest
 * It's referenced by a snapshot in the current manifest and the snapshot has not expired
 
-A compactor may not delete SSTs that are still in use by any active manifest.
+A compactor may not delete SSTs are referenced by any active manifest.
 
-The set of SSTs that are considered in use by an active manifest are:
+The set of SSTs that are referenced by a manifest are:
 
 * All `levels` files referenced in the manifest's `leveled_ssts`
 * All `wal` files with `wal_id_last_compacted` <= ID <= `wal_id_last_seen`
 
-_NOTE: The inclusive `>=` for `wal_id_last_compacted` is required so we can get the `writer_epoch` attribute from the `wal_id_last_compacted` file. This is important to know for the recovery process detailed in the Read Clients section below._
+_NOTE: The inclusive `>=` for `wal_id_last_compacted` is required so the compactor doesn't delete the most recently compacted file. We need this file to get the `writer_epoch` during the recovery process detailed in the Read Clients section below._
 
-_NOTE: Clock skew can affect the timing between the compactor and the snapshot clients. We're assuming we have well behaved clocks, [Network Time Protocol](https://www.ntp.org/documentation/4.2.8-series/ntpd/) (NTP) daemon, or [PTP Hardware Cocks](https://aws.amazon.com/blogs/compute/its-about-time-microsecond-accurate-clocks-on-amazon-ec2-instances/) (PHCs)._
+_NOTE: Clock skew can affect the timing between the compactor and the snapshot clients. We're assuming we have well behaved clocks, a [Network Time Protocol](https://www.ntp.org/documentation/4.2.8-series/ntpd/) (NTP) daemon, or [PTP Hardware Cocks](https://aws.amazon.com/blogs/compute/its-about-time-microsecond-accurate-clocks-on-amazon-ec2-instances/) (PHCs)._
 
 _NOTE: A [previous design proposal](https://github.com/slatedb/slatedb/pull/39/files#diff-d589c7beb3d163638e94dbc8e086b3efe093852f0cad96f04cb1283c3bd1eb74R105) used a `heartbeat_s` field that clients would update periodically. After some discussion (see [here](https://github.com/slatedb/slatedb/pull/39/files#r1588896947)), we landed on a design that supports both reference counts and snapshot timeouts. Reference counts are useful for long-lived snapshots that exist indefinitely. Heartbeats are useful for short-lived snapshots that exist for the lifespan of a single process._
 
@@ -402,7 +404,7 @@ _NOTE: A [previous design proposal](https://github.com/slatedb/slatedb/pull/39/f
 
 #### `writer_epoch`
 
-This design introduces the concept of a `writer_epoch`. The `writer_epoch` is a monotonically increasing u64 that is transactionally incremented by a writer on startup. The `writer_epoch` is used to prevent split-brain and fence zombie writers. A zombie writer is a writer that is less than the current writer.
+This design introduces the concept of a `writer_epoch`. The `writer_epoch` is a monotonically increasing `u64` that is transactionally incremented by a writer on startup. The `writer_epoch` is used to prevent split-brain and fence zombie writers. A zombie writer is a writer with an epoch that is less than the `writer_epoch` in the current manifest.
 
 `writer_epoch` exists in two places:
 
@@ -424,7 +426,7 @@ The writer client must then fence all older clients. This is done by writing an 
 1. List the `wal` directory to find the next SST ID.
 2. Write an empty SST with the new `writer_epoch` to the next SST ID using CAS or object versioning.
 
-At this point, there are three potential outcomes:
+At this point, there are four potential outcomes:
 
 1. The write is successful.
 2. The write was unsuccessful. Another writer wrote an SST with the same ID and a lower (older) `writer_epoch`.
@@ -487,11 +489,11 @@ SlateDB's `put()` API is asynchronous. Clients that want to know when their `put
 
 #### Parallel Writes
 
-The writer protocol we describe above assumes that writers are writing SSTs in sequence. That is, a writer will never write SST ID N until SST ID N-1 has been successfully written by the client to object storage.
+The writer protocol we describe above assumes that writers are writing SSTs in sequence. That is, a writer will never write SST ID N until SST ID N-1 has been successfully written to object storage by the client.
 
 But we know we will want to support parallel writes in the future. Parallel writes allow a single writer client to write multiple SSTs at the same time. This can reduce latency for the writer client. Our design should not preclude parallel writes.
 
-The current writer protocol can be extended to support parallel writes by defining a `max_parallel_writes` configuration parameter. A new writer must then write `max_parallel_writes` sequential fencing SSTs in a row starting from the first open SST position in the `wal` after `wal_id_last_compacted`. `max_parallel_writes` would also need to be stored in the manifest so readers, writers, and compactors can agree on it.
+The current writer protocol can be extended to support parallel writes by defining a `max_parallel_writes` configuration parameter. A new writer must then write `max_parallel_writes` sequential fencing SSTs in a row starting from the first open SST position in the `wal`. `max_parallel_writes` would also need to be stored in the manifest so readers, writers, and compactors can agree on it.
 
 _NOTE: This strategy is discussed in more detail [here](https://github.com/slatedb/slatedb/pull/24/files#r1585894110)._
 
@@ -541,7 +543,7 @@ We propose allowing readers and the compactor to treat SST 3 as valid.
 
 _NOTE: Astute readers might notice that `max_parallel_writes` is equivalent to a Kafka producer's [`max.in.flight.requests.per.connection`](https://docs.confluent.io/platform/current/installation/configuration/producer-configs.html#max-in-flight-requests-per-connection) setting._
 
-If more than 2 writers are writing in parallel, the protocol is the same. The only difference is readers will see writs from multiple epochs before the youngest writer wins the fencing race.
+If more than 2 writers are writing in parallel, the protocol is the same. The only difference is that readers will see writes from multiple epochs before the youngest writer wins the fencing race.
 
 To illustrate, consider an example where we have 3 writers. writer 1 is the old writer, while writer 2 and writer 3 are trying to fence:
 
@@ -613,7 +615,7 @@ This does mean that SST 3 will not be served by a reader until SST 2 arrives. Fo
 
 ### Compactors
 
-On startup, a compactor must increment the `writer_epoch` in the manifest. This is done in a similar manner to process described in the _Writer Protocol_ section above.
+On startup, a compactor must increment the `compactor_epoch` in the manifest. This is done in a similar manner to process described in the _Writer Protocol_ section above.
 
 After startup, compactors periodically do three things:
 
