@@ -9,8 +9,8 @@ Table of Contents:
   + [Reads](#reads)
 * [Problem](#problem)
 * [Solution](#solution)
-  + [Proposal](#proposal)
   + [Goals](#goals)
+  + [Proposal](#proposal)
   + [A Note on CAS](#a-note-on-cas)
   + [File Structure](#file-structure)
   + [Manifest Updates](#manifest-updates)
@@ -111,12 +111,6 @@ Even if SlateDB were to recover its state by reading all SSTs in object storage,
 
 ## Solution
 
-### Proposal
-
-We propose persisting SlateDB's `DbState` in a manifest file to solve problem (1). Such a design is quite common in [log-structured merge-trees](https://en.wikipedia.org/wiki/Log-structured_merge-tree) (LSMs). In particular, RocksDB [follows this pattern](https://github.com/facebook/rocksdb/wiki/MANIFEST). In SlateDB, we will persist `DbState` in a manifest file, which all clients will load on startup. Writer, compactor, and readers will all update the manifest in various situations. All updates to the manifest will be done using [compare-and-swap](https://en.wikipedia.org/wiki/Compare-and-swap) (CAS).
-
-To prevent zombie writers, we propose using CAS to ensure each SST is written exactly one time. We introduce the concept of writer epochs to determine when the current writer is a zombie and halt the process. The full fencing protocol is described below.
-
 ### Goals
 
 This design should:
@@ -129,6 +123,12 @@ This design should:
 * Work with object stores that support object versioning if a transactional store is available (DynamoDB, MySQL, and so on)
 * Provide < 100ms-300ms read/write latencies
 * Avoid write contention on the manifest
+
+### Proposal
+
+We propose persisting SlateDB's `DbState` in a manifest file to solve problem (1). Such a design is quite common in [log-structured merge-trees](https://en.wikipedia.org/wiki/Log-structured_merge-tree) (LSMs). In particular, RocksDB [follows this pattern](https://github.com/facebook/rocksdb/wiki/MANIFEST). In SlateDB, we will persist `DbState` in a manifest file, which all clients will load on startup. Writer, compactor, and readers will all update the manifest in various situations. All updates to the manifest will be done using [compare-and-swap](https://en.wikipedia.org/wiki/Compare-and-swap) (CAS).
+
+To prevent zombie writers, we propose using CAS to ensure each SST is written exactly one time. We introduce the concept of writer epochs to determine when the current writer is a zombie and halt the process. The full fencing protocol is described below.
 
 ### A Note on CAS
 
@@ -635,12 +635,12 @@ Merging leveled SSTs (2) is outside the scope of this design.
 
 To delete `wal` SSTs (3), the compactor periodically deletes all inactive SSTs. An SST is inactive when either:
 
-1. It's in `leveled_ssts` and it's not referenced in any active manifest
-2. It's in `wal` and its ID < `wal_id_last_compacted`
+1. It's in the `leveled_ssts` folder and it's not referenced in any active manifest
+2. It's in the `wal` folder and its ID < `wal_id_last_compacted`
 
 See the _Snapshots_ section for a definition of an "active manifest".
 
-_NOTE: The compactor must not delete the SST at `wal_id_last_compacted` so readers can recover the `writer_epoch` from the SST._
+_NOTE: We use `<`  not `<=` for (2) because the compactor must not delete the SST at `wal_id_last_compacted` so readers can recover the `writer_epoch` from the SST._
 
 ## Rejected Solutions
 
