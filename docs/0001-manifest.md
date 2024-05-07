@@ -29,11 +29,11 @@ pub(crate) struct DbState {
 These fields act as follows:
 
 * `memtable`: The currently active mutable MemTable. `put()` calls insert key-value pairs into this field.
-* `imm_memtables`: An ordered list of MemTables that in the process of being written to objet storage.
+* `imm_memtables`: An ordered list of MemTables that in the process of being written to object storage.
 * `l0`: An ordered list of level-0 [sorted string tables](https://www.scylladb.com/glossary/sstable/) (SSTs). These SSTs are not range partitioned; they each contain a full range of key-value pairs.
-* `next_sst_id`: The SST ID to use when SlateDB decides to freeze `memtable`, move it to `imm_memtables`, and flush it to object storage. This will be come the MemTable's ID on object storage.
+* `next_sst_id`: The SST ID to use when SlateDB decides to freeze `memtable`, move it to `imm_memtables`, and flush it to object storage. This will become the MemTable's ID on object storage.
 
-SlateDB doesn't have compaction implemented at the moment. As such, we don't have an level-1+ SSTs in the database state.
+SlateDB doesn't have compaction implemented at the moment. We don't have level-1+ SSTs in the database state.
 
 ### Writes
 
@@ -43,7 +43,7 @@ A `put()` is performed by inserting the key-value pair into `memtable`. Once `fl
 2. Insert the old `memtable` into index 0 of `imm_memtables`.
 3. For every immutable MemTable in `imm_memtables`.
   1. Encode the immutable MemTable as an SST.
-  2. Write the SST to object storageat path `sst-{id}`.
+  2. Write the SST to object storage path `sst-{id}`.
   3. Remove the MemTable from `imm_memtables`.
   4. Insert the SST's metadata (`SsTableInfo`) into `l0`.
   5. Increment `next_sst_id`.
@@ -277,7 +277,7 @@ If a client gets 100MB/s to and from EC2 to S3, it would take 56ms to read, 56ms
 
 SlateDB's WAL is a sequentially ordered contiguous list of SSTs. Each SST contains zero or more sorted key-value pairs. The WAL is used to store writes that have not yet been compacted.
 
-Traditionally, LSMs store WAL data in a different format from the SSTs; this is because, each `put()` call results in single key-value write to the WAL. But SlateDB doesn't write to the WAL on each `put()`. Instead, `put()`'s are batched together based on `flush_ms`, `flush_bytes` ([#30](https://github.com/slatedb/slatedb/issues/30)), or `skip_memtable_bytes` ([#31](https://github.com/slatedb/slatedb/issues/31)). Based on these configurations, multiple key-value pairs are stored in the WAL in a single write. Thus, SlateDB uses SSTs for both the WAL and compacted files.
+Traditionally, LSMs store WAL data in a different format from the SSTs; this is because each `put()` call results in a single key-value write to the WAL. But SlateDB doesn't write to the WAL on each `put()`. Instead, `put()`'s are batched together based on `flush_ms`, `flush_bytes` ([#30](https://github.com/slatedb/slatedb/issues/30)), or `skip_memtable_bytes` ([#31](https://github.com/slatedb/slatedb/issues/31)). Based on these configurations, multiple key-value pairs are stored in the WAL in a single write. Thus, SlateDB uses SSTs for both the WAL and compacted files.
 
 _NOTE: We discussed using a different format for the WAL [here](https://github.com/slatedb/slatedb/pull/39/files#r1590087062), but decided against it._
 
@@ -426,7 +426,7 @@ time 3, 000000000000000002.sst, writer_epoch=1
 time 4, 000000000000000003.sst, writer_epoch=2
 ```
 
-In example above, writer 1 successfully writes SSTs 0 and 1. At time 2, writer 2 successfully fences writer 1, but writer 1 hasn't yet seen the fence write. When writer 1 attempts to write SST 2, it loses the CAS write and halts because SST 2 has a higher writer_epoch. Writer 2 then continues with a successful write to SST 3.
+In the example above, writer 1 successfully writes SSTs 0 and 1. At time 2, writer 2 successfully fences writer 1, but writer 1 hasn't yet seen the fence write. When writer 1 attempts to write SST 2, it loses the CAS write and halts because SST 2 has a higher writer_epoch. Writer 2 then continues with a successful write to SST 3.
 
 Here's an example where a new writer has to retry its fence write because an older writer took its SST ID location (protocol scenario (2)):
 
