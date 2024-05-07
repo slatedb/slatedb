@@ -1,5 +1,40 @@
 # Manifest Design
 
+<!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
+
+- [Manifest Design](#manifest-design)
+   * [Current Design](#current-design)
+      + [Writes](#writes)
+      + [Reads](#reads)
+   * [Problem](#problem)
+   * [Solution](#solution)
+      + [Proposal](#proposal)
+      + [Goals](#goals)
+      + [A Note on CAS](#a-note-on-cas)
+      + [File Structure](#file-structure)
+         - [`manifest/current`](#manifestcurrent)
+         - [`manifest/01HX5JS57YZ3NXZ3H366XRS47R.manifest`](#manifest01hx5js57yz3nxz3h366xrs47rmanifest)
+            * [Structure](#structure)
+            * [Size](#size)
+         - [`wal/000000000000000000.sst`](#wal000000000000000000sst)
+            * [Attributes](#attributes)
+      + [Manifest Updates](#manifest-updates)
+      + [Snapshots](#snapshots)
+      + [Writers](#writers)
+         - [`writer_epoch`](#writer_epoch)
+         - [Writer Protocol](#writer-protocol)
+         - [Examples](#examples)
+         - [Acknowledgements](#acknowledgements)
+         - [Parallel Writes](#parallel-writes)
+      + [Readers](#readers)
+         - [Reader Protocol](#reader-protocol)
+         - [Parallel Writes](#parallel-writes-1)
+      + [Compactors](#compactors)
+   * [Rejected Solutions](#rejected-solutions)
+   * [Addendum](#addendum)
+
+<!-- TOC end -->
+
 Status: Under Discussion
 
 Authors:
@@ -29,7 +64,7 @@ pub(crate) struct DbState {
 These fields act as follows:
 
 * `memtable`: The currently active mutable MemTable. `put()` calls insert key-value pairs into this field.
-* `imm_memtables`: An ordered list of MemTables that in the process of being written to object storage.
+* `imm_memtables`: An ordered list of MemTables that are in the process of being written to object storage.
 * `l0`: An ordered list of level-0 [sorted string tables](https://www.scylladb.com/glossary/sstable/) (SSTs). These SSTs are not range partitioned; they each contain a full range of key-value pairs.
 * `next_sst_id`: The SST ID to use when SlateDB decides to freeze `memtable`, move it to `imm_memtables`, and flush it to object storage. This will become the MemTable's ID on object storage.
 
@@ -42,14 +77,14 @@ A `put()` is performed by inserting the key-value pair into `memtable`. Once `fl
 1. Replace `memtable` with a new (empty) MemTable.
 2. Insert the old `memtable` into index 0 of `imm_memtables`.
 3. For every immutable MemTable in `imm_memtables`.
-  1. Encode the immutable MemTable as an SST.
-  2. Write the SST to object storage path `sst-{id}`.
-  3. Remove the MemTable from `imm_memtables`.
-  4. Insert the SST's metadata (`SsTableInfo`) into `l0`.
-  5. Increment `next_sst_id`.
-  6. Notify listeners that are `await`'ing a `put()` in this MemTable.
+   1. Encode the immutable MemTable as an SST.
+   2. Write the SST to object storage path `sst-{next_sst_id}`.
+   3. Remove the MemTable from `imm_memtables`.
+   4. Insert the SST's metadata (`SsTableInfo`) into `l0`.
+   5. Increment `next_sst_id`.
+   6. Notify listeners that are `await`'ing a `put()` in this MemTable.
 
-The `SsTableInfo` structure is returned when the SST is encoded in 3.1. It looks like this:
+A `SsTableInfo` structure is returned when the SST is encoded in 3.1. It looks like this:
 
 ```rust
 pub(crate) struct SsTableInfo {
@@ -289,7 +324,7 @@ This design also does not expose writer epochs in WAL SST filenames (e.g. `[writ
 
 Each SST will have the following [user-defined metadata fields](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html#UserMetadata):
  
-* writer_epoch: This is a u64. Writers will set this on each SST written into `wal`.
+* `writer_epoch`: This is a u64. Writers will set this on each SST written into `wal`.
 
 ### Manifest Updates
 
@@ -426,7 +461,7 @@ time 3, 000000000000000002.sst, writer_epoch=1
 time 4, 000000000000000003.sst, writer_epoch=2
 ```
 
-In the example above, writer 1 successfully writes SSTs 0 and 1. At time 2, writer 2 successfully fences writer 1, but writer 1 hasn't yet seen the fence write. When writer 1 attempts to write SST 2, it loses the CAS write and halts because SST 2 has a higher writer_epoch. Writer 2 then continues with a successful write to SST 3.
+In the example above, writer 1 successfully writes SSTs 0 and 1. At time 2, writer 2 successfully fences writer 1, but writer 1 hasn't yet seen the fence write. When writer 1 attempts to write SST 2, it loses the CAS write and halts because SST 2 has a higher `writer_epoch`. Writer 2 then continues with a successful write to SST 3.
 
 Here's an example where a new writer has to retry its fence write because an older writer took its SST ID location (protocol scenario (2)):
 
