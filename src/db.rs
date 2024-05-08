@@ -248,4 +248,39 @@ mod tests {
         assert!(kv_store.get(key).await.unwrap().is_none());
         kv_store.close().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn test_flush_while_iterating() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open(
+            "/tmp/test_kv_store",
+            DbOptions {
+                flush_ms: 100,
+                min_filter_keys: 0,
+            },
+            object_store,
+        )
+        .unwrap();
+
+        let memtable = {
+            let lock = kv_store.inner.state.read();
+            lock.memtable.clone()
+        };
+
+        memtable.put_optimistic(b"abc1111", b"value1111");
+        memtable.put_optimistic(b"abc2222", b"value2222");
+        memtable.put_optimistic(b"abc3333", b"value3333");
+
+        let mut iter = memtable.iter();
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key, b"abc1111".as_slice());
+
+        kv_store.flush().await.unwrap();
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key, b"abc2222".as_slice());
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key, b"abc3333".as_slice());
+    }
 }
