@@ -25,6 +25,23 @@ impl<'a> BlockIterator<'a> {
         BlockIterator { block, off_off: 0 }
     }
 
+    /// Construct a BlockIterator that starts at the given key, or at the first
+    /// key greater than the given key if the exact key given is not in the block.
+    #[allow(dead_code)] // will be used in #8
+    pub fn from_key(block: &'a Block, key: &[u8]) -> BlockIterator<'a> {
+        let idx = block.offsets.partition_point(|offset| {
+            let mut cursor = &block.data[*offset as usize..];
+            let key_len = cursor.get_u16() as usize;
+            let cursor_key = &cursor[..key_len];
+            cursor_key < key
+        });
+
+        BlockIterator {
+            block,
+            off_off: idx,
+        }
+    }
+
     fn advance(&mut self) {
         self.off_off += 1;
     }
@@ -55,20 +72,65 @@ mod tests {
     #[tokio::test]
     async fn test_iterator() {
         let mut block_builder = BlockBuilder::new(1024);
-        assert!(block_builder.add("super".as_ref(), "mario".as_ref()));
         assert!(block_builder.add("donkey".as_ref(), "kong".as_ref()));
         assert!(block_builder.add("kratos".as_ref(), "atreus".as_ref()));
+        assert!(block_builder.add("super".as_ref(), "mario".as_ref()));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_first_key(&block);
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"super".as_slice());
-        assert_eq!(kv.value, b"mario".as_slice());
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"donkey".as_slice());
         assert_eq!(kv.value, b"kong".as_slice());
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"kratos".as_slice());
         assert_eq!(kv.value, b"atreus".as_slice());
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key, b"super".as_slice());
+        assert_eq!(kv.value, b"mario".as_slice());
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_iter_from_existing_key() {
+        let mut block_builder = BlockBuilder::new(1024);
+        assert!(block_builder.add("donkey".as_ref(), "kong".as_ref()));
+        assert!(block_builder.add("kratos".as_ref(), "atreus".as_ref()));
+        assert!(block_builder.add("super".as_ref(), "mario".as_ref()));
+        let block = block_builder.build().unwrap();
+        let mut iter = BlockIterator::from_key(&block, b"kratos".as_ref());
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key, b"kratos".as_slice());
+        assert_eq!(kv.value, b"atreus".as_slice());
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key, b"super".as_slice());
+        assert_eq!(kv.value, b"mario".as_slice());
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_iter_from_nonexisting_key() {
+        let mut block_builder = BlockBuilder::new(1024);
+        assert!(block_builder.add("donkey".as_ref(), "kong".as_ref()));
+        assert!(block_builder.add("kratos".as_ref(), "atreus".as_ref()));
+        assert!(block_builder.add("super".as_ref(), "mario".as_ref()));
+        let block = block_builder.build().unwrap();
+        let mut iter = BlockIterator::from_key(&block, b"ka".as_ref());
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key, b"kratos".as_slice());
+        assert_eq!(kv.value, b"atreus".as_slice());
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key, b"super".as_slice());
+        assert_eq!(kv.value, b"mario".as_slice());
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_iter_from_end() {
+        let mut block_builder = BlockBuilder::new(1024);
+        assert!(block_builder.add("donkey".as_ref(), "kong".as_ref()));
+        assert!(block_builder.add("kratos".as_ref(), "atreus".as_ref()));
+        assert!(block_builder.add("super".as_ref(), "mario".as_ref()));
+        let block = block_builder.build().unwrap();
+        let mut iter = BlockIterator::from_key(&block, b"zzz".as_ref());
         assert!(iter.next().await.unwrap().is_none());
     }
 }
