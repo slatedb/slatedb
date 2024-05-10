@@ -60,8 +60,6 @@ impl SsTableFormat {
         block: usize,
         obj: &impl ReadOnlyBlob,
     ) -> Result<Block, SlateDBError> {
-        // todo: range read
-        let bytes = obj.read().await?;
         let block_meta = &info.block_meta[block];
         let mut end = info.filter_offset;
         if block < info.block_meta.len() - 1 {
@@ -70,8 +68,8 @@ impl SsTableFormat {
         }
         // account for checksum
         end -= 4;
-        let raw_block = bytes.slice(block_meta.offset..end);
-        Ok(Block::decode(raw_block.as_ref()))
+        let bytes: Bytes = obj.read_range(block_meta.offset..end).await?;
+        Ok(Block::decode(&bytes))
     }
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
