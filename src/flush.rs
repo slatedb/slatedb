@@ -44,7 +44,7 @@ impl DbInner {
             let mut snapshot = wguard.as_ref().clone();
             snapshot.imm_memtables.pop();
             // always put the new sst at the front of l0
-            snapshot.l0.insert(0, sst);
+            snapshot.l0.push_front(sst);
             snapshot.next_sst_id += 1;
             *wguard = Arc::new(snapshot);
             imm.flush_notify.notify_waiters();
