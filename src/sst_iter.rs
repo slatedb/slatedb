@@ -27,7 +27,9 @@ impl SstIterator {
 impl KeyValueIterator for SstIterator {
     async fn next(&mut self) -> Result<Option<crate::iter::KeyValue>, crate::error::SlateDBError> {
         loop {
-            if self.current_iter.is_none() {
+            let current_iter = if let Some(current_iter) = self.current_iter.as_mut() {
+                current_iter
+            } else {
                 if self.next_block_idx >= self.table.info.block_meta.len() {
                     // No more blocks in the SST.
                     return Ok(None);
@@ -37,10 +39,10 @@ impl KeyValueIterator for SstIterator {
                     .table_store
                     .read_block(&self.table, self.next_block_idx)
                     .await?;
-                self.current_iter = Some(BlockIterator::from_first_key(block));
                 self.next_block_idx += 1;
-            }
-            let current_iter = self.current_iter.as_mut().unwrap();
+                self.current_iter
+                    .insert(BlockIterator::from_first_key(block))
+            };
 
             let kv = current_iter.next().await?;
 
