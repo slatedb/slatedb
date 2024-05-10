@@ -36,15 +36,15 @@ impl DbInner {
             let snapshot: DbState = rguard.as_ref().clone();
             snapshot
                 .imm_memtables
-                .last()
+                .back()
                 .map(|imm| (imm.clone(), snapshot.next_sst_id))
         } {
             let sst = self.flush_imm(imm.clone(), id).await?;
             let mut wguard = self.state.write();
             let mut snapshot = wguard.as_ref().clone();
-            snapshot.imm_memtables.pop();
+            snapshot.imm_memtables.pop_back();
             // always put the new sst at the front of l0
-            snapshot.l0.insert(0, sst);
+            snapshot.l0.push_front(sst);
             snapshot.next_sst_id += 1;
             *wguard = Arc::new(snapshot);
             imm.flush_notify.notify_waiters();
@@ -65,7 +65,7 @@ impl DbInner {
         // Swap the current memtable with a new one.
         let old_memtable = std::mem::replace(&mut snapshot.memtable, Arc::new(MemTable::new()));
         // Add the memtable to the immutable memtables.
-        snapshot.imm_memtables.insert(0, old_memtable.clone());
+        snapshot.imm_memtables.push_front(old_memtable.clone());
         // Update the snapshot.
         *guard = Arc::new(snapshot);
         Some(old_memtable)
