@@ -3,14 +3,39 @@ use crate::{
     error::SlateDBError,
     iter::{KeyValue, KeyValueIterator},
 };
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 
-pub struct BlockIterator<'a> {
-    block: &'a Block,
+pub trait BlockLike {
+    fn data(&self) -> &Bytes;
+    fn offsets(&self) -> &[u16];
+}
+
+impl BlockLike for Block {
+    fn data(&self) -> &Bytes {
+        &self.data
+    }
+
+    fn offsets(&self) -> &[u16] {
+        &self.offsets
+    }
+}
+
+impl BlockLike for &Block {
+    fn data(&self) -> &Bytes {
+        &self.data
+    }
+
+    fn offsets(&self) -> &[u16] {
+        &self.offsets
+    }
+}
+
+pub struct BlockIterator<B: BlockLike> {
+    block: B,
     off_off: usize,
 }
 
-impl<'a> KeyValueIterator for BlockIterator<'a> {
+impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
     async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
         let Some(key_value) = self.load_at_current_off() else {
             return Ok(None);
@@ -20,17 +45,17 @@ impl<'a> KeyValueIterator for BlockIterator<'a> {
     }
 }
 
-impl<'a> BlockIterator<'a> {
-    pub fn from_first_key(block: &'a Block) -> BlockIterator {
+impl<B: BlockLike> BlockIterator<B> {
+    pub fn from_first_key(block: B) -> BlockIterator<B> {
         BlockIterator { block, off_off: 0 }
     }
 
     /// Construct a BlockIterator that starts at the given key, or at the first
     /// key greater than the given key if the exact key given is not in the block.
     #[allow(dead_code)] // will be used in #8
-    pub fn from_key(block: &'a Block, key: &[u8]) -> BlockIterator<'a> {
-        let idx = block.offsets.partition_point(|offset| {
-            let mut cursor = &block.data[*offset as usize..];
+    pub fn from_key(block: B, key: &[u8]) -> BlockIterator<B> {
+        let idx = block.offsets().partition_point(|offset| {
+            let mut cursor = &block.data()[*offset as usize..];
             let key_len = cursor.get_u16() as usize;
             let cursor_key = &cursor[..key_len];
             cursor_key < key
@@ -47,13 +72,13 @@ impl<'a> BlockIterator<'a> {
     }
 
     fn load_at_current_off(&self) -> Option<KeyValue> {
-        if self.off_off >= self.block.offsets.len() {
+        if self.off_off >= self.block.offsets().len() {
             return None;
         }
-        let off = self.block.offsets[self.off_off];
+        let off = self.block.offsets()[self.off_off];
         let off_usz = off as usize;
         // TODO: bounds checks to avoid panics? (paulgb)
-        let mut cursor = self.block.data.slice(off_usz..);
+        let mut cursor = self.block.data().slice(off_usz..);
         let key_len = cursor.get_u16() as usize;
         let key = cursor.slice(..key_len);
         cursor.advance(key_len);

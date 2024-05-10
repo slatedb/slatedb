@@ -13,4 +13,5 @@ mod flush;
 mod iter;
 mod mem_table;
 mod sst;
+mod sst_iter;
 mod tablestore;
