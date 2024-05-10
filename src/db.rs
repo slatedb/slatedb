@@ -22,7 +22,7 @@ pub struct DbOptions {
 #[derive(Clone)]
 pub(crate) struct DbState {
     pub(crate) memtable: Arc<MemTable>,
-    pub(crate) imm_memtables: Vec<Arc<MemTable>>,
+    pub(crate) imm_memtables: VecDeque<Arc<MemTable>>,
     pub(crate) l0: VecDeque<SSTableHandle>,
     pub(crate) next_sst_id: usize,
 }
@@ -31,7 +31,7 @@ impl DbState {
     fn create() -> Self {
         Self {
             memtable: Arc::new(MemTable::new()),
-            imm_memtables: Vec::new(),
+            imm_memtables: VecDeque::new(),
             l0: VecDeque::new(),
             next_sst_id: 0,
         }
