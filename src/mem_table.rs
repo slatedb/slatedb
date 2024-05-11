@@ -1,5 +1,5 @@
 use crate::error::SlateDBError;
-use crate::iter::{KeyValue, KeyValueIterator};
+use crate::iter::{KVEntry, KeyValue, KeyValueIterator};
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
@@ -8,17 +8,22 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 
 pub(crate) struct MemTable {
-    pub(crate) map: Arc<SkipMap<Bytes, Bytes>>,
+    pub(crate) map: Arc<SkipMap<Bytes, Option<Bytes>>>,
     pub(crate) flush_notify: Arc<Notify>,
 }
 
-pub struct MemTableIterator<'a>(Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, Bytes>);
+pub struct MemTableIterator<'a>(
+    Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, Option<Bytes>>,
+);
 
 impl<'a> KeyValueIterator for MemTableIterator<'a> {
-    async fn next_entry(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
-        Ok(self.0.next().map(|entry| KeyValue {
-            key: entry.key().clone(),
-            value: entry.value().clone(),
+    async fn next_entry(&mut self) -> Result<Option<KVEntry>, SlateDBError> {
+        Ok(self.0.next().map(|entry| match entry.value() {
+            Some(value) => KVEntry::KeyValue(KeyValue {
+                key: entry.key().clone(),
+                value: value.clone(),
+            }),
+            None => KVEntry::Tombstone(entry.key().clone()),
         }))
     }
 }
@@ -32,7 +37,9 @@ impl MemTable {
     }
 
     pub(crate) fn get(&self, key: &[u8]) -> Option<Bytes> {
-        self.map.get(key).map(|entry| entry.value().clone())
+        self.map
+            .get(key)
+            .map(|entry| entry.value().clone().unwrap_or_default())
     }
 
     pub(crate) fn iter(&self) -> MemTableIterator {
@@ -53,25 +60,29 @@ impl MemTable {
     /// it is flushed to durable storage.
     #[allow(dead_code)] // will be used in #8
     pub(crate) fn put_optimistic(&self, key: &[u8], value: &[u8]) {
-        self.map
-            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+        self.map.insert(
+            Bytes::copy_from_slice(key),
+            Some(Bytes::copy_from_slice(value)),
+        );
     }
 
     /// Puts a value and waits for the value to be flushed to durable storage.
     pub(crate) async fn put(&self, key: &[u8], value: &[u8]) {
-        self.map
-            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+        self.map.insert(
+            Bytes::copy_from_slice(key),
+            Some(Bytes::copy_from_slice(value)),
+        );
         self.flush_notify.notified().await;
     }
 
     pub(crate) async fn delete(&self, key: &[u8]) {
-        self.map.insert(Bytes::copy_from_slice(key), Bytes::new());
+        self.map.insert(Bytes::copy_from_slice(key), None);
         self.flush_notify.notified().await;
     }
 
     #[allow(dead_code)]
     pub(crate) fn delete_optimistic(&self, key: &[u8]) {
-        self.map.insert(Bytes::copy_from_slice(key), Bytes::new());
+        self.map.insert(Bytes::copy_from_slice(key), None);
     }
 }
 

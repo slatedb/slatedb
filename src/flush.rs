@@ -1,6 +1,6 @@
 use crate::db::{DbInner, DbState};
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KVEntry, KeyValueIterator};
 use crate::mem_table::MemTable;
 use crate::tablestore::SSTableHandle;
 use futures::executor::block_on;
@@ -22,7 +22,14 @@ impl DbInner {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = imm.iter();
         while let Some(kv) = iter.next_entry().await? {
-            sst_builder.add(&kv.key, &kv.value)?;
+            match kv {
+                KVEntry::KeyValue(kv) => {
+                    sst_builder.add(&kv.key, Some(&kv.value))?;
+                }
+                KVEntry::Tombstone(key) => {
+                    sst_builder.add(&key, None)?;
+                }
+            }
         }
 
         let encoded_sst = sst_builder.build()?;

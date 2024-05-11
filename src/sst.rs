@@ -152,7 +152,7 @@ impl EncodedSsTableBuilder {
         }
     }
 
-    pub fn add(&mut self, key: &[u8], value: &[u8]) -> Result<(), SlateDBError> {
+    pub fn add(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<(), SlateDBError> {
         self.num_keys += 1;
 
         if self.first_key.is_empty() {
@@ -241,8 +241,8 @@ mod tests {
         let format = SsTableFormat::new(4096, 0);
         let table_store = TableStore::new(object_store, format);
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", b"value1").unwrap();
-        builder.add(b"key2", b"value2").unwrap();
+        builder.add(b"key1", Some(b"value1")).unwrap();
+        builder.add(b"key2", Some(b"value2")).unwrap();
         let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
         table_store.write_sst(0, encoded).await.unwrap();
@@ -256,8 +256,8 @@ mod tests {
         let format = SsTableFormat::new(4096, 3);
         let table_store = TableStore::new(object_store, format);
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", b"value1").unwrap();
-        builder.add(b"key2", b"value2").unwrap();
+        builder.add(b"key1", Some(b"value1")).unwrap();
+        builder.add(b"key2", Some(b"value2")).unwrap();
         let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
         table_store.write_sst(0, encoded).await.unwrap();

@@ -1,7 +1,7 @@
 use crate::{
-    block::Block,
+    block::{Block, TOMBSTONE},
     error::SlateDBError,
-    iter::{KeyValue, KeyValueIterator},
+    iter::{KVEntry, KeyValue, KeyValueIterator},
 };
 use bytes::{Buf, Bytes};
 
@@ -36,7 +36,7 @@ pub struct BlockIterator<B: BlockLike> {
 }
 
 impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
-    async fn next_entry(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<KVEntry>, SlateDBError> {
         let Some(key_value) = self.load_at_current_off() else {
             return Ok(None);
         };
@@ -71,7 +71,7 @@ impl<B: BlockLike> BlockIterator<B> {
         self.off_off += 1;
     }
 
-    fn load_at_current_off(&self) -> Option<KeyValue> {
+    fn load_at_current_off(&self) -> Option<KVEntry> {
         if self.off_off >= self.block.offsets().len() {
             return None;
         }
@@ -82,9 +82,14 @@ impl<B: BlockLike> BlockIterator<B> {
         let key_len = cursor.get_u16() as usize;
         let key = cursor.slice(..key_len);
         cursor.advance(key_len);
-        let value_len = cursor.get_u32() as usize;
-        let value = cursor.slice(..value_len);
-        Some(KeyValue { key, value })
+        let value_len = cursor.get_u32();
+
+        if value_len == TOMBSTONE {
+            return Some(KVEntry::Tombstone(key.clone()));
+        } else {
+            let value = cursor.slice(..value_len as usize);
+            Some(KVEntry::KeyValue(KeyValue { key, value }))
+        }
     }
 }
 
@@ -97,9 +102,9 @@ mod tests {
     #[tokio::test]
     async fn test_iterator() {
         let mut block_builder = BlockBuilder::new(1024);
-        assert!(block_builder.add("donkey".as_ref(), "kong".as_ref()));
-        assert!(block_builder.add("kratos".as_ref(), "atreus".as_ref()));
-        assert!(block_builder.add("super".as_ref(), "mario".as_ref()));
+        assert!(block_builder.add("donkey".as_ref(), Some("kong".as_ref())));
+        assert!(block_builder.add("kratos".as_ref(), Some("atreus".as_ref())));
+        assert!(block_builder.add("super".as_ref(), Some("mario".as_ref())));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_first_key(&block);
         let kv = iter.next().await.unwrap().unwrap();
@@ -117,9 +122,9 @@ mod tests {
     #[tokio::test]
     async fn test_iter_from_existing_key() {
         let mut block_builder = BlockBuilder::new(1024);
-        assert!(block_builder.add("donkey".as_ref(), "kong".as_ref()));
-        assert!(block_builder.add("kratos".as_ref(), "atreus".as_ref()));
-        assert!(block_builder.add("super".as_ref(), "mario".as_ref()));
+        assert!(block_builder.add("donkey".as_ref(), Some("kong".as_ref())));
+        assert!(block_builder.add("kratos".as_ref(), Some("atreus".as_ref())));
+        assert!(block_builder.add("super".as_ref(), Some("mario".as_ref())));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_key(&block, b"kratos".as_ref());
         let kv = iter.next().await.unwrap().unwrap();
@@ -134,9 +139,9 @@ mod tests {
     #[tokio::test]
     async fn test_iter_from_nonexisting_key() {
         let mut block_builder = BlockBuilder::new(1024);
-        assert!(block_builder.add("donkey".as_ref(), "kong".as_ref()));
-        assert!(block_builder.add("kratos".as_ref(), "atreus".as_ref()));
-        assert!(block_builder.add("super".as_ref(), "mario".as_ref()));
+        assert!(block_builder.add("donkey".as_ref(), Some("kong".as_ref())));
+        assert!(block_builder.add("kratos".as_ref(), Some("atreus".as_ref())));
+        assert!(block_builder.add("super".as_ref(), Some("mario".as_ref())));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_key(&block, b"ka".as_ref());
         let kv = iter.next().await.unwrap().unwrap();
@@ -151,9 +156,9 @@ mod tests {
     #[tokio::test]
     async fn test_iter_from_end() {
         let mut block_builder = BlockBuilder::new(1024);
-        assert!(block_builder.add("donkey".as_ref(), "kong".as_ref()));
-        assert!(block_builder.add("kratos".as_ref(), "atreus".as_ref()));
-        assert!(block_builder.add("super".as_ref(), "mario".as_ref()));
+        assert!(block_builder.add("donkey".as_ref(), Some("kong".as_ref())));
+        assert!(block_builder.add("kratos".as_ref(), Some("atreus".as_ref())));
+        assert!(block_builder.add("super".as_ref(), Some("mario".as_ref())));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_key(&block, b"zzz".as_ref());
         assert!(iter.next().await.unwrap().is_none());
