@@ -36,7 +36,7 @@ pub struct BlockIterator<B: BlockLike> {
 }
 
 impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
-    async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
         let Some(key_value) = self.load_at_current_off() else {
             return Ok(None);
         };
