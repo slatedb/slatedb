@@ -119,7 +119,7 @@ impl DbInner {
         key: &[u8],
     ) -> Result<Option<Bytes>, SlateDBError> {
         let mut iter = BlockIterator::from_first_key(block);
-        while let Some(current_key_value) = iter.next().await? {
+        while let Some(current_key_value) = iter.next_entry().await? {
             if current_key_value.key == key {
                 return Ok(Some(current_key_value.value));
             }

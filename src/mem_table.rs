@@ -15,7 +15,7 @@ pub(crate) struct MemTable {
 pub struct MemTableIterator<'a>(Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, Bytes>);
 
 impl<'a> KeyValueIterator for MemTableIterator<'a> {
-    async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
         Ok(self.0.next().map(|entry| KeyValue {
             key: entry.key().clone(),
             value: entry.value().clone(),
@@ -67,6 +67,11 @@ impl MemTable {
     pub(crate) async fn delete(&self, key: &[u8]) {
         self.map.insert(Bytes::copy_from_slice(key), Bytes::new());
         self.flush_notify.notified().await;
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn delete_optimistic(&self, key: &[u8]) {
+        self.map.insert(Bytes::copy_from_slice(key), Bytes::new());
     }
 }
 
@@ -140,6 +145,16 @@ mod tests {
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc555".as_slice());
         assert_eq!(kv.value, b"value5".as_slice());
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_memtable_iter_delete() {
+        let table = MemTable::new();
+        table.put_optimistic(b"abc333", b"value3");
+        table.delete_optimistic(b"abc333");
+
+        let mut iter = table.iter();
         assert!(iter.next().await.unwrap().is_none());
     }
 }

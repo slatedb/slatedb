@@ -25,7 +25,9 @@ impl SstIterator {
 }
 
 impl KeyValueIterator for SstIterator {
-    async fn next(&mut self) -> Result<Option<crate::iter::KeyValue>, crate::error::SlateDBError> {
+    async fn next_entry(
+        &mut self,
+    ) -> Result<Option<crate::iter::KeyValue>, crate::error::SlateDBError> {
         loop {
             let current_iter = if let Some(current_iter) = self.current_iter.as_mut() {
                 current_iter

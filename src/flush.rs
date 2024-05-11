@@ -21,7 +21,7 @@ impl DbInner {
     ) -> Result<SSTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = imm.iter();
-        while let Some(kv) = iter.next().await? {
+        while let Some(kv) = iter.next_entry().await? {
             sst_builder.add(&kv.key, &kv.value)?;
         }
 
