@@ -192,7 +192,7 @@ mod tests {
         assert!(builder.add(b"key3", Some(b"value3")));
         let block = builder.build().unwrap();
         let encoded = block.encode();
-        let decoded = Block::decode(&encoded);
+        let _decoded = Block::decode(&encoded);
     }
 
     #[test]

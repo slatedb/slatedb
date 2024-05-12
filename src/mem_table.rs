@@ -12,9 +12,9 @@ pub(crate) struct MemTable {
     pub(crate) flush_notify: Arc<Notify>,
 }
 
-pub struct MemTableIterator<'a>(
-    Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, Option<Bytes>>,
-);
+type MemTableRange<'a> = Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, Option<Bytes>>;
+
+pub struct MemTableIterator<'a>(MemTableRange<'a>);
 
 impl<'a> KeyValueIterator for MemTableIterator<'a> {
     async fn next_entry(&mut self) -> Result<Option<KVEntry>, SlateDBError> {
@@ -36,10 +36,12 @@ impl MemTable {
         }
     }
 
-    pub(crate) fn get(&self, key: &[u8]) -> Option<Bytes> {
-        self.map
-            .get(key)
-            .map(|entry| entry.value().clone().unwrap_or_default())
+    /// Get the value for a given key.
+    /// Returns None if the key is not in the memtable at all,
+    /// Some(None) if the key is in the memtable but has a tombstone value,
+    /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
+    pub(crate) fn get(&self, key: &[u8]) -> Option<Option<Bytes>> {
+        self.map.get(key).map(|entry| entry.value().clone())
     }
 
     pub(crate) fn iter(&self) -> MemTableIterator {

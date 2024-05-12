@@ -85,7 +85,7 @@ impl<B: BlockLike> BlockIterator<B> {
         let value_len = cursor.get_u32();
 
         if value_len == TOMBSTONE {
-            return Some(KVEntry::Tombstone(key.clone()));
+            Some(KVEntry::Tombstone(key.clone()))
         } else {
             let value = cursor.slice(..value_len as usize);
             Some(KVEntry::KeyValue(KeyValue { key, value }))

@@ -73,6 +73,14 @@ impl DbInner {
             Arc::clone(&guard)
         };
 
+        let maybe_bytes = std::iter::once(&snapshot.memtable)
+            .chain(snapshot.imm_memtables.iter())
+            .find_map(|memtable| memtable.get(key));
+
+        if let Some(val) = maybe_bytes {
+            return Ok(val);
+        }
+
         for sst in &snapshot.as_ref().l0 {
             if let Some(block_index) = self.find_block_for_key(sst, key).await? {
                 let block = self.table_store.read_block(sst, block_index).await?;
