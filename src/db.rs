@@ -1,18 +1,17 @@
+use crate::mem_table::MemTable;
+use crate::sst::SsTableFormat;
+use crate::tablestore::{SSTableHandle, TableStore};
+use crate::types::KVValue;
+use crate::{block::Block, error::SlateDBError};
+use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
+use bytes::Bytes;
+use object_store::ObjectStore;
+use parking_lot::{Mutex, RwLock};
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
     sync::Arc,
 };
-
-use crate::{block::Block, error::SlateDBError, iter::KVEntry};
-use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
-use bytes::Bytes;
-use object_store::ObjectStore;
-use parking_lot::{Mutex, RwLock};
-
-use crate::mem_table::MemTable;
-use crate::sst::SsTableFormat;
-use crate::tablestore::{SSTableHandle, TableStore};
 
 pub struct DbOptions {
     pub flush_ms: usize,
@@ -85,7 +84,10 @@ impl DbInner {
             if let Some(block_index) = self.find_block_for_key(sst, key).await? {
                 let block = self.table_store.read_block(sst, block_index).await?;
                 if let Some(val) = self.find_val_in_block(&block, key).await? {
-                    return Ok(val);
+                    match val {
+                        KVValue::Value(v) => return Ok(Some(v)),
+                        KVValue::Tombstone => return Ok(None),
+                    }
                 }
             }
         }
@@ -113,20 +115,11 @@ impl DbInner {
         &self,
         block: &Block,
         key: &[u8],
-    ) -> Result<Option<Option<Bytes>>, SlateDBError> {
+    ) -> Result<Option<KVValue>, SlateDBError> {
         let mut iter = BlockIterator::from_first_key(block);
         while let Some(current_key_value) = iter.next_entry().await? {
-            match current_key_value {
-                KVEntry::KeyValue(kv) => {
-                    if kv.key == key {
-                        return Ok(Some(Some(kv.value)));
-                    }
-                }
-                KVEntry::Tombstone(tombstone_key) => {
-                    if tombstone_key == key {
-                        return Ok(Some(None));
-                    }
-                }
+            if current_key_value.key == key {
+                return Ok(Some(current_key_value.value));
             }
         }
         Ok(None)

@@ -1,8 +1,9 @@
 use crate::{
     block::Block,
     block_iterator::BlockIterator,
-    iter::{KVEntry, KeyValueIterator},
+    iter::KeyValueIterator,
     tablestore::{SSTableHandle, TableStore},
+    types::KVEntry,
 };
 
 struct SstIterator {

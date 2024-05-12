@@ -1,5 +1,6 @@
 use crate::error::SlateDBError;
-use crate::iter::{KVEntry, KeyValue, KeyValueIterator};
+use crate::iter::KeyValueIterator;
+use crate::types::{KVEntry, KVValue};
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
@@ -18,12 +19,16 @@ pub struct MemTableIterator<'a>(MemTableRange<'a>);
 
 impl<'a> KeyValueIterator for MemTableIterator<'a> {
     async fn next_entry(&mut self) -> Result<Option<KVEntry>, SlateDBError> {
-        Ok(self.0.next().map(|entry| match entry.value() {
-            Some(value) => KVEntry::KeyValue(KeyValue {
+        Ok(self.0.next().map(|entry| {
+            let v = match entry.value() {
+                Some(v) => KVValue::Value(v.clone()),
+                None => KVValue::Tombstone,
+            };
+
+            KVEntry {
                 key: entry.key().clone(),
-                value: value.clone(),
-            }),
-            None => KVEntry::Tombstone(entry.key().clone()),
+                value: v,
+            }
         }))
     }
 }

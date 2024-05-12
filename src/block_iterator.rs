@@ -1,7 +1,8 @@
 use crate::{
     block::{Block, TOMBSTONE},
     error::SlateDBError,
-    iter::{KVEntry, KeyValue, KeyValueIterator},
+    iter::KeyValueIterator,
+    types::{KVEntry, KVValue},
 };
 use bytes::{Buf, Bytes};
 
@@ -84,12 +85,14 @@ impl<B: BlockLike> BlockIterator<B> {
         cursor.advance(key_len);
         let value_len = cursor.get_u32();
 
-        if value_len == TOMBSTONE {
-            Some(KVEntry::Tombstone(key.clone()))
+        let v = if value_len == TOMBSTONE {
+            KVValue::Tombstone
         } else {
             let value = cursor.slice(..value_len as usize);
-            Some(KVEntry::KeyValue(KeyValue { key, value }))
-        }
+            KVValue::Value(value)
+        };
+
+        Some(KVEntry { key, value: v })
     }
 }
 

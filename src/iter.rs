@@ -1,17 +1,5 @@
 use crate::error::SlateDBError;
-use bytes::Bytes;
-
-#[derive(Debug)]
-pub struct KeyValue {
-    pub key: Bytes,
-    pub value: Bytes,
-}
-
-#[derive(Debug)]
-pub enum KVEntry {
-    KeyValue(KeyValue),
-    Tombstone(Bytes),
-}
+use crate::types::{KVEntry, KVValue, KeyValue};
 
 /// Note: this is intentionally its own trait instead of an Iterator<Item=KeyValue>,
 /// because next will need to be made async to support SSTs, which are loaded over
@@ -23,9 +11,14 @@ pub trait KeyValueIterator {
         loop {
             let entry = self.next_entry().await?;
             if let Some(kv) = entry {
-                match kv {
-                    KVEntry::KeyValue(kv) => return Ok(Some(kv)),
-                    KVEntry::Tombstone(_) => continue,
+                match kv.value {
+                    KVValue::Value(v) => {
+                        return Ok(Some(KeyValue {
+                            key: kv.key,
+                            value: v,
+                        }))
+                    }
+                    KVValue::Tombstone => continue,
                 }
             } else {
                 return Ok(None);
