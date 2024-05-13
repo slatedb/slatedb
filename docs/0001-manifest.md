@@ -168,8 +168,8 @@ some-bucket/
 │  ├─ 01HX5JS57YZ3NXZ3H366XRS47R.manifest
 │  ├─ 01HX5JS90BM7099ED7F34E5WTG.manifest
 ├─ wal/
-│  ├─ 000000000000000000.sst
-│  ├─ 000000000000000001.sst
+│  ├─ 00000000000000000000.sst
+│  ├─ 00000000000000000001.sst
 │  ├─ ...
 ├─ levels/
 │  ├─ ...
@@ -302,9 +302,9 @@ This comes out to 5,624,042 bytes, or ~5.6 MiB. Whether this is reasonable or no
 
 If a client gets 100MB/s to and from EC2 to S3, it would take 56ms to read and 56ms to write (plus serialization, network, and TCP overhead). All in, let's say 250-500ms.
 
-#### `wal/000000000000000000.sst`
+#### `wal/00000000000000000000.sst`
 
-SlateDB's WAL is a sequentially ordered contiguous list of SSTs. Each SST contains zero or more sorted key-value pairs. The WAL is used to store writes that have not yet been compacted.
+SlateDB's WAL is a sequentially ordered contiguous list of SSTs. SST objects names are formatted as 20 digit zero-padded numbers to fit u64's maximum integer and to support lexicographical sorting. Each SST contains zero or more sorted key-value pairs. The WAL is used to store writes that have not yet been compacted.
 
 Traditionally, LSMs store WAL data in a different format from the SSTs; this is because each `put()` call results in a single key-value write to the WAL. But SlateDB doesn't write to the WAL on each `put()`. Instead, `put()`'s are batched together based on `flush_ms`, `flush_bytes` ([#30](https://github.com/slatedb/slatedb/issues/30)), or `skip_memtable_bytes` ([#31](https://github.com/slatedb/slatedb/issues/31)). Based on these configurations, multiple key-value pairs are stored in the WAL in a single write. Thus, SlateDB uses SSTs for both the WAL and compacted files.
 
@@ -450,11 +450,11 @@ Let's consider some examples to illustrate the writer protocol.
 Here's an example where a new writer successfully fences an older writer (protocol scenario (1)):
 
 ```
-time 0, 000000000000000000.sst, writer_epoch=1
-time 1, 000000000000000001.sst, writer_epoch=1
-time 2, 000000000000000002.sst, writer_epoch=2
-time 3, 000000000000000002.sst, writer_epoch=1
-time 4, 000000000000000003.sst, writer_epoch=2
+time 0, 00000000000000000000.sst, writer_epoch=1
+time 1, 00000000000000000001.sst, writer_epoch=1
+time 2, 00000000000000000002.sst, writer_epoch=2
+time 3, 00000000000000000002.sst, writer_epoch=1
+time 4, 00000000000000000003.sst, writer_epoch=2
 ```
 
 In the example above, writer 1 successfully writes SSTs 0 and 1. At time 2, writer 2 successfully fences writer 1, but writer 1 hasn't yet seen the fence write. When writer 1 attempts to write SST 2, it loses the CAS write and halts because SST 2 has a higher `writer_epoch`. Writer 2 then continues with a successful write to SST 3.
@@ -462,11 +462,11 @@ In the example above, writer 1 successfully writes SSTs 0 and 1. At time 2, writ
 Here's an example where a new writer has to retry its fence write because an older writer took its SST ID location (protocol scenario (2)):
 
 ```
-time 0, 000000000000000000.sst, writer_epoch=1
-time 1, 000000000000000001.sst, writer_epoch=1
-time 2, 000000000000000002.sst, writer_epoch=1
-time 3, 000000000000000002.sst, writer_epoch=2
-time 4, 000000000000000003.sst, writer_epoch=2
+time 0, 00000000000000000000.sst, writer_epoch=1
+time 1, 00000000000000000001.sst, writer_epoch=1
+time 2, 00000000000000000002.sst, writer_epoch=1
+time 3, 00000000000000000002.sst, writer_epoch=2
+time 4, 00000000000000000003.sst, writer_epoch=2
 ```
 
 In example above, writer 1 successfully writes SSTs 0, 1, and 2. Writer 2 tries to fence older writers with a write to SST ID 2, but fails because writer 1 has already written an SST at that location. Writer 2 sees that the SST with ID 2 has a lower `writer_epoch` than its own and retries its fence write at the next SST ID location. This write to SST ID 3 at time 4 is successful. Writer 2 has successfully fenced writer 1. If writer 1 tries to write to SST ID 3, it will see a higher `writer_epoch` and halt.
@@ -474,11 +474,11 @@ In example above, writer 1 successfully writes SSTs 0, 1, and 2. Writer 2 tries 
 Here's an example where a new writer gets fenced before it can write its own fencing write (protocol scenario (4)):
 
 ```
-time 0, 000000000000000000.sst, writer_epoch=1
-time 1, 000000000000000001.sst, writer_epoch=1
-time 2, 000000000000000002.sst, writer_epoch=3
-time 3, 000000000000000002.sst, writer_epoch=2
-time 4, 000000000000000003.sst, writer_epoch=3
+time 0, 00000000000000000000.sst, writer_epoch=1
+time 1, 00000000000000000001.sst, writer_epoch=1
+time 2, 00000000000000000002.sst, writer_epoch=3
+time 3, 00000000000000000002.sst, writer_epoch=2
+time 4, 00000000000000000003.sst, writer_epoch=3
 ```
 
 In example above, writer 1 successfully writes SSTs 0 and 1. Writer 2 tries to fence older writers with a write to SST ID 2, but fails because writer 3 has already written an SST at that location. Writer 2 sees that the SST with ID 2 has a higher `writer_epoch` than its own, and halts.
@@ -500,14 +500,14 @@ _NOTE: This strategy is discussed in more detail [here](https://github.com/slate
 Consider this example with `max_parallel_writes` set to 2:
 
 ```
-time 0, 000000000000000000.sst, writer_epoch=1
-time 1, 000000000000000001.sst, writer_epoch=1
-time 2, 000000000000000002.sst, writer_epoch=2
-time 3, 000000000000000003.sst, writer_epoch=1
-time 4, 000000000000000002.sst, writer_epoch=1
-time 5, 000000000000000003.sst, writer_epoch=2
-time 6, 000000000000000004.sst, writer_epoch=2
-time 7, 000000000000000005.sst, writer_epoch=2
+time 0, 00000000000000000000.sst, writer_epoch=1
+time 1, 00000000000000000001.sst, writer_epoch=1
+time 2, 00000000000000000002.sst, writer_epoch=2
+time 3, 00000000000000000003.sst, writer_epoch=1
+time 4, 00000000000000000002.sst, writer_epoch=1
+time 5, 00000000000000000003.sst, writer_epoch=2
+time 6, 00000000000000000004.sst, writer_epoch=2
+time 7, 00000000000000000005.sst, writer_epoch=2
 ```
 
 Writer 1 successfully writes SSTs 0, 1, and 3. Writer 1's SST 2 write fails at time 4 because writer 2 has already taken that location at time 2. At this point, writer 1 immediately stops writing new SSTs and halts. Existing parallel writes run to completion (either failure or success).
@@ -548,18 +548,18 @@ If more than 2 writers are writing in parallel, the protocol is the same. The on
 To illustrate, consider an example where we have 3 writers. writer 1 is the old writer, while writer 2 and writer 3 are trying to fence:
 
 ```
-time  0, 000000000000000000.sst, writer_epoch=1 // success
-time  1, 000000000000000001.sst, writer_epoch=1 // success
-time  2, 000000000000000002.sst, writer_epoch=3 // success
-time  3, 000000000000000003.sst, writer_epoch=1 // success
-time  4, 000000000000000002.sst, writer_epoch=1 // failure (writer 3 won at time 2), writer 1 halts
-time  5, 000000000000000003.sst, writer_epoch=2 // failure (writer 1 won at time 3)
-time  6, 000000000000000003.sst, writer_epoch=3 // failure (writer 1 won at time 3)
-time  7, 000000000000000004.sst, writer_epoch=2 // success
-time  8, 000000000000000004.sst, writer_epoch=3 // failure (writer 2 won at time 7)
-time  9, 000000000000000005.sst, writer_epoch=3 // success
-time 10, 000000000000000005.sst, writer_epoch=2 // failure (writer 3 won at time 9), writer 2 halts
-time 11, 000000000000000006.sst, writer_epoch=3 // success
+time  0, 00000000000000000000.sst, writer_epoch=1 // success
+time  1, 00000000000000000001.sst, writer_epoch=1 // success
+time  2, 00000000000000000002.sst, writer_epoch=3 // success
+time  3, 00000000000000000003.sst, writer_epoch=1 // success
+time  4, 00000000000000000002.sst, writer_epoch=1 // failure (writer 3 won at time 2), writer 1 halts
+time  5, 00000000000000000003.sst, writer_epoch=2 // failure (writer 1 won at time 3)
+time  6, 00000000000000000003.sst, writer_epoch=3 // failure (writer 1 won at time 3)
+time  7, 00000000000000000004.sst, writer_epoch=2 // success
+time  8, 00000000000000000004.sst, writer_epoch=3 // failure (writer 2 won at time 7)
+time  9, 00000000000000000005.sst, writer_epoch=3 // success
+time 10, 00000000000000000005.sst, writer_epoch=2 // failure (writer 3 won at time 9), writer 2 halts
+time 11, 00000000000000000006.sst, writer_epoch=3 // success
 ```
 
 At time 11, writer 3 has successfully fenced writer 1 and writer 2. Readers will consider all SSTs valid from 0-6, though only SSTs 0, 1, and 3 will have key-value pairs since fencing SST writes are always empty.
@@ -595,9 +595,9 @@ _NOTE: Readers can also skip snapshot creation if they wish. If they do so, they
 The reader protocol above assumes that all SSTs are contiguous and monotonically increasing. If parallel writes are allowed, a reader might see a `wal` with gaps between SSTs:
 
 ```
-time 0, 000000000000000000.sst, writer_epoch=1
-time 1, 000000000000000001.sst, writer_epoch=1
-time 2, 000000000000000003.sst, writer_epoch=1
+time 0, 00000000000000000000.sst, writer_epoch=1
+time 1, 00000000000000000001.sst, writer_epoch=1
+time 2, 00000000000000000003.sst, writer_epoch=1
 ```
 
 In this example, the reader has two choices:
