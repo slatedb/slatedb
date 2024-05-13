@@ -1,7 +1,7 @@
 use crate::mem_table::MemTable;
 use crate::sst::SsTableFormat;
 use crate::tablestore::{SSTableHandle, TableStore};
-use crate::types::KVValue;
+use crate::types::ValueDeletable;
 use crate::{block::Block, error::SlateDBError};
 use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
 use bytes::Bytes;
@@ -77,7 +77,7 @@ impl DbInner {
             .find_map(|memtable| memtable.get(key));
 
         if let Some(val) = maybe_bytes {
-            return Ok(val);
+            return Ok(val.into_option());
         }
 
         for sst in &snapshot.as_ref().l0 {
@@ -85,8 +85,8 @@ impl DbInner {
                 let block = self.table_store.read_block(sst, block_index).await?;
                 if let Some(val) = self.find_val_in_block(&block, key).await? {
                     match val {
-                        KVValue::Value(v) => return Ok(Some(v)),
-                        KVValue::Tombstone => return Ok(None),
+                        ValueDeletable::Value(v) => return Ok(Some(v)),
+                        ValueDeletable::Tombstone => return Ok(None),
                     }
                 }
             }
@@ -115,7 +115,7 @@ impl DbInner {
         &self,
         block: &Block,
         key: &[u8],
-    ) -> Result<Option<KVValue>, SlateDBError> {
+    ) -> Result<Option<ValueDeletable>, SlateDBError> {
         let mut iter = BlockIterator::from_first_key(block);
         while let Some(current_key_value) = iter.next_entry().await? {
             if current_key_value.key == key {

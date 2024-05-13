@@ -3,7 +3,7 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::MemTable;
 use crate::tablestore::SSTableHandle;
-use crate::types::KVValue;
+use crate::types::ValueDeletable;
 use futures::executor::block_on;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,10 +24,10 @@ impl DbInner {
         let mut iter = imm.iter();
         while let Some(kv) = iter.next_entry().await? {
             match kv.value {
-                KVValue::Value(v) => {
+                ValueDeletable::Value(v) => {
                     sst_builder.add(&kv.key, Some(&v))?;
                 }
-                KVValue::Tombstone => {
+                ValueDeletable::Tombstone => {
                     sst_builder.add(&kv.key, None)?;
                 }
             }

@@ -84,20 +84,17 @@ impl BlockBuilder {
             return false;
         }
 
+        self.offsets.push(self.data.len() as u16);
+        self.data.put_u16(key.len() as u16);
+        self.data.put(key);
         if let Some(value) = value {
-            self.offsets.push(self.data.len() as u16);
-            self.data.put_u16(key.len() as u16);
-            self.data.put(key);
             self.data.put_u32(value.len() as u32);
             self.data.put(value);
-            true
         } else {
-            self.offsets.push(self.data.len() as u16);
-            self.data.put_u16(key.len() as u16);
-            self.data.put(key);
             self.data.put_u32(TOMBSTONE);
-            true
         }
+
+        true
     }
 
     pub fn is_empty(&self) -> bool {

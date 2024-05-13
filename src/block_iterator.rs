@@ -2,7 +2,7 @@ use crate::{
     block::{Block, TOMBSTONE},
     error::SlateDBError,
     iter::KeyValueIterator,
-    types::{KVEntry, KVValue},
+    types::{KeyValueDeletable, ValueDeletable},
 };
 use bytes::{Buf, Bytes};
 
@@ -37,7 +37,7 @@ pub struct BlockIterator<B: BlockLike> {
 }
 
 impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
-    async fn next_entry(&mut self) -> Result<Option<KVEntry>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
         let Some(key_value) = self.load_at_current_off() else {
             return Ok(None);
         };
@@ -72,7 +72,7 @@ impl<B: BlockLike> BlockIterator<B> {
         self.off_off += 1;
     }
 
-    fn load_at_current_off(&self) -> Option<KVEntry> {
+    fn load_at_current_off(&self) -> Option<KeyValueDeletable> {
         if self.off_off >= self.block.offsets().len() {
             return None;
         }
@@ -86,13 +86,13 @@ impl<B: BlockLike> BlockIterator<B> {
         let value_len = cursor.get_u32();
 
         let v = if value_len == TOMBSTONE {
-            KVValue::Tombstone
+            ValueDeletable::Tombstone
         } else {
             let value = cursor.slice(..value_len as usize);
-            KVValue::Value(value)
+            ValueDeletable::Value(value)
         };
 
-        Some(KVEntry { key, value: v })
+        Some(KeyValueDeletable { key, value: v })
     }
 }
 

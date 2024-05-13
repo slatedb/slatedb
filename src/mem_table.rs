@@ -1,6 +1,6 @@
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
-use crate::types::{KVEntry, KVValue};
+use crate::types::{KeyValueDeletable, ValueDeletable};
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
@@ -9,26 +9,19 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 
 pub(crate) struct MemTable {
-    pub(crate) map: Arc<SkipMap<Bytes, Option<Bytes>>>,
+    pub(crate) map: Arc<SkipMap<Bytes, ValueDeletable>>,
     pub(crate) flush_notify: Arc<Notify>,
 }
 
-type MemTableRange<'a> = Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, Option<Bytes>>;
+type MemTableRange<'a> = Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, ValueDeletable>;
 
 pub struct MemTableIterator<'a>(MemTableRange<'a>);
 
 impl<'a> KeyValueIterator for MemTableIterator<'a> {
-    async fn next_entry(&mut self) -> Result<Option<KVEntry>, SlateDBError> {
-        Ok(self.0.next().map(|entry| {
-            let v = match entry.value() {
-                Some(v) => KVValue::Value(v.clone()),
-                None => KVValue::Tombstone,
-            };
-
-            KVEntry {
-                key: entry.key().clone(),
-                value: v,
-            }
+    async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+        Ok(self.0.next().map(|entry| KeyValueDeletable {
+            key: entry.key().clone(),
+            value: entry.value().clone(),
         }))
     }
 }
@@ -45,7 +38,7 @@ impl MemTable {
     /// Returns None if the key is not in the memtable at all,
     /// Some(None) if the key is in the memtable but has a tombstone value,
     /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
-    pub(crate) fn get(&self, key: &[u8]) -> Option<Option<Bytes>> {
+    pub(crate) fn get(&self, key: &[u8]) -> Option<ValueDeletable> {
         self.map.get(key).map(|entry| entry.value().clone())
     }
 
@@ -69,7 +62,7 @@ impl MemTable {
     pub(crate) fn put_optimistic(&self, key: &[u8], value: &[u8]) {
         self.map.insert(
             Bytes::copy_from_slice(key),
-            Some(Bytes::copy_from_slice(value)),
+            ValueDeletable::Value(Bytes::copy_from_slice(value)),
         );
     }
 
@@ -77,19 +70,21 @@ impl MemTable {
     pub(crate) async fn put(&self, key: &[u8], value: &[u8]) {
         self.map.insert(
             Bytes::copy_from_slice(key),
-            Some(Bytes::copy_from_slice(value)),
+            ValueDeletable::Value(Bytes::copy_from_slice(value)),
         );
         self.flush_notify.notified().await;
     }
 
     pub(crate) async fn delete(&self, key: &[u8]) {
-        self.map.insert(Bytes::copy_from_slice(key), None);
+        self.map
+            .insert(Bytes::copy_from_slice(key), ValueDeletable::Tombstone);
         self.flush_notify.notified().await;
     }
 
     #[allow(dead_code)]
     pub(crate) fn delete_optimistic(&self, key: &[u8]) {
-        self.map.insert(Bytes::copy_from_slice(key), None);
+        self.map
+            .insert(Bytes::copy_from_slice(key), ValueDeletable::Tombstone);
     }
 }
 
