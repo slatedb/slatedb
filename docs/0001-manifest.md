@@ -4,22 +4,22 @@ Table of Contents:
 
 <!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
 
-* [Current Design](#current-design)
-  + [Writes](#writes)
-  + [Reads](#reads)
-* [Problem](#problem)
-* [Solution](#solution)
-  + [Goals](#goals)
-  + [Proposal](#proposal)
-  + [A Note on CAS](#a-note-on-cas)
-  + [File Structure](#file-structure)
-  + [Manifest Updates](#manifest-updates)
-  + [Snapshots](#snapshots)
-  + [Writers](#writers)
-  + [Readers](#readers)
-  + [Compactors](#compactors)
-* [Rejected Solutions](#rejected-solutions)
-* [Addendum](#addendum)
+- [Current Design](#current-design)
+   * [Writes](#writes)
+   * [Reads](#reads)
+- [Problem](#problem)
+- [Solution](#solution)
+   * [Goals](#goals)
+   * [Proposal](#proposal)
+   * [CAS on S3](#cas-on-s3)
+   * [File Structure](#file-structure)
+   * [Manifest Updates](#manifest-updates)
+   * [Snapshots](#snapshots)
+   * [Writers](#writers)
+   * [Readers](#readers)
+   * [Compactors](#compactors)
+- [Rejected Solutions](#rejected-solutions)
+- [Addendum](#addendum)
 
 <!-- TOC end -->
 
@@ -129,9 +129,9 @@ This design should:
 
 We propose persisting SlateDB's `DbState` in a manifest file to solve problem (1). Such a design is quite common in [log-structured merge-trees](https://en.wikipedia.org/wiki/Log-structured_merge-tree) (LSMs). In particular, RocksDB [follows this pattern](https://github.com/facebook/rocksdb/wiki/MANIFEST). In SlateDB, we will persist `DbState` in a manifest file, which all clients will load on startup. Writer, compactor, and readers will all update the manifest in various situations. All updates to the manifest will be done using [compare-and-swap](https://en.wikipedia.org/wiki/Compare-and-swap) (CAS).
 
-To prevent zombie writers, we propose using CAS to ensure each SST is written exactly one time. We introduce the concept of writer epochs to determine when the current writer is a zombie and halt the process. The full fencing protocol is described below.
+To prevent zombie writers, we propose using CAS to ensure each SST is written exactly one time. We introduce the concept of writer epochs to determine when the current writer is a zombie and halt the process. The full fencing protocol is described later in the _Writer Protocol_ section.
 
-### A Note on CAS
+### CAS on S3
 
 Changes to the manifest file and SST writes both require CAS in this design. Most object stores provide CAS (a.k.a. preconditions, conditionals, `If-None-Match`, `If-Match`, and so on). But S3 does not, and we want to support S3. Fortunately, we can support CAS-like operations using several different patterns.
 
@@ -144,18 +144,59 @@ There are four different patterns to achieve CAS for these scenarios:
 
 1. **Use CAS**: If the object store supports CAS, we can use it. This pattern works for both scenarios described above.
 2. **Use a transactional store**: A transactional store such as DynamoDB or MySQL can be used to store the object. The object store is not used in this mode. This approach works for both scenarios described above, but does not work well for large objects.
-3. **Use object versioning**: Object stores that support [object versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html) can emulate CAS if the bucket has versioning enabled. Versioning allows multiple versions of an object to be stored. AWS stores versions [in insertion order](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html#API_ListObjectVersions_Example_3). We can leverage this property as well as AWS's [read-after-write](https://aws.amazon.com/blogs/aws/amazon-s3-update-strong-read-after-write-consistency/) consistency guarantees to emulate CAS. Many writers can write to the same object path. Writers can then list all versions of the object. The first version (the earliest) is considered the winner. All other writers have failed the CAS operation. This does require a [ListObjectVersions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) after the write, but if CAS is needed, this is the best we can do. This pattern works for immutable files--scenario (1)--but not mutable files--scenario (2).
+3. **Use object versioning**: Object stores that support [object versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html) can emulate CAS if the bucket has versioning enabled. Versioning allows multiple versions of an object to be stored. AWS stores versions [in insertion order](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html#API_ListObjectVersions_Example_3). We can leverage this property as well as AWS's [read-after-write](https://aws.amazon.com/blogs/aws/amazon-s3-update-strong-read-after-write-consistency/) consistency guarantees to emulate CAS. Many writers can write to the same object path. Writers can then list all versions of the object. The first version (the earliest) is considered the winner. All other writers have failed the CAS operation. This does require a [ListObjectVersions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) after the write, but if CAS is needed, this is the best we can do. This pattern works for immutable files--scenario (1)--but not mutable files--scenario (2). This pattern does not work for S3 Express One Zone since it does not support object versioning.
 4. **Use a proxy**: A proxy-based solution combines an object store and a transactional store. Two values are stored: an object and a pointer to object. Readers first read the pointer (e.g. object path) from the pointer, then read the object that the pointer points to. Writers read the current object (using the reader steps), update the object, and write it back to the object store at a new location (e.g. a new UUID). Writers then update the pointer to point to the new object. The pointer update is done conditionally if the pointer still points to the file the writer read. The pointer may reside in a file on an object store that supports CAS, or a transactional store like DynamoDB or MySQL. This pattern works for both immutable and mutable files. Unlike (1), it also works well for large objects.
+5. **Use a two-phase write**: Like the proxy solution (5), a two-phase write consists of a write to both an object storage and a transactional store. Writers first write a new object to a temporary location. The writer then writes a record to a transactional store. The transacational record signals an intent to copy; it contains a source, destination, and a completion flag. "put-if-not-exists" semantics are used on the destination column. The writer then copies the new object from its temporary location to its final destination in object storage. Upon completion, the transactional store's record is set to complete and the temporary file is deleted. If the writer fails before the transactional record is written, the write is abandoned. If the writer fails after the transactional record is written, a recovery process runs in the future to copy the object and set the completion flag. This pattern works for immutable objects. It also works well for large ubjects.
 
-_NOTE: These patterns are discussed more [here](https://github.com/slatedb/slatedb/pull/39/files#r1588879655)._
+_NOTE: These patterns are discussed more [here](https://github.com/slatedb/slatedb/pull/39/files#r1588879655) and [here](https://github.com/slatedb/slatedb/pull/43/files#r1597297640)._
 
 Our proposed solution uses the following forms of CAS:
 
-* A proxy pointer (4) for manifest CAS
-* CAS (1) for SST writes when the object store supports CAS
-* Object versioning (3) for SST writes when the object store does not support CAS
+* CAS (1) for manifest and SST writes when the object store supports CAS
+* Two-phase write (3) for manifest and SST writes when the object store does not support CAS
 
-_NOTE: This design introduces a read-after-write when using S3. This is slower than a pure-CAS operation, but we are gambling that S3 will soon support pure-CAS like every other object store. In the long run, we expect to switch S3 clients to use CAS and drop object versioning._
+#### Two-Phase CAS Protocol
+
+A description of the two-phase CAS protocol is described in this section. There are operations to consider:
+
+1. **Writes**: A process writes an object to object storage and fails if the object already exists.
+3. **Deletes**: A process deletes an object from object storage.
+2. **Recovery**: A process recovers a failed write or delete.
+
+##### Writes
+
+Suppose a writer wishes to write to the object location `manifest/00000000000000000000.manifest`. The writer follows these steps:
+
+1. Write the new manifest to a temporary location, say `manifest/00000000000000000000.manifest.[UUID].[checksum]`.
+2. Write a record to a transactional store, say DynamoDB, with the following fields:
+   * `source`: `manifest/00000000000000000000.manifest.[UUID].[checksum]`
+   * `destination`: `manifest/00000000000000000000.manifest`
+   * `phase`: `prepared`
+3. Copy the object from `manifest/00000000000000000000.manifest.[UUID].[checksum]` to `manifest/00000000000000000000.manifest`.
+4. Update the record in DynamoDB to set `phase` to `committed`.
+5. Delete the object from `manifest/00000000000000000000.manifest.[UUID].[checksum]`.
+
+_NOTE: The source location is arbitrary. If randomness is used in the name--a UUID, ULID, or KSUID--collisions must be considered. In our case, collisions are catastrophic since they lead to corruption. We use a UUID and checksum to attempt to reduce collisions._
+
+Once the record is written to DynamoDB with `phase` set to `prepared` in step (2), the entire write is considered durable. No other writers may insert a record with the same `destination` field.
+
+_NOTE: This design is inefficient on S3. A single SST write includes two S3 `PUT`s, two writes to DynamoDB (or equivalent), and one S3 `DELETE`. See [here](https://github.com/slatedb/slatedb/pull/43#issuecomment-2105368258) for napkin math on API cost. Latency should be minimally impacted since the write is considered durable after one S3 write and one DynamoDB write. Nevertheless, we are gambling that S3 will soon support pure-CAS like every other object store. In the long run, we expect to switch S3 clients to use CAS and drop object versioning._
+
+##### Deletes
+
+Deletions must also be considered. Old (inactive) manifests and garbage collected SSTs must be deleted. The deletion process is as follows:
+
+1. Update the record in DynamoDB to set `phase` to `deleted`.
+2. Delete the record from object storage.
+3. Delete the record from DynamoDB.
+
+The deletion is considered durable after step (1). Readers will continue to see files until step (2) is complete. Clients that wish to prevent reads of deleted files must wait to return until (2) is complete.
+
+_NOTE: It's possible to model deletions with only an object storage deletion. If a DynamoDB record's `phase` is `committed` and the object does not exist at `destination`, the object may be considered deleted. This approach slows recovery: the recovery client must check each DynamoDB's `destination` in object storage to see if it still exists. There are other variations (such as having CAS failures result in deletion checks). Ultimately, the deletion protocol above seems the safest and simplest._
+
+##### Recovery
+
+A writer or deletion process might fail at any point in the steps outlined above. Client processes may run recoveries at any point in the future to complete partial writes or deletes. The recovery process is as follows:
 
 ### File Structure
 
@@ -164,10 +205,9 @@ Let's look at SlateDB's file structure on object storage:
 ```
 some-bucket/
 ├─ manifest/
-│  ├─ current
-│  ├─ 01HX5JRMM7XYNQB74N3GJYZ4N9.manifest
-│  ├─ 01HX5JS57YZ3NXZ3H366XRS47R.manifest
-│  ├─ 01HX5JS90BM7099ED7F34E5WTG.manifest
+│  ├─ 00000000000000000000.manifest
+│  ├─ 00000000000000000001.manifest
+│  ├─ 00000000000000000002.manifest
 ├─ wal/
 │  ├─ 00000000000000000000.sst
 │  ├─ 00000000000000000001.sst
@@ -178,31 +218,13 @@ some-bucket/
 
 _NOTE: Previous iterations of this design referred to the WAL as `l0` or `level_0`, and the first level in `levels` (formerly `compacted`) as `level_1+`. We've since shifted the terminology to match traditional LSMs. This shift is discussed in more detail [here](https://github.com/slatedb/slatedb/pull/39/files#r1589855599)._
 
-#### `manifest/current`
-
-A file that contains a pointer to the current manifest file.
-
-For example, if `current` contains:
-
-```
-01HX5JS57YZ3NXZ3H366XRS47R
-```
-
-Then `manifest/01HX5JS57YZ3NXZ3H366XRS47R.manifest` is the current manifest.
-
-_NOTE: `manifest/current` only exists if the object store supports CAS. If the object store does not support CAS, the manifest pointer is stored in a transactional store._
-
-#### `manifest/01HX5JS57YZ3NXZ3H366XRS47R.manifest`
+#### `manifest/00000000000000000000.manifest`
 
 A file containing writer, compaction, and snapshot information--the state of the database at a point in time.
 
-The manifest's name is a [ULID](https://github.com/ulid/spec). ULIDs are time sortable, use only 26 characters, are URL-safe, and provide 80 bits of entropy.
+The manifest's name is formatted as 20 digit zero-padded numbers to fit u64's maximum integer and to support lexicographical sorting. The name represents the manifest's ID. Manifest IDs are monotonically increasing and contiguous. The manifest with the highest ID is considered the current manifest. `00000000000000000002.manifest` is the current manifest in the file structure section above.
 
-The manifest is written using CAS pattern (1). For object stores that don't support CAS, the object versioning pattern (3) is used. We could avoid using CAS on the `.manifest` files by including an ID with enough entropy to avoid conflicts (e.g. a UUID).
-
-**TODO: Do we want to just use CAS/object versioning here? 80 bits of entropy + the timestamp should be OK, but we could still get (really) unlucky. We would need to use CAS/object versioning on this object to guarantee safety. This is discussed [here](https://github.com/slatedb/slatedb/pull/24#discussion_r1582420379). Or should we use [KSUID](https://github.com/segmentio/ksuid) instead? It has 128 bits of entropy, not 80. See [this discussion](https://github.com/segmentio/ksuid/issues/8#issuecomment-306955956) for a comparison.**
-
-**TODO: The current design does not address incremental updates to the manifest. This is something that prior designs had. See [here](https://github.com/slatedb/slatedb/pull/24/files#diff-58d53b55614c8db2dd180ac49237f37991d2b378c75e0245d780356e5d0c8135R67). Do we want to consider incremental updates? Given that manifests are updated only periodically, I'm inclined to say no (at least for now).**
+_NOTE: The current design does not address incremental updates to the manifest. This is something that prior designs had. See [here](https://github.com/slatedb/slatedb/pull/24/files#diff-58d53b55614c8db2dd180ac49237f37991d2b378c75e0245d780356e5d0c8135R67). We've opted to eschew incremental manifest updates for the time being, given their size (~5MiB) and update frquency (on the order of minutes)._
 
 ##### Structure
 
@@ -299,13 +321,13 @@ Conservatively, a manifest with 1000 snapshots and 100,000 compacted SSTs would 
 = 5,628,042
 ```
 
-This comes out to 5,628,042 bytes, or ~5.6 MiB. Whether this is reasonable or not depends on how frequently manifests are updated. As we'll see below, updates should be infrequent enough that a 5.6 MiB manifest isn't a problem.
+This comes out to 5,628,042 bytes, or ~5.6 MiB. If a client gets 100MB/s to and from EC2 to S3, it would take 56ms to read and 56ms to write (plus serialization, network, and TCP overhead). All in, let's say 250-500ms.
 
-If a client gets 100MB/s to and from EC2 to S3, it would take 56ms to read and 56ms to write (plus serialization, network, and TCP overhead). All in, let's say 250-500ms.
+Whether this is reasonable or not depends on how frequently manifests are updated. As we'll see below, updates should be infrequent enough that a 5.6 MiB manifest isn't a problem.
 
 #### `wal/00000000000000000000.sst`
 
-SlateDB's WAL is a sequentially ordered contiguous list of SSTs. SST objects names are formatted as 20 digit zero-padded numbers to fit u64's maximum integer and to support lexicographical sorting. Each SST contains zero or more sorted key-value pairs. The WAL is used to store writes that have not yet been compacted.
+SlateDB's WAL is a sequentially ordered contiguous list of SSTs. SST object names are formatted as 20 digit zero-padded numbers to fit u64's maximum integer and to support lexicographical sorting. Each SST contains zero or more sorted key-value pairs. The WAL is used to store writes that have not yet been compacted.
 
 Traditionally, LSMs store WAL data in a different format from the SSTs; this is because each `put()` call results in a single key-value write to the WAL. But SlateDB doesn't write to the WAL on each `put()`. Instead, `put()`'s are batched together based on `flush_ms`, `flush_bytes` ([#30](https://github.com/slatedb/slatedb/issues/30)), or `skip_memtable_bytes` ([#31](https://github.com/slatedb/slatedb/issues/31)). Based on these configurations, multiple key-value pairs are stored in the WAL in a single write. Thus, SlateDB uses SSTs for both the WAL and compacted files.
 
@@ -325,14 +347,14 @@ Each SST will have the following [user-defined metadata fields](https://docs.aws
 
 A full read-modify-write Manifest update contains the following steps:
 
-1. Read `manifest/current` to find the current manifest. Say it's `01HX5JS57YZ3NXZ3H366XRS47R` in this example.
-2. Read `manifest/01HX5JS57YZ3NXZ3H366XRS47R.manifest` to read the current manifest.
+1. List `manifest` to find the manifest with the largest ID. Say it's `00000000000000000002.manifest` in this example.
+2. Read `manifest/00000000000000000002.manifest` to read the current manifest.
 3. Update the manifest in memory.
-4. Write the updated manifest to a  new file (say, `manifest/01HX5JS90BM7099ED7F34E5WTG.manifest`).
-5. If (4) was successful, write `01HX5JS90BM7099ED7F34E5WTG` to `manifest/current` using compare-and-swap (CAS) with the `manifest/current` version from (1).
+4. Write the updated manifest to the next manifest slot (`manifest/00000000000000000003.manifest`).
 
-(4) is a CAS operation. If the object store does not support CAS, we need to decide if we want to depend on filename entropy or if we want to do object versioning. See the TODO in the _`manifest/01HX5JS57YZ3NXZ3H366XRS47R.manifest`_ section.
-(5) is a CAS operation. A transactional store must be used if CAS is not available.
+(4) is a CAS operation. Clients will use either real CAS (pattern (1)) or two-phase write (pattern (5)) to update the manifest.
+
+If the CAS write fails in (4), the client must retry the entire process. This is because the client now has. The client must find the (new) latest manifest and re-apply its changes.
 
 Three different processes update the manifest:
 
@@ -349,7 +371,7 @@ The union of these three processes means the manifest is updated whenever:
 6. A compactor increments `compactor_epoch` on startup
 7. A compactor finishes a compaction periodically
 
-If these occur too frequently, there might be conflict between the clients. Conflict can lead to starvation, which can slow down startup time and compaction time. Luckily, all events except (7) should occur at the minute granularity or larger. Compaction, (7), warrants some additional thought, which we'll discuss below.
+If these occur too frequently, there might be conflict between the clients. Conflict can lead to starvation, which can slow down startup time and compaction time. Luckily, all events except (7) should occur at the minute granularity or larger. Compaction, (7), warrants some additional thought, which we discuss at the end of this document.
 
 Let's look at each of these in turn.
 
@@ -368,9 +390,7 @@ A snapshot has three fields: `id`, `manifest_id`, and `snapshot_expire_time_s`.
 
 Each client will use a different `id` for each snapshot it creates. Similarly, no two clients will share the same `id` for any snapshot. Clients that wish to share the same view of a database will each define different snapshots with the same `manifest_id`.
 
-Clients set the `snapshot_expire_time_s` when the snapshot is created. Clients may update their snapshot's `snapshot_expire_time_s` at their discretion by writing a new manifest with the updated value.
-
-A snapshot is considered expired if `snapshot_expire_time_s` is less than the current time. If `snapshot_expire_time_s` is 0, the snapshot will never expire.
+Clients set the `snapshot_expire_time_s` when the snapshot is created. Clients may update their snapshot's `snapshot_expire_time_s` at their discretion by writing a new manifest with the updated value. A snapshot is considered expired if `snapshot_expire_time_s` is less than the current time. If `snapshot_expire_time_s` is 0, the snapshot will never expire.
 
 _NOTE: Clients that set `snapshot_expire_time_s` to 0 must guarantee that they will eventually remove their snapshot from the manifest. If they do not, the snapshot's SSTs will never be removed._
 
@@ -413,11 +433,12 @@ This design introduces the concept of a `writer_epoch`. The `writer_epoch` is a 
 
 On startup, a writer client must increment `writer_epoch`.
 
-1. Read `manifest/current` to find the current manifest.
-2. Read the current manifest (e.g. `manifest/01HX5JS57YZ3NXZ3H366XRS47R.manifest`).
-3. Increment the `writer_epoch` in the manifest.
-4. Write a new manifest with the updated `writer_epoch`.
-5. Update `manifest/current` to point to the new manifest.
+1. List `manifest` to find the manifest with the largest ID.
+2. Read the current manifest (e.g. `manifest/00000000000000000002.manifest`).
+3. Increment the `writer_epoch` in the current manifest in memory.
+4. Write the manifest with the updated `writer_epoch` (e.g. `manifest/00000000000000000003.manifest`).
+
+_NOTE: This is the same process described in the _Manifest Updates_ section above._
 
 The writer client must then fence all older clients. This is done by writing an empty SST to the next SST ID in the WAL.
 
@@ -425,7 +446,7 @@ The writer client must then fence all older clients. This is done by writing an 
 2. List the `wal` directory to find the next SST ID.
 3. Write an empty SST with the new `writer_epoch` to the next SST ID using CAS or object versioning.
 
-_NOTE: A snapshot is created in (1) to prevent the compactor from deleting `wal` SSTs until the writer has written its fencing SST. See [here](https://github.com/slatedb/slatedb/pull/43/files#r1594460226) for more details._
+_NOTE: A snapshot is created in (1) to prevent the compactor from deleting `wal` SSTs while the writer has written its fencing SST. See [here](https://github.com/slatedb/slatedb/pull/43/files#r1594460226) for details._
 
 _NOTE: The writer may choose to release its snapshot created in (1) after writing the fencing SST in (3), or it may periodically refresh its snapshot._
 
