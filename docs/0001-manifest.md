@@ -377,7 +377,7 @@ A client creates a snapshot by creating a new manifest with a new snapshot added
 
 A client may also update `wal_id_last_seen` in the new manifest to include the most recent SST in the WAL that the client has seen. This allows clients to include the most recent SSTs from the `wal` in a new snapshot. See [here](https://github.com/slatedb/slatedb/pull/39/files#r1588780707) for more details.
 
-A manifest is considered active if either:
+A new snapshot may only reference an active manifest (see [here](https://github.com/slatedb/slatedb/pull/43/files#r1594444035) for more details). A manifest is considered active if either:
 
 * It's the current manifest
 * It's referenced by a snapshot in the current manifest and the snapshot has not expired
@@ -394,6 +394,8 @@ _NOTE: The inclusive `>=` for `wal_id_last_compacted` is required so the compact
 _NOTE: Clock skew can affect the timing between the compactor and the snapshot clients. We're assuming we have well behaved clocks, a [Network Time Protocol](https://www.ntp.org/documentation/4.2.8-series/ntpd/) (NTP) daemon, or [PTP Hardware Cocks](https://aws.amazon.com/blogs/compute/its-about-time-microsecond-accurate-clocks-on-amazon-ec2-instances/) (PHCs)._
 
 _NOTE: A [previous design proposal](https://github.com/slatedb/slatedb/pull/39/files#diff-d589c7beb3d163638e94dbc8e086b3efe093852f0cad96f04cb1283c3bd1eb74R105) used a `heartbeat_s` field that clients would update periodically. After some discussion (see [here](https://github.com/slatedb/slatedb/pull/39/files#r1588896947)), we landed on a design that supports both reference counts and snapshot timeouts. Reference counts are useful for long-lived snapshots that exist indefinitely. Heartbeats are useful for short-lived snapshots that exist for the lifespan of a single process._
+
+_NOTE: This design considers read-only snapshots. Read-write snapshots are discussed [here](https://github.com/slatedb/slatedb/pull/43/files#r1596319141) and in [[#49](https://github.com/slatedb/slatedb/issues/49)]._
 
 ### Writers
 
@@ -638,6 +640,8 @@ To delete `wal` SSTs (3), the compactor periodically deletes all inactive SSTs. 
 See the _Snapshots_ section for a definition of an "active manifest".
 
 _NOTE: We use `<`  not `<=` for (2) because the compactor must not delete the SST at `wal_id_last_compacted` so readers can recover the `writer_epoch` from the SST._
+
+_NOTE: This design considers the compactor and garbage collector (inactive SST deletion) as two separate activities that run for one database in one process--the compactor process. In the future, we might want to run the compactor and garbage collector in separate processes on separate machines. We might also want the garbage collector to run across multiple database. This should be doable, but is outside this design's scope. The topic is discussed [here](https://github.com/slatedb/slatedb/pull/43/files#r1596319141) and in [[#49](https://github.com/slatedb/slatedb/issues/49)]._
 
 ## Rejected Solutions
 
