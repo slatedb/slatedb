@@ -365,8 +365,6 @@ A snapshot has three fields: `id`, `manifest_id`, and `snapshot_expire_time_s`.
 * `manifest_id`: The manifest ID that this snapshot is using as its `DbState`.
 * `snapshot_expire_time_s`: The UTC Unix epoch seconds that the snapshot expires at.
 
-**TODO: Do we want to have the `id` be a UUID/ULID/KSUID (or just a string) so we can make the ID globally unique across all time, not just currently open snapshots?**
-
 Each client will use a different `id` for each snapshot it creates. Similarly, no two clients will share the same `id` for any snapshot. Clients that wish to share the same view of a database will each define different snapshots with the same `manifest_id`.
 
 Clients set the `snapshot_expire_time_s` when the snapshot is created. Clients may update their snapshot's `snapshot_expire_time_s` at their discretion by writing a new manifest with the updated value.
