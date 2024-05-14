@@ -123,6 +123,7 @@ This design should:
 * Work with object stores that support object versioning if a transactional store is available (DynamoDB, MySQL, and so on)
 * Provide < 100ms-300ms read/write latencies
 * Avoid write contention on the manifest
+* Work for S3, Google Cloud Storage (GCS), Azure Blob Storage (ABS), MinIO, Radically Reprogrammable (R2) Storage, and Tigris
 
 ### Proposal
 
