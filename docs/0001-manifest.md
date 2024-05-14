@@ -153,7 +153,7 @@ There are four different patterns to achieve CAS for these scenarios:
 2. **Use a transactional store**: A transactional store such as DynamoDB or MySQL can be used to store the object. The object store is not used in this mode. This approach works for both scenarios described above, but does not work well for large objects.
 3. **Use object versioning**: Object stores that support [object versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html) can emulate CAS if the bucket has versioning enabled. Versioning allows multiple versions of an object to be stored. AWS stores versions [in insertion order](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html#API_ListObjectVersions_Example_3). We can leverage this property as well as AWS's [read-after-write](https://aws.amazon.com/blogs/aws/amazon-s3-update-strong-read-after-write-consistency/) consistency guarantees to emulate CAS. Many writers can write to the same object path. Writers can then list all versions of the object. The first version (the earliest) is considered the winner. All other writers have failed the CAS operation. This does require a [ListObjectVersions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) after the write, but if CAS is needed, this is the best we can do. This pattern works for immutable files--scenario (1)--but not mutable files--scenario (2). This pattern does not work for S3 Express One Zone since it does not support object versioning.
 4. **Use a proxy**: A proxy-based solution combines an object store and a transactional store. Two values are stored: an object and a pointer to object. Readers first read the pointer (e.g. object path) from the pointer, then read the object that the pointer points to. Writers read the current object (using the reader steps), update the object, and write it back to the object store at a new location (e.g. a new UUID). Writers then update the pointer to point to the new object. The pointer update is done conditionally if the pointer still points to the file the writer read. The pointer may reside in a file on an object store that supports CAS, or a transactional store like DynamoDB or MySQL. This pattern works for both immutable and mutable files. Unlike (1), it also works well for large objects.
-5. **Use a two-phase write**: Like the proxy solution (5), a two-phase write consists of a write to both an object storage and a transactional store. Writers first write a new object to a temporary location. The writer then writes a record to a transactional store. The transacational record signals an intent to copy; it contains a source, destination, and a completion flag. "put-if-not-exists" semantics are used on the destination column. The writer then copies the new object from its temporary location to its final destination in object storage. Upon completion, the transactional store's record is set to complete and the temporary file is deleted. If the writer fails before the transactional record is written, the write is abandoned. If the writer fails after the transactional record is written, a recovery process runs in the future to copy the object and set the completion flag. This pattern works for immutable objects. It also works well for large ubjects.
+5. **Use a two-phase write**: Like the proxy solution (5), a two-phase write consists of a write to both an object storage and a transactional store. Writers first write a new object to a temporary location. The writer then writes a record to a transactional store. The transactional record signals an intent to copy; it contains a source, destination, and a completion flag. "put-if-not-exists" semantics are used on the destination column. The writer then copies the new object from its temporary location to its final destination in object storage. Upon completion, the transactional store's record is set to complete and the temporary file is deleted. If the writer fails before the transactional record is written, the write is abandoned. If the writer fails after the transactional record is written, a recovery process runs in the future to copy the object and set the completion flag. This pattern works for immutable objects. It also works well for large objects.
 
 _NOTE: These patterns are discussed more [here](https://github.com/slatedb/slatedb/pull/39/files#r1588879655) and [here](https://github.com/slatedb/slatedb/pull/43/files#r1597297640)._
 
@@ -231,7 +231,7 @@ A file containing writer, compaction, and snapshot information--the state of the
 
 The manifest's name is formatted as 20 digit zero-padded numbers to fit u64's maximum integer and to support lexicographical sorting. The name represents the manifest's ID. Manifest IDs are monotonically increasing and contiguous. The manifest with the highest ID is considered the current manifest. `00000000000000000002.manifest` is the current manifest in the file structure section above.
 
-_NOTE: The current design does not address incremental updates to the manifest. This is something that prior designs had. See [here](https://github.com/slatedb/slatedb/pull/24/files#diff-58d53b55614c8db2dd180ac49237f37991d2b378c75e0245d780356e5d0c8135R67). We've opted to eschew incremental manifest updates for the time being, given their size (~5MiB) and update frquency (on the order of minutes)._
+_NOTE: The current design does not address incremental updates to the manifest. This is something that prior designs had. See [here](https://github.com/slatedb/slatedb/pull/24/files#diff-58d53b55614c8db2dd180ac49237f37991d2b378c75e0245d780356e5d0c8135R67). We've opted to eschew incremental manifest updates for the time being, given their size (~5MiB) and update frequency (on the order of minutes)._
 
 ##### Structure
 
@@ -410,7 +410,7 @@ A new snapshot may only reference an active manifest (see [here](https://github.
 * It's the current manifest
 * It's referenced by a snapshot in the current manifest and the snapshot has not expired
 
-A compactor may not delete SSTs are referenced by any active manifest.
+A compactor may not delete SSTs that are referenced by any active manifest.
 
 The set of SSTs that are referenced by a manifest are:
 
@@ -449,7 +449,7 @@ _NOTE: This is the same process described in the _Manifest Updates_ section abov
 
 The writer client must then fence all older clients. This is done by writing an empty SST to the next SST ID in the WAL.
 
-1. Creatinga a new snapshot in the manifest.
+1. Create a new snapshot in the manifest.
 2. List the `wal` directory to find the next SST ID.
 3. Write an empty SST with the new `writer_epoch` to the next SST ID using CAS or object versioning.
 
@@ -500,7 +500,7 @@ time 3, 00000000000000000002.sst, writer_epoch=2
 time 4, 00000000000000000003.sst, writer_epoch=2
 ```
 
-In example above, writer 1 successfully writes SSTs 0, 1, and 2. Writer 2 tries to fence older writers with a write to SST ID 2, but fails because writer 1 has already written an SST at that location. Writer 2 sees that the SST with ID 2 has a lower `writer_epoch` than its own and retries its fence write at the next SST ID location. This write to SST ID 3 at time 4 is successful. Writer 2 has successfully fenced writer 1. If writer 1 tries to write to SST ID 3, it will see a higher `writer_epoch` and halt.
+In the example above, writer 1 successfully writes SSTs 0, 1, and 2. Writer 2 tries to fence older writers with a write to SST ID 2, but fails because writer 1 has already written an SST at that location. Writer 2 sees that the SST with ID 2 has a lower `writer_epoch` than its own and retries its fence write at the next SST ID location. This write to SST ID 3 at time 4 is successful. Writer 2 has successfully fenced writer 1. If writer 1 tries to write to SST ID 3, it will see a higher `writer_epoch` and halt.
 
 Here's an example where a new writer gets fenced before it can write its own fencing write (protocol scenario (4)):
 
@@ -642,13 +642,13 @@ If the reader includes SST 3 in its `DbState`, it will need to periodically chec
 
 We propose waiting for SST 2 to be written. This style simplifies polling: the reader simply polls for the next SST (SST 2 in the example above). When SST 2 appears, it's added to `l0` and the reader begins polling for SST 3.
 
-This does mean that SST 3 will not be served by a reader until SST 2 arrives. For the writer client, this is not a problem, since the writer client is fully consistent between its own reads and writes. But secondary reader clients might not see SST 3 for significant period of time if the writer dies. This is a tradeoff that we are comfortable with. If it proves problematic, we can implement (1), above, and poll for missing SSTs periodically.
+This does mean that SST 3 will not be served by a reader until SST 2 arrives. For the writer client, this is not a problem, since the writer client is fully consistent between its own reads and writes. But secondary reader clients might not see SST 3 for a significant period of time if the writer dies. This is a tradeoff that we are comfortable with. If it proves problematic, we can implement (1), above, and poll for missing SSTs periodically.
 
 _NOTE: There is some interdependence between when `wal_id_last_seen` and the semantics of a snapshot. If `wal_id_last_seen` were to include SST 3 in our example above, we'd have to decide whether to include SST 2 when it eventually arrives. The current design does not have this issue. This is discussed more [here](https://github.com/slatedb/slatedb/pull/43/files#r1594783266)._
 
 ### Compactors
 
-On startup, a compactor must increment the `compactor_epoch` in the manifest. This is done in a similar manner to process described in the _Writer Protocol_ section above.
+On startup, a compactor must increment the `compactor_epoch` in the manifest. This is done in a similar manner to the process described in the _Writer Protocol_ section above.
 
 After startup, compactors periodically do three things:
 
@@ -675,7 +675,7 @@ See the _Snapshots_ section for a definition of an "active manifest".
 
 _NOTE: We use `<`  not `<=` for (2) because the compactor must not delete the SST at `wal_id_last_compacted` so readers can recover the `writer_epoch` from the SST._
 
-_NOTE: This design considers the compactor and garbage collector (inactive SST deletion) as two separate activities that run for one database in one process--the compactor process. In the future, we might want to run the compactor and garbage collector in separate processes on separate machines. We might also want the garbage collector to run across multiple database. This should be doable, but is outside this design's scope. The topic is discussed [here](https://github.com/slatedb/slatedb/pull/43/files#r1596319141) and in [[#49](https://github.com/slatedb/slatedb/issues/49)]._
+_NOTE: This design considers the compactor and garbage collector (inactive SST deletion) as two separate activities that run for one database in one process--the compactor process. In the future, we might want to run the compactor and garbage collector in separate processes on separate machines. We might also want the garbage collector to run across multiple databases. This should be doable, but is outside this design's scope. The topic is discussed [here](https://github.com/slatedb/slatedb/pull/43/files#r1596319141) and in [[#49](https://github.com/slatedb/slatedb/issues/49)]._
 
 ## Rejected Solutions
 
@@ -707,7 +707,7 @@ We [considered using a protocol](https://github.com/slatedb/slatedb/pull/43/file
 
 ### `object_store` Locking
 
-Rust's `object_store` crate has a [locking mechanism](https://docs.rs/object_store/latest/object_store/aws/enum.S3CopyIfNotExists.html). We briefly looked at this, but [rejected it](https://github.com/slatedb/slatedb/pull/43/files#discussion_r1597551287) because it uses a TTLs for locks. We wanted a CAS operation that would not time out.
+Rust's `object_store` crate has a [locking mechanism](https://docs.rs/object_store/latest/object_store/aws/enum.S3CopyIfNotExists.html). We briefly looked at this, but [rejected it](https://github.com/slatedb/slatedb/pull/43/files#discussion_r1597551287) because it uses time to live (TTL) timeouts for locks. We wanted a CAS operation that would not time out.
 
 ## Addendum
 
