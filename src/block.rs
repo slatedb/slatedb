@@ -4,6 +4,9 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
 pub(crate) const SIZEOF_U32: usize = std::mem::size_of::<u32>();
 
+/// "None" values are encoded by using the maximum u32 value as the value length.
+pub(crate) const TOMBSTONE: u32 = u32::MAX;
+
 pub struct Block {
     pub(crate) data: Bytes,
     pub(crate) offsets: Vec<u16>,
@@ -65,25 +68,32 @@ impl BlockBuilder {
     }
 
     #[must_use]
-    pub fn add(&mut self, key: &[u8], value: &[u8]) -> bool {
+    pub fn add(&mut self, key: &[u8], value: Option<&[u8]>) -> bool {
         assert!(!key.is_empty(), "key must not be empty");
+
         // If adding the key-value pair would exceed the block size limit, don't add it.
         // (Unless the block is empty, in which case, allow the block to exceed the limit.)
         if self.estimated_size()
-            + key.len()
-            + value.len()
-            + SIZEOF_U16 * 2 // key size and offset size
-            + SIZEOF_U32 // value size
-            > self.block_size
+                + key.len()
+                + value.map(|v| v.len()).unwrap_or_default() // None takes no space (besides u32)
+                + SIZEOF_U16 * 2 // key size and offset size
+                + SIZEOF_U32 // value size
+                > self.block_size
             && !self.is_empty()
         {
             return false;
         }
+
         self.offsets.push(self.data.len() as u16);
         self.data.put_u16(key.len() as u16);
         self.data.put(key);
-        self.data.put_u32(value.len() as u32);
-        self.data.put(value);
+        if let Some(value) = value {
+            self.data.put_u32(value.len() as u32);
+            self.data.put(value);
+        } else {
+            self.data.put_u32(TOMBSTONE);
+        }
+
         true
     }
 
@@ -162,13 +172,24 @@ mod tests {
     #[test]
     fn test_block() {
         let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add(b"key1", b"value1"));
-        assert!(builder.add(b"key2", b"value2"));
+        assert!(builder.add(b"key1", Some(b"value1")));
+        assert!(builder.add(b"key2", Some(b"value2")));
         let block = builder.build().unwrap();
         let encoded = block.encode();
         let decoded = Block::decode(&encoded);
         assert_eq!(block.data, decoded.data);
         assert_eq!(block.offsets, decoded.offsets);
+    }
+
+    #[test]
+    fn test_block_with_tombstone() {
+        let mut builder = BlockBuilder::new(4096);
+        assert!(builder.add(b"key1", Some(b"value1")));
+        assert!(builder.add(b"key2", None));
+        assert!(builder.add(b"key3", Some(b"value3")));
+        let block = builder.build().unwrap();
+        let encoded = block.encode();
+        let _decoded = Block::decode(&encoded);
     }
 
     #[test]

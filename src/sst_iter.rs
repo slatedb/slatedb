@@ -3,6 +3,7 @@ use crate::{
     block_iterator::BlockIterator,
     iter::KeyValueIterator,
     tablestore::{SSTableHandle, TableStore},
+    types::KeyValueDeletable,
 };
 
 struct SstIterator {
@@ -27,7 +28,7 @@ impl SstIterator {
 impl KeyValueIterator for SstIterator {
     async fn next_entry(
         &mut self,
-    ) -> Result<Option<crate::iter::KeyValue>, crate::error::SlateDBError> {
+    ) -> Result<Option<KeyValueDeletable>, crate::error::SlateDBError> {
         loop {
             let current_iter = if let Some(current_iter) = self.current_iter.as_mut() {
                 current_iter
@@ -46,7 +47,7 @@ impl KeyValueIterator for SstIterator {
                     .insert(BlockIterator::from_first_key(block))
             };
 
-            let kv = current_iter.next().await?;
+            let kv = current_iter.next_entry().await?;
 
             match kv {
                 Some(kv) => return Ok(Some(kv)),
@@ -73,10 +74,10 @@ mod tests {
         let format = SsTableFormat::new(4096, 3);
         let table_store = TableStore::new(object_store, format);
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", b"value1").unwrap();
-        builder.add(b"key2", b"value2").unwrap();
-        builder.add(b"key3", b"value3").unwrap();
-        builder.add(b"key4", b"value4").unwrap();
+        builder.add(b"key1", Some(b"value1")).unwrap();
+        builder.add(b"key2", Some(b"value2")).unwrap();
+        builder.add(b"key3", Some(b"value3")).unwrap();
+        builder.add(b"key4", Some(b"value4")).unwrap();
         let encoded = builder.build().unwrap();
         table_store.write_sst(0, encoded).await.unwrap();
         let sst_handle = table_store.open_sst(0).await.unwrap();
@@ -110,7 +111,7 @@ mod tests {
             builder
                 .add(
                     format!("key{}", i).as_bytes(),
-                    format!("value{}", i).as_bytes(),
+                    Some(format!("value{}", i).as_bytes()),
                 )
                 .unwrap();
         }
@@ -122,7 +123,6 @@ mod tests {
 
         let mut iter = SstIterator::new(sst_handle, table_store);
         for i in 0..1000 {
-            println!("{}", i);
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, format!("key{}", i));
             assert_eq!(kv.value, format!("value{}", i));

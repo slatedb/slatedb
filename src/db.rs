@@ -1,18 +1,17 @@
-use std::{
-    collections::VecDeque,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
-
+use crate::mem_table::MemTable;
+use crate::sst::SsTableFormat;
+use crate::tablestore::{SSTableHandle, TableStore};
+use crate::types::ValueDeletable;
 use crate::{block::Block, error::SlateDBError};
 use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
 use bytes::Bytes;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
-
-use crate::mem_table::MemTable;
-use crate::sst::SsTableFormat;
-use crate::tablestore::{SSTableHandle, TableStore};
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 pub struct DbOptions {
     pub flush_ms: usize,
@@ -77,19 +76,15 @@ impl DbInner {
             .chain(snapshot.imm_memtables.iter())
             .find_map(|memtable| memtable.get(key));
 
-        // Filter is needed to remove tombstone deletes.
-        if let Some(val) = maybe_bytes.filter(|value| !value.is_empty()) {
-            return Ok(Some(val));
+        if let Some(val) = maybe_bytes {
+            return Ok(val.into_option());
         }
 
         for sst in &snapshot.as_ref().l0 {
             if let Some(block_index) = self.find_block_for_key(sst, key).await? {
                 let block = self.table_store.read_block(sst, block_index).await?;
                 if let Some(val) = self.find_val_in_block(&block, key).await? {
-                    if val.is_empty() {
-                        return Ok(None);
-                    }
-                    return Ok(Some(val));
+                    return Ok(val.into_option());
                 }
             }
         }
@@ -117,7 +112,7 @@ impl DbInner {
         &self,
         block: &Block,
         key: &[u8],
-    ) -> Result<Option<Bytes>, SlateDBError> {
+    ) -> Result<Option<ValueDeletable>, SlateDBError> {
         let mut iter = BlockIterator::from_first_key(block);
         while let Some(current_key_value) = iter.next_entry().await? {
             if current_key_value.key == key {
@@ -130,7 +125,6 @@ impl DbInner {
     /// Put a key-value pair into the database. Key and value must not be empty.
     pub async fn put(&self, key: &[u8], value: &[u8]) {
         assert!(!key.is_empty(), "key cannot be empty");
-        assert!(!value.is_empty(), "value cannot be empty");
 
         // Clone memtable to avoid a deadlock with flusher thread.
         let memtable = {
@@ -246,8 +240,31 @@ mod tests {
             Some(Bytes::from_static(value))
         );
         kv_store.delete(key).await;
-        assert!(kv_store.get(key).await.unwrap().is_none());
+        assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_put_empty_value() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open(
+            "/tmp/test_kv_store",
+            DbOptions {
+                flush_ms: 100,
+                min_filter_keys: 0,
+            },
+            object_store,
+        )
+        .unwrap();
+        let key = b"test_key";
+        let value = b"";
+        kv_store.put(key, value).await;
+        kv_store.flush().await.unwrap();
+
+        assert_eq!(
+            kv_store.get(key).await.unwrap(),
+            Some(Bytes::from_static(value))
+        );
     }
 
     #[tokio::test]

@@ -15,3 +15,4 @@ mod mem_table;
 mod sst;
 mod sst_iter;
 mod tablestore;
+mod types;
