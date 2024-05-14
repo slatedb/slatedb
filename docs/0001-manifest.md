@@ -19,6 +19,13 @@ Table of Contents:
    * [Readers](#readers)
    * [Compactors](#compactors)
 - [Rejected Solutions](#rejected-solutions)
+   * [Update Manifest on Write](#update-manifest-on-write)
+   * [Epoch in Object Names](#epoch-in-object-names)
+   * [Object Versioning CAS](#object-versioning-cas)
+   * [Use a `manifest/current` Proxy Pointer](#use-a-manifestcurrent-proxy-pointer)
+   * [Two-Phase Mutable CAS](#two-phase-mutable-cas)
+   * [DeltaStream Protocol](#deltastream-protocol)
+   * [`object_store` Locking](#object_store-locking)
 - [Addendum](#addendum)
 
 <!-- TOC end -->
@@ -700,7 +707,7 @@ We [considered using a protocol](https://github.com/slatedb/slatedb/pull/43/file
 
 ### `object_store` Locking
 
-Rust's `object_store` crate has a [locking mechanism](https://docs.rs/object_store/latest/object_store/aws/enum.S3CopyIfNotExists.html). We briefly looked at this, but [rejected it](https://github.com/slatedb/slatedb/pull/43/files#discussion_r1597551287) because it uses a TTLs for locks. We wanted a CAS operation that won't time out.
+Rust's `object_store` crate has a [locking mechanism](https://docs.rs/object_store/latest/object_store/aws/enum.S3CopyIfNotExists.html). We briefly looked at this, but [rejected it](https://github.com/slatedb/slatedb/pull/43/files#discussion_r1597551287) because it uses a TTLs for locks. We wanted a CAS operation that would not time out.
 
 ## Addendum
 
