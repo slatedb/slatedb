@@ -672,14 +672,27 @@ _NOTE: This design considers the compactor and garbage collector (inactive SST d
 
 ## Rejected Solutions
 
-The previous [manifest design proposal](https://github.com/slatedb/slatedb/pull/24/) contained two significant differences from this one:
+### Update Manifest on Write
 
-1. A transactional manifest update on every `wal` write (discussed [here](https://github.com/slatedb/slatedb/pull/39#issuecomment-2094356240))
-2. Namespaced `wal` filenames that used a writer epoch prefix (discussed [here](https://github.com/slatedb/slatedb/pull/24/files#diff-58d53b55614c8db2dd180ac49237f37991d2b378c75e0245d780356e5d0c8135R114))
+A previous [manifest design](https://github.com/slatedb/slatedb/pull/24/) proposed transactional manifest updates on every `wal` SST write (discussed [here](https://github.com/slatedb/slatedb/pull/39#issuecomment-2094356240)). This was rejected due to the high cost of transactional writes when using object storage with CAS for the manifest.
 
-(1) was rejected due to the high cost of transactional writes when using object storage with CAS for the manifest.
+### Epoch in Object Names
 
-(2) was rejected because it was deemed complex. We might revisit this decision in the future if we have a need for it.
+A previous [manifest design](https://github.com/slatedb/slatedb/pull/24/) proposed namespacing `wal` filenames with a writer epoch prefix (discussed [here](https://github.com/slatedb/slatedb/pull/24/files#diff-58d53b55614c8db2dd180ac49237f37991d2b378c75e0245d780356e5d0c8135R114)). This was rejected because it was deemed complex. We might revisit this decision in the future if we have a need for it.
+
+Another alternative to two-phase CAS was proposed [here](https://github.com/slatedb/slatedb/pull/43/files#r1597308492). This alternative reduced the operation to a single object storage PUT and single DynamoDB write. In doing so, [it required `writer_epoch` in object names](https://github.com/slatedb/slatedb/pull/43/files#r1597317062). This scheme prevented *real* CAS from working. We rejected this design because we decided to favor a design that worked well with real CAS.
+
+### Object Versioning CAS
+
+A [previous version](https://github.com/slatedb/slatedb/blob/6beba6949487a519b8bb6c69a3cf80f06778f540/docs/0001-manifest.md) of this design used object versioning for `wal` SST CAS. This design was rejected because S3 Express One Zone does not support object versioning.
+
+### Use a `manifest/current` Proxy Pointer
+
+A [previous version](https://github.com/slatedb/slatedb/blob/6beba6949487a519b8bb6c69a3cf80f06778f540/docs/0001-manifest.md) of this design contained an additional file: `manifest/current`. Once we decided to use incremental IDs for the manifest, we no longer needed this file.
+
+### Two-Phase Mutable CAS
+
+We [briefly discussed](https://github.com/slatedb/slatedb/pull/43/files#discussion_r1597489292) supporting mutable CAS operations with the two-phase write CAS pattern. There was [some disagreement](https://github.com/slatedb/slatedb/pull/43/files#r1597749655) about whether this was possible. It's conceivable that user-defined attributes might allow the two-phase CAS pattern to handle mutable CAS operations. We did not explore this since we decided to use incremental IDs for the manifest, which require only immutable CAS.
 
 ## Addendum
 
