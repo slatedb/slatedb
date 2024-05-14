@@ -420,8 +420,13 @@ On startup, a writer client must increment `writer_epoch`.
 
 The writer client must then fence all older clients. This is done by writing an empty SST to the next SST ID in the WAL.
 
-1. List the `wal` directory to find the next SST ID.
-2. Write an empty SST with the new `writer_epoch` to the next SST ID using CAS or object versioning.
+1. Creatinga a new snapshot in the manifest.
+2. List the `wal` directory to find the next SST ID.
+3. Write an empty SST with the new `writer_epoch` to the next SST ID using CAS or object versioning.
+
+_NOTE: A snapshot is created in (1) to prevent the compactor from deleting `wal` SSTs until the writer has written its fencing SST. See [here](https://github.com/slatedb/slatedb/pull/43/files#r1594460226) for more details._
+
+_NOTE: The writer may choose to release its snapshot created in (1) after writing the fencing SST in (3), or it may periodically refresh its snapshot._
 
 At this point, there are four potential outcomes:
 
