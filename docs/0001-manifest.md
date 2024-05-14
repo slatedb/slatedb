@@ -256,11 +256,11 @@ message SstInfo {
 }
 
 message Snapshot {
-  // A random ID that must be unique across all open snapshots.
-  uint32 id = 1;
+  // 128-bit UUID that must be unique across all open snapshots.
+  uint128 id = 1;
 
   // The manifest ID that this snapshot is using as its `DbState`.
-  string manifest_id = 2;
+  uint64 manifest_id = 2;
 
   // The UTC unix timestamp seconds that a snapshot expires at. Clients may update this value.
   // If `snapshot_expire_time_s` is older than now(), the snapshot is considered expired.
@@ -282,7 +282,7 @@ The size calculation (in bytes) for the manifest is:
 + 8                         // wal_id_last_compacted
 + 8                         // wal_id_last_seen
 + 4 + ~56 * leveled_ssts    // array length + leveled_ssts (~32 byte key + 24 bytes = ~56 bytes)
-+ 4 + 24 * snapshots        // array length + snapshots (24 bytes each)
++ 4 + 28 * snapshots        // array length + snapshots (28 bytes each)
 ```
 
 Conservatively, a manifest with 1000 snapshots and 100,000 compacted SSTs would be:
@@ -294,11 +294,11 @@ Conservatively, a manifest with 1000 snapshots and 100,000 compacted SSTs would 
 + 8                         // wal_id_last_compacted
 + 8                         // wal_id_last_seen
 + 4 + ~56 * 100000          // array length + leveled_ssts
-+ 4 + 24 * 1000             // array length + snapshots
-= 5,624,042
++ 4 + 28 * 1000             // array length + snapshots
+= 5,628,042
 ```
 
-This comes out to 5,624,042 bytes, or ~5.6 MiB. Whether this is reasonable or not depends on how frequently manifests are updated. As we'll see below, updates should be infrequent enough that a 5.6 MiB manifest isn't a problem.
+This comes out to 5,628,042 bytes, or ~5.6 MiB. Whether this is reasonable or not depends on how frequently manifests are updated. As we'll see below, updates should be infrequent enough that a 5.6 MiB manifest isn't a problem.
 
 If a client gets 100MB/s to and from EC2 to S3, it would take 56ms to read and 56ms to write (plus serialization, network, and TCP overhead). All in, let's say 250-500ms.
 
@@ -361,7 +361,7 @@ This design introduces the concept of snapshots, which allow clients to:
 
 A snapshot has three fields: `id`, `manifest_id`, and `snapshot_expire_time_s`.
 
-* `id`: A random ID that must be unique across all open snapshots.
+* `id`: A UUID that must be unique across all open snapshots.
 * `manifest_id`: The manifest ID that this snapshot is using as its `DbState`.
 * `snapshot_expire_time_s`: The UTC Unix epoch seconds that the snapshot expires at.
 
