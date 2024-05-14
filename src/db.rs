@@ -84,10 +84,7 @@ impl DbInner {
             if let Some(block_index) = self.find_block_for_key(sst, key).await? {
                 let block = self.table_store.read_block(sst, block_index).await?;
                 if let Some(val) = self.find_val_in_block(&block, key).await? {
-                    match val {
-                        ValueDeletable::Value(v) => return Ok(Some(v)),
-                        ValueDeletable::Tombstone => return Ok(None),
-                    }
+                    return Ok(val.into_option());
                 }
             }
         }
