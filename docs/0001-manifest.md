@@ -380,7 +380,7 @@ _NOTE: Clients that set `last_access_s` to 0 must guarantee that they will event
 
 A client creates a snapshot by creating a new manifest with a new snapshot added to the `snapshots` field.
 
-A client may also update `wal_id_last_seen` in the new manifest to include the most recent SST in the WAL that the client has seen. This allows clients using the same manifest to see exactly the same set of SSTs in the `wal`. See [here](https://github.com/slatedb/slatedb/pull/39/files#r1588780707) for more details.
+A client may also update `wal_id_last_seen` in the new manifest to include the most recent SST in the WAL that the client has seen. This allows clients to include the most recent SSTs from the `wal` in a new snapshot. See [here](https://github.com/slatedb/slatedb/pull/39/files#r1588780707) for more details.
 
 A manifest is considered active if either:
 
