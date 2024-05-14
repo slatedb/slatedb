@@ -262,10 +262,10 @@ message Snapshot {
   // The manifest ID that this snapshot is using as its `DbState`.
   string manifest_id = 2;
 
-  // The UTC seconds that snapshot was last accessed. Clients may periodically update this value.
-  // If `last_access_s` is older than `snapshot_timeout_s`, the snapshot is considered expired.
-  // If `last_access_s` is 0, the snapshot will never expire.
-  uint32 last_access_s = 3;
+  // The UTC unix timestamp seconds that a snapshot expires at. Clients may update this value.
+  // If `snapshot_expire_time_s` is older than now(), the snapshot is considered expired.
+  // If `snapshot_expire_time_s` is 0, the snapshot will never expire.
+  uint32 snapshot_expire_time_s = 3;
 }
 ```
 
@@ -359,24 +359,21 @@ This design introduces the concept of snapshots, which allow clients to:
 1. Prevent compaction from deleting SSTs that the client is still using
 2. Share a consistent view of the database state across multiple clients
 
-A snapshot has three fields: `id`, `manifest_id`, and `last_access_s`.
+A snapshot has three fields: `id`, `manifest_id`, and `snapshot_expire_time_s`.
 
 * `id`: A random ID that must be unique across all open snapshots.
 * `manifest_id`: The manifest ID that this snapshot is using as its `DbState`.
-* `last_access_s`: The UTC Unix epoch seconds that the snapshot was last accessed.
+* `snapshot_expire_time_s`: The UTC Unix epoch seconds that the snapshot expires at.
 
 **TODO: Do we want to have the `id` be a UUID/ULID/KSUID (or just a string) so we can make the ID globally unique across all time, not just currently open snapshots?**
 
 Each client will use a different `id` for each snapshot it creates. Similarly, no two clients will share the same `id` for any snapshot. Clients that wish to share the same view of a database will each define different snapshots with the same `manifest_id`.
 
-Clients set the `last_access_s` when the snapshot is created. Clients may update their snapshot's `last_access_s` at their discretion by writing a new manifest with the updated value.
+Clients set the `snapshot_expire_time_s` when the snapshot is created. Clients may update their snapshot's `snapshot_expire_time_s` at their discretion by writing a new manifest with the updated value.
 
-A snapshot is considered expired if both of the following are true:
+A snapshot is considered expired if `snapshot_expire_time_s` is less than the current time. If `snapshot_expire_time_s` is 0, the snapshot will never expire.
 
-* `last_access_s` < (now() - `snapshot_timeout_s`)
-* `last_access_s` > 0
-
-_NOTE: Clients that set `last_access_s` to 0 must guarantee that they will eventually remove their snapshot from the manifest. If they do not, the snapshot's SSTs will never be removed._
+_NOTE: Clients that set `snapshot_expire_time_s` to 0 must guarantee that they will eventually remove their snapshot from the manifest. If they do not, the snapshot's SSTs will never be removed._
 
 A client creates a snapshot by creating a new manifest with a new snapshot added to the `snapshots` field.
 
