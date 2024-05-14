@@ -392,7 +392,7 @@ A compactor may not delete SSTs are referenced by any active manifest.
 The set of SSTs that are referenced by a manifest are:
 
 * All `levels` files referenced in the manifest's `leveled_ssts`
-* All `wal` files with `wal_id_last_compacted` <= ID <= `wal_id_last_seen`
+* All `wal` files with SST ID >= `wal_id_last_compacted`
 
 _NOTE: The inclusive `>=` for `wal_id_last_compacted` is required so the compactor doesn't delete the most recently compacted file. We need this file to get the `writer_epoch` during the recovery process detailed in the Read Clients section below._
 
