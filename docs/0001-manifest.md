@@ -559,18 +559,20 @@ time 11, 00000000000000000006.sst, writer_epoch=3 // success
 
 At time 11, writer 3 has successfully fenced writer 1 and writer 2. Readers will consider all SSTs valid from 0-6, though only SSTs 0, 1, and 3 will have key-value pairs since fencing SST writes are always empty.
 
-_NOTE: We might want to add a liveness write for low-throughput write clients. This would allow clients to periodically write empty SSTs to make sure they're still the current writer. This would work with the current design, but isn't in scope._
+_NOTE: Writers will only detect that they've been fenced when they go to write. Low-throughput writers can periodically scan `wal` for SSTs with a higher `writer_epoch` to proactively detect that they've been fenced. This would work with the current design, but isn't in scope._
 
 ### Readers
 
 #### Reader Protocol
 
-Readers must establish a snapshot on startup. This process is described in the _Snapshots_ section above.
+Readers must establish a snapshot on startup and load DbState:
 
-Once a snapshot is established, readers do the following:
+1. List all `wal` to find the maximum contiguous SST
+2. Update the manifest to contain a new snapshot and set `wal_id_last_seen` to the ID found in (1)
+3. Load all `leveled_sst`s into `DbState.leveled_ssts`
+4. Load all `wal` SSTs >= `wal_id_last_compacted` into `DbState.l0`
 
-1. Load all `leveled_sst`s into `DbState.leveled_ssts`
-2. List and load all `wal` SSTs >= `wal_id_last_compacted` into `DbState.l0`
+If (2) fails due to a CAS conflict, restart from (1).
 
 _NOTE: We'll probably want to rename `DbState.l0` to `DbState.wal`._
 
@@ -606,7 +608,7 @@ We propose waiting for SST 2 to be written. This style simplifies polling: the r
 
 This does mean that SST 3 will not be served by a reader until SST 2 arrives. For the writer client, this is not a problem, since the writer client is fully consistent between its own reads and writes. But secondary reader clients might not see SST 3 for significant period of time if the writer dies. This is a tradeoff that we are comfortable with. If it proves problematic, we can implement (1), above, and poll for missing SSTs periodically.
 
-**TOOD: We'll need to decide on what the semantics are for `wal_id_last_seen` when parallel writes are enabled. Is it the last contiguously written SST ID, or the absolute last SST ID? I suspect we'll want to use the last contiguously written SST ID.**
+_NOTE: There is some interdependence between when `wal_id_last_seen` and the semantics of a snapshot. If `wal_id_last_seen` were to include SST 3 in our example above, we'd have to decide whether to include SST 2 when it eventually arrives. The current design does not have this issue. This is discussed more [here](https://github.com/slatedb/slatedb/pull/43/files#r1594783266)._
 
 ### Compactors
 
