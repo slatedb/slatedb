@@ -694,6 +694,14 @@ A [previous version](https://github.com/slatedb/slatedb/blob/6beba6949487a519b8b
 
 We [briefly discussed](https://github.com/slatedb/slatedb/pull/43/files#discussion_r1597489292) supporting mutable CAS operations with the two-phase write CAS pattern. There was [some disagreement](https://github.com/slatedb/slatedb/pull/43/files#r1597749655) about whether this was possible. It's conceivable that user-defined attributes might allow the two-phase CAS pattern to handle mutable CAS operations. We did not explore this since we decided to use incremental IDs for the manifest, which require only immutable CAS.
 
+### DeltaStream Protocol
+
+We [considered using a protocol](https://github.com/slatedb/slatedb/pull/43/files#discussion_r1597543706) similar to DeltaStream's. This protocol is similar to two-phase CAS, but uses a DynamoDB pointer to determine the current manifest rather than a LIST operation. This protocol wasn't obviously compatible with SST writes, though. We opted to have a single CAS approach for both the manifest and SSTs, so we rejected this design.
+
+### `object_store` Locking
+
+Rust's `object_store` crate has a [locking mechanism](https://docs.rs/object_store/latest/object_store/aws/enum.S3CopyIfNotExists.html). We briefly looked at this, but [rejected it](https://github.com/slatedb/slatedb/pull/43/files#discussion_r1597551287) because it uses a TTLs for locks. We wanted a CAS operation that won't time out.
+
 ## Addendum
 
 We found that Deltalake [has a locking library](https://github.com/delta-incubator/dynamodb-lock-rs). We thought it might be used for its LSM manifest updates, but it's not. We discuss our findings more [here](https://github.com/slatedb/slatedb/pull/24/files#r1582427235).
