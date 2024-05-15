@@ -149,7 +149,7 @@ There are two scenarios to consider when we want to CAS an object:
 1. The object we wish to CAS is immutable; it exists or it does not, but never changes once it exists ("create if not exists").
 2. The object we wish to CAS is mutable; it might exist and can change over time.
 
-There are four different patterns to achieve CAS for these scenarios:
+There are five different patterns to achieve CAS for these scenarios:
 
 1. **Use CAS**: If the object store supports CAS, we can use it. This pattern works for both scenarios described above.
 2. **Use a transactional store**: A transactional store such as DynamoDB or MySQL can be used to store the object. The object store is not used in this mode. This approach works for both scenarios described above, but does not work well for large objects.
@@ -162,7 +162,7 @@ _NOTE: These patterns are discussed more [here](https://github.com/slatedb/slate
 Our proposed solution uses the following forms of CAS:
 
 * CAS (1) for manifest and SST writes when the object store supports CAS
-* Two-phase write (3) for manifest and SST writes when the object store does not support CAS
+* Two-phase write (5) for manifest and SST writes when the object store does not support CAS
 
 #### Two-Phase CAS Protocol
 
@@ -189,7 +189,7 @@ _NOTE: The source location is arbitrary. If randomness is used in the name--a UU
 
 Once the record is written to DynamoDB in step (2), the entire write is considered durable. No other writers may insert a record with the same `destination` field.
 
-_NOTE: This design is inefficient on S3. A single SST write includes two S3 `PUT`s, two writes to DynamoDB (or equivalent), and one S3 `DELETE`. See [here](https://github.com/slatedb/slatedb/pull/43#issuecomment-2105368258) for napkin math on API cost. Latency should be minimally impacted since the write is considered durable after one S3 write and one DynamoDB write. Nevertheless, we are gambling that S3 will soon support pure-CAS like every other object store. In the long run, we expect to switch S3 clients to use CAS and drop object versioning._
+_NOTE: This design is inefficient on S3. A single SST write includes two S3 `PUT`s, two writes to DynamoDB (or equivalent), and one S3 `DELETE`. See [here](https://github.com/slatedb/slatedb/pull/43#issuecomment-2105368258) for napkin math on API cost. Latency should be minimally impacted since the write is considered durable after one S3 write and one DynamoDB write. Nevertheless, we are gambling that S3 will soon support pure-CAS like every other object store. In the long run, we expect to switch S3 clients to use CAS and drop support for two-phase CAS._
 
 ##### Deletes
 
@@ -376,10 +376,10 @@ The union of these three processes means the manifest is updated whenever:
 2. A reader updates a snapshot periodically
 3. A reader removes a snapshot when finished
 4. A writer increments `writer_epoch` and creates a snapshot on startup
-6. A compactor increments `compactor_epoch` on startup
-7. A compactor finishes a compaction periodically
+5. A compactor increments `compactor_epoch` on startup
+6. A compactor finishes a compaction periodically
 
-If these occur too frequently, there might be conflict between the clients. Conflict can lead to starvation, which can slow down startup time and compaction time. Luckily, all events except (7) should occur at the minute granularity or larger. Compaction, (7), warrants some additional thought, which we discuss at the end of this document.
+If these occur too frequently, there might be conflict between the clients. Conflict can lead to starvation, which can slow down startup time and compaction time. Luckily, all events except (6) should occur at the minute granularity or larger. Compaction, (6), warrants some additional thought, which we discuss at the end of this document.
 
 Let's look at each of these in turn.
 
