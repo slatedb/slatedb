@@ -18,6 +18,7 @@ Table of Contents:
    * [Writers](#writers)
    * [Readers](#readers)
    * [Compactors](#compactors)
+   * [Garbage Collectors](#garbage-collectors)
 - [Rejected Solutions](#rejected-solutions)
    * [Update Manifest on Write](#update-manifest-on-write)
    * [Epoch in Object Names](#epoch-in-object-names)
@@ -26,6 +27,7 @@ Table of Contents:
    * [Two-Phase Mutable CAS](#two-phase-mutable-cas)
    * [DeltaStream Protocol](#deltastream-protocol)
    * [`object_store` Locking](#object_store-locking)
+   * [Atomic Deletes](#atomic-deletes)
 - [Addendum](#addendum)
 
 <!-- TOC end -->
@@ -155,7 +157,7 @@ There are four different patterns to achieve CAS for these scenarios:
 4. **Use a proxy**: A proxy-based solution combines an object store and a transactional store. Two values are stored: an object and a pointer to object. Readers first read the pointer (e.g. object path) from the pointer, then read the object that the pointer points to. Writers read the current object (using the reader steps), update the object, and write it back to the object store at a new location (e.g. a new UUID). Writers then update the pointer to point to the new object. The pointer update is done conditionally if the pointer still points to the file the writer read. The pointer may reside in a file on an object store that supports CAS, or a transactional store like DynamoDB or MySQL. This pattern works for both immutable and mutable files. Unlike (1), it also works well for large objects.
 5. **Use a two-phase write**: Like the proxy solution (5), a two-phase write consists of a write to both an object storage and a transactional store. Writers first write a new object to a temporary location. The writer then writes a record to a transactional store. The transactional record signals an intent to copy; it contains a source, destination, and a completion flag. "put-if-not-exists" semantics are used on the destination column. The writer then copies the new object from its temporary location to its final destination in object storage. Upon completion, the transactional store's record is set to complete and the temporary file is deleted. If the writer fails before the transactional record is written, the write is abandoned. If the writer fails after the transactional record is written, a recovery process runs in the future to copy the object and set the completion flag. This pattern works for immutable objects. It also works well for large objects.
 
-_NOTE: These patterns are discussed more [here](https://github.com/slatedb/slatedb/pull/39/files#r1588879655) and [here](https://github.com/slatedb/slatedb/pull/43/files#r1597297640)._
+_NOTE: These patterns are discussed more [here](https://github.com/slatedb/slatedb/pull/39/files#r1588879655) and [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1597297640)._
 
 Our proposed solution uses the following forms of CAS:
 
@@ -404,7 +406,7 @@ A client creates a snapshot by creating a new manifest with a new snapshot added
 
 A client may also update `wal_id_last_seen` in the new manifest to include the most recent SST in the WAL that the client has seen. This allows clients to include the most recent SSTs from the `wal` in a new snapshot. See [here](https://github.com/slatedb/slatedb/pull/39/files#r1588780707) for more details.
 
-A new snapshot may only reference an active manifest (see [here](https://github.com/slatedb/slatedb/pull/43/files#r1594444035) for more details). A manifest is considered active if either:
+A new snapshot may only reference an active manifest (see [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1594444035) for more details). A manifest is considered active if either:
 
 * It's the current manifest
 * It's referenced by a snapshot in the current manifest and the snapshot has not expired
@@ -422,7 +424,7 @@ _NOTE: Clock skew can affect the timing between the compactor and the snapshot c
 
 _NOTE: A [previous design proposal](https://github.com/slatedb/slatedb/pull/39/files#diff-d589c7beb3d163638e94dbc8e086b3efe093852f0cad96f04cb1283c3bd1eb74R105) used a `heartbeat_s` field that clients would update periodically. After some discussion (see [here](https://github.com/slatedb/slatedb/pull/39/files#r1588896947)), we landed on a design that supports both reference counts and snapshot timeouts. Reference counts are useful for long-lived snapshots that exist indefinitely. Heartbeats are useful for short-lived snapshots that exist for the lifespan of a single process._
 
-_NOTE: This design considers read-only snapshots. Read-write snapshots are discussed [here](https://github.com/slatedb/slatedb/pull/43/files#r1596319141) and in [[#49](https://github.com/slatedb/slatedb/issues/49)]._
+_NOTE: This design considers read-only snapshots. Read-write snapshots are discussed [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1596319141) and in [[#49](https://github.com/slatedb/slatedb/issues/49)]._
 
 ### Writers
 
@@ -452,7 +454,7 @@ The writer client must then fence all older clients. This is done by writing an 
 2. List the `wal` directory to find the next SST ID.
 3. Write an empty SST with the new `writer_epoch` to the next SST ID using CAS or object versioning.
 
-_NOTE: A snapshot is created in (1) to prevent the compactor from deleting `wal` SSTs while the writer has written its fencing SST. See [here](https://github.com/slatedb/slatedb/pull/43/files#r1594460226) for details._
+_NOTE: A snapshot is created in (1) to prevent the compactor from deleting `wal` SSTs while the writer has written its fencing SST. See [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1594460226) for details._
 
 _NOTE: The writer may choose to release its snapshot created in (1) after writing the fencing SST in (3), or it may periodically refresh its snapshot._
 
@@ -643,7 +645,7 @@ We propose waiting for SST 2 to be written. This style simplifies polling: the r
 
 This does mean that SST 3 will not be served by a reader until SST 2 arrives. For the writer client, this is not a problem, since the writer client is fully consistent between its own reads and writes. But secondary reader clients might not see SST 3 for a significant period of time if the writer dies. This is a tradeoff that we are comfortable with. If it proves problematic, we can implement (1), above, and poll for missing SSTs periodically.
 
-_NOTE: There is some interdependence between when `wal_id_last_seen` and the semantics of a snapshot. If `wal_id_last_seen` were to include SST 3 in our example above, we'd have to decide whether to include SST 2 when it eventually arrives. The current design does not have this issue. This is discussed more [here](https://github.com/slatedb/slatedb/pull/43/files#r1594783266)._
+_NOTE: There is some interdependence between when `wal_id_last_seen` and the semantics of a snapshot. If `wal_id_last_seen` were to include SST 3 in our example above, we'd have to decide whether to include SST 2 when it eventually arrives. The current design does not have this issue. This is discussed more [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1594783266)._
 
 ### Compactors
 
@@ -668,7 +670,7 @@ Merging leveled SSTs (2) is outside the scope of this design.
 
 A garbage collector (GC) must delete both objects from object storage and records from the transactional store (when two-phase CAS is used). The garbage collector must delete inactive manifests and SSTs.
 
-_NOTE: This design considers the compactor and garbage collector (inactive SST deletion) as two separate activities that run for one database in one process--the compactor process. In the future, we might want to run the compactor and garbage collector in separate processes on separate machines. We might also want the garbage collector to run across multiple databases. This should be doable, but is outside this design's scope. The topic is discussed [here](https://github.com/slatedb/slatedb/pull/43/files#r1596319141) and in [[#49](https://github.com/slatedb/slatedb/issues/49)]._
+_NOTE: This design considers the compactor and garbage collector (inactive SST deletion) as two separate activities that run for one database in one process--the compactor process. In the future, we might want to run the compactor and garbage collector in separate processes on separate machines. We might also want the garbage collector to run across multiple databases. This should be doable, but is outside this design's scope. The topic is discussed [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1596319141) and in [[#49](https://github.com/slatedb/slatedb/issues/49)]._
 
 #### Object Deletion
 
@@ -719,7 +721,7 @@ A previous [manifest design](https://github.com/slatedb/slatedb/pull/24/) propos
 
 A previous [manifest design](https://github.com/slatedb/slatedb/pull/24/) proposed namespacing `wal` filenames with a writer epoch prefix (discussed [here](https://github.com/slatedb/slatedb/pull/24/files#diff-58d53b55614c8db2dd180ac49237f37991d2b378c75e0245d780356e5d0c8135R114)). This was rejected because it was deemed complex. We might revisit this decision in the future if we have a need for it.
 
-Another alternative to two-phase CAS was proposed [here](https://github.com/slatedb/slatedb/pull/43/files#r1597308492). This alternative reduced the operation to a single object storage PUT and single DynamoDB write. In doing so, [it required `writer_epoch` in object names](https://github.com/slatedb/slatedb/pull/43/files#r1597317062). This scheme prevented *real* CAS from working. We rejected this design because we decided to favor a design that worked well with real CAS.
+Another alternative to two-phase CAS was proposed [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1597308492). This alternative reduced the operation to a single object storage PUT and single DynamoDB write. In doing so, [it required `writer_epoch` in object names](https://github.com/slatedb/slatedb/pull/43#discussion_r1597317062). This scheme prevented *real* CAS from working. We rejected this design because we decided to favor a design that worked well with real CAS.
 
 ### Object Versioning CAS
 
@@ -731,15 +733,15 @@ A [previous version](https://github.com/slatedb/slatedb/blob/6beba6949487a519b8b
 
 ### Two-Phase Mutable CAS
 
-We [briefly discussed](https://github.com/slatedb/slatedb/pull/43/files#discussion_r1597489292) supporting mutable CAS operations with the two-phase write CAS pattern. There was [some disagreement](https://github.com/slatedb/slatedb/pull/43/files#r1597749655) about whether this was possible. It's conceivable that user-defined attributes might allow the two-phase CAS pattern to handle mutable CAS operations. We did not explore this since we decided to use incremental IDs for the manifest, which require only immutable CAS.
+We [briefly discussed](https://github.com/slatedb/slatedb/pull/43#discussion_r1597489292) supporting mutable CAS operations with the two-phase write CAS pattern. There was [some disagreement](https://github.com/slatedb/slatedb/pull/43#discussion_r1597749655) about whether this was possible. It's conceivable that user-defined attributes might allow the two-phase CAS pattern to handle mutable CAS operations. We did not explore this since we decided to use incremental IDs for the manifest, which require only immutable CAS.
 
 ### DeltaStream Protocol
 
-We [considered using a protocol](https://github.com/slatedb/slatedb/pull/43/files#discussion_r1597543706) similar to DeltaStream's. This protocol is similar to two-phase CAS, but uses a DynamoDB pointer to determine the current manifest rather than a LIST operation. This protocol wasn't obviously compatible with SST writes, though. We opted to have a single CAS approach for both the manifest and SSTs, so we rejected this design.
+We [considered using a protocol](https://github.com/slatedb/slatedb/pull/43#discussion_r1597543706) similar to DeltaStream's. This protocol is similar to two-phase CAS, but uses a DynamoDB pointer to determine the current manifest rather than a LIST operation. This protocol wasn't obviously compatible with SST writes, though. We opted to have a single CAS approach for both the manifest and SSTs, so we rejected this design.
 
 ### `object_store` Locking
 
-Rust's `object_store` crate has a [locking mechanism](https://docs.rs/object_store/latest/object_store/aws/enum.S3CopyIfNotExists.html). We briefly looked at this, but [rejected it](https://github.com/slatedb/slatedb/pull/43/files#discussion_r1597551287) because it uses time to live (TTL) timeouts for locks. We wanted a CAS operation that would not time out.
+Rust's `object_store` crate has a [locking mechanism](https://docs.rs/object_store/latest/object_store/aws/enum.S3CopyIfNotExists.html). We briefly looked at this, but [rejected it](https://github.com/slatedb/slatedb/pull/43#discussion_r1597551287) because it uses time to live (TTL) timeouts for locks. We wanted a CAS operation that would not time out.
 
 ### Atomic Deletes
 
