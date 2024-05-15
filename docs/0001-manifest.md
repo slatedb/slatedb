@@ -404,7 +404,7 @@ _NOTE: Clients that set `snapshot_expire_time_s` to 0 must guarantee that they w
 
 A client creates a snapshot by creating a new manifest with a new snapshot added to the `snapshots` field.
 
-A client may also update `wal_id_last_seen` in the new manifest to include the most recent SST in the WAL that the client has seen. This allows clients to include the most recent SSTs from the `wal` in a new snapshot. See [here](https://github.com/slatedb/slatedb/pull/39/files#r1588780707) for more details.
+A client may also update `wal_id_last_seen` in the new manifest to include the most recent SST in the WAL that the client has seen. This allows clients to include the most recent SSTs from the `wal` in a new snapshot. It also allows clients to determine which `wal` SSTs to ignore from the head of the WAL if the client is restarted. See [here](https://github.com/slatedb/slatedb/pull/39/files#r1588780707) and [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1601924366) for more details.
 
 A new snapshot may only reference an active manifest (see [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1594444035) and [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1601981496) for more details). A manifest is considered active if either:
 
@@ -447,7 +447,7 @@ On startup, a writer client must increment `writer_epoch`.
 4. Create a new snapshot in the current manifest in memory.
 5. Write the manifest with the updated `writer_epoch` (e.g. `manifest/00000000000000000003.manifest`).
 
-_NOTE: A snapshot is created in (4) to prevent the compactor from deleting `wal` SSTs while the writer is writing its fencing SST. See [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1594460226) for details._
+_NOTE: A snapshot is created in (4) to prevent the compactor from deleting `wal` SSTs while the writer is writing its fencing SST. The timeout for the snapshot will be twice as long as the writer's snapshot refresh interval. See [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1594460226) and [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1601806626) for details._
 
 The writer client must then fence all older clients. This is done by writing an empty SST to the next SST ID in the WAL.
 
@@ -687,11 +687,11 @@ These objects reside in three locations:
 
 The garbage collector will periodically list all objects in the `manifest`, `wal`, and `levels` directories and delete the following:
 
-1. Any `.manifest` that is not the latest is not referenced by any snapshot in the latest manifest.
+1. Any `.manifest` that is not an active manifest.
 2. Any other file in `manifest` that has an object storage creation timestamp older than a day.
-3. Any `.sst` in `wal` that is < `wal_id_last_compacted` in the current manifest.
+3. Any `.sst` in `wal` that is < the minimum `wal_id_last_compacted` in the set of all active manifests.
 4. Any other file in `wal` that has an object storage creation timestamp older than a day.
-5. Any `.sst` in `levels` that is not referenced by the latest manifest or any snapshot in the latest manifest.
+5. Any `.sst` in `levels` that is not referenced by any active manifest.
 
 _NOTE: These rules follow the definitions for active manifests and active SSTs in the _Snapshots_ section._
 
