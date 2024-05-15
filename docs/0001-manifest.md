@@ -178,32 +178,31 @@ Suppose a writer wishes to write to the object location `manifest/00000000000000
 2. Write a record to a transactional store, say DynamoDB, with the following fields:
    * `source`: `manifest/00000000000000000000.manifest.[UUID].[checksum]`
    * `destination`: `manifest/00000000000000000000.manifest`
-   * `phase`: `prepared`
+   * `committed`: `false`
 3. Copy the object from `manifest/00000000000000000000.manifest.[UUID].[checksum]` to `manifest/00000000000000000000.manifest`.
-4. Update the record in DynamoDB to set `phase` to `committed`.
+4. Update the record in DynamoDB to set `phase` to `true`.
 5. Delete the object from `manifest/00000000000000000000.manifest.[UUID].[checksum]`.
 
 _NOTE: The source location is arbitrary. If randomness is used in the name--a UUID, ULID, or KSUID--collisions must be considered. In our case, collisions are catastrophic since they lead to corruption. We use a UUID and checksum to attempt to reduce collisions._
 
-Once the record is written to DynamoDB with `phase` set to `prepared` in step (2), the entire write is considered durable. No other writers may insert a record with the same `destination` field.
+Once the record is written to DynamoDB in step (2), the entire write is considered durable. No other writers may insert a record with the same `destination` field.
 
 _NOTE: This design is inefficient on S3. A single SST write includes two S3 `PUT`s, two writes to DynamoDB (or equivalent), and one S3 `DELETE`. See [here](https://github.com/slatedb/slatedb/pull/43#issuecomment-2105368258) for napkin math on API cost. Latency should be minimally impacted since the write is considered durable after one S3 write and one DynamoDB write. Nevertheless, we are gambling that S3 will soon support pure-CAS like every other object store. In the long run, we expect to switch S3 clients to use CAS and drop object versioning._
 
 ##### Deletes
 
-Deletions must also be considered. Old (inactive) manifests and garbage collected SSTs must be deleted. The deletion process is as follows:
-
-1. Update the record in DynamoDB to set `phase` to `deleted`.
-2. Delete the record from object storage.
-3. Delete the record from DynamoDB.
-
-The deletion is considered durable after step (1). Readers will continue to see files until step (2) is complete. Clients that wish to prevent reads of deleted files must wait to return until (2) is complete.
-
-_NOTE: It's possible to model deletions with only an object storage deletion. If a DynamoDB record's `phase` is `committed` and the object does not exist at `destination`, the object may be considered deleted. This approach slows recovery: the recovery client must check each DynamoDB's `destination` in object storage to see if it still exists. There are other variations (such as having CAS failures result in deletion checks). Ultimately, the deletion protocol above seems the safest and simplest._
+See the garbage collection section below for details on deletions.
 
 ##### Recovery
 
 A writer or deletion process might fail at any point in the steps outlined above. Client processes may run recoveries at any point in the future to complete partial writes or deletes. The recovery process is as follows:
+
+1. List all records in DynamoDB with `committed` set to `false`.
+2. For each record, check if the `destination` object exists in object storage.
+   1. If the object exists, check if the `source` object exists.
+      1. If the `source` object exists, copy the `source` object to the `destination` object and set `committed` to `true`.
+      2. If the `source` object does not exist, delete the record from DynamoDB.
+   2. If the object does not exist, delete the record from DynamoDB.
 
 ### File Structure
 
@@ -512,7 +511,7 @@ time 3, 00000000000000000002.sst, writer_epoch=2
 time 4, 00000000000000000003.sst, writer_epoch=3
 ```
 
-In example above, writer 1 successfully writes SSTs 0 and 1. Writer 2 tries to fence older writers with a write to SST ID 2, but fails because writer 3 has already written an SST at that location. Writer 2 sees that the SST with ID 2 has a higher `writer_epoch` than its own, and halts.
+In the example above, writer 1 successfully writes SSTs 0 and 1. Writer 2 tries to fence older writers with a write to SST ID 2, but fails because writer 3 has already written an SST at that location. Writer 2 sees that the SST with ID 2 has a higher `writer_epoch` than its own, and halts.
 
 #### Acknowledgements
 
@@ -650,11 +649,10 @@ _NOTE: There is some interdependence between when `wal_id_last_seen` and the sem
 
 On startup, a compactor must increment the `compactor_epoch` in the manifest. This is done in a similar manner to the process described in the _Writer Protocol_ section above.
 
-After startup, compactors periodically do three things:
+After startup, compactors periodically do two things:
 
 1. Merge SSTs from the `wal` into `leveled_ssts`
 2. Merge SSTs from `leveled_ssts` into higher-level SSTs
-3. Delete unused SSTs
 
 To merge SSTs from the `wal` into `leveled_ssts` (1), the compactor must periodically:
 
@@ -666,16 +664,50 @@ _NOTE: This design implies that level 0 for `leveled_ssts` will not be range par
 
 Merging leveled SSTs (2) is outside the scope of this design.
 
-To delete `wal` SSTs (3), the compactor periodically deletes all inactive SSTs. An SST is inactive when either:
+_NOTE: This design considers the compactor and garbage collector (inactive SST deletion) as two separate activities that run for one database in one process--the compactor process. In the future, we might want to run the compactor and garbage collector in separate processes on separate machines. We might also want the garbage collector to run across multiple databases. This should be doable, but is outside this design's scope. The topic is discussed [here](https://github.com/slatedb/slatedb/pull/43/files#r1596319141) and in [[#49](https://github.com/slatedb/slatedb/issues/49)]._
 
-1. It's in the `leveled_ssts` folder and it's not referenced in any active manifest
-2. It's in the `wal` folder and its ID < `wal_id_last_compacted`
+### Garbage Collectors
 
-See the _Snapshots_ section for a definition of an "active manifest".
+A garbage collector (GC) must delete both objects from object storage and records from the transactional store (when two-phase CAS is used). The garbage collector must delete inactive manifests and SSTs.
+
+#### Object Deletion
+
+Four classes of objects must be deleted:
+
+* Inactive manifests
+* Inactive SSTs
+* Orphaned temporary manifests (when two-phase CAS is used)
+* Orphaned temporary SSTs (when two-phase CAS is used)
+
+These objects reside in three locations:
+
+* `manifest`
+* `wal`
+* `levels`
+
+The garbage collector will periodically list all objects in the `manifest`, `wal`, and `levels` directories and delete the following:
+
+1. Any `.manifest` that is not the latest is not referenced by any snapshot in the latest manifest.
+2. Any other file in `manifest` that has an object storage creation timestamp older than a day.
+3. Any `.sst` in `wal` that is < `wal_id_last_compacted` in the current manifest.
+4. Any other file in `wal` that has an object storage creation timestamp older than a day.
+5. Any `.sst` in `levels` that is not referenced by the latest manifest or any snapshot in the latest manifest.
+
+_NOTE: These rules follow the definitions for active manifests and active SSTs in the _Snapshots_ section._
+
+#### Transactional Store Deletion
+
+Two classes of records must be deleted from the transactional store:
+
+* Inactive manifests
+* Inactive SSTs
+
+The garbage collector will periodically delete all transactional store records with the following criteria:
+
+1. `source` references a `.manifest` that is not the latest and is not referenced by any snapshot in the latest manifest.
+2. `source` references an `.sst` in `wal` that is < `wal_id_last_compacted` in the current manifest.
 
 _NOTE: We use `<`  not `<=` for (2) because the compactor must not delete the SST at `wal_id_last_compacted` so readers can recover the `writer_epoch` from the SST._
-
-_NOTE: This design considers the compactor and garbage collector (inactive SST deletion) as two separate activities that run for one database in one process--the compactor process. In the future, we might want to run the compactor and garbage collector in separate processes on separate machines. We might also want the garbage collector to run across multiple databases. This should be doable, but is outside this design's scope. The topic is discussed [here](https://github.com/slatedb/slatedb/pull/43/files#r1596319141) and in [[#49](https://github.com/slatedb/slatedb/issues/49)]._
 
 ## Rejected Solutions
 
@@ -708,6 +740,10 @@ We [considered using a protocol](https://github.com/slatedb/slatedb/pull/43/file
 ### `object_store` Locking
 
 Rust's `object_store` crate has a [locking mechanism](https://docs.rs/object_store/latest/object_store/aws/enum.S3CopyIfNotExists.html). We briefly looked at this, but [rejected it](https://github.com/slatedb/slatedb/pull/43/files#discussion_r1597551287) because it uses time to live (TTL) timeouts for locks. We wanted a CAS operation that would not time out.
+
+### Atomic Deletes
+
+A [previous version](https://github.com/slatedb/slatedb/pull/43#discussion_r1600912132) of this design proposed using atomic deletes. This turned out to be unnecessary.
 
 ## Addendum
 
