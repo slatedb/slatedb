@@ -406,7 +406,7 @@ A client creates a snapshot by creating a new manifest with a new snapshot added
 
 A client may also update `wal_id_last_seen` in the new manifest to include the most recent SST in the WAL that the client has seen. This allows clients to include the most recent SSTs from the `wal` in a new snapshot. See [here](https://github.com/slatedb/slatedb/pull/39/files#r1588780707) for more details.
 
-A new snapshot may only reference an active manifest (see [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1594444035) for more details). A manifest is considered active if either:
+A new snapshot may only reference an active manifest (see [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1594444035) and [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1601981496) for more details). A manifest is considered active if either:
 
 * It's the current manifest
 * It's referenced by a snapshot in the current manifest and the snapshot has not expired
@@ -444,17 +444,15 @@ On startup, a writer client must increment `writer_epoch`.
 1. List `manifest` to find the manifest with the largest ID.
 2. Read the current manifest (e.g. `manifest/00000000000000000002.manifest`).
 3. Increment the `writer_epoch` in the current manifest in memory.
-4. Write the manifest with the updated `writer_epoch` (e.g. `manifest/00000000000000000003.manifest`).
+4. Create a new snapshot in the current manifest in memory.
+5. Write the manifest with the updated `writer_epoch` (e.g. `manifest/00000000000000000003.manifest`).
 
-_NOTE: This is the same process described in the _Manifest Updates_ section above._
+_NOTE: A snapshot is created in (4) to prevent the compactor from deleting `wal` SSTs while the writer is writing its fencing SST. See [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1594460226) for details._
 
 The writer client must then fence all older clients. This is done by writing an empty SST to the next SST ID in the WAL.
 
-1. Create a new snapshot in the manifest.
 2. List the `wal` directory to find the next SST ID.
 3. Write an empty SST with the new `writer_epoch` to the next SST ID using CAS or object versioning.
-
-_NOTE: A snapshot is created in (1) to prevent the compactor from deleting `wal` SSTs while the writer has written its fencing SST. See [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1594460226) for details._
 
 _NOTE: The writer may choose to release its snapshot created in (1) after writing the fencing SST in (3), or it may periodically refresh its snapshot._
 
