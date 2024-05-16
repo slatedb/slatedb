@@ -129,7 +129,7 @@ This design should:
 * Allow parallel writes from a single writer
 * Allow readers to snapshot state for consistent reads across time
 * Work with object stores that support CAS
-* Work with object stores that support object versioning if a transactional store is available (DynamoDB, MySQL, and so on)
+* Work with object stores that do not support CAS if a transactional store is available (DynamoDB, MySQL, and so on)
 * Provide < 100ms-300ms read/write latencies
 * Avoid write contention on the manifest
 * Work for S3, Google Cloud Storage (GCS), Azure Blob Storage (ABS), MinIO, Radically Reprogrammable (R2) Storage, and Tigris
@@ -182,7 +182,7 @@ Suppose a writer wishes to write to the object location `manifest/00000000000000
    * `destination`: `manifest/00000000000000000000.manifest`
    * `committed`: `false`
 3. Copy the object from `manifest/00000000000000000000.manifest.[UUID].[checksum]` to `manifest/00000000000000000000.manifest`.
-4. Update the record in DynamoDB to set `phase` to `true`.
+4. Update the record in DynamoDB to set `committed` to `true`.
 5. Delete the object from `manifest/00000000000000000000.manifest.[UUID].[checksum]`.
 
 _NOTE: The source location is arbitrary. If randomness is used in the name--a UUID, ULID, or KSUID--collisions must be considered. In our case, collisions are catastrophic since they lead to corruption. We use a UUID and checksum to attempt to reduce collisions._
@@ -267,6 +267,9 @@ message Manifest {
 }
 
 message SstInfo {
+  // Manifest format version to allow schema evolution.
+  uint16 sstinfo_format_version = 1;
+
   // Globally unique ID for an SST in the `compacted` folder.
   uint64 id = 1;
 
@@ -704,8 +707,8 @@ Two classes of records must be deleted from the transactional store:
 
 The garbage collector will periodically delete all transactional store records with the following criteria:
 
-1. `source` references a `.manifest` that is not the latest and is not referenced by any snapshot in the latest manifest.
-2. `source` references an `.sst` in `wal` that is < `wal_id_last_compacted` in the current manifest.
+1. `destination` references a `.manifest` that is not the latest and is not referenced by any snapshot in the latest manifest.
+2. `destination` references an `.sst` in `wal` that is < `wal_id_last_compacted` in the current manifest.
 
 _NOTE: We use `<`  not `<=` for (2) because the compactor must not delete the SST at `wal_id_last_compacted` so readers can recover the `writer_epoch` from the SST._
 
