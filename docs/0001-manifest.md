@@ -605,12 +605,16 @@ _NOTE: Writers will only detect that they've been fenced when they go to write. 
 
 Readers must establish a snapshot on startup and load DbState:
 
-1. List all `wal` to find the maximum contiguous SST
-2. Update the manifest to contain a new snapshot and set `wal_id_last_seen` to the ID found in (1)
-3. Load all `leveled_sst`s into `DbState.leveled_ssts`
-4. Load all `wal` SSTs >= `wal_id_last_compacted` into `DbState.l0`
+1. Read the current manifest
+2. List all `wal` to find the maximum contiguous SST
+3. Update the current manifest in-memory
+   1. Set `wal_id_last_seen` to the ID of the maximum contiguous SST in (2)
+   2. Create a new snapshot that references the new manifest
+4. Write the updated manifest to the next manifest slot, go to (1) if CAS fails
+5. Load all `leveled_sst`s into `DbState.leveled_ssts`
+6. Load all `wal` SSTs >= `wal_id_last_compacted` into `DbState.l0`
 
-If (2) fails due to a CAS conflict, restart from (1).
+_NOTE: Readers read the current manifest (1) before listing the `wal` (2) so the reader can detect manifest changes while it's listing the `wal` directory. This is important because the compactor and garbage collector might have deleted SSTs that the reader sees in (2). Without this protection, the reader might set `wal_id_last_seen` to an SST that no longer exists. See [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1603626303) for more details._
 
 _NOTE: We'll probably want to rename `DbState.l0` to `DbState.wal`._
 
