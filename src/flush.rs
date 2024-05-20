@@ -8,7 +8,7 @@ use futures::executor::block_on;
 use std::sync::Arc;
 use std::time::Duration;
 
-impl DbInner {
+impl<'a> DbInner<'a> {
     pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
         self.freeze_memtable();
         self.flush_imms().await?;
@@ -19,7 +19,7 @@ impl DbInner {
         &self,
         imm: Arc<MemTable>,
         id: usize,
-    ) -> Result<SSTableHandle, SlateDBError> {
+    ) -> Result<SSTableHandle<'a>, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = imm.iter();
         while let Some(kv) = iter.next_entry().await? {

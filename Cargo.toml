@@ -19,6 +19,7 @@ parking_lot = "0.12.1"
 siphasher = "1"
 thiserror = "1.0.59"
 tokio = { version = "1.37.0", features = ["sync"] }
+flatbuffers = "24.3.25"
 
 [dev-dependencies]
 tokio = { version = "1.37.0", features = ["rt-multi-thread"] }

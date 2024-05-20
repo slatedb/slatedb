@@ -112,59 +112,6 @@ impl BlockBuilder {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BlockMeta {
-    pub(crate) offset: usize,
-    pub(crate) first_key: Bytes,
-}
-
-impl BlockMeta {
-    // Encode a vector of block metadatas into a buffer.
-    pub fn encode_block_meta(block_meta: &[BlockMeta], buf: &mut Vec<u8>) {
-        let mut estimated_size = std::mem::size_of::<u32>(); // u32 = number of block metadatas
-        for meta in block_meta {
-            estimated_size += std::mem::size_of::<u32>(); // u32 = size of offset
-            estimated_size += std::mem::size_of::<u16>(); // u16 = size of key length
-            estimated_size += meta.first_key.len();
-        }
-        estimated_size += std::mem::size_of::<u32>(); // u32 = checksum
-
-        // Reserve the space to improve performance
-        buf.reserve(estimated_size);
-        let original_len = buf.len();
-        buf.put_u32(block_meta.len() as u32);
-        for meta in block_meta {
-            buf.put_u32(meta.offset as u32);
-            buf.put_u16(meta.first_key.len() as u16);
-            buf.put(meta.first_key.as_ref());
-        }
-        buf.put_u32(crc32fast::hash(&buf[original_len + 4..]));
-        assert_eq!(estimated_size, buf.len() - original_len);
-    }
-
-    /// Decode a vector of block metadatas from a buffer.
-    pub(crate) fn decode_block_meta(buf: &mut Bytes) -> Result<Vec<BlockMeta>, SlateDBError> {
-        let mut block_meta = Vec::new();
-        let num = buf.get_u32() as usize;
-        let meta_start = buf.slice(..);
-        let mut meta_len = 0;
-        for _ in 0..num {
-            let offset = buf.get_u32() as usize;
-            meta_len += std::mem::size_of::<u32>();
-            let first_key_len = buf.get_u16() as usize;
-            meta_len += std::mem::size_of::<u16>();
-            let first_key = buf.copy_to_bytes(first_key_len);
-            meta_len += first_key_len;
-            block_meta.push(BlockMeta { offset, first_key });
-        }
-        let checksum = crc32fast::hash(&meta_start[..meta_len]);
-        if buf.get_u32() != checksum {
-            return Err(SlateDBError::ChecksumMismatch);
-        }
-        Ok(block_meta)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,24 +137,5 @@ mod tests {
         let block = builder.build().unwrap();
         let encoded = block.encode();
         let _decoded = Block::decode(&encoded);
-    }
-
-    #[test]
-    fn test_block_meta() {
-        let block_meta = vec![
-            BlockMeta {
-                offset: 0,
-                first_key: Bytes::from("key1"),
-            },
-            BlockMeta {
-                offset: 99,
-                first_key: Bytes::from("key2"),
-            },
-        ];
-        let mut buf = Vec::new();
-        BlockMeta::encode_block_meta(&block_meta, &mut buf);
-        let mut as_bytes = Bytes::copy_from_slice(buf.as_slice());
-        let decoded = BlockMeta::decode_block_meta(&mut as_bytes).unwrap();
-        assert_eq!(block_meta, decoded);
     }
 }

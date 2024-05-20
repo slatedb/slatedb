@@ -43,9 +43,9 @@ impl ReadOnlyBlob for ReadOnlyObject {
 }
 
 #[derive(Clone)]
-pub struct SSTableHandle {
+pub struct SSTableHandle<'a> {
     pub id: usize,
-    pub info: SsTableInfo,
+    pub info: SsTableInfo<'a>,
     // we stash the filter in the handle for now, as a way to cache it so that
     // the db doesn't need to reload it for each read. Once we've put in a proper
     // cache, we should instead cache the filter block in the cache and get rid
@@ -65,11 +65,11 @@ impl TableStore {
         self.sst_format.table_builder()
     }
 
-    pub(crate) async fn write_sst(
+    pub(crate) async fn write_sst<'a>(
         &self,
         id: usize,
-        encoded_sst: EncodedSsTable,
-    ) -> Result<SSTableHandle, SlateDBError> {
+        encoded_sst: EncodedSsTable<'a>,
+    ) -> Result<SSTableHandle<'a>, SlateDBError> {
         self.object_store
             .put(&self.path(id), encoded_sst.raw.clone())
             .await
@@ -94,16 +94,16 @@ impl TableStore {
         Ok(SSTableHandle { id, info, filter })
     }
 
-    pub(crate) async fn read_filter(
+    pub(crate) async fn read_filter<'a>(
         &self,
-        handle: &SSTableHandle,
+        handle: &SSTableHandle<'a>,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         Ok(handle.filter.clone())
     }
 
-    pub(crate) async fn read_block(
+    pub(crate) async fn read_block<'a>(
         &self,
-        handle: &SSTableHandle,
+        handle: &SSTableHandle<'a>,
         block: usize,
     ) -> Result<Block, SlateDBError> {
         let path = self.path(handle.id);
