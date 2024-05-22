@@ -213,7 +213,7 @@ impl<'a> Db<'a> {
         self.inner.delete(key).await;
     }
 
-    pub async fn flush(&'a self) -> Result<(), SlateDBError> {
+    pub async fn flush(&self) -> Result<(), SlateDBError> {
         self.inner.flush().await
     }
 }
