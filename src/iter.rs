@@ -7,6 +7,7 @@ use crate::types::{KeyValue, KeyValueDeletable, ValueDeletable};
 /// See: https://github.com/slatedb/slatedb/issues/12
 pub trait KeyValueIterator {
     /// Returns the next non-deleted key-value pair in the iterator.
+    #[allow(dead_code)]
     async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
         loop {
             let entry = self.next_entry().await?;
