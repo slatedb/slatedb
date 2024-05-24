@@ -2,17 +2,13 @@ extern crate flatbuffers;
 use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::filter::{BloomFilter, BloomFilterBuilder};
-use crate::{
-    block::BlockBuilder,
-    error::SlateDBError,
+use crate::flatbuffer_types::{
+    BlockMeta, BlockMetaArgs, OwnedBlockMeta, OwnedSsTableInfo, SsTableInfo, SsTableInfoArgs,
 };
+use crate::{block::BlockBuilder, error::SlateDBError};
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
 use std::sync::Arc;
-
-#[path = "./generated/sst_generated.rs"]
-mod sst_generated;
-pub(crate) use sst_generated::{SsTableInfo, BlockMeta};
 
 pub(crate) struct SsTableFormat {
     block_size: usize,
@@ -30,7 +26,7 @@ impl<'a> SsTableFormat {
     pub(crate) async fn read_info(
         &self,
         obj: &impl ReadOnlyBlob,
-    ) -> Result<SsTableInfo, SlateDBError> {
+    ) -> Result<OwnedSsTableInfo, SlateDBError> {
         let len = obj.len().await?;
         if len <= 4 {
             return Err(SlateDBError::EmptySSTable);
@@ -40,20 +36,21 @@ impl<'a> SsTableFormat {
         let sst_metadata_offset =
             obj.read_range(sst_metadata_offset_range).await?.get_u32() as usize;
         // Get the metadata
-        let sst_metadata_range = sst_metadata_offset..len-4;
+        let sst_metadata_range = sst_metadata_offset..len - 4;
         let sst_metadata_bytes = obj.read_range(sst_metadata_range).await?;
-        SsTableInfo::decode(sst_metadata_bytes)
+        OwnedSsTableInfo::decode(sst_metadata_bytes)
     }
 
     pub(crate) async fn read_filter(
         &self,
-        info: &SsTableInfo<'a>,
+        info: &OwnedSsTableInfo,
         obj: &impl ReadOnlyBlob,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         let mut filter = None;
-        if info.filter_len() > 0 {
-            let filter_end = info.filter_offset() + info.filter_len();
-            let filter_offset_range = info.filter_offset() as usize..filter_end as usize;
+        let handle = info.borrow();
+        if handle.filter_len() > 0 {
+            let filter_end = handle.filter_offset() + handle.filter_len();
+            let filter_offset_range = handle.filter_offset() as usize..filter_end as usize;
             let filter_bytes = obj.read_range(filter_offset_range).await?;
             filter = Some(Arc::new(BloomFilter::decode(&filter_bytes)));
         }
@@ -62,19 +59,22 @@ impl<'a> SsTableFormat {
 
     pub(crate) async fn read_block(
         &self,
-        info: &SsTableInfo<'a>,
+        info: &OwnedSsTableInfo,
         block: usize,
         obj: &impl ReadOnlyBlob,
     ) -> Result<Block, SlateDBError> {
-        let block_meta = &info.block_meta().get(block);
-        let mut end = info.filter_offset();
-        if block < info.block_meta().len() - 1 {
-            let next_block_meta = &info.block_meta().get(block + 1);
+        let handle = info.borrow();
+        let block_meta = &handle.block_meta().get(block);
+        let mut end = handle.filter_offset();
+        if block < handle.block_meta().len() - 1 {
+            let next_block_meta = &handle.block_meta().get(block + 1);
             end = next_block_meta.offset();
         }
         // account for checksum
         end -= 4;
-        let bytes: Bytes = obj.read_range(block_meta.offset() as usize..end as usize).await?;
+        let bytes: Bytes = obj
+            .read_range(block_meta.offset() as usize..end as usize)
+            .await?;
         Ok(Block::decode(&bytes))
     }
 
@@ -83,25 +83,23 @@ impl<'a> SsTableFormat {
     }
 }
 
-impl<'a> SsTableInfo<'a> {
-    fn encode(info: &SsTableInfo, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(info._tab.buf());
+impl OwnedSsTableInfo {
+    fn encode(info: &OwnedSsTableInfo, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(info.data());
     }
 
-    pub(crate) fn decode(raw_block_meta: Bytes) -> Result<SsTableInfo<'a>, SlateDBError> {
+    pub(crate) fn decode(raw_block_meta: Bytes) -> Result<OwnedSsTableInfo, SlateDBError> {
         if raw_block_meta.len() <= 4 {
             return Err(SlateDBError::EmptyBlockMeta);
         }
 
-        match flatbuffers::root::<sst_generated::SsTableInfo>(&raw_block_meta) {
-            Ok(sstInfo) => Ok(sstInfo),
-            Err(e) => Err(SlateDBError::InvalidFlatbuffer(e))
-        }
+        let info = OwnedSsTableInfo::new(raw_block_meta.clone())?;
+        Ok(info)
     }
 }
 
-pub(crate) struct EncodedSsTable<'a> {
-    pub(crate) info: SsTableInfo<'a>,
+pub(crate) struct EncodedSsTable {
+    pub(crate) info: OwnedSsTableInfo,
     pub(crate) filter: Option<Arc<BloomFilter>>,
     pub(crate) raw: Bytes,
 }
@@ -117,7 +115,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     block_size: usize,
     min_filter_keys: u32,
     num_keys: u32,
-    filter_builder: BloomFilterBuilder,    
+    filter_builder: BloomFilterBuilder,
 }
 
 impl<'a> EncodedSsTableBuilder<'a> {
@@ -146,8 +144,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
             // New block must always accept the first KV pair
             assert!(self.builder.add(key, value));
-        }
-        else if self.first_first_key == None {
+        } else if self.first_first_key == None {
             self.first_first_key = Some(self.sst_info_builder.create_vector(key));
         }
 
@@ -166,14 +163,14 @@ impl<'a> EncodedSsTableBuilder<'a> {
         let builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
         let encoded_block = builder.build()?.encode();
 
-        let block_meta = sst_generated::BlockMeta::create(
+        let block_meta = BlockMeta::create(
             &mut self.sst_info_builder,
-            &sst_generated::BlockMetaArgs {
+            &BlockMetaArgs {
                 offset: self.data.len() as u64,
                 first_key: self.first_key,
             },
         );
-        
+
         self.block_meta.push(block_meta);
         let checksum = crc32fast::hash(&encoded_block);
         self.data.extend(encoded_block);
@@ -181,7 +178,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
         Ok(())
     }
 
-    pub fn build(mut self) -> Result<EncodedSsTable<'a>, SlateDBError> {
+    pub fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
         self.finish_block()?;
         let mut buf = self.data;
         let mut maybe_filter = None;
@@ -196,22 +193,24 @@ impl<'a> EncodedSsTableBuilder<'a> {
         }
 
         let meta_offset = buf.len();
-        let info_wip_offset = sst_generated::SsTableInfo::create(
+        let vector = self.sst_info_builder.create_vector(&self.block_meta);
+        let info_wip_offset = SsTableInfo::create(
             &mut self.sst_info_builder,
-            &sst_generated::SsTableInfoArgs {
+            &SsTableInfoArgs {
                 first_key: self.first_first_key,
-                block_meta: Some(self.sst_info_builder.create_vector(&self.block_meta)),
+                block_meta: Some(vector),
                 filter_offset: filter_offset as u64,
                 filter_len,
                 block_meta_offset: meta_offset as u64,
             },
         );
-        
-        self.sst_info_builder.finish(info_wip_offset, None);
-        let info = flatbuffers::root::<sst_generated::SsTableInfo>(&self.sst_info_builder.finished_data()).unwrap();
 
-        SsTableInfo::encode(&info, &mut buf);
-        
+        self.sst_info_builder.finish(info_wip_offset, None);
+        let info =
+            OwnedSsTableInfo::new(Bytes::from(self.sst_info_builder.finished_data().to_vec()))?;
+
+        OwnedSsTableInfo::encode(&info, &mut buf);
+
         // write the metadata offset at the end of the file. FlatBuffer internal representation is not intended to be used directly.
         buf.put_u32(meta_offset as u32);
         Ok(EncodedSsTable {
@@ -259,10 +258,8 @@ mod tests {
         table_store.write_sst(0, encoded).await.unwrap();
         let sst_handle = table_store.open_sst(0).await.unwrap();
         assert_eq!(encoded_info, sst_handle.info);
-        assert_eq!(
-            sst_handle.info.filter_offset(),
-            sst_handle.info.block_meta_offset()
-        );
-        assert_eq!(sst_handle.info.filter_len(), 0);
+        let handle = sst_handle.info.borrow();
+        assert_eq!(handle.filter_offset(), handle.block_meta_offset());
+        assert_eq!(handle.filter_len(), 0);
     }
 }

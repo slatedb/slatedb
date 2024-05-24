@@ -6,14 +6,14 @@ use crate::{
     types::KeyValueDeletable,
 };
 
-struct SstIterator<'a> {
-    table: SSTableHandle<'a>,
+struct SstIterator {
+    table: SSTableHandle,
     current_iter: Option<BlockIterator<Block>>,
     next_block_idx: usize,
     table_store: TableStore,
 }
 
-impl<'a> SstIterator<'a> {
+impl SstIterator {
     #[allow(dead_code)] // will be used in #8
     fn new(table: SSTableHandle, table_store: TableStore) -> Self {
         Self {
@@ -25,7 +25,7 @@ impl<'a> SstIterator<'a> {
     }
 }
 
-impl<'a> KeyValueIterator for SstIterator<'a> {
+impl KeyValueIterator for SstIterator {
     async fn next_entry(
         &mut self,
     ) -> Result<Option<KeyValueDeletable>, crate::error::SlateDBError> {
@@ -33,7 +33,7 @@ impl<'a> KeyValueIterator for SstIterator<'a> {
             let current_iter = if let Some(current_iter) = self.current_iter.as_mut() {
                 current_iter
             } else {
-                if self.next_block_idx >= self.table.info.block_meta().len() {
+                if self.next_block_idx >= self.table.info.borrow().block_meta().len() {
                     // No more blocks in the SST.
                     return Ok(None);
                 }
@@ -81,7 +81,7 @@ mod tests {
         let encoded = builder.build().unwrap();
         table_store.write_sst(0, encoded).await.unwrap();
         let sst_handle = table_store.open_sst(0).await.unwrap();
-        assert_eq!(sst_handle.info.block_meta().len(), 1);
+        assert_eq!(sst_handle.info.borrow().block_meta().len(), 1);
 
         let mut iter = SstIterator::new(sst_handle, table_store);
         let kv = iter.next().await.unwrap().unwrap();
@@ -119,7 +119,7 @@ mod tests {
         let encoded = builder.build().unwrap();
         table_store.write_sst(0, encoded).await.unwrap();
         let sst_handle = table_store.open_sst(0).await.unwrap();
-        assert_eq!(sst_handle.info.block_meta().len(), 6);
+        assert_eq!(sst_handle.info.borrow().block_meta().len(), 6);
 
         let mut iter = SstIterator::new(sst_handle, table_store);
         for i in 0..1000 {
