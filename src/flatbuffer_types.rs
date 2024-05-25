@@ -25,6 +25,6 @@ impl OwnedSsTableInfo {
         let raw = &self.data;
         // This is safe, because we validated the flatbuffer on construction and the
         // memory is immutable once we construct the handle.
-        unsafe { flatbuffers::root_unchecked::<SsTableInfo>(&raw) }
+        unsafe { flatbuffers::root_unchecked::<SsTableInfo>(raw) }
     }
 }

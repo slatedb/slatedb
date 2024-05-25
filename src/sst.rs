@@ -145,7 +145,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
             // New block must always accept the first KV pair
             assert!(self.builder.add(key, value));
             self.first_key = Some(self.sst_info_builder.create_vector(key));
-        } else if self.first_first_key == None {
+        } else if self.first_first_key.is_none() {
             self.first_first_key = Some(self.sst_info_builder.create_vector(key));
             self.first_key = Some(self.sst_info_builder.create_vector(key));
         }
