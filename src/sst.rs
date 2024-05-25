@@ -3,7 +3,7 @@ use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::filter::{BloomFilter, BloomFilterBuilder};
 use crate::flatbuffer_types::{
-    BlockMeta, BlockMetaArgs, OwnedBlockMeta, OwnedSsTableInfo, SsTableInfo, SsTableInfoArgs,
+    BlockMeta, BlockMetaArgs, OwnedSsTableInfo, SsTableInfo, SsTableInfoArgs,
 };
 use crate::{block::BlockBuilder, error::SlateDBError};
 use bytes::{Buf, BufMut, Bytes};
