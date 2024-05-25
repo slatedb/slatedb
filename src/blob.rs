@@ -7,5 +7,6 @@ pub(crate) trait ReadOnlyBlob {
 
     async fn read_range(&self, range: Range<usize>) -> Result<Bytes, SlateDBError>;
 
+    #[allow(dead_code)]
     async fn read(&self) -> Result<Bytes, SlateDBError>;
 }
