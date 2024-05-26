@@ -299,10 +299,7 @@ mod tests {
         let sst_handle = table_store.open_sst(0).await.unwrap();
         assert_eq!(encoded_info, sst_handle.info);
         let handle = sst_handle.info.borrow();
-        assert_eq!(
-            handle.filter_offset(), 
-            handle.block_meta_offset()
-        );
+        assert_eq!(handle.filter_offset(), handle.block_meta_offset());
         assert_eq!(handle.filter_len(), 0);
     }
 }
