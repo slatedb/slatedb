@@ -3,7 +3,7 @@ use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::filter::{BloomFilter, BloomFilterBuilder};
 use crate::flatbuffer_types::{
-    BlockMeta, BlockMetaArgs, OwnedBlockMeta, OwnedSsTableInfo, SsTableInfo, SsTableInfoArgs,
+    BlockMeta, BlockMetaArgs, OwnedSsTableInfo, SsTableInfo, SsTableInfoArgs,
 };
 use crate::{block::BlockBuilder, error::SlateDBError};
 use bytes::{Buf, BufMut, Bytes};
@@ -144,11 +144,12 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
             // New block must always accept the first KV pair
             assert!(self.builder.add(key, value));
-        } else if self.first_first_key == None {
+            self.first_key = Some(self.sst_info_builder.create_vector(key));
+        } else if self.first_first_key.is_none() {
             self.first_first_key = Some(self.sst_info_builder.create_vector(key));
+            self.first_key = Some(self.sst_info_builder.create_vector(key));
         }
 
-        self.first_key = Some(self.sst_info_builder.create_vector(key));
         self.filter_builder.add_key(key);
 
         Ok(())
@@ -240,9 +241,38 @@ mod tests {
         builder.add(b"key2", Some(b"value2")).unwrap();
         let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
-        table_store.write_sst(0, encoded).await.unwrap();
-        let sst_handle = table_store.open_sst(0).await.unwrap();
+
+        // write sst and validate that the handle returned has the correct content.
+        let sst_handle = table_store.write_sst(0, encoded).await.unwrap();
         assert_eq!(encoded_info, sst_handle.info);
+        let sst_info = sst_handle.info.borrow();
+        assert_eq!(1, sst_info.block_meta().len());
+        assert_eq!(
+            b"key1",
+            sst_info.first_key().unwrap().bytes(),
+            "first key in sst info should be correct"
+        );
+        assert_eq!(
+            b"key1",
+            sst_info.block_meta().get(0).first_key().bytes(),
+            "first key in block meta should be correct"
+        );
+
+        // construct sst info from the raw bytes and validate that it matches the original info.
+        let sst_handle_from_store = table_store.open_sst(0).await.unwrap();
+        assert_eq!(encoded_info, sst_handle_from_store.info);
+        let sst_info_from_store = sst_handle_from_store.info.borrow();
+        assert_eq!(1, sst_info_from_store.block_meta().len());
+        assert_eq!(
+            b"key1",
+            sst_info_from_store.first_key().unwrap().bytes(),
+            "first key in sst info should be correct after reading from store"
+        );
+        assert_eq!(
+            b"key1",
+            sst_info_from_store.block_meta().get(0).first_key().bytes(),
+            "first key in block meta should be correct after reading from store"
+        );
     }
 
     #[tokio::test]
