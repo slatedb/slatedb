@@ -15,7 +15,7 @@ pub(crate) struct SsTableFormat {
     min_filter_keys: u32,
 }
 
-impl<'a> SsTableFormat {
+impl SsTableFormat {
     pub fn new(block_size: usize, min_filter_keys: u32) -> Self {
         Self {
             block_size,
@@ -63,11 +63,11 @@ impl<'a> SsTableFormat {
         block: usize,
         obj: &impl ReadOnlyBlob,
     ) -> Result<Block, SlateDBError> {
-        let handle = info.borrow();
-        let block_meta = &handle.block_meta().get(block);
+        let handle = &info.borrow();
+        let block_meta = handle.block_meta().get(block);
         let mut end = handle.filter_offset();
         if block < handle.block_meta().len() - 1 {
-            let next_block_meta = &handle.block_meta().get(block + 1);
+            let next_block_meta = handle.block_meta().get(block + 1);
             end = next_block_meta.offset();
         }
         // account for checksum
@@ -86,14 +86,20 @@ impl<'a> SsTableFormat {
 impl OwnedSsTableInfo {
     fn encode(info: &OwnedSsTableInfo, buf: &mut Vec<u8>) {
         buf.extend_from_slice(info.data());
+        buf.put_u32(crc32fast::hash(info.data()));
     }
 
     pub(crate) fn decode(raw_block_meta: Bytes) -> Result<OwnedSsTableInfo, SlateDBError> {
         if raw_block_meta.len() <= 4 {
             return Err(SlateDBError::EmptyBlockMeta);
         }
+        let data = raw_block_meta.slice(..raw_block_meta.len() - 4).clone();
+        let checksum = raw_block_meta.slice(raw_block_meta.len() - 4..).get_u32();
+        if checksum != crc32fast::hash(&data) {
+            return Err(SlateDBError::ChecksumMismatch);
+        }
 
-        let info = OwnedSsTableInfo::new(raw_block_meta.clone())?;
+        let info = OwnedSsTableInfo::new(data)?;
         Ok(info)
     }
 }
@@ -109,7 +115,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     builder: BlockBuilder,
     sst_info_builder: flatbuffers::FlatBufferBuilder<'a, DefaultAllocator>,
     first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
-    first_first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
+    sst_first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'a>>>,
     data: Vec<u8>,
     block_size: usize,
@@ -125,7 +131,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
             data: Vec::new(),
             block_meta: Vec::new(),
             first_key: None,
-            first_first_key: None,
+            sst_first_key: None,
             block_size,
             builder: BlockBuilder::new(block_size),
             min_filter_keys,
@@ -145,8 +151,8 @@ impl<'a> EncodedSsTableBuilder<'a> {
             // New block must always accept the first KV pair
             assert!(self.builder.add(key, value));
             self.first_key = Some(self.sst_info_builder.create_vector(key));
-        } else if self.first_first_key.is_none() {
-            self.first_first_key = Some(self.sst_info_builder.create_vector(key));
+        } else if self.sst_first_key.is_none() {
+            self.sst_first_key = Some(self.sst_info_builder.create_vector(key));
             self.first_key = Some(self.sst_info_builder.create_vector(key));
         }
 
@@ -161,6 +167,10 @@ impl<'a> EncodedSsTableBuilder<'a> {
     }
 
     fn finish_block(&mut self) -> Result<(), SlateDBError> {
+        if self.builder.is_empty() {
+            return Ok(());
+        }
+
         let builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
         let encoded_block = builder.build()?.encode();
 
@@ -188,7 +198,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
         if self.num_keys >= self.min_filter_keys {
             let filter = Arc::new(self.filter_builder.build());
             let encoded_filter = filter.encode();
-            filter_len = encoded_filter.len() as u64;
+            filter_len = encoded_filter.len();
             buf.put(encoded_filter);
             maybe_filter = Some(filter);
         }
@@ -198,10 +208,10 @@ impl<'a> EncodedSsTableBuilder<'a> {
         let info_wip_offset = SsTableInfo::create(
             &mut self.sst_info_builder,
             &SsTableInfoArgs {
-                first_key: self.first_first_key,
+                first_key: self.sst_first_key,
                 block_meta: Some(vector),
                 filter_offset: filter_offset as u64,
-                filter_len,
+                filter_len: filter_len as u64,
                 block_meta_offset: meta_offset as u64,
             },
         );
@@ -289,7 +299,10 @@ mod tests {
         let sst_handle = table_store.open_sst(0).await.unwrap();
         assert_eq!(encoded_info, sst_handle.info);
         let handle = sst_handle.info.borrow();
-        assert_eq!(handle.filter_offset(), handle.block_meta_offset());
+        assert_eq!(
+            handle.filter_offset(), 
+            handle.block_meta_offset()
+        );
         assert_eq!(handle.filter_len(), 0);
     }
 }

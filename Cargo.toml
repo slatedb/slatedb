@@ -13,13 +13,13 @@ bytes = "1.6.0"
 crc32fast = "1.4.0"
 crossbeam-channel = "0.5.12"
 crossbeam-skiplist = "0.1.3"
+flatbuffers = "24.3.25"
 futures = "0.3.30"
 object_store = "0.9.1"
 parking_lot = "0.12.1"
 siphasher = "1"
 thiserror = "1.0.59"
 tokio = { version = "1.37.0", features = ["sync"] }
-flatbuffers = "24.3.25"
 
 [dev-dependencies]
 tokio = { version = "1.37.0", features = ["rt-multi-thread"] }

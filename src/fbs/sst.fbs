@@ -1,12 +1,13 @@
-table BlockMeta {
-    offset: ulong;
-    first_key: [ubyte] (required);
-}
-
+// Has metadata about a SST file.
 table SsTableInfo {
     first_key: [ubyte];
     block_meta: [BlockMeta] (required);
     filter_offset: ulong;
     filter_len: ulong;
     block_meta_offset: ulong;
+}
+
+table BlockMeta {
+    offset: ulong;
+    first_key: [ubyte] (required);
 }

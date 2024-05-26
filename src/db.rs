@@ -102,7 +102,6 @@ impl DbInner {
             }
         }
 
-        // loop over block_meta
         let handle = sst.info.borrow();
         for block_idx in 0..handle.block_meta().len() {
             let current_block_meta = handle.block_meta().get(block_idx);
