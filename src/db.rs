@@ -19,14 +19,14 @@ pub struct DbOptions {
 }
 
 #[derive(Clone)]
-pub(crate) struct DbState<'a> {
+pub(crate) struct DbState {
     pub(crate) memtable: Arc<MemTable>,
     pub(crate) imm_memtables: VecDeque<Arc<MemTable>>,
-    pub(crate) l0: VecDeque<SSTableHandle<'a>>,
+    pub(crate) l0: VecDeque<SSTableHandle>,
     pub(crate) next_sst_id: usize,
 }
 
-impl<'a> DbState<'a> {
+impl DbState {
     fn create() -> Self {
         Self {
             memtable: Arc::new(MemTable::new()),
@@ -37,15 +37,15 @@ impl<'a> DbState<'a> {
     }
 }
 
-pub(crate) struct DbInner<'a> {
-    pub(crate) state: Arc<RwLock<Arc<DbState<'a>>>>,
+pub(crate) struct DbInner {
+    pub(crate) state: Arc<RwLock<Arc<DbState>>>,
     #[allow(dead_code)] // TODO remove this once we write SSTs to disk
     pub(crate) path: PathBuf,
     pub(crate) options: DbOptions,
     pub(crate) table_store: TableStore,
 }
 
-impl<'a> DbInner<'a> {
+impl DbInner {
     pub fn new(
         path: impl AsRef<Path>,
         options: DbOptions,
@@ -93,7 +93,7 @@ impl<'a> DbInner<'a> {
 
     async fn find_block_for_key(
         &self,
-        sst: &SSTableHandle<'a>,
+        sst: &SSTableHandle,
         key: &[u8],
     ) -> Result<Option<usize>, SlateDBError> {
         if let Some(filter) = self.table_store.read_filter(sst).await? {
@@ -101,18 +101,18 @@ impl<'a> DbInner<'a> {
                 return Ok(None);
             }
         }
-        
+
         // loop over block_meta
-        for block_idx in 0..sst.info.block_meta().len() - 1 {
-            let current_block_meta = sst.info.block_meta().get(block_idx);
-            if current_block_meta.first_key().bytes() >= key{
+        let handle = sst.info.borrow();
+        for block_idx in 0..handle.block_meta().len() {
+            let current_block_meta = handle.block_meta().get(block_idx);
+            if current_block_meta.first_key().bytes() >= key {
                 return Ok(Some(block_idx));
             }
         }
-        
+
         Ok(None)
     }
-    
 
     async fn find_val_in_block(
         &self,
@@ -155,15 +155,15 @@ impl<'a> DbInner<'a> {
     }
 }
 
-pub struct Db<'a> {
-    inner: Arc<DbInner<'a>>,
+pub struct Db {
+    inner: Arc<DbInner>,
     /// Notifies the L0 flush thread to stop working.
     flush_notifier: crossbeam_channel::Sender<()>,
     /// The handle for the flush thread.
     flush_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
-impl<'a> Db<'a> {
+impl Db {
     pub fn open(
         path: impl AsRef<Path>,
         options: DbOptions,
@@ -181,7 +181,7 @@ impl<'a> Db<'a> {
         })
     }
 
-    pub async fn close(&'a self) -> Result<(), SlateDBError> {
+    pub async fn close(&self) -> Result<(), SlateDBError> {
         // Tell the notifier thread to shut down.
         self.flush_notifier.send(()).ok();
 
