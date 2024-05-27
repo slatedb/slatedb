@@ -36,7 +36,7 @@ jobs:
       - name: Generate and generated files
         run: |
           flatc -o tmp/generated --rust schemas/sst.fbs
-          if ! diff -r src/generated tmp/generated; then
+          if ! diff -r src/generated/*.rs tmp/generated; then
             echo "Generated files do not match!"
             diff -r src/generated tmp/generated
             exit 1
