@@ -107,14 +107,10 @@ impl DbInner {
         let mut low = 0;
         let mut high = handle.block_meta().len() - 1;
         let mut found_block_id: Option<usize> = None;
-        
+
         while low <= high {
             let mid = low + (high - low) / 2;
-            let current_block_first_key = handle
-                .block_meta()
-                .get(mid)
-                .first_key()
-                .bytes();
+            let current_block_first_key = handle.block_meta().get(mid).first_key().bytes();
 
             if current_block_first_key < key {
                 low = mid + 1;
@@ -125,12 +121,11 @@ impl DbInner {
                 } else {
                     break;
                 }
-                
             } else {
                 return Ok(Some(mid));
             }
         }
-        
+
         Ok(found_block_id)
     }
 
