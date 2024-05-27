@@ -111,18 +111,19 @@ impl DbInner {
         while low <= high {
             let mid = low + (high - low) / 2;
             let current_block_first_key = handle.block_meta().get(mid).first_key().bytes();
-
-            if current_block_first_key < key {
-                low = mid + 1;
-                found_block_id = Some(mid);
-            } else if current_block_first_key > key {
-                if mid > 0 {
-                    high = mid - 1;
-                } else {
-                    break;
+            match current_block_first_key.cmp(key) {
+                std::cmp::Ordering::Less => {
+                    low = mid + 1;
+                    found_block_id = Some(mid);
                 }
-            } else {
-                return Ok(Some(mid));
+                std::cmp::Ordering::Greater => {
+                    if mid > 0 {
+                        high = mid - 1;
+                    } else {
+                        break;
+                    }
+                }
+                std::cmp::Ordering::Equal => return Ok(Some(mid)),
             }
         }
 
