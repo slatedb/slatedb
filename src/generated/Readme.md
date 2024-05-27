@@ -7,6 +7,6 @@ This folder contains the generated [flatbuffer](https://flatbuffers.dev/) code. 
 To generate `.rs` files from `.fbs` files:
 
 1. Install [flatc](https://github.com/google/flatbuffers).
-2. Run `flatc --rust ../../schemas/sst.fbs` from this folder.
+2. Run `flatc -o src/generated --rust schemas/sst.fbs` from the project root.
 
 _NOTE: You can install it with `brew install flatbuffers` if you're using Homebrew._

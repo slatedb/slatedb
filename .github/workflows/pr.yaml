@@ -31,7 +31,7 @@ jobs:
 
       # Regenerate the Rust files
       - name: Regenerate Rust files
-        run: flatc --rust schemas/sst.fbs -o src/generated
+        run: flatc -o src/generated --rust schemas/sst.fbs
 
       # Check for differences
       - name: Verify generated files
