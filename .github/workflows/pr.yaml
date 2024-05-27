@@ -25,9 +25,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Install flatc
+      # Install specific version of flatc (24.3.25)
       - name: Install flatc
-        run: sudo apt-get install -y flatbuffers-compiler
+        run: |
+          wget https://github.com/google/flatbuffers/releases/download/v24.3.25/Linux.flatc.binary.g++-13.zip
+          unzip Linux.flatc.binary.g++-13.zip
+          sudo mv flatc /usr/local/bin/
 
       # Check for differences
       - name: Generate and generated files
