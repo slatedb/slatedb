@@ -2,6 +2,8 @@ use bytes::Bytes;
 use flatbuffers::InvalidFlatbuffer;
 
 #[path = "./generated/sst_generated.rs"]
+#[allow(warnings)]
+#[rustfmt::skip]
 mod sst_generated;
 
 pub use sst_generated::{BlockMeta, BlockMetaArgs, SsTableInfo, SsTableInfoArgs};
