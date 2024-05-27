@@ -103,14 +103,35 @@ impl DbInner {
         }
 
         let handle = sst.info.borrow();
-        for block_idx in 0..handle.block_meta().len() {
-            let current_block_meta = handle.block_meta().get(block_idx);
-            if current_block_meta.first_key().bytes() >= key {
-                return Ok(Some(block_idx));
+        // search for the block that could contain the key.
+        let mut low = 0;
+        let mut high = handle.block_meta().len() - 1;
+        let mut found_block_id: Option<usize> = None;
+        
+        while low <= high {
+            let mid = low + (high - low) / 2;
+            let current_block_first_key = handle
+                .block_meta()
+                .get(mid)
+                .first_key()
+                .bytes();
+
+            if current_block_first_key < key {
+                low = mid + 1;
+                found_block_id = Some(mid);
+            } else if current_block_first_key > key {
+                if mid > 0 {
+                    high = mid - 1;
+                } else {
+                    break;
+                }
+                
+            } else {
+                return Ok(Some(mid));
             }
         }
-
-        Ok(None)
+        
+        Ok(found_block_id)
     }
 
     async fn find_val_in_block(

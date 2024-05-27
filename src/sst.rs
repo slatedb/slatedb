@@ -1,4 +1,3 @@
-extern crate flatbuffers;
 use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::filter::{BloomFilter, BloomFilterBuilder};
@@ -35,7 +34,7 @@ impl SsTableFormat {
         let sst_metadata_offset_range = (len - 4)..len;
         let sst_metadata_offset =
             obj.read_range(sst_metadata_offset_range).await?.get_u32() as usize;
-        // Get the metadata
+        // Get the metadata. Last 4 bytes are the offset of SsTableInfo
         let sst_metadata_range = sst_metadata_offset..len - 4;
         let sst_metadata_bytes = obj.read_range(sst_metadata_range).await?;
         OwnedSsTableInfo::decode(sst_metadata_bytes)
