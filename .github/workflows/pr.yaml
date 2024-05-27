@@ -20,6 +20,27 @@ jobs:
       - name: Run rustfmt
         run: cargo fmt -- --check
 
+  flatbuffers_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install flatc
+      - name: Install flatc
+        run: sudo apt-get install -y flatbuffers-compiler
+
+      # Regenerate the Rust files
+      - name: Regenerate Rust files
+        run: flatc --rust schemas/sst.fbs -o src/generated
+
+      # Check for differences
+      - name: Verify generated files
+        run: |
+          if ! diff -r src/generated src/generated_new; then
+            echo "Generated files do not match!"
+            exit 1
+          fi
+
   tests:
     runs-on: ubuntu-latest
     steps:
