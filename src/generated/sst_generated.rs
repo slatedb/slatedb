@@ -11,7 +11,7 @@ use self::flatbuffers::{EndianScalar, Follow};
 
 pub enum SsTableInfoOffset {}
 #[derive(Copy, Clone, PartialEq)]
-
+// test
 pub struct SsTableInfo<'a> {
   pub _tab: flatbuffers::Table<'a>,
 }
