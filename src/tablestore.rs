@@ -2,7 +2,8 @@ use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
-use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat, SsTableInfo};
+use crate::flatbuffer_types::OwnedSsTableInfo;
+use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use bytes::Bytes;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -45,7 +46,7 @@ impl ReadOnlyBlob for ReadOnlyObject {
 #[derive(Clone)]
 pub struct SSTableHandle {
     pub id: usize,
-    pub info: SsTableInfo,
+    pub info: OwnedSsTableInfo,
     // we stash the filter in the handle for now, as a way to cache it so that
     // the db doesn't need to reload it for each read. Once we've put in a proper
     // cache, we should instead cache the filter block in the cache and get rid

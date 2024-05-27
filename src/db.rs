@@ -101,11 +101,33 @@ impl DbInner {
                 return Ok(None);
             }
         }
-        let block_idx = sst.info.block_meta.partition_point(|bm| bm.first_key > key);
-        if block_idx == sst.info.block_meta.len() {
-            return Ok(None);
+
+        let handle = sst.info.borrow();
+        // search for the block that could contain the key.
+        let mut low = 0;
+        let mut high = handle.block_meta().len() - 1;
+        let mut found_block_id: Option<usize> = None;
+
+        while low <= high {
+            let mid = low + (high - low) / 2;
+            let current_block_first_key = handle.block_meta().get(mid).first_key().bytes();
+            match current_block_first_key.cmp(key) {
+                std::cmp::Ordering::Less => {
+                    low = mid + 1;
+                    found_block_id = Some(mid);
+                }
+                std::cmp::Ordering::Greater => {
+                    if mid > 0 {
+                        high = mid - 1;
+                    } else {
+                        break;
+                    }
+                }
+                std::cmp::Ordering::Equal => return Ok(Some(mid)),
+            }
         }
-        Ok(Some(block_idx))
+
+        Ok(found_block_id)
     }
 
     async fn find_val_in_block(

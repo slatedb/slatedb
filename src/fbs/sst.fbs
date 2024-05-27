@@ -1,0 +1,25 @@
+// Has metadata about a SST file.
+table SsTableInfo {
+    // First key in the SST file.
+    first_key: [ubyte];
+
+    // Sequence of block metadata. SST files could have multiple blocks.
+    block_meta: [BlockMeta] (required);
+
+    // Offset of the bloom filter.
+    filter_offset: ulong;
+
+    // Length of bloom filter. Length will be zero if filter is not present.
+    filter_len: ulong;
+
+    // Offset of SsTableInfo in the SST file.
+    block_meta_offset: ulong;
+}
+
+table BlockMeta {
+    // Offset of the block within the SST file.
+    offset: ulong;
+
+    // First key contained in the block.
+    first_key: [ubyte] (required);
+}
