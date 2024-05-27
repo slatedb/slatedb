@@ -29,15 +29,13 @@ jobs:
       - name: Install flatc
         run: sudo apt-get install -y flatbuffers-compiler
 
-      # Regenerate the Rust files
-      - name: Regenerate Rust files
-        run: flatc -o src/generated --rust schemas/sst.fbs
-
       # Check for differences
-      - name: Verify generated files
+      - name: Generate and generated files
         run: |
-          if ! diff -r src/generated src/generated_new; then
+          flatc -o tmp/generated --rust schemas/sst.fbs
+          if ! diff -r src/generated tmp/generated; then
             echo "Generated files do not match!"
+            diff -r src/generated tmp/generated
             exit 1
           fi
 
