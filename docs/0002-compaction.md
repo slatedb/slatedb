@@ -364,6 +364,14 @@ TODO
 
 TODO
 
+#### Major Compactions
+
+TODO
+
+#### Distributed Compaction (e.g. scheduling larger compactions on temporary large instances)
+
+TODO
+
 ## Appendix
 
 ### Network Bandwidth vs Disk Bandwidth on AWS
