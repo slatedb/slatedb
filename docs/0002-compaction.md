@@ -375,11 +375,11 @@ TODO
 ### Network Bandwidth vs Disk Bandwidth on AWS
 
 | Instance Type | Network Bandwidth MBps (full-duplex) (Baseline/Burst) | Instance Disk Bandwidth MBps (assumes 4K max io size - experimentally verified for xlarges) (Read/Write) | EBS Bandwidth MBps (full-duplex) (Baseline/Burst) |
+| --- | --- | --- | --- |
 | m5d.xlarge | 160/1280 | 230/113 | 143.75/593.75 |
 | m5d.metal | 3200/3200 | 5468/2656 | 2375/2375 |
 | i3en.xlarge | 537/3200 | 332/253 | 144.2/593.75 |
 | i3en.metal | 12800/12800 | 7812/6250 | 2375/2375 |
 | c5d.xlarge | 160/1280 | 156/70 | 143.75/593.75 |
 | c5d.metal | 12800/12800 | 5468/2656 | 2375/2375 |
-
 
