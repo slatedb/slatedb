@@ -32,7 +32,7 @@ Table of Contents:
 
 <!-- TOC end -->
 
-Status: Under Discussion
+Status: Accepted
 
 Authors:
 
