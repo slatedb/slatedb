@@ -1,7 +1,5 @@
 # SlateDB Compaction
 
-Table of Contents:
-
 Status: Under Discussion
 
 Authors:
@@ -354,19 +352,15 @@ To serve Range Scans, the reader needs to look through every memtable, immutable
 
 ### Looking Ahead
 
-#### Advanced Compaction Policies
+#### Resuming Compaction
 
 TODO
 
-##### Resuming Compaction
+#### Lazy-Leveling/Tiered+Leveled
 
 TODO
 
-##### Tiered+Leveled
-
-TODO
-
-##### Time-Series
+#### Time-Series
 
 TODO
 
