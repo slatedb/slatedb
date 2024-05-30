@@ -159,7 +159,7 @@ write:
             2. update `l1` by prepending S, S’, S’’, … to the list
 4. If CAS from (3) fails:
     1. If CAS fails and the manifest has a different writer epoch, exit
-    1. If CAS fails and the manifest has the same writer epoch, go back to 3.3.3
+    1. If CAS fails and the manifest has the same writer epoch, go back to 3.iii.c
 5. If CAS from (3) succeeds, remove the immutable memtable.
 
 write-recovery:
@@ -193,10 +193,15 @@ compacted: [100, 50, 3, 1, 0]
 ```
 
 Here are examples of valid/invalid compactions (I’m using the notation Sources->Destination)
+
 `[SST-3, SST-4]->101`: This describes compacting the last 2 L1 SSTs to a new SR
+
 `[SST-1, SST-2]->101`: This is invalid because it skips SST-3 and SST-4
+
 `[SST-4, 100]->100`: This describes compacting SST-4 and SR 100 and saving the result as SR 100
+
 `[100, 50]->2`: This is invalid because it writes the result to an SR that is not consecutive to 50 (3 is consecutive to 50)
+
 `[SST-1, SST-2, SST-3, SST-4, 100, 50, 3, 1, 0]->0`: This describes a major compaction that compacts everything and saves it as SR 0
 
 Observe that we can use this basic definition to describe compactions done by different compaction algorithms (this isn’t strictly true in the above proposal - e.g. it doesn’t currently support some-to-all compactions like compacting a single SST from one SR into another SR, but that’s a fairly straightforward extension to the definition of a source) - it’s up to the Compaction Policy to decide what compactions to execute. The policy can choose to implement leveled compaction by viewing each SR as a level and scheduling Compactions that always merge one SR into the next SR. Or it can implement tiered compaction by grouping SRs into levels and define compactions that merge all the SRs in a level into a new SR at the next level. The levels themselves are a logical construct maintained by the policy.
