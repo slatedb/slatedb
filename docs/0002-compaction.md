@@ -124,17 +124,17 @@ Compaction behavior is be governed by the following DB options:
 
 `memtable_flush_interval_ms`: defines the minimum interval between memtable flush-related manifest updates in milliseconds.
 
-`l1_compaction_threshold_ssts`: defines the threshold number of SSTs for compacting L1.
+`l1_compaction_threshold_ssts`: defines the threshold number of SSTs for compacting L1. (default 8)
 
-`l1_max_ssts`: defines the maximum number of uncompacted L1 SSTs.
+`l1_max_ssts`: defines the maximum number of uncompacted L1 SSTs. (default 16)
 
-`max_compactions`: defines the max number of concurrent compactions.
+`max_compactions`: defines the max number of concurrent compactions. (default 4)
 
 `compaction_policy`: defines the compaction policy (currently only supports the value `tiered`)
 
-`compaction_policy.tiered.level_compaction_threshold_runs`: defines the threshold number of sorted runs for compacting a lower level (specific to the tiered compaction policy).
+`compaction_policy.tiered.level_compaction_threshold_runs`: defines the threshold number of sorted runs for compacting a lower level (specific to the tiered compaction policy). (default 8)
 
-`compaction_policy.tiered.level_max_runs`: defines the maximum number of sorted runs at alower level (specific to the tiered compaction policy).
+`compaction_policy.tiered.level_max_runs`: defines the maximum number of sorted runs at alower level (specific to the tiered compaction policy). (default 16)
 
 ### WAL->L1 Compaction
 
