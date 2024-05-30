@@ -46,6 +46,7 @@ The following are out-of-scope for this design. That said, the design should not
 - Optimize for specific workloads. For example, some databases optimize for in-order bulk inserts by avoiding compaction and simply writing out the database in its fully compacted form as inserts arrive.
 - Similarly, specialized compaction policies optimized for specific workloads are out-of-scope. For example, some databases support specialized compaction for time series data with a finite lifetime.
 - Resumable compaction. This proposal will not define how to resume a long-running compaction after a compactor restart. This is important to support, as compactions could take 10s of minutes, and the compactor should not have to restart them after a failure. I’ll include a section at the end on how we can extend the design to support htis.
+- GC of unused SSTs is excluded from this design
 
 ## Proposal
 
