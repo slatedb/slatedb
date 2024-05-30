@@ -101,7 +101,9 @@ table Manifest {
 ```
 
 We propose to augment the manifest by adding the following fields:
+
 `l1`: Contains a list of SST IDs in L1
+
 `compacted`: Contains a single instance of `Compacted`. `Compacted` contains a list of `SortedRun` instances. A `SortedRun` instance defines a single sorted run. Each Sorted Run contains a list of SST IDs and has a unique ID. The list of SST IDs defines the SSTs that comprise the sorted run. A given SST belongs to at most 1 SR. The ID describes the SR’s position in the list of sorted runs in `compacted`. That is, an SR S with an S.id must occur after SR S’ with ID S’.id if S.id < S’.id (so the sorted run with ID 0 must be last in the list). The last SR in the list must have ID 0. The semantics of the ID will be important when we describe how to define compactions.
 
 #### Naming Compacted SSTs (L1 and L2+)
@@ -118,13 +120,21 @@ In the Object Store, compacted SSTs are stored under the compacted directory. Ea
 ### DB Options
 
 Compaction behavior is be governed by the following DB options:
+
 `l1_sst_size_bytes`: defines the target L1 SST size in bytes.
+
 `memtable_flush_interval_ms`: defines the minimum interval between memtable flush-related manifest updates in milliseconds.
+
 `l1_compaction_threshold_ssts`: defines the threshold number of SSTs for compacting L1.
+
 `l1_max_ssts`: defines the maximum number of uncompacted L1 SSTs.
+
 `max_compactions`: defines the max number of concurrent compactions.
+
 `compaction_policy`: defines the compaction policy (currently only supports the value `tiered`)
+
 `compaction_policy.tiered.level_compaction_threshold_runs`: defines the threshold number of sorted runs for compacting a lower level (specific to the tiered compaction policy).
+
 `compaction_policy.tiered.level_max_runs`: defines the maximum number of sorted runs at alower level (specific to the tiered compaction policy).
 
 ### WAL->L1 Compaction
@@ -137,19 +147,19 @@ write:
 1. `put` adds the key-value to the current memtable and updates the WAL using the protocol described in [the manifest design](https://github.com/slatedb/slatedb/blob/main/docs/0001-manifest.md). 
 2. If the current memtable is larger than `l1_sst_size`, freeze the memtable by converting it to an immutable memtable, and write the memtable to a new ULID-named SST S in `compacted`.
 3. When S and all earlier SSTs S’, S’’, … for unflushed immutable tables are written:
-..1. update L1 in-memory by prepending S, S’, S’’, … to the list of SSTs in L1.
-..2. clear the immutable memtables for S, S’, S’’,...
-..3. if time since last manifest update > `memtable_flush_interval`:
-....1. if (number l1 SSTs > l1_max_uncompacted):
-......1. pause new writes
-......2. wait till number of l1 SSTs < l1_max_uncompacted
-....2. unpause writes if paused
-....3. update the manifest using CAS with the following modifications:
-......1. update `last_compacted` to the last WAL SST included in S
-......2. update `l1` by prepending S, S’, S’’, … to the list
+    1. update L1 in-memory by prepending S, S’, S’’, … to the list of SSTs in L1.
+    2. clear the immutable memtables for S, S’, S’’,...
+    3. if time since last manifest update > `memtable_flush_interval`:
+        1. if (number l1 SSTs > l1_max_uncompacted):
+            1. pause new writes
+            2. wait till number of l1 SSTs < l1_max_uncompacted
+        2. unpause writes if paused
+        3. update the manifest using CAS with the following modifications:
+            1. update `last_compacted` to the last WAL SST included in S
+            2. update `l1` by prepending S, S’, S’’, … to the list
 4. If CAS from (3) fails:
-..1. If CAS fails and the manifest has a different writer epoch, exit
-..1. If CAS fails and the manifest has the same writer epoch, go back to 3.3.3
+    1. If CAS fails and the manifest has a different writer epoch, exit
+    1. If CAS fails and the manifest has the same writer epoch, go back to 3.3.3
 5. If CAS from (3) succeeds, remove the immutable memtable.
 
 write-recovery:
@@ -171,8 +181,8 @@ Lets start by defining the interface between the CompactionExecutor and Compacti
 
 The Compaction Policy tells the Compaction Executor what compactions to execute. A Compaction is defined using the following parameters:
 * Sources: A list of one or more sources of data to compact. A source can either be a single L1 SST, or a single SR. The Sources must be logically consecutive. This means that for any sources S1 and S2 where S2 appears immediately after S1 in the list:
-...* If S1 is an L1 SST, then S2 must either be the next L1 SST OR if S1 is the last L1 SST then S2 must be the first SR (SR with the highest ID)
-...* If S1 is an SR, then S2 must be the next SR.
+    * If S1 is an L1 SST, then S2 must either be the next L1 SST OR if S1 is the last L1 SST then S2 must be the first SR (SR with the highest ID)
+    * If S1 is an SR, then S2 must be the next SR.
 * Destination: A destination SR. This can be a new SR, or it can be the SR from Sources with the lowest ID. If it’s a new SR, The SR must be logically consecutive to the last element of Sources (as described above).
 
 Let’s look at some examples of valid/invalid compactions. I’ll use string IDs for SSTs here instead of ULIDs. Suppose our manifest looks like:
@@ -270,8 +280,8 @@ Then, the compactor periodically polls the manifest. On every poll, the compacto
 The Compaction Executor implements `compact` by:
 
 1. Validate the compaction by running through the following checks. If any fail, return error
-..1. Make sure the compaction is valid as defined above in the Compaction section
-..2. Make sure there is no other ongoing compaction that includes the SSTs or SRs referenced by the compaction.
+    1. Make sure the compaction is valid as defined above in the Compaction section
+    2. Make sure there is no other ongoing compaction that includes the SSTs or SRs referenced by the compaction.
 2. At this point, the call to `compact` returns.
 3. Schedule the compaction for execution in the background.
 
@@ -306,17 +316,17 @@ All of this is to say, Tiered compaction feels like a great starting point for a
 
 SlateDB’s tiered Compaction Policy will work as follows:
 1. Whenever a new CompactorUpdate arrives on the policy channel:
-..1. The Compaction Policy groups SRs into levels L2, L3,... A level with a larger index is considered “lower” (ugh - this is confusing). The size of the runs in LN is at most `l1_sst_size X l1_compaction_threshold X compaction.policy.tiered.level_compaction_threshold^(N - 1)`
-..2. Iterate over the levels from lowest to highest. For each level, maybe schedule a compaction. The Compaction includes all SRs in the level as its source (TODO - we could probably include compactions for the higher level as well if it needs to be compacted, and so on - but we can add this later). The destination SR ID is the ID of the last SR in the level. Schedule a compaction for level N if:
-....1. The number of SRs in N > `compaction.policy.tiered.level_compaction_threshold_runs`
-....2. The number of SRs in N+1 < `compaction.policy.tiered.level_max_runs`
-....3. The number of uncompleted compactions < `max_compactions`
-....4. No ongoing compaction from level N
-..2. Maybe schedule a compaction for L1. The Compaction includes all SSTs in L1 as its source. The destination SR ID is the highest unused SR ID. Schedule a compaction for L1 if:
-....1. The number of SRs in L1 > `l1_compaction_threshold_ssts`
-....2. The number of SRs in L2 < `compaction.policy.tiered.level_max_runs`
-....3. The number of uncompleted compactions < `max_compactions`
-....4. No ongoing compaction from L1
+    1. The Compaction Policy groups SRs into levels L2, L3,... A level with a larger index is considered “lower” (ugh - this is confusing). The size of the runs in LN is at most `l1_sst_size X l1_compaction_threshold X compaction.policy.tiered.level_compaction_threshold^(N - 1)`
+    2. Iterate over the levels from lowest to highest. For each level, maybe schedule a compaction. The Compaction includes all SRs in the level as its source (TODO - we could probably include compactions for the higher level as well if it needs to be compacted, and so on - but we can add this later). The destination SR ID is the ID of the last SR in the level. Schedule a compaction for level N if:
+        1. The number of SRs in N > `compaction.policy.tiered.level_compaction_threshold_runs`
+        2. The number of SRs in N+1 < `compaction.policy.tiered.level_max_runs`
+        3. The number of uncompleted compactions < `max_compactions`
+        4. No ongoing compaction from level N
+    2. Maybe schedule a compaction for L1. The Compaction includes all SSTs in L1 as its source. The destination SR ID is the highest unused SR ID. Schedule a compaction for L1 if:
+        1. The number of SRs in L1 > `l1_compaction_threshold_ssts`
+        2. The number of SRs in L2 < `compaction.policy.tiered.level_max_runs`
+        3. The number of uncompleted compactions < `max_compactions`
+        4. No ongoing compaction from L1
 
 
 ### Back-Pressure
