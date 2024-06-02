@@ -2,9 +2,11 @@ use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
-use crate::flatbuffer_types::OwnedSsTableInfo;
+use crate::flatbuffer_types::{ManifestOwned, OwnedSsTableInfo};
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use bytes::Bytes;
+use flatbuffers::InvalidFlatbuffer;
+use futures::StreamExt;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use std::ops::Range;
@@ -61,6 +63,54 @@ impl TableStore {
             sst_format,
         }
     }
+
+    pub(crate) async fn open_latest_manifest(
+        &self,
+        root_path: &Path,
+    ) -> Option<Result<ManifestOwned, InvalidFlatbuffer>> {
+        let manifest_path = &Path::from(format!("{}/{}/", root_path, "manifest"));
+        let mut files_stream = self.object_store.list(Some(manifest_path));
+        let mut manifest_file_path: Option<Path> = None;
+
+        while let Some(file) = files_stream.next().await.transpose().unwrap() {
+            if file.location.extension().unwrap_or_default() == "manifest" {
+                if manifest_file_path.is_none() || manifest_file_path.as_ref().unwrap() < &file.location {
+                    manifest_file_path = Some(file.location.clone());
+                }
+            }
+        }
+
+        if manifest_file_path.is_some() {
+            let manifest_bytes = self
+                .object_store
+                .get(&manifest_file_path.unwrap())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+
+            Some(ManifestOwned::new(manifest_bytes.clone()))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) async fn write_manifest(
+        &self,
+        root_path: &Path,
+        manifest: ManifestOwned,
+    ) -> Result<(), SlateDBError> {
+        let manifest_path = &Path::from(format!("{}/{}/{:020}", root_path, "manifest", manifest.borrow().manifest_id()));
+        
+        self.object_store
+            .put(manifest_path, Bytes::copy_from_slice(manifest.data()))
+            .await
+            .map_err(SlateDBError::ObjectStoreError)?;
+            
+        Ok(())
+    }
+
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
         self.sst_format.table_builder()

@@ -4,14 +4,16 @@ use crate::tablestore::{SSTableHandle, TableStore};
 use crate::types::ValueDeletable;
 use crate::{block::Block, error::SlateDBError};
 use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
+use crate::flatbuffer_types::ManifestOwned;
 use bytes::Bytes;
+use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::VecDeque,
-    path::{Path, PathBuf},
     sync::Arc,
 };
+
 
 pub struct DbOptions {
     pub flush_ms: usize,
@@ -40,28 +42,26 @@ impl DbState {
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<Arc<DbState>>>,
     #[allow(dead_code)] // TODO remove this once we write SSTs to disk
-    pub(crate) path: PathBuf,
+    pub(crate) path: Path,
     pub(crate) options: DbOptions,
     pub(crate) table_store: TableStore,
+    #[allow(dead_code)] // TODO remove this once we write manifest to disk.
+    pub(crate) manifest: Arc<RwLock<ManifestOwned>>,
 }
 
 impl DbInner {
     pub fn new(
-        path: impl AsRef<Path>,
+        path: Path,
         options: DbOptions,
         table_store: TableStore,
+        manifest: ManifestOwned,
     ) -> Result<Self, SlateDBError> {
-        let path_buf = path.as_ref().to_path_buf();
-
-        if !path_buf.exists() {
-            std::fs::create_dir_all(path).map_err(SlateDBError::IoError)?;
-        }
-
         Ok(Self {
             state: Arc::new(RwLock::new(Arc::new(DbState::create()))),
-            path: path_buf,
+            path: path,
             options,
             table_store,
+            manifest: Arc::new(RwLock::new(manifest)),
         })
     }
 
@@ -180,14 +180,26 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn open(
-        path: impl AsRef<Path>,
+    pub async fn open(
+        path: Path,
         options: DbOptions,
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self, SlateDBError> {
         let sst_format = SsTableFormat::new(4096, options.min_filter_keys);
         let table_store = TableStore::new(object_store, sst_format);
-        let inner = Arc::new(DbInner::new(path, options, table_store)?);
+
+        let manifest = table_store.open_latest_manifest(&path).await;
+        let manifest = match manifest {
+            Some(Ok(manifest)) => manifest,
+            Some(Err(e)) => return Err(e.into()),
+            None => {
+                let manifest = ManifestOwned::create_new();
+                table_store.write_manifest(&path, manifest.clone()).await?;
+                manifest
+            }
+        };
+
+        let inner = Arc::new(DbInner::new(path, options, table_store, manifest)?);
         let (tx, rx) = crossbeam_channel::unbounded();
         let flush_thread = inner.spawn_flush_thread(rx);
         Ok(Self {
@@ -244,13 +256,14 @@ mod tests {
     async fn test_put_get_delete() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::open(
-            "/tmp/test_kv_store",
+            Path::from("/tmp/test_kv_store"),
             DbOptions {
                 flush_ms: 100,
                 min_filter_keys: 0,
             },
             object_store,
         )
+        .await
         .unwrap();
         let key = b"test_key";
         let value = b"test_value";
@@ -270,13 +283,14 @@ mod tests {
     async fn test_put_empty_value() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::open(
-            "/tmp/test_kv_store",
+            Path::from("/tmp/test_kv_store"),
             DbOptions {
                 flush_ms: 100,
                 min_filter_keys: 0,
             },
             object_store,
         )
+        .await
         .unwrap();
         let key = b"test_key";
         let value = b"";
@@ -293,13 +307,14 @@ mod tests {
     async fn test_flush_while_iterating() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::open(
-            "/tmp/test_kv_store",
+            Path::from("/tmp/test_kv_store"),
             DbOptions {
                 flush_ms: 100,
                 min_filter_keys: 0,
             },
             object_store,
         )
+        .await
         .unwrap();
 
         let memtable = {

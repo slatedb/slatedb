@@ -1,0 +1,43 @@
+include "sst.fbs";
+
+// Manifest to persist state of DB.
+table Manifest {
+    // Manifest format version to allow schema evolution.
+    manifest_format_version: ushort;
+
+    // Id of this manifest. Manifest file name will be derived from this id.
+    manifest_id: ulong;
+
+    // The current writer's epoch.
+    writer_epoch: ulong;
+
+    // The current compactor's epoch.
+    compactor_epoch: ulong;
+
+    // The most recent SST in the WAL that's been compacted.
+    wal_id_last_compacted: ulong;
+
+    // The most recent SST in the WAL at the time manifest was updated.
+    wal_id_last_seen: ulong;
+
+    // A list of the SST table info that are valid to read in the `levels` folder.
+    leveled_ssts: [SsTableInfo];
+
+    // A list of read snapshots that are currently open.
+    snapshots: [Snapshot];
+}
+
+// Snapshot reference to be included in manifest to record active snapshots.
+table Snapshot {
+    // TODO:- this was uint128 in the spec. Flat buffer doesn't have integer types beyond ulong.
+    // Id that must be unique across all open snapshots.
+    id: ulong;
+
+    // The manifest ID that this snapshot is using as its `DbState`.
+    manifest_id: ulong;
+
+    // The UTC unix timestamp seconds that a snapshot expires at. Clients may update this value.
+    // If `snapshot_expire_time_s` is older than now(), the snapshot is considered expired.
+    // If `snapshot_expire_time_s` is 0, the snapshot will never expire.
+    snapshot_expire_time_s: uint;
+}
