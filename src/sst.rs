@@ -236,12 +236,14 @@ mod tests {
     use crate::tablestore::TableStore;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
+    use object_store::path::Path;
     use std::sync::Arc;
 
     use super::*;
 
     #[tokio::test]
     async fn test_sstable() {
+        let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 0);
         let table_store = TableStore::new(object_store, format);
@@ -252,7 +254,7 @@ mod tests {
         let encoded_info = encoded.info.clone();
 
         // write sst and validate that the handle returned has the correct content.
-        let sst_handle = table_store.write_sst(0, encoded).await.unwrap();
+        let sst_handle = table_store.write_sst(&root_path, &String::from("wal"), 0, encoded).await.unwrap();
         assert_eq!(encoded_info, sst_handle.info);
         let sst_info = sst_handle.info.borrow();
         assert_eq!(1, sst_info.block_meta().len());
@@ -268,7 +270,7 @@ mod tests {
         );
 
         // construct sst info from the raw bytes and validate that it matches the original info.
-        let sst_handle_from_store = table_store.open_sst(0).await.unwrap();
+        let sst_handle_from_store = table_store.open_sst(&root_path, &String::from("wal"), 0).await.unwrap();
         assert_eq!(encoded_info, sst_handle_from_store.info);
         let sst_info_from_store = sst_handle_from_store.info.borrow();
         assert_eq!(1, sst_info_from_store.block_meta().len());
@@ -286,6 +288,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sstable_no_filter() {
+        let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 3);
         let table_store = TableStore::new(object_store, format);
@@ -294,8 +297,8 @@ mod tests {
         builder.add(b"key2", Some(b"value2")).unwrap();
         let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
-        table_store.write_sst(0, encoded).await.unwrap();
-        let sst_handle = table_store.open_sst(0).await.unwrap();
+        table_store.write_sst(&root_path, &String::from("wal"), 0, encoded).await.unwrap();
+        let sst_handle = table_store.open_sst(&root_path, &String::from("wal"), 0).await.unwrap();
         assert_eq!(encoded_info, sst_handle.info);
         let handle = sst_handle.info.borrow();
         assert_eq!(handle.filter_offset(), handle.block_meta_offset());

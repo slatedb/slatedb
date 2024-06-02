@@ -118,11 +118,14 @@ impl TableStore {
 
     pub(crate) async fn write_sst(
         &self,
+        root_path: &Path,
+        sub_path: &String,
         id: usize,
         encoded_sst: EncodedSsTable,
     ) -> Result<SSTableHandle, SlateDBError> {
+        let path = self.path(root_path, sub_path, id);
         self.object_store
-            .put(&self.path(id), encoded_sst.raw.clone())
+            .put(&path, encoded_sst.raw.clone())
             .await
             .map_err(SlateDBError::ObjectStoreError)?;
         Ok(SSTableHandle {
@@ -134,8 +137,8 @@ impl TableStore {
 
     // todo: clean up the warning suppression when we start using open_sst outside tests
     #[allow(dead_code)]
-    pub(crate) async fn open_sst(&self, id: usize) -> Result<SSTableHandle, SlateDBError> {
-        let path = self.path(id);
+    pub(crate) async fn open_sst(&self, root_path: &Path, sub_path: &String,  id: usize) -> Result<SSTableHandle, SlateDBError> {
+        let path = self.path(root_path, sub_path, id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
@@ -154,10 +157,12 @@ impl TableStore {
 
     pub(crate) async fn read_block(
         &self,
+        root_path: &Path,
+        sub_path: &String,
         handle: &SSTableHandle,
         block: usize,
     ) -> Result<Block, SlateDBError> {
-        let path = self.path(handle.id);
+        let path = self.path(root_path, sub_path, handle.id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
@@ -165,7 +170,7 @@ impl TableStore {
         self.sst_format.read_block(&handle.info, block, &obj).await
     }
 
-    fn path(&self, id: usize) -> Path {
-        Path::from(format!("sst-{}", id))
+    fn path(&self, root_path: &Path, sub_path: &String, id: usize) -> Path {
+        Path::from(format!("{}/{}/{:020}.sst", root_path, sub_path ,id))
     }
 }

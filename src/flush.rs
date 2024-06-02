@@ -34,7 +34,7 @@ impl DbInner {
         }
 
         let encoded_sst = sst_builder.build()?;
-        let handle = self.table_store.write_sst(id, encoded_sst).await?;
+        let handle = self.table_store.write_sst(&self.path, &String::from("wal") , id, encoded_sst).await?;
         Ok(handle)
     }
 
