@@ -368,8 +368,9 @@ mod tests {
     #[tokio::test]
     async fn test_basic_restore() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
         let kv_store = Db::open(
-            Path::from("/tmp/test_kv_store"),
+            path.clone(),
             DbOptions {
                 flush_ms: 100,
                 min_filter_keys: 0,
@@ -380,7 +381,7 @@ mod tests {
         .unwrap();
 
         // write some sst files
-        let sst_count: i32 = 5;
+        let sst_count: u64 = 5;
         for i in 0..sst_count {
             kv_store.put(&i.to_be_bytes(), &i.to_be_bytes()).await;
             kv_store.flush().await.unwrap();
@@ -390,7 +391,7 @@ mod tests {
 
         // recover and validate that sst files are loaded on recovery.
         let kv_store_restored = Db::open(
-            Path::from("/tmp/test_kv_store"),
+            path.clone(),
             DbOptions {
                 flush_ms: 100,
                 min_filter_keys: 0,
@@ -403,5 +404,12 @@ mod tests {
                 kv_store_restored.get(&i.to_be_bytes()).await.unwrap().is_some(),
                 true);
         }
+
+        // validate manifest file.
+        let sst_format = SsTableFormat::new(4096, 10);
+        let table_store = TableStore::new(object_store.clone(), sst_format);
+        let manifest_owned = table_store.open_latest_manifest(&path).await.unwrap().unwrap();
+        let manifest = manifest_owned.borrow();
+        assert_eq!(manifest.wal_id_last_seen(), sst_count);
     }
 }

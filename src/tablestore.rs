@@ -120,7 +120,7 @@ impl TableStore {
         root_path: &Path,
         manifest: &ManifestOwned,
     ) -> Result<(), SlateDBError> {
-        let manifest_path = &Path::from(format!("{}/{}/{:020}", root_path, "manifest", manifest.borrow().manifest_id()));
+        let manifest_path = &Path::from(format!("{}/{}/{:020}.manifest", root_path, "manifest", manifest.borrow().manifest_id()));
         
         self.object_store
             .put(manifest_path, Bytes::copy_from_slice(manifest.data()))
