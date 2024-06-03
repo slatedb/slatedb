@@ -35,7 +35,7 @@ There are a few problems with the current implementation that we address with th
 - Compact WAL SSTs into larger SSTs so that space from overwrites and deletes can be reclaimed, and reduce read amplification.
 - Further compact compacted SSTs to further reduce read and space amplification.
 - Define a simple initial compaction algorithm that balances the various types of amplification.
-- Allow for flexibility in the specific compaction algorithm. This is likely going to be an area that we can uniquely innovate, and the design should support easily iterating on compaction policy.
+- Allow for flexibility in the specific compaction algorithm. This is likely going to be an area that we can uniquely innovate, and the design should support easily iterating on compaction scheduler.
 - Split some compaction work between the writer and compactor processes to allow for better network utilization.
 - Support manual major compaction that compacts the whole database.
 
@@ -45,7 +45,7 @@ The following are out-of-scope for this design. That said, the design should not
 
 - Optimize for specific workloads. For example, some databases optimize for in-order bulk inserts by avoiding compaction and simply writing out the database in its fully compacted form as inserts arrive.
 - Similarly, specialized compaction policies optimized for specific workloads are out-of-scope. For example, some databases support specialized compaction for time series data with a finite lifetime.
-- Resumable compaction. This proposal will not define how to resume a long-running compaction after a compactor restart. This is important to support, as compactions could take 10s of minutes, and the compactor should not have to restart them after a failure. I’ll include a section at the end on how we can extend the design to support htis.
+- Resumable compaction. This proposal will not define how to resume a long-running compaction after a compactor restart. This is important to support, as compactions could take 10s of minutes, and the compactor should not have to restart them after a failure. I’ll include a section at the end on how we can extend the design to support this.
 - GC of unused SSTs is excluded from this design
 
 ## Proposal
@@ -67,9 +67,9 @@ In the rest of this document, we propose mechanisms for compacting together SSTs
 The main writer compacts the WAL to the first level of the database. This has a number of benefits:
 As we describe below, the main writer compacts the WAL directly from memory without reading the data back from S3 first. This saves cost for low-latency writers and more importantly, reduces load on the network.
 This offloads some of the compaction i/o from the compactor onto the writer. Assuming the main bottleneck for compaction will be network, this should help us achieve more throughput.
-It should be easier to coordinate between the compactor and writer for lower-frequency compactions to lower levels than WAL->L1 compactions.
+It should be easier to coordinate between the compactor and writer for lower-frequency compactions to lower levels than WAL->L0 compactions.
 
-The compactor is responsible for compacting L1 and the lower levels of the database. Compacted SSTs are maintained in a series of Sorted Runs (SRs). Each SR spans the full keyspace of the database. A SR is made up of an ordered series of SSTs, each of which contains a distinct subset of the total keyspace. We use Sorted Runs instead of large SSTs because it is a simple way to keep the size of the metadata blocks small enough so that they can be easily paged in and out of cache without polluting the cache. Larger SSTs have larger metadata blocks. It’s expensive to page them in and out of cache, and they are likely to displace other data that should be retained by the cache to achieve a high hit rate.
+The compactor is responsible for compacting L0 and the lower levels of the database. Compacted SSTs are maintained in a series of Sorted Runs (SRs). Each SR spans the full keyspace of the database. A SR is made up of an ordered series of SSTs, each of which contains a distinct subset of the total keyspace. We use Sorted Runs instead of large SSTs because it is a simple way to keep the size of the metadata blocks small enough so that they can be easily paged in and out of cache without polluting the cache. Larger SSTs have larger metadata blocks. It’s expensive to page them in and out of cache, and they are likely to displace other data that should be retained by the cache to achieve a high hit rate.
 
 The SRs are themselves ordered by age. When executing point lookups, SlateDB looks up the value for a key in age-order, and terminates the search at the first SR that contains the key. Range scans read every SR and sort-merge the result.
 
@@ -77,35 +77,34 @@ The SRs are themselves ordered by age. When executing point lookups, SlateDB loo
 
 ```
 table SortedRun {
-    id: uint32
+    id: uint32;
     ssts:[SstId];
 }
 
 table SstId {
-    high: uint64,
-    low: uint64
+    high: uint64;
+    low: uint64;
 }
 
 table Compacted {
-    runs: [SortedRun]
+    runs: [SortedRun];
 }
 
 table Manifest {
     …
-    l1: [SstId]
-    compacted: Compacted
-    compactions: Compaction
+    l0: [SstId];
+    compacted: Compacted;
     …
 }
 ```
 
 We propose to augment the manifest by adding the following fields:
 
-`l1`: Contains a list of SST IDs in L1
+`L0`: Contains a list of SST IDs in L0
 
 `compacted`: Contains a single instance of `Compacted`. `Compacted` contains a list of `SortedRun` instances. A `SortedRun` instance defines a single sorted run. Each Sorted Run contains a list of SST IDs and has a unique ID. The list of SST IDs defines the SSTs that comprise the sorted run. A given SST belongs to at most 1 SR. The ID describes the SR’s position in the list of sorted runs in `compacted`. That is, an SR S with an S.id must occur after SR S’ with ID S’.id if S.id < S’.id (so the sorted run with ID 0 must be last in the list). The last SR in the list must have ID 0. The semantics of the ID will be important when we describe how to define compactions.
 
-#### Naming Compacted SSTs (L1 and L2+)
+#### Naming Compacted SSTs (L0) and L1+)
 We will use ULIDs to name compacted SSTs (TODO: explain reasoning). The ULID is stored in the manifest in the `SstId` table, with the `high` and `low` fields containing the high and low bits of the ULID, respectively.
 
 In the Object Store, compacted SSTs are stored under the compacted directory. Each SST object is named using its ULID and the suffix `.sst`, e.g:
@@ -118,51 +117,53 @@ In the Object Store, compacted SSTs are stored under the compacted directory. Ea
 
 ### DB Options
 
-Compaction behavior is be governed by the following DB options:
+Compaction behavior is governed by the following DB options:
 
-`l1_sst_size_bytes`: defines the target L1 SST size in bytes.
+`l0_sst_size_bytes`: defines the target L0 SST size in bytes.
 
-`memtable_flush_interval_ms`: defines the minimum interval between memtable flush-related manifest updates in milliseconds.
+`l0_manifest_commit_interval_ms`: defines the minimum interval between memtable flush-related manifest updates in milliseconds.
 
-`l1_compaction_threshold_ssts`: defines the threshold number of SSTs for compacting L1. (default 8)
+`l0_compaction_threshold_ssts`: defines the threshold number of SSTs for compacting L0. (default 8)
 
-`l1_max_ssts`: defines the maximum number of uncompacted L1 SSTs. (default 16)
+`l0_max_ssts`: defines the maximum number of uncompacted L0 SSTs. (default 16)
 
 `max_compactions`: defines the max number of concurrent compactions. (default 4)
 
-`compaction_policy`: defines the compaction policy (currently only supports the value `tiered`)
+`compaction_scheduler`: defines the compaction scheduler (currently only supports the value `tiered`)
 
-`compaction_policy.tiered.level_compaction_threshold_runs`: defines the threshold number of sorted runs for compacting a lower level (specific to the tiered compaction policy). (default 8)
+`compaction_scheduler_tiered`: An options struct that defines scheduler options for tiered compaction.
 
-`compaction_policy.tiered.level_max_runs`: defines the maximum number of sorted runs at alower level (specific to the tiered compaction policy). (default 16)
+`compaction_scheduler_tiered.level_compaction_threshold_runs`: defines the threshold number of sorted runs for compacting a lower level (specific to the tiered compaction scheduler). (default 8)
 
-### WAL->L1 Compaction
+`compaction_scheduler_tiered.level_max_runs`: defines the maximum number of sorted runs at alower level (specific to the tiered compaction scheduler). (default 16)
 
-The writer is responsible for compacting the WAL to the first level of the database. It does this directly from the memtable rather than reading back the WAL first. Instead of freezing the memtable when writing the WAL, it instead retains it until enough data has accumulated to fill an L1 SST. Only then does it freeze the memtable and write out an L1 SST. When it’s been longer than `memtable_flush_interval` since the last manifest update, the writer updates the manifest with the new SSTs. The L1 writes are fenced by virtue of committing L1 SSTs in a manifest update. The newly written L1 SSTs are only considered part of the database when the manifest has been updated.
+### WAL->L0 Compaction
+
+The writer is responsible for compacting the WAL to the first level of the database. It does this directly from the memtable rather than reading back the WAL first. Instead of freezing the memtable when writing the WAL, it instead retains it until enough data has accumulated to fill an L0 SST. Only then does it freeze the memtable and write out an L0 SST. When it’s been longer than `l0_manifest_commit_interval_ms` since the last manifest update, the writer updates the manifest with the new SSTs. The L0 writes are fenced by virtue of committing L0 SSTs in a manifest update. The newly written L0 SSTs are only considered part of the database when the manifest has been updated.
 
 Let’s look at the write and recovery protocols in more detail:
 
 write:
 1. `put` adds the key-value to the current memtable and updates the WAL using the protocol described in [the manifest design](https://github.com/slatedb/slatedb/blob/main/docs/0001-manifest.md). 
-2. If the current memtable is larger than `l1_sst_size`, freeze the memtable by converting it to an immutable memtable, and write the memtable to a new ULID-named SST S in `compacted`.
+2. If the current memtable is larger than `l0_sst_size`, freeze the memtable by converting it to an immutable memtable, and write the memtable to a new ULID-named SST S in `compacted`.
 3. When S and all earlier SSTs S’, S’’, … for unflushed immutable tables are written:
-    1. update L1 in-memory by prepending S, S’, S’’, … to the list of SSTs in L1.
+    1. update L0 in-memory by prepending S, S’, S’’, … to the list of SSTs in L0.
     2. clear the immutable memtables for S, S’, S’’,...
-    3. if time since last manifest update > `memtable_flush_interval`:
-        1. if (number l1 SSTs > l1_max_uncompacted):
+    3. if time since last manifest update > `l0_manifest_commit_interval_ms`:
+        1. if (number l0 SSTs > l0_max_uncompacted):
             1. pause new writes
-            2. wait till number of l1 SSTs < l1_max_uncompacted
+            2. wait till number of l0 SSTs < l0_max_uncompacted
         2. unpause writes if paused
         3. update the manifest using CAS with the following modifications:
             1. update `last_compacted` to the last WAL SST included in S
-            2. update `l1` by prepending S, S’, S’’, … to the list
+            2. update `l0` by prepending S, S’, S’’, … to the list
 4. If CAS from (3) fails:
     1. If CAS fails and the manifest has a different writer epoch, exit
     1. If CAS fails and the manifest has the same writer epoch, go back to 3.iii.c
 5. If CAS from (3) succeeds, remove the immutable memtable.
 
 write-recovery:
-1. Fence older writers as described in the (manifest design)[https://github.com/slatedb/slatedb/blob/main/docs/0001-manifest.md].
+1. Fence older writers as described in the [manifest design](https://github.com/slatedb/slatedb/blob/main/docs/0001-manifest.md).
 2. Create a new mutable memtable
 3. For every WAL SST W after `last_compacted`, reapply the writes as described above in the write protocol.
 
@@ -170,40 +171,40 @@ TODO: should we have some way to bound the number of immutable memtables in memo
 
 ### Compacting Lower Levels
 
-The Compactor compacts L1 and the lower levels. It contains two logical processes: a Compaction Executor and a Compaction Policy. The Compaction Policy observes the current state of the database and schedules Compactions. The Compaction Executor bootstraps the Compactor, executes the Compactions scheduled by the Compaction Policy, and notifies the Compaction Policy about status. The Compaction Executor is fixed, while The Compaction Policy is modular to allow SlateDB to support different compaction styles. The specific policy is specified in the `compaction.policy` db option. Initially, we will implement a single policy that performs tiered compaction.
+The Compactor compacts L0 and the lower levels. It contains two logical processes: a Compaction Executor and a Compaction Scheduler. The Compaction Scheduler observes the current state of the database and schedules Compactions. The Compaction Executor bootstraps the Compactor, executes the Compactions scheduled by the Compaction Scheduler, and notifies the Compaction Scheduler about status. The Compaction Executor is fixed, while The Compaction Scheduler is modular to allow SlateDB to support different compaction styles. The specific scheduler is specified in the `compaction.scheduler` db option. Initially, we will implement a single scheduler that performs tiered compaction.
 
 #### Interfaces
 
-Lets start by defining the interface between the CompactionExecutor and CompactionPolicy. I’ll define them as Rust structs/traits. Then, we discuss how each component implements the interfaces.
+Lets start by defining the interface between the CompactionExecutor and CompactionScheduler. I’ll define them as Rust structs/traits. Then, we discuss how each component implements the interfaces.
 
 ##### Compactions
 
-The Compaction Policy tells the Compaction Executor what compactions to execute. A Compaction is defined using the following parameters:
-* Sources: A list of one or more sources of data to compact. A source can either be a single L1 SST, or a single SR. The Sources must be logically consecutive. This means that for any sources S1 and S2 where S2 appears immediately after S1 in the list:
-    * If S1 is an L1 SST, then S2 must either be the next L1 SST OR if S1 is the last L1 SST then S2 must be the first SR (SR with the highest ID)
+The Compaction Scheduler tells the Compaction Executor what compactions to execute. A Compaction is defined using the following parameters:
+* Sources: A list of one or more sources of data to compact. A source can either be a single L0 SST, or a single SR. The Sources must be logically consecutive. This means that for any sources S1 and S2 where S2 appears immediately after S1 in the list:
+    * If S1 is an L0 SST, then S2 must either be the next L0 SST OR if S1 is the last L0 SST then S2 must be the first SR (SR with the highest ID)
     * If S1 is an SR, then S2 must be the next SR.
 * Destination: A destination SR. This can be a new SR, or it can be the SR from Sources with the lowest ID. If it’s a new SR, The SR must be logically consecutive to the last element of Sources (as described above).
 
 Let’s look at some examples of valid/invalid compactions. I’ll use string IDs for SSTs here instead of ULIDs. Suppose our manifest looks like:
 
 ```
-l1: [SST-1, SST-2, SST-3, SST-4]
+l0: [SST-1, SST-2, SST-3, SST-4]
 compacted: [100, 50, 3, 1, 0]
 ```
 
 Here are examples of valid/invalid compactions (I’m using the notation Sources->Destination)
 
-`[SST-3, SST-4]->101`: This describes compacting the last 2 L1 SSTs to a new SR
+`[SST-2, SST-1]->101`: This describes compacting the oldest 2 L0 SSTs to a new SR
 
-`[SST-1, SST-2]->101`: This is invalid because it skips SST-3 and SST-4
+`[SST-4, SST-3]->101`: This is invalid because it skips SST-2 and SST-1
 
-`[SST-4, 100]->100`: This describes compacting SST-4 and SR 100 and saving the result as SR 100
+`[SST-1, 100]->100`: This describes compacting the oldest L0 SST (SST-1) and SR 100 and saving the result as SR 100
 
 `[100, 50]->2`: This is invalid because it writes the result to an SR that is not consecutive to 50 (3 is consecutive to 50)
 
-`[SST-1, SST-2, SST-3, SST-4, 100, 50, 3, 1, 0]->0`: This describes a major compaction that compacts everything and saves it as SR 0
+`[SST-4, SST-3, SST-2, SST-1, 100, 50, 3, 1, 0]->0`: This describes a major compaction that compacts everything and saves it as SR 0
 
-Observe that we can use this basic definition to describe compactions done by different compaction algorithms (this isn’t strictly true in the above proposal - e.g. it doesn’t currently support some-to-all compactions like compacting a single SST from one SR into another SR, but that’s a fairly straightforward extension to the definition of a source) - it’s up to the Compaction Policy to decide what compactions to execute. The policy can choose to implement leveled compaction by viewing each SR as a level and scheduling Compactions that always merge one SR into the next SR. Or it can implement tiered compaction by grouping SRs into levels and define compactions that merge all the SRs in a level into a new SR at the next level. The levels themselves are a logical construct maintained by the policy.
+Observe that we can use this basic definition to describe compactions done by different compaction algorithms (this isn’t strictly true in the above proposal - e.g. it doesn’t currently support some-to-all compactions like compacting a single SST from one SR into another SR, but that’s a fairly straightforward extension to the definition of a source) - it’s up to the Compaction Scheduler to decide what compactions to execute. The scheduler can choose to implement leveled compaction by viewing each SR as a level and scheduling Compactions that always merge one SR into the next SR. Or it can implement tiered compaction by grouping SRs into levels and define compactions that merge all the SRs in a level into a new SR at the next level. The levels themselves are a logical construct maintained by the scheduler.
 
 In Rust, this looks like:
 
@@ -221,7 +222,7 @@ struct Compaction {
 ```
 
 ##### Compaction Executor
-The Compaction Executor provides the following interface to the CompactionPolicy:
+The Compaction Executor provides the following interface to the CompactionScheduler:
 
 ```
 trait CompactionExecutor {
@@ -231,19 +232,19 @@ trait CompactionExecutor {
      * compaction was completed. The executor validates the compaction and returns an
      * error if the compaction is invalid.
      */
-    fn compact(&self, compaction: Compaction) -> Result<(), Error>
+    fn submit(&self, compaction: Compaction) -> Result<(), Error>
 }
 ```
 
-##### Compaction Policy
-The Compaction Policy provides the following interface to the Compaction Executor:
+##### Compaction Scheduler
+The Compaction Scheduler provides the following interface to the Compaction Executor:
 
 ```
 enum CompactorUpdateKind { DBState, CompactionFinished }
 
 struct DBStateUpdate {
     kind: CompactorUpdateKind // always DBState
-    state: DBState,  // we probably don’t want to use DBState here, but rather a subset that contains compactor-relevant state like l1 and compacted. But, you get the idea.
+    state: DBState,  // we probably don’t want to use DBState here, but rather a subset that contains compactor-relevant state like l0 and compacted. But, you get the idea.
 }
 
 struct CompactionFinished {
@@ -257,12 +258,12 @@ union CompactorUpdate {
     compaction_finished: CompactionFinished,
 }
 
-trait CompactionPolicy {
+trait CompactionScheduler {
     /*
-     * Notifies the policy that it should start evaluating the db for compaction. This method
-     * receives a channel over which the Executor sends the Policy updates about changes
+     * Notifies the scheduler that it should start evaluating the db for compaction. This method
+     * receives a channel over which the Executor sends the Scheduler updates about changes
      * to the database. This includes updates about changes to the database (e.g. arrival of
-     * new L1 files), and completion of compactions.
+     * new L0 files), and completion of compactions.
      */
     fn start(&self, executor: Box<dyn CompactionExecutor>, chan: Receiver<CompactorUpdate>);
 }
@@ -272,12 +273,12 @@ trait CompactionPolicy {
 
 The Compaction Executor initializes as follows:
 1. Update the `compactor_epoch` in the manifest using CAS
-2. Initialize the Compaction Policy by creating an instance based on `compaction.policy`, creating, a channel, and calling `start`
+2. Initialize the Compaction Scheduler by creating an instance based on `compaction.scheduler`, creating, a channel, and calling `start`
 3. Send the initial db state (as returned in the manifest) over the channel
 
 Then, the compactor periodically polls the manifest. On every poll, the compactor:
 1. Check if the `compactor_epoch` is different than the compactor’s epoch. If it is, exit.
-2. If the db has new l1 SSTs, send a `DBStateUpdate` message over the policy channel.
+2. If the db has new l0 SSTs, send a `DBStateUpdate` message over the scheduler channel.
 
 ##### Executing a Compaction
 
@@ -291,9 +292,9 @@ The Compaction Executor implements `compact` by:
 
 The Compaction Executor executes the compaction by reading the SSTs and SRs in `sources` and sort-merging them into a new SR.
 
-The Compaction Executor needs to coalesce updates. If the same key appears in multiple sources, then it takes the value from the logically earliest source. The Compaction Executor handles destination SR 0 specially. If the destination SR is 0, and the value for a key is resolved to a tombstone, then the Compaction Executor will not include include the key in the resulting SR.
+The Compaction Executor needs to coalesce updates. If the same key appears in multiple sources, then it takes the value from the logically latest (i.e. most recent) source. The Compaction Executor handles destination SR 0 specially. If the destination SR is 0, and the value for a key is resolved to a tombstone, then the Compaction Executor will not include include the key in the resulting SR.
 
-The new SR is made up of ULID-named SSTs in the `compacted` directory (just like L1). 
+The new SR is made up of ULID-named SSTs in the `compacted` directory (just like L0). 
 
 We should implement the sort-merge so that we can make good use of the available network. One good option here is to use `async` Object Store APIs to concurrently read the various sources, and then to write the resulting SSTs while we move on to the next key ranges. I think the details are something we can work out in the implementation, and it doesn’t have to be optimal in this iteration of work.
 
@@ -303,13 +304,13 @@ When the new SR has been fully written out, the Compaction Executor finishes the
 1. Read the existing manifest and verify that the `compactor_epoch` matches the compactor’s epoch. If it does not, exit.
 2. Generate a new manifest that has the new SR in `compacted` and the SR and SSTs from `sources` removed.
 3. Write the new manifest using CAS. If CAS fails, go back to 1
-4. Send the Compaction Policy a CompactionFinished message with the compaction ID and the updated DB state.
+4. Send the Compaction Scheduler a CompactionFinished message with the compaction ID and the updated DB state.
 
-#### Compaction Policy
+#### Compaction Scheduler
 
-The Compaction Policy is responsible for selecting the next Compaction. Our goal here is to implement something simple that works, and then iterate/optimize on it in future cycles. Initially we propose to implement basic tiered compaction, which tries to maintain sorted runs in size-based levels, and constrains the number of sorted runs in a given level by merging the runs together when there are too many of them, usually moving the resulting run to the next level.
+The Compaction Scheduler is responsible for selecting the next Compaction. Our goal here is to implement something simple that works, and then iterate/optimize on it in future cycles. Initially we propose to implement basic tiered compaction, which tries to maintain sorted runs in size-based levels, and constrains the number of sorted runs in a given level by merging the runs together when there are too many of them, usually moving the resulting run to the next level.
 
-We choose tiered compaction because it works well for workloads with a moderate to high volume of writes because it has lower write amplification than leveled compaction (usually by a factor of T where T is the fanout for each level).  It still guarantees that the total number of runs is proportional to O(log(N)) where N is the size of the db, but allows multiple runs to accumulate at a level to reduce the amount of merging (at the cost of a multiplier T on the number of runs, where T is the number of runs that can accumulate at a level - so it’s really O(Tlog(N))). So the drawback is that there can be significant space and read amplification. However, I think there are reasonable ways to work around most of these drawbacks for now, and we can trade off some write amplification for better read/space amplification down the line by implementing “lazy-leveling” as described in [dostoevetsky](https://scholar.harvard.edu/files/stratos/files/dostoevskykv.pdf):
+We choose tiered compaction because it works well for workloads with a moderate to high volume of writes because it has lower write amplification than leveled compaction (usually by a factor of T where T is the fanout for each level).  It still guarantees that the total number of runs is proportional to O(log(N)) where N is the size of the db, but allows multiple runs to accumulate at a level to reduce the amount of merging (at the cost of a multiplier T on the number of runs, where T is the number of runs that can accumulate at a level - so it’s really O(Tlog(N))). So the drawback is that there can be significant space and read amplification. However, I think there are reasonable ways to work around most of these drawbacks for now, and we can trade off some write amplification for better read/space amplification down the line by implementing “lazy-leveling” as described in [dostoevsky](https://scholar.harvard.edu/files/stratos/files/dostoevskykv.pdf):
 * Tiered compaction maintains `level_compaction_threshold_ssts` sorted runs even at the lowest level, which means the entire keyspace may be copied `level_compaction_threshold_runs` times. This is somewhat concerning from a cost pov, however as explained at the beginning of the design Object Store costs are much lower than block device costs (by a factor of 5-20x), so this is less of a concern for SlateDB than traditional stores.
 * The more concerning consequence of high space amplification is that it will likely directly lead to requiring a proportionally larger cache to achieve high hit rates for good read performance and cost. We can deal with this at first by allocating a larger cache. Eventually, we can do leveled compaction to the final level (meaning, maintain a single run at the final level) to dramatically reduce space amplification as described in the doestoevsky paper. Further, we can estimate space amplification by looking at the relative size of the non-last levels and final level, and execute compactions when amplification crosses some threshold.
 * Tiered compaction also yields a db with more Sorted Runs, which adds to the cost of point lookups. Impact to point lookup cost should be dramatically reduced by SlateDB’s usage of bloom filters. However, more Sorted Runs does mean that we will need more SST reads on average (as the expected number of bloom filters that return a fp increases linearly with the number of Sorted Runs). There are a number of approaches to solving this problem:
@@ -319,24 +320,24 @@ We choose tiered compaction because it works well for workloads with a moderate 
 
 All of this is to say, Tiered compaction feels like a great starting point for a general-purpose store, and we have reasonable short-term workarounds and long term solutions to most of the problems that we anticipate with tiered compaction.
 
-SlateDB’s tiered Compaction Policy will work as follows:
-1. Whenever a new CompactorUpdate arrives on the policy channel:
-    1. The Compaction Policy groups SRs into levels L2, L3,... A level with a larger index is considered “lower” (ugh - this is confusing). The size of the runs in LN is at most `l1_sst_size X l1_compaction_threshold X compaction.policy.tiered.level_compaction_threshold^(N - 1)`
+SlateDB’s tiered Compaction Scheduler will work as follows:
+1. Whenever a new CompactorUpdate arrives on the scheduler channel:
+    1. The Compaction Scheduler groups SRs into levels L1, L2,... A level with a larger index is considered “lower” (ugh - this is confusing). The size of the runs in LN is at most `l0_sst_size X l0_compaction_threshold X compaction.scheduler.tiered.level_compaction_threshold^N`
     2. Iterate over the levels from lowest to highest. For each level, maybe schedule a compaction. The Compaction includes all SRs in the level as its source (TODO - we could probably include compactions for the higher level as well if it needs to be compacted, and so on - but we can add this later). The destination SR ID is the ID of the last SR in the level. Schedule a compaction for level N if:
-        1. The number of SRs in N > `compaction.policy.tiered.level_compaction_threshold_runs`
-        2. The number of SRs in N+1 < `compaction.policy.tiered.level_max_runs`
+        1. The number of SRs in N > `compaction.scheduler.tiered.level_compaction_threshold_runs`
+        2. The number of SRs in N+1 < `compaction.scheduler.tiered.level_max_runs`
         3. The number of uncompleted compactions < `max_compactions`
         4. No ongoing compaction from level N
-    2. Maybe schedule a compaction for L1. The Compaction includes all SSTs in L1 as its source. The destination SR ID is the highest unused SR ID. Schedule a compaction for L1 if:
-        1. The number of SRs in L1 > `l1_compaction_threshold_ssts`
-        2. The number of SRs in L2 < `compaction.policy.tiered.level_max_runs`
+    2. Maybe schedule a compaction for L0. The Compaction includes all SSTs in L0 as its source. The destination SR ID is the highest unused SR ID. Schedule a compaction for L0 if:
+        1. The number of SRs in L0 > `l0_compaction_threshold_ssts`
+        2. The number of SRs in L1 < `compaction.scheduler.tiered.level_max_runs`
         3. The number of uncompleted compactions < `max_compactions`
-        4. No ongoing compaction from L1
+        4. No ongoing compaction from L0
 
 
 ### Back-Pressure
 
-The design described above applies back-pressure so that we don’t wind up writing faster than we can compact and get unbounded read/space amplification. SlateDB blocks new writes if the number of SSTs in L1 exceeds `l1_max_ssts`. This shouldn’t happen if compaction is keeping up and is able to merge SSTs from L1 to L2. Compactions to L2 are blocked if the number of runs in L2 is greater than `compaction.policy.tiered.level_max_runs`. Similarly, Compactions to L3, L4, … LN are blocked if the number of runs in those levels exceeds the threshold.
+The design described above applies back-pressure so that we don’t wind up writing faster than we can compact and get unbounded read/space amplification. SlateDB blocks new writes if the number of SSTs in L0 exceeds `l0_max_ssts`. This shouldn’t happen if compaction is keeping up and is able to merge SSTs from L0 to L1. Compactions to L1 are blocked if the number of runs in L1 is greater than `compaction.scheduler.tiered.level_max_runs`. Similarly, Compactions to L2, L3, … LN are blocked if the number of runs in those levels exceeds the threshold.
 
 ### Reads
 *Point-Lookups*
@@ -344,12 +345,16 @@ The design described above applies back-pressure so that we don’t wind up writ
 The reader looks up keys in the following order, and terminates the search at the first item that contains a given key:
 memtable
 immutable memtable
-L1 SSTs, in order
+L0 SSTs, in order
 SRs, in order
 
 *Range Scans*
 
 To serve Range Scans, the reader needs to look through every memtable, immutable memtable, SST, and SR and sort-merge the key-values that fall within the range.
+
+### Running the Compactor
+
+By default, the compactor will run alongside the main writer-reader in the same process. We will also support running the compactor in a separate process by initializing and running just the compactor.
 
 ### Looking Ahead
 
