@@ -364,4 +364,44 @@ mod tests {
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc3333".as_slice());
     }
+
+    #[tokio::test]
+    async fn test_basic_restore() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open(
+            Path::from("/tmp/test_kv_store"),
+            DbOptions {
+                flush_ms: 100,
+                min_filter_keys: 0,
+            },
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        // write some sst files
+        let sst_count: i32 = 5;
+        for i in 0..sst_count {
+            kv_store.put(&i.to_be_bytes(), &i.to_be_bytes()).await;
+            kv_store.flush().await.unwrap();
+        }
+
+        kv_store.close().await.unwrap();
+
+        // recover and validate that sst files are loaded on recovery.
+        let kv_store_restored = Db::open(
+            Path::from("/tmp/test_kv_store"),
+            DbOptions {
+                flush_ms: 100,
+                min_filter_keys: 0,
+            },
+            object_store.clone(),
+        ).await.unwrap();
+    
+        for i in 0..sst_count {
+            assert_eq!(
+                kv_store_restored.get(&i.to_be_bytes()).await.unwrap().is_some(),
+                true);
+        }
+    }
 }

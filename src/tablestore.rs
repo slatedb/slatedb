@@ -194,6 +194,12 @@ impl TableStore {
     }
 
     fn parse_wal_id(&self, path: &Path) -> u64 {
-        path.filename().unwrap().parse().unwrap()
+        path.filename()
+            .unwrap()
+            .splitn(2, '.')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
     }
 }
