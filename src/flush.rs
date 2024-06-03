@@ -18,21 +18,20 @@ impl DbInner {
     pub(crate) async fn write_manifest(&self) -> Result<(), SlateDBError> {
         let rguard_state = self.state.read();
         let mut wguard_manifest = self.manifest.write();
-        
+
         // TODO:- There doesn't seem to be a way to mutate flat buffer. https://github.com/google/flatbuffers/issues/5772
-        if wguard_manifest.borrow().wal_id_last_seen() != rguard_state.next_sst_id -1  {
-            let new_manifest = wguard_manifest.update_wal_id_last_seen(rguard_state.next_sst_id -1);
-            self.table_store.write_manifest(&self.path, &new_manifest).await?;
+        if wguard_manifest.borrow().wal_id_last_seen() != rguard_state.next_sst_id - 1 {
+            let new_manifest =
+                wguard_manifest.update_wal_id_last_seen(rguard_state.next_sst_id - 1);
+            self.table_store
+                .write_manifest(&self.path, &new_manifest)
+                .await?;
             *wguard_manifest = new_manifest;
         }
         Ok(())
     }
 
-    async fn flush_imm(
-        &self,
-        imm: Arc<MemTable>,
-        id: u64,
-    ) -> Result<SSTableHandle, SlateDBError> {
+    async fn flush_imm(&self, imm: Arc<MemTable>, id: u64) -> Result<SSTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = imm.iter();
         while let Some(kv) = iter.next_entry().await? {
@@ -47,7 +46,10 @@ impl DbInner {
         }
 
         let encoded_sst = sst_builder.build()?;
-        let handle = self.table_store.write_sst(&self.path, &String::from("wal") , id, encoded_sst).await?;
+        let handle = self
+            .table_store
+            .write_sst(&self.path, &String::from("wal"), id, encoded_sst)
+            .await?;
         Ok(handle)
     }
 

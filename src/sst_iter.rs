@@ -1,4 +1,3 @@
-use object_store::path::Path;
 use crate::{
     block::Block,
     block_iterator::BlockIterator,
@@ -6,6 +5,7 @@ use crate::{
     tablestore::{SSTableHandle, TableStore},
     types::KeyValueDeletable,
 };
+use object_store::path::Path;
 
 struct SstIterator {
     table: SSTableHandle,
@@ -18,14 +18,19 @@ struct SstIterator {
 
 impl SstIterator {
     #[allow(dead_code)] // will be used in #8
-    fn new(table: SSTableHandle, table_store: TableStore, root_path: Path, sub_path: String) -> Self {
+    fn new(
+        table: SSTableHandle,
+        table_store: TableStore,
+        root_path: Path,
+        sub_path: String,
+    ) -> Self {
         Self {
             table,
             current_iter: None,
             next_block_idx: 0,
             table_store,
             root_path,
-            sub_path
+            sub_path,
         }
     }
 }
@@ -45,7 +50,12 @@ impl KeyValueIterator for SstIterator {
 
                 let block = self
                     .table_store
-                    .read_block(&self.root_path, &self.sub_path, &self.table, self.next_block_idx)
+                    .read_block(
+                        &self.root_path,
+                        &self.sub_path,
+                        &self.table,
+                        self.next_block_idx,
+                    )
                     .await?;
                 self.next_block_idx += 1;
                 self.current_iter
@@ -70,9 +80,9 @@ impl KeyValueIterator for SstIterator {
 mod tests {
     use super::*;
     use crate::sst::SsTableFormat;
+    use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use std::sync::Arc;
-    use object_store::path::Path;
 
     #[tokio::test]
     async fn test_one_block_sst_iter() {
@@ -86,11 +96,17 @@ mod tests {
         builder.add(b"key3", Some(b"value3")).unwrap();
         builder.add(b"key4", Some(b"value4")).unwrap();
         let encoded = builder.build().unwrap();
-        table_store.write_sst(&root_path, &String::from("wal"), 0, encoded).await.unwrap();
-        let sst_handle = table_store.open_sst(&root_path, &String::from("wal"), 0).await.unwrap();
+        table_store
+            .write_sst(&root_path, &String::from("wal"), 0, encoded)
+            .await
+            .unwrap();
+        let sst_handle = table_store
+            .open_sst(&root_path, &String::from("wal"), 0)
+            .await
+            .unwrap();
         assert_eq!(sst_handle.info.borrow().block_meta().len(), 1);
 
-        let mut iter = SstIterator::new(sst_handle, table_store,root_path, String::from("wal"));
+        let mut iter = SstIterator::new(sst_handle, table_store, root_path, String::from("wal"));
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
@@ -125,8 +141,14 @@ mod tests {
         }
 
         let encoded = builder.build().unwrap();
-        table_store.write_sst(&root_path, &String::from("wal"), 0, encoded).await.unwrap();
-        let sst_handle = table_store.open_sst(&root_path, &String::from("wal"), 0).await.unwrap();
+        table_store
+            .write_sst(&root_path, &String::from("wal"), 0, encoded)
+            .await
+            .unwrap();
+        let sst_handle = table_store
+            .open_sst(&root_path, &String::from("wal"), 0)
+            .await
+            .unwrap();
         assert_eq!(sst_handle.info.borrow().block_meta().len(), 6);
 
         let mut iter = SstIterator::new(sst_handle, table_store, root_path, String::from("wal"));

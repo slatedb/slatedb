@@ -1,19 +1,15 @@
+use crate::flatbuffer_types::ManifestOwned;
 use crate::mem_table::MemTable;
 use crate::sst::SsTableFormat;
 use crate::tablestore::{SSTableHandle, TableStore};
 use crate::types::ValueDeletable;
 use crate::{block::Block, error::SlateDBError};
 use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
-use crate::flatbuffer_types::ManifestOwned;
 use bytes::Bytes;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
-use std::{
-    collections::VecDeque,
-    sync::Arc,
-};
-
+use std::{collections::VecDeque, sync::Arc};
 
 pub struct DbOptions {
     pub flush_ms: usize,
@@ -56,7 +52,6 @@ impl DbInner {
         table_store: TableStore,
         manifest: ManifestOwned,
     ) -> Result<Self, SlateDBError> {
-        
         let mut db_inner = Self {
             state: Arc::new(RwLock::new(Arc::new(DbState::create()))),
             path: path,
@@ -87,7 +82,10 @@ impl DbInner {
 
         for sst in &snapshot.as_ref().l0 {
             if let Some(block_index) = self.find_block_for_key(sst, key).await? {
-                let block = self.table_store.read_block(&self.path,  &String::from("wal"), sst, block_index).await?;
+                let block = self
+                    .table_store
+                    .read_block(&self.path, &String::from("wal"), sst, block_index)
+                    .await?;
                 if let Some(val) = self.find_val_in_block(&block, key).await? {
                     return Ok(val.into_option());
                 }
@@ -177,13 +175,19 @@ impl DbInner {
 
     async fn load_state(&mut self) -> Result<(), SlateDBError> {
         let rguard_manifest = self.manifest.read();
-        let wal_sst_list = self.table_store.get_wal_sst_list(&self.path, &rguard_manifest).await;
+        let wal_sst_list = self
+            .table_store
+            .get_wal_sst_list(&self.path, &rguard_manifest)
+            .await;
 
         for sst_id in wal_sst_list {
-            let sst = self.table_store.open_sst(&self.path, &String::from("wal"), sst_id).await?;
+            let sst = self
+                .table_store
+                .open_sst(&self.path, &String::from("wal"), sst_id)
+                .await?;
             let mut wguard_state = self.state.write();
             let mut snapshot = wguard_state.as_ref().clone();
-            
+
             // always put the new sst at the front of l0
             snapshot.l0.push_front(sst);
             snapshot.next_sst_id = sst_id + 1;
@@ -213,9 +217,7 @@ impl Db {
 
         let manifest = table_store.open_latest_manifest(&path).await;
         let manifest = match manifest {
-            Some(Ok(manifest)) => {
-                manifest
-            },
+            Some(Ok(manifest)) => manifest,
             Some(Err(e)) => return Err(e.into()),
             None => {
                 let manifest = ManifestOwned::create_new();
@@ -397,18 +399,29 @@ mod tests {
                 min_filter_keys: 0,
             },
             object_store.clone(),
-        ).await.unwrap();
-    
+        )
+        .await
+        .unwrap();
+
         for i in 0..sst_count {
             assert_eq!(
-                kv_store_restored.get(&i.to_be_bytes()).await.unwrap().is_some(),
-                true);
+                kv_store_restored
+                    .get(&i.to_be_bytes())
+                    .await
+                    .unwrap()
+                    .is_some(),
+                true
+            );
         }
 
         // validate manifest file.
         let sst_format = SsTableFormat::new(4096, 10);
         let table_store = TableStore::new(object_store.clone(), sst_format);
-        let manifest_owned = table_store.open_latest_manifest(&path).await.unwrap().unwrap();
+        let manifest_owned = table_store
+            .open_latest_manifest(&path)
+            .await
+            .unwrap()
+            .unwrap();
         let manifest = manifest_owned.borrow();
         assert_eq!(manifest.wal_id_last_seen(), sst_count);
     }

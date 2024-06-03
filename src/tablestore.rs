@@ -74,7 +74,9 @@ impl TableStore {
 
         while let Some(file) = files_stream.next().await.transpose().unwrap() {
             if file.location.extension().unwrap_or_default() == "manifest" {
-                if manifest_file_path.is_none() || manifest_file_path.as_ref().unwrap() < &file.location {
+                if manifest_file_path.is_none()
+                    || manifest_file_path.as_ref().unwrap() < &file.location
+                {
                     manifest_file_path = Some(file.location.clone());
                 }
             }
@@ -96,7 +98,11 @@ impl TableStore {
         }
     }
 
-    pub(crate) async fn get_wal_sst_list(&self, root_path: &Path, manifest: &ManifestOwned) -> Vec<u64> {
+    pub(crate) async fn get_wal_sst_list(
+        &self,
+        root_path: &Path,
+        manifest: &ManifestOwned,
+    ) -> Vec<u64> {
         let mut wal_list: Vec<u64> = Vec::new();
         let wal_path = &Path::from(format!("{}/{}/", root_path, "wal"));
         let mut files_stream = self.object_store.list(Some(wal_path));
@@ -120,16 +126,20 @@ impl TableStore {
         root_path: &Path,
         manifest: &ManifestOwned,
     ) -> Result<(), SlateDBError> {
-        let manifest_path = &Path::from(format!("{}/{}/{:020}.manifest", root_path, "manifest", manifest.borrow().manifest_id()));
-        
+        let manifest_path = &Path::from(format!(
+            "{}/{}/{:020}.manifest",
+            root_path,
+            "manifest",
+            manifest.borrow().manifest_id()
+        ));
+
         self.object_store
             .put(manifest_path, Bytes::copy_from_slice(manifest.data()))
             .await
             .map_err(SlateDBError::ObjectStoreError)?;
-            
+
         Ok(())
     }
-
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
         self.sst_format.table_builder()
@@ -156,7 +166,12 @@ impl TableStore {
 
     // todo: clean up the warning suppression when we start using open_sst outside tests
     #[allow(dead_code)]
-    pub(crate) async fn open_sst(&self, root_path: &Path, sub_path: &String,  id: u64) -> Result<SSTableHandle, SlateDBError> {
+    pub(crate) async fn open_sst(
+        &self,
+        root_path: &Path,
+        sub_path: &String,
+        id: u64,
+    ) -> Result<SSTableHandle, SlateDBError> {
         let path = self.path(root_path, sub_path, id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
@@ -190,7 +205,7 @@ impl TableStore {
     }
 
     fn path(&self, root_path: &Path, sub_path: &String, id: u64) -> Path {
-        Path::from(format!("{}/{}/{:020}.sst", root_path, sub_path ,id))
+        Path::from(format!("{}/{}/{:020}.sst", root_path, sub_path, id))
     }
 
     fn parse_wal_id(&self, path: &Path) -> u64 {
