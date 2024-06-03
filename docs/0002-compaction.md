@@ -105,7 +105,7 @@ We propose to augment the manifest by adding the following fields:
 `compacted`: Contains a single instance of `Compacted`. `Compacted` contains a list of `SortedRun` instances. A `SortedRun` instance defines a single sorted run. Each Sorted Run contains a list of SST IDs and has a unique ID. The list of SST IDs defines the SSTs that comprise the sorted run. A given SST belongs to at most 1 SR. The ID describes the SR’s position in the list of sorted runs in `compacted`. That is, an SR S with an S.id must occur after SR S’ with ID S’.id if S.id < S’.id (so the sorted run with ID 0 must be last in the list). The last SR in the list must have ID 0. The semantics of the ID will be important when we describe how to define compactions.
 
 #### Naming Compacted SSTs (L0) and L1+)
-We will use ULIDs to name compacted SSTs (TODO: explain reasoning). The ULID is stored in the manifest in the `SstId` table, with the `high` and `low` fields containing the high and low bits of the ULID, respectively.
+We will use ULIDs to name compacted SSTs. The ULID is stored in the manifest in the `SstId` table, with the `high` and `low` fields containing the high and low bits of the ULID, respectively.
 
 In the Object Store, compacted SSTs are stored under the compacted directory. Each SST object is named using its ULID and the suffix `.sst`, e.g:
 
@@ -323,7 +323,7 @@ All of this is to say, Tiered compaction feels like a great starting point for a
 SlateDB’s tiered Compaction Scheduler will work as follows:
 1. Whenever a new CompactorUpdate arrives on the scheduler channel:
     1. The Compaction Scheduler groups SRs into levels L1, L2,... A level with a larger index is considered “lower” (ugh - this is confusing). The size of the runs in LN is at most `l0_sst_size X l0_compaction_threshold X compaction.scheduler.tiered.level_compaction_threshold^N`
-    2. Iterate over the levels from lowest to highest. For each level, maybe schedule a compaction. The Compaction includes all SRs in the level as its source (TODO - we could probably include compactions for the higher level as well if it needs to be compacted, and so on - but we can add this later). The destination SR ID is the ID of the last SR in the level. Schedule a compaction for level N if:
+    2. Iterate over the levels from lowest to highest. For each level, maybe schedule a compaction. The Compaction includes all SRs in the level as its source (we could probably include compactions for the higher level as well if it needs to be compacted, and so on - but we can add this later). The destination SR ID is the ID of the last SR in the level. Schedule a compaction for level N if:
         1. The number of SRs in N > `compaction.scheduler.tiered.level_compaction_threshold_runs`
         2. The number of SRs in N+1 < `compaction.scheduler.tiered.level_max_runs`
         3. The number of uncompleted compactions < `max_compactions`
@@ -358,25 +358,33 @@ By default, the compactor will run alongside the main writer-reader in the same 
 
 ### Looking Ahead
 
+In this section I want to briefly sketch out how we can iterate on the design described above to add some additional features.
+
 #### Resuming Compaction
 
-TODO
+Compactions targeting lower levels can take a long time. If the compactor restarts, we don't want to lose compaction progress. We can record what compactions were ongoing in the manifest by defining a flatbuffer table schema that describes the Compaction struct defined above. Then, when the compactor restarts it knows what compactions were already scheduled.
+
+Its not enough to know what compactions were ongoing - a new compactor also needs to be able to reconstruct compaction progress. We can leave breadcrumbs to allow it to piece this information together:
+
+To do this we can allow including uncompleted SRs in the list of SRs in the manifest. We can do this by including a `completed` flag in the SR definition. Then, the new compactor can inspect the SSTs in the new SR, and see what key ranges have already completed compaction, and finish compacting the uncompacted key ranges. 
 
 #### Lazy-Leveling/Tiered+Leveled
 
-TODO
+The tiered compaction scheduler proposed in this document will have very high space amplification, as it maintains multiple SRs at the lowest level. Its likely that each SR at the lowest level contains most of the database, assuming a stable db size. As described above, to fix this (at the cost of added write amplification) we can always maintain a single run at the lowest level. In particular, our tiered compaction policy can always maintain SR 0 as its own level. When the earlier level is full, it can compact (at least) all SRs from that level into SR 0.
 
 #### Time-Series
 
-TODO
+Some databases (e.g. ScyllaDB) handle time-series data with a fixed lifetime specially. They maintain data in fixed time buckets that are themselves compacted according to some schedule (e.g. tiered or leveled), where each bucket corresponds to a distinct non-overlapping key range. Then, when a given bucket is no longer accessible (as defined by the fixed lifetime), the entire bucket is removed from the database.
 
-#### Major Compactions
-
-TODO
+We can implement such a Scheduler fairly easily. The main challenge is that we need to either:
+1. relax the compaction constraints so that we allow compacting non-contiguous SRs. Then, the scheduler can map each SR to some bucket, and only compact SRs that are in the same bucket. Reads would still work because SR order is preserved for a time bucket.
+2. Alternatively, we can extend the model in the manifest to allow a collection of `Compacted`. Then, the scheduler can maintain each bucket in its own `Compacted` instance that's associated with some key range. Reads would need to be aware of this mapping. When deleting a bucket the whole `Compacted` instance is dropped from the mapping.
 
 #### Distributed Compaction (e.g. scheduling larger compactions on temporary large instances)
 
-TODO
+One of the main advantages of running in cloud is that applications can dynamically provision resources for a short time to burst capacity, since compute is easily provisioned and billed only for the time its provisioned. This means that for really expensive compactions, we should be able to quickly spin up a short-lived but beefy compactor node to execute the compaction. There's nothing in the design above that precludes us doing this. The compactor could in the future with some (probably pluggable depending on whether a compactor runs on k8s, or directly on a compute service like ec2) API for provisioning, provision a short-lived node, notify it about compaction work, and then commit the manifest when the compaction work is complete.
+
+Its worth calling out that we already get some of this benefit as most instances have burstable network (e.g. an instance with a 5Gbps baseline network can burst up to 25Gbps for a short duration). 
 
 ## Appendix
 
