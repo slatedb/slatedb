@@ -366,7 +366,7 @@ Compactions targeting lower levels can take a long time. If the compactor restar
 
 Its not enough to know what compactions were ongoing - a new compactor also needs to be able to reconstruct compaction progress. We can leave breadcrumbs to allow it to piece this information together:
 
-To do this we can allow including uncompleted SRs in the list of SRs in the manifest. We can do this by including a `completed` flag in the SR definition. Then, the new compactor can inspect the SSTs in the new SR, and see what key ranges have already completed compaction, and finish compacting the uncompacted key ranges. 
+To do this we can allow including uncompleted SRs in the list of SRs in the manifest. We can do this by including a `completed` flag in the SR definition. For a given SR ID there should only be one with `completed` set to `true`, which is what the reader would use to serve reads. Then, the new compactor can inspect the SSTs in the new SR, and see what key ranges have already completed compaction, and finish compacting the uncompacted key ranges. 
 
 #### Lazy-Leveling/Tiered+Leveled
 
