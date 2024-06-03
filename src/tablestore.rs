@@ -96,6 +96,25 @@ impl TableStore {
         }
     }
 
+    pub(crate) async fn get_wal_sst_list(&self, root_path: &Path, manifest: &ManifestOwned) -> Vec<u64> {
+        let mut wal_list: Vec<u64> = Vec::new();
+        let wal_path = &Path::from(format!("{}/{}/", root_path, "wal"));
+        let mut files_stream = self.object_store.list(Some(wal_path));
+        let wal_id_last_compacted = manifest.borrow().wal_id_last_compacted();
+
+        while let Some(file) = files_stream.next().await.transpose().unwrap() {
+            if file.location.extension().unwrap_or_default() == "sst" {
+                let wal_id = self.parse_wal_id(&file.location);
+                if wal_id > wal_id_last_compacted {
+                    wal_list.push(wal_id);
+                }
+            }
+        }
+
+        wal_list.sort();
+        wal_list
+    }
+
     pub(crate) async fn write_manifest(
         &self,
         root_path: &Path,
@@ -172,5 +191,9 @@ impl TableStore {
 
     fn path(&self, root_path: &Path, sub_path: &String, id: u64) -> Path {
         Path::from(format!("{}/{}/{:020}.sst", root_path, sub_path ,id))
+    }
+
+    fn parse_wal_id(&self, path: &Path) -> u64 {
+        path.filename().unwrap().parse().unwrap()
     }
 }

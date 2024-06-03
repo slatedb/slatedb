@@ -50,19 +50,24 @@ pub(crate) struct DbInner {
 }
 
 impl DbInner {
-    pub fn new(
+    pub async fn new(
         path: Path,
         options: DbOptions,
         table_store: TableStore,
         manifest: ManifestOwned,
     ) -> Result<Self, SlateDBError> {
-        Ok(Self {
+        
+        let mut db_inner = Self {
             state: Arc::new(RwLock::new(Arc::new(DbState::create()))),
             path: path,
             options,
             table_store,
             manifest: Arc::new(RwLock::new(manifest)),
-        })
+        };
+
+        db_inner.load_state().await?;
+
+        Ok(db_inner)
     }
 
     /// Get the value for a given key.
@@ -169,6 +174,24 @@ impl DbInner {
 
         memtable.delete(key).await;
     }
+
+    async fn load_state(&mut self) -> Result<(), SlateDBError> {
+        let rguard_manifest = self.manifest.read();
+        let wal_sst_list = self.table_store.get_wal_sst_list(&self.path, &rguard_manifest).await;
+
+        for sst_id in wal_sst_list {
+            let sst = self.table_store.open_sst(&self.path, &String::from("wal"), sst_id).await?;
+            let mut wguard_state = self.state.write();
+            let mut snapshot = wguard_state.as_ref().clone();
+            
+            // always put the new sst at the front of l0
+            snapshot.l0.push_front(sst);
+            snapshot.next_sst_id = sst_id + 1;
+            *wguard_state = Arc::new(snapshot);
+        }
+
+        Ok(())
+    }
 }
 
 pub struct Db {
@@ -190,7 +213,9 @@ impl Db {
 
         let manifest = table_store.open_latest_manifest(&path).await;
         let manifest = match manifest {
-            Some(Ok(manifest)) => manifest,
+            Some(Ok(manifest)) => {
+                manifest
+            },
             Some(Err(e)) => return Err(e.into()),
             None => {
                 let manifest = ManifestOwned::create_new();
@@ -199,7 +224,7 @@ impl Db {
             }
         };
 
-        let inner = Arc::new(DbInner::new(path, options, table_store, manifest)?);
+        let inner = Arc::new(DbInner::new(path, options, table_store, manifest).await?);
         let (tx, rx) = crossbeam_channel::unbounded();
         let flush_thread = inner.spawn_flush_thread(rx);
         Ok(Self {
