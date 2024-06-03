@@ -47,7 +47,7 @@ impl ReadOnlyBlob for ReadOnlyObject {
 
 #[derive(Clone)]
 pub struct SSTableHandle {
-    pub id: usize,
+    pub id: u64,
     pub info: OwnedSsTableInfo,
     // we stash the filter in the handle for now, as a way to cache it so that
     // the db doesn't need to reload it for each read. Once we've put in a proper
@@ -99,7 +99,7 @@ impl TableStore {
     pub(crate) async fn write_manifest(
         &self,
         root_path: &Path,
-        manifest: ManifestOwned,
+        manifest: &ManifestOwned,
     ) -> Result<(), SlateDBError> {
         let manifest_path = &Path::from(format!("{}/{}/{:020}", root_path, "manifest", manifest.borrow().manifest_id()));
         
@@ -120,7 +120,7 @@ impl TableStore {
         &self,
         root_path: &Path,
         sub_path: &String,
-        id: usize,
+        id: u64,
         encoded_sst: EncodedSsTable,
     ) -> Result<SSTableHandle, SlateDBError> {
         let path = self.path(root_path, sub_path, id);
@@ -137,7 +137,7 @@ impl TableStore {
 
     // todo: clean up the warning suppression when we start using open_sst outside tests
     #[allow(dead_code)]
-    pub(crate) async fn open_sst(&self, root_path: &Path, sub_path: &String,  id: usize) -> Result<SSTableHandle, SlateDBError> {
+    pub(crate) async fn open_sst(&self, root_path: &Path, sub_path: &String,  id: u64) -> Result<SSTableHandle, SlateDBError> {
         let path = self.path(root_path, sub_path, id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
@@ -170,7 +170,7 @@ impl TableStore {
         self.sst_format.read_block(&handle.info, block, &obj).await
     }
 
-    fn path(&self, root_path: &Path, sub_path: &String, id: usize) -> Path {
+    fn path(&self, root_path: &Path, sub_path: &String, id: u64) -> Path {
         Path::from(format!("{}/{}/{:020}.sst", root_path, sub_path ,id))
     }
 }

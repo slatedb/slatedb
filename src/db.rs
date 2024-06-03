@@ -25,7 +25,7 @@ pub(crate) struct DbState {
     pub(crate) memtable: Arc<MemTable>,
     pub(crate) imm_memtables: VecDeque<Arc<MemTable>>,
     pub(crate) l0: VecDeque<SSTableHandle>,
-    pub(crate) next_sst_id: usize,
+    pub(crate) next_sst_id: u64,
 }
 
 impl DbState {
@@ -34,7 +34,7 @@ impl DbState {
             memtable: Arc::new(MemTable::new()),
             imm_memtables: VecDeque::new(),
             l0: VecDeque::new(),
-            next_sst_id: 0,
+            next_sst_id: 1,
         }
     }
 }
@@ -194,7 +194,7 @@ impl Db {
             Some(Err(e)) => return Err(e.into()),
             None => {
                 let manifest = ManifestOwned::create_new();
-                table_store.write_manifest(&path, manifest.clone()).await?;
+                table_store.write_manifest(&path, &manifest).await?;
                 manifest
             }
         };
@@ -224,6 +224,7 @@ impl Db {
 
         // Force a final flush on the mutable memtable
         self.inner.flush().await?;
+        self.inner.write_manifest().await?;
         Ok(())
     }
 
