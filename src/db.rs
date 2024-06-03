@@ -37,11 +37,9 @@ impl DbState {
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<Arc<DbState>>>,
-    #[allow(dead_code)] // TODO remove this once we write SSTs to disk
     pub(crate) path: Path,
     pub(crate) options: DbOptions,
     pub(crate) table_store: TableStore,
-    #[allow(dead_code)] // TODO remove this once we write manifest to disk.
     pub(crate) manifest: Arc<RwLock<ManifestOwned>>,
 }
 
@@ -180,19 +178,21 @@ impl DbInner {
             .get_wal_sst_list(&self.path, &rguard_manifest)
             .await;
 
+        let mut wguard_state = self.state.write();
+        let mut snapshot = wguard_state.as_ref().clone();
+
         for sst_id in wal_sst_list {
             let sst = self
                 .table_store
                 .open_sst(&self.path, &String::from("wal"), sst_id)
                 .await?;
-            let mut wguard_state = self.state.write();
-            let mut snapshot = wguard_state.as_ref().clone();
 
             // always put the new sst at the front of l0
             snapshot.l0.push_front(sst);
             snapshot.next_sst_id = sst_id + 1;
-            *wguard_state = Arc::new(snapshot);
         }
+
+        *wguard_state = Arc::new(snapshot);
 
         Ok(())
     }
@@ -414,7 +414,7 @@ mod tests {
             );
         }
 
-        // validate manifest file.
+        // validate that the manifest file exists.
         let sst_format = SsTableFormat::new(4096, 10);
         let table_store = TableStore::new(object_store.clone(), sst_format);
         let manifest_owned = table_store

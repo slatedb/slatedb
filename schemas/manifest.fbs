@@ -5,7 +5,7 @@ table Manifest {
     // Manifest format version to allow schema evolution.
     manifest_format_version: ushort;
 
-    // Id of this manifest. Manifest file name will be derived from this id.
+    // Id of manifest. Manifest file name will be derived from this id.
     manifest_id: ulong;
 
     // The current writer's epoch.

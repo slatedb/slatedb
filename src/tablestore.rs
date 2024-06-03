@@ -209,6 +209,7 @@ impl TableStore {
     }
 
     fn parse_wal_id(&self, path: &Path) -> u64 {
+        // TODO:- throw a specific SlateDBError if the file name is not in the expected format.
         path.filename()
             .unwrap()
             .splitn(2, '.')

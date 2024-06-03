@@ -77,7 +77,9 @@ impl ManifestOwned {
     pub fn update_wal_id_last_seen(&self, new_wal_id_last_seen: u64) -> ManifestOwned {
         let old_manifest = self.borrow();
 
-        // TODO:- Update method to also copy rest of the fields from the original manifest.
+        // TODO:- Update method to also copy rest of the fields from current manifest.
+        // This kind of copying for every update seems too much, but there doesn't seem to be a way to mutate flatbuffers.
+        // Update this after initial PR discussions.
         let builder = &mut flatbuffers::FlatBufferBuilder::new();
         let manifest = Manifest::create(
             builder,
