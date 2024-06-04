@@ -211,7 +211,6 @@ impl<'a> EncodedSsTableBuilder<'a> {
                 block_meta: Some(vector),
                 filter_offset: filter_offset as u64,
                 filter_len: filter_len as u64,
-                block_meta_offset: meta_offset as u64,
             },
         );
 
@@ -313,7 +312,6 @@ mod tests {
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
         let handle = sst_handle.info.borrow();
-        assert_eq!(handle.filter_offset(), handle.block_meta_offset());
         assert_eq!(handle.filter_len(), 0);
     }
 }

@@ -29,7 +29,6 @@ impl<'a> SsTableInfo<'a> {
   pub const VT_BLOCK_META: flatbuffers::VOffsetT = 6;
   pub const VT_FILTER_OFFSET: flatbuffers::VOffsetT = 8;
   pub const VT_FILTER_LEN: flatbuffers::VOffsetT = 10;
-  pub const VT_BLOCK_META_OFFSET: flatbuffers::VOffsetT = 12;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -41,7 +40,6 @@ impl<'a> SsTableInfo<'a> {
     args: &'args SsTableInfoArgs<'args>
   ) -> flatbuffers::WIPOffset<SsTableInfo<'bldr>> {
     let mut builder = SsTableInfoBuilder::new(_fbb);
-    builder.add_block_meta_offset(args.block_meta_offset);
     builder.add_filter_len(args.filter_len);
     builder.add_filter_offset(args.filter_offset);
     if let Some(x) = args.block_meta { builder.add_block_meta(x); }
@@ -78,13 +76,6 @@ impl<'a> SsTableInfo<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u64>(SsTableInfo::VT_FILTER_LEN, Some(0)).unwrap()}
   }
-  #[inline]
-  pub fn block_meta_offset(&self) -> u64 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(SsTableInfo::VT_BLOCK_META_OFFSET, Some(0)).unwrap()}
-  }
 }
 
 impl flatbuffers::Verifiable for SsTableInfo<'_> {
@@ -98,7 +89,6 @@ impl flatbuffers::Verifiable for SsTableInfo<'_> {
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<BlockMeta>>>>("block_meta", Self::VT_BLOCK_META, true)?
      .visit_field::<u64>("filter_offset", Self::VT_FILTER_OFFSET, false)?
      .visit_field::<u64>("filter_len", Self::VT_FILTER_LEN, false)?
-     .visit_field::<u64>("block_meta_offset", Self::VT_BLOCK_META_OFFSET, false)?
      .finish();
     Ok(())
   }
@@ -108,7 +98,6 @@ pub struct SsTableInfoArgs<'a> {
     pub block_meta: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<BlockMeta<'a>>>>>,
     pub filter_offset: u64,
     pub filter_len: u64,
-    pub block_meta_offset: u64,
 }
 impl<'a> Default for SsTableInfoArgs<'a> {
   #[inline]
@@ -118,7 +107,6 @@ impl<'a> Default for SsTableInfoArgs<'a> {
       block_meta: None, // required field
       filter_offset: 0,
       filter_len: 0,
-      block_meta_offset: 0,
     }
   }
 }
@@ -145,10 +133,6 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SsTableInfoBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<u64>(SsTableInfo::VT_FILTER_LEN, filter_len, 0);
   }
   #[inline]
-  pub fn add_block_meta_offset(&mut self, block_meta_offset: u64) {
-    self.fbb_.push_slot::<u64>(SsTableInfo::VT_BLOCK_META_OFFSET, block_meta_offset, 0);
-  }
-  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SsTableInfoBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     SsTableInfoBuilder {
@@ -171,7 +155,6 @@ impl core::fmt::Debug for SsTableInfo<'_> {
       ds.field("block_meta", &self.block_meta());
       ds.field("filter_offset", &self.filter_offset());
       ds.field("filter_len", &self.filter_len());
-      ds.field("block_meta_offset", &self.block_meta_offset());
       ds.finish()
   }
 }
