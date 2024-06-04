@@ -52,7 +52,7 @@ impl DbInner {
     ) -> Result<Self, SlateDBError> {
         let mut db_inner = Self {
             state: Arc::new(RwLock::new(Arc::new(DbState::create()))),
-            path: path,
+            path,
             options,
             table_store,
             manifest: Arc::new(RwLock::new(manifest)),
@@ -404,13 +404,12 @@ mod tests {
         .unwrap();
 
         for i in 0..sst_count {
-            assert_eq!(
+            assert!(
                 kv_store_restored
                     .get(&i.to_be_bytes())
                     .await
                     .unwrap()
-                    .is_some(),
-                true
+                    .is_some()
             );
         }
 

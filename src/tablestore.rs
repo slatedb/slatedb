@@ -81,12 +81,8 @@ impl TableStore {
         let mut manifest_file_path: Option<Path> = None;
 
         while let Some(file) = files_stream.next().await.transpose().unwrap() {
-            if file.location.extension().unwrap_or_default() == self.manifest_path {
-                if manifest_file_path.is_none()
-                    || manifest_file_path.as_ref().unwrap() < &file.location
-                {
-                    manifest_file_path = Some(file.location.clone());
-                }
+            if file.location.extension().unwrap_or_default() == self.manifest_path && (manifest_file_path.is_none() || manifest_file_path.as_ref().unwrap() < &file.location) {
+                manifest_file_path = Some(file.location.clone());
             }
         }
 
@@ -223,8 +219,7 @@ impl TableStore {
     fn parse_wal_id(&self, path: &Path) -> u64 {
         // TODO:- throw a specific SlateDBError if the file name is not in the expected format.
         path.filename()
-            .unwrap()
-            .splitn(2, '.')
+            .unwrap().split('.')
             .next()
             .unwrap()
             .parse()
