@@ -233,7 +233,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::tablestore::TableStore;
+    use crate::tablestore::{SstKind, TableStore};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -255,7 +255,7 @@ mod tests {
 
         // write sst and validate that the handle returned has the correct content.
         let sst_handle = table_store
-            .write_sst(&root_path, &String::from("wal"), 0, encoded)
+            .write_sst(&root_path, SstKind::Wal, 0, encoded)
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
@@ -274,7 +274,7 @@ mod tests {
 
         // construct sst info from the raw bytes and validate that it matches the original info.
         let sst_handle_from_store = table_store
-            .open_sst(&root_path, &String::from("wal"), 0)
+            .open_sst(&root_path, SstKind::Wal, 0)
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle_from_store.info);
@@ -304,11 +304,11 @@ mod tests {
         let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
         table_store
-            .write_sst(&root_path, &String::from("wal"), 0, encoded)
+            .write_sst(&root_path, SstKind::Wal, 0, encoded)
             .await
             .unwrap();
         let sst_handle = table_store
-            .open_sst(&root_path, &String::from("wal"), 0)
+            .open_sst(&root_path, SstKind::Wal, 0)
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);

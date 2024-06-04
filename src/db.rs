@@ -1,7 +1,7 @@
 use crate::flatbuffer_types::ManifestOwned;
 use crate::mem_table::MemTable;
 use crate::sst::SsTableFormat;
-use crate::tablestore::{SSTableHandle, TableStore};
+use crate::tablestore::{SSTableHandle, SstKind, TableStore};
 use crate::types::ValueDeletable;
 use crate::{block::Block, error::SlateDBError};
 use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
@@ -82,7 +82,7 @@ impl DbInner {
             if let Some(block_index) = self.find_block_for_key(sst, key).await? {
                 let block = self
                     .table_store
-                    .read_block(&self.path, &String::from("wal"), sst, block_index)
+                    .read_block(&self.path, SstKind::Wal, sst, block_index)
                     .await?;
                 if let Some(val) = self.find_val_in_block(&block, key).await? {
                     return Ok(val.into_option());
@@ -184,7 +184,7 @@ impl DbInner {
         for sst_id in wal_sst_list {
             let sst = self
                 .table_store
-                .open_sst(&self.path, &String::from("wal"), sst_id)
+                .open_sst(&self.path, SstKind::Wal, sst_id)
                 .await?;
 
             // always put the new sst at the front of l0

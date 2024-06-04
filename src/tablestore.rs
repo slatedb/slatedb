@@ -15,6 +15,12 @@ use std::sync::Arc;
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,
+    wal_path: &'static str,
+    manifest_path: &'static str,
+}
+
+pub enum SstKind {
+    Wal,
 }
 
 struct ReadOnlyObject {
@@ -61,6 +67,8 @@ impl TableStore {
         TableStore {
             object_store: object_store.clone(),
             sst_format,
+            wal_path: "wal",
+            manifest_path: "manifest",
         }
     }
 
@@ -68,12 +76,12 @@ impl TableStore {
         &self,
         root_path: &Path,
     ) -> Option<Result<ManifestOwned, InvalidFlatbuffer>> {
-        let manifest_path = &Path::from(format!("{}/{}/", root_path, "manifest"));
+        let manifest_path = &Path::from(format!("{}/{}/", root_path, self.manifest_path));
         let mut files_stream = self.object_store.list(Some(manifest_path));
         let mut manifest_file_path: Option<Path> = None;
 
         while let Some(file) = files_stream.next().await.transpose().unwrap() {
-            if file.location.extension().unwrap_or_default() == "manifest" {
+            if file.location.extension().unwrap_or_default() == self.manifest_path {
                 if manifest_file_path.is_none()
                     || manifest_file_path.as_ref().unwrap() < &file.location
                 {
@@ -104,7 +112,7 @@ impl TableStore {
         manifest: &ManifestOwned,
     ) -> Vec<u64> {
         let mut wal_list: Vec<u64> = Vec::new();
-        let wal_path = &Path::from(format!("{}/{}/", root_path, "wal"));
+        let wal_path = &Path::from(format!("{}/{}/", root_path, self.wal_path));
         let mut files_stream = self.object_store.list(Some(wal_path));
         let wal_id_last_compacted = manifest.borrow().wal_id_last_compacted();
 
@@ -127,10 +135,11 @@ impl TableStore {
         manifest: &ManifestOwned,
     ) -> Result<(), SlateDBError> {
         let manifest_path = &Path::from(format!(
-            "{}/{}/{:020}.manifest",
+            "{}/{}/{:020}.{}",
             root_path,
-            "manifest",
-            manifest.borrow().manifest_id()
+            self.manifest_path,
+            manifest.borrow().manifest_id(),
+            self.manifest_path
         ));
 
         self.object_store
@@ -148,11 +157,11 @@ impl TableStore {
     pub(crate) async fn write_sst(
         &self,
         root_path: &Path,
-        sub_path: &String,
+        sst_kind: SstKind,
         id: u64,
         encoded_sst: EncodedSsTable,
     ) -> Result<SSTableHandle, SlateDBError> {
-        let path = self.path(root_path, sub_path, id);
+        let path = self.path(root_path, sst_kind, id);
         self.object_store
             .put(&path, encoded_sst.raw.clone())
             .await
@@ -169,10 +178,10 @@ impl TableStore {
     pub(crate) async fn open_sst(
         &self,
         root_path: &Path,
-        sub_path: &String,
+        sst_kind: SstKind,
         id: u64,
     ) -> Result<SSTableHandle, SlateDBError> {
-        let path = self.path(root_path, sub_path, id);
+        let path = self.path(root_path, sst_kind, id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
@@ -192,11 +201,11 @@ impl TableStore {
     pub(crate) async fn read_block(
         &self,
         root_path: &Path,
-        sub_path: &String,
+        sst_kind: SstKind,
         handle: &SSTableHandle,
         block: usize,
     ) -> Result<Block, SlateDBError> {
-        let path = self.path(root_path, sub_path, handle.id);
+        let path = self.path(root_path, sst_kind, handle.id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
@@ -204,7 +213,10 @@ impl TableStore {
         self.sst_format.read_block(&handle.info, block, &obj).await
     }
 
-    fn path(&self, root_path: &Path, sub_path: &String, id: u64) -> Path {
+    fn path(&self, root_path: &Path, sst_kind: SstKind, id: u64) -> Path {
+        let sub_path = match sst_kind {
+            SstKind::Wal => self.wal_path,
+        };
         Path::from(format!("{}/{}/{:020}.sst", root_path, sub_path, id))
     }
 
