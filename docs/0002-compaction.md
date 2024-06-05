@@ -1,6 +1,6 @@
 # SlateDB Compaction
 
-Status: Under Discussion
+Status: Accepted
 
 Authors:
 * [Rohan Desai](https://github.com/rodesai)
@@ -104,7 +104,7 @@ We propose to augment the manifest by adding the following fields:
 
 `compacted`: Contains a single instance of `Compacted`. `Compacted` contains a list of `SortedRun` instances. A `SortedRun` instance defines a single sorted run. Each Sorted Run contains a list of SST IDs and has a unique ID. The list of SST IDs defines the SSTs that comprise the sorted run. A given SST belongs to at most 1 SR. The ID describes the SR’s position in the list of sorted runs in `compacted`. That is, an SR S with an S.id must occur after SR S’ with ID S’.id if S.id < S’.id (so the sorted run with ID 0 must be last in the list). The last SR in the list must have ID 0. The semantics of the ID will be important when we describe how to define compactions.
 
-#### Naming Compacted SSTs (L0) and L1+)
+#### Naming Compacted SSTs (L0 and L1+)
 We will use ULIDs to name compacted SSTs. The ULID is stored in the manifest in the `SstId` table, with the `high` and `low` fields containing the high and low bits of the ULID, respectively.
 
 In the Object Store, compacted SSTs are stored under the compacted directory. Each SST object is named using its ULID and the suffix `.sst`, e.g:
@@ -333,7 +333,6 @@ SlateDB’s tiered Compaction Scheduler will work as follows:
         2. The number of SRs in L1 < `compaction.scheduler.tiered.level_max_runs`
         3. The number of uncompleted compactions < `max_compactions`
         4. No ongoing compaction from L0
-
 
 ### Back-Pressure
 
