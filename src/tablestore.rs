@@ -5,7 +5,6 @@ use crate::filter::BloomFilter;
 use crate::flatbuffer_types::{ManifestOwned, OwnedSsTableInfo};
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use bytes::Bytes;
-use flatbuffers::InvalidFlatbuffer;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -75,30 +74,39 @@ impl TableStore {
     pub(crate) async fn open_latest_manifest(
         &self,
         root_path: &Path,
-    ) -> Option<Result<ManifestOwned, InvalidFlatbuffer>> {
+    ) -> Result<Option<ManifestOwned>, SlateDBError> {
         let manifest_path = &Path::from(format!("{}/{}/", root_path, self.manifest_path));
         let mut files_stream = self.object_store.list(Some(manifest_path));
         let mut manifest_file_path: Option<Path> = None;
 
-        while let Some(file) = files_stream.next().await.transpose().unwrap() {
-            if file.location.extension().unwrap_or_default() == self.manifest_path && (manifest_file_path.is_none() || manifest_file_path.as_ref().unwrap() < &file.location) {
-                manifest_file_path = Some(file.location.clone());
-            }
+        while let Some(file) = match files_stream.next().await.transpose() {
+            Ok(file) => file,
+            Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
+        } {
+            manifest_file_path = match manifest_file_path {
+                Some(path) => Some(if path < file.location { file.location } else { path }),
+                None => Some(file.location.clone()),
+            };
         }
 
-        if manifest_file_path.is_some() {
-            let manifest_bytes = self
-                .object_store
-                .get(&manifest_file_path.unwrap())
-                .await
-                .unwrap()
-                .bytes()
-                .await
-                .unwrap();
+        if manifest_file_path.is_none() {
+            return Ok(None);
+        }
 
-            Some(ManifestOwned::new(manifest_bytes.clone()))
+        if let Some(manifest_file_path) = manifest_file_path {
+            let manifest_bytes = match self.object_store.get(&manifest_file_path).await {
+                Ok(manifest) => match manifest.bytes().await {
+                    Ok(bytes) => bytes,
+                    Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
+                },
+                Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
+            };
+
+            ManifestOwned::new(manifest_bytes.clone())
+                .map(Some)
+                .map_err(SlateDBError::InvalidFlatbuffer)
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -106,15 +114,15 @@ impl TableStore {
         &self,
         root_path: &Path,
         manifest: &ManifestOwned,
-    ) -> Vec<u64> {
+    ) -> Result<Vec<u64>, SlateDBError> {
         let mut wal_list: Vec<u64> = Vec::new();
         let wal_path = &Path::from(format!("{}/{}/", root_path, self.wal_path));
         let mut files_stream = self.object_store.list(Some(wal_path));
         let wal_id_last_compacted = manifest.borrow().wal_id_last_compacted();
 
-        while let Some(file) = files_stream.next().await.transpose().unwrap() {
+        while let Some(file) = files_stream.next().await.transpose()? {
             if file.location.extension().unwrap_or_default() == "sst" {
-                let wal_id = self.parse_wal_id(&file.location);
+                let wal_id = self.parse_wal_id(&file.location)?;
                 if wal_id > wal_id_last_compacted {
                     wal_list.push(wal_id);
                 }
@@ -122,7 +130,7 @@ impl TableStore {
         }
 
         wal_list.sort();
-        wal_list
+        Ok(wal_list)
     }
 
     pub(crate) async fn write_manifest(
@@ -216,13 +224,15 @@ impl TableStore {
         Path::from(format!("{}/{}/{:020}.sst", root_path, sub_path, id))
     }
 
-    fn parse_wal_id(&self, path: &Path) -> u64 {
+    fn parse_wal_id(&self, path: &Path) -> Result<u64, SlateDBError> {
         // TODO:- throw a specific SlateDBError if the file name is not in the expected format.
+
         path.filename()
-            .unwrap().split('.')
+            .expect("invalid wal file")
+            .split('.')
             .next()
-            .unwrap()
+            .unwrap_or("0")
             .parse()
-            .unwrap()
+            .map_err(|_| SlateDBError::InvalidDBState)
     }
 }

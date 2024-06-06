@@ -174,11 +174,11 @@ impl DbInner {
     async fn load_state(&mut self) -> Result<(), SlateDBError> {
         let wal_sst_list = {
             let rguard_manifest = self.manifest.read();
-            
             self
                 .table_store
                 .get_wal_sst_list(&self.path, &rguard_manifest)
                 .await
+                ?
         };
 
         let mut snapshot = {
@@ -221,10 +221,9 @@ impl Db {
         let sst_format = SsTableFormat::new(4096, options.min_filter_keys);
         let table_store = TableStore::new(object_store, sst_format);
 
-        let manifest = table_store.open_latest_manifest(&path).await;
+        let manifest = table_store.open_latest_manifest(&path).await?;
         let manifest = match manifest {
-            Some(Ok(manifest)) => manifest,
-            Some(Err(e)) => return Err(e.into()),
+            Some(manifest) => manifest,
             None => {
                 let manifest = ManifestOwned::create_new();
                 table_store.write_manifest(&path, &manifest).await?;
