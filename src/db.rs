@@ -172,14 +172,19 @@ impl DbInner {
     }
 
     async fn load_state(&mut self) -> Result<(), SlateDBError> {
-        let rguard_manifest = self.manifest.read();
-        let wal_sst_list = self
-            .table_store
-            .get_wal_sst_list(&self.path, &rguard_manifest)
-            .await;
+        let wal_sst_list = {
+            let rguard_manifest = self.manifest.read();
+            let wal_sst_list = self
+                .table_store
+                .get_wal_sst_list(&self.path, &rguard_manifest)
+                .await;
+            wal_sst_list
+        };
 
-        let mut wguard_state = self.state.write();
-        let mut snapshot = wguard_state.as_ref().clone();
+        let mut snapshot = {
+            let rguard_state = self.state.read();
+            rguard_state.as_ref().clone()
+        };
 
         for sst_id in wal_sst_list {
             let sst = self
@@ -192,6 +197,7 @@ impl DbInner {
             snapshot.next_sst_id = sst_id + 1;
         }
 
+        let mut wguard_state = self.state.write();
         *wguard_state = Arc::new(snapshot);
 
         Ok(())
