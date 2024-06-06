@@ -23,14 +23,15 @@ impl DbInner {
                 let new_manifest = wguard_manifest.update_wal_id_last_seen(last_wal_sst_written);
                 *wguard_manifest = new_manifest.clone();
                 Some(new_manifest)
-            }
-            else {
+            } else {
                 None
             }
         };
 
-        if let Some(manifest) = updated_manifest{
-            self.table_store.write_manifest(&self.path, &manifest).await?
+        if let Some(manifest) = updated_manifest {
+            self.table_store
+                .write_manifest(&self.path, &manifest)
+                .await?
         }
 
         Ok(())

@@ -84,7 +84,11 @@ impl TableStore {
             Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
         } {
             manifest_file_path = match manifest_file_path {
-                Some(path) => Some(if path < file.location { file.location } else { path }),
+                Some(path) => Some(if path < file.location {
+                    file.location
+                } else {
+                    path
+                }),
                 None => Some(file.location.clone()),
             };
         }

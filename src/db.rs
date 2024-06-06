@@ -177,7 +177,7 @@ impl DbInner {
             .table_store
             .get_wal_sst_list(&self.path, wal_id_last_compacted)
             .await?;
-            
+
         let mut snapshot = {
             let rguard_state = self.state.read();
             rguard_state.as_ref().clone()
@@ -406,13 +406,11 @@ mod tests {
         .unwrap();
 
         for i in 0..sst_count {
-            assert!(
-                kv_store_restored
-                    .get(&i.to_be_bytes())
-                    .await
-                    .unwrap()
-                    .is_some()
-            );
+            assert!(kv_store_restored
+                .get(&i.to_be_bytes())
+                .await
+                .unwrap()
+                .is_some());
         }
 
         // validate that the manifest file exists.
