@@ -16,18 +16,23 @@ impl DbInner {
     }
 
     pub(crate) async fn write_manifest(&self) -> Result<(), SlateDBError> {
-        let rguard_state = self.state.read();
-        let mut wguard_manifest = self.manifest.write();
+        let updated_manifest = {
+            let last_wal_sst_written = self.state.read().next_sst_id - 1;
+            let mut wguard_manifest = self.manifest.write();
+            if wguard_manifest.borrow().wal_id_last_seen() != last_wal_sst_written {
+                let new_manifest = wguard_manifest.update_wal_id_last_seen(last_wal_sst_written);
+                *wguard_manifest = new_manifest.clone();
+                Some(new_manifest)
+            }
+            else {
+                None
+            }
+        };
 
-        // TODO:- There doesn't seem to be a way to mutate flat buffer. https://github.com/google/flatbuffers/issues/5772
-        if wguard_manifest.borrow().wal_id_last_seen() != rguard_state.next_sst_id - 1 {
-            let new_manifest =
-                wguard_manifest.update_wal_id_last_seen(rguard_state.next_sst_id - 1);
-            self.table_store
-                .write_manifest(&self.path, &new_manifest)
-                .await?;
-            *wguard_manifest = new_manifest;
+        if let Some(manifest) = updated_manifest{
+            self.table_store.write_manifest(&self.path, &manifest).await?
         }
+
         Ok(())
     }
 

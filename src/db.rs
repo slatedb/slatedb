@@ -172,15 +172,12 @@ impl DbInner {
     }
 
     async fn load_state(&mut self) -> Result<(), SlateDBError> {
-        let wal_sst_list = {
-            let rguard_manifest = self.manifest.read();
-            self
-                .table_store
-                .get_wal_sst_list(&self.path, &rguard_manifest)
-                .await
-                ?
-        };
-
+        let wal_id_last_compacted = self.manifest.read().borrow().wal_id_last_compacted();
+        let wal_sst_list = self
+            .table_store
+            .get_wal_sst_list(&self.path, wal_id_last_compacted)
+            .await?;
+            
         let mut snapshot = {
             let rguard_state = self.state.read();
             rguard_state.as_ref().clone()

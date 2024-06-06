@@ -113,12 +113,11 @@ impl TableStore {
     pub(crate) async fn get_wal_sst_list(
         &self,
         root_path: &Path,
-        manifest: &ManifestOwned,
+        wal_id_last_compacted: u64,
     ) -> Result<Vec<u64>, SlateDBError> {
         let mut wal_list: Vec<u64> = Vec::new();
         let wal_path = &Path::from(format!("{}/{}/", root_path, self.wal_path));
         let mut files_stream = self.object_store.list(Some(wal_path));
-        let wal_id_last_compacted = manifest.borrow().wal_id_last_compacted();
 
         while let Some(file) = files_stream.next().await.transpose()? {
             if file.location.extension().unwrap_or_default() == "sst" {
