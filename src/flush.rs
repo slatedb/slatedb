@@ -16,6 +16,7 @@ impl DbInner {
     }
 
     pub(crate) async fn write_manifest(&self) -> Result<(), SlateDBError> {
+        // get the update manifest if there are any updates.
         let updated_manifest = {
             let last_wal_sst_written = self.state.read().next_sst_id - 1;
             let mut wguard_manifest = self.manifest.write();

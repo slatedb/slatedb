@@ -78,7 +78,7 @@ impl ManifestOwned {
         let old_manifest = self.borrow();
 
         // TODO:- Update method to also copy rest of the fields from current manifest.
-        // This kind of copying for every update seems too much, but there doesn't seem to be a way to mutate flatbuffers.
+        // There doesn't seem to be a way to mutate flatbuffers. Every update requires constructing a new flatbuffer.
         // Update this after initial PR discussions.
         let builder = &mut flatbuffers::FlatBufferBuilder::new();
         let manifest = Manifest::create(
