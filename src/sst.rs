@@ -2,7 +2,7 @@ use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::filter::{BloomFilter, BloomFilterBuilder};
 use crate::flatbuffer_types::{
-    BlockMeta, BlockMetaArgs, OwnedSsTableInfo, SsTableInfo, SsTableInfoArgs,
+    BlockMeta, BlockMetaArgs, SsTableInfoOwned, SsTableInfo, SsTableInfoArgs,
 };
 use crate::{block::BlockBuilder, error::SlateDBError};
 use bytes::{Buf, BufMut, Bytes};
@@ -25,7 +25,7 @@ impl SsTableFormat {
     pub(crate) async fn read_info(
         &self,
         obj: &impl ReadOnlyBlob,
-    ) -> Result<OwnedSsTableInfo, SlateDBError> {
+    ) -> Result<SsTableInfoOwned, SlateDBError> {
         let len = obj.len().await?;
         if len <= 4 {
             return Err(SlateDBError::EmptySSTable);
@@ -37,12 +37,12 @@ impl SsTableFormat {
         // Get the metadata. Last 4 bytes are the offset of SsTableInfo
         let sst_metadata_range = sst_metadata_offset..len - 4;
         let sst_metadata_bytes = obj.read_range(sst_metadata_range).await?;
-        OwnedSsTableInfo::decode(sst_metadata_bytes)
+        SsTableInfoOwned::decode(sst_metadata_bytes)
     }
 
     pub(crate) async fn read_filter(
         &self,
-        info: &OwnedSsTableInfo,
+        info: &SsTableInfoOwned,
         obj: &impl ReadOnlyBlob,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         let mut filter = None;
@@ -58,7 +58,7 @@ impl SsTableFormat {
 
     pub(crate) async fn read_block(
         &self,
-        info: &OwnedSsTableInfo,
+        info: &SsTableInfoOwned,
         block: usize,
         obj: &impl ReadOnlyBlob,
     ) -> Result<Block, SlateDBError> {
@@ -82,13 +82,13 @@ impl SsTableFormat {
     }
 }
 
-impl OwnedSsTableInfo {
-    fn encode(info: &OwnedSsTableInfo, buf: &mut Vec<u8>) {
+impl SsTableInfoOwned {
+    fn encode(info: &SsTableInfoOwned, buf: &mut Vec<u8>) {
         buf.extend_from_slice(info.data());
         buf.put_u32(crc32fast::hash(info.data()));
     }
 
-    pub(crate) fn decode(raw_block_meta: Bytes) -> Result<OwnedSsTableInfo, SlateDBError> {
+    pub(crate) fn decode(raw_block_meta: Bytes) -> Result<SsTableInfoOwned, SlateDBError> {
         if raw_block_meta.len() <= 4 {
             return Err(SlateDBError::EmptyBlockMeta);
         }
@@ -98,13 +98,13 @@ impl OwnedSsTableInfo {
             return Err(SlateDBError::ChecksumMismatch);
         }
 
-        let info = OwnedSsTableInfo::new(data)?;
+        let info = SsTableInfoOwned::new(data)?;
         Ok(info)
     }
 }
 
 pub(crate) struct EncodedSsTable {
-    pub(crate) info: OwnedSsTableInfo,
+    pub(crate) info: SsTableInfoOwned,
     pub(crate) filter: Option<Arc<BloomFilter>>,
     pub(crate) raw: Bytes,
 }
@@ -216,9 +216,9 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
         self.sst_info_builder.finish(info_wip_offset, None);
         let info =
-            OwnedSsTableInfo::new(Bytes::from(self.sst_info_builder.finished_data().to_vec()))?;
+        SsTableInfoOwned::new(Bytes::from(self.sst_info_builder.finished_data().to_vec()))?;
 
-        OwnedSsTableInfo::encode(&info, &mut buf);
+        SsTableInfoOwned::encode(&info, &mut buf);
 
         // write the metadata offset at the end of the file. FlatBuffer internal representation is not intended to be used directly.
         buf.put_u32(meta_offset as u32);

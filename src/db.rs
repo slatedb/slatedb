@@ -217,7 +217,6 @@ impl Db {
     ) -> Result<Self, SlateDBError> {
         let sst_format = SsTableFormat::new(4096, options.min_filter_keys);
         let table_store = TableStore::new(object_store, sst_format);
-
         let manifest = table_store.open_latest_manifest(&path).await?;
         let manifest = match manifest {
             Some(manifest) => manifest,

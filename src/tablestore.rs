@@ -2,7 +2,7 @@ use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
-use crate::flatbuffer_types::{ManifestOwned, OwnedSsTableInfo};
+use crate::flatbuffer_types::{ManifestOwned, SsTableInfoOwned};
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use bytes::Bytes;
 use futures::StreamExt;
@@ -53,7 +53,7 @@ impl ReadOnlyBlob for ReadOnlyObject {
 #[derive(Clone)]
 pub struct SSTableHandle {
     pub id: u64,
-    pub info: OwnedSsTableInfo,
+    pub info: SsTableInfoOwned,
     // we stash the filter in the handle for now, as a way to cache it so that
     // the db doesn't need to reload it for each read. Once we've put in a proper
     // cache, we should instead cache the filter block in the cache and get rid
@@ -91,10 +91,6 @@ impl TableStore {
                 }),
                 None => Some(file.location.clone()),
             };
-        }
-
-        if manifest_file_path.is_none() {
-            return Ok(None);
         }
 
         if let Some(manifest_file_path) = manifest_file_path {
@@ -228,13 +224,11 @@ impl TableStore {
     }
 
     fn parse_wal_id(&self, path: &Path) -> Result<u64, SlateDBError> {
-        // TODO:- throw a specific SlateDBError if the file name is not in the expected format.
-
         path.filename()
             .expect("invalid wal file")
             .split('.')
             .next()
-            .unwrap_or("0")
+            .ok_or_else(|| SlateDBError::InvalidDBState)?
             .parse()
             .map_err(|_| SlateDBError::InvalidDBState)
     }

@@ -29,7 +29,6 @@ table Manifest {
 
 // Snapshot reference to be included in manifest to record active snapshots.
 table Snapshot {
-    // TODO:- this was uint128 in the spec. Flat buffer doesn't have integer types beyond ulong.
     // Id that must be unique across all open snapshots.
     id: ulong;
 

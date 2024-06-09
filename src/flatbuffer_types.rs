@@ -10,11 +10,11 @@ pub use manifest_generated::{
 };
 
 #[derive(Clone, PartialEq, Debug)]
-pub(crate) struct OwnedSsTableInfo {
+pub(crate) struct SsTableInfoOwned {
     data: Bytes,
 }
 
-impl OwnedSsTableInfo {
+impl SsTableInfoOwned {
     pub fn new(data: Bytes) -> Result<Self, InvalidFlatbuffer> {
         flatbuffers::root::<SsTableInfo>(&data)?;
         Ok(Self { data })
