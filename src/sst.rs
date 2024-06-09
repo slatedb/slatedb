@@ -2,7 +2,7 @@ use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::filter::{BloomFilter, BloomFilterBuilder};
 use crate::flatbuffer_types::{
-    BlockMeta, BlockMetaArgs, SsTableInfoOwned, SsTableInfo, SsTableInfoArgs,
+    BlockMeta, BlockMetaArgs, SsTableInfo, SsTableInfoArgs, SsTableInfoOwned,
 };
 use crate::{block::BlockBuilder, error::SlateDBError};
 use bytes::{Buf, BufMut, Bytes};
@@ -216,7 +216,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
         self.sst_info_builder.finish(info_wip_offset, None);
         let info =
-        SsTableInfoOwned::new(Bytes::from(self.sst_info_builder.finished_data().to_vec()))?;
+            SsTableInfoOwned::new(Bytes::from(self.sst_info_builder.finished_data().to_vec()))?;
 
         SsTableInfoOwned::encode(&info, &mut buf);
 
