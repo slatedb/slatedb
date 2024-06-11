@@ -37,7 +37,6 @@ impl DbState {
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<Arc<DbState>>>,
-    pub(crate) path: Path,
     pub(crate) options: DbOptions,
     pub(crate) table_store: TableStore,
     pub(crate) manifest: Arc<RwLock<ManifestOwned>>,
@@ -45,14 +44,12 @@ pub(crate) struct DbInner {
 
 impl DbInner {
     pub async fn new(
-        path: Path,
         options: DbOptions,
         table_store: TableStore,
         manifest: ManifestOwned,
     ) -> Result<Self, SlateDBError> {
         let mut db_inner = Self {
             state: Arc::new(RwLock::new(Arc::new(DbState::create()))),
-            path,
             options,
             table_store,
             manifest: Arc::new(RwLock::new(manifest)),
@@ -82,7 +79,7 @@ impl DbInner {
             if let Some(block_index) = self.find_block_for_key(sst, key).await? {
                 let block = self
                     .table_store
-                    .read_block(&self.path, SstKind::Wal, sst, block_index)
+                    .read_block(SstKind::Wal, sst, block_index)
                     .await?;
                 if let Some(val) = self.find_val_in_block(&block, key).await? {
                     return Ok(val.into_option());
@@ -175,7 +172,7 @@ impl DbInner {
         let wal_id_last_compacted = self.manifest.read().borrow().wal_id_last_compacted();
         let wal_sst_list = self
             .table_store
-            .get_wal_sst_list(&self.path, wal_id_last_compacted)
+            .get_wal_sst_list( wal_id_last_compacted)
             .await?;
 
         let mut snapshot = {
@@ -186,7 +183,7 @@ impl DbInner {
         for sst_id in wal_sst_list {
             let sst = self
                 .table_store
-                .open_sst(&self.path, SstKind::Wal, sst_id)
+                .open_sst( SstKind::Wal, sst_id)
                 .await?;
 
             // always put the new sst at the front of l0
@@ -216,18 +213,18 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self, SlateDBError> {
         let sst_format = SsTableFormat::new(4096, options.min_filter_keys);
-        let table_store = TableStore::new(object_store, sst_format);
-        let manifest = table_store.open_latest_manifest(&path).await?;
+        let table_store = TableStore::new(object_store, sst_format, path.clone());
+        let manifest = table_store.open_latest_manifest().await?;
         let manifest = match manifest {
             Some(manifest) => manifest,
             None => {
                 let manifest = ManifestOwned::create_new();
-                table_store.write_manifest(&path, &manifest).await?;
+                table_store.write_manifest(&manifest).await?;
                 manifest
             }
         };
 
-        let inner = Arc::new(DbInner::new(path, options, table_store, manifest).await?);
+        let inner = Arc::new(DbInner::new(options, table_store, manifest).await?);
         let (tx, rx) = crossbeam_channel::unbounded();
         let flush_thread = inner.spawn_flush_thread(rx);
         Ok(Self {
@@ -414,9 +411,9 @@ mod tests {
 
         // validate that the manifest file exists.
         let sst_format = SsTableFormat::new(4096, 10);
-        let table_store = TableStore::new(object_store.clone(), sst_format);
+        let table_store = TableStore::new(object_store.clone(), sst_format, path);
         let manifest_owned = table_store
-            .open_latest_manifest(&path)
+            .open_latest_manifest()
             .await
             .unwrap()
             .unwrap();

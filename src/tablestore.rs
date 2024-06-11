@@ -14,6 +14,7 @@ use std::sync::Arc;
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,
+    root_path: Path,
     wal_path: &'static str,
     manifest_path: &'static str,
 }
@@ -62,20 +63,18 @@ pub struct SSTableHandle {
 }
 
 impl TableStore {
-    pub fn new(object_store: Arc<dyn ObjectStore>, sst_format: SsTableFormat) -> TableStore {
+    pub fn new(object_store: Arc<dyn ObjectStore>, sst_format: SsTableFormat, root_path: Path) -> TableStore {
         TableStore {
             object_store: object_store.clone(),
             sst_format,
+            root_path,
             wal_path: "wal",
             manifest_path: "manifest",
         }
     }
 
-    pub(crate) async fn open_latest_manifest(
-        &self,
-        root_path: &Path,
-    ) -> Result<Option<ManifestOwned>, SlateDBError> {
-        let manifest_path = &Path::from(format!("{}/{}/", root_path, self.manifest_path));
+    pub(crate) async fn open_latest_manifest(&self) -> Result<Option<ManifestOwned>, SlateDBError> {
+        let manifest_path = &Path::from(format!("{}/{}/", &self.root_path, self.manifest_path));
         let mut files_stream = self.object_store.list(Some(manifest_path));
         let mut manifest_file_path: Option<Path> = None;
 
@@ -93,8 +92,8 @@ impl TableStore {
             };
         }
 
-        if let Some(manifest_file_path) = manifest_file_path {
-            let manifest_bytes = match self.object_store.get(&manifest_file_path).await {
+        if let Some(resolved_manifest_file_path) = manifest_file_path {
+            let manifest_bytes = match self.object_store.get(&resolved_manifest_file_path).await {
                 Ok(manifest) => match manifest.bytes().await {
                     Ok(bytes) => bytes,
                     Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
@@ -112,11 +111,10 @@ impl TableStore {
 
     pub(crate) async fn get_wal_sst_list(
         &self,
-        root_path: &Path,
         wal_id_last_compacted: u64,
     ) -> Result<Vec<u64>, SlateDBError> {
         let mut wal_list: Vec<u64> = Vec::new();
-        let wal_path = &Path::from(format!("{}/{}/", root_path, self.wal_path));
+        let wal_path = &Path::from(format!("{}/{}/", &self.root_path, self.wal_path));
         let mut files_stream = self.object_store.list(Some(wal_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
@@ -134,12 +132,11 @@ impl TableStore {
 
     pub(crate) async fn write_manifest(
         &self,
-        root_path: &Path,
         manifest: &ManifestOwned,
     ) -> Result<(), SlateDBError> {
         let manifest_path = &Path::from(format!(
             "{}/{}/{:020}.{}",
-            root_path,
+            &self.root_path,
             self.manifest_path,
             manifest.borrow().manifest_id(),
             self.manifest_path
@@ -159,12 +156,11 @@ impl TableStore {
 
     pub(crate) async fn write_sst(
         &self,
-        root_path: &Path,
         sst_kind: SstKind,
         id: u64,
         encoded_sst: EncodedSsTable,
     ) -> Result<SSTableHandle, SlateDBError> {
-        let path = self.path(root_path, sst_kind, id);
+        let path = self.path(sst_kind, id);
         self.object_store
             .put(&path, encoded_sst.raw.clone())
             .await
@@ -180,11 +176,10 @@ impl TableStore {
     #[allow(dead_code)]
     pub(crate) async fn open_sst(
         &self,
-        root_path: &Path,
         sst_kind: SstKind,
         id: u64,
     ) -> Result<SSTableHandle, SlateDBError> {
-        let path = self.path(root_path, sst_kind, id);
+        let path = self.path( sst_kind, id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
@@ -203,12 +198,11 @@ impl TableStore {
 
     pub(crate) async fn read_block(
         &self,
-        root_path: &Path,
         sst_kind: SstKind,
         handle: &SSTableHandle,
         block: usize,
     ) -> Result<Block, SlateDBError> {
-        let path = self.path(root_path, sst_kind, handle.id);
+        let path = self.path(sst_kind, handle.id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
@@ -216,11 +210,11 @@ impl TableStore {
         self.sst_format.read_block(&handle.info, block, &obj).await
     }
 
-    fn path(&self, root_path: &Path, sst_kind: SstKind, id: u64) -> Path {
+    fn path(&self, sst_kind: SstKind, id: u64) -> Path {
         let sub_path = match sst_kind {
             SstKind::Wal => self.wal_path,
         };
-        Path::from(format!("{}/{}/{:020}.sst", root_path, sub_path, id))
+        Path::from(format!("{}/{}/{:020}.sst", &self.root_path, sub_path, id))
     }
 
     fn parse_wal_id(&self, path: &Path) -> Result<u64, SlateDBError> {

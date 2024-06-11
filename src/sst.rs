@@ -245,7 +245,7 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 0);
-        let table_store = TableStore::new(object_store, format);
+        let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
         builder.add(b"key2", Some(b"value2")).unwrap();
@@ -254,7 +254,7 @@ mod tests {
 
         // write sst and validate that the handle returned has the correct content.
         let sst_handle = table_store
-            .write_sst(&root_path, SstKind::Wal, 0, encoded)
+            .write_sst(SstKind::Wal, 0, encoded)
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
@@ -273,7 +273,7 @@ mod tests {
 
         // construct sst info from the raw bytes and validate that it matches the original info.
         let sst_handle_from_store = table_store
-            .open_sst(&root_path, SstKind::Wal, 0)
+            .open_sst( SstKind::Wal, 0)
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle_from_store.info);
@@ -296,18 +296,18 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 3);
-        let table_store = TableStore::new(object_store, format);
+        let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
         builder.add(b"key2", Some(b"value2")).unwrap();
         let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
         table_store
-            .write_sst(&root_path, SstKind::Wal, 0, encoded)
+            .write_sst(SstKind::Wal, 0, encoded)
             .await
             .unwrap();
         let sst_handle = table_store
-            .open_sst(&root_path, SstKind::Wal, 0)
+            .open_sst(SstKind::Wal, 0)
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);

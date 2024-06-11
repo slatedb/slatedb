@@ -31,7 +31,7 @@ impl DbInner {
 
         if let Some(manifest) = updated_manifest {
             self.table_store
-                .write_manifest(&self.path, &manifest)
+                .write_manifest(&manifest)
                 .await?
         }
 
@@ -55,7 +55,7 @@ impl DbInner {
         let encoded_sst = sst_builder.build()?;
         let handle = self
             .table_store
-            .write_sst(&self.path, SstKind::Wal, id, encoded_sst)
+            .write_sst(SstKind::Wal, id, encoded_sst)
             .await?;
         Ok(handle)
     }

@@ -5,25 +5,22 @@ use crate::{
     tablestore::{SSTableHandle, SstKind, TableStore},
     types::KeyValueDeletable,
 };
-use object_store::path::Path;
 
 struct SstIterator {
     table: SSTableHandle,
     current_iter: Option<BlockIterator<Block>>,
     next_block_idx: usize,
-    table_store: TableStore,
-    root_path: Path,
+    table_store: TableStore    
 }
 
 impl SstIterator {
     #[allow(dead_code)] // will be used in #8
-    fn new(table: SSTableHandle, table_store: TableStore, root_path: Path) -> Self {
+    fn new(table: SSTableHandle, table_store: TableStore) -> Self {
         Self {
             table,
             current_iter: None,
             next_block_idx: 0,
-            table_store,
-            root_path,
+            table_store
         }
     }
 }
@@ -44,7 +41,6 @@ impl KeyValueIterator for SstIterator {
                 let block = self
                     .table_store
                     .read_block(
-                        &self.root_path,
                         SstKind::Wal,
                         &self.table,
                         self.next_block_idx,
@@ -83,7 +79,7 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 3);
-        let table_store = TableStore::new(object_store, format);
+        let table_store = TableStore::new(object_store, format, root_path.clone());
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
         builder.add(b"key2", Some(b"value2")).unwrap();
@@ -91,16 +87,16 @@ mod tests {
         builder.add(b"key4", Some(b"value4")).unwrap();
         let encoded = builder.build().unwrap();
         table_store
-            .write_sst(&root_path, SstKind::Wal, 0, encoded)
+            .write_sst(SstKind::Wal, 0, encoded)
             .await
             .unwrap();
         let sst_handle = table_store
-            .open_sst(&root_path, SstKind::Wal, 0)
+            .open_sst(SstKind::Wal, 0)
             .await
             .unwrap();
         assert_eq!(sst_handle.info.borrow().block_meta().len(), 1);
 
-        let mut iter = SstIterator::new(sst_handle, table_store, root_path);
+        let mut iter = SstIterator::new(sst_handle, table_store);
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
@@ -122,7 +118,7 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 3);
-        let table_store = TableStore::new(object_store, format);
+        let table_store = TableStore::new(object_store, format, root_path.clone());
         let mut builder = table_store.table_builder();
 
         for i in 0..1000 {
@@ -136,16 +132,16 @@ mod tests {
 
         let encoded = builder.build().unwrap();
         table_store
-            .write_sst(&root_path, SstKind::Wal, 0, encoded)
+            .write_sst(SstKind::Wal, 0, encoded)
             .await
             .unwrap();
         let sst_handle = table_store
-            .open_sst(&root_path, SstKind::Wal, 0)
+            .open_sst(SstKind::Wal, 0)
             .await
             .unwrap();
         assert_eq!(sst_handle.info.borrow().block_meta().len(), 6);
 
-        let mut iter = SstIterator::new(sst_handle, table_store, root_path);
+        let mut iter = SstIterator::new(sst_handle, table_store);
         for i in 0..1000 {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, format!("key{}", i));
