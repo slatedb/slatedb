@@ -172,7 +172,7 @@ impl DbInner {
         let wal_id_last_compacted = self.manifest.read().borrow().wal_id_last_compacted();
         let wal_sst_list = self
             .table_store
-            .get_wal_sst_list( wal_id_last_compacted)
+            .get_wal_sst_list(wal_id_last_compacted)
             .await?;
 
         let mut snapshot = {
@@ -181,10 +181,7 @@ impl DbInner {
         };
 
         for sst_id in wal_sst_list {
-            let sst = self
-                .table_store
-                .open_sst( SstKind::Wal, sst_id)
-                .await?;
+            let sst = self.table_store.open_sst(SstKind::Wal, sst_id).await?;
 
             // always put the new sst at the front of l0
             snapshot.l0.push_front(sst);
@@ -412,11 +409,7 @@ mod tests {
         // validate that the manifest file exists.
         let sst_format = SsTableFormat::new(4096, 10);
         let table_store = TableStore::new(object_store.clone(), sst_format, path);
-        let manifest_owned = table_store
-            .open_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap();
+        let manifest_owned = table_store.open_latest_manifest().await.unwrap().unwrap();
         let manifest = manifest_owned.borrow();
         assert_eq!(manifest.wal_id_last_seen(), sst_count);
     }

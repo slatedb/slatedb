@@ -30,9 +30,7 @@ impl DbInner {
         };
 
         if let Some(manifest) = updated_manifest {
-            self.table_store
-                .write_manifest(&manifest)
-                .await?
+            self.table_store.write_manifest(&manifest).await?
         }
 
         Ok(())

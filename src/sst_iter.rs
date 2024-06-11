@@ -10,7 +10,7 @@ struct SstIterator {
     table: SSTableHandle,
     current_iter: Option<BlockIterator<Block>>,
     next_block_idx: usize,
-    table_store: TableStore    
+    table_store: TableStore,
 }
 
 impl SstIterator {
@@ -20,7 +20,7 @@ impl SstIterator {
             table,
             current_iter: None,
             next_block_idx: 0,
-            table_store
+            table_store,
         }
     }
 }
@@ -40,11 +40,7 @@ impl KeyValueIterator for SstIterator {
 
                 let block = self
                     .table_store
-                    .read_block(
-                        SstKind::Wal,
-                        &self.table,
-                        self.next_block_idx,
-                    )
+                    .read_block(SstKind::Wal, &self.table, self.next_block_idx)
                     .await?;
                 self.next_block_idx += 1;
                 self.current_iter
@@ -90,10 +86,7 @@ mod tests {
             .write_sst(SstKind::Wal, 0, encoded)
             .await
             .unwrap();
-        let sst_handle = table_store
-            .open_sst(SstKind::Wal, 0)
-            .await
-            .unwrap();
+        let sst_handle = table_store.open_sst(SstKind::Wal, 0).await.unwrap();
         assert_eq!(sst_handle.info.borrow().block_meta().len(), 1);
 
         let mut iter = SstIterator::new(sst_handle, table_store);
@@ -135,10 +128,7 @@ mod tests {
             .write_sst(SstKind::Wal, 0, encoded)
             .await
             .unwrap();
-        let sst_handle = table_store
-            .open_sst(SstKind::Wal, 0)
-            .await
-            .unwrap();
+        let sst_handle = table_store.open_sst(SstKind::Wal, 0).await.unwrap();
         assert_eq!(sst_handle.info.borrow().block_meta().len(), 6);
 
         let mut iter = SstIterator::new(sst_handle, table_store);

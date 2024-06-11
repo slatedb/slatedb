@@ -63,7 +63,11 @@ pub struct SSTableHandle {
 }
 
 impl TableStore {
-    pub fn new(object_store: Arc<dyn ObjectStore>, sst_format: SsTableFormat, root_path: Path) -> TableStore {
+    pub fn new(
+        object_store: Arc<dyn ObjectStore>,
+        sst_format: SsTableFormat,
+        root_path: Path,
+    ) -> TableStore {
         TableStore {
             object_store: object_store.clone(),
             sst_format,
@@ -179,7 +183,7 @@ impl TableStore {
         sst_kind: SstKind,
         id: u64,
     ) -> Result<SSTableHandle, SlateDBError> {
-        let path = self.path( sst_kind, id);
+        let path = self.path(sst_kind, id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
