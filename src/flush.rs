@@ -17,11 +17,11 @@ impl DbInner {
 
     pub(crate) async fn write_manifest(&self) -> Result<(), SlateDBError> {
         // get the update manifest if there are any updates.
-        let updated_manifest = {
-            let last_wal_sst_written = self.state.read().next_sst_id - 1;
+        let updated_manifest: Option<crate::flatbuffer_types::ManifestOwned> = {
+            let db_state = self.state.read();
             let mut wguard_manifest = self.manifest.write();
-            if wguard_manifest.borrow().wal_id_last_seen() != last_wal_sst_written {
-                let new_manifest = wguard_manifest.update_wal_id_last_seen(last_wal_sst_written);
+            if wguard_manifest.borrow().wal_id_last_seen() != db_state.next_sst_id - 1 {
+                let new_manifest = wguard_manifest.get_updated_manifest(&db_state);
                 *wguard_manifest = new_manifest.clone();
                 Some(new_manifest)
             } else {

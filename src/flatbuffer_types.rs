@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use flatbuffers::InvalidFlatbuffer;
+use crate::db::DbState;
 
 #[path = "./generated/manifest_generated.rs"]
 #[allow(warnings)]
@@ -74,13 +75,10 @@ impl ManifestOwned {
         Self { data }
     }
 
-    pub fn update_wal_id_last_seen(&self, new_wal_id_last_seen: u64) -> ManifestOwned {
+    pub fn get_updated_manifest(&self, db_state: &DbState) -> ManifestOwned {
         let old_manifest = self.borrow();
-
-        // TODO:- Update method to also copy rest of the fields from current manifest.
-        // There doesn't seem to be a way to mutate flatbuffers. Every update requires constructing a new flatbuffer.
-        // Update this after initial PR discussions.
         let builder = &mut flatbuffers::FlatBufferBuilder::new();
+
         let manifest = Manifest::create(
             builder,
             &ManifestArgs {
@@ -89,7 +87,7 @@ impl ManifestOwned {
                 writer_epoch: old_manifest.writer_epoch(),
                 compactor_epoch: old_manifest.compactor_epoch(),
                 wal_id_last_compacted: old_manifest.wal_id_last_compacted(),
-                wal_id_last_seen: new_wal_id_last_seen,
+                wal_id_last_seen: db_state.next_sst_id - 1,
                 leveled_ssts: None,
                 snapshots: None,
             },
