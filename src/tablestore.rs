@@ -86,14 +86,19 @@ impl TableStore {
             Ok(file) => file,
             Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
         } {
-            manifest_file_path = match manifest_file_path {
-                Some(path) => Some(if path < file.location {
-                    file.location
-                } else {
-                    path
-                }),
-                None => Some(file.location.clone()),
-            };
+            match self.parse_id(&file.location, "manifest") {
+                Ok(_) => {
+                    manifest_file_path = match manifest_file_path {
+                        Some(path) => Some(if path < file.location {
+                            file.location
+                        } else {
+                            path
+                        }),
+                        None => Some(file.location.clone()),
+                    }
+                },
+                Err(_) => continue,
+            }
         }
 
         if let Some(resolved_manifest_file_path) = manifest_file_path {
@@ -122,11 +127,14 @@ impl TableStore {
         let mut files_stream = self.object_store.list(Some(wal_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
-            if file.location.extension().unwrap_or_default() == "sst" {
-                let wal_id = self.parse_wal_id(&file.location)?;
-                if wal_id > wal_id_last_compacted {
-                    wal_list.push(wal_id);
-                }
+            
+            match self.parse_id(&file.location, "sst") {
+                Ok(wal_id) => {
+                    if wal_id > wal_id_last_compacted {
+                        wal_list.push(wal_id);
+                    }
+                },
+                Err(_) => continue,
             }
         }
 
@@ -221,13 +229,18 @@ impl TableStore {
         Path::from(format!("{}/{}/{:020}.sst", &self.root_path, sub_path, id))
     }
 
-    fn parse_wal_id(&self, path: &Path) -> Result<u64, SlateDBError> {
-        path.filename()
-            .expect("invalid wal file")
-            .split('.')
-            .next()
-            .ok_or_else(|| SlateDBError::InvalidDBState)?
-            .parse()
-            .map_err(|_| SlateDBError::InvalidDBState)
+    fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {
+        match path.extension() {
+            Some(ext) if ext == expected_extension => {
+                path.filename()
+                    .expect("invalid wal file")
+                    .split('.')
+                    .next()
+                    .ok_or_else(|| SlateDBError::InvalidDBState)?
+                    .parse()
+                    .map_err(|_| SlateDBError::InvalidDBState)
+            },
+            _ => Err(SlateDBError::InvalidDBState),
+        }
     }
 }
