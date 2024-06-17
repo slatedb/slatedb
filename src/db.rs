@@ -1,4 +1,4 @@
-use crate::flatbuffer_types::ManifestOwned;
+use crate::flatbuffer_types::ManifestV1Owned;
 use crate::mem_table::MemTable;
 use crate::sst::SsTableFormat;
 use crate::tablestore::{SSTableHandle, SsTableId, TableStore};
@@ -39,14 +39,14 @@ pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<Arc<DbState>>>,
     pub(crate) options: DbOptions,
     pub(crate) table_store: TableStore,
-    pub(crate) manifest: Arc<RwLock<ManifestOwned>>,
+    pub(crate) manifest: Arc<RwLock<ManifestV1Owned>>,
 }
 
 impl DbInner {
     pub async fn new(
         options: DbOptions,
         table_store: TableStore,
-        manifest: ManifestOwned,
+        manifest: ManifestV1Owned,
     ) -> Result<Self, SlateDBError> {
         let mut db_inner = Self {
             state: Arc::new(RwLock::new(Arc::new(DbState::create()))),
@@ -212,7 +212,7 @@ impl Db {
         let manifest = match manifest {
             Some(manifest) => manifest,
             None => {
-                let manifest = ManifestOwned::create_new();
+                let manifest = ManifestV1Owned::create_new();
                 table_store.write_manifest(&manifest).await?;
                 manifest
             }

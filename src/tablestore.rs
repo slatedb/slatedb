@@ -2,7 +2,7 @@ use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
-use crate::flatbuffer_types::{ManifestOwned, SsTableInfoOwned};
+use crate::flatbuffer_types::{ManifestV1Owned, SsTableInfoOwned};
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use bytes::Bytes;
 use futures::StreamExt;
@@ -78,7 +78,7 @@ impl TableStore {
         }
     }
 
-    pub(crate) async fn open_latest_manifest(&self) -> Result<Option<ManifestOwned>, SlateDBError> {
+    pub(crate) async fn open_latest_manifest(&self) -> Result<Option<ManifestV1Owned>, SlateDBError> {
         let manifest_path = &Path::from(format!("{}/{}/", &self.root_path, self.manifest_path));
         let mut files_stream = self.object_store.list(Some(manifest_path));
         let mut manifest_file_path: Option<Path> = None;
@@ -111,7 +111,7 @@ impl TableStore {
                 Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
             };
 
-            ManifestOwned::new(manifest_bytes.clone())
+            ManifestV1Owned::new(manifest_bytes.clone())
                 .map(Some)
                 .map_err(SlateDBError::InvalidFlatbuffer)
         } else {
@@ -144,7 +144,7 @@ impl TableStore {
 
     pub(crate) async fn write_manifest(
         &self,
-        manifest: &ManifestOwned,
+        manifest: &ManifestV1Owned,
     ) -> Result<(), SlateDBError> {
         let manifest_path = &Path::from(format!(
             "{}/{}/{:020}.{}",

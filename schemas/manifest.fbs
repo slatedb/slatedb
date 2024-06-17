@@ -1,10 +1,7 @@
 include "sst.fbs";
 
 // Manifest to persist state of DB.
-table Manifest {
-    // Manifest format version to allow schema evolution.
-    manifest_format_version: ushort;
-
+table ManifestV1 {
     // Id of manifest. Manifest file name will be derived from this id.
     manifest_id: ulong;
 

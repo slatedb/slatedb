@@ -273,41 +273,40 @@ impl core::fmt::Debug for BlockMeta<'_> {
       ds.finish()
   }
 }
-pub enum ManifestOffset {}
+pub enum ManifestV1Offset {}
 #[derive(Copy, Clone, PartialEq)]
 
-pub struct Manifest<'a> {
+pub struct ManifestV1<'a> {
   pub _tab: flatbuffers::Table<'a>,
 }
 
-impl<'a> flatbuffers::Follow<'a> for Manifest<'a> {
-  type Inner = Manifest<'a>;
+impl<'a> flatbuffers::Follow<'a> for ManifestV1<'a> {
+  type Inner = ManifestV1<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
     Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
-impl<'a> Manifest<'a> {
-  pub const VT_MANIFEST_FORMAT_VERSION: flatbuffers::VOffsetT = 4;
-  pub const VT_MANIFEST_ID: flatbuffers::VOffsetT = 6;
-  pub const VT_WRITER_EPOCH: flatbuffers::VOffsetT = 8;
-  pub const VT_COMPACTOR_EPOCH: flatbuffers::VOffsetT = 10;
-  pub const VT_WAL_ID_LAST_COMPACTED: flatbuffers::VOffsetT = 12;
-  pub const VT_WAL_ID_LAST_SEEN: flatbuffers::VOffsetT = 14;
-  pub const VT_LEVELED_SSTS: flatbuffers::VOffsetT = 16;
-  pub const VT_SNAPSHOTS: flatbuffers::VOffsetT = 18;
+impl<'a> ManifestV1<'a> {
+  pub const VT_MANIFEST_ID: flatbuffers::VOffsetT = 4;
+  pub const VT_WRITER_EPOCH: flatbuffers::VOffsetT = 6;
+  pub const VT_COMPACTOR_EPOCH: flatbuffers::VOffsetT = 8;
+  pub const VT_WAL_ID_LAST_COMPACTED: flatbuffers::VOffsetT = 10;
+  pub const VT_WAL_ID_LAST_SEEN: flatbuffers::VOffsetT = 12;
+  pub const VT_LEVELED_SSTS: flatbuffers::VOffsetT = 14;
+  pub const VT_SNAPSHOTS: flatbuffers::VOffsetT = 16;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
-    Manifest { _tab: table }
+    ManifestV1 { _tab: table }
   }
   #[allow(unused_mut)]
   pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
     _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args ManifestArgs<'args>
-  ) -> flatbuffers::WIPOffset<Manifest<'bldr>> {
-    let mut builder = ManifestBuilder::new(_fbb);
+    args: &'args ManifestV1Args<'args>
+  ) -> flatbuffers::WIPOffset<ManifestV1<'bldr>> {
+    let mut builder = ManifestV1Builder::new(_fbb);
     builder.add_wal_id_last_seen(args.wal_id_last_seen);
     builder.add_wal_id_last_compacted(args.wal_id_last_compacted);
     builder.add_compactor_epoch(args.compactor_epoch);
@@ -315,77 +314,68 @@ impl<'a> Manifest<'a> {
     builder.add_manifest_id(args.manifest_id);
     if let Some(x) = args.snapshots { builder.add_snapshots(x); }
     if let Some(x) = args.leveled_ssts { builder.add_leveled_ssts(x); }
-    builder.add_manifest_format_version(args.manifest_format_version);
     builder.finish()
   }
 
 
   #[inline]
-  pub fn manifest_format_version(&self) -> u16 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<u16>(Manifest::VT_MANIFEST_FORMAT_VERSION, Some(0)).unwrap()}
-  }
-  #[inline]
   pub fn manifest_id(&self) -> u64 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(Manifest::VT_MANIFEST_ID, Some(0)).unwrap()}
+    unsafe { self._tab.get::<u64>(ManifestV1::VT_MANIFEST_ID, Some(0)).unwrap()}
   }
   #[inline]
   pub fn writer_epoch(&self) -> u64 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(Manifest::VT_WRITER_EPOCH, Some(0)).unwrap()}
+    unsafe { self._tab.get::<u64>(ManifestV1::VT_WRITER_EPOCH, Some(0)).unwrap()}
   }
   #[inline]
   pub fn compactor_epoch(&self) -> u64 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(Manifest::VT_COMPACTOR_EPOCH, Some(0)).unwrap()}
+    unsafe { self._tab.get::<u64>(ManifestV1::VT_COMPACTOR_EPOCH, Some(0)).unwrap()}
   }
   #[inline]
   pub fn wal_id_last_compacted(&self) -> u64 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(Manifest::VT_WAL_ID_LAST_COMPACTED, Some(0)).unwrap()}
+    unsafe { self._tab.get::<u64>(ManifestV1::VT_WAL_ID_LAST_COMPACTED, Some(0)).unwrap()}
   }
   #[inline]
   pub fn wal_id_last_seen(&self) -> u64 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(Manifest::VT_WAL_ID_LAST_SEEN, Some(0)).unwrap()}
+    unsafe { self._tab.get::<u64>(ManifestV1::VT_WAL_ID_LAST_SEEN, Some(0)).unwrap()}
   }
   #[inline]
   pub fn leveled_ssts(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SsTableInfo<'a>>>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SsTableInfo>>>>(Manifest::VT_LEVELED_SSTS, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SsTableInfo>>>>(ManifestV1::VT_LEVELED_SSTS, None)}
   }
   #[inline]
   pub fn snapshots(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Snapshot<'a>>>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Snapshot>>>>(Manifest::VT_SNAPSHOTS, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Snapshot>>>>(ManifestV1::VT_SNAPSHOTS, None)}
   }
 }
 
-impl flatbuffers::Verifiable for Manifest<'_> {
+impl flatbuffers::Verifiable for ManifestV1<'_> {
   #[inline]
   fn run_verifier(
     v: &mut flatbuffers::Verifier, pos: usize
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<u16>("manifest_format_version", Self::VT_MANIFEST_FORMAT_VERSION, false)?
      .visit_field::<u64>("manifest_id", Self::VT_MANIFEST_ID, false)?
      .visit_field::<u64>("writer_epoch", Self::VT_WRITER_EPOCH, false)?
      .visit_field::<u64>("compactor_epoch", Self::VT_COMPACTOR_EPOCH, false)?
@@ -397,8 +387,7 @@ impl flatbuffers::Verifiable for Manifest<'_> {
     Ok(())
   }
 }
-pub struct ManifestArgs<'a> {
-    pub manifest_format_version: u16,
+pub struct ManifestV1Args<'a> {
     pub manifest_id: u64,
     pub writer_epoch: u64,
     pub compactor_epoch: u64,
@@ -407,11 +396,10 @@ pub struct ManifestArgs<'a> {
     pub leveled_ssts: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SsTableInfo<'a>>>>>,
     pub snapshots: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Snapshot<'a>>>>>,
 }
-impl<'a> Default for ManifestArgs<'a> {
+impl<'a> Default for ManifestV1Args<'a> {
   #[inline]
   fn default() -> Self {
-    ManifestArgs {
-      manifest_format_version: 0,
+    ManifestV1Args {
       manifest_id: 0,
       writer_epoch: 0,
       compactor_epoch: 0,
@@ -423,62 +411,57 @@ impl<'a> Default for ManifestArgs<'a> {
   }
 }
 
-pub struct ManifestBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+pub struct ManifestV1Builder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
   fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
   start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
 }
-impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestBuilder<'a, 'b, A> {
-  #[inline]
-  pub fn add_manifest_format_version(&mut self, manifest_format_version: u16) {
-    self.fbb_.push_slot::<u16>(Manifest::VT_MANIFEST_FORMAT_VERSION, manifest_format_version, 0);
-  }
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
   #[inline]
   pub fn add_manifest_id(&mut self, manifest_id: u64) {
-    self.fbb_.push_slot::<u64>(Manifest::VT_MANIFEST_ID, manifest_id, 0);
+    self.fbb_.push_slot::<u64>(ManifestV1::VT_MANIFEST_ID, manifest_id, 0);
   }
   #[inline]
   pub fn add_writer_epoch(&mut self, writer_epoch: u64) {
-    self.fbb_.push_slot::<u64>(Manifest::VT_WRITER_EPOCH, writer_epoch, 0);
+    self.fbb_.push_slot::<u64>(ManifestV1::VT_WRITER_EPOCH, writer_epoch, 0);
   }
   #[inline]
   pub fn add_compactor_epoch(&mut self, compactor_epoch: u64) {
-    self.fbb_.push_slot::<u64>(Manifest::VT_COMPACTOR_EPOCH, compactor_epoch, 0);
+    self.fbb_.push_slot::<u64>(ManifestV1::VT_COMPACTOR_EPOCH, compactor_epoch, 0);
   }
   #[inline]
   pub fn add_wal_id_last_compacted(&mut self, wal_id_last_compacted: u64) {
-    self.fbb_.push_slot::<u64>(Manifest::VT_WAL_ID_LAST_COMPACTED, wal_id_last_compacted, 0);
+    self.fbb_.push_slot::<u64>(ManifestV1::VT_WAL_ID_LAST_COMPACTED, wal_id_last_compacted, 0);
   }
   #[inline]
   pub fn add_wal_id_last_seen(&mut self, wal_id_last_seen: u64) {
-    self.fbb_.push_slot::<u64>(Manifest::VT_WAL_ID_LAST_SEEN, wal_id_last_seen, 0);
+    self.fbb_.push_slot::<u64>(ManifestV1::VT_WAL_ID_LAST_SEEN, wal_id_last_seen, 0);
   }
   #[inline]
   pub fn add_leveled_ssts(&mut self, leveled_ssts: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<SsTableInfo<'b >>>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Manifest::VT_LEVELED_SSTS, leveled_ssts);
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_LEVELED_SSTS, leveled_ssts);
   }
   #[inline]
   pub fn add_snapshots(&mut self, snapshots: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Snapshot<'b >>>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Manifest::VT_SNAPSHOTS, snapshots);
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_SNAPSHOTS, snapshots);
   }
   #[inline]
-  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> ManifestBuilder<'a, 'b, A> {
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> ManifestV1Builder<'a, 'b, A> {
     let start = _fbb.start_table();
-    ManifestBuilder {
+    ManifestV1Builder {
       fbb_: _fbb,
       start_: start,
     }
   }
   #[inline]
-  pub fn finish(self) -> flatbuffers::WIPOffset<Manifest<'a>> {
+  pub fn finish(self) -> flatbuffers::WIPOffset<ManifestV1<'a>> {
     let o = self.fbb_.end_table(self.start_);
     flatbuffers::WIPOffset::new(o.value())
   }
 }
 
-impl core::fmt::Debug for Manifest<'_> {
+impl core::fmt::Debug for ManifestV1<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    let mut ds = f.debug_struct("Manifest");
-      ds.field("manifest_format_version", &self.manifest_format_version());
+    let mut ds = f.debug_struct("ManifestV1");
       ds.field("manifest_id", &self.manifest_id());
       ds.field("writer_epoch", &self.writer_epoch());
       ds.field("compactor_epoch", &self.compactor_epoch());
