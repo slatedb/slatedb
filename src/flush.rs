@@ -2,7 +2,7 @@ use crate::db::{DbInner, DbState};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::MemTable;
-use crate::tablestore::{SSTableHandle, SstKind};
+use crate::tablestore::{self, SSTableHandle};
 use crate::types::ValueDeletable;
 use futures::executor::block_on;
 use std::sync::Arc;
@@ -51,9 +51,10 @@ impl DbInner {
         }
 
         let encoded_sst = sst_builder.build()?;
+        let wal_id = tablestore::SsTableId::Wal(id);
         let handle = self
             .table_store
-            .write_sst(SstKind::Wal, id, encoded_sst)
+            .write_sst(&wal_id, encoded_sst)
             .await?;
         Ok(handle)
     }

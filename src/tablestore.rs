@@ -19,10 +19,6 @@ pub struct TableStore {
     manifest_path: &'static str,
 }
 
-pub enum SstKind {
-    Wal,
-}
-
 struct ReadOnlyObject {
     object_store: Arc<dyn ObjectStore>,
     path: Path,
@@ -52,8 +48,13 @@ impl ReadOnlyBlob for ReadOnlyObject {
 }
 
 #[derive(Clone)]
+pub enum SsTableId {
+    Wal(u64),
+}
+
+#[derive(Clone)]
 pub struct SSTableHandle {
-    pub id: u64,
+    pub id: SsTableId,
     pub info: SsTableInfoOwned,
     // we stash the filter in the handle for now, as a way to cache it so that
     // the db doesn't need to reload it for each read. Once we've put in a proper
@@ -168,17 +169,16 @@ impl TableStore {
 
     pub(crate) async fn write_sst(
         &self,
-        sst_kind: SstKind,
-        id: u64,
+        id: &SsTableId,
         encoded_sst: EncodedSsTable,
     ) -> Result<SSTableHandle, SlateDBError> {
-        let path = self.path(sst_kind, id);
+        let path = self.path(&id);
         self.object_store
             .put(&path, encoded_sst.raw.clone())
             .await
             .map_err(SlateDBError::ObjectStoreError)?;
         Ok(SSTableHandle {
-            id,
+            id: id.clone(),
             info: encoded_sst.info,
             filter: encoded_sst.filter,
         })
@@ -188,17 +188,16 @@ impl TableStore {
     #[allow(dead_code)]
     pub(crate) async fn open_sst(
         &self,
-        sst_kind: SstKind,
-        id: u64,
+        id: &SsTableId,
     ) -> Result<SSTableHandle, SlateDBError> {
-        let path = self.path(sst_kind, id);
+        let path = self.path(id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
         };
         let info = self.sst_format.read_info(&obj).await?;
         let filter = self.sst_format.read_filter(&info, &obj).await?;
-        Ok(SSTableHandle { id, info, filter })
+        Ok(SSTableHandle { id: id.clone(), info, filter })
     }
 
     pub(crate) async fn read_filter(
@@ -210,11 +209,10 @@ impl TableStore {
 
     pub(crate) async fn read_block(
         &self,
-        sst_kind: SstKind,
         handle: &SSTableHandle,
         block: usize,
     ) -> Result<Block, SlateDBError> {
-        let path = self.path(sst_kind, handle.id);
+        let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
@@ -222,11 +220,10 @@ impl TableStore {
         self.sst_format.read_block(&handle.info, block, &obj).await
     }
 
-    fn path(&self, sst_kind: SstKind, id: u64) -> Path {
-        let sub_path = match sst_kind {
-            SstKind::Wal => self.wal_path,
-        };
-        Path::from(format!("{}/{}/{:020}.sst", &self.root_path, sub_path, id))
+    fn path(&self, id: &SsTableId) -> Path {
+        match id {
+            SsTableId::Wal(id) => Path::from(format!("{}/{}/{:020}.sst", &self.root_path, self.wal_path, id)),
+       }
     }
 
     fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {

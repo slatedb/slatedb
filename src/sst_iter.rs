@@ -2,7 +2,7 @@ use crate::{
     block::Block,
     block_iterator::BlockIterator,
     iter::KeyValueIterator,
-    tablestore::{SSTableHandle, SstKind, TableStore},
+    tablestore::{SSTableHandle, TableStore},
     types::KeyValueDeletable,
 };
 
@@ -40,7 +40,7 @@ impl KeyValueIterator for SstIterator {
 
                 let block = self
                     .table_store
-                    .read_block(SstKind::Wal, &self.table, self.next_block_idx)
+                    .read_block(&self.table, self.next_block_idx)
                     .await?;
                 self.next_block_idx += 1;
                 self.current_iter
@@ -65,7 +65,7 @@ impl KeyValueIterator for SstIterator {
 mod tests {
     use super::*;
     use crate::sst::SsTableFormat;
-    use crate::tablestore::SstKind;
+    use crate::tablestore::SsTableId;
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use std::sync::Arc;
@@ -83,10 +83,10 @@ mod tests {
         builder.add(b"key4", Some(b"value4")).unwrap();
         let encoded = builder.build().unwrap();
         table_store
-            .write_sst(SstKind::Wal, 0, encoded)
+            .write_sst( &SsTableId::Wal(0), encoded)
             .await
             .unwrap();
-        let sst_handle = table_store.open_sst(SstKind::Wal, 0).await.unwrap();
+        let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         assert_eq!(sst_handle.info.borrow().block_meta().len(), 1);
 
         let mut iter = SstIterator::new(sst_handle, table_store);
@@ -125,10 +125,10 @@ mod tests {
 
         let encoded = builder.build().unwrap();
         table_store
-            .write_sst(SstKind::Wal, 0, encoded)
+            .write_sst(&SsTableId::Wal(0), encoded)
             .await
             .unwrap();
-        let sst_handle = table_store.open_sst(SstKind::Wal, 0).await.unwrap();
+        let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         assert_eq!(sst_handle.info.borrow().block_meta().len(), 6);
 
         let mut iter = SstIterator::new(sst_handle, table_store);
