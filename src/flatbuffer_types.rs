@@ -59,7 +59,7 @@ impl ManifestV1Owned {
         let builder = &mut flatbuffers::FlatBufferBuilder::new();
         let manifest = ManifestV1::create(
             builder,
-            &&ManifestV1Args {
+            &ManifestV1Args {
                 manifest_id: 1,
                 writer_epoch: 1,
                 compactor_epoch: 0,
@@ -80,7 +80,7 @@ impl ManifestV1Owned {
 
         let manifest = ManifestV1::create(
             builder,
-            &&ManifestV1Args {
+            &ManifestV1Args {
                 manifest_id: old_manifest.manifest_id() + 1,
                 writer_epoch: old_manifest.writer_epoch(),
                 compactor_epoch: old_manifest.compactor_epoch(),
