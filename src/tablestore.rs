@@ -78,7 +78,9 @@ impl TableStore {
         }
     }
 
-    pub(crate) async fn open_latest_manifest(&self) -> Result<Option<ManifestV1Owned>, SlateDBError> {
+    pub(crate) async fn open_latest_manifest(
+        &self,
+    ) -> Result<Option<ManifestV1Owned>, SlateDBError> {
         let manifest_path = &Path::from(format!("{}/{}/", &self.root_path, self.manifest_path));
         let mut files_stream = self.object_store.list(Some(manifest_path));
         let mut manifest_file_path: Option<Path> = None;
