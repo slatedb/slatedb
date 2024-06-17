@@ -1,17 +1,15 @@
+use crate::flatbuffer_types::ManifestV1Owned;
 use crate::mem_table::MemTable;
 use crate::sst::SsTableFormat;
-use crate::tablestore::{SSTableHandle, TableStore};
+use crate::tablestore::{SSTableHandle, SsTableId, TableStore};
 use crate::types::ValueDeletable;
 use crate::{block::Block, error::SlateDBError};
 use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
 use bytes::Bytes;
+use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
-use std::{
-    collections::VecDeque,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::VecDeque, sync::Arc};
 
 pub struct DbOptions {
     pub flush_ms: usize,
@@ -23,7 +21,7 @@ pub(crate) struct DbState {
     pub(crate) memtable: Arc<MemTable>,
     pub(crate) imm_memtables: VecDeque<Arc<MemTable>>,
     pub(crate) l0: VecDeque<SSTableHandle>,
-    pub(crate) next_sst_id: usize,
+    pub(crate) next_sst_id: u64,
 }
 
 impl DbState {
@@ -32,37 +30,34 @@ impl DbState {
             memtable: Arc::new(MemTable::new()),
             imm_memtables: VecDeque::new(),
             l0: VecDeque::new(),
-            next_sst_id: 0,
+            next_sst_id: 1,
         }
     }
 }
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<Arc<DbState>>>,
-    #[allow(dead_code)] // TODO remove this once we write SSTs to disk
-    pub(crate) path: PathBuf,
     pub(crate) options: DbOptions,
     pub(crate) table_store: TableStore,
+    pub(crate) manifest: Arc<RwLock<ManifestV1Owned>>,
 }
 
 impl DbInner {
-    pub fn new(
-        path: impl AsRef<Path>,
+    pub async fn new(
         options: DbOptions,
         table_store: TableStore,
+        manifest: ManifestV1Owned,
     ) -> Result<Self, SlateDBError> {
-        let path_buf = path.as_ref().to_path_buf();
-
-        if !path_buf.exists() {
-            std::fs::create_dir_all(path).map_err(SlateDBError::IoError)?;
-        }
-
-        Ok(Self {
+        let mut db_inner = Self {
             state: Arc::new(RwLock::new(Arc::new(DbState::create()))),
-            path: path_buf,
             options,
             table_store,
-        })
+            manifest: Arc::new(RwLock::new(manifest)),
+        };
+
+        db_inner.load_state().await?;
+
+        Ok(db_inner)
     }
 
     /// Get the value for a given key.
@@ -169,6 +164,32 @@ impl DbInner {
 
         memtable.delete(key).await;
     }
+
+    async fn load_state(&mut self) -> Result<(), SlateDBError> {
+        let wal_id_last_compacted = self.manifest.read().borrow().wal_id_last_compacted();
+        let wal_sst_list = self
+            .table_store
+            .get_wal_sst_list(wal_id_last_compacted)
+            .await?;
+
+        let mut snapshot = {
+            let rguard_state = self.state.read();
+            rguard_state.as_ref().clone()
+        };
+
+        for sst_id in wal_sst_list {
+            let sst = self.table_store.open_sst(&SsTableId::Wal(sst_id)).await?;
+
+            // always put the new sst at the front of l0
+            snapshot.l0.push_front(sst);
+            snapshot.next_sst_id = sst_id + 1;
+        }
+
+        let mut wguard_state = self.state.write();
+        *wguard_state = Arc::new(snapshot);
+
+        Ok(())
+    }
 }
 
 pub struct Db {
@@ -180,14 +201,24 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn open(
-        path: impl AsRef<Path>,
+    pub async fn open(
+        path: Path,
         options: DbOptions,
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self, SlateDBError> {
         let sst_format = SsTableFormat::new(4096, options.min_filter_keys);
-        let table_store = TableStore::new(object_store, sst_format);
-        let inner = Arc::new(DbInner::new(path, options, table_store)?);
+        let table_store = TableStore::new(object_store, sst_format, path.clone());
+        let manifest = table_store.open_latest_manifest().await?;
+        let manifest = match manifest {
+            Some(manifest) => manifest,
+            None => {
+                let manifest = ManifestV1Owned::create_new();
+                table_store.write_manifest(&manifest).await?;
+                manifest
+            }
+        };
+
+        let inner = Arc::new(DbInner::new(options, table_store, manifest).await?);
         let (tx, rx) = crossbeam_channel::unbounded();
         let flush_thread = inner.spawn_flush_thread(rx);
         Ok(Self {
@@ -212,6 +243,7 @@ impl Db {
 
         // Force a final flush on the mutable memtable
         self.inner.flush().await?;
+        self.inner.write_manifest().await?;
         Ok(())
     }
 
@@ -244,13 +276,14 @@ mod tests {
     async fn test_put_get_delete() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::open(
-            "/tmp/test_kv_store",
+            Path::from("/tmp/test_kv_store"),
             DbOptions {
                 flush_ms: 100,
                 min_filter_keys: 0,
             },
             object_store,
         )
+        .await
         .unwrap();
         let key = b"test_key";
         let value = b"test_value";
@@ -270,13 +303,14 @@ mod tests {
     async fn test_put_empty_value() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::open(
-            "/tmp/test_kv_store",
+            Path::from("/tmp/test_kv_store"),
             DbOptions {
                 flush_ms: 100,
                 min_filter_keys: 0,
             },
             object_store,
         )
+        .await
         .unwrap();
         let key = b"test_key";
         let value = b"";
@@ -293,13 +327,14 @@ mod tests {
     async fn test_flush_while_iterating() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::open(
-            "/tmp/test_kv_store",
+            Path::from("/tmp/test_kv_store"),
             DbOptions {
                 flush_ms: 100,
                 min_filter_keys: 0,
             },
             object_store,
         )
+        .await
         .unwrap();
 
         let memtable = {
@@ -322,5 +357,57 @@ mod tests {
 
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc3333".as_slice());
+    }
+
+    #[tokio::test]
+    async fn test_basic_restore() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let kv_store = Db::open(
+            path.clone(),
+            DbOptions {
+                flush_ms: 100,
+                min_filter_keys: 0,
+            },
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        // write some sst files
+        let sst_count: u64 = 5;
+        for i in 0..sst_count {
+            kv_store.put(&i.to_be_bytes(), &i.to_be_bytes()).await;
+            kv_store.flush().await.unwrap();
+        }
+
+        kv_store.close().await.unwrap();
+
+        // recover and validate that sst files are loaded on recovery.
+        let kv_store_restored = Db::open(
+            path.clone(),
+            DbOptions {
+                flush_ms: 100,
+                min_filter_keys: 0,
+            },
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        for i in 0..sst_count {
+            assert!(kv_store_restored
+                .get(&i.to_be_bytes())
+                .await
+                .unwrap()
+                .is_some());
+        }
+
+        // validate that the manifest file exists.
+        let sst_format = SsTableFormat::new(4096, 10);
+        let table_store = TableStore::new(object_store.clone(), sst_format, path);
+        let manifest_owned = table_store.open_latest_manifest().await.unwrap().unwrap();
+        let manifest = manifest_owned.borrow();
+        assert_eq!(manifest.wal_id_last_seen(), sst_count);
     }
 }

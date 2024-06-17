@@ -2,7 +2,7 @@ use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::filter::{BloomFilter, BloomFilterBuilder};
 use crate::flatbuffer_types::{
-    BlockMeta, BlockMetaArgs, OwnedSsTableInfo, SsTableInfo, SsTableInfoArgs,
+    BlockMeta, BlockMetaArgs, SsTableInfo, SsTableInfoArgs, SsTableInfoOwned,
 };
 use crate::{block::BlockBuilder, error::SlateDBError};
 use bytes::{Buf, BufMut, Bytes};
@@ -25,7 +25,7 @@ impl SsTableFormat {
     pub(crate) async fn read_info(
         &self,
         obj: &impl ReadOnlyBlob,
-    ) -> Result<OwnedSsTableInfo, SlateDBError> {
+    ) -> Result<SsTableInfoOwned, SlateDBError> {
         let len = obj.len().await?;
         if len <= 4 {
             return Err(SlateDBError::EmptySSTable);
@@ -37,12 +37,12 @@ impl SsTableFormat {
         // Get the metadata. Last 4 bytes are the offset of SsTableInfo
         let sst_metadata_range = sst_metadata_offset..len - 4;
         let sst_metadata_bytes = obj.read_range(sst_metadata_range).await?;
-        OwnedSsTableInfo::decode(sst_metadata_bytes)
+        SsTableInfoOwned::decode(sst_metadata_bytes)
     }
 
     pub(crate) async fn read_filter(
         &self,
-        info: &OwnedSsTableInfo,
+        info: &SsTableInfoOwned,
         obj: &impl ReadOnlyBlob,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         let mut filter = None;
@@ -58,7 +58,7 @@ impl SsTableFormat {
 
     pub(crate) async fn read_block(
         &self,
-        info: &OwnedSsTableInfo,
+        info: &SsTableInfoOwned,
         block: usize,
         obj: &impl ReadOnlyBlob,
     ) -> Result<Block, SlateDBError> {
@@ -82,13 +82,13 @@ impl SsTableFormat {
     }
 }
 
-impl OwnedSsTableInfo {
-    fn encode(info: &OwnedSsTableInfo, buf: &mut Vec<u8>) {
+impl SsTableInfoOwned {
+    fn encode(info: &SsTableInfoOwned, buf: &mut Vec<u8>) {
         buf.extend_from_slice(info.data());
         buf.put_u32(crc32fast::hash(info.data()));
     }
 
-    pub(crate) fn decode(raw_block_meta: Bytes) -> Result<OwnedSsTableInfo, SlateDBError> {
+    pub(crate) fn decode(raw_block_meta: Bytes) -> Result<SsTableInfoOwned, SlateDBError> {
         if raw_block_meta.len() <= 4 {
             return Err(SlateDBError::EmptyBlockMeta);
         }
@@ -98,13 +98,13 @@ impl OwnedSsTableInfo {
             return Err(SlateDBError::ChecksumMismatch);
         }
 
-        let info = OwnedSsTableInfo::new(data)?;
+        let info = SsTableInfoOwned::new(data)?;
         Ok(info)
     }
 }
 
 pub(crate) struct EncodedSsTable {
-    pub(crate) info: OwnedSsTableInfo,
+    pub(crate) info: SsTableInfoOwned,
     pub(crate) filter: Option<Arc<BloomFilter>>,
     pub(crate) raw: Bytes,
 }
@@ -211,15 +211,14 @@ impl<'a> EncodedSsTableBuilder<'a> {
                 block_meta: Some(vector),
                 filter_offset: filter_offset as u64,
                 filter_len: filter_len as u64,
-                block_meta_offset: meta_offset as u64,
             },
         );
 
         self.sst_info_builder.finish(info_wip_offset, None);
         let info =
-            OwnedSsTableInfo::new(Bytes::from(self.sst_info_builder.finished_data().to_vec()))?;
+            SsTableInfoOwned::new(Bytes::from(self.sst_info_builder.finished_data().to_vec()))?;
 
-        OwnedSsTableInfo::encode(&info, &mut buf);
+        SsTableInfoOwned::encode(&info, &mut buf);
 
         // write the metadata offset at the end of the file. FlatBuffer internal representation is not intended to be used directly.
         buf.put_u32(meta_offset as u32);
@@ -233,8 +232,9 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::tablestore::TableStore;
+    use crate::tablestore::{SsTableId, TableStore};
     use object_store::memory::InMemory;
+    use object_store::path::Path;
     use object_store::ObjectStore;
     use std::sync::Arc;
 
@@ -242,9 +242,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_sstable() {
+        let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 0);
-        let table_store = TableStore::new(object_store, format);
+        let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
         builder.add(b"key2", Some(b"value2")).unwrap();
@@ -252,7 +253,10 @@ mod tests {
         let encoded_info = encoded.info.clone();
 
         // write sst and validate that the handle returned has the correct content.
-        let sst_handle = table_store.write_sst(0, encoded).await.unwrap();
+        let sst_handle = table_store
+            .write_sst(&SsTableId::Wal(0), encoded)
+            .await
+            .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
         let sst_info = sst_handle.info.borrow();
         assert_eq!(1, sst_info.block_meta().len());
@@ -268,7 +272,7 @@ mod tests {
         );
 
         // construct sst info from the raw bytes and validate that it matches the original info.
-        let sst_handle_from_store = table_store.open_sst(0).await.unwrap();
+        let sst_handle_from_store = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         assert_eq!(encoded_info, sst_handle_from_store.info);
         let sst_info_from_store = sst_handle_from_store.info.borrow();
         assert_eq!(1, sst_info_from_store.block_meta().len());
@@ -286,19 +290,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_sstable_no_filter() {
+        let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 3);
-        let table_store = TableStore::new(object_store, format);
+        let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
         builder.add(b"key2", Some(b"value2")).unwrap();
         let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
-        table_store.write_sst(0, encoded).await.unwrap();
-        let sst_handle = table_store.open_sst(0).await.unwrap();
+        table_store
+            .write_sst(&SsTableId::Wal(0), encoded)
+            .await
+            .unwrap();
+        let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         assert_eq!(encoded_info, sst_handle.info);
         let handle = sst_handle.info.borrow();
-        assert_eq!(handle.filter_offset(), handle.block_meta_offset());
         assert_eq!(handle.filter_len(), 0);
     }
 }

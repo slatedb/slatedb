@@ -65,22 +65,28 @@ impl KeyValueIterator for SstIterator {
 mod tests {
     use super::*;
     use crate::sst::SsTableFormat;
+    use crate::tablestore::SsTableId;
+    use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use std::sync::Arc;
 
     #[tokio::test]
     async fn test_one_block_sst_iter() {
+        let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 3);
-        let table_store = TableStore::new(object_store, format);
+        let table_store = TableStore::new(object_store, format, root_path.clone());
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
         builder.add(b"key2", Some(b"value2")).unwrap();
         builder.add(b"key3", Some(b"value3")).unwrap();
         builder.add(b"key4", Some(b"value4")).unwrap();
         let encoded = builder.build().unwrap();
-        table_store.write_sst(0, encoded).await.unwrap();
-        let sst_handle = table_store.open_sst(0).await.unwrap();
+        table_store
+            .write_sst(&SsTableId::Wal(0), encoded)
+            .await
+            .unwrap();
+        let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         assert_eq!(sst_handle.info.borrow().block_meta().len(), 1);
 
         let mut iter = SstIterator::new(sst_handle, table_store);
@@ -102,9 +108,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_many_block_sst_iter() {
+        let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 3);
-        let table_store = TableStore::new(object_store, format);
+        let table_store = TableStore::new(object_store, format, root_path.clone());
         let mut builder = table_store.table_builder();
 
         for i in 0..1000 {
@@ -117,8 +124,11 @@ mod tests {
         }
 
         let encoded = builder.build().unwrap();
-        table_store.write_sst(0, encoded).await.unwrap();
-        let sst_handle = table_store.open_sst(0).await.unwrap();
+        table_store
+            .write_sst(&SsTableId::Wal(0), encoded)
+            .await
+            .unwrap();
+        let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         assert_eq!(sst_handle.info.borrow().block_meta().len(), 6);
 
         let mut iter = SstIterator::new(sst_handle, table_store);

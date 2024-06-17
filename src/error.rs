@@ -20,4 +20,7 @@ pub enum SlateDBError {
 
     #[error("Invalid sst error")]
     InvalidFlatbuffer(#[from] flatbuffers::InvalidFlatbuffer),
+
+    #[error("Invalid DB state error")]
+    InvalidDBState,
 }

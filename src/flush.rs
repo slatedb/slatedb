@@ -2,7 +2,7 @@ use crate::db::{DbInner, DbState};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::MemTable;
-use crate::tablestore::SSTableHandle;
+use crate::tablestore::{self, SSTableHandle};
 use crate::types::ValueDeletable;
 use futures::executor::block_on;
 use std::sync::Arc;
@@ -15,11 +15,28 @@ impl DbInner {
         Ok(())
     }
 
-    async fn flush_imm(
-        &self,
-        imm: Arc<MemTable>,
-        id: usize,
-    ) -> Result<SSTableHandle, SlateDBError> {
+    pub(crate) async fn write_manifest(&self) -> Result<(), SlateDBError> {
+        // get the update manifest if there are any updates.
+        let updated_manifest: Option<crate::flatbuffer_types::ManifestV1Owned> = {
+            let db_state = self.state.read();
+            let mut wguard_manifest = self.manifest.write();
+            if wguard_manifest.borrow().wal_id_last_seen() != db_state.next_sst_id - 1 {
+                let new_manifest = wguard_manifest.get_updated_manifest(&db_state);
+                *wguard_manifest = new_manifest.clone();
+                Some(new_manifest)
+            } else {
+                None
+            }
+        };
+
+        if let Some(manifest) = updated_manifest {
+            self.table_store.write_manifest(&manifest).await?
+        }
+
+        Ok(())
+    }
+
+    async fn flush_imm(&self, imm: Arc<MemTable>, id: u64) -> Result<SSTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = imm.iter();
         while let Some(kv) = iter.next_entry().await? {
@@ -34,7 +51,8 @@ impl DbInner {
         }
 
         let encoded_sst = sst_builder.build()?;
-        let handle = self.table_store.write_sst(id, encoded_sst).await?;
+        let wal_id = tablestore::SsTableId::Wal(id);
+        let handle = self.table_store.write_sst(&wal_id, encoded_sst).await?;
         Ok(handle)
     }
 
