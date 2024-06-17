@@ -151,10 +151,12 @@ impl DbInner {
         // Clone memtable to avoid a deadlock with flusher thread.
         let memtable = {
             let guard = self.state.read();
-            Arc::clone(&guard.memtable)
+            let memtable = Arc::clone(&guard.memtable);
+            memtable.put(key, value);
+            memtable
         };
 
-        memtable.put(key, value).await;
+        memtable.await_flush().await;
     }
 
     /// Delete a key from the database. Key must not be empty.
@@ -164,10 +166,12 @@ impl DbInner {
         // Clone memtable to avoid a deadlock with flusher thread.
         let memtable = {
             let guard = self.state.read();
-            Arc::clone(&guard.memtable)
+            let memtable = Arc::clone(&guard.memtable);
+            memtable.delete(key);
+            memtable
         };
 
-        memtable.delete(key).await;
+        memtable.await_flush().await;
     }
 }
 
@@ -307,9 +311,9 @@ mod tests {
             lock.memtable.clone()
         };
 
-        memtable.put_optimistic(b"abc1111", b"value1111");
-        memtable.put_optimistic(b"abc2222", b"value2222");
-        memtable.put_optimistic(b"abc3333", b"value3333");
+        memtable.put(b"abc1111", b"value1111");
+        memtable.put(b"abc2222", b"value2222");
+        memtable.put(b"abc3333", b"value3333");
 
         let mut iter = memtable.iter();
         let kv = iter.next().await.unwrap().unwrap();
