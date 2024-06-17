@@ -171,7 +171,7 @@ impl TableStore {
         id: &SsTableId,
         encoded_sst: EncodedSsTable,
     ) -> Result<SSTableHandle, SlateDBError> {
-        let path = self.path(&id);
+        let path = self.path(id);
         self.object_store
             .put(&path, encoded_sst.raw.clone())
             .await
