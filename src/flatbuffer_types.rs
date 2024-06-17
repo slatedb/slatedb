@@ -1,6 +1,6 @@
+use crate::db::DbState;
 use bytes::Bytes;
 use flatbuffers::InvalidFlatbuffer;
-use crate::db::DbState;
 
 #[path = "./generated/manifest_generated.rs"]
 #[allow(warnings)]

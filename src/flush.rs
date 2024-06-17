@@ -52,10 +52,7 @@ impl DbInner {
 
         let encoded_sst = sst_builder.build()?;
         let wal_id = tablestore::SsTableId::Wal(id);
-        let handle = self
-            .table_store
-            .write_sst(&wal_id, encoded_sst)
-            .await?;
+        let handle = self.table_store.write_sst(&wal_id, encoded_sst).await?;
         Ok(handle)
     }
 

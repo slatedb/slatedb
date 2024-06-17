@@ -83,7 +83,7 @@ mod tests {
         builder.add(b"key4", Some(b"value4")).unwrap();
         let encoded = builder.build().unwrap();
         table_store
-            .write_sst( &SsTableId::Wal(0), encoded)
+            .write_sst(&SsTableId::Wal(0), encoded)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();

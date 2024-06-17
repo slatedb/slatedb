@@ -232,7 +232,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::tablestore::{TableStore, SsTableId};
+    use crate::tablestore::{SsTableId, TableStore};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;

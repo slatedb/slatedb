@@ -77,10 +77,7 @@ impl DbInner {
 
         for sst in &snapshot.as_ref().l0 {
             if let Some(block_index) = self.find_block_for_key(sst, key).await? {
-                let block = self
-                    .table_store
-                    .read_block(sst, block_index)
-                    .await?;
+                let block = self.table_store.read_block(sst, block_index).await?;
                 if let Some(val) = self.find_val_in_block(&block, key).await? {
                     return Ok(val.into_option());
                 }

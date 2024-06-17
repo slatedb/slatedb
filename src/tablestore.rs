@@ -97,7 +97,7 @@ impl TableStore {
                         }),
                         None => Some(file.location.clone()),
                     }
-                },
+                }
                 Err(_) => continue,
             }
         }
@@ -128,13 +128,12 @@ impl TableStore {
         let mut files_stream = self.object_store.list(Some(wal_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
-            
             match self.parse_id(&file.location, "sst") {
                 Ok(wal_id) => {
                     if wal_id > wal_id_last_compacted {
                         wal_list.push(wal_id);
                     }
-                },
+                }
                 Err(_) => continue,
             }
         }
@@ -186,10 +185,7 @@ impl TableStore {
 
     // todo: clean up the warning suppression when we start using open_sst outside tests
     #[allow(dead_code)]
-    pub(crate) async fn open_sst(
-        &self,
-        id: &SsTableId,
-    ) -> Result<SSTableHandle, SlateDBError> {
+    pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SSTableHandle, SlateDBError> {
         let path = self.path(id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
@@ -197,7 +193,11 @@ impl TableStore {
         };
         let info = self.sst_format.read_info(&obj).await?;
         let filter = self.sst_format.read_filter(&info, &obj).await?;
-        Ok(SSTableHandle { id: id.clone(), info, filter })
+        Ok(SSTableHandle {
+            id: id.clone(),
+            info,
+            filter,
+        })
     }
 
     pub(crate) async fn read_filter(
@@ -222,21 +222,23 @@ impl TableStore {
 
     fn path(&self, id: &SsTableId) -> Path {
         match id {
-            SsTableId::Wal(id) => Path::from(format!("{}/{}/{:020}.sst", &self.root_path, self.wal_path, id)),
-       }
+            SsTableId::Wal(id) => Path::from(format!(
+                "{}/{}/{:020}.sst",
+                &self.root_path, self.wal_path, id
+            )),
+        }
     }
 
     fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {
         match path.extension() {
-            Some(ext) if ext == expected_extension => {
-                path.filename()
-                    .expect("invalid wal file")
-                    .split('.')
-                    .next()
-                    .ok_or_else(|| SlateDBError::InvalidDBState)?
-                    .parse()
-                    .map_err(|_| SlateDBError::InvalidDBState)
-            },
+            Some(ext) if ext == expected_extension => path
+                .filename()
+                .expect("invalid wal file")
+                .split('.')
+                .next()
+                .ok_or_else(|| SlateDBError::InvalidDBState)?
+                .parse()
+                .map_err(|_| SlateDBError::InvalidDBState),
             _ => Err(SlateDBError::InvalidDBState),
         }
     }
