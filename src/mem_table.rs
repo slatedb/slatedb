@@ -59,32 +59,21 @@ impl MemTable {
     /// Puts a value, returning as soon as the value is written to the memtable but before
     /// it is flushed to durable storage.
     #[allow(dead_code)] // will be used in #8
-    pub(crate) fn put_optimistic(&self, key: &[u8], value: &[u8]) {
+    pub(crate) fn put(&self, key: &[u8], value: &[u8]) {
         self.map.insert(
             Bytes::copy_from_slice(key),
             ValueDeletable::Value(Bytes::copy_from_slice(value)),
         );
-    }
-
-    /// Puts a value and waits for the value to be flushed to durable storage.
-    pub(crate) async fn put(&self, key: &[u8], value: &[u8]) {
-        self.map.insert(
-            Bytes::copy_from_slice(key),
-            ValueDeletable::Value(Bytes::copy_from_slice(value)),
-        );
-        self.flush_notify.notified().await;
-    }
-
-    pub(crate) async fn delete(&self, key: &[u8]) {
-        self.map
-            .insert(Bytes::copy_from_slice(key), ValueDeletable::Tombstone);
-        self.flush_notify.notified().await;
     }
 
     #[allow(dead_code)]
-    pub(crate) fn delete_optimistic(&self, key: &[u8]) {
+    pub(crate) fn delete(&self, key: &[u8]) {
         self.map
             .insert(Bytes::copy_from_slice(key), ValueDeletable::Tombstone);
+    }
+
+    pub(crate) async fn await_flush(&self) {
+        self.flush_notify.notified().await;
     }
 }
 
@@ -95,11 +84,11 @@ mod tests {
     #[tokio::test]
     async fn test_memtable_iter() {
         let table = MemTable::new();
-        table.put_optimistic(b"abc333", b"value3");
-        table.put_optimistic(b"abc111", b"value1");
-        table.put_optimistic(b"abc555", b"value5");
-        table.put_optimistic(b"abc444", b"value4");
-        table.put_optimistic(b"abc222", b"value2");
+        table.put(b"abc333", b"value3");
+        table.put(b"abc111", b"value1");
+        table.put(b"abc555", b"value5");
+        table.put(b"abc444", b"value4");
+        table.put(b"abc222", b"value2");
 
         let mut iter = table.iter();
         let kv = iter.next().await.unwrap().unwrap();
@@ -123,11 +112,11 @@ mod tests {
     #[tokio::test]
     async fn test_memtable_range_from_existing_key() {
         let table = MemTable::new();
-        table.put_optimistic(b"abc333", b"value3");
-        table.put_optimistic(b"abc111", b"value1");
-        table.put_optimistic(b"abc555", b"value5");
-        table.put_optimistic(b"abc444", b"value4");
-        table.put_optimistic(b"abc222", b"value2");
+        table.put(b"abc333", b"value3");
+        table.put(b"abc111", b"value1");
+        table.put(b"abc555", b"value5");
+        table.put(b"abc444", b"value4");
+        table.put(b"abc222", b"value2");
 
         let mut iter = table.range_from(b"abc333");
         let kv = iter.next().await.unwrap().unwrap();
@@ -145,11 +134,11 @@ mod tests {
     #[tokio::test]
     async fn test_memtable_range_from_nonexisting_key() {
         let table = MemTable::new();
-        table.put_optimistic(b"abc333", b"value3");
-        table.put_optimistic(b"abc111", b"value1");
-        table.put_optimistic(b"abc555", b"value5");
-        table.put_optimistic(b"abc444", b"value4");
-        table.put_optimistic(b"abc222", b"value2");
+        table.put(b"abc333", b"value3");
+        table.put(b"abc111", b"value1");
+        table.put(b"abc555", b"value5");
+        table.put(b"abc444", b"value4");
+        table.put(b"abc222", b"value2");
 
         let mut iter = table.range_from(b"abc345");
         let kv = iter.next().await.unwrap().unwrap();
@@ -164,8 +153,8 @@ mod tests {
     #[tokio::test]
     async fn test_memtable_iter_delete() {
         let table = MemTable::new();
-        table.put_optimistic(b"abc333", b"value3");
-        table.delete_optimistic(b"abc333");
+        table.put(b"abc333", b"value3");
+        table.delete(b"abc333");
 
         let mut iter = table.iter();
         assert!(iter.next().await.unwrap().is_none());
