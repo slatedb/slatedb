@@ -1,5 +1,5 @@
 use crate::flatbuffer_types::ManifestV1Owned;
-use crate::mem_table::MemTable;
+use crate::mem_table::{MemTable, WritableMemTable};
 use crate::sst::SsTableFormat;
 use crate::tablestore::{SSTableHandle, SsTableId, TableStore};
 use crate::types::ValueDeletable;
@@ -16,9 +16,13 @@ pub struct DbOptions {
     pub min_filter_keys: u32,
 }
 
-#[derive(Clone)]
 pub(crate) struct DbState {
-    pub(crate) memtable: Arc<MemTable>,
+    pub(crate) memtable: WritableMemTable,
+    pub(crate) compacted: Arc<CompactedDbState>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompactedDbState {
     pub(crate) imm_memtables: VecDeque<Arc<MemTable>>,
     pub(crate) l0: VecDeque<SSTableHandle>,
     pub(crate) next_sst_id: u64,
@@ -27,16 +31,18 @@ pub(crate) struct DbState {
 impl DbState {
     fn create() -> Self {
         Self {
-            memtable: Arc::new(MemTable::new()),
-            imm_memtables: VecDeque::new(),
-            l0: VecDeque::new(),
-            next_sst_id: 1,
+            memtable: WritableMemTable::new(),
+            compacted: Arc::new(CompactedDbState {
+                imm_memtables: VecDeque::new(),
+                l0: VecDeque::new(),
+                next_sst_id: 1,
+            }),
         }
     }
 }
 
 pub(crate) struct DbInner {
-    pub(crate) state: Arc<RwLock<Arc<DbState>>>,
+    pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
     pub(crate) table_store: TableStore,
     pub(crate) manifest: Arc<RwLock<ManifestV1Owned>>,
@@ -49,7 +55,7 @@ impl DbInner {
         manifest: ManifestV1Owned,
     ) -> Result<Self, SlateDBError> {
         let mut db_inner = Self {
-            state: Arc::new(RwLock::new(Arc::new(DbState::create()))),
+            state: Arc::new(RwLock::new(DbState::create())),
             options,
             table_store,
             manifest: Arc::new(RwLock::new(manifest)),
@@ -62,20 +68,20 @@ impl DbInner {
 
     /// Get the value for a given key.
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
-        let snapshot = {
+        let (memtable, compacted) = {
             let guard = self.state.read();
-            Arc::clone(&guard)
+            (guard.memtable.table().clone(), Arc::clone(&guard.compacted))
         };
 
-        let maybe_bytes = std::iter::once(&snapshot.memtable)
-            .chain(snapshot.imm_memtables.iter())
+        let maybe_bytes = std::iter::once(&memtable)
+            .chain(compacted.imm_memtables.iter())
             .find_map(|memtable| memtable.get(key));
 
         if let Some(val) = maybe_bytes {
             return Ok(val.into_option());
         }
 
-        for sst in &snapshot.as_ref().l0 {
+        for sst in &compacted.l0 {
             if let Some(block_index) = self.find_block_for_key(sst, key).await? {
                 let block = self.table_store.read_block(sst, block_index).await?;
                 if let Some(val) = self.find_val_in_block(&block, key).await? {
@@ -145,10 +151,10 @@ impl DbInner {
 
         // Clone memtable to avoid a deadlock with flusher thread.
         let memtable = {
-            let guard = self.state.read();
-            let memtable = Arc::clone(&guard.memtable);
-            memtable.put(key, value);
-            memtable
+            let mut guard = self.state.write();
+            let writeable_memtable = &mut guard.memtable;
+            writeable_memtable.put(key, value);
+            writeable_memtable.table().clone()
         };
 
         memtable.await_flush().await;
@@ -160,10 +166,10 @@ impl DbInner {
 
         // Clone memtable to avoid a deadlock with flusher thread.
         let memtable = {
-            let guard = self.state.read();
-            let memtable = Arc::clone(&guard.memtable);
-            memtable.delete(key);
-            memtable
+            let mut guard = self.state.write();
+            let writeable_memtable = &mut guard.memtable;
+            writeable_memtable.delete(key);
+            writeable_memtable.table().clone()
         };
 
         memtable.await_flush().await;
@@ -178,7 +184,7 @@ impl DbInner {
 
         let mut snapshot = {
             let rguard_state = self.state.read();
-            rguard_state.as_ref().clone()
+            rguard_state.compacted.as_ref().clone()
         };
 
         for sst_id in wal_sst_list {
@@ -190,7 +196,7 @@ impl DbInner {
         }
 
         let mut wguard_state = self.state.write();
-        *wguard_state = Arc::new(snapshot);
+        wguard_state.compacted = Arc::new(snapshot);
 
         Ok(())
     }
@@ -342,13 +348,12 @@ mod tests {
         .unwrap();
 
         let memtable = {
-            let lock = kv_store.inner.state.read();
-            lock.memtable.clone()
+            let mut lock = kv_store.inner.state.write();
+            lock.memtable.put(b"abc1111", b"value1111");
+            lock.memtable.put(b"abc2222", b"value2222");
+            lock.memtable.put(b"abc3333", b"value3333");
+            lock.memtable.table().clone()
         };
-
-        memtable.put(b"abc1111", b"value1111");
-        memtable.put(b"abc2222", b"value2222");
-        memtable.put(b"abc3333", b"value3333");
 
         let mut iter = memtable.iter();
         let kv = iter.next().await.unwrap().unwrap();
