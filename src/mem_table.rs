@@ -8,14 +8,24 @@ use std::ops::Bound;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
-pub(crate) struct MemTable {
+pub(crate) struct KVTable {
     map: SkipMap<Bytes, ValueDeletable>,
     flush_notify: Arc<Notify>,
 }
 
-pub(crate) struct WritableMemTable {
-    table: Arc<MemTable>,
+pub(crate) struct WritableKVTable {
+    table: Arc<KVTable>,
     size: usize,
+}
+
+pub(crate) struct ImmutableMemtable {
+    last_wal_id: u64,
+    table: Arc<KVTable>,
+}
+
+pub(crate) struct ImmutableWal {
+    id: u64,
+    table: Arc<KVTable>,
 }
 
 type MemTableRange<'a> = Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, ValueDeletable>;
@@ -31,10 +41,44 @@ impl<'a> KeyValueIterator for MemTableIterator<'a> {
     }
 }
 
-impl WritableMemTable {
+impl ImmutableMemtable {
+    pub(crate) fn new(table: WritableKVTable, last_wal_id: u64) -> Self {
+        Self {
+            table: table.table,
+            last_wal_id,
+        }
+    }
+
+    pub(crate) fn table(&self) -> Arc<KVTable> {
+        self.table.clone()
+    }
+
+    pub(crate) fn last_wal_id(&self) -> u64 {
+        self.last_wal_id
+    }
+}
+
+impl ImmutableWal {
+    pub(crate) fn new(id: u64, table: WritableKVTable) -> Self {
+        Self {
+            id,
+            table: table.table,
+        }
+    }
+
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub(crate) fn table(&self) -> Arc<KVTable> {
+        self.table.clone()
+    }
+}
+
+impl WritableKVTable {
     pub(crate) fn new() -> Self {
         Self {
-            table: Arc::new(MemTable::new()),
+            table: Arc::new(KVTable::new()),
             size: 0,
         }
     }
@@ -44,7 +88,7 @@ impl WritableMemTable {
         self.size
     }
 
-    pub(crate) fn table(&self) -> &Arc<MemTable> {
+    pub(crate) fn table(&self) -> &Arc<KVTable> {
         &self.table
     }
 
@@ -72,7 +116,7 @@ impl WritableMemTable {
     }
 }
 
-impl MemTable {
+impl KVTable {
     fn new() -> Self {
         Self {
             map: SkipMap::new(),
@@ -135,7 +179,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_iter() {
-        let mut table = WritableMemTable::new();
+        let mut table = WritableKVTable::new();
         table.put(b"abc333", b"value3");
         table.put(b"abc111", b"value1");
         table.put(b"abc555", b"value5");
@@ -163,7 +207,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_range_from_existing_key() {
-        let mut table = WritableMemTable::new();
+        let mut table = WritableKVTable::new();
         table.put(b"abc333", b"value3");
         table.put(b"abc111", b"value1");
         table.put(b"abc555", b"value5");
@@ -185,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_range_from_nonexisting_key() {
-        let mut table = WritableMemTable::new();
+        let mut table = WritableKVTable::new();
         table.put(b"abc333", b"value3");
         table.put(b"abc111", b"value1");
         table.put(b"abc555", b"value5");
@@ -204,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_iter_delete() {
-        let mut table = WritableMemTable::new();
+        let mut table = WritableKVTable::new();
         table.put(b"abc333", b"value3");
         table.delete(b"abc333");
 
@@ -214,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_track_sz() {
-        let mut table = WritableMemTable::new();
+        let mut table = WritableKVTable::new();
 
         table.put(b"abc333", b"val1");
         assert_eq!(table.size(), 10);
