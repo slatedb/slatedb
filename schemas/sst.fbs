@@ -1,3 +1,13 @@
+table CompactedSstId {
+    high: uint64;
+    low: uint64;
+}
+
+table CompactedSsTable {
+    id: CompactedSstId;
+    info: SsTableInfo;
+}
+
 // Has metadata about a SST file.
 table SsTableInfo {
     // First key in the SST file.

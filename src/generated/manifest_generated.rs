@@ -9,6 +9,234 @@ use core::cmp::Ordering;
 extern crate flatbuffers;
 use self::flatbuffers::{EndianScalar, Follow};
 
+pub enum CompactedSstIdOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct CompactedSstId<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for CompactedSstId<'a> {
+  type Inner = CompactedSstId<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> CompactedSstId<'a> {
+  pub const VT_HIGH: flatbuffers::VOffsetT = 4;
+  pub const VT_LOW: flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    CompactedSstId { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args CompactedSstIdArgs
+  ) -> flatbuffers::WIPOffset<CompactedSstId<'bldr>> {
+    let mut builder = CompactedSstIdBuilder::new(_fbb);
+    builder.add_low(args.low);
+    builder.add_high(args.high);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn high(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(CompactedSstId::VT_HIGH, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn low(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(CompactedSstId::VT_LOW, Some(0)).unwrap()}
+  }
+}
+
+impl flatbuffers::Verifiable for CompactedSstId<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<u64>("high", Self::VT_HIGH, false)?
+     .visit_field::<u64>("low", Self::VT_LOW, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct CompactedSstIdArgs {
+    pub high: u64,
+    pub low: u64,
+}
+impl<'a> Default for CompactedSstIdArgs {
+  #[inline]
+  fn default() -> Self {
+    CompactedSstIdArgs {
+      high: 0,
+      low: 0,
+    }
+  }
+}
+
+pub struct CompactedSstIdBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSstIdBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_high(&mut self, high: u64) {
+    self.fbb_.push_slot::<u64>(CompactedSstId::VT_HIGH, high, 0);
+  }
+  #[inline]
+  pub fn add_low(&mut self, low: u64) {
+    self.fbb_.push_slot::<u64>(CompactedSstId::VT_LOW, low, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> CompactedSstIdBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    CompactedSstIdBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<CompactedSstId<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for CompactedSstId<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("CompactedSstId");
+      ds.field("high", &self.high());
+      ds.field("low", &self.low());
+      ds.finish()
+  }
+}
+pub enum CompactedSsTableOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct CompactedSsTable<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for CompactedSsTable<'a> {
+  type Inner = CompactedSsTable<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> CompactedSsTable<'a> {
+  pub const VT_ID: flatbuffers::VOffsetT = 4;
+  pub const VT_INFO: flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    CompactedSsTable { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args CompactedSsTableArgs<'args>
+  ) -> flatbuffers::WIPOffset<CompactedSsTable<'bldr>> {
+    let mut builder = CompactedSsTableBuilder::new(_fbb);
+    if let Some(x) = args.info { builder.add_info(x); }
+    if let Some(x) = args.id { builder.add_id(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn id(&self) -> Option<CompactedSstId<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<CompactedSstId>>(CompactedSsTable::VT_ID, None)}
+  }
+  #[inline]
+  pub fn info(&self) -> Option<SsTableInfo<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<SsTableInfo>>(CompactedSsTable::VT_INFO, None)}
+  }
+}
+
+impl flatbuffers::Verifiable for CompactedSsTable<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<flatbuffers::ForwardsUOffset<CompactedSstId>>("id", Self::VT_ID, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<SsTableInfo>>("info", Self::VT_INFO, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct CompactedSsTableArgs<'a> {
+    pub id: Option<flatbuffers::WIPOffset<CompactedSstId<'a>>>,
+    pub info: Option<flatbuffers::WIPOffset<SsTableInfo<'a>>>,
+}
+impl<'a> Default for CompactedSsTableArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    CompactedSsTableArgs {
+      id: None,
+      info: None,
+    }
+  }
+}
+
+pub struct CompactedSsTableBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_id(&mut self, id: flatbuffers::WIPOffset<CompactedSstId<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<CompactedSstId>>(CompactedSsTable::VT_ID, id);
+  }
+  #[inline]
+  pub fn add_info(&mut self, info: flatbuffers::WIPOffset<SsTableInfo<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<SsTableInfo>>(CompactedSsTable::VT_INFO, info);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> CompactedSsTableBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    CompactedSsTableBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<CompactedSsTable<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for CompactedSsTable<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("CompactedSsTable");
+      ds.field("id", &self.id());
+      ds.field("info", &self.info());
+      ds.finish()
+  }
+}
 pub enum SsTableInfoOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -294,8 +522,9 @@ impl<'a> ManifestV1<'a> {
   pub const VT_COMPACTOR_EPOCH: flatbuffers::VOffsetT = 8;
   pub const VT_WAL_ID_LAST_COMPACTED: flatbuffers::VOffsetT = 10;
   pub const VT_WAL_ID_LAST_SEEN: flatbuffers::VOffsetT = 12;
-  pub const VT_LEVELED_SSTS: flatbuffers::VOffsetT = 14;
-  pub const VT_SNAPSHOTS: flatbuffers::VOffsetT = 16;
+  pub const VT_L0: flatbuffers::VOffsetT = 14;
+  pub const VT_COMPACTED: flatbuffers::VOffsetT = 16;
+  pub const VT_SNAPSHOTS: flatbuffers::VOffsetT = 18;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -313,7 +542,8 @@ impl<'a> ManifestV1<'a> {
     builder.add_writer_epoch(args.writer_epoch);
     builder.add_manifest_id(args.manifest_id);
     if let Some(x) = args.snapshots { builder.add_snapshots(x); }
-    if let Some(x) = args.leveled_ssts { builder.add_leveled_ssts(x); }
+    if let Some(x) = args.compacted { builder.add_compacted(x); }
+    if let Some(x) = args.l0 { builder.add_l0(x); }
     builder.finish()
   }
 
@@ -354,11 +584,18 @@ impl<'a> ManifestV1<'a> {
     unsafe { self._tab.get::<u64>(ManifestV1::VT_WAL_ID_LAST_SEEN, Some(0)).unwrap()}
   }
   #[inline]
-  pub fn leveled_ssts(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SsTableInfo<'a>>>> {
+  pub fn l0(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SsTableInfo>>>>(ManifestV1::VT_LEVELED_SSTS, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>(ManifestV1::VT_L0, None)}
+  }
+  #[inline]
+  pub fn compacted(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRun<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRun>>>>(ManifestV1::VT_COMPACTED, None)}
   }
   #[inline]
   pub fn snapshots(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Snapshot<'a>>>> {
@@ -381,7 +618,8 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
      .visit_field::<u64>("compactor_epoch", Self::VT_COMPACTOR_EPOCH, false)?
      .visit_field::<u64>("wal_id_last_compacted", Self::VT_WAL_ID_LAST_COMPACTED, false)?
      .visit_field::<u64>("wal_id_last_seen", Self::VT_WAL_ID_LAST_SEEN, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SsTableInfo>>>>("leveled_ssts", Self::VT_LEVELED_SSTS, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("l0", Self::VT_L0, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRun>>>>("compacted", Self::VT_COMPACTED, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Snapshot>>>>("snapshots", Self::VT_SNAPSHOTS, false)?
      .finish();
     Ok(())
@@ -393,7 +631,8 @@ pub struct ManifestV1Args<'a> {
     pub compactor_epoch: u64,
     pub wal_id_last_compacted: u64,
     pub wal_id_last_seen: u64,
-    pub leveled_ssts: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SsTableInfo<'a>>>>>,
+    pub l0: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
+    pub compacted: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRun<'a>>>>>,
     pub snapshots: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Snapshot<'a>>>>>,
 }
 impl<'a> Default for ManifestV1Args<'a> {
@@ -405,7 +644,8 @@ impl<'a> Default for ManifestV1Args<'a> {
       compactor_epoch: 0,
       wal_id_last_compacted: 0,
       wal_id_last_seen: 0,
-      leveled_ssts: None,
+      l0: None,
+      compacted: None,
       snapshots: None,
     }
   }
@@ -437,8 +677,12 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
     self.fbb_.push_slot::<u64>(ManifestV1::VT_WAL_ID_LAST_SEEN, wal_id_last_seen, 0);
   }
   #[inline]
-  pub fn add_leveled_ssts(&mut self, leveled_ssts: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<SsTableInfo<'b >>>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_LEVELED_SSTS, leveled_ssts);
+  pub fn add_l0(&mut self, l0: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<CompactedSsTable<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_L0, l0);
+  }
+  #[inline]
+  pub fn add_compacted(&mut self, compacted: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<SortedRun<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_COMPACTED, compacted);
   }
   #[inline]
   pub fn add_snapshots(&mut self, snapshots: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Snapshot<'b >>>>) {
@@ -467,8 +711,123 @@ impl core::fmt::Debug for ManifestV1<'_> {
       ds.field("compactor_epoch", &self.compactor_epoch());
       ds.field("wal_id_last_compacted", &self.wal_id_last_compacted());
       ds.field("wal_id_last_seen", &self.wal_id_last_seen());
-      ds.field("leveled_ssts", &self.leveled_ssts());
+      ds.field("l0", &self.l0());
+      ds.field("compacted", &self.compacted());
       ds.field("snapshots", &self.snapshots());
+      ds.finish()
+  }
+}
+pub enum SortedRunOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct SortedRun<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for SortedRun<'a> {
+  type Inner = SortedRun<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> SortedRun<'a> {
+  pub const VT_ID: flatbuffers::VOffsetT = 4;
+  pub const VT_SSTS: flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    SortedRun { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SortedRunArgs<'args>
+  ) -> flatbuffers::WIPOffset<SortedRun<'bldr>> {
+    let mut builder = SortedRunBuilder::new(_fbb);
+    if let Some(x) = args.ssts { builder.add_ssts(x); }
+    builder.add_id(args.id);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn id(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(SortedRun::VT_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn ssts(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>(SortedRun::VT_SSTS, None)}
+  }
+}
+
+impl flatbuffers::Verifiable for SortedRun<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<u32>("id", Self::VT_ID, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("ssts", Self::VT_SSTS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SortedRunArgs<'a> {
+    pub id: u32,
+    pub ssts: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
+}
+impl<'a> Default for SortedRunArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SortedRunArgs {
+      id: 0,
+      ssts: None,
+    }
+  }
+}
+
+pub struct SortedRunBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SortedRunBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_id(&mut self, id: u32) {
+    self.fbb_.push_slot::<u32>(SortedRun::VT_ID, id, 0);
+  }
+  #[inline]
+  pub fn add_ssts(&mut self, ssts: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<CompactedSsTable<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(SortedRun::VT_SSTS, ssts);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SortedRunBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SortedRunBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<SortedRun<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for SortedRun<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("SortedRun");
+      ds.field("id", &self.id());
+      ds.field("ssts", &self.ssts());
       ds.finish()
   }
 }
