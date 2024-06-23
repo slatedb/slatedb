@@ -3,7 +3,9 @@ use bytes::Bytes;
 /// Represents a key-value pair known not to be a tombstone.
 #[derive(Debug, Clone)]
 pub struct KeyValue {
+    #[allow(dead_code)]
     pub key: Bytes,
+    #[allow(dead_code)]
     pub value: Bytes,
 }
 
