@@ -72,12 +72,10 @@ impl DbInner {
             let snapshot = rguard.compacted.as_ref().clone();
             snapshot.imm_wal.back().cloned()
         } {
-            let sst = self.flush_imm_wal(imm.clone()).await?;
+            self.flush_imm_wal(imm.clone()).await?;
             let mut wguard = self.state.write();
             let mut snapshot = wguard.compacted.as_ref().clone();
             snapshot.imm_wal.pop_back();
-            // always put the new sst at the front of l0
-            snapshot.wal_ssts.push_front(sst);
             wguard.compacted = Arc::new(snapshot);
             imm.table().notify_flush()
         }

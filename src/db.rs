@@ -3,6 +3,7 @@ use crate::mem_table::{ImmutableMemtable, ImmutableWal, WritableKVTable};
 use crate::memtable_flush::MemtableFlushThreadMsg;
 use crate::memtable_flush::MemtableFlushThreadMsg::{FlushImmutableMemtables, Shutdown};
 use crate::sst::SsTableFormat;
+use crate::sst_iter::SstIterator;
 use crate::tablestore::{SSTableHandle, SsTableId, TableStore};
 use crate::types::ValueDeletable;
 use crate::{block::Block, error::SlateDBError};
@@ -29,8 +30,6 @@ pub(crate) struct DbState {
 pub(crate) struct CompactedDbState {
     pub(crate) imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
     pub(crate) imm_wal: VecDeque<Arc<ImmutableWal>>,
-    // todo: get rid of me when we read using l0 and imm_memtable
-    pub(crate) wal_ssts: VecDeque<SSTableHandle>,
     pub(crate) l0: VecDeque<SSTableHandle>,
     pub(crate) next_wal_sst_id: u64,
     pub(crate) last_compacted_wal_sst_id: u64,
@@ -44,7 +43,6 @@ impl DbState {
             compacted: Arc::new(CompactedDbState {
                 imm_memtable: VecDeque::new(),
                 imm_wal: VecDeque::new(),
-                wal_ssts: VecDeque::new(),
                 l0: VecDeque::new(),
                 next_wal_sst_id: 1,
                 last_compacted_wal_sst_id: 0,
@@ -85,18 +83,18 @@ impl DbInner {
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
         let (memtable, compacted) = {
             let guard = self.state.read();
-            (guard.wal.table().clone(), Arc::clone(&guard.compacted))
+            (guard.memtable.table().clone(), Arc::clone(&guard.compacted))
         };
 
         let maybe_bytes = std::iter::once(memtable)
-            .chain(compacted.imm_wal.iter().map(|imm| imm.table()))
+            .chain(compacted.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
 
         if let Some(val) = maybe_bytes {
             return Ok(val.into_option());
         }
 
-        for sst in &compacted.wal_ssts {
+        for sst in &compacted.l0 {
             if let Some(block_index) = self.find_block_for_key(sst, key).await? {
                 let block = self.table_store.read_block(sst, block_index).await?;
                 if let Some(val) = self.find_val_in_block(&block, key).await? {
@@ -176,9 +174,6 @@ impl DbInner {
             },
         };
         self.freeze_memtable(guard, wal_id);
-        self.memtable_flush_notifier
-            .send(FlushImmutableMemtables)
-            .expect("failed to send memtable flush msg");
     }
 
     pub(crate) fn freeze_wal(&self, guard: &mut RwLockWriteGuard<DbState>) -> Option<u64> {
@@ -205,6 +200,9 @@ impl DbInner {
             .imm_memtable
             .push_front(Arc::new(ImmutableMemtable::new(old_memtable, wal_id)));
         guard.compacted = Arc::new(compacted_snapshot);
+        self.memtable_flush_notifier
+            .send(FlushImmutableMemtables)
+            .expect("failed to send memtable flush msg");
     }
 
     /// Put a key-value pair into the database. Key and value must not be empty.
@@ -260,9 +258,24 @@ impl DbInner {
         snapshot.last_compacted_wal_sst_id = wal_id_last_compacted;
         for sst_id in wal_sst_list {
             let sst = self.table_store.open_sst(&SsTableId::Wal(sst_id)).await?;
-
-            // always put the new sst at the front of l0
-            snapshot.wal_ssts.push_front(sst);
+            let sst_id = match &sst.id {
+                SsTableId::Wal(id) => *id,
+                SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
+            };
+            let mut iter = SstIterator::new(sst, &self.table_store);
+            // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
+            while let Some(kv) = iter.next_entry().await? {
+                let mut wguard = self.state.write();
+                match kv.value {
+                    ValueDeletable::Value(value) => {
+                        wguard.memtable.put(kv.key.as_ref(), value.as_ref())
+                    }
+                    ValueDeletable::Tombstone => wguard.memtable.delete(kv.key.as_ref()),
+                }
+                if wguard.memtable.size() >= self.options.l0_sst_size_bytes {
+                    self.freeze_memtable(&mut wguard, sst_id);
+                }
+            }
             snapshot.next_wal_sst_id = sst_id + 1;
         }
 
