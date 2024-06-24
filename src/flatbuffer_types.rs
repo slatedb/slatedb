@@ -85,7 +85,7 @@ impl ManifestV1Owned {
                 writer_epoch: old_manifest.writer_epoch(),
                 compactor_epoch: old_manifest.compactor_epoch(),
                 wal_id_last_compacted: old_manifest.wal_id_last_compacted(),
-                wal_id_last_seen: db_state.next_sst_id - 1,
+                wal_id_last_seen: db_state.compacted.next_sst_id - 1,
                 leveled_ssts: None,
                 snapshots: None,
             },
