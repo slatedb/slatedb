@@ -1,7 +1,7 @@
 use crate::db::DbInner;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
-use crate::mem_table::{MemTable, WritableMemTable};
+use crate::mem_table::{ImmutableWal, KVTable};
 use crate::tablestore::{self, SSTableHandle};
 use crate::types::ValueDeletable;
 use futures::executor::block_on;
@@ -10,8 +10,8 @@ use std::time::Duration;
 
 impl DbInner {
     pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
-        self.freeze_memtable();
-        self.flush_imms().await?;
+        self.freeze_wal(&mut self.state.write());
+        self.flush_imm_wals().await?;
         Ok(())
     }
 
@@ -20,8 +20,9 @@ impl DbInner {
         let updated_manifest: Option<crate::flatbuffer_types::ManifestV1Owned> = {
             let db_state = self.state.read();
             let mut wguard_manifest = self.manifest.write();
-            if wguard_manifest.borrow().wal_id_last_seen() != db_state.compacted.next_sst_id - 1 {
-                let new_manifest = wguard_manifest.get_updated_manifest(&db_state);
+            if wguard_manifest.borrow().wal_id_last_seen() != db_state.compacted.next_wal_sst_id - 1
+            {
+                let new_manifest = wguard_manifest.get_updated_manifest(&db_state.compacted);
                 *wguard_manifest = new_manifest.clone();
                 Some(new_manifest)
             } else {
@@ -36,9 +37,14 @@ impl DbInner {
         Ok(())
     }
 
-    async fn flush_imm(&self, imm: Arc<MemTable>, id: u64) -> Result<SSTableHandle, SlateDBError> {
+    // todo: move me
+    pub(crate) async fn flush_imm_table(
+        &self,
+        id: &tablestore::SsTableId,
+        imm_table: Arc<KVTable>,
+    ) -> Result<SSTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
-        let mut iter = imm.iter();
+        let mut iter = imm_table.iter();
         while let Some(kv) = iter.next_entry().await? {
             match kv.value {
                 ValueDeletable::Value(v) => {
@@ -51,51 +57,31 @@ impl DbInner {
         }
 
         let encoded_sst = sst_builder.build()?;
-        let wal_id = tablestore::SsTableId::Wal(id);
-        let handle = self.table_store.write_sst(&wal_id, encoded_sst).await?;
+        let handle = self.table_store.write_sst(id, encoded_sst).await?;
         Ok(handle)
     }
 
-    async fn flush_imms(&self) -> Result<(), SlateDBError> {
-        while let Some((imm, id)) = {
-            let rguard = self.state.read();
-            let snapshot = rguard.compacted.as_ref().clone();
-            snapshot
-                .imm_memtables
-                .back()
-                .map(|imm| (imm.clone(), snapshot.next_sst_id))
-        } {
-            let sst = self.flush_imm(imm.clone(), id).await?;
-            let mut wguard = self.state.write();
-            let mut snapshot = wguard.compacted.as_ref().clone();
-            snapshot.imm_memtables.pop_back();
-            // always put the new sst at the front of l0
-            snapshot.l0.push_front(sst);
-            snapshot.next_sst_id += 1;
-            wguard.compacted = Arc::new(snapshot);
-            imm.notify_flush()
-        }
-        Ok(())
+    async fn flush_imm_wal(&self, imm: Arc<ImmutableWal>) -> Result<SSTableHandle, SlateDBError> {
+        let wal_id = tablestore::SsTableId::Wal(imm.id());
+        self.flush_imm_table(&wal_id, imm.table()).await
     }
 
-    /// Moves the current memtable to imm_memtables and creates a new memtable.
-    fn freeze_memtable(&self) -> Option<Arc<MemTable>> {
-        let mut guard = self.state.write();
-        // Skip if the memtable is empty.
-        if guard.memtable.table().is_empty() {
-            return None;
+    async fn flush_imm_wals(&self) -> Result<(), SlateDBError> {
+        while let Some(imm) = {
+            let rguard = self.state.read();
+            let snapshot = rguard.compacted.as_ref().clone();
+            snapshot.imm_wal.back().cloned()
+        } {
+            let sst = self.flush_imm_wal(imm.clone()).await?;
+            let mut wguard = self.state.write();
+            let mut snapshot = wguard.compacted.as_ref().clone();
+            snapshot.imm_wal.pop_back();
+            // always put the new sst at the front of l0
+            snapshot.l0.push_front(sst);
+            wguard.compacted = Arc::new(snapshot);
+            imm.table().notify_flush()
         }
-
-        // Swap the current memtable with a new one.
-        let old_memtable = std::mem::replace(&mut guard.memtable, WritableMemTable::new());
-        // Add the memtable to the immutable memtables.
-        let mut compacted_snapshot = guard.compacted.as_ref().clone();
-        compacted_snapshot
-            .imm_memtables
-            .push_front(old_memtable.table().clone());
-        // Update the snapshot.
-        guard.compacted = Arc::new(compacted_snapshot);
-        Some(old_memtable.table().clone())
+        Ok(())
     }
 
     pub(crate) fn spawn_flush_thread(

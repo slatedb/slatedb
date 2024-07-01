@@ -10,12 +10,14 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use std::ops::Range;
 use std::sync::Arc;
+use ulid::Ulid;
 
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,
     root_path: Path,
     wal_path: &'static str,
+    compacted_path: &'static str,
     manifest_path: &'static str,
 }
 
@@ -50,6 +52,7 @@ impl ReadOnlyBlob for ReadOnlyObject {
 #[derive(Clone)]
 pub enum SsTableId {
     Wal(u64),
+    Compacted(Ulid),
 }
 
 #[derive(Clone)]
@@ -74,6 +77,7 @@ impl TableStore {
             sst_format,
             root_path,
             wal_path: "wal",
+            compacted_path: "compacted",
             manifest_path: "manifest",
         }
     }
@@ -227,6 +231,12 @@ impl TableStore {
             SsTableId::Wal(id) => Path::from(format!(
                 "{}/{}/{:020}.sst",
                 &self.root_path, self.wal_path, id
+            )),
+            SsTableId::Compacted(ulid) => Path::from(format!(
+                "{}/{}/{}.sst",
+                &self.root_path,
+                self.compacted_path,
+                ulid.to_string()
             )),
         }
     }

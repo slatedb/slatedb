@@ -1,4 +1,4 @@
-use crate::db::DbState;
+use crate::db::CompactedDbState;
 use bytes::Bytes;
 use flatbuffers::InvalidFlatbuffer;
 
@@ -74,7 +74,7 @@ impl ManifestV1Owned {
         Self { data }
     }
 
-    pub fn get_updated_manifest(&self, db_state: &DbState) -> ManifestV1Owned {
+    pub fn get_updated_manifest(&self, compacted_db_state: &CompactedDbState) -> ManifestV1Owned {
         let old_manifest = self.borrow();
         let builder = &mut flatbuffers::FlatBufferBuilder::new();
 
@@ -84,8 +84,8 @@ impl ManifestV1Owned {
                 manifest_id: old_manifest.manifest_id() + 1,
                 writer_epoch: old_manifest.writer_epoch(),
                 compactor_epoch: old_manifest.compactor_epoch(),
-                wal_id_last_compacted: old_manifest.wal_id_last_compacted(),
-                wal_id_last_seen: db_state.compacted.next_sst_id - 1,
+                wal_id_last_compacted: compacted_db_state.last_compacted_wal_sst_id,
+                wal_id_last_seen: compacted_db_state.next_wal_sst_id - 1,
                 leveled_ssts: None,
                 snapshots: None,
             },

@@ -13,6 +13,7 @@ mod flatbuffer_types;
 mod flush;
 mod iter;
 mod mem_table;
+mod memtable_flush;
 mod sst;
 mod sst_iter;
 mod tablestore;
