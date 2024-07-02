@@ -457,11 +457,11 @@ mod tests {
                 .unwrap();
             let mut iter = SstIterator::new(sst1, &table_store);
             let kv = iter.next().await.unwrap().unwrap();
-            assert_eq!(kv.key.as_ref(), ['a' as u8 + i; 16]);
-            assert_eq!(kv.value.as_ref(), ['b' as u8 + i; 50]);
+            assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
+            assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);
             let kv = iter.next().await.unwrap().unwrap();
-            assert_eq!(kv.key.as_ref(), ['j' as u8 + i; 16]);
-            assert_eq!(kv.value.as_ref(), ['k' as u8 + i; 50]);
+            assert_eq!(kv.key.as_ref(), [b'j' + i; 16]);
+            assert_eq!(kv.value.as_ref(), [b'k' + i; 50]);
             let kv = iter.next().await.unwrap();
             assert!(kv.is_none());
         }
