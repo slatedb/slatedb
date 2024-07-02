@@ -29,6 +29,8 @@ pub(crate) struct DbState {
 pub(crate) struct CompactedDbState {
     pub(crate) imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
     pub(crate) imm_wal: VecDeque<Arc<ImmutableWal>>,
+    // todo: get rid of me when we read using l0 and imm_memtable
+    pub(crate) wal_ssts: VecDeque<SSTableHandle>,
     pub(crate) l0: VecDeque<SSTableHandle>,
     pub(crate) next_wal_sst_id: u64,
     pub(crate) last_compacted_wal_sst_id: u64,
@@ -42,6 +44,7 @@ impl DbState {
             compacted: Arc::new(CompactedDbState {
                 imm_memtable: VecDeque::new(),
                 imm_wal: VecDeque::new(),
+                wal_ssts: VecDeque::new(),
                 l0: VecDeque::new(),
                 next_wal_sst_id: 1,
                 last_compacted_wal_sst_id: 0,
@@ -93,7 +96,7 @@ impl DbInner {
             return Ok(val.into_option());
         }
 
-        for sst in &compacted.l0 {
+        for sst in &compacted.wal_ssts {
             if let Some(block_index) = self.find_block_for_key(sst, key).await? {
                 let block = self.table_store.read_block(sst, block_index).await?;
                 if let Some(val) = self.find_val_in_block(&block, key).await? {
@@ -259,7 +262,7 @@ impl DbInner {
             let sst = self.table_store.open_sst(&SsTableId::Wal(sst_id)).await?;
 
             // always put the new sst at the front of l0
-            snapshot.l0.push_front(sst);
+            snapshot.wal_ssts.push_front(sst);
             snapshot.next_wal_sst_id = sst_id + 1;
         }
 
@@ -362,10 +365,12 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sst_iter::SstIterator;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use std::time::{Duration, SystemTime};
     use tokio::time::sleep;
+    use ulid::Ulid;
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -434,6 +439,31 @@ mod tests {
                 }
                 sleep(Duration::from_millis(100)).await;
             }
+        }
+
+        let manifest_owned = table_store.open_latest_manifest().await.unwrap().unwrap();
+        let manifest = manifest_owned.borrow();
+        let l0 = manifest.l0().unwrap();
+        assert_eq!(l0.len(), 3);
+        for i in 0u8..3u8 {
+            let compacted_sst1 = l0.get(2 - i as usize);
+            let ulid = Ulid::from((
+                compacted_sst1.id().unwrap().high(),
+                compacted_sst1.id().unwrap().low(),
+            ));
+            let sst1 = table_store
+                .open_sst(&SsTableId::Compacted(ulid))
+                .await
+                .unwrap();
+            let mut iter = SstIterator::new(sst1, &table_store);
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
+            assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key.as_ref(), [b'j' + i; 16]);
+            assert_eq!(kv.value.as_ref(), [b'k' + i; 50]);
+            let kv = iter.next().await.unwrap();
+            assert!(kv.is_none());
         }
     }
 
