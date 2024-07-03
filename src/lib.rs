@@ -19,3 +19,4 @@ mod sst;
 mod sst_iter;
 mod tablestore;
 mod types;
+mod failpoints;
