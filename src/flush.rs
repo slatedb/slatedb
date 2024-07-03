@@ -1,10 +1,11 @@
-use crate::db::DbInner;
+use crate::db::{DbInner, DbState};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
-use crate::mem_table::{ImmutableWal, KVTable};
+use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
 use crate::tablestore::{self, SSTableHandle};
 use crate::types::ValueDeletable;
 use futures::executor::block_on;
+use parking_lot::RwLockWriteGuard;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +14,23 @@ impl DbInner {
         self.freeze_wal(&mut self.state.write());
         self.flush_imm_wals().await?;
         Ok(())
+    }
+
+    fn freeze_wal(&self, guard: &mut RwLockWriteGuard<DbState>) -> Option<u64> {
+        if guard.wal.table().is_empty() {
+            return None;
+        }
+        let old_wal = std::mem::replace(&mut guard.wal, WritableKVTable::new());
+        let mut compacted_snapshot = guard.compacted.as_ref().clone();
+        let imm_wal = Arc::new(ImmutableWal::new(
+            compacted_snapshot.next_wal_sst_id,
+            old_wal,
+        ));
+        let id = imm_wal.id();
+        compacted_snapshot.imm_wal.push_front(imm_wal);
+        compacted_snapshot.next_wal_sst_id += 1;
+        guard.compacted = Arc::new(compacted_snapshot);
+        Some(id)
     }
 
     pub(crate) async fn write_manifest(&self) -> Result<(), SlateDBError> {
@@ -66,6 +84,20 @@ impl DbInner {
         self.flush_imm_table(&wal_id, imm.table()).await
     }
 
+    fn flush_imm_wal_to_memtable(&self, mem_table: &mut WritableKVTable, imm_table: Arc<KVTable>) {
+        let mut iter = imm_table.iter();
+        while let Some(kv) = iter.next_entry_sync() {
+            match kv.value {
+                ValueDeletable::Value(v) => {
+                    mem_table.put(&kv.key, &v);
+                }
+                ValueDeletable::Tombstone => {
+                    mem_table.delete(&kv.key);
+                }
+            }
+        }
+    }
+
     async fn flush_imm_wals(&self) -> Result<(), SlateDBError> {
         while let Some(imm) = {
             let rguard = self.state.read();
@@ -77,7 +109,11 @@ impl DbInner {
             let mut snapshot = wguard.compacted.as_ref().clone();
             snapshot.imm_wal.pop_back();
             wguard.compacted = Arc::new(snapshot);
-            imm.table().notify_flush()
+            // flush to the memtable before notifying so that data is available for reads
+            // once we support committed read isolation, reads should read from memtable first
+            self.flush_imm_wal_to_memtable(&mut wguard.memtable, imm.table());
+            self.maybe_freeze_memtable(&mut wguard, imm.id());
+            imm.table().notify_flush();
         }
         Ok(())
     }

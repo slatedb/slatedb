@@ -34,10 +34,16 @@ pub struct MemTableIterator<'a>(MemTableRange<'a>);
 
 impl<'a> KeyValueIterator for MemTableIterator<'a> {
     async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
-        Ok(self.0.next().map(|entry| KeyValueDeletable {
+        Ok(self.next_entry_sync())
+    }
+}
+
+impl<'a> MemTableIterator<'a> {
+    pub(crate) fn next_entry_sync(&mut self) -> Option<KeyValueDeletable> {
+        self.0.next().map(|entry| KeyValueDeletable {
             key: entry.key().clone(),
             value: entry.value().clone(),
-        }))
+        })
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::flatbuffer_types::ManifestV1Owned;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, WritableKVTable};
 use crate::memtable_flush::MemtableFlushThreadMsg;
-use crate::memtable_flush::MemtableFlushThreadMsg::{FlushImmutableMemtables, Shutdown};
+use crate::memtable_flush::MemtableFlushThreadMsg::Shutdown;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::{SSTableHandle, SsTableId, TableStore};
@@ -11,7 +11,7 @@ use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
 use bytes::Bytes;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
+use parking_lot::{Mutex, RwLock};
 use std::{collections::VecDeque, sync::Arc};
 
 pub struct DbOptions {
@@ -158,53 +158,6 @@ impl DbInner {
         Ok(None)
     }
 
-    fn maybe_freeze_memtable(&self, guard: &mut RwLockWriteGuard<DbState>) {
-        if guard.memtable.size() < self.options.l0_sst_size_bytes {
-            return;
-        }
-        // If there was no active wal with data, that means the flush thread
-        // will have just frozen it. In that case, check the imm wal list.
-        // If there are no imm wal entries, all wal entries are flushed, so use
-        // the last flushed wal's id
-        let wal_id = match self.freeze_wal(guard) {
-            Some(id) => id,
-            None => match guard.compacted.imm_wal.front() {
-                Some(imm_wal) => imm_wal.id(),
-                None => guard.compacted.next_wal_sst_id - 1,
-            },
-        };
-        self.freeze_memtable(guard, wal_id);
-    }
-
-    pub(crate) fn freeze_wal(&self, guard: &mut RwLockWriteGuard<DbState>) -> Option<u64> {
-        if guard.wal.table().is_empty() {
-            return None;
-        }
-        let old_wal = std::mem::replace(&mut guard.wal, WritableKVTable::new());
-        let mut compacted_snapshot = guard.compacted.as_ref().clone();
-        let imm_wal = Arc::new(ImmutableWal::new(
-            compacted_snapshot.next_wal_sst_id,
-            old_wal,
-        ));
-        let id = imm_wal.id();
-        compacted_snapshot.imm_wal.push_front(imm_wal);
-        compacted_snapshot.next_wal_sst_id += 1;
-        guard.compacted = Arc::new(compacted_snapshot);
-        Some(id)
-    }
-
-    fn freeze_memtable(&self, guard: &mut RwLockWriteGuard<DbState>, wal_id: u64) {
-        let old_memtable = std::mem::replace(&mut guard.memtable, WritableKVTable::new());
-        let mut compacted_snapshot = guard.compacted.as_ref().clone();
-        compacted_snapshot
-            .imm_memtable
-            .push_front(Arc::new(ImmutableMemtable::new(old_memtable, wal_id)));
-        guard.compacted = Arc::new(compacted_snapshot);
-        self.memtable_flush_notifier
-            .send(FlushImmutableMemtables)
-            .expect("failed to send memtable flush msg");
-    }
-
     /// Put a key-value pair into the database. Key and value must not be empty.
     pub async fn put(&self, key: &[u8], value: &[u8]) {
         assert!(!key.is_empty(), "key cannot be empty");
@@ -212,13 +165,9 @@ impl DbInner {
         // Clone memtable to avoid a deadlock with flusher thread.
         let current_wal_table = {
             let mut guard = self.state.write();
-            let current_memtable = &mut guard.memtable;
-            current_memtable.put(key, value);
             let current_wal = &mut guard.wal;
             current_wal.put(key, value);
-            let current_wal_table = current_wal.table().clone();
-            self.maybe_freeze_memtable(&mut guard);
-            current_wal_table
+            current_wal.table().clone()
         };
 
         current_wal_table.await_flush().await;
@@ -231,13 +180,9 @@ impl DbInner {
         // Clone memtable to avoid a deadlock with flusher thread.
         let current_wal_table = {
             let mut guard = self.state.write();
-            let current_memtable = &mut guard.memtable;
-            current_memtable.delete(key);
             let current_wal = &mut guard.wal;
             current_wal.delete(key);
-            let current_wal_table = current_wal.table().clone();
-            self.maybe_freeze_memtable(&mut guard);
-            current_wal_table
+            current_wal.table().clone()
         };
 
         current_wal_table.await_flush().await;
@@ -250,12 +195,13 @@ impl DbInner {
             .get_wal_sst_list(wal_id_last_compacted)
             .await?;
 
-        let mut snapshot = {
-            let rguard_state = self.state.read();
-            rguard_state.compacted.as_ref().clone()
-        };
-
-        snapshot.last_compacted_wal_sst_id = wal_id_last_compacted;
+        {
+            let mut wguard = self.state.write();
+            let mut compacted = wguard.compacted.as_ref().clone();
+            compacted.last_compacted_wal_sst_id = wal_id_last_compacted;
+            compacted.next_wal_sst_id = wal_id_last_compacted + 1;
+            wguard.compacted = Arc::new(compacted);
+        }
         for sst_id in wal_sst_list {
             let sst = self.table_store.open_sst(&SsTableId::Wal(sst_id)).await?;
             let sst_id = match &sst.id {
@@ -272,16 +218,15 @@ impl DbInner {
                     }
                     ValueDeletable::Tombstone => wguard.memtable.delete(kv.key.as_ref()),
                 }
-                if wguard.memtable.size() >= self.options.l0_sst_size_bytes {
-                    self.freeze_memtable(&mut wguard, sst_id);
-                }
             }
-            snapshot.next_wal_sst_id = sst_id + 1;
+            {
+                let mut wguard = self.state.write();
+                self.maybe_freeze_memtable(&mut wguard, sst_id);
+                let mut compacted = wguard.compacted.as_ref().clone();
+                compacted.next_wal_sst_id = sst_id + 1;
+                wguard.compacted = Arc::new(compacted);
+            }
         }
-
-        let mut wguard_state = self.state.write();
-        wguard_state.compacted = Arc::new(snapshot);
-
         Ok(())
     }
 }
