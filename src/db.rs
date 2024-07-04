@@ -588,11 +588,11 @@ mod tests {
         .unwrap();
 
         // write a few keys that will result in memtable flushes
-        let key1 = ['a' as u8; 32];
-        let value1 = ['b' as u8; 96];
+        let key1 = [b'a'; 32];
+        let value1 = [b'b'; 96];
         db.put(&key1, &value1).await;
-        let key2 = ['c' as u8; 32];
-        let value2 = ['d' as u8; 96];
+        let key2 = [b'c'; 32];
+        let value2 = [b'd'; 96];
         db.put(&key2, &value2).await;
 
         db.close().await.unwrap();
@@ -613,7 +613,7 @@ mod tests {
         // verify that we reload imm
         let compacted = db.inner.state.read().compacted.clone();
         assert_eq!(compacted.imm_memtable.len(), 2);
-        assert_eq!(compacted.imm_memtable.get(0).unwrap().last_wal_id(), 2);
+        assert_eq!(compacted.imm_memtable.front().unwrap().last_wal_id(), 2);
         assert_eq!(compacted.imm_memtable.get(1).unwrap().last_wal_id(), 1);
         assert_eq!(compacted.next_wal_sst_id, 3);
         assert_eq!(
