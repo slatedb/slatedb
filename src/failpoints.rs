@@ -202,6 +202,7 @@
 //!    a single crate, or across multiple crates.
 
 #![deny(missing_docs, missing_debug_implementations)]
+#![allow(warnings)]
 
 use std::collections::HashMap;
 use std::env::VarError;

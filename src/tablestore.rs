@@ -70,6 +70,7 @@ pub struct SSTableHandle {
 }
 
 impl TableStore {
+    #[allow(dead_code)]
     pub fn new(
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
