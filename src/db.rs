@@ -346,11 +346,9 @@ mod tests {
     use super::*;
     use crate::failpoints;
     use crate::sst_iter::SstIterator;
-    use futures::FutureExt;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use std::time::{Duration, SystemTime};
-    use tokio::task;
     use tokio::time::sleep;
     use ulid::Ulid;
 
