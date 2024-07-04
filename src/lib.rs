@@ -7,6 +7,7 @@ mod blob;
 mod block;
 mod block_iterator;
 pub mod db;
+mod db_common;
 mod error;
 mod filter;
 mod flatbuffer_types;
