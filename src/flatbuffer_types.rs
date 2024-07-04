@@ -1,4 +1,4 @@
-use crate::db::CompactedDbState;
+use crate::db_state::CoreDbState;
 use bytes::Bytes;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
 use std::collections::VecDeque;
@@ -80,7 +80,7 @@ impl ManifestV1Owned {
         Self { data }
     }
 
-    pub fn get_updated_manifest(&self, compacted_db_state: &CompactedDbState) -> ManifestV1Owned {
+    pub fn get_updated_manifest(&self, compacted_db_state: &CoreDbState) -> ManifestV1Owned {
         let old_manifest = self.borrow();
         let builder = flatbuffers::FlatBufferBuilder::new();
         let mut manifest_builder = ManifestBuilder::new(builder);
@@ -173,7 +173,7 @@ impl<'b> ManifestBuilder<'b> {
     fn create_from_compacted_dbstate(
         &mut self,
         old_manifest: ManifestV1,
-        compacted_db_state: &CompactedDbState,
+        compacted_db_state: &CoreDbState,
     ) -> Bytes {
         let l0 = self.create_compacted_ssts(&compacted_db_state.l0);
         let manifest = ManifestV1::create(

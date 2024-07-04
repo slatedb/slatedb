@@ -1,7 +1,7 @@
 use crate::db::ReadLevel::{Commited, Uncommitted};
+use crate::db_state::DbState;
 use crate::failpoints::FailPointRegistry;
 use crate::flatbuffer_types::ManifestV1Owned;
-use crate::mem_table::{ImmutableMemtable, ImmutableWal, WritableKVTable};
 use crate::mem_table_flush::MemtableFlushThreadMsg;
 use crate::mem_table_flush::MemtableFlushThreadMsg::Shutdown;
 use crate::sst::SsTableFormat;
@@ -14,7 +14,7 @@ use bytes::Bytes;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
-use std::{collections::VecDeque, sync::Arc};
+use std::sync::Arc;
 
 pub enum ReadLevel {
     Commited,
@@ -53,37 +53,6 @@ pub struct DbOptions {
     pub l0_sst_size_bytes: usize,
 }
 
-pub(crate) struct DbState {
-    pub(crate) memtable: WritableKVTable,
-    pub(crate) wal: WritableKVTable,
-    pub(crate) compacted: Arc<CompactedDbState>,
-}
-
-#[derive(Clone)]
-pub(crate) struct CompactedDbState {
-    pub(crate) imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
-    pub(crate) imm_wal: VecDeque<Arc<ImmutableWal>>,
-    pub(crate) l0: VecDeque<SSTableHandle>,
-    pub(crate) next_wal_sst_id: u64,
-    pub(crate) last_compacted_wal_sst_id: u64,
-}
-
-impl DbState {
-    fn create() -> Self {
-        Self {
-            memtable: WritableKVTable::new(),
-            wal: WritableKVTable::new(),
-            compacted: Arc::new(CompactedDbState {
-                imm_memtable: VecDeque::new(),
-                imm_wal: VecDeque::new(),
-                l0: VecDeque::new(),
-                next_wal_sst_id: 1,
-                last_compacted_wal_sst_id: 0,
-            }),
-        }
-    }
-}
-
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
@@ -99,16 +68,15 @@ impl DbInner {
         manifest: ManifestV1Owned,
         memtable_flush_notifier: crossbeam_channel::Sender<MemtableFlushThreadMsg>,
     ) -> Result<Self, SlateDBError> {
-        let mut db_inner = Self {
-            state: Arc::new(RwLock::new(DbState::create())),
+        let state = DbState::load(&manifest);
+        let db_inner = Self {
+            state: Arc::new(RwLock::new(state)),
             options,
             table_store,
             manifest: Arc::new(RwLock::new(manifest)),
             memtable_flush_notifier,
         };
-
-        db_inner.load_state().await?;
-
+        db_inner.replay_wal().await?;
         Ok(db_inner)
     }
 
@@ -118,32 +86,25 @@ impl DbInner {
         key: &[u8],
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        let (wal, memtable, compacted) = {
-            let guard = self.state.read();
-            (
-                guard.wal.table().clone(),
-                guard.memtable.table().clone(),
-                Arc::clone(&guard.compacted),
-            )
-        };
+        let snapshot = self.state.read().snapshot();
 
         if matches!(options.read_level, Uncommitted) {
-            let maybe_bytes = std::iter::once(wal)
-                .chain(compacted.imm_wal.iter().map(|imm| imm.table()))
+            let maybe_bytes = std::iter::once(snapshot.wal)
+                .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
             if let Some(val) = maybe_bytes {
                 return Ok(val.into_option());
             }
         }
 
-        let maybe_bytes = std::iter::once(memtable)
-            .chain(compacted.imm_memtable.iter().map(|imm| imm.table()))
+        let maybe_bytes = std::iter::once(snapshot.memtable)
+            .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
         if let Some(val) = maybe_bytes {
             return Ok(val.into_option());
         }
 
-        for sst in &compacted.l0 {
+        for sst in &snapshot.state.core.l0 {
             if let Some(block_index) = self.find_block_for_key(sst, key).await? {
                 let block = self.table_store.read_block(sst, block_index).await?;
                 if let Some(val) = self.find_val_in_block(&block, key).await? {
@@ -214,7 +175,7 @@ impl DbInner {
         // Clone memtable to avoid a deadlock with flusher thread.
         let current_wal_table = {
             let mut guard = self.state.write();
-            let current_wal = &mut guard.wal;
+            let current_wal = guard.wal();
             current_wal.put(key, value);
             current_wal.table().clone()
         };
@@ -231,7 +192,7 @@ impl DbInner {
         // Clone memtable to avoid a deadlock with flusher thread.
         let current_wal_table = {
             let mut guard = self.state.write();
-            let current_wal = &mut guard.wal;
+            let current_wal = guard.wal();
             current_wal.delete(key);
             current_wal.table().clone()
         };
@@ -241,20 +202,12 @@ impl DbInner {
         }
     }
 
-    async fn load_state(&mut self) -> Result<(), SlateDBError> {
-        let wal_id_last_compacted = self.manifest.read().borrow().wal_id_last_compacted();
+    async fn replay_wal(&self) -> Result<(), SlateDBError> {
+        let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
         let wal_sst_list = self
             .table_store
             .get_wal_sst_list(wal_id_last_compacted)
             .await?;
-
-        {
-            let mut wguard = self.state.write();
-            let mut compacted = wguard.compacted.as_ref().clone();
-            compacted.last_compacted_wal_sst_id = wal_id_last_compacted;
-            compacted.next_wal_sst_id = wal_id_last_compacted + 1;
-            wguard.compacted = Arc::new(compacted);
-        }
         for sst_id in wal_sst_list {
             let sst = self.table_store.open_sst(&SsTableId::Wal(sst_id)).await?;
             let sst_id = match &sst.id {
@@ -264,20 +217,25 @@ impl DbInner {
             let mut iter = SstIterator::new(sst, &self.table_store);
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
             while let Some(kv) = iter.next_entry().await? {
-                let mut wguard = self.state.write();
+                // TODO: it's not ideal that we have to take this lock for every kv. We can solve
+                //       this by either:
+                //       1. detaching this method from self and calling it before initializing
+                //          DbInner. The downside is we can't use member methods of DbInner
+                //          like maybe_freeze_wal
+                //       2. accumulating kv-pairs in memory and bulk-applying the writes
+                let mut guard = self.state.write();
                 match kv.value {
                     ValueDeletable::Value(value) => {
-                        wguard.memtable.put(kv.key.as_ref(), value.as_ref())
+                        guard.memtable().put(kv.key.as_ref(), value.as_ref())
                     }
-                    ValueDeletable::Tombstone => wguard.memtable.delete(kv.key.as_ref()),
+                    ValueDeletable::Tombstone => guard.memtable().delete(kv.key.as_ref()),
                 }
             }
             {
-                let mut wguard = self.state.write();
-                self.maybe_freeze_memtable(&mut wguard, sst_id);
-                let mut compacted = wguard.compacted.as_ref().clone();
-                compacted.next_wal_sst_id = sst_id + 1;
-                wguard.compacted = Arc::new(compacted);
+                let mut guard = self.state.write();
+                self.maybe_freeze_memtable(&mut guard, sst_id);
+                assert_eq!(guard.state().core.next_wal_sst_id, sst_id);
+                guard.increment_next_wal_id();
             }
         }
         Ok(())
@@ -562,10 +520,10 @@ mod tests {
 
         let memtable = {
             let mut lock = kv_store.inner.state.write();
-            lock.wal.put(b"abc1111", b"value1111");
-            lock.wal.put(b"abc2222", b"value2222");
-            lock.wal.put(b"abc3333", b"value3333");
-            lock.wal.table().clone()
+            lock.wal().put(b"abc1111", b"value1111");
+            lock.wal().put(b"abc2222", b"value2222");
+            lock.wal().put(b"abc3333", b"value3333");
+            lock.wal().table().clone()
         };
 
         let mut iter = memtable.iter();
@@ -809,11 +767,14 @@ mod tests {
         .unwrap();
 
         // verify that we reload imm
-        let compacted = db.inner.state.read().compacted.clone();
-        assert_eq!(compacted.imm_memtable.len(), 2);
-        assert_eq!(compacted.imm_memtable.front().unwrap().last_wal_id(), 2);
-        assert_eq!(compacted.imm_memtable.get(1).unwrap().last_wal_id(), 1);
-        assert_eq!(compacted.next_wal_sst_id, 3);
+        let snapshot = db.inner.state.read().snapshot();
+        assert_eq!(snapshot.state.imm_memtable.len(), 2);
+        assert_eq!(
+            snapshot.state.imm_memtable.front().unwrap().last_wal_id(),
+            2
+        );
+        assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 1);
+        assert_eq!(snapshot.state.core.next_wal_sst_id, 3);
         assert_eq!(
             db.get(&key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
