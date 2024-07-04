@@ -1,3 +1,4 @@
+use crate::db::ReadLevel::{Commited, Uncommitted};
 use crate::failpoints::FailPointRegistry;
 use crate::flatbuffer_types::ManifestV1Owned;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, WritableKVTable};
@@ -14,6 +15,37 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use std::{collections::VecDeque, sync::Arc};
+
+pub enum ReadLevel {
+    Commited,
+    Uncommitted,
+}
+
+pub struct ReadOptions {
+    pub read_level: ReadLevel,
+}
+
+impl ReadOptions {
+    const fn default() -> Self {
+        Self {
+            read_level: Commited,
+        }
+    }
+}
+
+const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
+
+pub struct WriteOptions {
+    pub await_flush: bool,
+}
+
+impl WriteOptions {
+    const fn default() -> Self {
+        Self { await_flush: true }
+    }
+}
+
+const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
 
 pub struct DbOptions {
     pub flush_ms: usize,
@@ -81,16 +113,32 @@ impl DbInner {
     }
 
     /// Get the value for a given key.
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
-        let (memtable, compacted) = {
+    pub async fn get_with_options(
+        &self,
+        key: &[u8],
+        options: &ReadOptions,
+    ) -> Result<Option<Bytes>, SlateDBError> {
+        let (wal, memtable, compacted) = {
             let guard = self.state.read();
-            (guard.memtable.table().clone(), Arc::clone(&guard.compacted))
+            (
+                guard.wal.table().clone(),
+                guard.memtable.table().clone(),
+                Arc::clone(&guard.compacted),
+            )
         };
+
+        if matches!(options.read_level, Uncommitted) {
+            let maybe_bytes = std::iter::once(wal)
+                .chain(compacted.imm_wal.iter().map(|imm| imm.table()))
+                .find_map(|memtable| memtable.get(key));
+            if let Some(val) = maybe_bytes {
+                return Ok(val.into_option());
+            }
+        }
 
         let maybe_bytes = std::iter::once(memtable)
             .chain(compacted.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
-
         if let Some(val) = maybe_bytes {
             return Ok(val.into_option());
         }
@@ -160,7 +208,7 @@ impl DbInner {
     }
 
     /// Put a key-value pair into the database. Key and value must not be empty.
-    pub async fn put(&self, key: &[u8], value: &[u8]) {
+    pub async fn put_with_options(&self, key: &[u8], value: &[u8], options: &WriteOptions) {
         assert!(!key.is_empty(), "key cannot be empty");
 
         // Clone memtable to avoid a deadlock with flusher thread.
@@ -171,11 +219,13 @@ impl DbInner {
             current_wal.table().clone()
         };
 
-        current_wal_table.await_flush().await;
+        if options.await_flush {
+            current_wal_table.await_flush().await;
+        }
     }
 
     /// Delete a key from the database. Key must not be empty.
-    pub async fn delete(&self, key: &[u8]) {
+    pub async fn delete_with_options(&self, key: &[u8], options: &WriteOptions) {
         assert!(!key.is_empty(), "key cannot be empty");
 
         // Clone memtable to avoid a deadlock with flusher thread.
@@ -186,7 +236,9 @@ impl DbInner {
             current_wal.table().clone()
         };
 
-        current_wal_table.await_flush().await;
+        if options.await_flush {
+            current_wal_table.await_flush().await;
+        }
     }
 
     async fn load_state(&mut self) -> Result<(), SlateDBError> {
@@ -323,17 +375,38 @@ impl Db {
     }
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
-        self.inner.get(key).await
+        self.inner.get_with_options(key, DEFAULT_READ_OPTIONS).await
+    }
+
+    pub async fn get_with_options(
+        &self,
+        key: &[u8],
+        options: &ReadOptions,
+    ) -> Result<Option<Bytes>, SlateDBError> {
+        self.inner.get_with_options(key, options).await
     }
 
     pub async fn put(&self, key: &[u8], value: &[u8]) {
         // TODO move the put into an async block by blocking on the memtable flush
-        self.inner.put(key, value).await;
+        self.inner
+            .put_with_options(key, value, DEFAULT_WRITE_OPTIONS)
+            .await;
+    }
+
+    pub async fn put_with_options(&self, key: &[u8], value: &[u8], options: &WriteOptions) {
+        self.inner.put_with_options(key, value, options).await;
     }
 
     pub async fn delete(&self, key: &[u8]) {
         // TODO move the put into an async block by blocking on the memtable flush
-        self.inner.delete(key).await;
+        self.inner
+            .delete_with_options(key, DEFAULT_WRITE_OPTIONS)
+            .await;
+    }
+
+    pub async fn delete_with_options(&self, key: &[u8], options: &WriteOptions) {
+        // TODO move the put into an async block by blocking on the memtable flush
+        self.inner.delete_with_options(key, options).await;
     }
 
     pub async fn flush(&self) -> Result<(), SlateDBError> {
@@ -560,6 +633,131 @@ mod tests {
         let manifest_owned = table_store.open_latest_manifest().await.unwrap().unwrap();
         let manifest = manifest_owned.borrow();
         assert_eq!(manifest.wal_id_last_seen(), sst_count);
+    }
+
+    #[tokio::test]
+    async fn test_should_read_uncommitted_data_if_read_level_uncommitted() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let kv_store = Db::open(
+            path.clone(),
+            DbOptions {
+                flush_ms: 100,
+                min_filter_keys: 0,
+                l0_sst_size_bytes: 1024,
+            },
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        failpoints::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+        kv_store
+            .put_with_options(
+                "foo".as_bytes(),
+                "bar".as_bytes(),
+                &WriteOptions { await_flush: false },
+            )
+            .await;
+
+        let val = kv_store
+            .get_with_options(
+                "foo".as_bytes(),
+                &ReadOptions {
+                    read_level: Uncommitted,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(val, Some(Bytes::from("bar")));
+
+        failpoints::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_should_read_only_committed_data() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let kv_store = Db::open(
+            path.clone(),
+            DbOptions {
+                flush_ms: 100,
+                min_filter_keys: 0,
+                l0_sst_size_bytes: 1024,
+            },
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        kv_store.put("foo".as_bytes(), "bar".as_bytes()).await;
+        failpoints::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+        kv_store
+            .put_with_options(
+                "foo".as_bytes(),
+                "bla".as_bytes(),
+                &WriteOptions { await_flush: false },
+            )
+            .await;
+
+        let val = kv_store.get("foo".as_bytes()).await.unwrap();
+        assert_eq!(val, Some(Bytes::from("bar")));
+        let val = kv_store
+            .get_with_options(
+                "foo".as_bytes(),
+                &ReadOptions {
+                    read_level: Uncommitted,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(val, Some(Bytes::from("bla")));
+
+        failpoints::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_should_delete_without_awaiting_flush() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let kv_store = Db::open(
+            path.clone(),
+            DbOptions {
+                flush_ms: 100,
+                min_filter_keys: 0,
+                l0_sst_size_bytes: 1024,
+            },
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        kv_store.put("foo".as_bytes(), "bar".as_bytes()).await;
+        failpoints::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+        kv_store
+            .delete_with_options("foo".as_bytes(), &WriteOptions { await_flush: false })
+            .await;
+
+        let val = kv_store.get("foo".as_bytes()).await.unwrap();
+        assert_eq!(val, Some(Bytes::from("bar")));
+        let val = kv_store
+            .get_with_options(
+                "foo".as_bytes(),
+                &ReadOptions {
+                    read_level: Uncommitted,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(val, None);
+
+        failpoints::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+        kv_store.close().await.unwrap();
     }
 
     #[tokio::test]
