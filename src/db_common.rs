@@ -1,7 +1,7 @@
 use crate::db::DbInner;
 use crate::db::DbState;
 use crate::mem_table::{ImmutableMemtable, WritableKVTable};
-use crate::memtable_flush::MemtableFlushThreadMsg::FlushImmutableMemtables;
+use crate::mem_table_flush::MemtableFlushThreadMsg::FlushImmutableMemtables;
 use parking_lot::RwLockWriteGuard;
 use std::sync::Arc;
 

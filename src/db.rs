@@ -1,8 +1,8 @@
 use crate::failpoints::FailPointRegistry;
 use crate::flatbuffer_types::ManifestV1Owned;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, WritableKVTable};
-use crate::memtable_flush::MemtableFlushThreadMsg;
-use crate::memtable_flush::MemtableFlushThreadMsg::Shutdown;
+use crate::mem_table_flush::MemtableFlushThreadMsg;
+use crate::mem_table_flush::MemtableFlushThreadMsg::Shutdown;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::{SSTableHandle, SsTableId, TableStore};
