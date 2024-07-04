@@ -1,3 +1,4 @@
+use crate::failpoints::FailPointRegistry;
 use crate::flatbuffer_types::ManifestV1Owned;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, WritableKVTable};
 use crate::memtable_flush::MemtableFlushThreadMsg;
@@ -246,8 +247,28 @@ impl Db {
         options: DbOptions,
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self, SlateDBError> {
+        Self::open_with_fp_registry(
+            path,
+            options,
+            object_store,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await
+    }
+
+    pub async fn open_with_fp_registry(
+        path: Path,
+        options: DbOptions,
+        object_store: Arc<dyn ObjectStore>,
+        fp_registry: Arc<FailPointRegistry>,
+    ) -> Result<Self, SlateDBError> {
         let sst_format = SsTableFormat::new(4096, options.min_filter_keys);
-        let table_store = TableStore::new(object_store, sst_format, path.clone());
+        let table_store = TableStore::new_with_fp_registry(
+            object_store,
+            sst_format,
+            path.clone(),
+            fp_registry.clone(),
+        );
         let manifest = table_store.open_latest_manifest().await?;
         let manifest = match manifest {
             Some(manifest) => manifest,
@@ -323,6 +344,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::failpoints;
     use crate::sst_iter::SstIterator;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
@@ -538,5 +560,69 @@ mod tests {
         let manifest_owned = table_store.open_latest_manifest().await.unwrap().unwrap();
         let manifest = manifest_owned.borrow();
         assert_eq!(manifest.wal_id_last_seen(), sst_count);
+    }
+
+    #[tokio::test]
+    async fn test_should_recover_imm_from_wal() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        failpoints::cfg(
+            fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            "return",
+        )
+        .unwrap();
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let db = Db::open_with_fp_registry(
+            path.clone(),
+            DbOptions {
+                flush_ms: 100,
+                min_filter_keys: 0,
+                l0_sst_size_bytes: 128,
+            },
+            object_store.clone(),
+            fp_registry.clone(),
+        )
+        .await
+        .unwrap();
+
+        // write a few keys that will result in memtable flushes
+        let key1 = [b'a'; 32];
+        let value1 = [b'b'; 96];
+        db.put(&key1, &value1).await;
+        let key2 = [b'c'; 32];
+        let value2 = [b'd'; 96];
+        db.put(&key2, &value2).await;
+
+        db.close().await.unwrap();
+
+        // reload the db
+        let db = Db::open(
+            path.clone(),
+            DbOptions {
+                flush_ms: 100,
+                min_filter_keys: 0,
+                l0_sst_size_bytes: 128,
+            },
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        // verify that we reload imm
+        let compacted = db.inner.state.read().compacted.clone();
+        assert_eq!(compacted.imm_memtable.len(), 2);
+        assert_eq!(compacted.imm_memtable.front().unwrap().last_wal_id(), 2);
+        assert_eq!(compacted.imm_memtable.get(1).unwrap().last_wal_id(), 1);
+        assert_eq!(compacted.next_wal_sst_id, 3);
+        assert_eq!(
+            db.get(&key1).await.unwrap(),
+            Some(Bytes::copy_from_slice(&value1))
+        );
+        assert_eq!(
+            db.get(&key2).await.unwrap(),
+            Some(Bytes::copy_from_slice(&value2))
+        );
     }
 }

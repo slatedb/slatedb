@@ -1,6 +1,8 @@
 use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::error::SlateDBError;
+use crate::fail_point;
+use crate::failpoints::FailPointRegistry;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::{ManifestV1Owned, SsTableInfoOwned};
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
@@ -19,6 +21,7 @@ pub struct TableStore {
     wal_path: &'static str,
     compacted_path: &'static str,
     manifest_path: &'static str,
+    fp_registry: Arc<FailPointRegistry>,
 }
 
 struct ReadOnlyObject {
@@ -67,18 +70,34 @@ pub struct SSTableHandle {
 }
 
 impl TableStore {
+    #[allow(dead_code)]
     pub fn new(
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
         root_path: Path,
-    ) -> TableStore {
-        TableStore {
+    ) -> Self {
+        Self::new_with_fp_registry(
+            object_store,
+            sst_format,
+            root_path,
+            Arc::new(FailPointRegistry::new()),
+        )
+    }
+
+    pub fn new_with_fp_registry(
+        object_store: Arc<dyn ObjectStore>,
+        sst_format: SsTableFormat,
+        root_path: Path,
+        fp_registry: Arc<FailPointRegistry>,
+    ) -> Self {
+        Self {
             object_store: object_store.clone(),
             sst_format,
             root_path,
             wal_path: "wal",
             compacted_path: "compacted",
             manifest_path: "manifest",
+            fp_registry,
         }
     }
 
@@ -177,6 +196,25 @@ impl TableStore {
         id: &SsTableId,
         encoded_sst: EncodedSsTable,
     ) -> Result<SSTableHandle, SlateDBError> {
+        fail_point!(
+            self.fp_registry.clone(),
+            "write-wal-sst-io-error",
+            matches!(id, SsTableId::Wal(_)),
+            |_| Result::Err(SlateDBError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "oops"
+            )))
+        );
+        fail_point!(
+            self.fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            matches!(id, SsTableId::Compacted(_)),
+            |_| Result::Err(SlateDBError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "oops"
+            )))
+        );
+
         let path = self.path(id);
         self.object_store
             .put(&path, encoded_sst.raw.clone())

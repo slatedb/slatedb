@@ -9,6 +9,7 @@ mod block_iterator;
 pub mod db;
 mod db_common;
 mod error;
+mod failpoints;
 mod filter;
 mod flatbuffer_types;
 mod flush;
