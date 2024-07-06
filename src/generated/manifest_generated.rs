@@ -522,9 +522,10 @@ impl<'a> ManifestV1<'a> {
   pub const VT_COMPACTOR_EPOCH: flatbuffers::VOffsetT = 8;
   pub const VT_WAL_ID_LAST_COMPACTED: flatbuffers::VOffsetT = 10;
   pub const VT_WAL_ID_LAST_SEEN: flatbuffers::VOffsetT = 12;
-  pub const VT_L0: flatbuffers::VOffsetT = 14;
-  pub const VT_COMPACTED: flatbuffers::VOffsetT = 16;
-  pub const VT_SNAPSHOTS: flatbuffers::VOffsetT = 18;
+  pub const VT_L0_LAST_COMPACTED: flatbuffers::VOffsetT = 14;
+  pub const VT_L0: flatbuffers::VOffsetT = 16;
+  pub const VT_COMPACTED: flatbuffers::VOffsetT = 18;
+  pub const VT_SNAPSHOTS: flatbuffers::VOffsetT = 20;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -544,6 +545,7 @@ impl<'a> ManifestV1<'a> {
     if let Some(x) = args.snapshots { builder.add_snapshots(x); }
     if let Some(x) = args.compacted { builder.add_compacted(x); }
     if let Some(x) = args.l0 { builder.add_l0(x); }
+    if let Some(x) = args.l0_last_compacted { builder.add_l0_last_compacted(x); }
     builder.finish()
   }
 
@@ -584,6 +586,13 @@ impl<'a> ManifestV1<'a> {
     unsafe { self._tab.get::<u64>(ManifestV1::VT_WAL_ID_LAST_SEEN, Some(0)).unwrap()}
   }
   #[inline]
+  pub fn l0_last_compacted(&self) -> Option<CompactedSstId<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<CompactedSstId>>(ManifestV1::VT_L0_LAST_COMPACTED, None)}
+  }
+  #[inline]
   pub fn l0(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>> {
     // Safety:
     // Created from valid Table for this object
@@ -618,6 +627,7 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
      .visit_field::<u64>("compactor_epoch", Self::VT_COMPACTOR_EPOCH, false)?
      .visit_field::<u64>("wal_id_last_compacted", Self::VT_WAL_ID_LAST_COMPACTED, false)?
      .visit_field::<u64>("wal_id_last_seen", Self::VT_WAL_ID_LAST_SEEN, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<CompactedSstId>>("l0_last_compacted", Self::VT_L0_LAST_COMPACTED, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("l0", Self::VT_L0, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRun>>>>("compacted", Self::VT_COMPACTED, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Snapshot>>>>("snapshots", Self::VT_SNAPSHOTS, false)?
@@ -631,6 +641,7 @@ pub struct ManifestV1Args<'a> {
     pub compactor_epoch: u64,
     pub wal_id_last_compacted: u64,
     pub wal_id_last_seen: u64,
+    pub l0_last_compacted: Option<flatbuffers::WIPOffset<CompactedSstId<'a>>>,
     pub l0: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
     pub compacted: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRun<'a>>>>>,
     pub snapshots: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Snapshot<'a>>>>>,
@@ -644,6 +655,7 @@ impl<'a> Default for ManifestV1Args<'a> {
       compactor_epoch: 0,
       wal_id_last_compacted: 0,
       wal_id_last_seen: 0,
+      l0_last_compacted: None,
       l0: None,
       compacted: None,
       snapshots: None,
@@ -675,6 +687,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
   #[inline]
   pub fn add_wal_id_last_seen(&mut self, wal_id_last_seen: u64) {
     self.fbb_.push_slot::<u64>(ManifestV1::VT_WAL_ID_LAST_SEEN, wal_id_last_seen, 0);
+  }
+  #[inline]
+  pub fn add_l0_last_compacted(&mut self, l0_last_compacted: flatbuffers::WIPOffset<CompactedSstId<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<CompactedSstId>>(ManifestV1::VT_L0_LAST_COMPACTED, l0_last_compacted);
   }
   #[inline]
   pub fn add_l0(&mut self, l0: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<CompactedSsTable<'b >>>>) {
@@ -711,6 +727,7 @@ impl core::fmt::Debug for ManifestV1<'_> {
       ds.field("compactor_epoch", &self.compactor_epoch());
       ds.field("wal_id_last_compacted", &self.wal_id_last_compacted());
       ds.field("wal_id_last_seen", &self.wal_id_last_seen());
+      ds.field("l0_last_compacted", &self.l0_last_compacted());
       ds.field("l0", &self.l0());
       ds.field("compacted", &self.compacted());
       ds.field("snapshots", &self.snapshots());

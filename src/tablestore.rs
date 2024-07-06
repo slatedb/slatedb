@@ -52,13 +52,23 @@ impl ReadOnlyBlob for ReadOnlyObject {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum SsTableId {
     Wal(u64),
     Compacted(Ulid),
 }
 
-#[derive(Clone)]
+impl SsTableId {
+    #[allow(clippy::panic)]
+    pub(crate) fn unwrap_compacted_id(&self) -> Ulid {
+        match self {
+            SsTableId::Wal(_) => panic!("found WAL id when unwrapping compacted ID"),
+            SsTableId::Compacted(ulid) => *ulid,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
 pub struct SSTableHandle {
     pub id: SsTableId,
     pub info: SsTableInfoOwned,
