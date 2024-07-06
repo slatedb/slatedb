@@ -17,11 +17,14 @@ table ManifestV1 {
     // The most recent SST in the WAL at the time manifest was updated.
     wal_id_last_seen: ulong;
 
+    // The last compacted l0
+    l0_last_compacted: CompactedSstId;
+
     // A list of the L0 SSTs that are valid to read in the `compacted` folder.
-    l0: [CompactedSsTable];
+    l0: [CompactedSsTable] (required);
 
     // A list of the sorted runs that are valid to read in the `compacted` folder.
-    compacted: [SortedRun];
+    compacted: [SortedRun] (required);
 
     // A list of read snapshots that are currently open.
     snapshots: [Snapshot];
@@ -29,7 +32,7 @@ table ManifestV1 {
 
 table SortedRun {
     id: uint32;
-    ssts: [CompactedSsTable];
+    ssts: [CompactedSsTable] (required);
 }
 
 // Snapshot reference to be included in manifest to record active snapshots.

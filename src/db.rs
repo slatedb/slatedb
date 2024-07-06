@@ -1,3 +1,4 @@
+use crate::compactor::{Compactor, CompactorOptions};
 use crate::db::ReadLevel::{Commited, Uncommitted};
 use crate::db_state::DbState;
 use crate::flatbuffer_types::ManifestV1Owned;
@@ -48,16 +49,18 @@ impl WriteOptions {
 
 const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
 
+#[derive(Clone)]
 pub struct DbOptions {
     pub flush_ms: usize,
     pub min_filter_keys: u32,
     pub l0_sst_size_bytes: usize,
+    pub compactor_options: Option<CompactorOptions>,
 }
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
-    pub(crate) table_store: TableStore,
+    pub(crate) table_store: Arc<TableStore>,
     pub(crate) manifest: Arc<RwLock<ManifestV1Owned>>,
     pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
 }
@@ -65,7 +68,7 @@ pub(crate) struct DbInner {
 impl DbInner {
     pub async fn new(
         options: DbOptions,
-        table_store: TableStore,
+        table_store: Arc<TableStore>,
         manifest: ManifestV1Owned,
         memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
     ) -> Result<Self, SlateDBError> {
@@ -250,6 +253,7 @@ pub struct Db {
     /// The handle for the flush thread.
     flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    compactor: Mutex<Option<Compactor>>,
 }
 
 impl Db {
@@ -274,12 +278,12 @@ impl Db {
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         let sst_format = SsTableFormat::new(4096, options.min_filter_keys);
-        let table_store = TableStore::new_with_fp_registry(
+        let table_store = Arc::new(TableStore::new_with_fp_registry(
             object_store,
             sst_format,
             path.clone(),
             fp_registry.clone(),
-        );
+        ));
         let manifest = table_store.open_latest_manifest().await?;
         let manifest = match manifest {
             Some(manifest) => manifest,
@@ -291,21 +295,41 @@ impl Db {
         };
 
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
-        let inner =
-            Arc::new(DbInner::new(options, table_store, manifest, memtable_flush_tx).await?);
+        let inner = Arc::new(
+            DbInner::new(options, table_store.clone(), manifest, memtable_flush_tx).await?,
+        );
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let tokio_handle = Handle::current();
         let flush_thread = inner.spawn_flush_task(rx, &tokio_handle);
         let memtable_flush_task = inner.spawn_memtable_flush_task(memtable_flush_rx, &tokio_handle);
+        let mut compactor = None;
+        if let Some(compactor_options) = &inner.options.compactor_options {
+            compactor = Some(
+                Compactor::new(
+                    table_store.clone(),
+                    compactor_options.clone(),
+                    Handle::current(),
+                )
+                .await?,
+            )
+        }
         Ok(Self {
             inner,
             flush_notifier: tx,
             flush_task: Mutex::new(flush_thread),
             memtable_flush_task: Mutex::new(memtable_flush_task),
+            compactor: Mutex::new(compactor),
         })
     }
 
     pub async fn close(&self) -> Result<(), SlateDBError> {
+        if let Some(compactor) = {
+            let mut maybe_compactor = self.compactor.lock();
+            maybe_compactor.take()
+        } {
+            compactor.close().await;
+        }
+
         // Tell the notifier thread to shut down.
         self.flush_notifier.send(()).ok();
         self.inner.memtable_flush_notifier.send(Shutdown).ok();
@@ -394,6 +418,7 @@ mod tests {
                 flush_ms: 100,
                 min_filter_keys: 0,
                 l0_sst_size_bytes: 1024,
+                compactor_options: None,
             },
             object_store,
         )
@@ -423,6 +448,7 @@ mod tests {
                 flush_ms: 100,
                 min_filter_keys: 0,
                 l0_sst_size_bytes: 128,
+                compactor_options: None,
             },
             object_store.clone(),
         )
@@ -456,7 +482,7 @@ mod tests {
 
         let manifest_owned = table_store.open_latest_manifest().await.unwrap().unwrap();
         let manifest = manifest_owned.borrow();
-        let l0 = manifest.l0().unwrap();
+        let l0 = manifest.l0();
         assert_eq!(l0.len(), 3);
         for i in 0u8..3u8 {
             let compacted_sst1 = l0.get(2 - i as usize);
@@ -489,6 +515,7 @@ mod tests {
                 flush_ms: 100,
                 min_filter_keys: 0,
                 l0_sst_size_bytes: 1024,
+                compactor_options: None,
             },
             object_store,
         )
@@ -514,6 +541,7 @@ mod tests {
                 flush_ms: 100,
                 min_filter_keys: 0,
                 l0_sst_size_bytes: 1024,
+                compactor_options: None,
             },
             object_store,
         )
@@ -551,6 +579,7 @@ mod tests {
                 flush_ms: 100,
                 min_filter_keys: 0,
                 l0_sst_size_bytes: 128,
+                compactor_options: None,
             },
             object_store.clone(),
         )
@@ -584,6 +613,7 @@ mod tests {
                 flush_ms: 100,
                 min_filter_keys: 0,
                 l0_sst_size_bytes: 128,
+                compactor_options: None,
             },
             object_store.clone(),
         )
@@ -620,6 +650,7 @@ mod tests {
                 flush_ms: 100,
                 min_filter_keys: 0,
                 l0_sst_size_bytes: 1024,
+                compactor_options: None,
             },
             object_store.clone(),
         )
@@ -661,6 +692,7 @@ mod tests {
                 flush_ms: 100,
                 min_filter_keys: 0,
                 l0_sst_size_bytes: 1024,
+                compactor_options: None,
             },
             object_store.clone(),
         )
@@ -705,6 +737,7 @@ mod tests {
                 flush_ms: 100,
                 min_filter_keys: 0,
                 l0_sst_size_bytes: 1024,
+                compactor_options: None,
             },
             object_store.clone(),
         )
@@ -752,6 +785,7 @@ mod tests {
                 flush_ms: 100,
                 min_filter_keys: 0,
                 l0_sst_size_bytes: 128,
+                compactor_options: None,
             },
             object_store.clone(),
             fp_registry.clone(),
@@ -776,6 +810,7 @@ mod tests {
                 flush_ms: 100,
                 min_filter_keys: 0,
                 l0_sst_size_bytes: 128,
+                compactor_options: None,
             },
             object_store.clone(),
         )

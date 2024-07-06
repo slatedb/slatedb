@@ -21,10 +21,18 @@ pub(crate) struct COWDbState {
     pub(crate) core: CoreDbState,
 }
 
+#[derive(Clone, PartialEq)]
+pub(crate) struct SortedRun {
+    pub(crate) id: u32,
+    pub(crate) ssts: Vec<SSTableHandle>,
+}
+
 // represents the core db state that we persist in the manifest
 #[derive(Clone)]
 pub(crate) struct CoreDbState {
+    pub(crate) l0_last_compacted: Option<Ulid>,
     pub(crate) l0: VecDeque<SSTableHandle>,
+    pub(crate) compacted: Vec<SortedRun>,
     pub(crate) next_wal_sst_id: u64,
     pub(crate) last_compacted_wal_sst_id: u64,
 }
@@ -47,23 +55,23 @@ impl CoreDbState {
         table_store: &TableStore,
     ) -> Result<Self, SlateDBError> {
         let manifest = manifest.borrow();
+        let l0_last_compacted = manifest
+            .l0_last_compacted()
+            .map(|id| Ulid::from((id.high(), id.low())));
         let mut l0 = VecDeque::new();
-        match manifest.l0() {
-            None => {}
-            Some(man_l0) => {
-                for man_sst in man_l0.iter() {
-                    let man_sst_id = man_sst.id().expect("SSTs in manifest must have IDs");
-                    let sst_id = Compacted(Ulid::from((man_sst_id.high(), man_sst_id.low())));
-                    let sst_info = SsTableInfoOwned::create_copy(
-                        &man_sst.info().expect("SSTs in manifest must have info"),
-                    );
-                    let l0_sst = table_store.open_compacted_sst(sst_id, sst_info).await?;
-                    l0.push_back(l0_sst);
-                }
-            }
+        for man_sst in manifest.l0().iter() {
+            let man_sst_id = man_sst.id().expect("SSTs in manifest must have IDs");
+            let sst_id = Compacted(Ulid::from((man_sst_id.high(), man_sst_id.low())));
+            let sst_info = SsTableInfoOwned::create_copy(
+                &man_sst.info().expect("SSTs in manifest must have info"),
+            );
+            let l0_sst = table_store.open_compacted_sst(sst_id, sst_info).await?;
+            l0.push_back(l0_sst);
         }
         Ok(CoreDbState {
+            l0_last_compacted,
             l0,
+            compacted: Vec::new(),
             next_wal_sst_id: manifest.wal_id_last_compacted() + 1,
             last_compacted_wal_sst_id: manifest.wal_id_last_compacted(),
         })

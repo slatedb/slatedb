@@ -1,14 +1,16 @@
+use crate::db_state;
 use crate::db_state::CoreDbState;
 use bytes::Bytes;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
-use std::collections::VecDeque;
+use ulid::Ulid;
 
 #[path = "./generated/manifest_generated.rs"]
 #[allow(warnings)]
 #[rustfmt::skip]
 mod manifest_generated;
 use crate::flatbuffer_types::manifest_generated::{
-    CompactedSsTable, CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs,
+    CompactedSsTable, CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, SortedRun,
+    SortedRunArgs,
 };
 use crate::tablestore::{SSTableHandle, SsTableId};
 pub use manifest_generated::{
@@ -70,6 +72,8 @@ impl ManifestV1Owned {
 
     pub fn create_new() -> Self {
         let builder = &mut FlatBufferBuilder::new();
+        let l0 = Some(builder.create_vector::<ForwardsUOffset<CompactedSsTable>>(&[]));
+        let compacted = Some(builder.create_vector::<ForwardsUOffset<SortedRun>>(&[]));
         let manifest = ManifestV1::create(
             builder,
             &ManifestV1Args {
@@ -78,8 +82,9 @@ impl ManifestV1Owned {
                 compactor_epoch: 0,
                 wal_id_last_compacted: 0,
                 wal_id_last_seen: 0,
-                l0: None,
-                compacted: None,
+                l0_last_compacted: None,
+                l0,
+                compacted,
                 snapshots: None,
             },
         );
@@ -90,12 +95,18 @@ impl ManifestV1Owned {
 
     pub fn create_updated_manifest(&self, compacted_db_state: &CoreDbState) -> ManifestV1Owned {
         let old_manifest = self.borrow();
-        let builder = flatbuffers::FlatBufferBuilder::new();
+        let builder = FlatBufferBuilder::new();
         let mut manifest_builder = DbFlatBufferBuilder::new(builder);
         Self {
             data: manifest_builder
                 .create_manifest_from_compacted_dbstate(old_manifest, compacted_db_state),
         }
+    }
+}
+
+impl<'b> CompactedSstId<'b> {
+    pub(crate) fn ulid(&self) -> Ulid {
+        Ulid::from((self.high(), self.low()))
     }
 }
 
@@ -141,22 +152,26 @@ impl<'b> DbFlatBufferBuilder<'b> {
         )
     }
 
+    fn add_compacted_sst_id(&mut self, ulid: &Ulid) -> WIPOffset<CompactedSstId<'b>> {
+        let uidu128 = ulid.0;
+        let high = (uidu128 >> 64) as u64;
+        let low = ((uidu128 << 64) >> 64) as u64;
+        CompactedSstId::create(&mut self.builder, &CompactedSstIdArgs { high, low })
+    }
+
     #[allow(clippy::panic)]
     fn add_compacted_sst(
         &mut self,
         id: &SsTableId,
         info: &SsTableInfoOwned,
     ) -> WIPOffset<CompactedSsTable<'b>> {
-        let uidu128 = match id {
+        let ulid = match id {
             SsTableId::Wal(_) => {
                 panic!("cannot pass WAL SST handle to create compacted sst")
             }
-            SsTableId::Compacted(uid) => uid.0,
+            SsTableId::Compacted(ulid) => *ulid,
         };
-        let high = (uidu128 >> 64) as u64;
-        let low = ((uidu128 << 64) >> 64) as u64;
-        let compacted_sst_id =
-            CompactedSstId::create(&mut self.builder, &CompactedSstIdArgs { high, low });
+        let compacted_sst_id = self.add_compacted_sst_id(&ulid);
         let compacted_sst_info = self.add_sst_info_copy(&info.borrow());
         CompactedSsTable::create(
             &mut self.builder,
@@ -167,15 +182,39 @@ impl<'b> DbFlatBufferBuilder<'b> {
         )
     }
 
-    fn add_compacted_ssts(
+    fn add_compacted_ssts<'a, I>(
         &mut self,
-        ssts: &VecDeque<SSTableHandle>,
-    ) -> WIPOffset<Vector<'b, ForwardsUOffset<CompactedSsTable<'b>>>> {
+        ssts: I,
+    ) -> WIPOffset<Vector<'b, ForwardsUOffset<CompactedSsTable<'b>>>>
+    where
+        I: Iterator<Item = &'a SSTableHandle>,
+    {
         let compacted_ssts: Vec<WIPOffset<CompactedSsTable>> = ssts
-            .iter()
             .map(|sst| self.add_compacted_sst(&sst.id, &sst.info))
             .collect();
         self.builder.create_vector(compacted_ssts.as_ref())
+    }
+
+    fn add_sorted_run(&mut self, sorted_run: &db_state::SortedRun) -> WIPOffset<SortedRun<'b>> {
+        let ssts = self.add_compacted_ssts(sorted_run.ssts.iter());
+        SortedRun::create(
+            &mut self.builder,
+            &SortedRunArgs {
+                id: sorted_run.id,
+                ssts: Some(ssts),
+            },
+        )
+    }
+
+    fn add_sorted_runs(
+        &mut self,
+        sorted_runs: &[db_state::SortedRun],
+    ) -> WIPOffset<Vector<'b, ForwardsUOffset<SortedRun<'b>>>> {
+        let sorted_runs_fbs: Vec<WIPOffset<SortedRun>> = sorted_runs
+            .iter()
+            .map(|sr| self.add_sorted_run(sr))
+            .collect();
+        self.builder.create_vector(sorted_runs_fbs.as_ref())
     }
 
     fn create_manifest_from_compacted_dbstate(
@@ -183,7 +222,12 @@ impl<'b> DbFlatBufferBuilder<'b> {
         old_manifest: ManifestV1,
         compacted_db_state: &CoreDbState,
     ) -> Bytes {
-        let l0 = self.add_compacted_ssts(&compacted_db_state.l0);
+        let l0 = self.add_compacted_ssts(compacted_db_state.l0.iter());
+        let mut l0_last_compacted = None;
+        if let Some(ulid) = compacted_db_state.l0_last_compacted.as_ref() {
+            l0_last_compacted = Some(self.add_compacted_sst_id(ulid))
+        }
+        let compacted = self.add_sorted_runs(&compacted_db_state.compacted);
         let manifest = ManifestV1::create(
             &mut self.builder,
             &ManifestV1Args {
@@ -192,8 +236,9 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 compactor_epoch: old_manifest.compactor_epoch(),
                 wal_id_last_compacted: compacted_db_state.last_compacted_wal_sst_id,
                 wal_id_last_seen: compacted_db_state.next_wal_sst_id - 1,
+                l0_last_compacted,
                 l0: Some(l0),
-                compacted: None,
+                compacted: Some(compacted),
                 snapshots: None,
             },
         );
