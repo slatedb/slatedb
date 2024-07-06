@@ -1,8 +1,11 @@
-use crate::flatbuffer_types::ManifestV1Owned;
+use crate::error::SlateDBError;
+use crate::flatbuffer_types::{ManifestV1Owned, SsTableInfoOwned};
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
-use crate::tablestore::SSTableHandle;
+use crate::tablestore::SsTableId::Compacted;
+use crate::tablestore::{SSTableHandle, TableStore};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use ulid::Ulid;
 
 pub(crate) struct DbState {
     memtable: WritableKVTable,
@@ -35,27 +38,53 @@ pub(crate) struct DbStateSnapshot {
 }
 
 impl CoreDbState {
-    pub fn load(manifest: &ManifestV1Owned) -> CoreDbState {
+    // TODO: SSTs only need table store to be loaded because filters are currently loaded when
+    //       an sst is opened. Once we load filters lazily we can drop tablestore and make this
+    //       synchronous
+    //       https://github.com/slatedb/slatedb/issues/89
+    pub async fn load(
+        manifest: &ManifestV1Owned,
+        table_store: &TableStore,
+    ) -> Result<Self, SlateDBError> {
         let manifest = manifest.borrow();
-        CoreDbState {
-            l0: VecDeque::new(),
+        let mut l0 = VecDeque::new();
+        match manifest.l0() {
+            None => {}
+            Some(man_l0) => {
+                for man_sst in man_l0.iter() {
+                    let man_sst_id = man_sst.id().expect("SSTs in manifest must have IDs");
+                    let sst_id = Compacted(Ulid::from((man_sst_id.high(), man_sst_id.low())));
+                    let sst_info = SsTableInfoOwned::create_copy(
+                        &man_sst.info().expect("SSTs in manifest must have info"),
+                    );
+                    let l0_sst = table_store.open_compacted_sst(sst_id, sst_info).await?;
+                    l0.push_back(l0_sst);
+                }
+            }
+        }
+        Ok(CoreDbState {
+            l0,
             next_wal_sst_id: manifest.wal_id_last_compacted() + 1,
             last_compacted_wal_sst_id: manifest.wal_id_last_compacted(),
-        }
+        })
     }
 }
 
 impl DbState {
-    pub fn load(manifest: &ManifestV1Owned) -> Self {
-        Self {
+    pub async fn load(
+        manifest: &ManifestV1Owned,
+        table_store: &TableStore,
+    ) -> Result<Self, SlateDBError> {
+        let core = CoreDbState::load(manifest, table_store).await?;
+        Ok(Self {
             memtable: WritableKVTable::new(),
             wal: WritableKVTable::new(),
             state: Arc::new(COWDbState {
                 imm_memtable: VecDeque::new(),
                 imm_wal: VecDeque::new(),
-                core: CoreDbState::load(manifest),
+                core,
             }),
-        }
+        })
     }
 
     pub fn state(&self) -> Arc<COWDbState> {

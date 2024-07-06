@@ -36,6 +36,14 @@ impl SsTableInfoOwned {
         // memory is immutable once we construct the handle.
         unsafe { flatbuffers::root_unchecked::<SsTableInfo>(raw) }
     }
+
+    pub fn create_copy(sst_info: &SsTableInfo) -> Self {
+        let builder = flatbuffers::FlatBufferBuilder::new();
+        let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
+        Self {
+            data: db_fb_builder.create_sst_info_copy(sst_info),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -61,7 +69,7 @@ impl ManifestV1Owned {
     }
 
     pub fn create_new() -> Self {
-        let builder = &mut flatbuffers::FlatBufferBuilder::new();
+        let builder = &mut FlatBufferBuilder::new();
         let manifest = ManifestV1::create(
             builder,
             &ManifestV1Args {
@@ -80,26 +88,27 @@ impl ManifestV1Owned {
         Self { data }
     }
 
-    pub fn get_updated_manifest(&self, compacted_db_state: &CoreDbState) -> ManifestV1Owned {
+    pub fn create_updated_manifest(&self, compacted_db_state: &CoreDbState) -> ManifestV1Owned {
         let old_manifest = self.borrow();
         let builder = flatbuffers::FlatBufferBuilder::new();
-        let mut manifest_builder = ManifestBuilder::new(builder);
+        let mut manifest_builder = DbFlatBufferBuilder::new(builder);
         Self {
-            data: manifest_builder.create_from_compacted_dbstate(old_manifest, compacted_db_state),
+            data: manifest_builder
+                .create_manifest_from_compacted_dbstate(old_manifest, compacted_db_state),
         }
     }
 }
 
-struct ManifestBuilder<'b> {
+struct DbFlatBufferBuilder<'b> {
     builder: FlatBufferBuilder<'b>,
 }
 
-impl<'b> ManifestBuilder<'b> {
-    pub fn new(builder: FlatBufferBuilder<'b>) -> Self {
+impl<'b> DbFlatBufferBuilder<'b> {
+    fn new(builder: FlatBufferBuilder<'b>) -> Self {
         Self { builder }
     }
 
-    pub fn create_block_meta(&mut self, block_meta: &BlockMeta) -> WIPOffset<BlockMeta<'b>> {
+    fn add_block_meta_copy(&mut self, block_meta: &BlockMeta) -> WIPOffset<BlockMeta<'b>> {
         let first_key = self.builder.create_vector(block_meta.first_key().bytes());
         BlockMeta::create(
             &mut self.builder,
@@ -110,8 +119,7 @@ impl<'b> ManifestBuilder<'b> {
         )
     }
 
-    pub fn create_sst_info(&mut self, info_owned: &SsTableInfoOwned) -> WIPOffset<SsTableInfo<'b>> {
-        let info = info_owned.borrow();
+    fn add_sst_info_copy(&mut self, info: &SsTableInfo) -> WIPOffset<SsTableInfo<'b>> {
         let first_key = match info.first_key() {
             None => None,
             Some(first_key_vector) => Some(self.builder.create_vector(first_key_vector.bytes())),
@@ -119,7 +127,7 @@ impl<'b> ManifestBuilder<'b> {
         let block_meta_vec: Vec<WIPOffset<BlockMeta>> = info
             .block_meta()
             .iter()
-            .map(|block_meta| self.create_block_meta(&block_meta))
+            .map(|block_meta| self.add_block_meta_copy(&block_meta))
             .collect();
         let block_meta = self.builder.create_vector(block_meta_vec.as_ref());
         SsTableInfo::create(
@@ -134,7 +142,7 @@ impl<'b> ManifestBuilder<'b> {
     }
 
     #[allow(clippy::panic)]
-    pub fn create_compacted_sst(
+    fn add_compacted_sst(
         &mut self,
         id: &SsTableId,
         info: &SsTableInfoOwned,
@@ -149,7 +157,7 @@ impl<'b> ManifestBuilder<'b> {
         let low = ((uidu128 << 64) >> 64) as u64;
         let compacted_sst_id =
             CompactedSstId::create(&mut self.builder, &CompactedSstIdArgs { high, low });
-        let compacted_sst_info = self.create_sst_info(info);
+        let compacted_sst_info = self.add_sst_info_copy(&info.borrow());
         CompactedSsTable::create(
             &mut self.builder,
             &CompactedSsTableArgs {
@@ -159,23 +167,23 @@ impl<'b> ManifestBuilder<'b> {
         )
     }
 
-    pub fn create_compacted_ssts(
+    fn add_compacted_ssts(
         &mut self,
         ssts: &VecDeque<SSTableHandle>,
     ) -> WIPOffset<Vector<'b, ForwardsUOffset<CompactedSsTable<'b>>>> {
         let compacted_ssts: Vec<WIPOffset<CompactedSsTable>> = ssts
             .iter()
-            .map(|sst| self.create_compacted_sst(&sst.id, &sst.info))
+            .map(|sst| self.add_compacted_sst(&sst.id, &sst.info))
             .collect();
         self.builder.create_vector(compacted_ssts.as_ref())
     }
 
-    fn create_from_compacted_dbstate(
+    fn create_manifest_from_compacted_dbstate(
         &mut self,
         old_manifest: ManifestV1,
         compacted_db_state: &CoreDbState,
     ) -> Bytes {
-        let l0 = self.create_compacted_ssts(&compacted_db_state.l0);
+        let l0 = self.add_compacted_ssts(&compacted_db_state.l0);
         let manifest = ManifestV1::create(
             &mut self.builder,
             &ManifestV1Args {
@@ -190,6 +198,12 @@ impl<'b> ManifestBuilder<'b> {
             },
         );
         self.builder.finish(manifest, None);
+        Bytes::copy_from_slice(self.builder.finished_data())
+    }
+
+    fn create_sst_info_copy(&mut self, sst_info: &SsTableInfo) -> Bytes {
+        let copy = self.add_sst_info_copy(sst_info);
+        self.builder.finish(copy, None);
         Bytes::copy_from_slice(self.builder.finished_data())
     }
 }

@@ -13,6 +13,8 @@ table SsTableInfo {
     // First key in the SST file.
     first_key: [ubyte];
 
+    // TODO: we should move this index out into its own object
+    //       https://github.com/slatedb/slatedb/issues/88
     // Sequence of block metadata. SST files could have multiple blocks.
     block_meta: [BlockMeta] (required);
 

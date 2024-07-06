@@ -62,10 +62,11 @@ pub enum SsTableId {
 pub struct SSTableHandle {
     pub id: SsTableId,
     pub info: SsTableInfoOwned,
-    // we stash the filter in the handle for now, as a way to cache it so that
-    // the db doesn't need to reload it for each read. Once we've put in a proper
-    // cache, we should instead cache the filter block in the cache and get rid
-    // of this reference.
+    // TODO: we stash the filter in the handle for now, as a way to cache it so that
+    //       the db doesn't need to reload it for each read. Once we've put in a proper
+    //       cache, we should instead cache the filter block in the cache and get rid
+    //       of this reference.
+    //       https://github.com/slatedb/slatedb/issues/89
     filter: Option<Arc<BloomFilter>>,
 }
 
@@ -224,6 +225,26 @@ impl TableStore {
             id: id.clone(),
             info: encoded_sst.info,
             filter: encoded_sst.filter,
+        })
+    }
+
+    // TODO: once we move filters into cache, this method should no longer be async
+    //       https://github.com/slatedb/slatedb/issues/89
+    pub(crate) async fn open_compacted_sst(
+        &self,
+        id: SsTableId,
+        info: SsTableInfoOwned,
+    ) -> Result<SSTableHandle, SlateDBError> {
+        let path = self.path(&id);
+        let obj = ReadOnlyObject {
+            object_store: self.object_store.clone(),
+            path,
+        };
+        let filter = self.sst_format.read_filter(&info, &obj).await?;
+        Ok(SSTableHandle {
+            id: id.clone(),
+            info,
+            filter,
         })
     }
 
