@@ -13,18 +13,14 @@ pub(crate) enum MemtableFlushThreadMsg {
 impl DbInner {
     pub(crate) async fn flush_imm_memtables_to_l0(&self) -> Result<(), SlateDBError> {
         while let Some(imm_memtable) = {
-            let guard = self.state.read();
-            guard.compacted.imm_memtable.back().cloned()
+            let rguard = self.state.read();
+            rguard.state().imm_memtable.back().cloned()
         } {
             let id = SsTableId::Compacted(Ulid::new());
             let sst_handle = self.flush_imm_table(&id, imm_memtable.table()).await?;
             {
                 let mut guard = self.state.write();
-                let mut compacted_snapshot = guard.compacted.as_ref().clone();
-                compacted_snapshot.imm_memtable.pop_back();
-                compacted_snapshot.l0.push_front(sst_handle);
-                compacted_snapshot.last_compacted_wal_sst_id = imm_memtable.last_wal_id();
-                guard.compacted = Arc::new(compacted_snapshot);
+                guard.move_imm_memtable_to_l0(imm_memtable.clone(), sst_handle);
             }
             self.write_manifest().await?;
         }

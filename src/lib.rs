@@ -8,6 +8,7 @@ mod block;
 mod block_iterator;
 pub mod db;
 mod db_common;
+mod db_state;
 mod error;
 mod failpoints;
 mod filter;
