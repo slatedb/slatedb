@@ -21,7 +21,7 @@ impl DbInner {
             let compacted = &self.state.read().state().core;
             let mut wguard_manifest = self.manifest.write();
             if wguard_manifest.borrow().wal_id_last_seen() != compacted.next_wal_sst_id - 1 {
-                let new_manifest = wguard_manifest.get_updated_manifest(compacted);
+                let new_manifest = wguard_manifest.create_updated_manifest(compacted);
                 *wguard_manifest = new_manifest.clone();
                 Some(new_manifest)
             } else {

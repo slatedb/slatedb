@@ -68,7 +68,7 @@ impl DbInner {
         manifest: ManifestV1Owned,
         memtable_flush_notifier: crossbeam_channel::Sender<MemtableFlushThreadMsg>,
     ) -> Result<Self, SlateDBError> {
-        let state = DbState::load(&manifest);
+        let state = DbState::load(&manifest, &table_store).await?;
         let db_inner = Self {
             state: Arc::new(RwLock::new(state)),
             options,
@@ -548,14 +548,25 @@ mod tests {
             DbOptions {
                 flush_ms: 100,
                 min_filter_keys: 0,
-                l0_sst_size_bytes: 1024,
+                l0_sst_size_bytes: 128,
             },
             object_store.clone(),
         )
         .await
         .unwrap();
 
-        // write some sst files
+        // do a few writes that will result in l0 flushes
+        let l0_count: u64 = 3;
+        for i in 0..l0_count {
+            kv_store
+                .put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48])
+                .await;
+            kv_store
+                .put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48])
+                .await;
+        }
+
+        // write some smaller keys so that we populate wal without flushing to l0
         let sst_count: u64 = 5;
         for i in 0..sst_count {
             kv_store.put(&i.to_be_bytes(), &i.to_be_bytes()).await;
@@ -570,19 +581,22 @@ mod tests {
             DbOptions {
                 flush_ms: 100,
                 min_filter_keys: 0,
-                l0_sst_size_bytes: 1024,
+                l0_sst_size_bytes: 128,
             },
             object_store.clone(),
         )
         .await
         .unwrap();
 
+        for i in 0..l0_count {
+            let val = kv_store_restored.get(&[b'a' + i as u8; 16]).await.unwrap();
+            assert_eq!(val, Some(Bytes::copy_from_slice(&[b'b' + i as u8; 48])));
+            let val = kv_store_restored.get(&[b'j' + i as u8; 16]).await.unwrap();
+            assert_eq!(val, Some(Bytes::copy_from_slice(&[b'k' + i as u8; 48])));
+        }
         for i in 0..sst_count {
-            assert!(kv_store_restored
-                .get(&i.to_be_bytes())
-                .await
-                .unwrap()
-                .is_some());
+            let val = kv_store_restored.get(&i.to_be_bytes()).await.unwrap();
+            assert_eq!(val, Some(Bytes::copy_from_slice(&i.to_be_bytes())));
         }
 
         // validate that the manifest file exists.
@@ -590,7 +604,7 @@ mod tests {
         let table_store = TableStore::new(object_store.clone(), sst_format, path);
         let manifest_owned = table_store.open_latest_manifest().await.unwrap().unwrap();
         let manifest = manifest_owned.borrow();
-        assert_eq!(manifest.wal_id_last_seen(), sst_count);
+        assert_eq!(manifest.wal_id_last_seen(), sst_count + 2 * l0_count);
     }
 
     #[tokio::test]
