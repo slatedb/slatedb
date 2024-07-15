@@ -1,6 +1,5 @@
 use crate::db::ReadLevel::{Commited, Uncommitted};
 use crate::db_state::DbState;
-use crate::failpoints::FailPointRegistry;
 use crate::flatbuffer_types::ManifestV1Owned;
 use crate::mem_table_flush::MemtableFlushThreadMsg;
 use crate::mem_table_flush::MemtableFlushThreadMsg::Shutdown;
@@ -11,6 +10,7 @@ use crate::types::ValueDeletable;
 use crate::{block::Block, error::SlateDBError};
 use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
 use bytes::Bytes;
+use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
@@ -375,7 +375,6 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::failpoints;
     use crate::sst_iter::SstIterator;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
@@ -624,7 +623,7 @@ mod tests {
         .await
         .unwrap();
 
-        failpoints::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
         kv_store
             .put_with_options(
                 "foo".as_bytes(),
@@ -644,7 +643,7 @@ mod tests {
             .unwrap();
         assert_eq!(val, Some(Bytes::from("bar")));
 
-        failpoints::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
         kv_store.close().await.unwrap();
     }
 
@@ -666,7 +665,7 @@ mod tests {
         .unwrap();
 
         kv_store.put("foo".as_bytes(), "bar".as_bytes()).await;
-        failpoints::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
         kv_store
             .put_with_options(
                 "foo".as_bytes(),
@@ -688,7 +687,7 @@ mod tests {
             .unwrap();
         assert_eq!(val, Some(Bytes::from("bla")));
 
-        failpoints::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
         kv_store.close().await.unwrap();
     }
 
@@ -710,7 +709,7 @@ mod tests {
         .unwrap();
 
         kv_store.put("foo".as_bytes(), "bar".as_bytes()).await;
-        failpoints::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
         kv_store
             .delete_with_options("foo".as_bytes(), &WriteOptions { await_flush: false })
             .await;
@@ -728,14 +727,14 @@ mod tests {
             .unwrap();
         assert_eq!(val, None);
 
-        failpoints::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
         kv_store.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_should_recover_imm_from_wal() {
         let fp_registry = Arc::new(FailPointRegistry::new());
-        failpoints::cfg(
+        fail_parallel::cfg(
             fp_registry.clone(),
             "write-compacted-sst-io-error",
             "return",
