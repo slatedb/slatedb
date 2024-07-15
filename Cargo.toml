@@ -13,7 +13,7 @@ bytes = "1.6.0"
 crc32fast = "1.4.0"
 crossbeam-channel = "0.5.12"
 crossbeam-skiplist = "0.1.3"
-fail-parallel = { version = "0.5.1", features = ["failpoints"] }
+fail-parallel = "0.5.1"
 flatbuffers = "24.3.25"
 futures = "0.3.30"
 object_store = "0.9.1"
@@ -28,3 +28,7 @@ once_cell = "1.19.0"
 
 [dev-dependencies]
 tokio = { version = "1.37.0", features = ["rt-multi-thread"] }
+
+[features]
+default = ["failpoints"]
+failpoints = ["fail-parallel/failpoints"]
