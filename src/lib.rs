@@ -10,7 +10,6 @@ pub mod db;
 mod db_common;
 mod db_state;
 mod error;
-mod failpoints;
 mod filter;
 mod flatbuffer_types;
 mod flush;

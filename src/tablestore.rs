@@ -1,12 +1,11 @@
 use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::error::SlateDBError;
-use crate::fail_point;
-use crate::failpoints::FailPointRegistry;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::{ManifestV1Owned, SsTableInfoOwned};
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use bytes::Bytes;
+use fail_parallel::{fail_point, FailPointRegistry};
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::ObjectStore;
