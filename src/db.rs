@@ -15,6 +15,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use std::sync::Arc;
+use tokio::runtime::Handle;
 
 pub enum ReadLevel {
     Commited,
@@ -58,7 +59,7 @@ pub(crate) struct DbInner {
     pub(crate) options: DbOptions,
     pub(crate) table_store: TableStore,
     pub(crate) manifest: Arc<RwLock<ManifestV1Owned>>,
-    pub(crate) memtable_flush_notifier: crossbeam_channel::Sender<MemtableFlushThreadMsg>,
+    pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
 }
 
 impl DbInner {
@@ -66,7 +67,7 @@ impl DbInner {
         options: DbOptions,
         table_store: TableStore,
         manifest: ManifestV1Owned,
-        memtable_flush_notifier: crossbeam_channel::Sender<MemtableFlushThreadMsg>,
+        memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
     ) -> Result<Self, SlateDBError> {
         let state = DbState::load(&manifest, &table_store).await?;
         let db_inner = Self {
@@ -245,10 +246,10 @@ impl DbInner {
 pub struct Db {
     inner: Arc<DbInner>,
     /// Notifies the L0 flush thread to stop working.
-    flush_notifier: crossbeam_channel::Sender<()>,
+    flush_notifier: tokio::sync::mpsc::UnboundedSender<()>,
     /// The handle for the flush thread.
-    flush_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
-    memtable_flush_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Db {
@@ -289,17 +290,18 @@ impl Db {
             }
         };
 
-        let (memtable_flush_tx, memtable_flush_rx) = crossbeam_channel::unbounded();
+        let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner =
             Arc::new(DbInner::new(options, table_store, manifest, memtable_flush_tx).await?);
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let flush_thread = inner.spawn_flush_thread(rx);
-        let memtable_flush_thread = inner.spawn_memtable_flush_thread(memtable_flush_rx);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let tokio_handle = Handle::current();
+        let flush_thread = inner.spawn_flush_task(rx, &tokio_handle);
+        let memtable_flush_task = inner.spawn_memtable_flush_task(memtable_flush_rx, &tokio_handle);
         Ok(Self {
             inner,
             flush_notifier: tx,
-            flush_thread: Mutex::new(flush_thread),
-            memtable_flush_thread: Mutex::new(memtable_flush_thread),
+            flush_task: Mutex::new(flush_thread),
+            memtable_flush_task: Mutex::new(memtable_flush_task),
         })
     }
 
@@ -308,22 +310,23 @@ impl Db {
         self.flush_notifier.send(()).ok();
         self.inner.memtable_flush_notifier.send(Shutdown).ok();
 
-        // Scope the flush_thread lock so its lock isn't held while awaiting the final flush below.
-        {
+        if let Some(flush_task) = {
+            // Scope the flush_thread lock so its lock isn't held while awaiting the join
+            // and the final flush below.
             // Wait for the flush thread to finish.
-            let mut flush_thread = self.flush_thread.lock();
-            if let Some(flush_thread) = flush_thread.take() {
-                flush_thread.join().expect("Failed to join flush thread");
-            }
+            let mut flush_task = self.flush_task.lock();
+            flush_task.take()
+        } {
+            flush_task.await.expect("Failed to join flush thread");
         }
 
-        {
-            let mut memtable_flush_thread = self.memtable_flush_thread.lock();
-            if let Some(memtable_flush_thread) = memtable_flush_thread.take() {
-                memtable_flush_thread
-                    .join()
-                    .expect("Failed to join memtable flush thread");
-            }
+        if let Some(memtable_flush_task) = {
+            let mut memtable_flush_task = self.memtable_flush_task.lock();
+            memtable_flush_task.take()
+        } {
+            memtable_flush_task
+                .await
+                .expect("Failed to join memtable flush thread");
         }
 
         // Force a final flush on the mutable memtable

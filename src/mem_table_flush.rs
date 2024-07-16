@@ -1,8 +1,8 @@
 use crate::db::DbInner;
 use crate::error::SlateDBError;
 use crate::tablestore::SsTableId;
-use futures::executor::block_on;
 use std::sync::Arc;
+use tokio::runtime::Handle;
 use ulid::Ulid;
 
 pub(crate) enum MemtableFlushThreadMsg {
@@ -27,23 +27,23 @@ impl DbInner {
         Ok(())
     }
 
-    pub(crate) fn spawn_memtable_flush_thread(
+    pub(crate) fn spawn_memtable_flush_task(
         self: &Arc<Self>,
-        rx: crossbeam_channel::Receiver<MemtableFlushThreadMsg>,
-    ) -> Option<std::thread::JoinHandle<()>> {
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<MemtableFlushThreadMsg>,
+        tokio_handle: &Handle,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         let this = Arc::clone(self);
-        Some(std::thread::spawn(move || loop {
-            let msg = rx.recv();
-            match msg {
-                Ok(MemtableFlushThreadMsg::Shutdown) => return,
-                Ok(MemtableFlushThreadMsg::FlushImmutableMemtables) => {
-                    match block_on(this.flush_imm_memtables_to_l0()) {
-                        Ok(_) => {}
-                        Err(err) => print!("error from memtable flush: {}", err),
+        Some(tokio_handle.spawn(async move {
+            loop {
+                let msg = rx.recv().await.expect("channel unexpectedly closed");
+                match msg {
+                    MemtableFlushThreadMsg::Shutdown => return,
+                    MemtableFlushThreadMsg::FlushImmutableMemtables => {
+                        match this.flush_imm_memtables_to_l0().await {
+                            Ok(_) => {}
+                            Err(err) => print!("error from memtable flush: {}", err),
+                        }
                     }
-                }
-                Err(err) => {
-                    print!("error on memtable flush thread channel: {}", err)
                 }
             }
         }))

@@ -4,9 +4,10 @@ use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
 use crate::tablestore::{self, SSTableHandle};
 use crate::types::ValueDeletable;
-use futures::executor::block_on;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::runtime::Handle;
+use tokio::select;
 
 impl DbInner {
     pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
@@ -96,22 +97,23 @@ impl DbInner {
         Ok(())
     }
 
-    pub(crate) fn spawn_flush_thread(
+    pub(crate) fn spawn_flush_task(
         self: &Arc<Self>,
-        rx: crossbeam_channel::Receiver<()>,
-    ) -> Option<std::thread::JoinHandle<()>> {
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+        tokio_handle: &Handle,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         let this = Arc::clone(self);
-        Some(std::thread::spawn(move || {
-            let ticker =
-                crossbeam_channel::tick(Duration::from_millis(this.options.flush_ms as u64));
+        Some(tokio_handle.spawn(async move {
+            let mut ticker =
+                tokio::time::interval(Duration::from_millis(this.options.flush_ms as u64));
             loop {
-                crossbeam_channel::select! {
+                select! {
                   // Tick to freeze and flush the memtable
-                  recv(ticker) -> _ => {
-                    let _ = block_on(this.flush());
+                  _ = ticker.tick() => {
+                    _ = this.flush().await;
                   }
                   // Stop the thread.
-                  recv(rx) -> _ => return
+                  _ = rx.recv() => return
                 }
             }
         }))
