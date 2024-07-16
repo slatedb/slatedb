@@ -218,7 +218,7 @@ impl DbInner {
                 SsTableId::Wal(id) => *id,
                 SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
             };
-            let mut iter = SstIterator::new(sst, &self.table_store);
+            let mut iter = SstIterator::new(&sst, &self.table_store);
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
             while let Some(kv) = iter.next_entry().await? {
                 // TODO: it's not ideal that we have to take this lock for every kv. We can solve
@@ -494,7 +494,7 @@ mod tests {
                 .open_sst(&SsTableId::Compacted(ulid))
                 .await
                 .unwrap();
-            let mut iter = SstIterator::new(sst1, &table_store);
+            let mut iter = SstIterator::new(&sst1, &table_store);
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);

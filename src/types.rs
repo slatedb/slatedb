@@ -10,7 +10,7 @@ pub struct KeyValue {
 }
 
 /// Represents a key-value pair that may be a tombstone.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct KeyValueDeletable {
     pub key: Bytes,
     pub value: ValueDeletable,
@@ -21,7 +21,7 @@ pub struct KeyValueDeletable {
 /// to prevent type confusion between `None` indicating
 /// that a key does not exist, and `Tombstone` indicating
 /// that the key exists but has a tombstone value.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ValueDeletable {
     Value(Bytes),
     Tombstone,
