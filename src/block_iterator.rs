@@ -101,7 +101,7 @@ mod tests {
     use crate::block::BlockBuilder;
     use crate::block_iterator::BlockIterator;
     use crate::iter::KeyValueIterator;
-    use crate::types::KeyValue;
+    use crate::test_utils;
 
     #[tokio::test]
     async fn test_iterator() {
@@ -112,11 +112,11 @@ mod tests {
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_first_key(&block);
         let kv = iter.next().await.unwrap().unwrap();
-        assert_kv(&kv, b"donkey", b"kong");
+        test_utils::assert_kv(&kv, b"donkey", b"kong");
         let kv = iter.next().await.unwrap().unwrap();
-        assert_kv(&kv, b"kratos", b"atreus");
+        test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
-        assert_kv(&kv, b"super", b"mario");
+        test_utils::assert_kv(&kv, b"super", b"mario");
         assert!(iter.next().await.unwrap().is_none());
     }
 
@@ -129,9 +129,9 @@ mod tests {
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_key(&block, b"kratos".as_ref());
         let kv = iter.next().await.unwrap().unwrap();
-        assert_kv(&kv, b"kratos", b"atreus");
+        test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
-        assert_kv(&kv, b"super", b"mario");
+        test_utils::assert_kv(&kv, b"super", b"mario");
         assert!(iter.next().await.unwrap().is_none());
     }
 
@@ -144,9 +144,9 @@ mod tests {
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_key(&block, b"ka".as_ref());
         let kv = iter.next().await.unwrap().unwrap();
-        assert_kv(&kv, b"kratos", b"atreus");
+        test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
-        assert_kv(&kv, b"super", b"mario");
+        test_utils::assert_kv(&kv, b"super", b"mario");
         assert!(iter.next().await.unwrap().is_none());
     }
 
@@ -159,10 +159,5 @@ mod tests {
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_key(&block, b"zzz".as_ref());
         assert!(iter.next().await.unwrap().is_none());
-    }
-
-    fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
-        assert_eq!(kv.key, key);
-        assert_eq!(kv.value, val);
     }
 }

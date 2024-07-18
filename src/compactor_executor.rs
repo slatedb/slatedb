@@ -5,7 +5,6 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
 use crate::sorted_run_iterator::SortedRunIterator;
-use crate::sst::EncodedSsTableBuilder;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::{SSTableHandle, SsTableId, TableStore};
 use parking_lot::Mutex;
@@ -68,17 +67,6 @@ pub(crate) struct TokioCompactionExecutorInner {
 }
 
 impl TokioCompactionExecutorInner {
-    async fn finish_sst(
-        &self,
-        builder: EncodedSsTableBuilder<'_>,
-        ssts: &mut Vec<SSTableHandle>,
-    ) -> Result<(), SlateDBError> {
-        let encoded_sst = builder.build()?;
-        let sst_id = SsTableId::Compacted(Ulid::new());
-        ssts.push(self.table_store.write_sst(&sst_id, encoded_sst).await?);
-        Ok(())
-    }
-
     async fn execute_compaction(
         &self,
         compaction: CompactionJob,
@@ -97,23 +85,29 @@ impl TokioCompactionExecutorInner {
         let sr_merge_iter = MergeIterator::new(sr_iters).await?;
         let mut all_iter = TwoMergeIterator::new(l0_merge_iter, sr_merge_iter).await?;
         let mut output_ssts = Vec::new();
-        let mut current_builder = self.table_store.table_builder();
+        let mut current_writer = self
+            .table_store
+            .table_writer(SsTableId::Compacted(Ulid::new()));
         let mut current_size = 0usize;
         while let Some(kv) = all_iter.next_entry().await? {
             // Add to SST
             let value = kv.value.into_option();
-            current_builder.add(kv.key.as_ref(), value.as_ref().map(|b| b.as_ref()))?;
+            current_writer
+                .add(kv.key.as_ref(), value.as_ref().map(|b| b.as_ref()))
+                .await?;
             current_size += kv.key.len() + value.map_or(0, |b| b.len());
-            // todo: turn into option
             if current_size > self.options.max_sst_size {
                 current_size = 0;
-                let finished_builder =
-                    mem::replace(&mut current_builder, self.table_store.table_builder());
-                self.finish_sst(finished_builder, &mut output_ssts).await?;
+                let finished_writer = mem::replace(
+                    &mut current_writer,
+                    self.table_store
+                        .table_writer(SsTableId::Compacted(Ulid::new())),
+                );
+                output_ssts.push(finished_writer.close().await?);
             }
         }
         if current_size > 0 {
-            self.finish_sst(current_builder, &mut output_ssts).await?;
+            output_ssts.push(current_writer.close().await?);
         }
         Ok(SortedRun {
             id: compaction.destination,

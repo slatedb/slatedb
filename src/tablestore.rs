@@ -4,13 +4,15 @@ use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::{ManifestV1Owned, SsTableInfoOwned};
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
-use bytes::Bytes;
+use bytes::{BufMut, Bytes};
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::StreamExt;
+use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use std::ops::Range;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 pub struct TableStore {
@@ -197,6 +199,15 @@ impl TableStore {
         Ok(())
     }
 
+    pub(crate) fn table_writer(&self, id: SsTableId) -> EncodedSsTableWriter {
+        let path = self.path(&id);
+        EncodedSsTableWriter {
+            id,
+            builder: self.sst_format.table_builder(),
+            writer: BufWriter::new(self.object_store.clone(), path),
+        }
+    }
+
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
         self.sst_format.table_builder()
     }
@@ -226,8 +237,17 @@ impl TableStore {
         );
 
         let path = self.path(id);
+        let total_size = encoded_sst
+            .unconsumed_blocks
+            .iter()
+            .map(|chunk| chunk.len())
+            .sum();
+        let mut data = Vec::<u8>::with_capacity(total_size);
+        for chunk in encoded_sst.unconsumed_blocks {
+            data.put_slice(chunk.as_ref())
+        }
         self.object_store
-            .put(&path, encoded_sst.raw.clone())
+            .put(&path, Bytes::from(data))
             .await
             .map_err(SlateDBError::ObjectStoreError)?;
         Ok(SSTableHandle {
@@ -321,5 +341,92 @@ impl TableStore {
                 .map_err(|_| SlateDBError::InvalidDBState),
             _ => Err(SlateDBError::InvalidDBState),
         }
+    }
+}
+
+pub(crate) struct EncodedSsTableWriter<'a> {
+    id: SsTableId,
+    builder: EncodedSsTableBuilder<'a>,
+    writer: BufWriter,
+}
+
+impl<'a> EncodedSsTableWriter<'a> {
+    pub async fn add(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<(), SlateDBError> {
+        self.builder.add(key, value)?;
+        self.drain_blocks().await
+    }
+
+    pub async fn close(mut self) -> Result<SSTableHandle, SlateDBError> {
+        let mut encoded_sst = self.builder.build()?;
+        while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
+            self.writer.write_all(block.as_ref()).await?;
+        }
+        self.writer.shutdown().await?;
+        Ok(SSTableHandle {
+            id: self.id.clone(),
+            info: encoded_sst.info,
+            filter: encoded_sst.filter,
+        })
+    }
+
+    async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {
+        while let Some(block) = self.builder.next_block() {
+            self.writer.write_all(block.as_ref()).await?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::sst::SsTableFormat;
+    use crate::sst_iter::SstIterator;
+    use crate::tablestore::{SsTableId, TableStore};
+    use crate::test_utils::assert_iterator;
+    use crate::types::ValueDeletable;
+    use bytes::Bytes;
+    use object_store::path::Path;
+    use std::sync::Arc;
+    use ulid::Ulid;
+
+    const ROOT: &str = "/root";
+
+    #[tokio::test]
+    async fn test_sst_writer_should_write_sst() {
+        // given:
+        let os = Arc::new(object_store::memory::InMemory::new());
+        let format = SsTableFormat::new(32, 1);
+        let ts = TableStore::new(os.clone(), format, Path::from(ROOT));
+        let id = SsTableId::Compacted(Ulid::new());
+
+        // when:
+        let mut writer = ts.table_writer(id);
+        writer.add(&[b'a'; 16], Some(&[1u8; 16])).await.unwrap();
+        writer.add(&[b'b'; 16], Some(&[2u8; 16])).await.unwrap();
+        writer.add(&[b'c'; 16], None).await.unwrap();
+        writer.add(&[b'd'; 16], Some(&[4u8; 16])).await.unwrap();
+        let sst = writer.close().await.unwrap();
+
+        // then:
+        let mut iter = SstIterator::new(&sst, &ts);
+        assert_iterator(
+            &mut iter,
+            &[
+                (
+                    &[b'a'; 16],
+                    ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 16])),
+                ),
+                (
+                    &[b'b'; 16],
+                    ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 16])),
+                ),
+                (&[b'c'; 16], ValueDeletable::Tombstone),
+                (
+                    &[b'd'; 16],
+                    ValueDeletable::Value(Bytes::copy_from_slice(&[4u8; 16])),
+                ),
+            ],
+        )
+        .await;
     }
 }
