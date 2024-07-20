@@ -10,6 +10,7 @@ use futures::StreamExt;
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::ObjectStore;
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -53,7 +54,7 @@ impl ReadOnlyBlob for ReadOnlyObject {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Hash, Eq)]
 pub enum SsTableId {
     Wal(u64),
     Compacted(Ulid),
@@ -301,6 +302,21 @@ impl TableStore {
         Ok(handle.filter.clone())
     }
 
+    pub(crate) async fn read_blocks(
+        &self,
+        handle: &SSTableHandle,
+        blocks: Range<usize>,
+    ) -> Result<VecDeque<Block>, SlateDBError> {
+        let path = self.path(&handle.id);
+        let obj = ReadOnlyObject {
+            object_store: self.object_store.clone(),
+            path,
+        };
+        self.sst_format
+            .read_blocks(&handle.info, blocks, &obj)
+            .await
+    }
+
     pub(crate) async fn read_block(
         &self,
         handle: &SSTableHandle,
@@ -396,7 +412,7 @@ mod tests {
         // given:
         let os = Arc::new(object_store::memory::InMemory::new());
         let format = SsTableFormat::new(32, 1);
-        let ts = TableStore::new(os.clone(), format, Path::from(ROOT));
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
         let id = SsTableId::Compacted(Ulid::new());
 
         // when:
@@ -408,7 +424,7 @@ mod tests {
         let sst = writer.close().await.unwrap();
 
         // then:
-        let mut iter = SstIterator::new(&sst, &ts);
+        let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1);
         assert_iterator(
             &mut iter,
             &[

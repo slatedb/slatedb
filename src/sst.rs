@@ -8,6 +8,7 @@ use crate::{block::BlockBuilder, error::SlateDBError};
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -58,14 +59,57 @@ impl SsTableFormat {
         Ok(filter)
     }
 
-    fn block_range(&self, block: usize, handle: &SsTableInfo) -> (usize, usize) {
-        let block_meta = handle.block_meta().get(block);
-        let mut end = handle.filter_offset() as usize;
-        if block < handle.block_meta().len() - 1 {
-            let next_block_meta = handle.block_meta().get(block + 1);
-            end = next_block_meta.offset() as usize;
+    fn block_range(&self, blocks: Range<usize>, handle: &SsTableInfo) -> Range<usize> {
+        let mut end_offset = handle.filter_offset() as usize;
+        if blocks.end < handle.block_meta().len() {
+            let next_block_meta = handle.block_meta().get(blocks.end);
+            end_offset = next_block_meta.offset() as usize;
         }
-        (block_meta.offset() as usize, end)
+        let start_offset = handle.block_meta().get(blocks.start).offset() as usize;
+        start_offset..end_offset
+    }
+
+    pub(crate) async fn read_blocks(
+        &self,
+        info: &SsTableInfoOwned,
+        blocks: Range<usize>,
+        obj: &impl ReadOnlyBlob,
+    ) -> Result<VecDeque<Block>, SlateDBError> {
+        let handle = &info.borrow();
+        assert!(blocks.start <= blocks.end);
+        assert!(blocks.end <= handle.block_meta().len());
+        if blocks.start == blocks.end {
+            return Ok(VecDeque::new());
+        }
+        let range = self.block_range(blocks.clone(), handle);
+        let start_offset = range.start;
+        let bytes: Bytes = obj.read_range(range).await?;
+        let mut decoded_blocks = VecDeque::new();
+        for block in blocks {
+            let block_meta = handle.block_meta().get(block);
+            let block_bytes_start = block_meta.offset() as usize - start_offset;
+            let block_bytes = if block == handle.block_meta().len() - 1 {
+                bytes.slice(block_bytes_start..)
+            } else {
+                let next_block_meta = handle.block_meta().get(block + 1);
+                let block_bytes_end = next_block_meta.offset() as usize - start_offset;
+                bytes.slice(block_bytes_start..block_bytes_end)
+            };
+            decoded_blocks.push_back(self.decode_block(block_bytes)?);
+        }
+        Ok(decoded_blocks)
+    }
+
+    fn decode_block(&self, bytes: Bytes) -> Result<Block, SlateDBError> {
+        let checksum_sz = std::mem::size_of::<u32>();
+        let block_bytes = bytes.slice(..bytes.len() - checksum_sz);
+        let mut checksum_bytes = bytes.slice(bytes.len() - checksum_sz..);
+        let checksum = crc32fast::hash(&block_bytes);
+        let stored_checksum = checksum_bytes.get_u32();
+        if checksum != stored_checksum {
+            return Err(SlateDBError::ChecksumMismatch);
+        }
+        Ok(Block::decode(block_bytes))
     }
 
     pub(crate) async fn read_block(
@@ -74,12 +118,8 @@ impl SsTableFormat {
         block: usize,
         obj: &impl ReadOnlyBlob,
     ) -> Result<Block, SlateDBError> {
-        let handle = &info.borrow();
-        let (start, mut end) = self.block_range(block, handle);
-        // account for checksum
-        end -= 4;
-        let bytes: Bytes = obj.read_range(start..end).await?;
-        Ok(Block::decode(&bytes))
+        let mut blocks = self.read_blocks(info, block..block + 1, obj).await?;
+        Ok(blocks.pop_front().expect("expected a block to be returned"))
     }
 
     #[allow(dead_code)]
@@ -88,13 +128,10 @@ impl SsTableFormat {
         info: &SsTableInfoOwned,
         block: usize,
         sst_bytes: &Bytes,
-    ) -> Block {
+    ) -> Result<Block, SlateDBError> {
         let handle = &info.borrow();
-        let (start, mut end) = self.block_range(block, handle);
-        // account for checksum
-        end -= 4;
-        let bytes: Bytes = sst_bytes.slice(start..end);
-        Block::decode(&bytes)
+        let bytes: Bytes = sst_bytes.slice(self.block_range(block..block + 1, handle));
+        self.decode_block(bytes)
     }
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
@@ -267,6 +304,7 @@ mod tests {
     use crate::tablestore::{SsTableId, TableStore};
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
+    use bytes::BytesMut;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -278,7 +316,7 @@ mod tests {
         let block = builder.next_block();
         assert!(block.is_some());
         let block = block.unwrap();
-        let block = Block::decode(block.slice(..block.len() - 4).as_ref());
+        let block = Block::decode(block.slice(..block.len() - 4));
         BlockIterator::from_first_key(block)
     }
 
@@ -347,7 +385,7 @@ mod tests {
             raw_sst.put_slice(block.as_ref());
         }
         let raw_sst = Bytes::copy_from_slice(raw_sst.as_slice());
-        let block = format.read_block_raw(&encoded.info, 0, &raw_sst);
+        let block = format.read_block_raw(&encoded.info, 0, &raw_sst).unwrap();
         let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
@@ -357,7 +395,7 @@ mod tests {
             )],
         )
         .await;
-        let block = format.read_block_raw(&encoded.info, 1, &raw_sst);
+        let block = format.read_block_raw(&encoded.info, 1, &raw_sst).unwrap();
         let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
@@ -367,7 +405,7 @@ mod tests {
             )],
         )
         .await;
-        let block = format.read_block_raw(&encoded.info, 2, &raw_sst);
+        let block = format.read_block_raw(&encoded.info, 2, &raw_sst).unwrap();
         let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
@@ -446,5 +484,140 @@ mod tests {
         assert_eq!(encoded_info, sst_handle.info);
         let handle = sst_handle.info.borrow();
         assert_eq!(handle.filter_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_read_blocks() {
+        // given:
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(32, 1);
+        let table_store = TableStore::new(object_store, format.clone(), root_path);
+        let mut builder = table_store.table_builder();
+        builder.add(&[b'a'; 2], Some(&[1u8; 2])).unwrap();
+        builder.add(&[b'b'; 2], Some(&[2u8; 2])).unwrap();
+        builder.add(&[b'c'; 20], Some(&[3u8; 20])).unwrap();
+        builder.add(&[b'd'; 20], Some(&[4u8; 20])).unwrap();
+        let encoded = builder.build().unwrap();
+        let info = encoded.info.clone();
+        let mut bytes = BytesMut::new();
+        encoded
+            .unconsumed_blocks
+            .iter()
+            .for_each(|b| bytes.put(b.clone()));
+        let blob = BytesBlob {
+            bytes: bytes.freeze(),
+        };
+
+        // when:
+        let mut blocks = format.read_blocks(&info, 0..2, &blob).await.unwrap();
+
+        // then:
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
+        assert_iterator(
+            &mut iter,
+            &[
+                (
+                    &[b'a'; 2],
+                    ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 2])),
+                ),
+                (
+                    &[b'b'; 2],
+                    ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 2])),
+                ),
+            ],
+        )
+        .await;
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
+        assert_iterator(
+            &mut iter,
+            &[(
+                &[b'c'; 20],
+                ValueDeletable::Value(Bytes::copy_from_slice(&[3u8; 20])),
+            )],
+        )
+        .await;
+        assert!(blocks.is_empty())
+    }
+
+    #[tokio::test]
+    async fn test_read_all_blocks() {
+        // given:
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(32, 1);
+        let table_store = TableStore::new(object_store, format.clone(), root_path);
+        let mut builder = table_store.table_builder();
+        builder.add(&[b'a'; 2], Some(&[1u8; 2])).unwrap();
+        builder.add(&[b'b'; 2], Some(&[2u8; 2])).unwrap();
+        builder.add(&[b'c'; 20], Some(&[3u8; 20])).unwrap();
+        builder.add(&[b'd'; 20], Some(&[4u8; 20])).unwrap();
+        let encoded = builder.build().unwrap();
+        let info = encoded.info.clone();
+        let mut bytes = BytesMut::new();
+        encoded
+            .unconsumed_blocks
+            .iter()
+            .for_each(|b| bytes.put(b.clone()));
+        let blob = BytesBlob {
+            bytes: bytes.freeze(),
+        };
+
+        // when:
+        let mut blocks = format.read_blocks(&info, 0..3, &blob).await.unwrap();
+
+        // then:
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
+        assert_iterator(
+            &mut iter,
+            &[
+                (
+                    &[b'a'; 2],
+                    ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 2])),
+                ),
+                (
+                    &[b'b'; 2],
+                    ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 2])),
+                ),
+            ],
+        )
+        .await;
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
+        assert_iterator(
+            &mut iter,
+            &[(
+                &[b'c'; 20],
+                ValueDeletable::Value(Bytes::copy_from_slice(&[3u8; 20])),
+            )],
+        )
+        .await;
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
+        assert_iterator(
+            &mut iter,
+            &[(
+                &[b'd'; 20],
+                ValueDeletable::Value(Bytes::copy_from_slice(&[4u8; 20])),
+            )],
+        )
+        .await;
+        assert!(blocks.is_empty())
+    }
+
+    struct BytesBlob {
+        bytes: Bytes,
+    }
+
+    impl ReadOnlyBlob for BytesBlob {
+        async fn len(&self) -> Result<usize, SlateDBError> {
+            Ok(self.bytes.len())
+        }
+
+        async fn read_range(&self, range: Range<usize>) -> Result<Bytes, SlateDBError> {
+            Ok(self.bytes.slice(range))
+        }
+
+        async fn read(&self) -> Result<Bytes, SlateDBError> {
+            Ok(self.bytes.clone())
+        }
     }
 }

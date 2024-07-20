@@ -324,7 +324,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let mut iter = SstIterator::new(&handle, table_store.as_ref());
+        let mut iter = SstIterator::new(&handle, table_store.clone(), 1, 1);
         for i in 0..4 {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), &[b'a' + i as u8; 16]);
@@ -430,7 +430,7 @@ mod tests {
         let db = Db::open(Path::from(PATH), DEFAULT_OPTIONS, os.clone())
             .await
             .unwrap();
-        let sst_format = SsTableFormat::new(4096, 10);
+        let sst_format = SsTableFormat::new(32, 10);
         let table_store = Arc::new(TableStore::new(os.clone(), sst_format, Path::from(PATH)));
         (os, table_store, db)
     }

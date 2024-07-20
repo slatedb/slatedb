@@ -2,13 +2,14 @@ use crate::compactor::{CompactorOptions, WorkerToOrchestoratorMsg};
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::error::SlateDBError;
 use crate::sst::SsTableFormat;
-use crate::tablestore::{SsTableId, TableStore};
+use crate::tablestore::{SSTableHandle, SsTableId, TableStore};
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::{RngCore, SeedableRng};
+use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
@@ -200,16 +201,44 @@ fn run_bench(
         table_store.clone(),
     );
     let sst_ids: Vec<SsTableId> = (0u32..options.num_ssts as u32).map(sst_id).collect();
-    let mut ssts = Vec::new();
+    let mut futures =
+        FuturesUnordered::<JoinHandle<Result<(SsTableId, SSTableHandle), SlateDBError>>>::new();
+    let mut ssts_by_id = HashMap::new();
     for id in sst_ids.iter() {
-        ssts.push(handle.block_on(table_store.open_sst(id))?);
+        println!("load sst");
+        if futures.len() > 8 {
+            let (id, handle) = handle
+                .block_on(futures.next())
+                .expect("expected join handle")
+                .expect("join failed")?;
+            ssts_by_id.insert(id, handle);
+        }
+        let id_clone = id.clone();
+        let table_store_clone = table_store.clone();
+        let jh = handle.spawn(async move {
+            match table_store_clone.open_sst(&id_clone).await {
+                Ok(h) => Ok((id_clone, h)),
+                Err(err) => Err(err),
+            }
+        });
+        futures.push(jh);
     }
+    while let Some(jh) = handle.block_on(futures.next()) {
+        let (id, handle) = jh.expect("join failed")?;
+        ssts_by_id.insert(id, handle);
+    }
+    println!("finished loading");
+    let ssts: Vec<SSTableHandle> = sst_ids
+        .iter()
+        .map(|id| ssts_by_id.get(id).expect("expected sst").clone())
+        .collect();
     let job = CompactionJob {
         destination: 0,
         ssts,
         sorted_runs: vec![],
     };
     let start = std::time::Instant::now();
+    println!("start compaction job");
     executor.start_compaction(job);
     let WorkerToOrchestoratorMsg::CompactionFinished(result) = rx.recv().expect("recv failed");
     match result {

@@ -29,8 +29,9 @@ impl Block {
     }
 
     #[rustfmt::skip]
-    pub fn decode(data: &[u8]) -> Self {
+    pub fn decode(bytes: Bytes) -> Self {
         // Get number of elements in the block
+        let data = bytes.as_ref();
         let entry_offsets_len = (&data[data.len() - SIZEOF_U16..]).get_u16() as usize;
         let data_end = data.len()
             - SIZEOF_U16                                            // Entry u16 length
@@ -40,8 +41,8 @@ impl Block {
             .chunks(SIZEOF_U16)
             .map(|mut x| x.get_u16())
             .collect();
-        let data = Bytes::copy_from_slice(data[0..data_end].as_ref());
-        Self { data, offsets }
+        let bytes = bytes.slice(0..data_end);
+        Self { data: bytes, offsets }
     }
 }
 
@@ -123,7 +124,7 @@ mod tests {
         assert!(builder.add(b"key2", Some(b"value2")));
         let block = builder.build().unwrap();
         let encoded = block.encode();
-        let decoded = Block::decode(&encoded);
+        let decoded = Block::decode(encoded);
         assert_eq!(block.data, decoded.data);
         assert_eq!(block.offsets, decoded.offsets);
     }
@@ -136,6 +137,6 @@ mod tests {
         assert!(builder.add(b"key3", Some(b"value3")));
         let block = builder.build().unwrap();
         let encoded = block.encode();
-        let _decoded = Block::decode(&encoded);
+        let _decoded = Block::decode(encoded);
     }
 }

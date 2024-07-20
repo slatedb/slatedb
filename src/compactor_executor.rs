@@ -74,13 +74,13 @@ impl TokioCompactionExecutorInner {
         let l0_iters: VecDeque<SstIterator> = compaction
             .ssts
             .iter()
-            .map(|l0| SstIterator::new(l0, self.table_store.as_ref()))
+            .map(|l0| SstIterator::new_spawn(l0, self.table_store.clone(), 4, 256, true))
             .collect();
         let l0_merge_iter = MergeIterator::new(l0_iters).await?;
         let sr_iters: VecDeque<SortedRunIterator> = compaction
             .sorted_runs
             .iter()
-            .map(|sr| SortedRunIterator::new(sr, self.table_store.as_ref()))
+            .map(|sr| SortedRunIterator::new_spawn(sr, self.table_store.clone(), 4, 256, true))
             .collect();
         let sr_merge_iter = MergeIterator::new(sr_iters).await?;
         let mut all_iter = TwoMergeIterator::new(l0_merge_iter, sr_merge_iter).await?;
@@ -97,6 +97,7 @@ impl TokioCompactionExecutorInner {
                 .await?;
             current_size += kv.key.len() + value.map_or(0, |b| b.len());
             if current_size > self.options.max_sst_size {
+                println!("finish one sst");
                 current_size = 0;
                 let finished_writer = mem::replace(
                     &mut current_writer,
