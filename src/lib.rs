@@ -6,6 +6,7 @@
 mod blob;
 mod block;
 mod block_iterator;
+pub mod compaction_execute_bench;
 mod compactor;
 mod compactor_executor;
 mod compactor_state;
@@ -25,4 +26,6 @@ mod sorted_run_iterator;
 mod sst;
 mod sst_iter;
 mod tablestore;
+#[cfg(test)]
+mod test_utils;
 mod types;

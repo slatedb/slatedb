@@ -7,8 +7,10 @@ use crate::flatbuffer_types::{
 use crate::{block::BlockBuilder, error::SlateDBError};
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub(crate) struct SsTableFormat {
     block_size: usize,
     min_filter_keys: u32,
@@ -56,6 +58,16 @@ impl SsTableFormat {
         Ok(filter)
     }
 
+    fn block_range(&self, block: usize, handle: &SsTableInfo) -> (usize, usize) {
+        let block_meta = handle.block_meta().get(block);
+        let mut end = handle.filter_offset() as usize;
+        if block < handle.block_meta().len() - 1 {
+            let next_block_meta = handle.block_meta().get(block + 1);
+            end = next_block_meta.offset() as usize;
+        }
+        (block_meta.offset() as usize, end)
+    }
+
     pub(crate) async fn read_block(
         &self,
         info: &SsTableInfoOwned,
@@ -63,18 +75,26 @@ impl SsTableFormat {
         obj: &impl ReadOnlyBlob,
     ) -> Result<Block, SlateDBError> {
         let handle = &info.borrow();
-        let block_meta = handle.block_meta().get(block);
-        let mut end = handle.filter_offset();
-        if block < handle.block_meta().len() - 1 {
-            let next_block_meta = handle.block_meta().get(block + 1);
-            end = next_block_meta.offset();
-        }
+        let (start, mut end) = self.block_range(block, handle);
         // account for checksum
         end -= 4;
-        let bytes: Bytes = obj
-            .read_range(block_meta.offset() as usize..end as usize)
-            .await?;
+        let bytes: Bytes = obj.read_range(start..end).await?;
         Ok(Block::decode(&bytes))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn read_block_raw(
+        &self,
+        info: &SsTableInfoOwned,
+        block: usize,
+        sst_bytes: &Bytes,
+    ) -> Block {
+        let handle = &info.borrow();
+        let (start, mut end) = self.block_range(block, handle);
+        // account for checksum
+        end -= 4;
+        let bytes: Bytes = sst_bytes.slice(start..end);
+        Block::decode(&bytes)
     }
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
@@ -106,7 +126,7 @@ impl SsTableInfoOwned {
 pub(crate) struct EncodedSsTable {
     pub(crate) info: SsTableInfoOwned,
     pub(crate) filter: Option<Arc<BloomFilter>>,
-    pub(crate) raw: Bytes,
+    pub(crate) unconsumed_blocks: VecDeque<Bytes>,
 }
 
 /// Builds an SSTable from key-value pairs.
@@ -116,7 +136,8 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
     sst_first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'a>>>,
-    data: Vec<u8>,
+    current_len: usize,
+    blocks: VecDeque<Bytes>,
     block_size: usize,
     min_filter_keys: u32,
     num_keys: u32,
@@ -127,7 +148,8 @@ impl<'a> EncodedSsTableBuilder<'a> {
     /// Create a builder based on target block size.
     fn new(block_size: usize, min_filter_keys: u32) -> Self {
         Self {
-            data: Vec::new(),
+            current_len: 0,
+            blocks: VecDeque::new(),
             block_meta: Vec::new(),
             first_key: None,
             sst_first_key: None,
@@ -145,7 +167,10 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
         if !self.builder.add(key, value) {
             // Create a new block builder and append block data
-            self.finish_block()?;
+            if let Some(block) = self.finish_block()? {
+                self.current_len += block.len();
+                self.blocks.push_back(Bytes::from(block));
+            }
 
             // New block must always accept the first KV pair
             assert!(self.builder.add(key, value));
@@ -160,14 +185,18 @@ impl<'a> EncodedSsTableBuilder<'a> {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub fn estimated_size(&self) -> usize {
-        self.data.len()
+    pub fn next_block(&mut self) -> Option<Bytes> {
+        self.blocks.pop_front()
     }
 
-    fn finish_block(&mut self) -> Result<(), SlateDBError> {
+    #[allow(dead_code)]
+    pub fn estimated_size(&self) -> usize {
+        self.current_len
+    }
+
+    fn finish_block(&mut self) -> Result<Option<Vec<u8>>, SlateDBError> {
         if self.builder.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
         let builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
@@ -176,24 +205,25 @@ impl<'a> EncodedSsTableBuilder<'a> {
         let block_meta = BlockMeta::create(
             &mut self.sst_info_builder,
             &BlockMetaArgs {
-                offset: self.data.len() as u64,
+                offset: self.current_len as u64,
                 first_key: self.first_key,
             },
         );
 
         self.block_meta.push(block_meta);
         let checksum = crc32fast::hash(&encoded_block);
-        self.data.extend(encoded_block);
-        self.data.put_u32(checksum);
-        Ok(())
+        let total_block_size = encoded_block.len() + std::mem::size_of::<u32>();
+        let mut block = Vec::with_capacity(total_block_size);
+        block.put(encoded_block);
+        block.put_u32(checksum);
+        Ok(Some(block))
     }
 
     pub fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
-        self.finish_block()?;
-        let mut buf = self.data;
+        let mut buf = self.finish_block()?.unwrap_or(Vec::new());
         let mut maybe_filter = None;
         let mut filter_len = 0;
-        let filter_offset = buf.len();
+        let filter_offset = self.current_len + buf.len();
         if self.num_keys >= self.min_filter_keys {
             let filter = Arc::new(self.filter_builder.build());
             let encoded_filter = filter.encode();
@@ -202,7 +232,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
             maybe_filter = Some(filter);
         }
 
-        let meta_offset = buf.len();
+        let meta_offset = self.current_len + buf.len();
         let vector = self.sst_info_builder.create_vector(&self.block_meta);
         let info_wip_offset = SsTableInfo::create(
             &mut self.sst_info_builder,
@@ -222,23 +252,132 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
         // write the metadata offset at the end of the file. FlatBuffer internal representation is not intended to be used directly.
         buf.put_u32(meta_offset as u32);
+        self.blocks.push_back(Bytes::from(buf));
         Ok(EncodedSsTable {
             info,
             filter: maybe_filter,
-            raw: Bytes::from(buf),
+            unconsumed_blocks: self.blocks,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::block_iterator::BlockIterator;
     use crate::tablestore::{SsTableId, TableStore};
+    use crate::test_utils::assert_iterator;
+    use crate::types::ValueDeletable;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
     use std::sync::Arc;
 
     use super::*;
+
+    fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIterator<Block> {
+        let block = builder.next_block();
+        assert!(block.is_some());
+        let block = block.unwrap();
+        let block = Block::decode(block.slice(..block.len() - 4).as_ref());
+        BlockIterator::from_first_key(block)
+    }
+
+    #[tokio::test]
+    async fn test_builder_should_make_blocks_available() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(32, 0);
+        let table_store = TableStore::new(object_store, format, root_path);
+        let mut builder = table_store.table_builder();
+        builder.add(&[b'a'; 8], Some(&[b'1'; 8])).unwrap();
+        builder.add(&[b'b'; 8], Some(&[b'2'; 8])).unwrap();
+        builder.add(&[b'c'; 8], Some(&[b'3'; 8])).unwrap();
+
+        // when:
+        let mut iter = next_block_to_iter(&mut builder);
+        assert_iterator(
+            &mut iter,
+            &[(
+                &[b'a'; 8],
+                ValueDeletable::Value(Bytes::copy_from_slice(&[b'1'; 8])),
+            )],
+        )
+        .await;
+        let mut iter = next_block_to_iter(&mut builder);
+        assert_iterator(
+            &mut iter,
+            &[(
+                &[b'b'; 8],
+                ValueDeletable::Value(Bytes::copy_from_slice(&[b'2'; 8])),
+            )],
+        )
+        .await;
+        assert!(builder.next_block().is_none());
+        builder.add(&[b'd'; 8], Some(&[b'4'; 8])).unwrap();
+        let mut iter = next_block_to_iter(&mut builder);
+        assert_iterator(
+            &mut iter,
+            &[(
+                &[b'c'; 8],
+                ValueDeletable::Value(Bytes::copy_from_slice(&[b'3'; 8])),
+            )],
+        )
+        .await;
+        assert!(builder.next_block().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_builder_should_return_unconsumed_blocks() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(32, 0);
+        let table_store = TableStore::new(object_store, format.clone(), root_path);
+        let mut builder = table_store.table_builder();
+        builder.add(&[b'a'; 8], Some(&[b'1'; 8])).unwrap();
+        builder.add(&[b'b'; 8], Some(&[b'2'; 8])).unwrap();
+        builder.add(&[b'c'; 8], Some(&[b'3'; 8])).unwrap();
+        let first_block = builder.next_block();
+
+        let mut encoded = builder.build().unwrap();
+
+        let mut raw_sst = Vec::<u8>::new();
+        raw_sst.put_slice(first_block.unwrap().as_ref());
+        assert_eq!(encoded.unconsumed_blocks.len(), 2);
+        while let Some(block) = encoded.unconsumed_blocks.pop_front() {
+            raw_sst.put_slice(block.as_ref());
+        }
+        let raw_sst = Bytes::copy_from_slice(raw_sst.as_slice());
+        let block = format.read_block_raw(&encoded.info, 0, &raw_sst);
+        let mut iter = BlockIterator::from_first_key(block);
+        assert_iterator(
+            &mut iter,
+            &[(
+                &[b'a'; 8],
+                ValueDeletable::Value(Bytes::copy_from_slice(&[b'1'; 8])),
+            )],
+        )
+        .await;
+        let block = format.read_block_raw(&encoded.info, 1, &raw_sst);
+        let mut iter = BlockIterator::from_first_key(block);
+        assert_iterator(
+            &mut iter,
+            &[(
+                &[b'b'; 8],
+                ValueDeletable::Value(Bytes::copy_from_slice(&[b'2'; 8])),
+            )],
+        )
+        .await;
+        let block = format.read_block_raw(&encoded.info, 2, &raw_sst);
+        let mut iter = BlockIterator::from_first_key(block);
+        assert_iterator(
+            &mut iter,
+            &[(
+                &[b'c'; 8],
+                ValueDeletable::Value(Bytes::copy_from_slice(&[b'3'; 8])),
+            )],
+        )
+        .await;
+    }
 
     #[tokio::test]
     async fn test_sstable() {
