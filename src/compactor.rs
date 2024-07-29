@@ -1,11 +1,12 @@
 use crate::compactor::CompactorMainMsg::Shutdown;
+use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, CompactorState};
 use crate::db_state::SortedRun;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::ManifestV1Owned;
 use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
 use crate::tablestore::{SSTableHandle, TableStore};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
@@ -21,13 +22,15 @@ pub(crate) trait CompactionScheduler {
 
 #[derive(Clone)]
 pub struct CompactorOptions {
-    poll_interval: Duration,
+    pub(crate) poll_interval: Duration,
+    pub(crate) max_sst_size: usize,
 }
 
 impl CompactorOptions {
     pub fn default() -> Self {
         Self {
             poll_interval: DEFAULT_COMPACTOR_POLL_INTERVAL,
+            max_sst_size: 1024 * 1024 * 1024,
         }
     }
 }
@@ -36,9 +39,8 @@ enum CompactorMainMsg {
     Shutdown,
 }
 
-#[allow(dead_code)]
-enum WorkerToOrchestoratorMsg {
-    CompactionFinished(SortedRun),
+pub(crate) enum WorkerToOrchestoratorMsg {
+    CompactionFinished(Result<SortedRun, SlateDBError>),
 }
 
 pub(crate) struct Compactor {
@@ -85,13 +87,13 @@ impl Compactor {
 }
 
 struct CompactorOrchestrator {
-    options: CompactorOptions,
+    options: Arc<CompactorOptions>,
     table_store: Arc<TableStore>,
     tokio_handle: Handle,
     state: CompactorState,
     scheduler: Box<dyn CompactionScheduler>,
+    executor: Box<dyn CompactionExecutor>,
     external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
-    worker_tx: crossbeam_channel::Sender<WorkerToOrchestoratorMsg>,
     worker_rx: crossbeam_channel::Receiver<WorkerToOrchestoratorMsg>,
 }
 
@@ -102,17 +104,24 @@ impl CompactorOrchestrator {
         tokio_handle: Handle,
         external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
     ) -> Result<Self, SlateDBError> {
+        let options = Arc::new(options);
         let state = Self::load_state(table_store.clone(), &tokio_handle)?;
-        let scheduler = Self::load_compaction_scheduler(&options);
+        let scheduler = Self::load_compaction_scheduler(options.as_ref());
         let (worker_tx, worker_rx) = crossbeam_channel::unbounded();
+        let executor = TokioCompactionExecutor::new(
+            tokio_handle.clone(),
+            options.clone(),
+            worker_tx,
+            table_store.clone(),
+        );
         let orchestrator = Self {
             options,
             table_store,
             tokio_handle,
             state,
             scheduler,
+            executor: Box::new(executor),
             external_rx,
-            worker_tx,
             worker_rx,
         };
         Ok(orchestrator)
@@ -145,8 +154,11 @@ impl CompactorOrchestrator {
                     self.load_manifest().expect("fatal error loading manifest");
                 }
                 recv(self.worker_rx) -> msg => {
-                    let WorkerToOrchestoratorMsg::CompactionFinished(sr) = msg.expect("fatal error receiving worker msg");
-                    self.finish_compaction(sr).expect("fatal error finishing compaction");
+                    let WorkerToOrchestoratorMsg::CompactionFinished(result) = msg.expect("fatal error receiving worker msg");
+                    match result {
+                        Ok(sr) => self.finish_compaction(sr).expect("fatal error finishing compaction"),
+                        Err(err) => println!("error executing compaction: {:#?}", err)
+                    }
                 }
                 recv(self.external_rx) -> _ => {
                     return;
@@ -187,27 +199,33 @@ impl CompactorOrchestrator {
     }
 
     fn start_compaction(&mut self, compaction: Compaction) {
-        // todo: spawn compaction tasks on the runtime instead
-        // just complete the compaction for now by trivially writing a new run with
-        // the l0 SSTs
-        let l0s: HashSet<Ulid> = compaction.sources.iter().map(|s| s.unwrap_sst()).collect();
-        let compacted: Vec<SSTableHandle> = self
-            .state
-            .db_state()
+        let db_state = self.state.db_state();
+        let compacted_sst_iter = db_state.compacted.iter().flat_map(|sr| sr.ssts.iter());
+        let ssts_by_id: HashMap<Ulid, &SSTableHandle> = db_state
             .l0
             .iter()
-            .filter(|h| {
-                let ulid = h.id.unwrap_compacted_id();
-                l0s.contains(&ulid)
-            })
-            .cloned()
+            .chain(compacted_sst_iter)
+            .map(|sst| (sst.id.unwrap_compacted_id(), sst))
             .collect();
-        self.worker_tx
-            .send(WorkerToOrchestoratorMsg::CompactionFinished(SortedRun {
-                id: compaction.destination,
-                ssts: compacted,
-            }))
-            .expect("failed to send compaction finished msg");
+        let srs_by_id: HashMap<u32, &SortedRun> =
+            db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
+        let ssts: Vec<SSTableHandle> = compaction
+            .sources
+            .iter()
+            .filter_map(|s| s.maybe_unwrap_sst())
+            .filter_map(|ulid| ssts_by_id.get(&ulid).map(|t| (*t).clone()))
+            .collect();
+        let sorted_runs: Vec<SortedRun> = compaction
+            .sources
+            .iter()
+            .filter_map(|s| s.maybe_unwrap_sorted_run())
+            .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
+            .collect();
+        self.executor.start_compaction(CompactionJob {
+            destination: compaction.destination,
+            ssts,
+            sorted_runs,
+        });
     }
 
     // state writers
@@ -247,8 +265,11 @@ mod tests {
     use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestoratorMsg};
     use crate::compactor_state::{Compaction, SourceId};
     use crate::db::{Db, DbOptions};
+    use crate::flatbuffer_types::SsTableInfoOwned;
+    use crate::iter::KeyValueIterator;
     use crate::sst::SsTableFormat;
-    use crate::tablestore::TableStore;
+    use crate::sst_iter::SstIterator;
+    use crate::tablestore::{SsTableId, TableStore};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -265,6 +286,7 @@ mod tests {
         l0_sst_size_bytes: 128,
         compactor_options: Some(CompactorOptions {
             poll_interval: Duration::from_millis(100),
+            max_sst_size: 1024 * 1024 * 1024,
         }),
     };
 
@@ -292,7 +314,28 @@ mod tests {
         let manifest = manifest_owned.borrow();
         assert!(manifest.l0_last_compacted().is_some());
         assert_eq!(manifest.compacted().len(), 1);
-        assert_eq!(manifest.compacted().get(0).ssts().len(), 4);
+        let compacted = manifest.compacted().get(0).ssts();
+        assert_eq!(compacted.len(), 1);
+        let sst = compacted.get(0);
+        let handle = table_store
+            .open_compacted_sst(
+                SsTableId::Compacted(sst.id().unwrap().ulid()),
+                SsTableInfoOwned::create_copy(&sst.info().unwrap()),
+            )
+            .await
+            .unwrap();
+        let mut iter = SstIterator::new(&handle, table_store.as_ref());
+        for i in 0..4 {
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key.as_ref(), &[b'a' + i as u8; 16]);
+            assert_eq!(kv.value.as_ref(), &[b'b' + i as u8; 48]);
+        }
+        for i in 0..4 {
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key.as_ref(), &[b'j' + i as u8; 16]);
+            assert_eq!(kv.value.as_ref(), &[b'k' + i as u8; 48]);
+        }
+        assert!(iter.next().await.unwrap().is_none());
         // todo: test that the db can read the k/vs (once we implement reading from compacted)
     }
 
@@ -330,7 +373,9 @@ mod tests {
             .submit_compaction(Compaction::new(l0_ids_to_compact.clone(), 0))
             .unwrap();
         let msg = orchestrator.worker_rx.recv().unwrap();
-        let WorkerToOrchestoratorMsg::CompactionFinished(sr) = msg;
+        let WorkerToOrchestoratorMsg::CompactionFinished(Ok(sr)) = msg else {
+            panic!("compaction failed")
+        };
 
         // when:
         orchestrator.finish_compaction(sr).unwrap();
@@ -354,7 +399,7 @@ mod tests {
         assert!(!compacted_l0s.contains(&l0_id));
         assert_eq!(
             manifest.l0_last_compacted().unwrap().ulid(),
-            compacted_l0s.first().unwrap().clone()
+            l0_ids_to_compact.first().unwrap().unwrap_sst()
         );
     }
 

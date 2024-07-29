@@ -29,6 +29,7 @@ impl SourceId {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn unwrap_sst(&self) -> Ulid {
         self.maybe_unwrap_sst()
             .expect("tried to unwrap Sst as Sorted Run")

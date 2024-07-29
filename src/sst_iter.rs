@@ -1,3 +1,4 @@
+use crate::error::SlateDBError;
 use crate::{
     block::Block,
     block_iterator::BlockIterator,
@@ -7,7 +8,7 @@ use crate::{
 };
 
 pub(crate) struct SstIterator<'a> {
-    table: SSTableHandle,
+    table: &'a SSTableHandle,
     current_iter: Option<BlockIterator<Block>>,
     next_block_idx: usize,
     table_store: &'a TableStore,
@@ -15,7 +16,7 @@ pub(crate) struct SstIterator<'a> {
 
 impl<'a> SstIterator<'a> {
     #[allow(dead_code)] // will be used in #8
-    pub(crate) fn new(table: SSTableHandle, table_store: &'a TableStore) -> Self {
+    pub(crate) fn new(table: &'a SSTableHandle, table_store: &'a TableStore) -> Self {
         Self {
             table,
             current_iter: None,
@@ -26,9 +27,7 @@ impl<'a> SstIterator<'a> {
 }
 
 impl<'a> KeyValueIterator for SstIterator<'a> {
-    async fn next_entry(
-        &mut self,
-    ) -> Result<Option<KeyValueDeletable>, crate::error::SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
         loop {
             let current_iter = if let Some(current_iter) = self.current_iter.as_mut() {
                 current_iter
@@ -40,7 +39,7 @@ impl<'a> KeyValueIterator for SstIterator<'a> {
 
                 let block = self
                     .table_store
-                    .read_block(&self.table, self.next_block_idx)
+                    .read_block(self.table, self.next_block_idx)
                     .await?;
                 self.next_block_idx += 1;
                 self.current_iter
@@ -89,7 +88,7 @@ mod tests {
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         assert_eq!(sst_handle.info.borrow().block_meta().len(), 1);
 
-        let mut iter = SstIterator::new(sst_handle, &table_store);
+        let mut iter = SstIterator::new(&sst_handle, &table_store);
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
@@ -131,7 +130,7 @@ mod tests {
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         assert_eq!(sst_handle.info.borrow().block_meta().len(), 6);
 
-        let mut iter = SstIterator::new(sst_handle, &table_store);
+        let mut iter = SstIterator::new(&sst_handle, &table_store);
         for i in 0..1000 {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, format!("key{}", i));
