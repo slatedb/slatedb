@@ -82,6 +82,15 @@ pub struct SSTableHandle {
     filter: Option<Arc<BloomFilter>>,
 }
 
+impl SSTableHandle {
+    pub(crate) fn range_covers_key(&self, key: &[u8]) -> bool {
+        if let Some(first_key) = self.info.borrow().first_key() {
+            return key >= first_key.bytes();
+        }
+        false
+    }
+}
+
 impl TableStore {
     #[allow(dead_code)]
     pub fn new(
@@ -206,6 +215,7 @@ impl TableStore {
             id,
             builder: self.sst_format.table_builder(),
             writer: BufWriter::new(self.object_store.clone(), path),
+            blocks_written: 0,
         }
     }
 
@@ -317,6 +327,7 @@ impl TableStore {
             .await
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn read_block(
         &self,
         handle: &SSTableHandle,
@@ -364,6 +375,7 @@ pub(crate) struct EncodedSsTableWriter<'a> {
     id: SsTableId,
     builder: EncodedSsTableBuilder<'a>,
     writer: BufWriter,
+    blocks_written: usize,
 }
 
 impl<'a> EncodedSsTableWriter<'a> {
@@ -388,8 +400,14 @@ impl<'a> EncodedSsTableWriter<'a> {
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {
         while let Some(block) = self.builder.next_block() {
             self.writer.write_all(block.as_ref()).await?;
+            self.blocks_written += 1;
         }
         Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn blocks_written(&self) -> usize {
+        self.blocks_written
     }
 }
 

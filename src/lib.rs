@@ -6,6 +6,7 @@
 mod blob;
 mod block;
 mod block_iterator;
+#[cfg(feature = "db_bench")]
 pub mod compaction_execute_bench;
 mod compactor;
 mod compactor_executor;
@@ -13,7 +14,7 @@ mod compactor_state;
 pub mod db;
 mod db_common;
 mod db_state;
-mod error;
+pub mod error;
 mod filter;
 mod flatbuffer_types;
 mod flush;
@@ -26,6 +27,6 @@ mod sorted_run_iterator;
 mod sst;
 mod sst_iter;
 mod tablestore;
-#[cfg(test)]
+#[cfg(any(test, feature = "db_bench"))]
 mod test_utils;
 mod types;

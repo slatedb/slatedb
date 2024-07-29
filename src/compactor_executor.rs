@@ -74,13 +74,13 @@ impl TokioCompactionExecutorInner {
         let l0_iters: VecDeque<SstIterator> = compaction
             .ssts
             .iter()
-            .map(|l0| SstIterator::new_spawn(l0, self.table_store.clone(), 4, 256, true))
+            .map(|l0| SstIterator::new_spawn(l0, self.table_store.clone(), 4, 256))
             .collect();
         let l0_merge_iter = MergeIterator::new(l0_iters).await?;
         let sr_iters: VecDeque<SortedRunIterator> = compaction
             .sorted_runs
             .iter()
-            .map(|sr| SortedRunIterator::new_spawn(sr, self.table_store.clone(), 4, 256, true))
+            .map(|sr| SortedRunIterator::new_spawn(sr, self.table_store.clone(), 4, 256))
             .collect();
         let sr_merge_iter = MergeIterator::new(sr_iters).await?;
         let mut all_iter = TwoMergeIterator::new(l0_merge_iter, sr_merge_iter).await?;

@@ -19,6 +19,7 @@ enum FetchTask {
 pub(crate) struct SstIterator<'a> {
     table: &'a SSTableHandle,
     current_iter: Option<BlockIterator<Block>>,
+    from_key: Option<&'a [u8]>,
     next_block_idx_to_fetch: usize,
     fetch_tasks: VecDeque<FetchTask>,
     max_fetch_tasks: usize,
@@ -27,23 +28,50 @@ pub(crate) struct SstIterator<'a> {
 }
 
 impl<'a> SstIterator<'a> {
-    pub(crate) fn new(
+    fn first_block_with_data_including_or_after_key(sst: &SSTableHandle, key: &[u8]) -> usize {
+        let handle = sst.info.borrow();
+        // search for the block that could contain the key.
+        let mut low = 0;
+        let mut high = handle.block_meta().len() - 1;
+        // if the key is less than all the blocks' first key, scan the whole sst
+        let mut found_block_id = 0;
+
+        while low <= high {
+            let mid = low + (high - low) / 2;
+            let mid_block_first_key = handle.block_meta().get(mid).first_key().bytes();
+            match mid_block_first_key.cmp(key) {
+                std::cmp::Ordering::Less => {
+                    low = mid + 1;
+                    found_block_id = mid;
+                }
+                std::cmp::Ordering::Greater => {
+                    if mid > 0 {
+                        high = mid - 1;
+                    } else {
+                        break;
+                    }
+                }
+                std::cmp::Ordering::Equal => return mid,
+            }
+        }
+        found_block_id
+    }
+
+    pub(crate) fn new_from_key(
         table: &'a SSTableHandle,
         table_store: Arc<TableStore>,
+        from_key: &'a [u8],
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
     ) -> Self {
-        assert!(max_fetch_tasks > 0);
-        assert!(blocks_to_fetch > 0);
-        Self {
+        Self::new_opts(
             table,
-            current_iter: None,
-            next_block_idx_to_fetch: 0,
-            fetch_tasks: VecDeque::new(),
+            Some(from_key),
+            table_store,
             max_fetch_tasks,
             blocks_to_fetch,
-            table_store,
-        }
+            false,
+        )
     }
 
     pub(crate) fn new_spawn(
@@ -51,9 +79,56 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
+    ) -> Self {
+        Self::new_opts(
+            table,
+            None,
+            table_store,
+            max_fetch_tasks,
+            blocks_to_fetch,
+            true,
+        )
+    }
+
+    pub(crate) fn new(
+        table: &'a SSTableHandle,
+        table_store: Arc<TableStore>,
+        max_fetch_tasks: usize,
+        blocks_to_fetch: usize,
+    ) -> Self {
+        Self::new_opts(
+            table,
+            None,
+            table_store,
+            max_fetch_tasks,
+            blocks_to_fetch,
+            false,
+        )
+    }
+
+    pub(crate) fn new_opts(
+        table: &'a SSTableHandle,
+        from_key: Option<&'a [u8]>,
+        table_store: Arc<TableStore>,
+        max_fetch_tasks: usize,
+        blocks_to_fetch: usize,
         spawn: bool,
     ) -> Self {
-        let mut iter = Self::new(table, table_store, max_fetch_tasks, blocks_to_fetch);
+        assert!(max_fetch_tasks > 0);
+        assert!(blocks_to_fetch > 0);
+        let next_block_idx_to_fetch = from_key
+            .map(|k| Self::first_block_with_data_including_or_after_key(table, k))
+            .unwrap_or(0);
+        let mut iter = Self {
+            table,
+            current_iter: None,
+            next_block_idx_to_fetch,
+            from_key,
+            fetch_tasks: VecDeque::new(),
+            max_fetch_tasks,
+            blocks_to_fetch,
+            table_store,
+        };
         if spawn {
             iter.spawn_fetches();
         }
@@ -94,7 +169,11 @@ impl<'a> SstIterator<'a> {
                     }
                     FetchTask::Finished(blocks) => {
                         if let Some(block) = blocks.pop_front() {
-                            return Ok(Some(BlockIterator::from_first_key(block)));
+                            let first_key = self.from_key.take();
+                            return match first_key {
+                                None => Ok(Some(BlockIterator::from_first_key(block))),
+                                Some(k) => Ok(Some(BlockIterator::from_key(block, k))),
+                            };
                         } else {
                             self.fetch_tasks.pop_front();
                         }
@@ -142,6 +221,7 @@ mod tests {
     use super::*;
     use crate::sst::SsTableFormat;
     use crate::tablestore::SsTableId;
+    use crate::test_utils::{assert_kv, OrderedBytesGenerator};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use std::sync::Arc;
@@ -216,5 +296,101 @@ mod tests {
 
         let next = iter.next().await.unwrap();
         assert!(next.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_iter_from_key() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(128, 1);
+        let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
+        let first_key = [b'a'; 16];
+        let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'z');
+        let mut test_case_key_gen = key_gen.clone();
+        let first_val = [1u8; 16];
+        let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
+        let mut test_case_val_gen = val_gen.clone();
+        let (sst, nkeys) = build_sst_with_n_blocks(3, table_store.clone(), key_gen, val_gen).await;
+
+        // iterate over all keys and make sure we iterate from that key
+        for i in 0..nkeys {
+            let mut expected_key_gen = test_case_key_gen.clone();
+            let mut expected_val_gen = test_case_val_gen.clone();
+            let from_key = test_case_key_gen.next();
+            let _ = test_case_val_gen.next();
+            let mut iter =
+                SstIterator::new_from_key(&sst, table_store.clone(), from_key.as_ref(), 1, 1);
+            for _ in 0..nkeys - i {
+                let e = iter.next().await.unwrap().unwrap();
+                assert_kv(
+                    &e,
+                    expected_key_gen.next().as_ref(),
+                    expected_val_gen.next().as_ref(),
+                );
+            }
+            assert!(iter.next().await.unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_iter_from_key_smaller_than_first() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(128, 1);
+        let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
+        let first_key = [b'b'; 16];
+        let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
+        let mut expected_key_gen = key_gen.clone();
+        let first_val = [2u8; 16];
+        let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
+        let mut expected_val_gen = val_gen.clone();
+        let (sst, nkeys) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
+
+        let mut iter = SstIterator::new_from_key(&sst, table_store.clone(), &[b'a'; 16], 1, 1);
+
+        for _ in 0..nkeys {
+            let e = iter.next().await.unwrap().unwrap();
+            assert_kv(
+                &e,
+                expected_key_gen.next().as_ref(),
+                expected_val_gen.next().as_ref(),
+            );
+        }
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_iter_from_key_larger_than_last() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(128, 1);
+        let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
+        let first_key = [b'b'; 16];
+        let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
+        let first_val = [2u8; 16];
+        let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
+        let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
+
+        let mut iter = SstIterator::new_from_key(&sst, table_store.clone(), &[b'z'; 16], 1, 1);
+
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    async fn build_sst_with_n_blocks(
+        n: usize,
+        ts: Arc<TableStore>,
+        mut key_gen: OrderedBytesGenerator,
+        mut val_gen: OrderedBytesGenerator,
+    ) -> (SSTableHandle, usize) {
+        let mut writer = ts.table_writer(SsTableId::Wal(0));
+        let mut nkeys = 0usize;
+        while writer.blocks_written() < n {
+            writer
+                .add(key_gen.next().as_ref(), Some(val_gen.next().as_ref()))
+                .await
+                .unwrap();
+            nkeys += 1;
+        }
+        (writer.close().await.unwrap(), nkeys)
     }
 }
