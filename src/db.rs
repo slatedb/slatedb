@@ -218,7 +218,7 @@ impl DbInner {
                 SsTableId::Wal(id) => *id,
                 SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
             };
-            let mut iter = SstIterator::new(&sst, &self.table_store);
+            let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1);
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
             while let Some(kv) = iter.next_entry().await? {
                 // TODO: it's not ideal that we have to take this lock for every kv. We can solve
@@ -456,7 +456,11 @@ mod tests {
         .unwrap();
 
         let sst_format = SsTableFormat::new(4096, 10);
-        let table_store = TableStore::new(object_store.clone(), sst_format, path.clone());
+        let table_store = Arc::new(TableStore::new(
+            object_store.clone(),
+            sst_format,
+            path.clone(),
+        ));
 
         // Write data a few times such that each loop results in a memtable flush
         let mut last_compacted = 0;
@@ -494,7 +498,7 @@ mod tests {
                 .open_sst(&SsTableId::Compacted(ulid))
                 .await
                 .unwrap();
-            let mut iter = SstIterator::new(&sst1, &table_store);
+            let mut iter = SstIterator::new(&sst1, table_store.clone(), 1, 1);
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);
