@@ -17,6 +17,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::runtime::Handle;
 
 pub enum ReadLevel {
@@ -53,6 +54,7 @@ const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
 #[derive(Clone)]
 pub struct DbOptions {
     pub flush_ms: usize,
+    pub manifest_poll_interval: Duration,
     pub min_filter_keys: u32,
     pub l0_sst_size_bytes: usize,
     pub compactor_options: Option<CompactorOptions>,
@@ -124,7 +126,9 @@ impl DbInner {
                 let mut iter =
                     SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1);
                 if let Some(entry) = iter.next_entry().await? {
-                    return Ok(entry.value.into_option());
+                    if entry.key == key {
+                        return Ok(entry.value.into_option());
+                    }
                 }
             }
         }
@@ -385,11 +389,11 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flatbuffer_types::ManifestV1;
     use crate::sst_iter::SstIterator;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
-    use std::time::{Duration, SystemTime};
-    use tokio::time::sleep;
+    use std::time::Duration;
     use ulid::Ulid;
 
     #[tokio::test]
@@ -397,12 +401,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::open(
             Path::from("/tmp/test_kv_store"),
-            DbOptions {
-                flush_ms: 100,
-                min_filter_keys: 0,
-                l0_sst_size_bytes: 1024,
-                compactor_options: None,
-            },
+            test_db_options(0, 1024, None),
             object_store,
         )
         .await
@@ -427,12 +426,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let kv_store = Db::open(
             path.clone(),
-            DbOptions {
-                flush_ms: 100,
-                min_filter_keys: 0,
-                l0_sst_size_bytes: 128,
-                compactor_options: None,
-            },
+            test_db_options(0, 128, None),
             object_store.clone(),
         )
         .await
@@ -454,17 +448,17 @@ mod tests {
             let key = [b'j' + i; 16];
             let value = [b'k' + i; 50];
             kv_store.put(&key, &value).await;
-            let now = SystemTime::now();
-            while now.elapsed().unwrap().as_secs() < 30 {
-                let manifest_owned = table_store.open_latest_manifest().await.unwrap().unwrap();
-                let manifest = manifest_owned.borrow();
-                if manifest.wal_id_last_compacted() > last_compacted {
-                    assert_eq!(manifest.wal_id_last_compacted(), (i as u64) * 2 + 2);
-                    last_compacted = manifest.wal_id_last_compacted();
-                    break;
-                }
-                sleep(Duration::from_millis(100)).await;
-            }
+            let manifest = wait_for_manifest_condition(
+                table_store.as_ref(),
+                |m| m.wal_id_last_compacted() > last_compacted,
+                Duration::from_secs(30),
+            )
+            .await;
+            assert_eq!(
+                manifest.borrow().wal_id_last_compacted(),
+                (i as u64) * 2 + 2
+            );
+            last_compacted = manifest.borrow().wal_id_last_compacted();
         }
 
         let manifest_owned = table_store.open_latest_manifest().await.unwrap().unwrap();
@@ -498,12 +492,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::open(
             Path::from("/tmp/test_kv_store"),
-            DbOptions {
-                flush_ms: 100,
-                min_filter_keys: 0,
-                l0_sst_size_bytes: 1024,
-                compactor_options: None,
-            },
+            test_db_options(0, 1024, None),
             object_store,
         )
         .await
@@ -524,12 +513,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::open(
             Path::from("/tmp/test_kv_store"),
-            DbOptions {
-                flush_ms: 100,
-                min_filter_keys: 0,
-                l0_sst_size_bytes: 1024,
-                compactor_options: None,
-            },
+            test_db_options(0, 1024, None),
             object_store,
         )
         .await
@@ -562,12 +546,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let kv_store = Db::open(
             path.clone(),
-            DbOptions {
-                flush_ms: 100,
-                min_filter_keys: 0,
-                l0_sst_size_bytes: 128,
-                compactor_options: None,
-            },
+            test_db_options(0, 128, None),
             object_store.clone(),
         )
         .await
@@ -596,12 +575,7 @@ mod tests {
         // recover and validate that sst files are loaded on recovery.
         let kv_store_restored = Db::open(
             path.clone(),
-            DbOptions {
-                flush_ms: 100,
-                min_filter_keys: 0,
-                l0_sst_size_bytes: 128,
-                compactor_options: None,
-            },
+            test_db_options(0, 128, None),
             object_store.clone(),
         )
         .await
@@ -633,12 +607,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let kv_store = Db::open(
             path.clone(),
-            DbOptions {
-                flush_ms: 100,
-                min_filter_keys: 0,
-                l0_sst_size_bytes: 1024,
-                compactor_options: None,
-            },
+            test_db_options(0, 1024, None),
             object_store.clone(),
         )
         .await
@@ -675,12 +644,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let kv_store = Db::open(
             path.clone(),
-            DbOptions {
-                flush_ms: 100,
-                min_filter_keys: 0,
-                l0_sst_size_bytes: 1024,
-                compactor_options: None,
-            },
+            test_db_options(0, 1024, None),
             object_store.clone(),
         )
         .await
@@ -720,12 +684,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let kv_store = Db::open(
             path.clone(),
-            DbOptions {
-                flush_ms: 100,
-                min_filter_keys: 0,
-                l0_sst_size_bytes: 1024,
-                compactor_options: None,
-            },
+            test_db_options(0, 1024, None),
             object_store.clone(),
         )
         .await
@@ -768,12 +727,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let db = Db::open_with_fp_registry(
             path.clone(),
-            DbOptions {
-                flush_ms: 100,
-                min_filter_keys: 0,
-                l0_sst_size_bytes: 128,
-                compactor_options: None,
-            },
+            test_db_options(0, 128, None),
             object_store.clone(),
             fp_registry.clone(),
         )
@@ -793,12 +747,7 @@ mod tests {
         // reload the db
         let db = Db::open(
             path.clone(),
-            DbOptions {
-                flush_ms: 100,
-                min_filter_keys: 0,
-                l0_sst_size_bytes: 128,
-                compactor_options: None,
-            },
+            test_db_options(0, 128, None),
             object_store.clone(),
         )
         .await
@@ -821,5 +770,117 @@ mod tests {
             db.get(&key2).await.unwrap(),
             Some(Bytes::copy_from_slice(&value2))
         );
+    }
+
+    async fn do_test_should_read_compacted_db(options: DbOptions) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let db = Db::open(path.clone(), options, object_store.clone())
+            .await
+            .unwrap();
+        let sst_fmt = SsTableFormat::new(64, 1);
+        let ts = TableStore::new(object_store.clone(), sst_fmt, path.clone());
+
+        // write enough to fill up a few l0 SSTs
+        for i in 0..4 {
+            db.put(&[b'a' + i; 32], &[1u8 + i; 32]).await;
+            db.put(&[b'm' + i; 32], &[13u8 + i; 32]).await;
+        }
+        // wait for compactor to compact them
+        wait_for_manifest_condition(
+            &ts,
+            |m| m.l0_last_compacted().is_some() && m.l0().is_empty(),
+            Duration::from_secs(10),
+        )
+        .await;
+        // write more l0s and wait for compaction
+        for i in 0..4 {
+            db.put(&[b'f' + i; 32], &[6u8 + i; 32]).await;
+            db.put(&[b's' + i; 32], &[19u8 + i; 32]).await;
+        }
+        wait_for_manifest_condition(
+            &ts,
+            |m| m.l0_last_compacted().is_some() && m.l0().is_empty(),
+            Duration::from_secs(10),
+        )
+        .await;
+        // write another l0
+        db.put(&[b'a'; 32], &[128u8; 32]).await;
+        db.put(&[b'm'; 32], &[129u8; 32]).await;
+
+        let val = db.get(&[b'a'; 32]).await.unwrap();
+        assert_eq!(val, Some(Bytes::copy_from_slice(&[128u8; 32])));
+        let val = db.get(&[b'm'; 32]).await.unwrap();
+        assert_eq!(val, Some(Bytes::copy_from_slice(&[129u8; 32])));
+        for i in 1..4 {
+            let val = db.get(&[b'a' + i; 32]).await.unwrap();
+            assert_eq!(val, Some(Bytes::copy_from_slice(&[1u8 + i; 32])));
+            let val = db.get(&[b'm' + i; 32]).await.unwrap();
+            assert_eq!(val, Some(Bytes::copy_from_slice(&[13u8 + i; 32])));
+        }
+        for i in 0..4 {
+            let val = db.get(&[b'f' + i; 32]).await.unwrap();
+            assert_eq!(val, Some(Bytes::copy_from_slice(&[6u8 + i; 32])));
+            let val = db.get(&[b's' + i; 32]).await.unwrap();
+            assert_eq!(val, Some(Bytes::copy_from_slice(&[19u8 + i; 32])));
+        }
+        let neg_lookup = db.get(&[b'a', b'b', b'c']).await;
+        assert!(neg_lookup.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_should_read_from_compacted_db() {
+        do_test_should_read_compacted_db(test_db_options(
+            0,
+            127,
+            Some(CompactorOptions {
+                poll_interval: Duration::from_millis(100),
+                max_sst_size: 256,
+            }),
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_should_read_from_compacted_db_no_filters() {
+        do_test_should_read_compacted_db(test_db_options(
+            u32::MAX,
+            127,
+            Some(CompactorOptions {
+                poll_interval: Duration::from_millis(100),
+                max_sst_size: 256,
+            }),
+        ))
+        .await
+    }
+
+    async fn wait_for_manifest_condition(
+        ts: &TableStore,
+        cond: impl Fn(&ManifestV1) -> bool,
+        timeout: Duration,
+    ) -> ManifestV1Owned {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            let manifest = ts.open_latest_manifest().await.unwrap().unwrap();
+            if cond(&manifest.borrow()) {
+                return manifest;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("manifest condition took longer than timeout")
+    }
+
+    fn test_db_options(
+        min_filter_keys: u32,
+        l0_sst_size_bytes: usize,
+        compactor_options: Option<CompactorOptions>,
+    ) -> DbOptions {
+        DbOptions {
+            flush_ms: 100,
+            manifest_poll_interval: Duration::from_millis(100),
+            min_filter_keys,
+            l0_sst_size_bytes,
+            compactor_options,
+        }
     }
 }

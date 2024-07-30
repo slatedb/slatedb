@@ -1,4 +1,5 @@
 use crate::db::DbInner;
+use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::tablestore::SsTableId;
 use std::sync::Arc;
@@ -11,6 +12,43 @@ pub(crate) enum MemtableFlushThreadMsg {
 }
 
 impl DbInner {
+    pub(crate) async fn load_manifest(&self) -> Result<(), SlateDBError> {
+        let current_manifest = self
+            .table_store
+            .open_latest_manifest()
+            .await?
+            .expect("manifest must exist");
+        let snapshot = {
+            let state_snapshot = self.state.read().snapshot();
+            state_snapshot.state.clone()
+        };
+        let compacted = CoreDbState::load_srs_from_manifest(
+            &snapshot.core.compacted,
+            &current_manifest.borrow(),
+            self.table_store.as_ref(),
+        )
+        .await?;
+        let mut wguard_state = self.state.write();
+        wguard_state.refresh_db_state(current_manifest, compacted);
+        Ok(())
+    }
+
+    pub(crate) async fn write_manifest(&self) -> Result<(), SlateDBError> {
+        let manifest = {
+            let rguard_state = self.state.read();
+            let mut wguard_manifest = self.manifest.write();
+            let new_manifest = wguard_manifest.create_updated_manifest(&rguard_state.state().core);
+            *wguard_manifest = new_manifest;
+            wguard_manifest.clone()
+        };
+        self.table_store.write_manifest(&manifest).await
+    }
+
+    pub(crate) async fn write_manifest_safely(&self) -> Result<(), SlateDBError> {
+        self.load_manifest().await?;
+        self.write_manifest().await
+    }
+
     pub(crate) async fn flush_imm_memtables_to_l0(&self) -> Result<(), SlateDBError> {
         while let Some(imm_memtable) = {
             let rguard = self.state.read();
@@ -22,7 +60,7 @@ impl DbInner {
                 let mut guard = self.state.write();
                 guard.move_imm_memtable_to_l0(imm_memtable.clone(), sst_handle);
             }
-            self.write_manifest().await?;
+            self.write_manifest_safely().await?;
         }
         Ok(())
     }
@@ -34,14 +72,25 @@ impl DbInner {
     ) -> Option<tokio::task::JoinHandle<()>> {
         let this = Arc::clone(self);
         Some(tokio_handle.spawn(async move {
+            let mut manifest_poll_interval =
+                tokio::time::interval(this.options.manifest_poll_interval);
             loop {
-                let msg = rx.recv().await.expect("channel unexpectedly closed");
-                match msg {
-                    MemtableFlushThreadMsg::Shutdown => return,
-                    MemtableFlushThreadMsg::FlushImmutableMemtables => {
-                        match this.flush_imm_memtables_to_l0().await {
-                            Ok(_) => {}
-                            Err(err) => print!("error from memtable flush: {}", err),
+                tokio::select! {
+                    _ = manifest_poll_interval.tick() => {
+                        if let Err(err) = this.load_manifest().await {
+                            print!("error loading manifest: {}", err);
+                        }
+                    }
+                    msg = rx.recv() => {
+                        let msg = msg.expect("channel unexpectedly closed");
+                        match msg {
+                            MemtableFlushThreadMsg::Shutdown => return,
+                            MemtableFlushThreadMsg::FlushImmutableMemtables => {
+                                match this.flush_imm_memtables_to_l0().await {
+                                    Ok(_) => {}
+                                    Err(err) => print!("error from memtable flush: {}", err),
+                                }
+                            }
                         }
                     }
                 }

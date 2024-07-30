@@ -282,6 +282,7 @@ mod tests {
     const PATH: &str = "/test/db";
     const DEFAULT_OPTIONS: DbOptions = DbOptions {
         flush_ms: 100,
+        manifest_poll_interval: Duration::from_millis(100),
         min_filter_keys: 0,
         l0_sst_size_bytes: 128,
         compactor_options: Some(CompactorOptions {

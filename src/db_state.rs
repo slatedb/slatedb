@@ -1,9 +1,9 @@
 use crate::error::SlateDBError;
-use crate::flatbuffer_types::{ManifestV1Owned, SsTableInfoOwned};
+use crate::flatbuffer_types::{ManifestV1, ManifestV1Owned, SsTableInfoOwned};
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
 use crate::tablestore::SsTableId::Compacted;
 use crate::tablestore::{SSTableHandle, TableStore};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use ulid::Ulid;
 
@@ -52,7 +52,7 @@ impl SortedRun {
 }
 
 // represents the core db state that we persist in the manifest
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct CoreDbState {
     pub(crate) l0_last_compacted: Option<Ulid>,
     pub(crate) l0: VecDeque<SSTableHandle>,
@@ -92,13 +92,43 @@ impl CoreDbState {
             let l0_sst = table_store.open_compacted_sst(sst_id, sst_info).await?;
             l0.push_back(l0_sst);
         }
+        let compacted = Self::load_srs_from_manifest(&Vec::new(), &manifest, table_store).await?;
         Ok(CoreDbState {
             l0_last_compacted,
             l0,
-            compacted: Vec::new(),
+            compacted,
             next_wal_sst_id: manifest.wal_id_last_compacted() + 1,
             last_compacted_wal_sst_id: manifest.wal_id_last_compacted(),
         })
+    }
+
+    pub async fn load_srs_from_manifest(
+        compacted: &[SortedRun],
+        manifest: &ManifestV1<'_>,
+        table_store: &TableStore,
+    ) -> Result<Vec<SortedRun>, SlateDBError> {
+        let old_runs_by_id: HashMap<u32, &SortedRun> =
+            compacted.iter().map(|sr| (sr.id, sr)).collect();
+        let mut new_compacted = Vec::new();
+        for compactor_sr in manifest.compacted().iter() {
+            if let Some(old_sr) = old_runs_by_id.get(&compactor_sr.id()) {
+                new_compacted.push((*old_sr).clone());
+            } else {
+                let mut ssts = Vec::new();
+                for compactor_sst in compactor_sr.ssts().iter() {
+                    let id = Compacted(compactor_sst.id().expect("sst must have id").ulid());
+                    let info = SsTableInfoOwned::create_copy(
+                        &compactor_sst.info().expect("sst must have info"),
+                    );
+                    ssts.push(table_store.open_compacted_sst(id, info).await?);
+                }
+                new_compacted.push(SortedRun {
+                    id: compactor_sr.id(),
+                    ssts,
+                })
+            }
+        }
+        Ok(new_compacted)
     }
 }
 
@@ -197,6 +227,32 @@ impl DbState {
     pub fn increment_next_wal_id(&mut self) {
         let mut state = self.state_copy();
         state.core.next_wal_sst_id += 1;
+        self.update_state(state);
+    }
+
+    pub fn refresh_db_state(
+        &mut self,
+        compactor_manifest_owned: ManifestV1Owned,
+        compacted: Vec<SortedRun>,
+    ) {
+        let compactor_manifest = compactor_manifest_owned.borrow();
+        // copy over L0 up to l0_last_compacted
+        let l0_last_compacted = compactor_manifest
+            .l0_last_compacted()
+            .map(|id| Ulid::from((id.high(), id.low())));
+        let mut new_l0 = VecDeque::new();
+        for sst in self.state.core.l0.iter() {
+            if let Some(l0_last_compacted) = l0_last_compacted {
+                if sst.id.unwrap_compacted_id() == l0_last_compacted {
+                    break;
+                }
+            }
+            new_l0.push_back(sst.clone());
+        }
+        let mut state = self.state_copy();
+        state.core.l0_last_compacted = l0_last_compacted;
+        state.core.l0 = new_l0;
+        state.core.compacted = compacted;
         self.update_state(state);
     }
 }
