@@ -1,8 +1,9 @@
 use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
+use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
-use crate::flatbuffer_types::{ManifestV1Owned, SsTableInfoOwned};
+use crate::flatbuffer_types::ManifestV1Owned;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use bytes::{BufMut, Bytes};
 use fail_parallel::{fail_point, FailPointRegistry};
@@ -10,11 +11,11 @@ use futures::StreamExt;
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use std::collections::VecDeque;
+use parking_lot::RwLock;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use ulid::Ulid;
 
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
@@ -24,6 +25,12 @@ pub struct TableStore {
     compacted_path: &'static str,
     manifest_path: &'static str,
     fp_registry: Arc<FailPointRegistry>,
+    // TODO: we cache the filters here for now, so the db doesn't need to reload them
+    //       for each read. This means that all the filters need to fit in memory.
+    //       Once we've put in a proper cache, we should instead cache the filter block in
+    //       the cache and get rid of this.
+    //       https://github.com/slatedb/slatedb/issues/89
+    filter_cache: RwLock<HashMap<SsTableId, Option<Arc<BloomFilter>>>>,
 }
 
 struct ReadOnlyObject {
@@ -51,43 +58,6 @@ impl ReadOnlyBlob for ReadOnlyObject {
     async fn read(&self) -> Result<Bytes, SlateDBError> {
         let file = self.object_store.get(&self.path).await?;
         file.bytes().await.map_err(SlateDBError::ObjectStoreError)
-    }
-}
-
-#[derive(Clone, PartialEq, Debug, Hash, Eq)]
-pub enum SsTableId {
-    Wal(u64),
-    Compacted(Ulid),
-}
-
-impl SsTableId {
-    #[allow(clippy::panic)]
-    pub(crate) fn unwrap_compacted_id(&self) -> Ulid {
-        match self {
-            SsTableId::Wal(_) => panic!("found WAL id when unwrapping compacted ID"),
-            SsTableId::Compacted(ulid) => *ulid,
-        }
-    }
-}
-
-#[derive(Clone, PartialEq)]
-pub struct SSTableHandle {
-    pub id: SsTableId,
-    pub info: SsTableInfoOwned,
-    // TODO: we stash the filter in the handle for now, as a way to cache it so that
-    //       the db doesn't need to reload it for each read. Once we've put in a proper
-    //       cache, we should instead cache the filter block in the cache and get rid
-    //       of this reference.
-    //       https://github.com/slatedb/slatedb/issues/89
-    filter: Option<Arc<BloomFilter>>,
-}
-
-impl SSTableHandle {
-    pub(crate) fn range_covers_key(&self, key: &[u8]) -> bool {
-        if let Some(first_key) = self.info.borrow().first_key() {
-            return key >= first_key.bytes();
-        }
-        false
     }
 }
 
@@ -120,6 +90,7 @@ impl TableStore {
             compacted_path: "compacted",
             manifest_path: "manifest",
             fp_registry,
+            filter_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -215,6 +186,7 @@ impl TableStore {
             id,
             builder: self.sst_format.table_builder(),
             writer: BufWriter::new(self.object_store.clone(), path),
+            table_store: self,
             blocks_written: 0,
         }
     }
@@ -261,31 +233,18 @@ impl TableStore {
             .put(&path, Bytes::from(data))
             .await
             .map_err(SlateDBError::ObjectStoreError)?;
+        self.cache_filter(id.clone(), encoded_sst.filter);
         Ok(SSTableHandle {
             id: id.clone(),
             info: encoded_sst.info,
-            filter: encoded_sst.filter,
         })
     }
 
-    // TODO: once we move filters into cache, this method should no longer be async
-    //       https://github.com/slatedb/slatedb/issues/89
-    pub(crate) async fn open_compacted_sst(
-        &self,
-        id: SsTableId,
-        info: SsTableInfoOwned,
-    ) -> Result<SSTableHandle, SlateDBError> {
-        let path = self.path(&id);
-        let obj = ReadOnlyObject {
-            object_store: self.object_store.clone(),
-            path,
-        };
-        let filter = self.sst_format.read_filter(&info, &obj).await?;
-        Ok(SSTableHandle {
-            id: id.clone(),
-            info,
-            filter,
-        })
+    fn cache_filter(&self, sst: SsTableId, filter: Option<Arc<BloomFilter>>) {
+        {
+            let mut wguard = self.filter_cache.write();
+            wguard.insert(sst, filter);
+        }
     }
 
     // todo: clean up the warning suppression when we start using open_sst outside tests
@@ -297,11 +256,9 @@ impl TableStore {
             path,
         };
         let info = self.sst_format.read_info(&obj).await?;
-        let filter = self.sst_format.read_filter(&info, &obj).await?;
         Ok(SSTableHandle {
             id: id.clone(),
             info,
-            filter,
         })
     }
 
@@ -309,7 +266,21 @@ impl TableStore {
         &self,
         handle: &SSTableHandle,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
-        Ok(handle.filter.clone())
+        {
+            let rguard = self.filter_cache.read();
+            if let Some(filter) = rguard.get(&handle.id) {
+                return Ok(filter.clone());
+            }
+        }
+        let path = self.path(&handle.id);
+        let obj = ReadOnlyObject {
+            object_store: self.object_store.clone(),
+            path,
+        };
+        let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
+        let mut wguard = self.filter_cache.write();
+        wguard.insert(handle.id.clone(), filter.clone());
+        Ok(filter)
     }
 
     pub(crate) async fn read_blocks(
@@ -375,6 +346,7 @@ pub(crate) struct EncodedSsTableWriter<'a> {
     id: SsTableId,
     builder: EncodedSsTableBuilder<'a>,
     writer: BufWriter,
+    table_store: &'a TableStore,
     blocks_written: usize,
 }
 
@@ -390,10 +362,11 @@ impl<'a> EncodedSsTableWriter<'a> {
             self.writer.write_all(block.as_ref()).await?;
         }
         self.writer.shutdown().await?;
+        self.table_store
+            .cache_filter(self.id.clone(), encoded_sst.filter);
         Ok(SSTableHandle {
             id: self.id.clone(),
             info: encoded_sst.info,
-            filter: encoded_sst.filter,
         })
     }
 
@@ -413,9 +386,10 @@ impl<'a> EncodedSsTableWriter<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
-    use crate::tablestore::{SsTableId, TableStore};
+    use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
     use bytes::Bytes;

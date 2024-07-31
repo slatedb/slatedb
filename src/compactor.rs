@@ -1,11 +1,11 @@
 use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, CompactorState};
-use crate::db_state::SortedRun;
+use crate::db_state::{SSTableHandle, SortedRun};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::ManifestV1Owned;
 use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
-use crate::tablestore::{SSTableHandle, TableStore};
+use crate::tablestore::TableStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
@@ -139,7 +139,7 @@ impl CompactorOrchestrator {
         let maybe_manifest = tokio_handle.block_on(table_store.open_latest_manifest())?;
         if let Some(manifest) = maybe_manifest {
             // todo: bump epoch here
-            let state = CompactorState::new(manifest, table_store.as_ref(), tokio_handle)?;
+            let state = CompactorState::new(manifest);
             Ok(state)
         } else {
             Err(SlateDBError::InvalidDBState)
@@ -248,13 +248,7 @@ impl CompactorOrchestrator {
     }
 
     fn refresh_db_state(&mut self, manifest: ManifestV1Owned) -> Result<(), SlateDBError> {
-        let result =
-            self.state
-                .refresh_db_state(manifest, self.table_store.clone(), &self.tokio_handle);
-        if result.is_err() {
-            println!("error merging writer manifest update: {:#?}", result);
-            return Ok(());
-        }
+        self.state.refresh_db_state(manifest);
         self.maybe_schedule_compactions()?;
         Ok(())
     }
@@ -265,11 +259,12 @@ mod tests {
     use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestoratorMsg};
     use crate::compactor_state::{Compaction, SourceId};
     use crate::db::{Db, DbOptions};
+    use crate::db_state::{SSTableHandle, SsTableId};
     use crate::flatbuffer_types::SsTableInfoOwned;
     use crate::iter::KeyValueIterator;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
-    use crate::tablestore::{SsTableId, TableStore};
+    use crate::tablestore::TableStore;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -318,13 +313,10 @@ mod tests {
         let compacted = manifest.compacted().get(0).ssts();
         assert_eq!(compacted.len(), 1);
         let sst = compacted.get(0);
-        let handle = table_store
-            .open_compacted_sst(
-                SsTableId::Compacted(sst.id().unwrap().ulid()),
-                SsTableInfoOwned::create_copy(&sst.info().unwrap()),
-            )
-            .await
-            .unwrap();
+        let handle = SSTableHandle::new(
+            SsTableId::Compacted(sst.id().unwrap().ulid()),
+            SsTableInfoOwned::create_copy(&sst.info().unwrap()),
+        );
         let mut iter = SstIterator::new(&handle, table_store.clone(), 1, 1);
         for i in 0..4 {
             let kv = iter.next().await.unwrap().unwrap();

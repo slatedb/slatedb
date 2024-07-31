@@ -1,9 +1,7 @@
+use crate::db_state::SSTableHandle;
 use crate::error::SlateDBError;
 use crate::{
-    block::Block,
-    block_iterator::BlockIterator,
-    iter::KeyValueIterator,
-    tablestore::{SSTableHandle, TableStore},
+    block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, tablestore::TableStore,
     types::KeyValueDeletable,
 };
 use std::cmp::min;
@@ -219,8 +217,8 @@ impl<'a> KeyValueIterator for SstIterator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
-    use crate::tablestore::SsTableId;
     use crate::test_utils::{assert_kv, OrderedBytesGenerator};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};

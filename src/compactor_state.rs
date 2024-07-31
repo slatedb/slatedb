@@ -1,12 +1,9 @@
 use crate::compactor_state::CompactionStatus::Submitted;
-use crate::db_state::{CoreDbState, SortedRun};
+use crate::db_state::SsTableId::Compacted;
+use crate::db_state::{CoreDbState, SSTableHandle, SortedRun};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{ManifestV1Owned, SsTableInfoOwned};
-use crate::tablestore::SsTableId::Compacted;
-use crate::tablestore::{SSTableHandle, TableStore};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
-use tokio::runtime::Handle;
 use ulid::Ulid;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -90,17 +87,13 @@ impl CompactorState {
         self.compactions.values().cloned().collect()
     }
 
-    pub(crate) fn new(
-        manifest: ManifestV1Owned,
-        table_store: &TableStore,
-        tokio_handle: &Handle,
-    ) -> Result<Self, SlateDBError> {
-        let db_state = tokio_handle.block_on(CoreDbState::load(&manifest, table_store))?;
-        Ok(Self {
+    pub(crate) fn new(manifest: ManifestV1Owned) -> Self {
+        let db_state = CoreDbState::load(&manifest);
+        Self {
             db_state,
             manifest,
             compactions: HashMap::<u32, Compaction>::new(),
-        })
+        }
     }
 
     pub(crate) fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
@@ -113,27 +106,14 @@ impl CompactorState {
         Ok(())
     }
 
-    pub(crate) fn refresh_db_state(
-        &mut self,
-        writer_manifest_owned: ManifestV1Owned,
-        table_store: Arc<TableStore>,
-        tokio_handle: &Handle,
-    ) -> Result<(), SlateDBError> {
+    pub(crate) fn refresh_db_state(&mut self, writer_manifest_owned: ManifestV1Owned) {
         let writer_manifest = writer_manifest_owned.borrow();
         // the writer may have added more l0 SSTs. Add these to our l0 list.
         let last_compacted_l0 = self.db_state.l0_last_compacted;
         let mut merged_l0s = VecDeque::new();
-        let our_l0s_by_id: HashMap<Ulid, &SSTableHandle> = self
-            .db_state
-            .l0
-            .iter()
-            .map(|h| (h.id.unwrap_compacted_id(), h))
-            .collect();
         let writer_l0 = writer_manifest.l0();
-        let mut i = 0;
-        while i < writer_l0.len() {
+        for writer_l0_sst in writer_l0 {
             // todo: move to some utility method
-            let writer_l0_sst = writer_l0.get(i);
             let writer_l0_id = writer_l0_sst.id().expect("l0 sst must have id").ulid();
             // todo: this is brittle. we are relying on the l0 list always being updated in
             //       an expected order. We should instead encode the ordering in the l0 SST IDs
@@ -142,20 +122,15 @@ impl CompactorState {
                 None => true,
                 Some(last_compacted_l0_id) => writer_l0_id != *last_compacted_l0_id,
             } {
-                if let Some(&handle_ref) = our_l0s_by_id.get(&writer_l0_id) {
-                    merged_l0s.push_back(handle_ref.clone())
-                } else {
-                    let writer_l0_info = writer_l0_sst.info().expect("l0 sst must have info");
-                    let handle = tokio_handle.block_on(table_store.open_compacted_sst(
-                        Compacted(writer_l0_id),
-                        SsTableInfoOwned::create_copy(&writer_l0_info),
-                    ))?;
-                    merged_l0s.push_back(handle);
-                }
+                let writer_l0_info = writer_l0_sst.info().expect("l0 sst must have info");
+                let handle = SSTableHandle::new(
+                    Compacted(writer_l0_id),
+                    SsTableInfoOwned::create_copy(&writer_l0_info),
+                );
+                merged_l0s.push_back(handle);
             } else {
                 break;
             }
-            i += 1;
         }
 
         // write out the merged core db state and manifest
@@ -165,8 +140,6 @@ impl CompactorState {
         merged.next_wal_sst_id = writer_manifest.wal_id_last_seen() + 1;
         self.db_state = merged;
         self.manifest = self.manifest.create_updated_manifest(&self.db_state);
-
-        Ok(())
     }
 
     pub(crate) fn finish_compaction(&mut self, output_sr: SortedRun) {
@@ -235,14 +208,16 @@ mod tests {
     use crate::compactor_state::CompactionStatus::Submitted;
     use crate::compactor_state::SourceId::Sst;
     use crate::db::{Db, DbOptions};
+    use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
-    use crate::tablestore::SsTableId;
+    use crate::tablestore::TableStore;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use std::sync::Arc;
     use std::thread::sleep;
     use std::time::{Duration, SystemTime};
-    use tokio::runtime::Runtime;
+    use tokio::runtime::{Handle, Runtime};
 
     const PATH: &str = "/test/db";
     const DEFAULT_OPTIONS: DbOptions = DbOptions {
@@ -348,9 +323,7 @@ mod tests {
             wait_for_manifest_with_l0_len(&table_store, rt.handle(), state.db_state().l0.len() + 1);
 
         // when:
-        state
-            .refresh_db_state(writer_manifest.clone(), table_store, rt.handle())
-            .unwrap();
+        state.refresh_db_state(writer_manifest.clone());
 
         // then:
         assert!(state.db_state().l0_last_compacted.is_none());
@@ -395,9 +368,7 @@ mod tests {
         let db_state_before_merge = state.db_state().clone();
 
         // when:
-        state
-            .refresh_db_state(writer_manifest.clone(), table_store, rt.handle())
-            .unwrap();
+        state.refresh_db_state(writer_manifest.clone());
 
         // then:
         let db_state = state.db_state();
@@ -463,9 +434,7 @@ mod tests {
             wait_for_manifest_with_l0_len(&table_store, rt.handle(), original_l0s.len() + 1);
 
         // when:
-        state
-            .refresh_db_state(writer_manifest.clone(), table_store, rt.handle())
-            .unwrap();
+        state.refresh_db_state(writer_manifest.clone());
 
         // then:
         let db_state = state.db_state();
@@ -571,7 +540,7 @@ mod tests {
             .block_on(table_store.open_latest_manifest())
             .unwrap()
             .unwrap();
-        let state = CompactorState::new(manifest, table_store.as_ref(), tokio_handle).unwrap();
+        let state = CompactorState::new(manifest);
         (os, table_store, state)
     }
 }

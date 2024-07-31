@@ -301,7 +301,8 @@ impl<'a> EncodedSsTableBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use crate::block_iterator::BlockIterator;
-    use crate::tablestore::{SsTableId, TableStore};
+    use crate::db_state::SsTableId;
+    use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
     use bytes::BytesMut;

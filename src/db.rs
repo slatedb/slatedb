@@ -1,6 +1,6 @@
 use crate::compactor::{Compactor, CompactorOptions};
 use crate::db::ReadLevel::{Commited, Uncommitted};
-use crate::db_state::{DbState, SortedRun};
+use crate::db_state::{DbState, SSTableHandle, SortedRun, SsTableId};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::ManifestV1Owned;
 use crate::iter::KeyValueIterator;
@@ -9,7 +9,7 @@ use crate::mem_table_flush::MemtableFlushThreadMsg::Shutdown;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
-use crate::tablestore::{SSTableHandle, SsTableId, TableStore};
+use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
@@ -75,7 +75,7 @@ impl DbInner {
         manifest: ManifestV1Owned,
         memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
     ) -> Result<Self, SlateDBError> {
-        let state = DbState::load(&manifest, &table_store).await?;
+        let state = DbState::load(&manifest);
         let db_inner = Self {
             state: Arc::new(RwLock::new(state)),
             options,

@@ -1,8 +1,9 @@
 use crate::db::DbInner;
+use crate::db_state;
+use crate::db_state::SSTableHandle;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
-use crate::tablestore::{self, SSTableHandle};
 use crate::types::ValueDeletable;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,7 +19,7 @@ impl DbInner {
 
     pub(crate) async fn flush_imm_table(
         &self,
-        id: &tablestore::SsTableId,
+        id: &db_state::SsTableId,
         imm_table: Arc<KVTable>,
     ) -> Result<SSTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
@@ -40,7 +41,7 @@ impl DbInner {
     }
 
     async fn flush_imm_wal(&self, imm: Arc<ImmutableWal>) -> Result<SSTableHandle, SlateDBError> {
-        let wal_id = tablestore::SsTableId::Wal(imm.id());
+        let wal_id = db_state::SsTableId::Wal(imm.id());
         self.flush_imm_table(&wal_id, imm.table()).await
     }
 
