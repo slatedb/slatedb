@@ -3,7 +3,8 @@ use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompacti
 use crate::error::SlateDBError;
 use crate::sst::SsTableFormat;
 use crate::tablestore::{SSTableHandle, SsTableId, TableStore};
-use bytes::{BufMut, Bytes, BytesMut};
+use crate::test_utils::OrderedBytesGenerator;
+use bytes::BufMut;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use object_store::path::Path;
@@ -150,7 +151,9 @@ async fn do_load_sst(
 ) -> Result<(), SlateDBError> {
     let mut rng = rand_xorshift::XorShiftRng::from_entropy();
     let start = std::time::Instant::now();
-    let mut key_gen = KeyGenerator::new(i, key_start.as_slice());
+    let mut suffix = Vec::<u8>::new();
+    suffix.put_u32(i);
+    let mut key_gen = OrderedBytesGenerator::new_with_suffix(suffix.as_ref(), key_start.as_slice());
     let mut sst_writer = table_store.table_writer(sst_id(i));
     for _ in 0..num_keys {
         let mut val = vec![0u8; val_bytes];
@@ -285,35 +288,6 @@ fn load_options() -> Options {
     };
     println!("Options: {:#?}", options);
     options
-}
-
-struct KeyGenerator {
-    id: u32,
-    bytes: Vec<u8>,
-}
-
-impl KeyGenerator {
-    fn new(id: u32, bytes: &[u8]) -> Self {
-        let bytes = Vec::from(bytes);
-        Self { id, bytes }
-    }
-
-    fn next(&mut self) -> Bytes {
-        let mut result = BytesMut::with_capacity(self.bytes.len() + std::mem::size_of::<u32>());
-        result.put_slice(self.bytes.as_slice());
-        result.put_u32(self.id);
-        self.increment();
-        result.freeze()
-    }
-
-    fn increment(&mut self) {
-        let mut pos = self.bytes.len() - 1;
-        while self.bytes[pos] == u8::MAX {
-            self.bytes[pos] = 0;
-            pos -= 1;
-        }
-        self.bytes[pos] += 1;
-    }
 }
 
 #[allow(clippy::panic)]

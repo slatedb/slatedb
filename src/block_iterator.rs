@@ -53,7 +53,6 @@ impl<B: BlockLike> BlockIterator<B> {
 
     /// Construct a BlockIterator that starts at the given key, or at the first
     /// key greater than the given key if the exact key given is not in the block.
-    #[allow(dead_code)] // will be used in #8
     pub fn from_key(block: B, key: &[u8]) -> BlockIterator<B> {
         let idx = block.offsets().partition_point(|offset| {
             let mut cursor = &block.data()[*offset as usize..];

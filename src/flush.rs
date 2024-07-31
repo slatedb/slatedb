@@ -89,7 +89,6 @@ impl DbInner {
             let mut wguard = self.state.write();
             wguard.pop_imm_wal();
             // flush to the memtable before notifying so that data is available for reads
-            // once we support committed read isolation, reads should read from memtable first
             self.flush_imm_wal_to_memtable(wguard.memtable(), imm.table());
             self.maybe_freeze_memtable(&mut wguard, imm.id());
             imm.table().notify_flush();

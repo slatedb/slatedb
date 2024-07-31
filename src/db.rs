@@ -1,15 +1,16 @@
 use crate::compactor::{Compactor, CompactorOptions};
 use crate::db::ReadLevel::{Commited, Uncommitted};
-use crate::db_state::DbState;
+use crate::db_state::{DbState, SortedRun};
+use crate::error::SlateDBError;
 use crate::flatbuffer_types::ManifestV1Owned;
+use crate::iter::KeyValueIterator;
 use crate::mem_table_flush::MemtableFlushThreadMsg;
 use crate::mem_table_flush::MemtableFlushThreadMsg::Shutdown;
+use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::{SSTableHandle, SsTableId, TableStore};
 use crate::types::ValueDeletable;
-use crate::{block::Block, error::SlateDBError};
-use crate::{block_iterator::BlockIterator, iter::KeyValueIterator};
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
@@ -109,67 +110,49 @@ impl DbInner {
         }
 
         for sst in &snapshot.state.core.l0 {
-            if let Some(block_index) = self.find_block_for_key(sst, key).await? {
-                let block = self.table_store.read_block(sst, block_index).await?;
-                if let Some(val) = self.find_val_in_block(&block, key).await? {
-                    return Ok(val.into_option());
+            if self.sst_may_include_key(sst, key).await? {
+                let mut iter = SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1);
+                if let Some(entry) = iter.next_entry().await? {
+                    if entry.key == key {
+                        return Ok(entry.value.into_option());
+                    }
+                }
+            }
+        }
+        for sr in &snapshot.state.core.compacted {
+            if self.sr_may_include_key(sr, key).await? {
+                let mut iter =
+                    SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1);
+                if let Some(entry) = iter.next_entry().await? {
+                    return Ok(entry.value.into_option());
                 }
             }
         }
         Ok(None)
     }
 
-    async fn find_block_for_key(
+    async fn sst_may_include_key(
         &self,
         sst: &SSTableHandle,
         key: &[u8],
-    ) -> Result<Option<usize>, SlateDBError> {
+    ) -> Result<bool, SlateDBError> {
+        if !sst.range_covers_key(key) {
+            return Ok(false);
+        }
         if let Some(filter) = self.table_store.read_filter(sst).await? {
-            if !filter.has_key(key) {
-                return Ok(None);
-            }
+            return Ok(filter.has_key(key));
         }
-
-        let handle = sst.info.borrow();
-        // search for the block that could contain the key.
-        let mut low = 0;
-        let mut high = handle.block_meta().len() - 1;
-        let mut found_block_id: Option<usize> = None;
-
-        while low <= high {
-            let mid = low + (high - low) / 2;
-            let current_block_first_key = handle.block_meta().get(mid).first_key().bytes();
-            match current_block_first_key.cmp(key) {
-                std::cmp::Ordering::Less => {
-                    low = mid + 1;
-                    found_block_id = Some(mid);
-                }
-                std::cmp::Ordering::Greater => {
-                    if mid > 0 {
-                        high = mid - 1;
-                    } else {
-                        break;
-                    }
-                }
-                std::cmp::Ordering::Equal => return Ok(Some(mid)),
-            }
-        }
-
-        Ok(found_block_id)
+        Ok(true)
     }
 
-    async fn find_val_in_block(
-        &self,
-        block: &Block,
-        key: &[u8],
-    ) -> Result<Option<ValueDeletable>, SlateDBError> {
-        let mut iter = BlockIterator::from_first_key(block);
-        while let Some(current_key_value) = iter.next_entry().await? {
-            if current_key_value.key == key {
-                return Ok(Some(current_key_value.value));
+    async fn sr_may_include_key(&self, sr: &SortedRun, key: &[u8]) -> Result<bool, SlateDBError> {
+        if let Some(sst) = sr.find_sst_with_range_covering_key(key) {
+            if let Some(filter) = self.table_store.read_filter(sst).await? {
+                return Ok(filter.has_key(key));
             }
+            return Ok(true);
         }
-        Ok(None)
+        Ok(false)
     }
 
     /// Put a key-value pair into the database. Key and value must not be empty.

@@ -27,6 +27,30 @@ pub(crate) struct SortedRun {
     pub(crate) ssts: Vec<SSTableHandle>,
 }
 
+impl SortedRun {
+    pub(crate) fn find_sst_with_range_covering_key_idx(&self, key: &[u8]) -> Option<usize> {
+        // returns the sst after the one whose range includes the key
+        let first_sst = self.ssts.partition_point(|sst| {
+            sst.info
+                .borrow()
+                .first_key()
+                .expect("sst must have first key")
+                .bytes()
+                <= key
+        });
+        if first_sst > 0 {
+            return Some(first_sst - 1);
+        }
+        // all ssts have a range greater than the key
+        None
+    }
+
+    pub(crate) fn find_sst_with_range_covering_key(&self, key: &[u8]) -> Option<&SSTableHandle> {
+        self.find_sst_with_range_covering_key_idx(key)
+            .map(|idx| &self.ssts[idx])
+    }
+}
+
 // represents the core db state that we persist in the manifest
 #[derive(Clone)]
 pub(crate) struct CoreDbState {

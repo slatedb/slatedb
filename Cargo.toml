@@ -35,6 +35,7 @@ fail-parallel = { version = "0.5.1", features = ["failpoints"] }
 [features]
 default = ["aws"]
 aws = ["object_store/aws"]
+db_bench = ["aws"]
 
 [[bin]]
 name = "compaction-execute-bench"
