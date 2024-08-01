@@ -27,29 +27,46 @@ Then you can use SlateDB in your Rust code:
 
 ```rust
 use bytes::Bytes;
-use object_store::{ObjectStore, memory::InMemory};
-use slatedb::db:{Db, DbOptions, TableStore};
-use std::sync::Arc;
+use object_store::{ObjectStore, memory::InMemory, path::Path};
+use slatedb::db:{Db, DbOptions};
+use std::{sync::Arc, time::Duration};
 
 #[tokio::main]
 fn main() {
+    // Setup
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let table_store = TableStore::new(object_store);
+    let options = DbOptions {
+        flush_ms: 100,
+        manifest_poll_interval: Duration::from_millis(100),
+        min_filter_keys,
+        l0_sst_size_bytes,
+        compactor_options,
+    };
     let kv_store = Db::open(
-        "/tmp/test_kv_store",
-        DbOptions { flush_ms: 100 },
-        table_store,
+        Path::from("/tmp/test_kv_store"),
+        options,
+        object_store,
     )
+    .await
     .unwrap();
+
+    // Put
     let key = b"test_key";
     let value = b"test_value";
     kv_store.put(key, value).await;
+
+    // Get
     assert_eq!(
         kv_store.get(key).await.unwrap(),
         Some(Bytes::from_static(value))
     );
+
+    // Delete
     kv_store.delete(key).await;
     assert!(kv_store.get(key).await.unwrap().is_none());
+
+    // Close
+    assert!(kv_store.close().await.unwrap().is_none());
 }
 ```
 
