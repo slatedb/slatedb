@@ -21,7 +21,7 @@ object_store = "0.9.1"
 parking_lot = "0.12.1"
 siphasher = "1"
 thiserror = "1.0.59"
-tokio = { version = "1.37.0", features = ["sync", "rt", "rt-multi-thread"] }
+tokio = { version = "1.37.0", features = ["macros", "sync", "rt", "rt-multi-thread"] }
 ulid = "1.1.2"
 rand = "0.8.5"
 rand_xorshift = "0.3.0"

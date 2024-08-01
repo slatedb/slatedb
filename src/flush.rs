@@ -16,28 +16,6 @@ impl DbInner {
         Ok(())
     }
 
-    pub(crate) async fn write_manifest(&self) -> Result<(), SlateDBError> {
-        // get the update manifest if there are any updates.
-        let updated_manifest: Option<crate::flatbuffer_types::ManifestV1Owned> = {
-            let compacted = &self.state.read().state().core;
-            let mut wguard_manifest = self.manifest.write();
-            if wguard_manifest.borrow().wal_id_last_seen() != compacted.next_wal_sst_id - 1 {
-                let new_manifest = wguard_manifest.create_updated_manifest(compacted);
-                *wguard_manifest = new_manifest.clone();
-                Some(new_manifest)
-            } else {
-                None
-            }
-        };
-
-        if let Some(manifest) = updated_manifest {
-            self.table_store.write_manifest(&manifest).await?
-        }
-
-        Ok(())
-    }
-
-    // todo: move me
     pub(crate) async fn flush_imm_table(
         &self,
         id: &tablestore::SsTableId,
