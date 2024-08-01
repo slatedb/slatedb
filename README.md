@@ -1,12 +1,14 @@
-# SlateDB
+<div align="center">
+  <a href="https://slatedb.io"><img src="https://github.com/slatedb/slatedb-website/blob/main/assets/png/gh-banner.png?raw=true" alt="SlateDB"></a>
+</div>
 
-A cloud native embedded storage engine built on object storage.
+## Introduction
 
-## Status
-
-SlateDB is currently in the early stages of development. It is not yet ready for production use.
+SlateDB is a cloud native embedded storage engine built on object storage.
 
 ## Roadmap
+
+SlateDB is currently in the early stages of development. It is not yet ready for production use.
 
 - [x] Basic API (get, put, delete)
 - [x] SSTs on object storage
