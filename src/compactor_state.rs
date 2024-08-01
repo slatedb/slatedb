@@ -1,8 +1,6 @@
 use crate::compactor_state::CompactionStatus::Submitted;
-use crate::db_state::SsTableId::Compacted;
 use crate::db_state::{CoreDbState, SSTableHandle, SortedRun};
 use crate::error::SlateDBError;
-use crate::flatbuffer_types::{ManifestV1Owned, SsTableInfoOwned};
 use std::collections::{HashMap, HashSet, VecDeque};
 use ulid::Ulid;
 
@@ -66,10 +64,6 @@ impl Compaction {
 
 pub(crate) struct CompactorState {
     db_state: CoreDbState,
-    // TODO: fully specify the manifest in CoreDbState, and then we can drop this and just convert
-    //       back and forth from ManifestSynchronizer. This is also blocked on lazy-loading the
-    //       filters, since its currently too expensive to load the manifest from CoreDbState.
-    manifest: ManifestV1Owned,
     compactions: HashMap<u32, Compaction>,
 }
 
@@ -78,20 +72,14 @@ impl CompactorState {
         &self.db_state
     }
 
-    pub(crate) fn manifest(&self) -> &ManifestV1Owned {
-        &self.manifest
-    }
-
     #[allow(dead_code)]
     pub(crate) fn compactions(&self) -> Vec<Compaction> {
         self.compactions.values().cloned().collect()
     }
 
-    pub(crate) fn new(manifest: ManifestV1Owned) -> Self {
-        let db_state = CoreDbState::load(&manifest);
+    pub(crate) fn new(db_state: CoreDbState) -> Self {
         Self {
             db_state,
-            manifest,
             compactions: HashMap::<u32, Compaction>::new(),
         }
     }
@@ -122,15 +110,13 @@ impl CompactorState {
         Ok(())
     }
 
-    pub(crate) fn refresh_db_state(&mut self, writer_manifest_owned: ManifestV1Owned) {
-        let writer_manifest = writer_manifest_owned.borrow();
+    pub(crate) fn refresh_db_state(&mut self, writer_state: &CoreDbState) {
         // the writer may have added more l0 SSTs. Add these to our l0 list.
         let last_compacted_l0 = self.db_state.l0_last_compacted;
         let mut merged_l0s = VecDeque::new();
-        let writer_l0 = writer_manifest.l0();
+        let writer_l0 = &writer_state.l0;
         for writer_l0_sst in writer_l0 {
-            // todo: move to some utility method
-            let writer_l0_id = writer_l0_sst.id().expect("l0 sst must have id").ulid();
+            let writer_l0_id = writer_l0_sst.id.unwrap_compacted_id();
             // todo: this is brittle. we are relying on the l0 list always being updated in
             //       an expected order. We should instead encode the ordering in the l0 SST IDs
             //       and assert that it follows the order
@@ -138,12 +124,7 @@ impl CompactorState {
                 None => true,
                 Some(last_compacted_l0_id) => writer_l0_id != *last_compacted_l0_id,
             } {
-                let writer_l0_info = writer_l0_sst.info().expect("l0 sst must have info");
-                let handle = SSTableHandle::new(
-                    Compacted(writer_l0_id),
-                    SsTableInfoOwned::create_copy(&writer_l0_info),
-                );
-                merged_l0s.push_back(handle);
+                merged_l0s.push_back(writer_l0_sst.clone());
             } else {
                 break;
             }
@@ -152,10 +133,9 @@ impl CompactorState {
         // write out the merged core db state and manifest
         let mut merged = self.db_state.clone();
         merged.l0 = merged_l0s;
-        merged.last_compacted_wal_sst_id = writer_manifest.wal_id_last_compacted();
-        merged.next_wal_sst_id = writer_manifest.wal_id_last_seen() + 1;
+        merged.last_compacted_wal_sst_id = writer_state.last_compacted_wal_sst_id;
+        merged.next_wal_sst_id = writer_state.next_wal_sst_id;
         self.db_state = merged;
-        self.manifest = writer_manifest_owned.create_updated_manifest(&self.db_state);
     }
 
     pub(crate) fn finish_compaction(&mut self, output_sr: SortedRun) {
@@ -214,7 +194,6 @@ impl CompactorState {
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
             self.db_state = db_state;
-            self.manifest = self.manifest.create_updated_manifest(&self.db_state);
             self.compactions.remove(&output_sr.id);
         }
     }
@@ -235,7 +214,7 @@ mod tests {
     use crate::compactor_state::SourceId::Sst;
     use crate::db::{Db, DbOptions};
     use crate::db_state::SsTableId;
-    use crate::manifest_store::ManifestStore;
+    use crate::manifest_store::{ManifestStore, StoredManifest};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -339,27 +318,23 @@ mod tests {
     fn test_should_refresh_db_state_correctly_when_never_compacted() {
         // given:
         let rt = build_runtime();
-        let (os, manifest_store, mut state) = build_test_state(rt.handle());
+        let (os, mut sm, mut state) = build_test_state(rt.handle());
         // open a new db and write another l0
         let db = build_db(os.clone(), rt.handle());
         rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48]));
         rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48]));
-        let writer_manifest = wait_for_manifest_with_l0_len(
-            &manifest_store,
-            rt.handle(),
-            state.db_state().l0.len() + 1,
-        );
+        let writer_db_state =
+            wait_for_manifest_with_l0_len(&mut sm, rt.handle(), state.db_state().l0.len() + 1);
 
         // when:
-        state.refresh_db_state(writer_manifest.clone());
+        state.refresh_db_state(&writer_db_state);
 
         // then:
         assert!(state.db_state().l0_last_compacted.is_none());
-        let expected_merged_l0s: Vec<Ulid> = writer_manifest
-            .borrow()
-            .l0()
+        let expected_merged_l0s: Vec<Ulid> = writer_db_state
+            .l0
             .iter()
-            .map(|t| t.id().unwrap().ulid())
+            .map(|t| t.id.unwrap_compacted_id())
             .collect();
         let merged_l0s: Vec<Ulid> = state
             .db_state()
@@ -374,7 +349,7 @@ mod tests {
     fn test_should_refresh_db_state_correctly() {
         // given:
         let rt = build_runtime();
-        let (os, table_store, mut state) = build_test_state(rt.handle());
+        let (os, mut sm, mut state) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
         state
@@ -391,12 +366,12 @@ mod tests {
         let db = build_db(os.clone(), rt.handle());
         rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48]));
         rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48]));
-        let writer_manifest =
-            wait_for_manifest_with_l0_len(&table_store, rt.handle(), original_l0s.len() + 1);
+        let writer_db_state =
+            wait_for_manifest_with_l0_len(&mut sm, rt.handle(), original_l0s.len() + 1);
         let db_state_before_merge = state.db_state().clone();
 
         // when:
-        state.refresh_db_state(writer_manifest.clone());
+        state.refresh_db_state(&writer_db_state);
 
         // then:
         let db_state = state.db_state();
@@ -405,8 +380,7 @@ mod tests {
             .map(|h| h.id.unwrap_compacted_id())
             .collect();
         expected_merged_l0s.pop_back();
-        let new_l0 = writer_manifest.borrow().l0().get(0).id().unwrap();
-        let new_l0 = Ulid::from((new_l0.high(), new_l0.low()));
+        let new_l0 = writer_db_state.l0.front().unwrap().id.unwrap_compacted_id();
         expected_merged_l0s.push_front(new_l0);
         let merged_l0: VecDeque<Ulid> = db_state
             .l0
@@ -420,31 +394,23 @@ mod tests {
         );
         assert_eq!(
             db_state.last_compacted_wal_sst_id,
-            writer_manifest.borrow().wal_id_last_compacted()
+            writer_db_state.last_compacted_wal_sst_id
         );
-        assert_eq!(
-            db_state.next_wal_sst_id,
-            writer_manifest.borrow().wal_id_last_seen() + 1
-        );
-        let manifest = state.manifest();
-        assert_eq!(
-            manifest.borrow(),
-            writer_manifest.create_updated_manifest(db_state).borrow()
-        )
+        assert_eq!(db_state.next_wal_sst_id, writer_db_state.next_wal_sst_id);
     }
 
     #[test]
     fn test_should_refresh_db_state_correctly_when_all_l0_compacted() {
         // given:
         let rt = build_runtime();
-        let (os, table_store, mut state) = build_test_state(rt.handle());
+        let (os, mut sm, mut state) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
         state
             .submit_compaction(Compaction::new(
                 original_l0s
                     .iter()
-                    .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
+                    .map(|h| Sst(h.id.unwrap_compacted_id()))
                     .collect(),
                 0,
             ))
@@ -458,17 +424,16 @@ mod tests {
         let db = build_db(os.clone(), rt.handle());
         rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48]));
         rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48]));
-        let writer_manifest =
-            wait_for_manifest_with_l0_len(&table_store, rt.handle(), original_l0s.len() + 1);
+        let writer_db_state =
+            wait_for_manifest_with_l0_len(&mut sm, rt.handle(), original_l0s.len() + 1);
 
         // when:
-        state.refresh_db_state(writer_manifest.clone());
+        state.refresh_db_state(&writer_db_state);
 
         // then:
         let db_state = state.db_state();
         let mut expected_merged_l0s = VecDeque::new();
-        let new_l0 = writer_manifest.borrow().l0().get(0).id().unwrap();
-        let new_l0 = Ulid::from((new_l0.high(), new_l0.low()));
+        let new_l0 = writer_db_state.l0.front().unwrap().id.unwrap_compacted_id();
         expected_merged_l0s.push_front(new_l0);
         let merged_l0: VecDeque<Ulid> = db_state
             .l0
@@ -520,17 +485,14 @@ mod tests {
     }
 
     fn wait_for_manifest_with_l0_len(
-        manifest_store: &Arc<ManifestStore>,
+        stored_manifest: &mut StoredManifest,
         tokio_handle: &Handle,
         len: usize,
-    ) -> ManifestV1Owned {
+    ) -> CoreDbState {
         run_for(Duration::from_secs(30), || {
-            let maybe_manifest = tokio_handle
-                .block_on(manifest_store.read_latest_manifest())
-                .unwrap()
-                .unwrap();
-            if maybe_manifest.borrow().l0().len() == len {
-                return Some(maybe_manifest);
+            let db_state = tokio_handle.block_on(stored_manifest.refresh()).unwrap();
+            if db_state.l0.len() == len {
+                return Some(db_state.clone());
             }
             None
         })
@@ -553,7 +515,7 @@ mod tests {
 
     fn build_test_state(
         tokio_handle: &Handle,
-    ) -> (Arc<dyn ObjectStore>, Arc<ManifestStore>, CompactorState) {
+    ) -> (Arc<dyn ObjectStore>, StoredManifest, CompactorState) {
         let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let db = build_db(os.clone(), tokio_handle);
         let l0_count: u64 = 5;
@@ -563,11 +525,11 @@ mod tests {
         }
         tokio_handle.block_on(db.close()).unwrap();
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
-        let manifest = tokio_handle
-            .block_on(manifest_store.read_latest_manifest())
+        let stored_manifest = tokio_handle
+            .block_on(StoredManifest::load(manifest_store))
             .unwrap()
             .unwrap();
-        let state = CompactorState::new(manifest);
-        (os, manifest_store, state)
+        let state = CompactorState::new(stored_manifest.db_state().clone());
+        (os, stored_manifest, state)
     }
 }

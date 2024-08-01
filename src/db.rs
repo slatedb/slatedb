@@ -1,10 +1,9 @@
 use crate::compactor::{Compactor, CompactorOptions};
 use crate::db::ReadLevel::{Commited, Uncommitted};
-use crate::db_state::{DbState, SSTableHandle, SortedRun, SsTableId};
+use crate::db_state::{CoreDbState, DbState, SSTableHandle, SortedRun, SsTableId};
 use crate::error::SlateDBError;
-use crate::flatbuffer_types::ManifestV1Owned;
 use crate::iter::KeyValueIterator;
-use crate::manifest_store::ManifestStore;
+use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table_flush::MemtableFlushThreadMsg;
 use crate::mem_table_flush::MemtableFlushThreadMsg::Shutdown;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -64,27 +63,22 @@ pub struct DbOptions {
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
-    pub(crate) manifest_store: Arc<ManifestStore>,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) manifest: Arc<RwLock<ManifestV1Owned>>,
     pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
 }
 
 impl DbInner {
     pub async fn new(
         options: DbOptions,
-        manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
-        manifest: ManifestV1Owned,
+        core_db_state: CoreDbState,
         memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
     ) -> Result<Self, SlateDBError> {
-        let state = DbState::load(&manifest);
+        let state = DbState::new(core_db_state);
         let db_inner = Self {
             state: Arc::new(RwLock::new(state)),
             options,
-            manifest_store,
             table_store,
-            manifest: Arc::new(RwLock::new(manifest)),
             memtable_flush_notifier,
         };
         db_inner.replay_wal().await?;
@@ -203,7 +197,9 @@ impl DbInner {
             .table_store
             .get_wal_sst_list(wal_id_last_compacted)
             .await?;
+        let mut last_sst_id = wal_id_last_compacted;
         for sst_id in wal_sst_list {
+            last_sst_id = sst_id;
             let sst = self.table_store.open_sst(&SsTableId::Wal(sst_id)).await?;
             let sst_id = match &sst.id {
                 SsTableId::Wal(id) => *id,
@@ -229,10 +225,17 @@ impl DbInner {
             {
                 let mut guard = self.state.write();
                 self.maybe_freeze_memtable(&mut guard, sst_id);
-                assert_eq!(guard.state().core.next_wal_sst_id, sst_id);
-                guard.increment_next_wal_id();
+                if guard.state().core.next_wal_sst_id == sst_id {
+                    guard.increment_next_wal_id();
+                }
             }
         }
+        // assert that we didn't have any gaps in the wal
+        assert_eq!(
+            last_sst_id + 1,
+            self.state.read().state().core.next_wal_sst_id
+        );
+
         Ok(())
     }
 }
@@ -276,23 +279,13 @@ impl Db {
             fp_registry.clone(),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
-        let manifest = manifest_store.read_latest_manifest().await?;
-        let manifest = match manifest {
-            Some(manifest) => manifest,
-            None => {
-                let manifest = ManifestV1Owned::create_new();
-                manifest_store.write_manifest(&manifest).await?;
-                manifest
-            }
-        };
-
+        let manifest = Self::init_db(&manifest_store).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
             DbInner::new(
                 options,
-                manifest_store.clone(),
                 table_store.clone(),
-                manifest,
+                manifest.db_state()?.clone(),
                 memtable_flush_tx,
             )
             .await?,
@@ -300,7 +293,8 @@ impl Db {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let tokio_handle = Handle::current();
         let flush_thread = inner.spawn_flush_task(rx, &tokio_handle);
-        let memtable_flush_task = inner.spawn_memtable_flush_task(memtable_flush_rx, &tokio_handle);
+        let memtable_flush_task =
+            inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
         let mut compactor = None;
         if let Some(compactor_options) = &inner.options.compactor_options {
             compactor = Some(
@@ -320,6 +314,22 @@ impl Db {
             memtable_flush_task: Mutex::new(memtable_flush_task),
             compactor: Mutex::new(compactor),
         })
+    }
+
+    async fn init_db(
+        manifest_store: &Arc<ManifestStore>,
+    ) -> Result<FenceableManifest, SlateDBError> {
+        let stored_manifest = Self::init_stored_manifest(manifest_store).await?;
+        FenceableManifest::init_writer(stored_manifest).await
+    }
+
+    async fn init_stored_manifest(
+        manifest_store: &Arc<ManifestStore>,
+    ) -> Result<StoredManifest, SlateDBError> {
+        if let Some(stored_manifest) = StoredManifest::load(manifest_store.clone()).await? {
+            return Ok(stored_manifest);
+        }
+        StoredManifest::init_new_db(manifest_store.clone(), CoreDbState::new()).await
     }
 
     pub async fn close(&self) -> Result<(), SlateDBError> {
@@ -353,9 +363,6 @@ impl Db {
                 .expect("Failed to join memtable flush thread");
         }
 
-        // Force a final flush on the mutable memtable
-        self.inner.flush().await?;
-        self.inner.write_manifest().await?;
         Ok(())
     }
 
@@ -402,12 +409,10 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flatbuffer_types::ManifestV1;
     use crate::sst_iter::SstIterator;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use std::time::Duration;
-    use ulid::Ulid;
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -446,6 +451,10 @@ mod tests {
         .unwrap();
 
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let mut stored_manifest = StoredManifest::load(manifest_store.clone())
+            .await
+            .unwrap()
+            .unwrap();
         let sst_format = SsTableFormat::new(4096, 10);
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
@@ -462,38 +471,22 @@ mod tests {
             let key = [b'j' + i; 16];
             let value = [b'k' + i; 50];
             kv_store.put(&key, &value).await;
-            let manifest = wait_for_manifest_condition(
-                manifest_store.as_ref(),
-                |m| m.wal_id_last_compacted() > last_compacted,
+            let db_state = wait_for_manifest_condition(
+                &mut stored_manifest,
+                |s| s.last_compacted_wal_sst_id > last_compacted,
                 Duration::from_secs(30),
             )
             .await;
-            assert_eq!(
-                manifest.borrow().wal_id_last_compacted(),
-                (i as u64) * 2 + 2
-            );
-            last_compacted = manifest.borrow().wal_id_last_compacted();
+            assert_eq!(db_state.last_compacted_wal_sst_id, (i as u64) * 2 + 2);
+            last_compacted = db_state.last_compacted_wal_sst_id
         }
 
-        let manifest_owned = manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap();
-        let manifest = manifest_owned.borrow();
-        let l0 = manifest.l0();
+        let db_state = stored_manifest.refresh().await.unwrap();
+        let l0 = &db_state.l0;
         assert_eq!(l0.len(), 3);
         for i in 0u8..3u8 {
-            let compacted_sst1 = l0.get(2 - i as usize);
-            let ulid = Ulid::from((
-                compacted_sst1.id().unwrap().high(),
-                compacted_sst1.id().unwrap().low(),
-            ));
-            let sst1 = table_store
-                .open_sst(&SsTableId::Compacted(ulid))
-                .await
-                .unwrap();
-            let mut iter = SstIterator::new(&sst1, table_store.clone(), 1, 1);
+            let sst1 = l0.get(2 - i as usize).unwrap();
+            let mut iter = SstIterator::new(sst1, table_store.clone(), 1, 1);
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);
@@ -611,14 +604,10 @@ mod tests {
         }
 
         // validate that the manifest file exists.
-        let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let manifest_owned = manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap();
-        let manifest = manifest_owned.borrow();
-        assert_eq!(manifest.wal_id_last_seen(), sst_count + 2 * l0_count);
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap().unwrap();
+        let db_state = stored_manifest.db_state();
+        assert_eq!(db_state.next_wal_sst_id, sst_count + 2 * l0_count + 1);
     }
 
     #[tokio::test]
@@ -800,6 +789,7 @@ mod tests {
             .await
             .unwrap();
         let ms = ManifestStore::new(&path, object_store.clone());
+        let mut sm = StoredManifest::load(Arc::new(ms)).await.unwrap().unwrap();
 
         // write enough to fill up a few l0 SSTs
         for i in 0..4 {
@@ -808,8 +798,8 @@ mod tests {
         }
         // wait for compactor to compact them
         wait_for_manifest_condition(
-            &ms,
-            |m| m.l0_last_compacted().is_some() && m.l0().is_empty(),
+            &mut sm,
+            |s| s.l0_last_compacted.is_some() && s.l0.is_empty(),
             Duration::from_secs(10),
         )
         .await;
@@ -824,8 +814,8 @@ mod tests {
             db.put(&[b's' + i; 32], &[19u8 + i; 32]).await;
         }
         wait_for_manifest_condition(
-            &ms,
-            |m| m.l0_last_compacted().is_some() && m.l0().is_empty(),
+            &mut sm,
+            |s| s.l0_last_compacted.is_some() && s.l0.is_empty(),
             Duration::from_secs(10),
         )
         .await;
@@ -890,15 +880,15 @@ mod tests {
     }
 
     async fn wait_for_manifest_condition(
-        ms: &ManifestStore,
-        cond: impl Fn(&ManifestV1) -> bool,
+        sm: &mut StoredManifest,
+        cond: impl Fn(&CoreDbState) -> bool,
         timeout: Duration,
-    ) -> ManifestV1Owned {
+    ) -> CoreDbState {
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
-            let manifest = ms.read_latest_manifest().await.unwrap().unwrap();
-            if cond(&manifest.borrow()) {
-                return manifest;
+            let db_state = sm.refresh().await.unwrap();
+            if cond(db_state) {
+                return db_state.clone();
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

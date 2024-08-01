@@ -2,6 +2,7 @@ use crate::db_state;
 use crate::db_state::{CoreDbState, SSTableHandle};
 use bytes::Bytes;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
+use std::collections::VecDeque;
 use ulid::Ulid;
 
 #[path = "./generated/manifest_generated.rs"]
@@ -9,10 +10,13 @@ use ulid::Ulid;
 #[rustfmt::skip]
 mod manifest_generated;
 use crate::db_state::SsTableId;
+use crate::db_state::SsTableId::Compacted;
+use crate::error::SlateDBError;
 use crate::flatbuffer_types::manifest_generated::{
     CompactedSsTable, CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, SortedRun,
     SortedRunArgs,
 };
+use crate::manifest::{Manifest, ManifestCodec};
 pub use manifest_generated::{
     BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableInfo, SsTableInfoArgs,
 };
@@ -48,59 +52,67 @@ impl SsTableInfoOwned {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
-pub(crate) struct ManifestV1Owned {
-    data: Bytes,
+pub(crate) struct FlatBufferManifestCodec {}
+
+impl ManifestCodec for FlatBufferManifestCodec {
+    fn encode(&self, manifest: &Manifest) -> Bytes {
+        self.create_from_manifest(manifest)
+    }
+
+    fn decode(&self, bytes: &Bytes) -> Result<Manifest, SlateDBError> {
+        let manifest = flatbuffers::root::<ManifestV1>(bytes)?;
+        Ok(self.manifest(&manifest))
+    }
 }
 
-impl ManifestV1Owned {
-    pub fn new(data: Bytes) -> Result<Self, InvalidFlatbuffer> {
-        flatbuffers::root::<ManifestV1>(&data)?;
-        Ok(Self { data })
-    }
-
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    pub fn borrow(&self) -> ManifestV1<'_> {
-        let raw = &self.data;
-        // This is safe, because we validated the flatbuffer on construction and the
-        // memory is immutable once we construct the handle.
-        unsafe { flatbuffers::root_unchecked::<ManifestV1>(raw) }
-    }
-
-    pub fn create_new() -> Self {
-        let builder = &mut FlatBufferBuilder::new();
-        let l0 = Some(builder.create_vector::<ForwardsUOffset<CompactedSsTable>>(&[]));
-        let compacted = Some(builder.create_vector::<ForwardsUOffset<SortedRun>>(&[]));
-        let manifest = ManifestV1::create(
-            builder,
-            &ManifestV1Args {
-                manifest_id: 1,
-                writer_epoch: 1,
-                compactor_epoch: 0,
-                wal_id_last_compacted: 0,
-                wal_id_last_seen: 0,
-                l0_last_compacted: None,
-                l0,
-                compacted,
-                snapshots: None,
-            },
-        );
-        builder.finish(manifest, None);
-        let data = Bytes::copy_from_slice(builder.finished_data());
-        Self { data }
-    }
-
-    pub fn create_updated_manifest(&self, compacted_db_state: &CoreDbState) -> ManifestV1Owned {
-        let old_manifest = self.borrow();
-        let builder = FlatBufferBuilder::new();
-        let mut manifest_builder = DbFlatBufferBuilder::new(builder);
-        Self {
-            data: manifest_builder
-                .create_manifest_from_compacted_dbstate(old_manifest, compacted_db_state),
+impl FlatBufferManifestCodec {
+    pub fn manifest(&self, manifest: &ManifestV1) -> Manifest {
+        let l0_last_compacted = manifest
+            .l0_last_compacted()
+            .map(|id| Ulid::from((id.high(), id.low())));
+        let mut l0 = VecDeque::new();
+        for man_sst in manifest.l0().iter() {
+            let man_sst_id = man_sst.id().expect("SSTs in manifest must have IDs");
+            let sst_id = Compacted(Ulid::from((man_sst_id.high(), man_sst_id.low())));
+            let sst_info = SsTableInfoOwned::create_copy(
+                &man_sst.info().expect("SSTs in manifest must have info"),
+            );
+            let l0_sst = SSTableHandle::new(sst_id, sst_info);
+            l0.push_back(l0_sst);
         }
+        let mut compacted = Vec::new();
+        for manifest_sr in manifest.compacted().iter() {
+            let mut ssts = Vec::new();
+            for manifest_sst in manifest_sr.ssts().iter() {
+                let id = Compacted(manifest_sst.id().expect("sst must have id").ulid());
+                let info = SsTableInfoOwned::create_copy(
+                    &manifest_sst.info().expect("sst must have info"),
+                );
+                ssts.push(SSTableHandle::new(id, info));
+            }
+            compacted.push(db_state::SortedRun {
+                id: manifest_sr.id(),
+                ssts,
+            })
+        }
+        let core = CoreDbState {
+            l0_last_compacted,
+            l0,
+            compacted,
+            next_wal_sst_id: manifest.wal_id_last_seen() + 1,
+            last_compacted_wal_sst_id: manifest.wal_id_last_compacted(),
+        };
+        Manifest {
+            core,
+            writer_epoch: manifest.writer_epoch(),
+            compactor_epoch: manifest.compactor_epoch(),
+        }
+    }
+
+    pub fn create_from_manifest(&self, manifest: &Manifest) -> Bytes {
+        let builder = FlatBufferBuilder::new();
+        let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
+        db_fb_builder.create_manifest(manifest)
     }
 }
 
@@ -217,25 +229,22 @@ impl<'b> DbFlatBufferBuilder<'b> {
         self.builder.create_vector(sorted_runs_fbs.as_ref())
     }
 
-    fn create_manifest_from_compacted_dbstate(
-        &mut self,
-        old_manifest: ManifestV1,
-        compacted_db_state: &CoreDbState,
-    ) -> Bytes {
-        let l0 = self.add_compacted_ssts(compacted_db_state.l0.iter());
+    fn create_manifest(&mut self, manifest: &Manifest) -> Bytes {
+        let core = &manifest.core;
+        let l0 = self.add_compacted_ssts(core.l0.iter());
         let mut l0_last_compacted = None;
-        if let Some(ulid) = compacted_db_state.l0_last_compacted.as_ref() {
+        if let Some(ulid) = core.l0_last_compacted.as_ref() {
             l0_last_compacted = Some(self.add_compacted_sst_id(ulid))
         }
-        let compacted = self.add_sorted_runs(&compacted_db_state.compacted);
+        let compacted = self.add_sorted_runs(&core.compacted);
         let manifest = ManifestV1::create(
             &mut self.builder,
             &ManifestV1Args {
-                manifest_id: old_manifest.manifest_id() + 1,
-                writer_epoch: old_manifest.writer_epoch(),
-                compactor_epoch: old_manifest.compactor_epoch(),
-                wal_id_last_compacted: compacted_db_state.last_compacted_wal_sst_id,
-                wal_id_last_seen: compacted_db_state.next_wal_sst_id - 1,
+                manifest_id: 0, // todo: get rid of me
+                writer_epoch: manifest.writer_epoch,
+                compactor_epoch: manifest.compactor_epoch,
+                wal_id_last_compacted: core.last_compacted_wal_sst_id,
+                wal_id_last_seen: core.next_wal_sst_id - 1,
                 l0_last_compacted,
                 l0: Some(l0),
                 compacted: Some(compacted),
