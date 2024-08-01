@@ -3,7 +3,6 @@ use crate::block::Block;
 use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
-use crate::flatbuffer_types::ManifestV1Owned;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use bytes::{BufMut, Bytes};
 use fail_parallel::{fail_point, FailPointRegistry};
@@ -23,7 +22,6 @@ pub struct TableStore {
     root_path: Path,
     wal_path: &'static str,
     compacted_path: &'static str,
-    manifest_path: &'static str,
     fp_registry: Arc<FailPointRegistry>,
     // TODO: we cache the filters here for now, so the db doesn't need to reload them
     //       for each read. This means that all the filters need to fit in memory.
@@ -88,52 +86,8 @@ impl TableStore {
             root_path,
             wal_path: "wal",
             compacted_path: "compacted",
-            manifest_path: "manifest",
             fp_registry,
             filter_cache: RwLock::new(HashMap::new()),
-        }
-    }
-
-    pub(crate) async fn open_latest_manifest(
-        &self,
-    ) -> Result<Option<ManifestV1Owned>, SlateDBError> {
-        let manifest_path = &Path::from(format!("{}/{}/", &self.root_path, self.manifest_path));
-        let mut files_stream = self.object_store.list(Some(manifest_path));
-        let mut manifest_file_path: Option<Path> = None;
-
-        while let Some(file) = match files_stream.next().await.transpose() {
-            Ok(file) => file,
-            Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
-        } {
-            match self.parse_id(&file.location, "manifest") {
-                Ok(_) => {
-                    manifest_file_path = match manifest_file_path {
-                        Some(path) => Some(if path < file.location {
-                            file.location
-                        } else {
-                            path
-                        }),
-                        None => Some(file.location.clone()),
-                    }
-                }
-                Err(_) => continue,
-            }
-        }
-
-        if let Some(resolved_manifest_file_path) = manifest_file_path {
-            let manifest_bytes = match self.object_store.get(&resolved_manifest_file_path).await {
-                Ok(manifest) => match manifest.bytes().await {
-                    Ok(bytes) => bytes,
-                    Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
-                },
-                Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
-            };
-
-            ManifestV1Owned::new(manifest_bytes.clone())
-                .map(Some)
-                .map_err(SlateDBError::InvalidFlatbuffer)
-        } else {
-            Ok(None)
         }
     }
 
@@ -158,26 +112,6 @@ impl TableStore {
 
         wal_list.sort();
         Ok(wal_list)
-    }
-
-    pub(crate) async fn write_manifest(
-        &self,
-        manifest: &ManifestV1Owned,
-    ) -> Result<(), SlateDBError> {
-        let manifest_path = &Path::from(format!(
-            "{}/{}/{:020}.{}",
-            &self.root_path,
-            self.manifest_path,
-            manifest.borrow().manifest_id(),
-            self.manifest_path
-        ));
-
-        self.object_store
-            .put(manifest_path, Bytes::copy_from_slice(manifest.data()))
-            .await
-            .map_err(SlateDBError::ObjectStoreError)?;
-
-        Ok(())
     }
 
     pub(crate) fn table_writer(&self, id: SsTableId) -> EncodedSsTableWriter {

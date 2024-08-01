@@ -13,12 +13,14 @@ pub(crate) enum MemtableFlushThreadMsg {
 impl DbInner {
     pub(crate) async fn load_manifest(&self) -> Result<(), SlateDBError> {
         let current_manifest = self
-            .table_store
-            .open_latest_manifest()
+            .manifest_store
+            .read_latest_manifest()
             .await?
             .expect("manifest must exist");
         let mut wguard_state = self.state.write();
-        wguard_state.refresh_db_state(current_manifest);
+        wguard_state.refresh_db_state(current_manifest.clone());
+        let mut wguard_manifest = self.manifest.write();
+        *wguard_manifest = current_manifest;
         Ok(())
     }
 
@@ -30,12 +32,22 @@ impl DbInner {
             *wguard_manifest = new_manifest;
             wguard_manifest.clone()
         };
-        self.table_store.write_manifest(&manifest).await
+        self.manifest_store.write_manifest(&manifest).await
     }
 
     pub(crate) async fn write_manifest_safely(&self) -> Result<(), SlateDBError> {
-        self.load_manifest().await?;
-        self.write_manifest().await
+        // todo: pull this write loop into another type
+        // todo: check for writer fencing
+        loop {
+            self.load_manifest().await?;
+            match self.write_manifest().await {
+                Ok(_) => return Ok(()),
+                Err(SlateDBError::ManifestVersionExists) => {
+                    print!("conflicting manifest version. retry write");
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     pub(crate) async fn flush_imm_memtables_to_l0(&self) -> Result<(), SlateDBError> {

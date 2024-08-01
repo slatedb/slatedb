@@ -18,6 +18,9 @@ pub enum SlateDBError {
     #[error("Object store error")]
     ObjectStoreError(#[from] object_store::Error),
 
+    #[error("Manifest file already exists")]
+    ManifestVersionExists,
+
     #[error("Invalid sst error")]
     InvalidFlatbuffer(#[from] flatbuffers::InvalidFlatbuffer),
 

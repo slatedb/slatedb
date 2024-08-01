@@ -100,8 +100,24 @@ impl CompactorState {
         // todo: validate the compaction here
         //       https://github.com/slatedb/slatedb/issues/96
         if self.compactions.contains_key(&compaction.destination) {
+            // we already have an ongoing compaction for this destination
             return Err(SlateDBError::InvalidCompaction);
         }
+        if self
+            .db_state
+            .compacted
+            .iter()
+            .any(|sr| sr.id == compaction.destination)
+        {
+            // the compaction overwrites an existing sr but doesn't include the sr
+            if !compaction.sources.iter().any(|src| match src {
+                SourceId::SortedRun(sr) => *sr == compaction.destination,
+                SourceId::Sst(_) => false,
+            }) {
+                return Err(SlateDBError::InvalidCompaction);
+            }
+        }
+        println!("accepted submitted compaction: {:#?}", compaction);
         self.compactions.insert(compaction.destination, compaction);
         Ok(())
     }
@@ -139,11 +155,12 @@ impl CompactorState {
         merged.last_compacted_wal_sst_id = writer_manifest.wal_id_last_compacted();
         merged.next_wal_sst_id = writer_manifest.wal_id_last_seen() + 1;
         self.db_state = merged;
-        self.manifest = self.manifest.create_updated_manifest(&self.db_state);
+        self.manifest = writer_manifest_owned.create_updated_manifest(&self.db_state);
     }
 
     pub(crate) fn finish_compaction(&mut self, output_sr: SortedRun) {
         if let Some(compaction) = self.compactions.get(&output_sr.id) {
+            println!("finished compaction: {:#?}", compaction);
             // reconstruct l0
             let compaction_l0s: HashSet<Ulid> = compaction
                 .sources
@@ -184,6 +201,7 @@ impl CompactorState {
             if !inserted {
                 new_compacted.push(output_sr.clone());
             }
+            Self::assert_compacted_srs_in_id_order(&new_compacted);
             let first_source = compaction
                 .sources
                 .first()
@@ -200,6 +218,14 @@ impl CompactorState {
             self.compactions.remove(&output_sr.id);
         }
     }
+
+    fn assert_compacted_srs_in_id_order(compacted: &[SortedRun]) {
+        let mut last_sr_id = u32::MAX;
+        for sr in compacted.iter() {
+            assert!(sr.id < last_sr_id);
+            last_sr_id = sr.id;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -209,8 +235,7 @@ mod tests {
     use crate::compactor_state::SourceId::Sst;
     use crate::db::{Db, DbOptions};
     use crate::db_state::SsTableId;
-    use crate::sst::SsTableFormat;
-    use crate::tablestore::TableStore;
+    use crate::manifest_store::ManifestStore;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -314,13 +339,16 @@ mod tests {
     fn test_should_refresh_db_state_correctly_when_never_compacted() {
         // given:
         let rt = build_runtime();
-        let (os, table_store, mut state) = build_test_state(rt.handle());
+        let (os, manifest_store, mut state) = build_test_state(rt.handle());
         // open a new db and write another l0
         let db = build_db(os.clone(), rt.handle());
         rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48]));
         rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48]));
-        let writer_manifest =
-            wait_for_manifest_with_l0_len(&table_store, rt.handle(), state.db_state().l0.len() + 1);
+        let writer_manifest = wait_for_manifest_with_l0_len(
+            &manifest_store,
+            rt.handle(),
+            state.db_state().l0.len() + 1,
+        );
 
         // when:
         state.refresh_db_state(writer_manifest.clone());
@@ -492,13 +520,13 @@ mod tests {
     }
 
     fn wait_for_manifest_with_l0_len(
-        table_store: &Arc<TableStore>,
+        manifest_store: &Arc<ManifestStore>,
         tokio_handle: &Handle,
         len: usize,
     ) -> ManifestV1Owned {
         run_for(Duration::from_secs(30), || {
             let maybe_manifest = tokio_handle
-                .block_on(table_store.open_latest_manifest())
+                .block_on(manifest_store.read_latest_manifest())
                 .unwrap()
                 .unwrap();
             if maybe_manifest.borrow().l0().len() == len {
@@ -525,7 +553,7 @@ mod tests {
 
     fn build_test_state(
         tokio_handle: &Handle,
-    ) -> (Arc<dyn ObjectStore>, Arc<TableStore>, CompactorState) {
+    ) -> (Arc<dyn ObjectStore>, Arc<ManifestStore>, CompactorState) {
         let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let db = build_db(os.clone(), tokio_handle);
         let l0_count: u64 = 5;
@@ -534,13 +562,12 @@ mod tests {
             tokio_handle.block_on(db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48]));
         }
         tokio_handle.block_on(db.close()).unwrap();
-        let sst_format = SsTableFormat::new(4096, 10);
-        let table_store = Arc::new(TableStore::new(os.clone(), sst_format, Path::from(PATH)));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let manifest = tokio_handle
-            .block_on(table_store.open_latest_manifest())
+            .block_on(manifest_store.read_latest_manifest())
             .unwrap()
             .unwrap();
         let state = CompactorState::new(manifest);
-        (os, table_store, state)
+        (os, manifest_store, state)
     }
 }

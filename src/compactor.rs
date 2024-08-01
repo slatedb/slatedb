@@ -4,6 +4,7 @@ use crate::compactor_state::{Compaction, CompactorState};
 use crate::db_state::{SSTableHandle, SortedRun};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::ManifestV1Owned;
+use crate::manifest_store::ManifestStore;
 use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
 use crate::tablestore::TableStore;
 use std::collections::HashMap;
@@ -50,6 +51,7 @@ pub(crate) struct Compactor {
 
 impl Compactor {
     pub(crate) async fn new(
+        manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         options: CompactorOptions,
         tokio_handle: Handle,
@@ -57,8 +59,13 @@ impl Compactor {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let (err_tx, err_rx) = tokio::sync::oneshot::channel();
         let main_thread = thread::spawn(move || {
-            let load_result =
-                CompactorOrchestrator::new(options, table_store.clone(), tokio_handle, external_rx);
+            let load_result = CompactorOrchestrator::new(
+                options,
+                manifest_store.clone(),
+                table_store.clone(),
+                tokio_handle,
+                external_rx,
+            );
             let mut orchestrator = match load_result {
                 Ok(orchestrator) => orchestrator,
                 Err(err) => {
@@ -88,7 +95,7 @@ impl Compactor {
 
 struct CompactorOrchestrator {
     options: Arc<CompactorOptions>,
-    table_store: Arc<TableStore>,
+    manifest_store: Arc<ManifestStore>,
     tokio_handle: Handle,
     state: CompactorState,
     scheduler: Box<dyn CompactionScheduler>,
@@ -100,12 +107,13 @@ struct CompactorOrchestrator {
 impl CompactorOrchestrator {
     fn new(
         options: CompactorOptions,
+        manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         tokio_handle: Handle,
         external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
     ) -> Result<Self, SlateDBError> {
         let options = Arc::new(options);
-        let state = Self::load_state(table_store.clone(), &tokio_handle)?;
+        let state = Self::load_state(manifest_store.clone(), &tokio_handle)?;
         let scheduler = Self::load_compaction_scheduler(options.as_ref());
         let (worker_tx, worker_rx) = crossbeam_channel::unbounded();
         let executor = TokioCompactionExecutor::new(
@@ -116,7 +124,7 @@ impl CompactorOrchestrator {
         );
         let orchestrator = Self {
             options,
-            table_store,
+            manifest_store,
             tokio_handle,
             state,
             scheduler,
@@ -133,10 +141,10 @@ impl CompactorOrchestrator {
     }
 
     fn load_state(
-        table_store: Arc<TableStore>,
+        manifest_store: Arc<ManifestStore>,
         tokio_handle: &Handle,
     ) -> Result<CompactorState, SlateDBError> {
-        let maybe_manifest = tokio_handle.block_on(table_store.open_latest_manifest())?;
+        let maybe_manifest = tokio_handle.block_on(manifest_store.read_latest_manifest())?;
         if let Some(manifest) = maybe_manifest {
             // todo: bump epoch here
             let state = CompactorState::new(manifest);
@@ -170,7 +178,7 @@ impl CompactorOrchestrator {
     fn load_manifest(&mut self) -> Result<(), SlateDBError> {
         let manifest = self
             .tokio_handle
-            .block_on(self.table_store.open_latest_manifest())?;
+            .block_on(self.manifest_store.read_latest_manifest())?;
         // todo: check epoch here
         self.refresh_db_state(manifest.expect("manifest must exist"))?;
         Ok(())
@@ -179,15 +187,21 @@ impl CompactorOrchestrator {
     fn write_manifest(&self) -> Result<(), SlateDBError> {
         let manifest = self.state.manifest();
         self.tokio_handle
-            .block_on(self.table_store.write_manifest(manifest))
+            .block_on(self.manifest_store.write_manifest(manifest))
     }
 
     fn write_manifest_safely(&mut self) -> Result<(), SlateDBError> {
-        // todo: run this in a loop until either the write succeeds or we get fenced
-        // read the manifest first to pull in any writer changes and check for compactor fencing
-        self.load_manifest()?;
-        self.write_manifest()?;
-        Ok(())
+        // todo: check for compactor fencing
+        loop {
+            self.load_manifest()?;
+            match self.write_manifest() {
+                Ok(_) => return Ok(()),
+                Err(SlateDBError::ManifestVersionExists) => {
+                    print!("conflicting manifest version. retry write");
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     fn maybe_schedule_compactions(&mut self) -> Result<(), SlateDBError> {
@@ -262,6 +276,7 @@ mod tests {
     use crate::db_state::{SSTableHandle, SsTableId};
     use crate::flatbuffer_types::SsTableInfoOwned;
     use crate::iter::KeyValueIterator;
+    use crate::manifest_store::ManifestStore;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
@@ -289,7 +304,7 @@ mod tests {
     #[tokio::test]
     async fn test_compactor_compacts_l0() {
         // given:
-        let (_, table_store, db) = build_test_db().await;
+        let (_, manifest_store, table_store, db) = build_test_db().await;
         for i in 0..4 {
             db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48]).await;
             db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48]).await;
@@ -297,7 +312,11 @@ mod tests {
 
         // when:
         let maybe_manifest_owned = run_for(Duration::from_secs(10), || async {
-            let manifest = table_store.open_latest_manifest().await.unwrap().unwrap();
+            let manifest = manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .unwrap();
             if manifest.borrow().l0_last_compacted().is_some() {
                 return Some(manifest);
             }
@@ -337,13 +356,14 @@ mod tests {
         // given:
         // write an l0
         let rt = build_runtime();
-        let (os, table_store, db) = rt.block_on(build_test_db());
+        let (os, manifest_store, table_store, db) = rt.block_on(build_test_db());
         rt.block_on(db.put(&[b'a'; 32], &[b'b'; 96]));
         rt.block_on(db.close()).unwrap();
         let options = DEFAULT_OPTIONS.clone();
         let (_, external_rx) = crossbeam_channel::unbounded();
         let mut orchestrator = CompactorOrchestrator::new(
             options.compactor_options.unwrap(),
+            manifest_store.clone(),
             table_store.clone(),
             rt.handle().clone(),
             external_rx,
@@ -375,7 +395,7 @@ mod tests {
 
         // then:
         let manifest_owned = rt
-            .block_on(table_store.open_latest_manifest())
+            .block_on(manifest_store.read_latest_manifest())
             .unwrap()
             .unwrap();
         let manifest = manifest_owned.borrow();
@@ -418,13 +438,19 @@ mod tests {
         None
     }
 
-    async fn build_test_db() -> (Arc<dyn ObjectStore>, Arc<TableStore>, Db) {
+    async fn build_test_db() -> (
+        Arc<dyn ObjectStore>,
+        Arc<ManifestStore>,
+        Arc<TableStore>,
+        Db,
+    ) {
         let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let db = Db::open(Path::from(PATH), DEFAULT_OPTIONS, os.clone())
             .await
             .unwrap();
         let sst_format = SsTableFormat::new(32, 10);
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let table_store = Arc::new(TableStore::new(os.clone(), sst_format, Path::from(PATH)));
-        (os, table_store, db)
+        (os, manifest_store, table_store, db)
     }
 }
