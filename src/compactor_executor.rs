@@ -1,12 +1,12 @@
 use crate::compactor::WorkerToOrchestoratorMsg::CompactionFinished;
 use crate::compactor::{CompactorOptions, WorkerToOrchestoratorMsg};
-use crate::db_state::SortedRun;
+use crate::db_state::{SSTableHandle, SortedRun, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
-use crate::tablestore::{SSTableHandle, SsTableId, TableStore};
+use crate::tablestore::TableStore;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::mem;

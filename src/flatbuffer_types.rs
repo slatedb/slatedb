@@ -1,5 +1,5 @@
 use crate::db_state;
-use crate::db_state::CoreDbState;
+use crate::db_state::{CoreDbState, SSTableHandle};
 use bytes::Bytes;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
 use ulid::Ulid;
@@ -8,11 +8,11 @@ use ulid::Ulid;
 #[allow(warnings)]
 #[rustfmt::skip]
 mod manifest_generated;
+use crate::db_state::SsTableId;
 use crate::flatbuffer_types::manifest_generated::{
     CompactedSsTable, CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, SortedRun,
     SortedRunArgs,
 };
-use crate::tablestore::{SSTableHandle, SsTableId};
 pub use manifest_generated::{
     BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableInfo, SsTableInfoArgs,
 };

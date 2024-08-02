@@ -1,8 +1,9 @@
 use crate::compactor::{CompactorOptions, WorkerToOrchestoratorMsg};
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
+use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::sst::SsTableFormat;
-use crate::tablestore::{SSTableHandle, SsTableId, TableStore};
+use crate::tablestore::TableStore;
 use crate::test_utils::OrderedBytesGenerator;
 use bytes::BufMut;
 use futures::stream::FuturesUnordered;

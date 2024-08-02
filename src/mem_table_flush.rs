@@ -1,7 +1,6 @@
 use crate::db::DbInner;
-use crate::db_state::CoreDbState;
+use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
-use crate::tablestore::SsTableId;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use ulid::Ulid;
@@ -18,18 +17,8 @@ impl DbInner {
             .open_latest_manifest()
             .await?
             .expect("manifest must exist");
-        let snapshot = {
-            let state_snapshot = self.state.read().snapshot();
-            state_snapshot.state.clone()
-        };
-        let compacted = CoreDbState::load_srs_from_manifest(
-            &snapshot.core.compacted,
-            &current_manifest.borrow(),
-            self.table_store.as_ref(),
-        )
-        .await?;
         let mut wguard_state = self.state.write();
-        wguard_state.refresh_db_state(current_manifest, compacted);
+        wguard_state.refresh_db_state(current_manifest);
         Ok(())
     }
 

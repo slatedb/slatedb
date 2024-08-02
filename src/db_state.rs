@@ -1,24 +1,43 @@
-use crate::error::SlateDBError;
 use crate::flatbuffer_types::{ManifestV1, ManifestV1Owned, SsTableInfoOwned};
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
-use crate::tablestore::SsTableId::Compacted;
-use crate::tablestore::{SSTableHandle, TableStore};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use ulid::Ulid;
+use SsTableId::Compacted;
 
-pub(crate) struct DbState {
-    memtable: WritableKVTable,
-    wal: WritableKVTable,
-    state: Arc<COWDbState>,
+#[derive(Clone, PartialEq)]
+pub struct SSTableHandle {
+    pub id: SsTableId,
+    pub info: SsTableInfoOwned,
 }
 
-// represents the state that is mutated by creating a new copy with the mutations
-#[derive(Clone)]
-pub(crate) struct COWDbState {
-    pub(crate) imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
-    pub(crate) imm_wal: VecDeque<Arc<ImmutableWal>>,
-    pub(crate) core: CoreDbState,
+impl SSTableHandle {
+    pub(crate) fn new(id: SsTableId, info: SsTableInfoOwned) -> Self {
+        SSTableHandle { id, info }
+    }
+
+    pub(crate) fn range_covers_key(&self, key: &[u8]) -> bool {
+        if let Some(first_key) = self.info.borrow().first_key() {
+            return key >= first_key.bytes();
+        }
+        false
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Hash, Eq)]
+pub enum SsTableId {
+    Wal(u64),
+    Compacted(Ulid),
+}
+
+impl SsTableId {
+    #[allow(clippy::panic)]
+    pub(crate) fn unwrap_compacted_id(&self) -> Ulid {
+        match self {
+            SsTableId::Wal(_) => panic!("found WAL id when unwrapping compacted ID"),
+            Compacted(ulid) => *ulid,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -51,6 +70,19 @@ impl SortedRun {
     }
 }
 
+pub(crate) struct DbState {
+    memtable: WritableKVTable,
+    wal: WritableKVTable,
+    state: Arc<COWDbState>,
+}
+
+// represents the state that is mutated by creating a new copy with the mutations
+#[derive(Clone)]
+pub(crate) struct COWDbState {
+    pub(crate) imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
+    pub(crate) imm_wal: VecDeque<Arc<ImmutableWal>>,
+    pub(crate) core: CoreDbState,
+}
 // represents the core db state that we persist in the manifest
 #[derive(Clone, PartialEq)]
 pub(crate) struct CoreDbState {
@@ -70,14 +102,7 @@ pub(crate) struct DbStateSnapshot {
 }
 
 impl CoreDbState {
-    // TODO: SSTs only need table store to be loaded because filters are currently loaded when
-    //       an sst is opened. Once we load filters lazily we can drop tablestore and make this
-    //       synchronous
-    //       https://github.com/slatedb/slatedb/issues/89
-    pub async fn load(
-        manifest: &ManifestV1Owned,
-        table_store: &TableStore,
-    ) -> Result<Self, SlateDBError> {
+    pub fn load(manifest: &ManifestV1Owned) -> Self {
         let manifest = manifest.borrow();
         let l0_last_compacted = manifest
             .l0_last_compacted()
@@ -89,64 +114,50 @@ impl CoreDbState {
             let sst_info = SsTableInfoOwned::create_copy(
                 &man_sst.info().expect("SSTs in manifest must have info"),
             );
-            let l0_sst = table_store.open_compacted_sst(sst_id, sst_info).await?;
+            let l0_sst = SSTableHandle::new(sst_id, sst_info);
             l0.push_back(l0_sst);
         }
-        let compacted = Self::load_srs_from_manifest(&Vec::new(), &manifest, table_store).await?;
-        Ok(CoreDbState {
+        let compacted = Self::load_srs_from_manifest(&manifest);
+        CoreDbState {
             l0_last_compacted,
             l0,
             compacted,
             next_wal_sst_id: manifest.wal_id_last_compacted() + 1,
             last_compacted_wal_sst_id: manifest.wal_id_last_compacted(),
-        })
+        }
     }
 
-    pub async fn load_srs_from_manifest(
-        compacted: &[SortedRun],
-        manifest: &ManifestV1<'_>,
-        table_store: &TableStore,
-    ) -> Result<Vec<SortedRun>, SlateDBError> {
-        let old_runs_by_id: HashMap<u32, &SortedRun> =
-            compacted.iter().map(|sr| (sr.id, sr)).collect();
+    fn load_srs_from_manifest(manifest: &ManifestV1<'_>) -> Vec<SortedRun> {
         let mut new_compacted = Vec::new();
-        for compactor_sr in manifest.compacted().iter() {
-            if let Some(old_sr) = old_runs_by_id.get(&compactor_sr.id()) {
-                new_compacted.push((*old_sr).clone());
-            } else {
-                let mut ssts = Vec::new();
-                for compactor_sst in compactor_sr.ssts().iter() {
-                    let id = Compacted(compactor_sst.id().expect("sst must have id").ulid());
-                    let info = SsTableInfoOwned::create_copy(
-                        &compactor_sst.info().expect("sst must have info"),
-                    );
-                    ssts.push(table_store.open_compacted_sst(id, info).await?);
-                }
-                new_compacted.push(SortedRun {
-                    id: compactor_sr.id(),
-                    ssts,
-                })
+        for manifest_sr in manifest.compacted().iter() {
+            let mut ssts = Vec::new();
+            for manifest_sst in manifest_sr.ssts().iter() {
+                let id = Compacted(manifest_sst.id().expect("sst must have id").ulid());
+                let info = SsTableInfoOwned::create_copy(
+                    &manifest_sst.info().expect("sst must have info"),
+                );
+                ssts.push(SSTableHandle::new(id, info));
             }
+            new_compacted.push(SortedRun {
+                id: manifest_sr.id(),
+                ssts,
+            })
         }
-        Ok(new_compacted)
+        new_compacted
     }
 }
 
 impl DbState {
-    pub async fn load(
-        manifest: &ManifestV1Owned,
-        table_store: &TableStore,
-    ) -> Result<Self, SlateDBError> {
-        let core = CoreDbState::load(manifest, table_store).await?;
-        Ok(Self {
+    pub fn load(manifest: &ManifestV1Owned) -> Self {
+        Self {
             memtable: WritableKVTable::new(),
             wal: WritableKVTable::new(),
             state: Arc::new(COWDbState {
                 imm_memtable: VecDeque::new(),
                 imm_wal: VecDeque::new(),
-                core,
+                core: CoreDbState::load(manifest),
             }),
-        })
+        }
     }
 
     pub fn state(&self) -> Arc<COWDbState> {
@@ -230,11 +241,7 @@ impl DbState {
         self.update_state(state);
     }
 
-    pub fn refresh_db_state(
-        &mut self,
-        compactor_manifest_owned: ManifestV1Owned,
-        compacted: Vec<SortedRun>,
-    ) {
+    pub fn refresh_db_state(&mut self, compactor_manifest_owned: ManifestV1Owned) {
         let compactor_manifest = compactor_manifest_owned.borrow();
         // copy over L0 up to l0_last_compacted
         let l0_last_compacted = compactor_manifest
@@ -249,10 +256,105 @@ impl DbState {
             }
             new_l0.push_back(sst.clone());
         }
+        let compacted = CoreDbState::load_srs_from_manifest(&compactor_manifest);
         let mut state = self.state_copy();
         state.core.l0_last_compacted = l0_last_compacted;
         state.core.l0 = new_l0;
         state.core.compacted = compacted;
         self.update_state(state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db_state::{DbState, SSTableHandle, SsTableId};
+    use crate::flatbuffer_types::{
+        BlockMeta, ManifestV1Owned, SsTableInfo, SsTableInfoArgs, SsTableInfoOwned,
+    };
+    use bytes::Bytes;
+    use flatbuffers::ForwardsUOffset;
+    use ulid::Ulid;
+
+    #[test]
+    fn test_should_refresh_db_state_with_l0s_up_to_last_compacted() {
+        // given:
+        let manifest = ManifestV1Owned::create_new();
+        let mut db_state = DbState::load(&manifest);
+        add_l0s_to_dbstate(&mut db_state, 4);
+        // mimic the compactor popping off l0s
+        let mut l0s = db_state.state.core.l0.clone();
+        l0s.pop_back();
+        let last_compacted = db_state.state.core.l0.back().unwrap();
+        let manifest = manifest.create_updated_manifest(&db_state.state.core);
+        let mut compacted_db_state = DbState::load(&manifest);
+        let mut cow_state = compacted_db_state.state_copy();
+        cow_state.core.l0_last_compacted = Some(last_compacted.id.unwrap_compacted_id());
+        cow_state.core.l0.clone_from(&l0s);
+        compacted_db_state.update_state(cow_state);
+        let manifest = manifest.create_updated_manifest(&compacted_db_state.state.core);
+
+        // when:
+        db_state.refresh_db_state(manifest);
+
+        // then:
+        let expected: Vec<SsTableId> = l0s.iter().map(|l0| l0.id.clone()).collect();
+        let merged: Vec<SsTableId> = db_state
+            .state
+            .core
+            .l0
+            .iter()
+            .map(|l0| l0.id.clone())
+            .collect();
+        assert_eq!(expected, merged);
+    }
+
+    #[test]
+    fn test_should_refresh_db_state_with_all_l0s_if_none_compacted() {
+        // given:
+        let manifest = ManifestV1Owned::create_new();
+        let mut db_state = DbState::load(&manifest);
+        add_l0s_to_dbstate(&mut db_state, 4);
+        let l0s = db_state.state.core.l0.clone();
+        assert!(manifest.borrow().l0_last_compacted().is_none());
+
+        // when:
+        db_state.refresh_db_state(manifest);
+
+        // then:
+        let expected: Vec<SsTableId> = l0s.iter().map(|l0| l0.id.clone()).collect();
+        let merged: Vec<SsTableId> = db_state
+            .state
+            .core
+            .l0
+            .iter()
+            .map(|l0| l0.id.clone())
+            .collect();
+        assert_eq!(expected, merged);
+    }
+
+    fn add_l0s_to_dbstate(db_state: &mut DbState, n: u32) {
+        let dummy_info = create_sst_info();
+        for i in 0..n {
+            db_state.freeze_memtable(i as u64);
+            let imm = db_state.state.imm_memtable.back().unwrap().clone();
+            let handle = SSTableHandle::new(SsTableId::Compacted(Ulid::new()), dummy_info.clone());
+            db_state.move_imm_memtable_to_l0(imm, handle);
+        }
+    }
+
+    fn create_sst_info() -> SsTableInfoOwned {
+        let mut builder = flatbuffers::FlatBufferBuilder::new();
+        let block_meta_wip = builder.create_vector::<ForwardsUOffset<BlockMeta>>(&[]);
+        let wip = SsTableInfo::create(
+            &mut builder,
+            &SsTableInfoArgs {
+                first_key: None,
+                block_meta: Some(block_meta_wip),
+                filter_offset: 0,
+                filter_len: 0,
+            },
+        );
+        builder.finish(wip, None);
+        SsTableInfoOwned::new(Bytes::copy_from_slice(builder.finished_data())).unwrap()
     }
 }

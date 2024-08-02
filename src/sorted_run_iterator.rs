@@ -1,8 +1,8 @@
-use crate::db_state::SortedRun;
+use crate::db_state::{SSTableHandle, SortedRun};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::sst_iter::SstIterator;
-use crate::tablestore::{SSTableHandle, TableStore};
+use crate::tablestore::TableStore;
 use crate::types::KeyValueDeletable;
 use std::slice::Iter;
 use std::sync::Arc;
@@ -133,8 +133,8 @@ impl<'a> KeyValueIterator for SortedRunIterator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
-    use crate::tablestore::SsTableId;
     use crate::test_utils::{assert_kv, OrderedBytesGenerator};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
