@@ -166,7 +166,7 @@ Our proposed solution uses the following forms of CAS:
 
 #### Two-Phase CAS Protocol
 
-A description of the two-phase CAS protocol is described in this section. There are operations to consider:
+A description of the two-phase CAS protocol is described in this section. These are the operations to consider:
 
 1. **Writes**: A process writes an object to object storage and fails if the object already exists.
 3. **Deletes**: A process deletes an object from object storage.
