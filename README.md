@@ -70,7 +70,7 @@ fn main() {
 }
 ```
 
-An async runtime is required to use SlateDB. The example above uses `tokio`, but you can use any async runtime. SlateDB also uses the [`object_store`](https://docs.rs/object_store/latest/object_store/) crate to interact with object storage, and therefore supports any object storage that implements the `ObjectStore` trait.
+SlateDB uses the [`object_store`](https://docs.rs/object_store/latest/object_store/) crate to interact with object storage, and therefore supports any object storage that implements the `ObjectStore` trait.
 
 ## Roadmap
 
