@@ -154,8 +154,8 @@ There are five different patterns to achieve CAS for these scenarios:
 1. **Use CAS**: If the object store supports CAS, we can use it. This pattern works for both scenarios described above.
 2. **Use a transactional store**: A transactional store such as DynamoDB or MySQL can be used to store the object. The object store is not used in this mode. This approach works for both scenarios described above, but does not work well for large objects.
 3. **Use object versioning**: Object stores that support [object versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html) can emulate CAS if the bucket has versioning enabled. Versioning allows multiple versions of an object to be stored. AWS stores versions [in insertion order](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html#API_ListObjectVersions_Example_3). We can leverage this property as well as AWS's [read-after-write](https://aws.amazon.com/blogs/aws/amazon-s3-update-strong-read-after-write-consistency/) consistency guarantees to emulate CAS. Many writers can write to the same object path. Writers can then list all versions of the object. The first version (the earliest) is considered the winner. All other writers have failed the CAS operation. This does require a [ListObjectVersions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) after the write, but if CAS is needed, this is the best we can do. This pattern works for immutable files--scenario (1)--but not mutable files--scenario (2). This pattern does not work for S3 Express One Zone since it does not support object versioning.
-4. **Use a proxy**: A proxy-based solution combines an object store and a transactional store. Two values are stored: an object and a pointer to object. Readers first read the pointer (e.g. object path) from the pointer, then read the object that the pointer points to. Writers read the current object (using the reader steps), update the object, and write it back to the object store at a new location (e.g. a new UUID). Writers then update the pointer to point to the new object. The pointer update is done conditionally if the pointer still points to the file the writer read. The pointer may reside in a file on an object store that supports CAS, or a transactional store like DynamoDB or MySQL. This pattern works for both immutable and mutable files. Unlike (1), it also works well for large objects.
-5. **Use a two-phase write**: Like the proxy solution (5), a two-phase write consists of a write to both an object storage and a transactional store. Writers first write a new object to a temporary location. The writer then writes a record to a transactional store. The transactional record signals an intent to copy; it contains a source, destination, and a completion flag. "put-if-not-exists" semantics are used on the destination column. The writer then copies the new object from its temporary location to its final destination in object storage. Upon completion, the transactional store's record is set to complete and the temporary file is deleted. If the writer fails before the transactional record is written, the write is abandoned. If the writer fails after the transactional record is written, a recovery process runs in the future to copy the object and set the completion flag. This pattern works for immutable objects. It also works well for large objects.
+4. **Use a proxy**: A proxy-based solution combines an object store and a transactional store. Two values are stored: an object and a pointer to object. Readers first read the pointer (e.g. object path), then read the object that the pointer points to. Writers read the current object (using the reader steps), update the object, and write it back to the object store at a new location (e.g. a new UUID). Writers then update the pointer to point to the new object. The pointer update is done conditionally if the pointer still points to the file the writer read. The pointer may reside in a file on an object store that supports CAS, or a transactional store like DynamoDB or MySQL. This pattern works for both immutable and mutable files. Unlike (2), it also works well for large objects.
+5. **Use a two-phase write**: Like the proxy solution (4), a two-phase write consists of a write to both an object storage and a transactional store. Writers first write a new object to a temporary location. The writer then writes a record to a transactional store. The transactional record signals an intent to copy; it contains a source, destination, and a completion flag. "put-if-not-exists" semantics are used on the destination column. The writer then copies the new object from its temporary location to its final destination in object storage. Upon completion, the transactional store's record is set to complete and the temporary file is deleted. If the writer fails before the transactional record is written, the write is abandoned. If the writer fails after the transactional record is written, a recovery process runs in the future to copy the object and set the completion flag. This pattern works for immutable objects. It also works well for large objects.
 
 _NOTE: These patterns are discussed more [here](https://github.com/slatedb/slatedb/pull/39/files#r1588879655) and [here](https://github.com/slatedb/slatedb/pull/43#discussion_r1597297640)._
 
@@ -164,9 +164,11 @@ Our proposed solution uses the following forms of CAS:
 * CAS (1) for manifest and SST writes when the object store supports CAS
 * Two-phase write (5) for manifest and SST writes when the object store does not support CAS
 
+_NOTE: Two-phase write (5) was selected because the folder structure will be the same for CAS object stores. A proxy-based solution (4) would store objects at random locations; only the pointer record would contain the actual object name. (5) is in keeping with our philosophy with our belief that S3 will eventually get CAS. Once this happens, S3 clients can be replaced simply by swapping the transactional store write for a CAS write. Also, (4) requires a proxy read for every object read, while (5) requires an extra write. The extra write is preferred since it's asynchronous (it can happen after an async acknowledgement) and obviates the proxy reads._
+
 #### Two-Phase CAS Protocol
 
-A description of the two-phase CAS protocol is described in this section. There are operations to consider:
+A description of the two-phase CAS protocol is described in this section. These are the operations to consider:
 
 1. **Writes**: A process writes an object to object storage and fails if the object already exists.
 3. **Deletes**: A process deletes an object from object storage.
@@ -200,11 +202,10 @@ See the garbage collection section below for details on deletions.
 A writer or deletion process might fail at any point in the steps outlined above. Client processes may run recoveries at any point in the future to complete partial writes or deletes. The recovery process is as follows:
 
 1. List all records in DynamoDB with `committed` set to `false`.
-2. For each record, check if the `destination` object exists in object storage.
-   1. If the object exists, check if the `source` object exists.
-      1. If the `source` object exists, copy the `source` object to the `destination` object and set `committed` to `true`.
-      2. If the `source` object does not exist, delete the record from DynamoDB.
-   2. If the object does not exist, delete the record from DynamoDB.
+2. For each record:
+     1. Copy the `source` object to the `destination` object.
+     2. Set `committed` to `true`.
+     3. Delete the source object.
 
 ### File Structure
 
