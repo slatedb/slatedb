@@ -200,12 +200,10 @@ See the garbage collection section below for details on deletions.
 A writer or deletion process might fail at any point in the steps outlined above. Client processes may run recoveries at any point in the future to complete partial writes or deletes. The recovery process is as follows:
 
 1. List all records in DynamoDB with `committed` set to `false`.
-2. For each record, check if the `source` object exists in object storage.
-   1. If the `source` object exists:
-     1. Copy the `source` object to the `destination` object
-     2. Delete the source object.
-     3. Set `committed` to `true`.
-   2. If the `source` object does not exist, set the DynamoDB record's `committed` to true.
+2. For each record:
+     1. Copy the `source` object to the `destination` object.
+     2. Set `committed` to `true`.
+     3. Delete the source object.
 
 ### File Structure
 
