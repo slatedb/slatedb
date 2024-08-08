@@ -164,6 +164,8 @@ Our proposed solution uses the following forms of CAS:
 * CAS (1) for manifest and SST writes when the object store supports CAS
 * Two-phase write (5) for manifest and SST writes when the object store does not support CAS
 
+_NOTE: Two-phase write (5) was selected because the folder structure will be the same for CAS object stores. A proxy-based solution (4) would store objects at random locations; only the pointer record would contain the actual object name. (5) is in keeping with our philosophy with our belief that S3 will eventually get CAS. Once this happens, S3 clients can be replaced simply by swapping the transactional store write for a CAS write. Also, (4) requires a proxy read for every object read, while (5) requires an extra write. The extra write is preferred since it's asynchronous (it can happen after an async acknowledgement) and obviates the proxy reads._
+
 #### Two-Phase CAS Protocol
 
 A description of the two-phase CAS protocol is described in this section. These are the operations to consider:
