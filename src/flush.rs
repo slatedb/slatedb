@@ -91,7 +91,10 @@ impl DbInner {
                     _ = this.flush().await;
                   }
                   // Stop the thread.
-                  _ = rx.recv() => return
+                  _ = rx.recv() => {
+                        _ = this.flush().await;
+                        return
+                  }
                 }
             }
         }))

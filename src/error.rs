@@ -29,4 +29,7 @@ pub enum SlateDBError {
 
     #[error("Invalid Compaction")]
     InvalidCompaction,
+
+    #[error("Detected newer DB client")]
+    Fenced,
 }

@@ -19,6 +19,7 @@ mod filter;
 mod flatbuffer_types;
 mod flush;
 mod iter;
+mod manifest;
 mod manifest_store;
 mod mem_table;
 mod mem_table_flush;
