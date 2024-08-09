@@ -4,6 +4,7 @@ use crate::db_state::{DbState, SSTableHandle, SortedRun, SsTableId};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::ManifestV1Owned;
 use crate::iter::KeyValueIterator;
+use crate::manifest_store::ManifestStore;
 use crate::mem_table_flush::MemtableFlushThreadMsg;
 use crate::mem_table_flush::MemtableFlushThreadMsg::Shutdown;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -63,6 +64,7 @@ pub struct DbOptions {
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
+    pub(crate) manifest_store: Arc<ManifestStore>,
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) manifest: Arc<RwLock<ManifestV1Owned>>,
     pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
@@ -71,6 +73,7 @@ pub(crate) struct DbInner {
 impl DbInner {
     pub async fn new(
         options: DbOptions,
+        manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         manifest: ManifestV1Owned,
         memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
@@ -79,6 +82,7 @@ impl DbInner {
         let db_inner = Self {
             state: Arc::new(RwLock::new(state)),
             options,
+            manifest_store,
             table_store,
             manifest: Arc::new(RwLock::new(manifest)),
             memtable_flush_notifier,
@@ -266,24 +270,32 @@ impl Db {
     ) -> Result<Self, SlateDBError> {
         let sst_format = SsTableFormat::new(4096, options.min_filter_keys);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            object_store,
+            object_store.clone(),
             sst_format,
             path.clone(),
             fp_registry.clone(),
         ));
-        let manifest = table_store.open_latest_manifest().await?;
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest = manifest_store.read_latest_manifest().await?;
         let manifest = match manifest {
             Some(manifest) => manifest,
             None => {
                 let manifest = ManifestV1Owned::create_new();
-                table_store.write_manifest(&manifest).await?;
+                manifest_store.write_manifest(&manifest).await?;
                 manifest
             }
         };
 
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
-            DbInner::new(options, table_store.clone(), manifest, memtable_flush_tx).await?,
+            DbInner::new(
+                options,
+                manifest_store.clone(),
+                table_store.clone(),
+                manifest,
+                memtable_flush_tx,
+            )
+            .await?,
         );
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let tokio_handle = Handle::current();
@@ -293,6 +305,7 @@ impl Db {
         if let Some(compactor_options) = &inner.options.compactor_options {
             compactor = Some(
                 Compactor::new(
+                    manifest_store.clone(),
                     table_store.clone(),
                     compactor_options.clone(),
                     Handle::current(),
@@ -432,6 +445,7 @@ mod tests {
         .await
         .unwrap();
 
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let sst_format = SsTableFormat::new(4096, 10);
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
@@ -449,7 +463,7 @@ mod tests {
             let value = [b'k' + i; 50];
             kv_store.put(&key, &value).await;
             let manifest = wait_for_manifest_condition(
-                table_store.as_ref(),
+                manifest_store.as_ref(),
                 |m| m.wal_id_last_compacted() > last_compacted,
                 Duration::from_secs(30),
             )
@@ -461,7 +475,11 @@ mod tests {
             last_compacted = manifest.borrow().wal_id_last_compacted();
         }
 
-        let manifest_owned = table_store.open_latest_manifest().await.unwrap().unwrap();
+        let manifest_owned = manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .unwrap();
         let manifest = manifest_owned.borrow();
         let l0 = manifest.l0();
         assert_eq!(l0.len(), 3);
@@ -593,9 +611,12 @@ mod tests {
         }
 
         // validate that the manifest file exists.
-        let sst_format = SsTableFormat::new(4096, 10);
-        let table_store = TableStore::new(object_store.clone(), sst_format, path);
-        let manifest_owned = table_store.open_latest_manifest().await.unwrap().unwrap();
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
+        let manifest_owned = manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .unwrap();
         let manifest = manifest_owned.borrow();
         assert_eq!(manifest.wal_id_last_seen(), sst_count + 2 * l0_count);
     }
@@ -778,8 +799,7 @@ mod tests {
         let db = Db::open(path.clone(), options, object_store.clone())
             .await
             .unwrap();
-        let sst_fmt = SsTableFormat::new(64, 1);
-        let ts = TableStore::new(object_store.clone(), sst_fmt, path.clone());
+        let ms = ManifestStore::new(&path, object_store.clone());
 
         // write enough to fill up a few l0 SSTs
         for i in 0..4 {
@@ -788,22 +808,32 @@ mod tests {
         }
         // wait for compactor to compact them
         wait_for_manifest_condition(
-            &ts,
+            &ms,
             |m| m.l0_last_compacted().is_some() && m.l0().is_empty(),
             Duration::from_secs(10),
         )
         .await;
+        println!(
+            "1 l0: {} {}",
+            db.inner.state.read().state().core.l0.len(),
+            db.inner.state.read().state().core.compacted.len()
+        );
         // write more l0s and wait for compaction
         for i in 0..4 {
             db.put(&[b'f' + i; 32], &[6u8 + i; 32]).await;
             db.put(&[b's' + i; 32], &[19u8 + i; 32]).await;
         }
         wait_for_manifest_condition(
-            &ts,
+            &ms,
             |m| m.l0_last_compacted().is_some() && m.l0().is_empty(),
             Duration::from_secs(10),
         )
         .await;
+        println!(
+            "2 l0: {} {}",
+            db.inner.state.read().state().core.l0.len(),
+            db.inner.state.read().state().core.compacted.len()
+        );
         // write another l0
         db.put(&[b'a'; 32], &[128u8; 32]).await;
         db.put(&[b'm'; 32], &[129u8; 32]).await;
@@ -813,6 +843,11 @@ mod tests {
         let val = db.get(&[b'm'; 32]).await.unwrap();
         assert_eq!(val, Some(Bytes::copy_from_slice(&[129u8; 32])));
         for i in 1..4 {
+            println!(
+                "3 l0: {} {}",
+                db.inner.state.read().state().core.l0.len(),
+                db.inner.state.read().state().core.compacted.len()
+            );
             let val = db.get(&[b'a' + i; 32]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[1u8 + i; 32])));
             let val = db.get(&[b'm' + i; 32]).await.unwrap();
@@ -855,13 +890,13 @@ mod tests {
     }
 
     async fn wait_for_manifest_condition(
-        ts: &TableStore,
+        ms: &ManifestStore,
         cond: impl Fn(&ManifestV1) -> bool,
         timeout: Duration,
     ) -> ManifestV1Owned {
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
-            let manifest = ts.open_latest_manifest().await.unwrap().unwrap();
+            let manifest = ms.read_latest_manifest().await.unwrap().unwrap();
             if cond(&manifest.borrow()) {
                 return manifest;
             }

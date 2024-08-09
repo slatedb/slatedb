@@ -10,7 +10,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         // for now, just compact l0 down to a new sorted run each time
         let mut compactions = Vec::new();
         if db_state.l0.len() >= 4 {
-            let next_sr = db_state.compacted.first().map_or(0, |r| r.id);
+            let next_sr = db_state.compacted.first().map_or(0, |r| r.id + 1);
             let sources: Vec<SourceId> = db_state
                 .l0
                 .iter()

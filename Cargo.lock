@@ -1129,6 +1129,7 @@ name = "slatedb"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "async-trait",
  "bytes",
  "crc32fast",
  "crossbeam-channel",

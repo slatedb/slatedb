@@ -10,6 +10,7 @@ readme = "README.md"
 
 [dependencies]
 async-channel = "2.3.1"
+async-trait = "0.1.81"
 bytes = "1.6.0"
 crc32fast = "1.4.0"
 crossbeam-channel = "0.5.13"

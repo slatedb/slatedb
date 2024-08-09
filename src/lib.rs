@@ -19,6 +19,7 @@ mod filter;
 mod flatbuffer_types;
 mod flush;
 mod iter;
+mod manifest_store;
 mod mem_table;
 mod mem_table_flush;
 mod merge_iterator;
@@ -29,4 +30,5 @@ mod sst_iter;
 mod tablestore;
 #[cfg(any(test, feature = "db_bench"))]
 mod test_utils;
+mod transactional_object_store;
 mod types;
