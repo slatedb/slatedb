@@ -29,6 +29,7 @@ Then you can use SlateDB in your Rust code:
 use bytes::Bytes;
 use object_store::{ObjectStore, memory::InMemory, path::Path};
 use slatedb::db:{Db, DbOptions};
+use slatedb::compactor::CompactorOptions;
 use std::{sync::Arc, time::Duration};
 
 #[tokio::main]
@@ -38,9 +39,9 @@ fn main() {
     let options = DbOptions {
         flush_ms: 100,
         manifest_poll_interval: Duration::from_millis(100),
-        min_filter_keys,
-        l0_sst_size_bytes,
-        compactor_options,
+        min_filter_keys: 10,
+        l0_sst_size_bytes: 128,
+        CompactorOptions::default(),
     };
     let kv_store = Db::open(
         Path::from("/tmp/test_kv_store"),
