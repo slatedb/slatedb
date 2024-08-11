@@ -78,7 +78,7 @@ pub struct DbOptions {
     /// the manifest file allows writers to detect fencing operations and allows
     /// readers to detect newly written data.
     pub manifest_poll_interval: Duration,
-    
+
     /// Write SSTables with a bloom filter if the number of keys in the SSTable
     /// is greater than or equal to this value. Reads on small SSTables might be
     /// faster without a bloom filter.
