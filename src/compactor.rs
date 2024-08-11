@@ -23,12 +23,20 @@ pub(crate) trait CompactionScheduler {
 /// Options for the compactor.
 #[derive(Clone)]
 pub struct CompactorOptions {
-    /// The interval at which the compactor checks for a new manifest.
+    /// The interval at which the compactor checks for a new manifest and schedules
+    /// compactions.
     pub(crate) poll_interval: Duration,
+
+    /// A compacted SSTable's maximum size. If more data needs to be written during
+    /// a compaction, a new SSTable will be created when this byte size is exceeded.
     pub(crate) max_sst_size: usize,
 }
 
+/// Default options for the compactor. Currently, only a
+/// `SizeTieredCompactionScheduler` compaction strategy is implemented.
 impl CompactorOptions {
+    /// Returns a `CompactorOptions` with a 5 second poll interval and a 1GB max
+    /// SSTable size.
     pub fn default() -> Self {
         Self {
             poll_interval: DEFAULT_COMPACTOR_POLL_INTERVAL,
