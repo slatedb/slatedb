@@ -20,8 +20,10 @@ pub(crate) trait CompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
 }
 
+/// Options for the compactor.
 #[derive(Clone)]
 pub struct CompactorOptions {
+    /// The interval at which the compactor checks for a new manifest.
     pub(crate) poll_interval: Duration,
     pub(crate) max_sst_size: usize,
 }

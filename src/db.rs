@@ -20,16 +20,25 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
 
+/// Whether reads see data that's been written to object storage.
 pub enum ReadLevel {
+    /// Client reads will only see data that's been written to object storage.
     Commited,
+
+    /// Clients will see all writes, including those not yet written to object
+    /// storage.
     Uncommitted,
 }
 
+/// Configuration for client read operations. `ReadOptions` is supplied for each
+/// read call and controls the behavior of the read.
 pub struct ReadOptions {
+    /// The read commit level for read operations.
     pub read_level: ReadLevel,
 }
 
 impl ReadOptions {
+    /// Create a new ReadOptions with `read_level` set to `Commited`.
     const fn default() -> Self {
         Self {
             read_level: Commited,
@@ -37,26 +46,50 @@ impl ReadOptions {
     }
 }
 
+/// Default read options.
 const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
 
+/// Configuration for client write operations. `WriteOptions` is supplied for each
+/// write call and controls the behavior of the write.
 pub struct WriteOptions {
+    /// Whether `put` calls should block until the write has been written to
+    /// object storage.
     pub await_flush: bool,
 }
 
 impl WriteOptions {
+    /// Create a new `WriteOptions`` with `await_flush` set to `true`.
     const fn default() -> Self {
         Self { await_flush: true }
     }
 }
 
+/// Default write options.
 const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
 
+/// Configuration options for the database. These options are set on client startup.
 #[derive(Clone)]
 pub struct DbOptions {
+    /// How frequently to flush the write-ahead log to object storage (in
+    /// milliseconds).
     pub flush_ms: usize,
+
+    /// How frequently to poll for new manifest files (in milliseconds). Refreshing
+    /// the manifest file allows writers to detect fencing operations and allows
+    /// readers to detect newly written data.
     pub manifest_poll_interval: Duration,
+    
+    /// Write SSTables with a bloom filter if the number of keys in the SSTable
+    /// is greater than or equal to this value. Reads on small SSTables might be
+    /// faster without a bloom filter.
     pub min_filter_keys: u32,
+
+    /// The minimum size a memtable needs to be before it is frozen and flushed to
+    /// L0 object storage. Writes will still be flushed to the object storage WAL
+    /// (based on flush_ms) regardless of this value.
     pub l0_sst_size_bytes: usize,
+
+    /// Configuration options for the compactor.
     pub compactor_options: Option<CompactorOptions>,
 }
 
