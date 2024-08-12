@@ -102,6 +102,12 @@ pub struct DbOptions {
     /// L0 SSTables there will be. L0 SSTables are not range partitioned; each is its
     /// own sorted table. As such, reads that don't hit the WAL or memtable will need
     /// to scan all L0 SSTables. The more there are, the slower the scan will be.
+    /// * **Memory usage**: The larger the L0 SSTable size threshold, the larger the
+    /// unflushed in-memory memtable will grow. This shouldn't be a concern for most
+    /// workloads, but it's worth considering for workloads with very high L0
+    /// SSTable sizes.
+    /// * **API cost**: Smaller L0 SSTable sizes will result in more frequent writes
+    /// to object storage. This can increase your object storage costs.
     ///
     /// We recommend setting this value to a size that will result in one L0 SSTable
     /// per-second. With a default compaction interval of 5 seconds, this will result
