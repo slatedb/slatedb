@@ -90,7 +90,8 @@ pub struct DbOptions {
 
     /// The minimum size a memtable needs to be before it is frozen and flushed to
     /// L0 object storage. Writes will still be flushed to the object storage WAL
-    /// (based on flush_ms) regardless of this value.
+    /// (based on flush_ms) regardless of this value. Memtable sizes are checked
+    /// every `flush_ms` milliseconds.
     /// 
     /// When setting this configuration, users must consider:
     /// 
@@ -101,6 +102,11 @@ pub struct DbOptions {
     /// L0 SSTables there will be. L0 SSTables are not range partitioned; each is its
     /// own sorted table. As such, reads that don't hit the WAL or memtable will need
     /// to scan all L0 SSTables. The more there are, the slower the scan will be.
+    /// 
+    /// We recommend setting this value to a size that will result in one L0 SSTable
+    /// per-second. With a default compaction interval of 5 seconds, this will result
+    /// in 4 or 5 L0 SSTables per compaction. Thus, a writer putting 10MiB/s of data
+    /// would configure this value to 10 * 1024 * 1024 = 10_485_760 bytes.
     pub l0_sst_size_bytes: usize,
 
     /// Configuration options for the compactor.
