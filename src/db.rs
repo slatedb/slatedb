@@ -108,6 +108,10 @@ pub struct DbOptions {
     /// SSTable sizes.
     /// * **API cost**: Smaller L0 SSTable sizes will result in more frequent writes
     /// to object storage. This can increase your object storage costs.
+    /// * **Secondary reader latency**: Secondary (non-writer) clients only see L0+
+    /// writes; they don't see WAL writes. Thus, the higher the L0 SSTable size, the
+    /// less frequently they will be written, and the longer it will take for
+    /// secondary readers to see new data.
     ///
     /// We recommend setting this value to a size that will result in one L0 SSTable
     /// per-second. With a default compaction interval of 5 seconds, this will result
