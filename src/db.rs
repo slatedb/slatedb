@@ -76,7 +76,11 @@ pub struct DbOptions {
 
     /// How frequently to poll for new manifest files (in milliseconds). Refreshing
     /// the manifest file allows writers to detect fencing operations and allows
-    /// readers to detect newly written data.
+    /// readers to detect newly compacted data.
+    /// 
+    /// **NOTE: SlateDB secondary readers (i.e. non-writer clients) do not currently
+    /// read from the WAL. Such readers only read from L0+. The manifest poll intervals
+    /// allows such readers to detect new L0+ files.**
     pub manifest_poll_interval: Duration,
 
     /// Write SSTables with a bloom filter if the number of keys in the SSTable
@@ -87,6 +91,16 @@ pub struct DbOptions {
     /// The minimum size a memtable needs to be before it is frozen and flushed to
     /// L0 object storage. Writes will still be flushed to the object storage WAL
     /// (based on flush_ms) regardless of this value.
+    /// 
+    /// When setting this configuration, users must consider:
+    /// 
+    /// * **Recovery time**: The larger the L0 SSTable size threshold, the less
+    /// frequently it will be written. As a result, the more recovery data there
+    /// will be in the WAL if a process restarts.
+    /// * **Number of L0 SSTs**: The smaller the L0 SSTable size threshold, the more
+    /// L0 SSTables there will be. L0 SSTables are not range partitioned; each is its
+    /// own sorted table. As such, reads that don't hit the WAL or memtable will need
+    /// to scan all L0 SSTables. The more there are, the slower the scan will be.
     pub l0_sst_size_bytes: usize,
 
     /// Configuration options for the compactor.

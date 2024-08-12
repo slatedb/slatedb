@@ -23,12 +23,13 @@ pub(crate) trait CompactionScheduler {
 /// Options for the compactor.
 #[derive(Clone)]
 pub struct CompactorOptions {
-    /// The interval at which the compactor checks for a new manifest and schedules
-    /// compactions.
+    /// The interval at which the compactor checks for a new manifest and decides
+    /// if a compaction must be scheduled
     pub(crate) poll_interval: Duration,
 
-    /// A compacted SSTable's maximum size. If more data needs to be written during
-    /// a compaction, a new SSTable will be created when this byte size is exceeded.
+    /// A compacted SSTable's maximum size (in bytes). If more data needs to be
+    /// written during a compaction, a new SSTable will be created when this size
+    /// is exceeded.
     pub(crate) max_sst_size: usize,
 }
 
