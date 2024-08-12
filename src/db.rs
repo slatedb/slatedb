@@ -1,5 +1,8 @@
-use crate::compactor::{Compactor, CompactorOptions};
-use crate::db::ReadLevel::{Commited, Uncommitted};
+use crate::compactor::Compactor;
+use crate::config::ReadLevel::Uncommitted;
+use crate::config::{
+    DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
+};
 use crate::db_state::{CoreDbState, DbState, SSTableHandle, SortedRun, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
@@ -17,111 +20,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::runtime::Handle;
-
-/// Whether reads see data that's been written to object storage.
-pub enum ReadLevel {
-    /// Client reads will only see data that's been written to object storage.
-    Commited,
-
-    /// Clients will see all writes, including those not yet written to object
-    /// storage.
-    Uncommitted,
-}
-
-/// Configuration for client read operations. `ReadOptions` is supplied for each
-/// read call and controls the behavior of the read.
-pub struct ReadOptions {
-    /// The read commit level for read operations.
-    pub read_level: ReadLevel,
-}
-
-impl ReadOptions {
-    /// Create a new ReadOptions with `read_level` set to `Commited`.
-    const fn default() -> Self {
-        Self {
-            read_level: Commited,
-        }
-    }
-}
-
-/// Default read options.
-const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
-
-/// Configuration for client write operations. `WriteOptions` is supplied for each
-/// write call and controls the behavior of the write.
-pub struct WriteOptions {
-    /// Whether `put` calls should block until the write has been written to
-    /// object storage.
-    pub await_flush: bool,
-}
-
-impl WriteOptions {
-    /// Create a new `WriteOptions`` with `await_flush` set to `true`.
-    const fn default() -> Self {
-        Self { await_flush: true }
-    }
-}
-
-/// Default write options.
-const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
-
-/// Configuration options for the database. These options are set on client startup.
-#[derive(Clone)]
-pub struct DbOptions {
-    /// How frequently to flush the write-ahead log to object storage (in
-    /// milliseconds).
-    pub flush_ms: usize,
-
-    /// How frequently to poll for new manifest files (in milliseconds). Refreshing
-    /// the manifest file allows writers to detect fencing operations and allows
-    /// readers to detect newly compacted data.
-    ///
-    /// **NOTE: SlateDB secondary readers (i.e. non-writer clients) do not currently
-    /// read from the WAL. Such readers only read from L0+. The manifest poll intervals
-    /// allows such readers to detect new L0+ files.**
-    pub manifest_poll_interval: Duration,
-
-    /// Write SSTables with a bloom filter if the number of keys in the SSTable
-    /// is greater than or equal to this value. Reads on small SSTables might be
-    /// faster without a bloom filter.
-    pub min_filter_keys: u32,
-
-    /// The minimum size a memtable needs to be before it is frozen and flushed to
-    /// L0 object storage. Writes will still be flushed to the object storage WAL
-    /// (based on flush_ms) regardless of this value. Memtable sizes are checked
-    /// every `flush_ms` milliseconds.
-    ///
-    /// When setting this configuration, users must consider:
-    ///
-    /// * **Recovery time**: The larger the L0 SSTable size threshold, the less
-    ///   frequently it will be written. As a result, the more recovery data there
-    ///   will be in the WAL if a process restarts.
-    /// * **Number of L0 SSTs**: The smaller the L0 SSTable size threshold, the more
-    ///   L0 SSTables there will be. L0 SSTables are not range partitioned; each is its
-    ///   own sorted table. As such, reads that don't hit the WAL or memtable will need
-    ///   to scan all L0 SSTables. The more there are, the slower the scan will be.
-    /// * **Memory usage**: The larger the L0 SSTable size threshold, the larger the
-    ///   unflushed in-memory memtable will grow. This shouldn't be a concern for most
-    ///   workloads, but it's worth considering for workloads with very high L0
-    ///   SSTable sizes.
-    /// * **API cost**: Smaller L0 SSTable sizes will result in more frequent writes
-    ///   to object storage. This can increase your object storage costs.
-    /// * **Secondary reader latency**: Secondary (non-writer) clients only see L0+
-    ///   writes; they don't see WAL writes. Thus, the higher the L0 SSTable size, the
-    ///   less frequently they will be written, and the longer it will take for
-    ///   secondary readers to see new data.
-    ///
-    /// We recommend setting this value to a size that will result in one L0 SSTable
-    /// per-second. With a default compaction interval of 5 seconds, this will result
-    /// in 4 or 5 L0 SSTables per compaction. Thus, a writer putting 10MiB/s of data
-    /// would configure this value to 10 * 1024 * 1024 = 10_485_760 bytes.
-    pub l0_sst_size_bytes: usize,
-
-    /// Configuration options for the compactor.
-    pub compactor_options: Option<CompactorOptions>,
-}
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -472,6 +371,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CompactorOptions;
     use crate::sst_iter::SstIterator;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;

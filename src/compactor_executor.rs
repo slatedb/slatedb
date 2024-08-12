@@ -1,5 +1,6 @@
+use crate::compactor::WorkerToOrchestoratorMsg;
 use crate::compactor::WorkerToOrchestoratorMsg::CompactionFinished;
-use crate::compactor::{CompactorOptions, WorkerToOrchestoratorMsg};
+use crate::config::CompactorOptions;
 use crate::db_state::{SSTableHandle, SortedRun, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
