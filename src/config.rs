@@ -6,13 +6,16 @@ pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
 #[allow(dead_code)]
 pub const DEFAULT_COMPACTOR_OPTIONS: &CompactorOptions = &CompactorOptions::default();
 
-/// Whether reads see data that's been written to object storage.
+/// Whether reads see only writes that have been committed durably to the DB.  A
+/// write is considered durably committed if all future calls to read are guaranteed
+/// to serve the data written by the write, until some later durably committed write
+/// updates the same key.
 pub enum ReadLevel {
-    /// Client reads will only see data that's been written to object storage.
+    /// Client reads will only see data that's been committed durably to the DB.
     Commited,
 
-    /// Clients will see all writes, including those not yet written to object
-    /// storage.
+    /// Clients will see all writes, including those not yet durably committed to the
+    /// DB.
     Uncommitted,
 }
 
@@ -35,8 +38,8 @@ impl ReadOptions {
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
 pub struct WriteOptions {
-    /// Whether `put` calls should block until the write has been written to
-    /// object storage.
+    /// Whether `put` calls should block until the write has been durably committed
+    /// to the DB.
     pub await_flush: bool,
 }
 
@@ -94,10 +97,12 @@ pub struct DbOptions {
     /// * **Recovery time**: The larger the L0 SSTable size threshold, the less
     ///   frequently it will be written. As a result, the more recovery data there
     ///   will be in the WAL if a process restarts.
-    /// * **Number of L0 SSTs**: The smaller the L0 SSTable size threshold, the more
-    ///   L0 SSTables there will be. L0 SSTables are not range partitioned; each is its
-    ///   own sorted table. As such, reads that don't hit the WAL or memtable will need
-    ///   to scan all L0 SSTables. The more there are, the slower the scan will be.
+    /// * **Number of L0 SSTs/SRs**: The smaller the L0 SSTable size threshold, the
+    ///   more SSTs and Sorted Runs there will be. L0 SSTables are not range
+    ///   partitioned; each is its own sorted table. Similarly, each Sorted Run also
+    ///   stores the entire keyspace. As such, reads that don't hit the WAL or memtable
+    ///   may need to scan all L0 SSTables and Sorted Runs. The more there are, the
+    ///   slower the scan will be.
     /// * **Memory usage**: The larger the L0 SSTable size threshold, the larger the
     ///   unflushed in-memory memtable will grow. This shouldn't be a concern for most
     ///   workloads, but it's worth considering for workloads with very high L0
@@ -108,11 +113,6 @@ pub struct DbOptions {
     ///   writes; they don't see WAL writes. Thus, the higher the L0 SSTable size, the
     ///   less frequently they will be written, and the longer it will take for
     ///   secondary readers to see new data.
-    ///
-    /// We recommend setting this value to a size that will result in one L0 SSTable
-    /// per-second. With a default compaction interval of 5 seconds, this will result
-    /// in 4 or 5 L0 SSTables per compaction. Thus, a writer putting 10MiB/s of data
-    /// would configure this value to 10 * 1024 * 1024 = 10_485_760 bytes.
     pub l0_sst_size_bytes: usize,
 
     /// Configuration options for the compactor.
@@ -127,8 +127,8 @@ pub struct CompactorOptions {
     pub(crate) poll_interval: Duration,
 
     /// A compacted SSTable's maximum size (in bytes). If more data needs to be
-    /// written during a compaction, a new SSTable will be created when this size
-    /// is exceeded.
+    /// written to a Sorted Run during a compaction, a new SSTable will be created
+    /// in the Sorted Run when this size is exceeded.
     pub(crate) max_sst_size: usize,
 }
 

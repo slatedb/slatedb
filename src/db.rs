@@ -119,7 +119,7 @@ impl DbInner {
         Ok(false)
     }
 
-    /// Put a key-value pair into the database. Key and value must not be empty.
+    /// Put a key-value pair into the database. Key must not be empty.
     pub async fn put_with_options(&self, key: &[u8], value: &[u8], options: &WriteOptions) {
         assert!(!key.is_empty(), "key cannot be empty");
 
