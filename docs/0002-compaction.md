@@ -1,5 +1,29 @@
 # SlateDB Compaction
 
+Table of Contents:
+
+<!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
+
+- [Current Implementation](#current-implementation)
+- [Problem](#problem)
+- [Goals](#goals)
+- [Non-Goals](#non-goals)
+- [Proposal](#proposal)
+   * [Amplification](#amplification)
+   * [High Level Overview](#high-level-overview)
+   * [Manifest Changes](#manifest-changes)
+   * [DB Options](#db-options)
+   * [WAL->L0 Compaction](#wal-l0-compaction)
+   * [Compacting Lower Levels](#compacting-lower-levels)
+   * [Back-Pressure](#back-pressure)
+   * [Reads](#reads)
+   * [Running the Compactor](#running-the-compactor)
+   * [Looking Ahead](#looking-ahead)
+- [Appendix](#appendix)
+   * [Network Bandwidth vs Disk Bandwidth on AWS](#network-bandwidth-vs-disk-bandwidth-on-aws)
+
+<!-- TOC end -->
+
 Status: Accepted
 
 Authors:
