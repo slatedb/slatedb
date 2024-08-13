@@ -1,6 +1,7 @@
 use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, CompactorState};
+use crate::config::CompactorOptions;
 use crate::db_state::{SSTableHandle, SortedRun};
 use crate::error::SlateDBError;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -10,40 +11,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
 use tokio::runtime::Handle;
 use ulid::Ulid;
 
-const DEFAULT_COMPACTOR_POLL_INTERVAL: Duration = Duration::from_secs(5);
-
 pub(crate) trait CompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
-}
-
-/// Options for the compactor.
-#[derive(Clone)]
-pub struct CompactorOptions {
-    /// The interval at which the compactor checks for a new manifest and decides
-    /// if a compaction must be scheduled
-    pub(crate) poll_interval: Duration,
-
-    /// A compacted SSTable's maximum size (in bytes). If more data needs to be
-    /// written during a compaction, a new SSTable will be created when this size
-    /// is exceeded.
-    pub(crate) max_sst_size: usize,
-}
-
-/// Default options for the compactor. Currently, only a
-/// `SizeTieredCompactionScheduler` compaction strategy is implemented.
-impl CompactorOptions {
-    /// Returns a `CompactorOptions` with a 5 second poll interval and a 1GB max
-    /// SSTable size.
-    pub fn default() -> Self {
-        Self {
-            poll_interval: DEFAULT_COMPACTOR_POLL_INTERVAL,
-            max_sst_size: 1024 * 1024 * 1024,
-        }
-    }
 }
 
 enum CompactorMainMsg {
@@ -275,7 +247,8 @@ impl CompactorOrchestrator {
 mod tests {
     use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestoratorMsg};
     use crate::compactor_state::{Compaction, SourceId};
-    use crate::db::{Db, DbOptions};
+    use crate::config::DbOptions;
+    use crate::db::Db;
     use crate::iter::KeyValueIterator;
     use crate::manifest_store::{ManifestStore, StoredManifest};
     use crate::sst::SsTableFormat;

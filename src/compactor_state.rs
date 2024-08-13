@@ -212,7 +212,8 @@ mod tests {
     use super::*;
     use crate::compactor_state::CompactionStatus::Submitted;
     use crate::compactor_state::SourceId::Sst;
-    use crate::db::{Db, DbOptions};
+    use crate::config::DbOptions;
+    use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::manifest_store::{ManifestStore, StoredManifest};
     use object_store::memory::InMemory;
