@@ -28,8 +28,8 @@ pub struct CompactorOptions {
     pub(crate) poll_interval: Duration,
 
     /// A compacted SSTable's maximum size (in bytes). If more data needs to be
-    /// written during a compaction, a new SSTable will be created when this size
-    /// is exceeded.
+    /// written to a Sorted Run during a compaction, a new SSTable will be created
+    /// in the Sorted Run when this size is exceeded.
     pub(crate) max_sst_size: usize,
 }
 

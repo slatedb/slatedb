@@ -20,13 +20,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
 
-/// Whether reads see data that's been written to object storage.
+/// Whether reads see only writes that have been committed durably to the db.  A
+/// write is considered durably committed if all future calls to read are guaranteed
+/// to serve the data written by the write, until some later durably committed write
+/// updates the same key.
 pub enum ReadLevel {
-    /// Client reads will only see data that's been written to object storage.
+    /// Client reads will only see data that's been committed durably to the db.
     Commited,
 
-    /// Clients will see all writes, including those not yet written to object
-    /// storage.
+    /// Clients will see all writes, including those not yet durably committed to the db.
     Uncommitted,
 }
 
@@ -52,8 +54,8 @@ const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
 pub struct WriteOptions {
-    /// Whether `put` calls should block until the write has been written to
-    /// object storage.
+    /// Whether `put` calls should block until the write has been durably committed
+    /// to the db.
     pub await_flush: bool,
 }
 
@@ -71,7 +73,11 @@ const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
 #[derive(Clone)]
 pub struct DbOptions {
     /// How frequently to flush the write-ahead log to object storage (in
-    /// milliseconds).
+    /// milliseconds). This also functions as an optimistic upper bound on the
+    /// latency of writes with await_flush=true. It is optimistic in the sense
+    /// that it does not account for flushes that are blocked by some external
+    /// condition (e.g. broken connectivity to the object store), or by compaction
+    /// backpressure.
     pub flush_ms: usize,
 
     /// How frequently to poll for new manifest files (in milliseconds). Refreshing
@@ -98,10 +104,11 @@ pub struct DbOptions {
     /// * **Recovery time**: The larger the L0 SSTable size threshold, the less
     ///   frequently it will be written. As a result, the more recovery data there
     ///   will be in the WAL if a process restarts.
-    /// * **Number of L0 SSTs**: The smaller the L0 SSTable size threshold, the more
-    ///   L0 SSTables there will be. L0 SSTables are not range partitioned; each is its
-    ///   own sorted table. As such, reads that don't hit the WAL or memtable will need
-    ///   to scan all L0 SSTables. The more there are, the slower the scan will be.
+    /// * **Number of L0 SSTs/SRs**: The smaller the L0 SSTable size threshold, the more
+    ///   SSTs and Sorted Runs there will be. L0 SSTables are not range partitioned; each is
+    ///   its own sorted table. Similarly, each Sorted Run also stores the entire keyspace.
+    ///   As such, reads that don't hit the WAL or memtable may need to scan all L0 SSTables.
+    ///   and Sorted Runs. The more there are, the slower the scan will be.
     /// * **Memory usage**: The larger the L0 SSTable size threshold, the larger the
     ///   unflushed in-memory memtable will grow. This shouldn't be a concern for most
     ///   workloads, but it's worth considering for workloads with very high L0
@@ -112,11 +119,6 @@ pub struct DbOptions {
     ///   writes; they don't see WAL writes. Thus, the higher the L0 SSTable size, the
     ///   less frequently they will be written, and the longer it will take for
     ///   secondary readers to see new data.
-    ///
-    /// We recommend setting this value to a size that will result in one L0 SSTable
-    /// per-second. With a default compaction interval of 5 seconds, this will result
-    /// in 4 or 5 L0 SSTables per compaction. Thus, a writer putting 10MiB/s of data
-    /// would configure this value to 10 * 1024 * 1024 = 10_485_760 bytes.
     pub l0_sst_size_bytes: usize,
 
     /// Configuration options for the compactor.
@@ -220,7 +222,7 @@ impl DbInner {
         Ok(false)
     }
 
-    /// Put a key-value pair into the database. Key and value must not be empty.
+    /// Put a key-value pair into the database. Key must not be empty.
     pub async fn put_with_options(&self, key: &[u8], value: &[u8], options: &WriteOptions) {
         assert!(!key.is_empty(), "key cannot be empty");
 
