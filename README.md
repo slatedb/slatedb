@@ -73,6 +73,10 @@ fn main() {
 
 SlateDB uses the [`object_store`](https://docs.rs/object_store/latest/object_store/) crate to interact with object storage, and therefore supports any object storage that implements the `ObjectStore` trait.
 
+## Documentation
+
+Visit [slatedb.io](https://slatedb.io) to learn more.
+
 ## Roadmap
 
 SlateDB is currently in the early stages of development. It is not yet ready for production use.
