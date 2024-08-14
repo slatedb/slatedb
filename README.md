@@ -4,23 +4,23 @@
 
 ## Introduction
 
-SlateDB is an embedded storage engine built as a [log-structured merge-tree](https://en.wikipedia.org/wiki/Log-structured_merge-tree). Unlike traditional LSM-tree storage engines, SlateDB writes data to object storage (S3, GCS, ABS, MinIO, Tigris, and so on). Leveraging object storage allows SlateDB to provide bottomless storage capacity, high durability, and easy replication. The trade-off is that object storage has a higher latency and higher API cost than local disk.
+[SlateDB](https://slatedb.io) is an embedded storage engine built as a [log-structured merge-tree](https://en.wikipedia.org/wiki/Log-structured_merge-tree). Unlike traditional LSM-tree storage engines, SlateDB writes data to object storage (S3, GCS, ABS, MinIO, Tigris, and so on). Leveraging object storage allows SlateDB to provide bottomless storage capacity, high durability, and easy replication. The trade-off is that object storage has a higher latency and higher API cost than local disk.
 
 To mitigate high write API costs (PUTs), SlateDB batches writes. Rather than writing every `put()` call to object storage, MemTables are flushed periodically to object storage as a string-sorted table (SST). The flush interval is configurable.
 
 To mitigate write latency, SlateDB provides an async `put` method. Clients that prefer strong durability can `await` on `put` until the MemTable is flushed to object storage (trading latency for durability). Clients that prefer lower latency can simply ignore the future returned by `put`.
 
-To mitigate read latency and read API costs (GETs), SlateDB uses standard LSM-tree caching techniques: in-memory block caches, compression, bloom filters, and local SST disk caches.
+To mitigate read latency and read API costs (GETs), SlateDB will use standard LSM-tree caching techniques: in-memory block caches, compression, bloom filters, and local SST disk caches.
 
-SlateDB has a configurable compaction layer. See the [compaction design document](https://github.com/slatedb/slatedb/blob/main/docs/0002-compaction.md) for more information.
+Checkout [slatedb.io](https://slatedb.io) to learn more.
 
 ## Get Started
 
-SlateDB is not published to crates.io yet. To use SlateDB, add the following to your `Cargo.toml`:
+Add the following to your `Cargo.toml` to use SlateDB:
 
 ```toml
 [dependencies]
-slatedb = { git = "https://github.com/slatedb/slatedb.git" }
+slatedb = "*"
 ```
 
 Then you can use SlateDB in your Rust code:
@@ -77,7 +77,7 @@ SlateDB uses the [`object_store`](https://docs.rs/object_store/latest/object_sto
 
 Visit [slatedb.io](https://slatedb.io) to learn more.
 
-## Roadmap
+## Features
 
 SlateDB is currently in the early stages of development. It is not yet ready for production use.
 
