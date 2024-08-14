@@ -33,7 +33,7 @@ use slatedb::config::{CompactorOptions, DbOptions};
 use std::{sync::Arc, time::Duration};
 
 #[tokio::main]
-fn main() {
+async fn main() {
     // Setup
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let options = DbOptions {
