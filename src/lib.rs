@@ -11,7 +11,7 @@ pub mod compaction_execute_bench;
 mod compactor;
 mod compactor_executor;
 mod compactor_state;
-mod config;
+pub mod config;
 pub mod db;
 mod db_common;
 mod db_state;
