@@ -5,7 +5,7 @@ edition = "2021"
 description = "A cloud native embedded storage engine built on object storage."
 repository = "https://github.com/slatedb/slatedb"
 license = "Apache-2.0"
-homepage = "https://github.com/slatedb/slatedb"
+homepage = "https://slatedb.io"
 readme = "README.md"
 
 [dependencies]
