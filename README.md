@@ -1,6 +1,11 @@
-<div align="center">
-  <a href="https://slatedb.io"><img src="https://github.com/slatedb/slatedb-website/blob/main/assets/png/gh-banner.png?raw=true" alt="SlateDB"></a>
-</div>
+<a href="https://slatedb.io">
+  <img src="https://github.com/slatedb/slatedb-website/blob/main/assets/png/gh-banner.png?raw=true" alt="SlateDB" width="100%">
+</a>
+
+<a href="https://crates.io/crates/slatedb">![Crates.io Version](https://img.shields.io/crates/v/slatedb?style=flat-square)</a>
+![GitHub License](https://img.shields.io/github/license/slatedb/slatedb?style=flat-square)
+<a href="https://slatedb.io">![slatedb.io](https://img.shields.io/badge/site-slatedb.io-00A1FF?style=flat-square)</a>
+<a href="https://discord.gg/mHYmGy5MgA">![Discord](https://img.shields.io/discord/1232385660460204122?style=flat-square)</a>
 
 ## Introduction
 
