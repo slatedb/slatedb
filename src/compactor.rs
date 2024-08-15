@@ -346,7 +346,11 @@ mod tests {
             .collect();
         // write another l0
         let db = rt
-            .block_on(Db::open_with_opts(Path::from(PATH), options.clone(), os.clone()))
+            .block_on(Db::open_with_opts(
+                Path::from(PATH),
+                options.clone(),
+                os.clone(),
+            ))
             .unwrap();
         rt.block_on(db.put(&[b'j'; 32], &[b'k'; 96]));
         rt.block_on(db.close()).unwrap();
