@@ -1,0 +1,50 @@
+include "sst.fbs";
+
+// Manifest to persist state of DB.
+table ManifestV1 {
+    // Id of manifest. Manifest file name will be derived from this id.
+    manifest_id: ulong;
+
+    // The current writer's epoch.
+    writer_epoch: ulong;
+
+    // The current compactor's epoch.
+    compactor_epoch: ulong;
+
+    // The most recent SST in the WAL that's been compacted.
+    wal_id_last_compacted: ulong;
+
+    // The most recent SST in the WAL at the time manifest was updated.
+    wal_id_last_seen: ulong;
+
+    // The last compacted l0
+    l0_last_compacted: CompactedSstId;
+
+    // A list of the L0 SSTs that are valid to read in the `compacted` folder.
+    l0: [CompactedSsTable] (required);
+
+    // A list of the sorted runs that are valid to read in the `compacted` folder.
+    compacted: [SortedRun] (required);
+
+    // A list of read snapshots that are currently open.
+    snapshots: [Snapshot];
+}
+
+table SortedRun {
+    id: uint32;
+    ssts: [CompactedSsTable] (required);
+}
+
+// Snapshot reference to be included in manifest to record active snapshots.
+table Snapshot {
+    // Id that must be unique across all open snapshots.
+    id: ulong;
+
+    // The manifest ID that this snapshot is using as its `DbState`.
+    manifest_id: ulong;
+
+    // The UTC unix timestamp seconds that a snapshot expires at. Clients may update this value.
+    // If `snapshot_expire_time_s` is older than now(), the snapshot is considered expired.
+    // If `snapshot_expire_time_s` is 0, the snapshot will never expire.
+    snapshot_expire_time_s: uint;
+}

@@ -1,0 +1,52 @@
+[package]
+name = "slatedb"
+version = "0.1.2"
+edition = "2021"
+description = "A cloud native embedded storage engine built on object storage."
+repository = "https://github.com/slatedb/slatedb"
+license = "Apache-2.0"
+homepage = "https://slatedb.io"
+readme = "README.md"
+
+[dependencies]
+async-channel = "2.3.1"
+async-trait = "0.1.81"
+bytes = "1.6.0"
+crc32fast = "1.4.0"
+crossbeam-channel = "0.5.13"
+crossbeam-skiplist = "0.1.3"
+fail-parallel = "0.5.1"
+flatbuffers = "24.3.25"
+futures = "0.3.30"
+object_store = "0.10.2"
+parking_lot = "0.12.1"
+siphasher = "1"
+thiserror = "1.0.59"
+tokio = { version = "1.37.0", features = ["macros", "sync", "rt", "rt-multi-thread"] }
+ulid = "1.1.2"
+rand = "0.8.5"
+rand_xorshift = "0.3.0"
+log = {  version = "0.4.22", features = ["std"] }
+once_cell = "1.19.0"
+snap = { version = "1.1.1", optional = true }
+flate2 = { version = "1.0.31", optional = true }
+lz4_flex = { version = "0.11.3", optional = true }
+zstd = { version = "0.13.2", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.37.0", features = ["rt-multi-thread"] }
+fail-parallel = { version = "0.5.1", features = ["failpoints"] }
+
+[features]
+default = ["aws"]
+aws = ["object_store/aws"]
+db_bench = ["aws"]
+compression = ["snappy"]
+snappy = ["dep:snap"]
+zlib = ["dep:flate2"]
+lz4 = ["dep:lz4_flex"]
+zstd = ["dep:zstd"]
+
+[[bin]]
+name = "compaction-execute-bench"
+path = "src/compaction_execute_bench/compaction_execute_bench.rs"
