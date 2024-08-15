@@ -83,7 +83,6 @@ pub(crate) struct COWDbState {
     pub(crate) imm_wal: VecDeque<Arc<ImmutableWal>>,
     pub(crate) core: CoreDbState,
 }
-
 // represents the core db state that we persist in the manifest
 #[derive(Clone, PartialEq)]
 pub(crate) struct CoreDbState {
