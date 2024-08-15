@@ -346,7 +346,7 @@ mod tests {
             .collect();
         // write another l0
         let db = rt
-            .block_on(Db::open(Path::from(PATH), options.clone(), os.clone()))
+            .block_on(Db::open_with_opts(Path::from(PATH), options.clone(), os.clone()))
             .unwrap();
         rt.block_on(db.put(&[b'j'; 32], &[b'k'; 96]));
         rt.block_on(db.close()).unwrap();
@@ -412,7 +412,7 @@ mod tests {
         Db,
     ) {
         let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::open(Path::from(PATH), options, os.clone())
+        let db = Db::open_with_opts(Path::from(PATH), options, os.clone())
             .await
             .unwrap();
         let sst_format = SsTableFormat::new(32, 10);

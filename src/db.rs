@@ -215,6 +215,13 @@ pub struct Db {
 impl Db {
     pub async fn open(
         path: Path,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> Result<Self, SlateDBError> {
+        Self::open_with_opts(path, DbOptions::default(), object_store).await
+    }
+
+    pub async fn open_with_opts(
+        path: Path,
         options: DbOptions,
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self, SlateDBError> {
@@ -380,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn test_put_get_delete() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let kv_store = Db::open(
+        let kv_store = Db::open_with_opts(
             Path::from("/tmp/test_kv_store"),
             test_db_options(0, 1024, None),
             object_store,
@@ -405,7 +412,7 @@ mod tests {
     async fn test_put_flushes_memtable() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open(
+        let kv_store = Db::open_with_opts(
             path.clone(),
             test_db_options(0, 128, None),
             object_store.clone(),
@@ -464,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn test_put_empty_value() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let kv_store = Db::open(
+        let kv_store = Db::open_with_opts(
             Path::from("/tmp/test_kv_store"),
             test_db_options(0, 1024, None),
             object_store,
@@ -485,7 +492,7 @@ mod tests {
     #[tokio::test]
     async fn test_flush_while_iterating() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let kv_store = Db::open(
+        let kv_store = Db::open_with_opts(
             Path::from("/tmp/test_kv_store"),
             test_db_options(0, 1024, None),
             object_store,
@@ -518,7 +525,7 @@ mod tests {
     async fn test_basic_restore() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open(
+        let kv_store = Db::open_with_opts(
             path.clone(),
             test_db_options(0, 128, None),
             object_store.clone(),
@@ -547,7 +554,7 @@ mod tests {
         kv_store.close().await.unwrap();
 
         // recover and validate that sst files are loaded on recovery.
-        let kv_store_restored = Db::open(
+        let kv_store_restored = Db::open_with_opts(
             path.clone(),
             test_db_options(0, 128, None),
             object_store.clone(),
@@ -578,7 +585,7 @@ mod tests {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open(
+        let kv_store = Db::open_with_opts(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
@@ -615,7 +622,7 @@ mod tests {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open(
+        let kv_store = Db::open_with_opts(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
@@ -655,7 +662,7 @@ mod tests {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open(
+        let kv_store = Db::open_with_opts(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
@@ -718,7 +725,7 @@ mod tests {
         db.close().await.unwrap();
 
         // reload the db
-        let db = Db::open(
+        let db = Db::open_with_opts(
             path.clone(),
             test_db_options(0, 128, None),
             object_store.clone(),
@@ -748,7 +755,7 @@ mod tests {
     async fn do_test_should_read_compacted_db(options: DbOptions) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let db = Db::open(path.clone(), options, object_store.clone())
+        let db = Db::open_with_opts(path.clone(), options, object_store.clone())
             .await
             .unwrap();
         let ms = ManifestStore::new(&path, object_store.clone());
