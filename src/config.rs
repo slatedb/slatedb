@@ -124,10 +124,10 @@ impl DbOptions {
     pub const fn default() -> Self {
         Self {
             flush_ms: 100,
-            manifest_poll_interval: Duration::from_millis(100),
+            manifest_poll_interval: Duration::from_secs(1),
             min_filter_keys: 1000,
             l0_sst_size_bytes: 128,
-            compactor_options: None,
+            compactor_options: Some(CompactorOptions::default()),
         }
     }
 }
