@@ -9,7 +9,7 @@ use fail_parallel::{fail_point, FailPointRegistry};
 use futures::StreamExt;
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, PutPayload};
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
@@ -164,7 +164,7 @@ impl TableStore {
             data.put_slice(chunk.as_ref())
         }
         self.object_store
-            .put(&path, Bytes::from(data))
+            .put(&path, PutPayload::from(data))
             .await
             .map_err(SlateDBError::ObjectStoreError)?;
         self.cache_filter(id.clone(), encoded_sst.filter);

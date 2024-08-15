@@ -4,7 +4,7 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::{
-    path, Error, GetResult, ObjectMeta, ObjectStore, PutMode, PutOptions, PutResult,
+    path, Error, GetResult, ObjectMeta, ObjectStore, PutMode, PutOptions, PutPayload, PutResult,
 };
 use std::sync::Arc;
 
@@ -63,7 +63,11 @@ impl TransactionalObjectStore for DelegatingTransactionalObjectStore {
     async fn put_if_not_exists(&self, path: &Path, data: Bytes) -> Result<PutResult, Error> {
         let path = self.path(path);
         self.object_store
-            .put_opts(&path, data, PutOptions::from(PutMode::Create))
+            .put_opts(
+                &path,
+                PutPayload::from_bytes(data),
+                PutOptions::from(PutMode::Create),
+            )
             .await
     }
 
@@ -99,7 +103,7 @@ mod tests {
     use futures::StreamExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, PutPayload};
     use std::sync::Arc;
 
     const ROOT_PATH: &str = "/root/path";
@@ -180,12 +184,9 @@ mod tests {
             )
             .await
             .unwrap();
-        os.put(
-            &Path::from("biz/baz"),
-            Bytes::copy_from_slice("data1".as_bytes()),
-        )
-        .await
-        .unwrap();
+        os.put(&Path::from("biz/baz"), PutPayload::from("data1".as_bytes()))
+            .await
+            .unwrap();
 
         // when:
         let mut listing = txnl_os.list(None);
