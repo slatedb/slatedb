@@ -74,7 +74,7 @@ pub struct DbOptions {
     /// bytes to object storage.
     pub flush_ms: usize,
 
-    /// How frequently to poll for new manifest files. Refreshing the manifest file 
+    /// How frequently to poll for new manifest files. Refreshing the manifest file
     /// allows writers to detect fencing operations and allows readers to detect newly
     /// compacted data.
     ///
