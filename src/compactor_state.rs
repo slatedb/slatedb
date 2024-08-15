@@ -225,13 +225,6 @@ mod tests {
     use tokio::runtime::{Handle, Runtime};
 
     const PATH: &str = "/test/db";
-    const DEFAULT_OPTIONS: DbOptions = DbOptions {
-        flush_ms: 100,
-        manifest_poll_interval: Duration::from_millis(100),
-        min_filter_keys: 0,
-        l0_sst_size_bytes: 128,
-        compactor_options: None,
-    };
 
     #[test]
     fn test_should_register_compaction_as_submitted() {
@@ -510,7 +503,7 @@ mod tests {
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
         tokio_handle
-            .block_on(Db::open(Path::from(PATH), DEFAULT_OPTIONS, os))
+            .block_on(Db::open(Path::from(PATH), os))
             .unwrap()
     }
 

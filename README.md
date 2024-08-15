@@ -48,7 +48,7 @@ async fn main() {
         l0_sst_size_bytes: 128,
         compactor_options: Some(CompactorOptions::default()),
     };
-    let kv_store = Db::open(
+    let kv_store = Db::open_with_opts(
         Path::from("/tmp/test_kv_store"),
         options,
         object_store,

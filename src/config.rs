@@ -2,6 +2,7 @@ use std::time::Duration;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
 pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
+pub const DEFAULT_DB_OPTIONS: &DbOptions = &DbOptions::default();
 
 #[allow(dead_code)]
 pub const DEFAULT_COMPACTOR_OPTIONS: &CompactorOptions = &CompactorOptions::default();
@@ -73,9 +74,9 @@ pub struct DbOptions {
     /// bytes to object storage.
     pub flush_ms: usize,
 
-    /// How frequently to poll for new manifest files (in milliseconds). Refreshing
-    /// the manifest file allows writers to detect fencing operations and allows
-    /// readers to detect newly compacted data.
+    /// How frequently to poll for new manifest files. Refreshing the manifest file 
+    /// allows writers to detect fencing operations and allows readers to detect newly
+    /// compacted data.
     ///
     /// **NOTE: SlateDB secondary readers (i.e. non-writer clients) do not currently
     /// read from the WAL. Such readers only read from L0+. The manifest poll intervals
@@ -117,6 +118,18 @@ pub struct DbOptions {
 
     /// Configuration options for the compactor.
     pub compactor_options: Option<CompactorOptions>,
+}
+
+impl DbOptions {
+    pub const fn default() -> Self {
+        Self {
+            flush_ms: 100,
+            manifest_poll_interval: Duration::from_millis(100),
+            min_filter_keys: 1000,
+            l0_sst_size_bytes: 128,
+            compactor_options: None,
+        }
+    }
 }
 
 /// Options for the compactor.
