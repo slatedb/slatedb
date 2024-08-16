@@ -1,4 +1,6 @@
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
+
+use crate::error::SlateDBError;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
 pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
@@ -148,7 +150,7 @@ pub struct CompactorOptions {
 }
 
 /// The compression algorithm to use for SSTables.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum CompressionCodec {
     #[cfg(feature = "snappy")]
     /// Snappy compression algorithm.
@@ -162,6 +164,24 @@ pub enum CompressionCodec {
     #[cfg(feature = "zstd")]
     /// Zstd compression algorithm.
     Zstd,
+}
+
+impl FromStr for CompressionCodec {
+    type Err = SlateDBError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            #[cfg(feature = "snappy")]
+            "snappy" => Ok(Self::Snappy),
+            #[cfg(feature = "zlib")]
+            "zlib" => Ok(Self::Zlib),
+            #[cfg(feature = "lz4")]
+            "lz4" => Ok(Self::Lz4),
+            #[cfg(feature = "zstd")]
+            "zstd" => Ok(Self::Zstd),
+            _ => Err(SlateDBError::InvalidCompressionCodec),
+        }
+    }
 }
 
 /// Default options for the compactor. Currently, only a

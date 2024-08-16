@@ -32,4 +32,7 @@ pub enum SlateDBError {
 
     #[error("Detected newer DB client")]
     Fenced,
+
+    #[error("Invalid Compression Codec")]
+    InvalidCompressionCodec,
 }

@@ -7,12 +7,15 @@ use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
-use std::{
-    collections::VecDeque,
-    io::{Read, Write},
-};
+
+#[cfg(feature = "snappy")]
+use std::io::Read;
+
+#[cfg(feature = "lz4")]
+use std::io::Write;
 
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
@@ -324,7 +327,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
         let builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
         let encoded_block = builder.build()?.encode();
         let compressed_block = match self.compression_codec {
-            Some(c) => Self::compress(Bytes::from(encoded_block), c),
+            Some(c) => Self::compress(encoded_block, c),
             None => encoded_block,
         };
 

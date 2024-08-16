@@ -31,6 +31,7 @@ struct Options {
     num_ssts: usize,
     key_bytes: usize,
     val_bytes: usize,
+    compression_codec: Option<CompressionCodec>,
 }
 
 #[cfg(feature = "aws")]
@@ -55,10 +56,10 @@ fn open_object_store(options: &Options) -> Result<Arc<dyn ObjectStore>, SlateDBE
 }
 
 #[allow(clippy::panic)]
-pub fn run_compaction_execute_bench(c: Option<CompressionCodec>) -> Result<(), SlateDBError> {
+pub fn run_compaction_execute_bench() -> Result<(), SlateDBError> {
     let options = load_options();
     let s3 = open_object_store(&options)?;
-    let sst_format = SsTableFormat::new(4096, 1, c);
+    let sst_format = SsTableFormat::new(4096, 1, options.compression_codec);
     let table_store = Arc::new(TableStore::new(
         s3.clone(),
         sst_format,
@@ -276,6 +277,12 @@ fn load_options() -> Options {
     let val_bytes = std::env::var("VAL_BYTES")
         .ok()
         .unwrap_or(String::from("224"));
+    let compression_codec = std::env::var("COMPRESSION_CODEC").ok().map(|codec| {
+        codec
+            .parse::<CompressionCodec>()
+            .expect("invalid compression codec")
+    });
+
     let options = Options {
         aws_key,
         aws_secret,
@@ -287,6 +294,7 @@ fn load_options() -> Options {
         num_ssts: num_ssts.parse::<usize>().expect("invalid num ssts"),
         key_bytes: key_bytes.parse::<usize>().expect("invalid key bytes"),
         val_bytes: val_bytes.parse::<usize>().expect("invalid val bytes"),
+        compression_codec,
     };
     println!("Options: {:#?}", options);
     options
