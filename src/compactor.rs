@@ -1,3 +1,4 @@
+use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::CompactorOptions;
@@ -6,7 +7,6 @@ use crate::error::SlateDBError;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
 use crate::tablestore::TableStore;
-use crate::{compactor::CompactorMainMsg::Shutdown, config::CompressionCodec};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
@@ -37,7 +37,6 @@ impl Compactor {
         table_store: Arc<TableStore>,
         options: CompactorOptions,
         tokio_handle: Handle,
-        c: Option<CompressionCodec>,
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let (err_tx, err_rx) = tokio::sync::oneshot::channel();
@@ -57,7 +56,7 @@ impl Compactor {
                 }
             };
             err_tx.send(Ok(())).expect("err channel failure");
-            orchestrator.run(c);
+            orchestrator.run();
         });
         err_rx.await.expect("err channel failure")?;
         Ok(Self {
@@ -134,17 +133,17 @@ impl CompactorOrchestrator {
         Ok(CompactorState::new(db_state.clone()))
     }
 
-    fn run(&mut self, c: Option<CompressionCodec>) {
+    fn run(&mut self) {
         let ticker = crossbeam_channel::tick(self.options.poll_interval);
         loop {
             crossbeam_channel::select! {
                 recv(ticker) -> _ => {
-                    self.load_manifest(c).expect("fatal error loading manifest");
+                    self.load_manifest().expect("fatal error loading manifest");
                 }
                 recv(self.worker_rx) -> msg => {
                     let WorkerToOrchestoratorMsg::CompactionFinished(result) = msg.expect("fatal error receiving worker msg");
                     match result {
-                        Ok(sr) => self.finish_compaction(sr, c).expect("fatal error finishing compaction"),
+                        Ok(sr) => self.finish_compaction(sr).expect("fatal error finishing compaction"),
                         Err(err) => println!("error executing compaction: {:#?}", err)
                     }
                 }
@@ -155,9 +154,9 @@ impl CompactorOrchestrator {
         }
     }
 
-    fn load_manifest(&mut self, c: Option<CompressionCodec>) -> Result<(), SlateDBError> {
+    fn load_manifest(&mut self) -> Result<(), SlateDBError> {
         self.tokio_handle.block_on(self.manifest.refresh())?;
-        self.refresh_db_state(c)?;
+        self.refresh_db_state()?;
         Ok(())
     }
 
@@ -167,9 +166,9 @@ impl CompactorOrchestrator {
             .block_on(self.manifest.update_db_state(core))
     }
 
-    fn write_manifest_safely(&mut self, c: Option<CompressionCodec>) -> Result<(), SlateDBError> {
+    fn write_manifest_safely(&mut self) -> Result<(), SlateDBError> {
         loop {
-            self.load_manifest(c)?;
+            self.load_manifest()?;
             match self.write_manifest() {
                 Ok(_) => return Ok(()),
                 Err(SlateDBError::ManifestVersionExists) => {
@@ -180,18 +179,15 @@ impl CompactorOrchestrator {
         }
     }
 
-    fn maybe_schedule_compactions(
-        &mut self,
-        c: Option<CompressionCodec>,
-    ) -> Result<(), SlateDBError> {
+    fn maybe_schedule_compactions(&mut self) -> Result<(), SlateDBError> {
         let compactions = self.scheduler.maybe_schedule_compaction(&self.state);
         for compaction in compactions.iter() {
-            self.submit_compaction(compaction.clone(), c)?;
+            self.submit_compaction(compaction.clone())?;
         }
         Ok(())
     }
 
-    fn start_compaction(&mut self, compaction: Compaction, c: Option<CompressionCodec>) {
+    fn start_compaction(&mut self, compaction: Compaction) {
         let db_state = self.state.db_state();
         let compacted_sst_iter = db_state.compacted.iter().flat_map(|sr| sr.ssts.iter());
         let ssts_by_id: HashMap<Ulid, &SSTableHandle> = db_state
@@ -214,46 +210,35 @@ impl CompactorOrchestrator {
             .filter_map(|s| s.maybe_unwrap_sorted_run())
             .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
             .collect();
-        self.executor.start_compaction(
-            CompactionJob {
-                destination: compaction.destination,
-                ssts,
-                sorted_runs,
-            },
-            c,
-        );
+        self.executor.start_compaction(CompactionJob {
+            destination: compaction.destination,
+            ssts,
+            sorted_runs,
+        });
     }
 
     // state writers
 
-    fn finish_compaction(
-        &mut self,
-        output_sr: SortedRun,
-        c: Option<CompressionCodec>,
-    ) -> Result<(), SlateDBError> {
+    fn finish_compaction(&mut self, output_sr: SortedRun) -> Result<(), SlateDBError> {
         self.state.finish_compaction(output_sr);
-        self.write_manifest_safely(c)?;
-        self.maybe_schedule_compactions(c)?;
+        self.write_manifest_safely()?;
+        self.maybe_schedule_compactions()?;
         Ok(())
     }
 
-    fn submit_compaction(
-        &mut self,
-        compaction: Compaction,
-        c: Option<CompressionCodec>,
-    ) -> Result<(), SlateDBError> {
+    fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
         let result = self.state.submit_compaction(compaction.clone());
         if result.is_err() {
             println!("invalid compaction: {:#?}", result);
             return Ok(());
         }
-        self.start_compaction(compaction, c);
+        self.start_compaction(compaction);
         Ok(())
     }
 
-    fn refresh_db_state(&mut self, c: Option<CompressionCodec>) -> Result<(), SlateDBError> {
+    fn refresh_db_state(&mut self) -> Result<(), SlateDBError> {
         self.state.refresh_db_state(self.manifest.db_state()?);
-        self.maybe_schedule_compactions(c)?;
+        self.maybe_schedule_compactions()?;
         Ok(())
     }
 }
@@ -370,7 +355,7 @@ mod tests {
         rt.block_on(db.put(&[b'j'; 32], &[b'k'; 96]));
         rt.block_on(db.close()).unwrap();
         orchestrator
-            .submit_compaction(Compaction::new(l0_ids_to_compact.clone(), 0), None)
+            .submit_compaction(Compaction::new(l0_ids_to_compact.clone(), 0))
             .unwrap();
         let msg = orchestrator.worker_rx.recv().unwrap();
         let WorkerToOrchestoratorMsg::CompactionFinished(Ok(sr)) = msg else {
@@ -378,7 +363,7 @@ mod tests {
         };
 
         // when:
-        orchestrator.finish_compaction(sr, None).unwrap();
+        orchestrator.finish_compaction(sr).unwrap();
 
         // then:
         let db_state = rt.block_on(stored_manifest.refresh()).unwrap();

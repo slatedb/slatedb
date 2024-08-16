@@ -1,9 +1,9 @@
+use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
-use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use bytes::{BufMut, Bytes};
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::StreamExt;
@@ -285,21 +285,13 @@ pub(crate) struct EncodedSsTableWriter<'a> {
 }
 
 impl<'a> EncodedSsTableWriter<'a> {
-    pub async fn add(
-        &mut self,
-        key: &[u8],
-        value: Option<&[u8]>,
-        c: Option<CompressionCodec>,
-    ) -> Result<(), SlateDBError> {
-        self.builder.add(key, value, c)?;
+    pub async fn add(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<(), SlateDBError> {
+        self.builder.add(key, value)?;
         self.drain_blocks().await
     }
 
-    pub async fn close(
-        mut self,
-        c: Option<CompressionCodec>,
-    ) -> Result<SSTableHandle, SlateDBError> {
-        let mut encoded_sst = self.builder.build(c)?;
+    pub async fn close(mut self) -> Result<SSTableHandle, SlateDBError> {
+        let mut encoded_sst = self.builder.build()?;
         while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
             self.writer.write_all(block.as_ref()).await?;
         }
@@ -351,20 +343,11 @@ mod tests {
 
         // when:
         let mut writer = ts.table_writer(id);
-        writer
-            .add(&[b'a'; 16], Some(&[1u8; 16]), None)
-            .await
-            .unwrap();
-        writer
-            .add(&[b'b'; 16], Some(&[2u8; 16]), None)
-            .await
-            .unwrap();
-        writer.add(&[b'c'; 16], None, None).await.unwrap();
-        writer
-            .add(&[b'd'; 16], Some(&[4u8; 16]), None)
-            .await
-            .unwrap();
-        let sst = writer.close(None).await.unwrap();
+        writer.add(&[b'a'; 16], Some(&[1u8; 16])).await.unwrap();
+        writer.add(&[b'b'; 16], Some(&[2u8; 16])).await.unwrap();
+        writer.add(&[b'c'; 16], None).await.unwrap();
+        writer.add(&[b'd'; 16], Some(&[4u8; 16])).await.unwrap();
+        let sst = writer.close().await.unwrap();
 
         // then:
         let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1);

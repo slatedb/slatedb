@@ -231,11 +231,11 @@ mod tests {
         let format = SsTableFormat::new(4096, 3, None);
         let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", Some(b"value1"), None).unwrap();
-        builder.add(b"key2", Some(b"value2"), None).unwrap();
-        builder.add(b"key3", Some(b"value3"), None).unwrap();
-        builder.add(b"key4", Some(b"value4"), None).unwrap();
-        let encoded = builder.build(None).unwrap();
+        builder.add(b"key1", Some(b"value1")).unwrap();
+        builder.add(b"key2", Some(b"value2")).unwrap();
+        builder.add(b"key3", Some(b"value3")).unwrap();
+        builder.add(b"key4", Some(b"value4")).unwrap();
+        let encoded = builder.build().unwrap();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded)
             .await
@@ -273,12 +273,11 @@ mod tests {
                 .add(
                     format!("key{}", i).as_bytes(),
                     Some(format!("value{}", i).as_bytes()),
-                    None,
                 )
                 .unwrap();
         }
 
-        let encoded = builder.build(None).unwrap();
+        let encoded = builder.build().unwrap();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded)
             .await
@@ -385,11 +384,11 @@ mod tests {
         let mut nkeys = 0usize;
         while writer.blocks_written() < n {
             writer
-                .add(key_gen.next().as_ref(), Some(val_gen.next().as_ref()), None)
+                .add(key_gen.next().as_ref(), Some(val_gen.next().as_ref()))
                 .await
                 .unwrap();
             nkeys += 1;
         }
-        (writer.close(None).await.unwrap(), nkeys)
+        (writer.close().await.unwrap(), nkeys)
     }
 }

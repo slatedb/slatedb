@@ -1,3 +1,4 @@
+use crate::compactor::WorkerToOrchestoratorMsg;
 use crate::compactor::WorkerToOrchestoratorMsg::CompactionFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SSTableHandle, SortedRun, SsTableId};
@@ -7,7 +8,6 @@ use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
-use crate::{compactor::WorkerToOrchestoratorMsg, config::CompressionCodec};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::mem;
@@ -22,7 +22,7 @@ pub(crate) struct CompactionJob {
 }
 
 pub(crate) trait CompactionExecutor {
-    fn start_compaction(&self, compaction: CompactionJob, c: Option<CompressionCodec>);
+    fn start_compaction(&self, compaction: CompactionJob);
 }
 
 pub(crate) struct TokioCompactionExecutor {
@@ -49,8 +49,8 @@ impl TokioCompactionExecutor {
 }
 
 impl CompactionExecutor for TokioCompactionExecutor {
-    fn start_compaction(&self, compaction: CompactionJob, c: Option<CompressionCodec>) {
-        self.inner.start_compaction(compaction, c);
+    fn start_compaction(&self, compaction: CompactionJob) {
+        self.inner.start_compaction(compaction);
     }
 }
 
@@ -71,7 +71,6 @@ impl TokioCompactionExecutorInner {
     async fn execute_compaction(
         &self,
         compaction: CompactionJob,
-        c: Option<CompressionCodec>,
     ) -> Result<SortedRun, SlateDBError> {
         let l0_iters: VecDeque<SstIterator> = compaction
             .ssts
@@ -95,7 +94,7 @@ impl TokioCompactionExecutorInner {
             // Add to SST
             let value = kv.value.into_option();
             current_writer
-                .add(kv.key.as_ref(), value.as_ref().map(|b| b.as_ref()), c)
+                .add(kv.key.as_ref(), value.as_ref().map(|b| b.as_ref()))
                 .await?;
             current_size += kv.key.len() + value.map_or(0, |b| b.len());
             if current_size > self.options.max_sst_size {
@@ -106,11 +105,11 @@ impl TokioCompactionExecutorInner {
                     self.table_store
                         .table_writer(SsTableId::Compacted(Ulid::new())),
                 );
-                output_ssts.push(finished_writer.close(c).await?);
+                output_ssts.push(finished_writer.close().await?);
             }
         }
         if current_size > 0 {
-            output_ssts.push(current_writer.close(c).await?);
+            output_ssts.push(current_writer.close().await?);
         }
         Ok(SortedRun {
             id: compaction.destination,
@@ -118,14 +117,14 @@ impl TokioCompactionExecutorInner {
         })
     }
 
-    fn start_compaction(self: &Arc<Self>, compaction: CompactionJob, c: Option<CompressionCodec>) {
+    fn start_compaction(self: &Arc<Self>, compaction: CompactionJob) {
         let mut tasks = self.tasks.lock();
         let dst = compaction.destination;
         assert!(!tasks.contains_key(&dst));
         let this = self.clone();
         let task = self.handle.spawn(async move {
             let dst = compaction.destination;
-            let result = this.execute_compaction(compaction, c).await;
+            let result = this.execute_compaction(compaction).await;
             this.worker_tx
                 .send(CompactionFinished(result))
                 .expect("failed to send compaction finished msg");

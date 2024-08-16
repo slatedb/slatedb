@@ -68,8 +68,8 @@ pub fn run_compaction_execute_bench(c: Option<CompressionCodec>) -> Result<(), S
         .enable_all()
         .build()?;
     match options.mode.as_str() {
-        "RUN" => run_bench(&options, runtime.handle().clone(), table_store, c),
-        "LOAD" => runtime.block_on(run_load(&options, table_store, c)),
+        "RUN" => run_bench(&options, runtime.handle().clone(), table_store),
+        "LOAD" => runtime.block_on(run_load(&options, table_store)),
         "CLEAR" => run_clear(&options, runtime.handle().clone(), s3.clone()),
         invalid => panic!("invalid mode: {}", invalid),
     }
@@ -79,11 +79,7 @@ fn sst_id(id: u32) -> SsTableId {
     SsTableId::Compacted(Ulid::from((id as u64, id as u64)))
 }
 
-async fn run_load(
-    options: &Options,
-    table_store: Arc<TableStore>,
-    c: Option<CompressionCodec>,
-) -> Result<(), SlateDBError> {
+async fn run_load(options: &Options, table_store: Arc<TableStore>) -> Result<(), SlateDBError> {
     let num_ssts = options.num_ssts as u32;
     let sst_bytes = options.sst_bytes;
     let key_bytes = options.key_bytes;
@@ -103,7 +99,7 @@ async fn run_load(
         }
         let ts = table_store.clone();
         let key_start_copy = key_start.clone();
-        let jh = tokio::spawn(load_sst(i, ts, key_start_copy, num_keys, val_bytes, c));
+        let jh = tokio::spawn(load_sst(i, ts, key_start_copy, num_keys, val_bytes));
         futures.push(jh)
     }
     while !futures.is_empty() {
@@ -122,7 +118,6 @@ async fn load_sst(
     key_start: Vec<u8>,
     num_keys: usize,
     val_bytes: usize,
-    c: Option<CompressionCodec>,
 ) -> Result<(), SlateDBError> {
     let mut retries = 0;
     loop {
@@ -132,7 +127,6 @@ async fn load_sst(
             key_start.clone(),
             num_keys,
             val_bytes,
-            c,
         )
         .await;
         match result {
@@ -156,7 +150,6 @@ async fn do_load_sst(
     key_start: Vec<u8>,
     num_keys: usize,
     val_bytes: usize,
-    c: Option<CompressionCodec>,
 ) -> Result<(), SlateDBError> {
     let mut rng = rand_xorshift::XorShiftRng::from_entropy();
     let start = std::time::Instant::now();
@@ -168,9 +161,9 @@ async fn do_load_sst(
         let mut val = vec![0u8; val_bytes];
         rng.fill_bytes(val.as_mut_slice());
         let key = key_gen.next();
-        sst_writer.add(key.as_ref(), Some(val.as_ref()), c).await?;
+        sst_writer.add(key.as_ref(), Some(val.as_ref())).await?;
     }
-    let encoded = sst_writer.close(c).await?;
+    let encoded = sst_writer.close().await?;
     println!(
         "wrote sst with id: {:#?} {:#?}",
         &encoded.id,
@@ -203,7 +196,6 @@ fn run_bench(
     options: &Options,
     handle: tokio::runtime::Handle,
     table_store: Arc<TableStore>,
-    c: Option<CompressionCodec>,
 ) -> Result<(), SlateDBError> {
     let (tx, rx) = crossbeam_channel::unbounded();
     let compactor_options = DEFAULT_COMPACTOR_OPTIONS.clone();
@@ -252,7 +244,7 @@ fn run_bench(
     };
     let start = std::time::Instant::now();
     println!("start compaction job");
-    executor.start_compaction(job, c);
+    executor.start_compaction(job);
     let WorkerToOrchestoratorMsg::CompactionFinished(result) = rx.recv().expect("recv failed");
     match result {
         Ok(_) => {

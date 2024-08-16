@@ -1,9 +1,6 @@
-use std::{
-    io::{Read, Write},
-    usize,
-};
+use std::usize;
 
-use crate::{config::CompressionCodec, error::SlateDBError};
+use crate::error::SlateDBError;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
@@ -19,7 +16,7 @@ pub struct Block {
 
 impl Block {
     #[rustfmt::skip]
-    pub fn encode(&self, c: Option<CompressionCodec>) -> Bytes {
+    pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(
             self.data.len()                   // data byte length
             + self.offsets.len() * SIZEOF_U16 // offsets as u16's
@@ -30,23 +27,13 @@ impl Block {
             buf.put_u16(*offset);
         }
         buf.put_u16(self.offsets.len() as u16);
-        let encoded = buf.freeze();
-
-        match c {
-            Some(c) => self.compress(encoded, c),
-            None => encoded,
-        }
+        buf.freeze()
     }
 
     #[rustfmt::skip]
-    pub fn decode(bytes: Bytes, c: Option<CompressionCodec>) -> Self {
-        let decompressed = match c {
-            Some(option) => Self::decompress(bytes, option),
-            None => bytes,
-        };
-
+    pub fn decode(bytes: Bytes) -> Self {
         // Get number of elements in the block
-        let data = decompressed.as_ref();
+        let data = bytes.as_ref();
         let entry_offsets_len = (&data[data.len() - SIZEOF_U16..]).get_u16() as usize;
         let data_end = data.len()
             - SIZEOF_U16                                            // Entry u16 length
@@ -56,68 +43,10 @@ impl Block {
             .chunks(SIZEOF_U16)
             .map(|mut x| x.get_u16())
             .collect();
-        let bytes = decompressed.slice(0..data_end);
+        let bytes = bytes.slice(0..data_end);
         Self {
             data: bytes,
             offsets,
-        }
-    }
-
-    fn compress(&self, data: Bytes, c: CompressionCodec) -> Bytes {
-        match c {
-            #[cfg(feature = "snappy")]
-            CompressionCodec::Snappy => {
-                let compressed = snap::raw::Encoder::new().compress_vec(&data).unwrap();
-                Bytes::from(compressed)
-            }
-            #[cfg(feature = "zlib")]
-            CompressionCodec::Zlib => {
-                let mut encoder =
-                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-                encoder.write_all(&data).unwrap();
-                Bytes::from(encoder.finish().unwrap())
-            }
-            #[cfg(feature = "lz4")]
-            CompressionCodec::Lz4 => {
-                let compressed = lz4_flex::block::compress_prepend_size(&data);
-                Bytes::from(compressed)
-            }
-            #[cfg(feature = "zstd")]
-            CompressionCodec::Zstd => {
-                let compressed = zstd::bulk::compress(&data, 3).unwrap();
-                Bytes::from(compressed)
-            }
-        }
-    }
-
-    fn decompress(compressed_data: Bytes, compression_option: CompressionCodec) -> Bytes {
-        match compression_option {
-            #[cfg(feature = "snappy")]
-            CompressionCodec::Snappy => Bytes::from(
-                snap::raw::Decoder::new()
-                    .decompress_vec(&compressed_data)
-                    .unwrap(),
-            ),
-            #[cfg(feature = "zlib")]
-            CompressionCodec::Zlib => {
-                let mut decoder = flate2::read::ZlibDecoder::new(&compressed_data[..]);
-                let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed).unwrap();
-                Bytes::from(decompressed)
-            }
-            #[cfg(feature = "lz4")]
-            CompressionCodec::Lz4 => {
-                let decompressed =
-                    lz4_flex::block::decompress_size_prepended(&compressed_data).unwrap();
-                Bytes::from(decompressed)
-            }
-            #[cfg(feature = "zstd")]
-            CompressionCodec::Zstd => {
-                let decompressed = zstd::stream::decode_all(&compressed_data[..]).unwrap();
-                Bytes::from(decompressed)
-            }
-            #[allow(unreachable_patterns)]
-            _ => panic!("Unsupported compression codec"),
         }
     }
 }
@@ -199,60 +128,8 @@ mod tests {
         assert!(builder.add(b"key1", Some(b"value1")));
         assert!(builder.add(b"key2", Some(b"value2")));
         let block = builder.build().unwrap();
-        let encoded = block.encode(None);
-        let decoded = Block::decode(encoded, None);
-        assert_eq!(block.data, decoded.data);
-        assert_eq!(block.offsets, decoded.offsets);
-    }
-
-    #[test]
-    #[cfg(feature = "snappy")]
-    fn test_block_with_snappy() {
-        let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add(b"key1", Some(b"value1")));
-        assert!(builder.add(b"key2", Some(b"value2")));
-        let block = builder.build().unwrap();
-        let encoded = block.encode(Some(CompressionCodec::Snappy));
-        let decoded = Block::decode(encoded, Some(CompressionCodec::Snappy));
-        assert_eq!(block.data, decoded.data);
-        assert_eq!(block.offsets, decoded.offsets);
-    }
-
-    #[test]
-    #[cfg(feature = "zstd")]
-    fn test_block_with_zstd() {
-        let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add(b"key1", Some(b"value1")));
-        assert!(builder.add(b"key2", Some(b"value2")));
-        let block = builder.build().unwrap();
-        let encoded = block.encode(Some(CompressionCodec::Zstd));
-        let decoded = Block::decode(encoded, Some(CompressionCodec::Zstd));
-        assert_eq!(block.data, decoded.data);
-        assert_eq!(block.offsets, decoded.offsets);
-    }
-
-    #[test]
-    #[cfg(feature = "lz4")]
-    fn test_block_with_lz4() {
-        let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add(b"key1", Some(b"value1")));
-        assert!(builder.add(b"key2", Some(b"value2")));
-        let block = builder.build().unwrap();
-        let encoded = block.encode(Some(CompressionCodec::Lz4));
-        let decoded = Block::decode(encoded, Some(CompressionCodec::Lz4));
-        assert_eq!(block.data, decoded.data);
-        assert_eq!(block.offsets, decoded.offsets);
-    }
-
-    #[test]
-    #[cfg(feature = "zlib")]
-    fn test_block_with_zlib() {
-        let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add(b"key1", Some(b"value1")));
-        assert!(builder.add(b"key2", Some(b"value2")));
-        let block = builder.build().unwrap();
-        let encoded = block.encode(Some(CompressionCodec::Zlib));
-        let decoded = Block::decode(encoded, Some(CompressionCodec::Zlib));
+        let encoded = block.encode();
+        let decoded = Block::decode(encoded);
         assert_eq!(block.data, decoded.data);
         assert_eq!(block.offsets, decoded.offsets);
     }
@@ -264,19 +141,7 @@ mod tests {
         assert!(builder.add(b"key2", None));
         assert!(builder.add(b"key3", Some(b"value3")));
         let block = builder.build().unwrap();
-        let encoded = block.encode(None);
-        let _decoded = Block::decode(encoded, None);
-    }
-
-    #[test]
-    #[cfg(features = "snappy")]
-    fn test_block_with_tombstone() {
-        let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add(b"key1", Some(b"value1")));
-        assert!(builder.add(b"key2", None));
-        assert!(builder.add(b"key3", Some(b"value3")));
-        let block = builder.build().unwrap();
-        let encoded = block.encode(None);
-        let _decoded = Block::decode(encoded, CompressionCodec::Snappy);
+        let encoded = block.encode();
+        let _decoded = Block::decode(encoded);
     }
 }

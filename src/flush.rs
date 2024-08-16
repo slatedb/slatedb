@@ -27,15 +27,15 @@ impl DbInner {
         while let Some(kv) = iter.next_entry().await? {
             match kv.value {
                 ValueDeletable::Value(v) => {
-                    sst_builder.add(&kv.key, Some(&v), self.options.compression_codec)?;
+                    sst_builder.add(&kv.key, Some(&v))?;
                 }
                 ValueDeletable::Tombstone => {
-                    sst_builder.add(&kv.key, None, self.options.compression_codec)?;
+                    sst_builder.add(&kv.key, None)?;
                 }
             }
         }
 
-        let encoded_sst = sst_builder.build(self.options.compression_codec)?;
+        let encoded_sst = sst_builder.build()?;
         let handle = self.table_store.write_sst(id, encoded_sst).await?;
         Ok(handle)
     }

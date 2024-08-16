@@ -7,9 +7,12 @@ use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
-use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
+use std::{
+    collections::VecDeque,
+    io::{Read, Write},
+};
 
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
@@ -65,6 +68,37 @@ impl SsTableFormat {
         Ok(filter)
     }
 
+    fn decompress(compressed_data: Bytes, compression_option: CompressionCodec) -> Bytes {
+        match compression_option {
+            #[cfg(feature = "snappy")]
+            CompressionCodec::Snappy => Bytes::from(
+                snap::raw::Decoder::new()
+                    .decompress_vec(&compressed_data)
+                    .unwrap(),
+            ),
+            #[cfg(feature = "zlib")]
+            CompressionCodec::Zlib => {
+                let mut decoder = flate2::read::ZlibDecoder::new(&compressed_data[..]);
+                let mut decompressed = Vec::new();
+                decoder.read_to_end(&mut decompressed).unwrap();
+                Bytes::from(decompressed)
+            }
+            #[cfg(feature = "lz4")]
+            CompressionCodec::Lz4 => {
+                let decompressed =
+                    lz4_flex::block::decompress_size_prepended(&compressed_data).unwrap();
+                Bytes::from(decompressed)
+            }
+            #[cfg(feature = "zstd")]
+            CompressionCodec::Zstd => {
+                let decompressed = zstd::stream::decode_all(&compressed_data[..]).unwrap();
+                Bytes::from(decompressed)
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("Unsupported compression codec"),
+        }
+    }
+
     fn block_range(&self, blocks: Range<usize>, handle: &SsTableInfo) -> Range<usize> {
         let mut end_offset = handle.filter_offset() as usize;
         if blocks.end < handle.block_meta().len() {
@@ -115,7 +149,15 @@ impl SsTableFormat {
         if checksum != stored_checksum {
             return Err(SlateDBError::ChecksumMismatch);
         }
-        Ok(Block::decode(block_bytes, self.compression_codec))
+        let decoded_block = Block::decode(block_bytes);
+        let decompressed_bytes = match self.compression_codec {
+            Some(c) => Self::decompress(decoded_block.data, c),
+            None => decoded_block.data,
+        };
+        Ok(Block {
+            data: decompressed_bytes,
+            offsets: decoded_block.offsets,
+        })
     }
 
     pub(crate) async fn read_block(
@@ -141,7 +183,11 @@ impl SsTableFormat {
     }
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
-        EncodedSsTableBuilder::new(self.block_size, self.min_filter_keys)
+        EncodedSsTableBuilder::new(
+            self.block_size,
+            self.min_filter_keys,
+            self.compression_codec,
+        )
     }
 }
 
@@ -185,11 +231,16 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     min_filter_keys: u32,
     num_keys: u32,
     filter_builder: BloomFilterBuilder,
+    compression_codec: Option<CompressionCodec>,
 }
 
 impl<'a> EncodedSsTableBuilder<'a> {
     /// Create a builder based on target block size.
-    fn new(block_size: usize, min_filter_keys: u32) -> Self {
+    fn new(
+        block_size: usize,
+        min_filter_keys: u32,
+        compression_codec: Option<CompressionCodec>,
+    ) -> Self {
         Self {
             current_len: 0,
             blocks: VecDeque::new(),
@@ -202,20 +253,43 @@ impl<'a> EncodedSsTableBuilder<'a> {
             num_keys: 0,
             filter_builder: BloomFilterBuilder::new(10),
             sst_info_builder: flatbuffers::FlatBufferBuilder::new(),
+            compression_codec,
         }
     }
 
-    pub fn add(
-        &mut self,
-        key: &[u8],
-        value: Option<&[u8]>,
-        c: Option<CompressionCodec>,
-    ) -> Result<(), SlateDBError> {
+    fn compress(data: Bytes, c: CompressionCodec) -> Bytes {
+        match c {
+            #[cfg(feature = "snappy")]
+            CompressionCodec::Snappy => {
+                let compressed = snap::raw::Encoder::new().compress_vec(&data).unwrap();
+                Bytes::from(compressed)
+            }
+            #[cfg(feature = "zlib")]
+            CompressionCodec::Zlib => {
+                let mut encoder =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(&data).unwrap();
+                Bytes::from(encoder.finish().unwrap())
+            }
+            #[cfg(feature = "lz4")]
+            CompressionCodec::Lz4 => {
+                let compressed = lz4_flex::block::compress_prepend_size(&data);
+                Bytes::from(compressed)
+            }
+            #[cfg(feature = "zstd")]
+            CompressionCodec::Zstd => {
+                let compressed = zstd::bulk::compress(&data, 3).unwrap();
+                Bytes::from(compressed)
+            }
+        }
+    }
+
+    pub fn add(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<(), SlateDBError> {
         self.num_keys += 1;
 
         if !self.builder.add(key, value) {
             // Create a new block builder and append block data
-            if let Some(block) = self.finish_block(c)? {
+            if let Some(block) = self.finish_block()? {
                 self.current_len += block.len();
                 self.blocks.push_back(Bytes::from(block));
             }
@@ -242,16 +316,17 @@ impl<'a> EncodedSsTableBuilder<'a> {
         self.current_len
     }
 
-    fn finish_block(
-        &mut self,
-        c: Option<CompressionCodec>,
-    ) -> Result<Option<Vec<u8>>, SlateDBError> {
+    fn finish_block(&mut self) -> Result<Option<Vec<u8>>, SlateDBError> {
         if self.builder.is_empty() {
             return Ok(None);
         }
 
         let builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
-        let encoded_block = builder.build()?.encode(c);
+        let encoded_block = builder.build()?.encode();
+        let compressed_block = match self.compression_codec {
+            Some(c) => Self::compress(Bytes::from(encoded_block), c),
+            None => encoded_block,
+        };
 
         let block_meta = BlockMeta::create(
             &mut self.sst_info_builder,
@@ -262,16 +337,16 @@ impl<'a> EncodedSsTableBuilder<'a> {
         );
 
         self.block_meta.push(block_meta);
-        let checksum = crc32fast::hash(&encoded_block);
-        let total_block_size = encoded_block.len() + std::mem::size_of::<u32>();
+        let checksum = crc32fast::hash(&compressed_block);
+        let total_block_size = compressed_block.len() + std::mem::size_of::<u32>();
         let mut block = Vec::with_capacity(total_block_size);
-        block.put(encoded_block);
+        block.put(compressed_block);
         block.put_u32(checksum);
         Ok(Some(block))
     }
 
-    pub fn build(mut self, c: Option<CompressionCodec>) -> Result<EncodedSsTable, SlateDBError> {
-        let mut buf = self.finish_block(c)?.unwrap_or(Vec::new());
+    pub fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
+        let mut buf = self.finish_block()?.unwrap_or(Vec::new());
         let mut maybe_filter = None;
         let mut filter_len = 0;
         let filter_offset = self.current_len + buf.len();
@@ -331,7 +406,7 @@ mod tests {
         let block = builder.next_block();
         assert!(block.is_some());
         let block = block.unwrap();
-        let block = Block::decode(block.slice(..block.len() - 4), None);
+        let block = Block::decode(block.slice(..block.len() - 4));
         BlockIterator::from_first_key(block)
     }
 
@@ -342,9 +417,9 @@ mod tests {
         let format = SsTableFormat::new(32, 0, None);
         let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
-        builder.add(&[b'a'; 8], Some(&[b'1'; 8]), None).unwrap();
-        builder.add(&[b'b'; 8], Some(&[b'2'; 8]), None).unwrap();
-        builder.add(&[b'c'; 8], Some(&[b'3'; 8]), None).unwrap();
+        builder.add(&[b'a'; 8], Some(&[b'1'; 8])).unwrap();
+        builder.add(&[b'b'; 8], Some(&[b'2'; 8])).unwrap();
+        builder.add(&[b'c'; 8], Some(&[b'3'; 8])).unwrap();
 
         // when:
         let mut iter = next_block_to_iter(&mut builder);
@@ -366,7 +441,7 @@ mod tests {
         )
         .await;
         assert!(builder.next_block().is_none());
-        builder.add(&[b'd'; 8], Some(&[b'4'; 8]), None).unwrap();
+        builder.add(&[b'd'; 8], Some(&[b'4'; 8])).unwrap();
         let mut iter = next_block_to_iter(&mut builder);
         assert_iterator(
             &mut iter,
@@ -386,12 +461,12 @@ mod tests {
         let format = SsTableFormat::new(32, 0, None);
         let table_store = TableStore::new(object_store, format.clone(), root_path);
         let mut builder = table_store.table_builder();
-        builder.add(&[b'a'; 8], Some(&[b'1'; 8]), None).unwrap();
-        builder.add(&[b'b'; 8], Some(&[b'2'; 8]), None).unwrap();
-        builder.add(&[b'c'; 8], Some(&[b'3'; 8]), None).unwrap();
+        builder.add(&[b'a'; 8], Some(&[b'1'; 8])).unwrap();
+        builder.add(&[b'b'; 8], Some(&[b'2'; 8])).unwrap();
+        builder.add(&[b'c'; 8], Some(&[b'3'; 8])).unwrap();
         let first_block = builder.next_block();
 
-        let mut encoded = builder.build(None).unwrap();
+        let mut encoded = builder.build().unwrap();
 
         let mut raw_sst = Vec::<u8>::new();
         raw_sst.put_slice(first_block.unwrap().as_ref());
@@ -439,9 +514,9 @@ mod tests {
         let format = SsTableFormat::new(4096, 0, None);
         let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", Some(b"value1"), None).unwrap();
-        builder.add(b"key2", Some(b"value2"), None).unwrap();
-        let encoded = builder.build(None).unwrap();
+        builder.add(b"key1", Some(b"value1")).unwrap();
+        builder.add(b"key2", Some(b"value2")).unwrap();
+        let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
 
         // write sst and validate that the handle returned has the correct content.
@@ -487,9 +562,9 @@ mod tests {
         let format = SsTableFormat::new(4096, 3, None);
         let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", Some(b"value1"), None).unwrap();
-        builder.add(b"key2", Some(b"value2"), None).unwrap();
-        let encoded = builder.build(None).unwrap();
+        builder.add(b"key1", Some(b"value1")).unwrap();
+        builder.add(b"key2", Some(b"value2")).unwrap();
+        let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded)
@@ -509,11 +584,11 @@ mod tests {
         let format = SsTableFormat::new(32, 1, None);
         let table_store = TableStore::new(object_store, format.clone(), root_path);
         let mut builder = table_store.table_builder();
-        builder.add(&[b'a'; 2], Some(&[1u8; 2]), None).unwrap();
-        builder.add(&[b'b'; 2], Some(&[2u8; 2]), None).unwrap();
-        builder.add(&[b'c'; 20], Some(&[3u8; 20]), None).unwrap();
-        builder.add(&[b'd'; 20], Some(&[4u8; 20]), None).unwrap();
-        let encoded = builder.build(None).unwrap();
+        builder.add(&[b'a'; 2], Some(&[1u8; 2])).unwrap();
+        builder.add(&[b'b'; 2], Some(&[2u8; 2])).unwrap();
+        builder.add(&[b'c'; 20], Some(&[3u8; 20])).unwrap();
+        builder.add(&[b'd'; 20], Some(&[4u8; 20])).unwrap();
+        let encoded = builder.build().unwrap();
         let info = encoded.info.clone();
         let mut bytes = BytesMut::new();
         encoded
@@ -563,11 +638,11 @@ mod tests {
         let format = SsTableFormat::new(32, 1, None);
         let table_store = TableStore::new(object_store, format.clone(), root_path);
         let mut builder = table_store.table_builder();
-        builder.add(&[b'a'; 2], Some(&[1u8; 2]), None).unwrap();
-        builder.add(&[b'b'; 2], Some(&[2u8; 2]), None).unwrap();
-        builder.add(&[b'c'; 20], Some(&[3u8; 20]), None).unwrap();
-        builder.add(&[b'd'; 20], Some(&[4u8; 20]), None).unwrap();
-        let encoded = builder.build(None).unwrap();
+        builder.add(&[b'a'; 2], Some(&[1u8; 2])).unwrap();
+        builder.add(&[b'b'; 2], Some(&[2u8; 2])).unwrap();
+        builder.add(&[b'c'; 20], Some(&[3u8; 20])).unwrap();
+        builder.add(&[b'd'; 20], Some(&[4u8; 20])).unwrap();
+        let encoded = builder.build().unwrap();
         let info = encoded.info.clone();
         let mut bytes = BytesMut::new();
         encoded
