@@ -1,5 +1,9 @@
-on: push
 name: PR Checks
+
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # Make sure CI fails on all warnings, including Clippy lints
 env:
