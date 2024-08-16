@@ -1,5 +1,3 @@
-use std::usize;
-
 use crate::error::SlateDBError;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
