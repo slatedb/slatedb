@@ -228,7 +228,7 @@ mod tests {
     async fn test_one_block_sst_iter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 3);
+        let format = SsTableFormat::new(4096, 3, None);
         let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
@@ -264,7 +264,7 @@ mod tests {
     async fn test_many_block_sst_iter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 3);
+        let format = SsTableFormat::new(4096, 3, None);
         let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
         let mut builder = table_store.table_builder();
 
@@ -300,7 +300,7 @@ mod tests {
     async fn test_iter_from_key() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(128, 1);
+        let format = SsTableFormat::new(128, 1, None);
         let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
         let first_key = [b'a'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'z');
@@ -334,7 +334,7 @@ mod tests {
     async fn test_iter_from_key_smaller_than_first() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(128, 1);
+        let format = SsTableFormat::new(128, 1, None);
         let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -361,7 +361,7 @@ mod tests {
     async fn test_iter_from_key_larger_than_last() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(128, 1);
+        let format = SsTableFormat::new(128, 1, None);
         let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');

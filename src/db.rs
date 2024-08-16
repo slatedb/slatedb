@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
@@ -19,7 +21,6 @@ use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
-use std::sync::Arc;
 use tokio::runtime::Handle;
 
 pub(crate) struct DbInner {
@@ -240,7 +241,8 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
-        let sst_format = SsTableFormat::new(4096, options.min_filter_keys);
+        let sst_format =
+            SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             object_store.clone(),
             sst_format,
@@ -252,7 +254,7 @@ impl Db {
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
             DbInner::new(
-                options,
+                options.clone(),
                 table_store.clone(),
                 manifest.db_state()?.clone(),
                 memtable_flush_tx,
@@ -426,7 +428,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let sst_format = SsTableFormat::new(4096, 10);
+        let sst_format = SsTableFormat::new(4096, 10, None);
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
             sst_format,
@@ -877,6 +879,7 @@ mod tests {
             min_filter_keys,
             l0_sst_size_bytes,
             compactor_options,
+            compression_codec: None,
         }
     }
 }

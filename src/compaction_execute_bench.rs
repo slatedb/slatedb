@@ -1,4 +1,3 @@
-use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::config::DEFAULT_COMPACTOR_OPTIONS;
 use crate::db_state::{SSTableHandle, SsTableId};
@@ -6,6 +5,7 @@ use crate::error::SlateDBError;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 use crate::test_utils::OrderedBytesGenerator;
+use crate::{compactor::WorkerToOrchestratorMsg, config::CompressionCodec};
 use bytes::BufMut;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -32,6 +32,7 @@ struct Options {
     num_ssts: usize,
     key_bytes: usize,
     val_bytes: usize,
+    compression_codec: Option<CompressionCodec>,
 }
 
 #[cfg(feature = "aws")]
@@ -59,7 +60,7 @@ fn open_object_store(options: &Options) -> Result<Arc<dyn ObjectStore>, SlateDBE
 pub fn run_compaction_execute_bench() -> Result<(), SlateDBError> {
     let options = load_options();
     let s3 = open_object_store(&options)?;
-    let sst_format = SsTableFormat::new(4096, 1);
+    let sst_format = SsTableFormat::new(4096, 1, options.compression_codec);
     let table_store = Arc::new(TableStore::new(
         s3.clone(),
         sst_format,
@@ -277,6 +278,12 @@ fn load_options() -> Options {
     let val_bytes = std::env::var("VAL_BYTES")
         .ok()
         .unwrap_or(String::from("224"));
+    let compression_codec = std::env::var("COMPRESSION_CODEC").ok().map(|codec| {
+        codec
+            .parse::<CompressionCodec>()
+            .expect("invalid compression codec")
+    });
+
     let options = Options {
         aws_key,
         aws_secret,
@@ -288,6 +295,7 @@ fn load_options() -> Options {
         num_ssts: num_ssts.parse::<usize>().expect("invalid num ssts"),
         key_bytes: key_bytes.parse::<usize>().expect("invalid key bytes"),
         val_bytes: val_bytes.parse::<usize>().expect("invalid val bytes"),
+        compression_codec,
     };
     info!("Options: {:#?}", options);
     options

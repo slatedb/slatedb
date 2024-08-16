@@ -337,7 +337,7 @@ mod tests {
     async fn test_sst_writer_should_write_sst() {
         // given:
         let os = Arc::new(object_store::memory::InMemory::new());
-        let format = SsTableFormat::new(32, 1);
+        let format = SsTableFormat::new(32, 1, None);
         let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
         let id = SsTableId::Compacted(Ulid::new());
 

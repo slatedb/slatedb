@@ -6,6 +6,7 @@
 ![GitHub License](https://img.shields.io/github/license/slatedb/slatedb?style=flat-square)
 <a href="https://slatedb.io">![slatedb.io](https://img.shields.io/badge/site-slatedb.io-00A1FF?style=flat-square)</a>
 <a href="https://discord.gg/mHYmGy5MgA">![Discord](https://img.shields.io/discord/1232385660460204122?style=flat-square)</a>
+<a href="https://docs.rs/slatedb/latest/slatedb/">![Docs](https://img.shields.io/badge/docs-docs.rs-00A1FF?style=flat-square)</a>
 
 ## Introduction
 
@@ -33,7 +34,7 @@ Then you can use SlateDB in your Rust code:
 ```rust
 use bytes::Bytes;
 use object_store::{ObjectStore, memory::InMemory, path::Path};
-use slatedb::db:Db;
+use slatedb::db::Db;
 use slatedb::config::{CompactorOptions, DbOptions};
 use std::{sync::Arc, time::Duration};
 
@@ -47,6 +48,7 @@ async fn main() {
         min_filter_keys: 10,
         l0_sst_size_bytes: 128,
         compactor_options: Some(CompactorOptions::default()),
+        compression_codec: None,
     };
     let kv_store = Db::open_with_opts(
         Path::from("/tmp/test_kv_store"),
@@ -91,7 +93,7 @@ SlateDB is currently in the early stages of development. It is not yet ready for
 - [ ] Range queries ([#8](https://github.com/slatedb/slatedb/issues/8))
 - [ ] Block cache ([#15](https://github.com/slatedb/slatedb/issues/15))
 - [ ] Disk cache ([#9](https://github.com/slatedb/slatedb/issues/9))
-- [ ] Compression ([#10](https://github.com/slatedb/slatedb/issues/10))
+- [x] Compression ([#10](https://github.com/slatedb/slatedb/issues/10))
 - [x] Bloom filters ([#11](https://github.com/slatedb/slatedb/issues/11))
 - [x] Manifest persistence ([#14](https://github.com/slatedb/slatedb/issues/14))
 - [x] Compaction ([#7](https://github.com/slatedb/slatedb/issues/7))
