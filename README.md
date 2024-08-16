@@ -48,6 +48,7 @@ async fn main() {
         min_filter_keys: 10,
         l0_sst_size_bytes: 128,
         compactor_options: Some(CompactorOptions::default()),
+        compression_codec: None,
     };
     let kv_store = Db::open_with_opts(
         Path::from("/tmp/test_kv_store"),
