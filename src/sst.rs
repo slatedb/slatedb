@@ -71,34 +71,38 @@ impl SsTableFormat {
         Ok(filter)
     }
 
-    fn decompress(compressed_data: Bytes, compression_option: CompressionCodec) -> Bytes {
+    fn decompress(
+        compressed_data: Bytes,
+        compression_option: CompressionCodec,
+    ) -> Result<Bytes, SlateDBError> {
         match compression_option {
             #[cfg(feature = "snappy")]
-            CompressionCodec::Snappy => Bytes::from(
+            CompressionCodec::Snappy => Ok(Bytes::from(
                 snap::raw::Decoder::new()
                     .decompress_vec(&compressed_data)
-                    .unwrap(),
-            ),
+                    .map_err(|_| SlateDBError::BlockDecompressionError)?,
+            )),
             #[cfg(feature = "zlib")]
             CompressionCodec::Zlib => {
                 let mut decoder = flate2::read::ZlibDecoder::new(&compressed_data[..]);
                 let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed).unwrap();
-                Bytes::from(decompressed)
+                decoder
+                    .read_to_end(&mut decompressed)
+                    .map_err(|_| SlateDBError::BlockDecompressionError)?;
+                Ok(Bytes::from(decompressed))
             }
             #[cfg(feature = "lz4")]
             CompressionCodec::Lz4 => {
-                let decompressed =
-                    lz4_flex::block::decompress_size_prepended(&compressed_data).unwrap();
-                Bytes::from(decompressed)
+                let decompressed = lz4_flex::block::decompress_size_prepended(&compressed_data)
+                    .map_err(|_| SlateDBError::BlockDecompressionError)?;
+                Ok(Bytes::from(decompressed))
             }
             #[cfg(feature = "zstd")]
             CompressionCodec::Zstd => {
-                let decompressed = zstd::stream::decode_all(&compressed_data[..]).unwrap();
-                Bytes::from(decompressed)
+                let decompressed = zstd::stream::decode_all(&compressed_data[..])
+                    .map_err(|_| SlateDBError::BlockDecompressionError)?;
+                Ok(Bytes::from(decompressed))
             }
-            #[allow(unreachable_patterns)]
-            _ => panic!("Unsupported compression codec"),
         }
     }
 
@@ -154,7 +158,7 @@ impl SsTableFormat {
         }
         let decoded_block = Block::decode(block_bytes);
         let decompressed_bytes = match self.compression_codec {
-            Some(c) => Self::decompress(decoded_block.data, c),
+            Some(c) => Self::decompress(decoded_block.data, c)?,
             None => decoded_block.data,
         };
         Ok(Block {
@@ -260,29 +264,38 @@ impl<'a> EncodedSsTableBuilder<'a> {
         }
     }
 
-    fn compress(data: Bytes, c: CompressionCodec) -> Bytes {
+    fn compress(data: Bytes, c: CompressionCodec) -> Result<Bytes, SlateDBError> {
         match c {
             #[cfg(feature = "snappy")]
             CompressionCodec::Snappy => {
-                let compressed = snap::raw::Encoder::new().compress_vec(&data).unwrap();
-                Bytes::from(compressed)
+                let compressed = snap::raw::Encoder::new()
+                    .compress_vec(&data)
+                    .map_err(|_| SlateDBError::BlockCompressionError)?;
+                Ok(Bytes::from(compressed))
             }
             #[cfg(feature = "zlib")]
             CompressionCodec::Zlib => {
                 let mut encoder =
                     flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-                encoder.write_all(&data).unwrap();
-                Bytes::from(encoder.finish().unwrap())
+                encoder
+                    .write_all(&data)
+                    .map_err(|_| SlateDBError::BlockCompressionError)?;
+                Ok(Bytes::from(
+                    encoder
+                        .finish()
+                        .map_err(|_| SlateDBError::BlockCompressionError)?,
+                ))
             }
             #[cfg(feature = "lz4")]
             CompressionCodec::Lz4 => {
                 let compressed = lz4_flex::block::compress_prepend_size(&data);
-                Bytes::from(compressed)
+                Ok(Bytes::from(compressed))
             }
             #[cfg(feature = "zstd")]
             CompressionCodec::Zstd => {
-                let compressed = zstd::bulk::compress(&data, 3).unwrap();
-                Bytes::from(compressed)
+                let compressed = zstd::bulk::compress(&data, 3)
+                    .map_err(|_| SlateDBError::BlockCompressionError)?;
+                Ok(Bytes::from(compressed))
             }
         }
     }
@@ -327,7 +340,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
         let builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
         let encoded_block = builder.build()?.encode();
         let compressed_block = match self.compression_codec {
-            Some(c) => Self::compress(encoded_block, c),
+            Some(c) => Self::compress(encoded_block, c)?,
             None => encoded_block,
         };
 

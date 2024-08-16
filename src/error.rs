@@ -35,4 +35,10 @@ pub enum SlateDBError {
 
     #[error("Invalid Compression Codec")]
     InvalidCompressionCodec,
+
+    #[error("Error Decompressing Block")]
+    BlockDecompressionError,
+
+    #[error("Error Compressing Block")]
+    BlockCompressionError,
 }
