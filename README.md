@@ -6,6 +6,7 @@
 ![GitHub License](https://img.shields.io/github/license/slatedb/slatedb?style=flat-square)
 <a href="https://slatedb.io">![slatedb.io](https://img.shields.io/badge/site-slatedb.io-00A1FF?style=flat-square)</a>
 <a href="https://discord.gg/mHYmGy5MgA">![Discord](https://img.shields.io/discord/1232385660460204122?style=flat-square)</a>
+<a href="https://docs.rs/slatedb/latest/slatedb/">![Docs](https://img.shields.io/badge/docs-docs.rs-00A1FF?style=flat-square)</a>
 
 ## Introduction
 
@@ -33,7 +34,7 @@ Then you can use SlateDB in your Rust code:
 ```rust
 use bytes::Bytes;
 use object_store::{ObjectStore, memory::InMemory, path::Path};
-use slatedb::db:Db;
+use slatedb::db::Db;
 use slatedb::config::{CompactorOptions, DbOptions};
 use std::{sync::Arc, time::Duration};
 
