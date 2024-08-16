@@ -1,9 +1,9 @@
-use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::filter::{BloomFilter, BloomFilterBuilder};
 use crate::flatbuffer_types::{
     BlockMeta, BlockMetaArgs, SsTableInfo, SsTableInfoArgs, SsTableInfoOwned,
 };
+use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
@@ -11,17 +11,29 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
 
+#[cfg(feature = "snappy")]
+use std::io::Read;
+
+#[cfg(feature = "lz4")]
+use std::io::Write;
+
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
     block_size: usize,
     min_filter_keys: u32,
+    compression_codec: Option<CompressionCodec>,
 }
 
 impl SsTableFormat {
-    pub fn new(block_size: usize, min_filter_keys: u32) -> Self {
+    pub fn new(
+        block_size: usize,
+        min_filter_keys: u32,
+        compression_codec: Option<CompressionCodec>,
+    ) -> Self {
         Self {
             block_size,
             min_filter_keys,
+            compression_codec,
         }
     }
 
@@ -57,6 +69,42 @@ impl SsTableFormat {
             filter = Some(Arc::new(BloomFilter::decode(&filter_bytes)));
         }
         Ok(filter)
+    }
+
+    /// Decompresses the compressed data using the specified compression codec.
+    fn decompress(
+        compressed_data: Bytes,
+        compression_option: CompressionCodec,
+    ) -> Result<Bytes, SlateDBError> {
+        match compression_option {
+            #[cfg(feature = "snappy")]
+            CompressionCodec::Snappy => Ok(Bytes::from(
+                snap::raw::Decoder::new()
+                    .decompress_vec(&compressed_data)
+                    .map_err(|_| SlateDBError::BlockDecompressionError)?,
+            )),
+            #[cfg(feature = "zlib")]
+            CompressionCodec::Zlib => {
+                let mut decoder = flate2::read::ZlibDecoder::new(&compressed_data[..]);
+                let mut decompressed = Vec::new();
+                decoder
+                    .read_to_end(&mut decompressed)
+                    .map_err(|_| SlateDBError::BlockDecompressionError)?;
+                Ok(Bytes::from(decompressed))
+            }
+            #[cfg(feature = "lz4")]
+            CompressionCodec::Lz4 => {
+                let decompressed = lz4_flex::block::decompress_size_prepended(&compressed_data)
+                    .map_err(|_| SlateDBError::BlockDecompressionError)?;
+                Ok(Bytes::from(decompressed))
+            }
+            #[cfg(feature = "zstd")]
+            CompressionCodec::Zstd => {
+                let decompressed = zstd::stream::decode_all(&compressed_data[..])
+                    .map_err(|_| SlateDBError::BlockDecompressionError)?;
+                Ok(Bytes::from(decompressed))
+            }
+        }
     }
 
     fn block_range(&self, blocks: Range<usize>, handle: &SsTableInfo) -> Range<usize> {
@@ -109,7 +157,15 @@ impl SsTableFormat {
         if checksum != stored_checksum {
             return Err(SlateDBError::ChecksumMismatch);
         }
-        Ok(Block::decode(block_bytes))
+        let decoded_block = Block::decode(block_bytes);
+        let decompressed_bytes = match self.compression_codec {
+            Some(c) => Self::decompress(decoded_block.data, c)?,
+            None => decoded_block.data,
+        };
+        Ok(Block {
+            data: decompressed_bytes,
+            offsets: decoded_block.offsets,
+        })
     }
 
     pub(crate) async fn read_block(
@@ -135,7 +191,11 @@ impl SsTableFormat {
     }
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
-        EncodedSsTableBuilder::new(self.block_size, self.min_filter_keys)
+        EncodedSsTableBuilder::new(
+            self.block_size,
+            self.min_filter_keys,
+            self.compression_codec,
+        )
     }
 }
 
@@ -179,11 +239,16 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     min_filter_keys: u32,
     num_keys: u32,
     filter_builder: BloomFilterBuilder,
+    compression_codec: Option<CompressionCodec>,
 }
 
 impl<'a> EncodedSsTableBuilder<'a> {
     /// Create a builder based on target block size.
-    fn new(block_size: usize, min_filter_keys: u32) -> Self {
+    fn new(
+        block_size: usize,
+        min_filter_keys: u32,
+        compression_codec: Option<CompressionCodec>,
+    ) -> Self {
         Self {
             current_len: 0,
             blocks: VecDeque::new(),
@@ -196,6 +261,44 @@ impl<'a> EncodedSsTableBuilder<'a> {
             num_keys: 0,
             filter_builder: BloomFilterBuilder::new(10),
             sst_info_builder: flatbuffers::FlatBufferBuilder::new(),
+            compression_codec,
+        }
+    }
+
+    /// Compresses the data using the specified compression codec.
+    fn compress(data: Bytes, c: CompressionCodec) -> Result<Bytes, SlateDBError> {
+        match c {
+            #[cfg(feature = "snappy")]
+            CompressionCodec::Snappy => {
+                let compressed = snap::raw::Encoder::new()
+                    .compress_vec(&data)
+                    .map_err(|_| SlateDBError::BlockCompressionError)?;
+                Ok(Bytes::from(compressed))
+            }
+            #[cfg(feature = "zlib")]
+            CompressionCodec::Zlib => {
+                let mut encoder =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder
+                    .write_all(&data)
+                    .map_err(|_| SlateDBError::BlockCompressionError)?;
+                Ok(Bytes::from(
+                    encoder
+                        .finish()
+                        .map_err(|_| SlateDBError::BlockCompressionError)?,
+                ))
+            }
+            #[cfg(feature = "lz4")]
+            CompressionCodec::Lz4 => {
+                let compressed = lz4_flex::block::compress_prepend_size(&data);
+                Ok(Bytes::from(compressed))
+            }
+            #[cfg(feature = "zstd")]
+            CompressionCodec::Zstd => {
+                let compressed = zstd::bulk::compress(&data, 3)
+                    .map_err(|_| SlateDBError::BlockCompressionError)?;
+                Ok(Bytes::from(compressed))
+            }
         }
     }
 
@@ -238,6 +341,10 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
         let builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
         let encoded_block = builder.build()?.encode();
+        let compressed_block = match self.compression_codec {
+            Some(c) => Self::compress(encoded_block, c)?,
+            None => encoded_block,
+        };
 
         let block_meta = BlockMeta::create(
             &mut self.sst_info_builder,
@@ -248,10 +355,10 @@ impl<'a> EncodedSsTableBuilder<'a> {
         );
 
         self.block_meta.push(block_meta);
-        let checksum = crc32fast::hash(&encoded_block);
-        let total_block_size = encoded_block.len() + std::mem::size_of::<u32>();
+        let checksum = crc32fast::hash(&compressed_block);
+        let total_block_size = compressed_block.len() + std::mem::size_of::<u32>();
         let mut block = Vec::with_capacity(total_block_size);
-        block.put(encoded_block);
+        block.put(compressed_block);
         block.put_u32(checksum);
         Ok(Some(block))
     }
@@ -325,7 +432,7 @@ mod tests {
     async fn test_builder_should_make_blocks_available() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 0);
+        let format = SsTableFormat::new(32, 0, None);
         let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 8], Some(&[b'1'; 8])).unwrap();
@@ -369,7 +476,7 @@ mod tests {
     async fn test_builder_should_return_unconsumed_blocks() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 0);
+        let format = SsTableFormat::new(32, 0, None);
         let table_store = TableStore::new(object_store, format.clone(), root_path);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 8], Some(&[b'1'; 8])).unwrap();
@@ -422,7 +529,7 @@ mod tests {
     async fn test_sstable() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 0);
+        let format = SsTableFormat::new(4096, 0, None);
         let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
@@ -470,7 +577,7 @@ mod tests {
     async fn test_sstable_no_filter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 3);
+        let format = SsTableFormat::new(4096, 3, None);
         let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
@@ -492,7 +599,7 @@ mod tests {
         // given:
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 1);
+        let format = SsTableFormat::new(32, 1, None);
         let table_store = TableStore::new(object_store, format.clone(), root_path);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 2], Some(&[1u8; 2])).unwrap();
@@ -546,7 +653,7 @@ mod tests {
         // given:
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 1);
+        let format = SsTableFormat::new(32, 1, None);
         let table_store = TableStore::new(object_store, format.clone(), root_path);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 2], Some(&[1u8; 2])).unwrap();

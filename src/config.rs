@@ -1,4 +1,6 @@
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
+
+use crate::error::SlateDBError;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
 pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
@@ -118,6 +120,7 @@ pub struct DbOptions {
 
     /// Configuration options for the compactor.
     pub compactor_options: Option<CompactorOptions>,
+    pub compression_codec: Option<CompressionCodec>,
 }
 
 impl DbOptions {
@@ -128,6 +131,7 @@ impl DbOptions {
             min_filter_keys: 1000,
             l0_sst_size_bytes: 128,
             compactor_options: Some(CompactorOptions::default()),
+            compression_codec: None,
         }
     }
 }
@@ -143,6 +147,41 @@ pub struct CompactorOptions {
     /// written to a Sorted Run during a compaction, a new SSTable will be created
     /// in the Sorted Run when this size is exceeded.
     pub(crate) max_sst_size: usize,
+}
+
+/// The compression algorithm to use for SSTables.
+#[derive(Clone, Copy, Debug)]
+pub enum CompressionCodec {
+    #[cfg(feature = "snappy")]
+    /// Snappy compression algorithm.
+    Snappy,
+    #[cfg(feature = "zlib")]
+    /// Zlib compression algorithm.
+    Zlib,
+    #[cfg(feature = "lz4")]
+    /// Lz4 compression algorithm.
+    Lz4,
+    #[cfg(feature = "zstd")]
+    /// Zstd compression algorithm.
+    Zstd,
+}
+
+impl FromStr for CompressionCodec {
+    type Err = SlateDBError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            #[cfg(feature = "snappy")]
+            "snappy" => Ok(Self::Snappy),
+            #[cfg(feature = "zlib")]
+            "zlib" => Ok(Self::Zlib),
+            #[cfg(feature = "lz4")]
+            "lz4" => Ok(Self::Lz4),
+            #[cfg(feature = "zstd")]
+            "zstd" => Ok(Self::Zstd),
+            _ => Err(SlateDBError::InvalidCompressionCodec),
+        }
+    }
 }
 
 /// Default options for the compactor. Currently, only a

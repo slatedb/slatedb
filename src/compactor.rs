@@ -416,10 +416,10 @@ mod tests {
         Db,
     ) {
         let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::open_with_opts(Path::from(PATH), options, os.clone())
+        let db = Db::open_with_opts(Path::from(PATH), options.clone(), os.clone())
             .await
             .unwrap();
-        let sst_format = SsTableFormat::new(32, 10);
+        let sst_format = SsTableFormat::new(32, 10, options.compression_codec);
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let table_store = Arc::new(TableStore::new(os.clone(), sst_format, Path::from(PATH)));
         (os, manifest_store, table_store, db)
@@ -432,6 +432,7 @@ mod tests {
             min_filter_keys: 0,
             l0_sst_size_bytes: 128,
             compactor_options,
+            compression_codec: None,
         }
     }
 }
