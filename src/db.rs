@@ -383,6 +383,7 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use std::time::Duration;
+    use tracing::info;
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -773,7 +774,7 @@ mod tests {
             Duration::from_secs(10),
         )
         .await;
-        println!(
+        info!(
             "1 l0: {} {}",
             db.inner.state.read().state().core.l0.len(),
             db.inner.state.read().state().core.compacted.len()
@@ -789,7 +790,7 @@ mod tests {
             Duration::from_secs(10),
         )
         .await;
-        println!(
+        info!(
             "2 l0: {} {}",
             db.inner.state.read().state().core.l0.len(),
             db.inner.state.read().state().core.compacted.len()
@@ -803,7 +804,7 @@ mod tests {
         let val = db.get(&[b'm'; 32]).await.unwrap();
         assert_eq!(val, Some(Bytes::copy_from_slice(&[129u8; 32])));
         for i in 1..4 {
-            println!(
+            info!(
                 "3 l0: {} {}",
                 db.inner.state.read().state().core.l0.len(),
                 db.inner.state.read().state().core.compacted.len()

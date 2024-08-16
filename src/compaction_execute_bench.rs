@@ -1,4 +1,4 @@
-use crate::compactor::WorkerToOrchestoratorMsg;
+use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::config::DEFAULT_COMPACTOR_OPTIONS;
 use crate::db_state::{SSTableHandle, SsTableId};
@@ -17,6 +17,7 @@ use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+use tracing::{error, info};
 use ulid::Ulid;
 
 #[derive(Debug)]
@@ -135,7 +136,7 @@ async fn load_sst(
                 if retries >= 3 {
                     return Err(err);
                 } else {
-                    println!("error loading sst: {:#?}", err)
+                    error!("error loading sst: {:#?}", err)
                 }
             }
         }
@@ -164,7 +165,7 @@ async fn do_load_sst(
         sst_writer.add(key.as_ref(), Some(val.as_ref())).await?;
     }
     let encoded = sst_writer.close().await?;
-    println!(
+    info!(
         "wrote sst with id: {:#?} {:#?}",
         &encoded.id,
         start.elapsed()
@@ -209,8 +210,8 @@ fn run_bench(
     let mut futures =
         FuturesUnordered::<JoinHandle<Result<(SsTableId, SSTableHandle), SlateDBError>>>::new();
     let mut ssts_by_id = HashMap::new();
+    info!("load sst");
     for id in sst_ids.iter() {
-        println!("load sst");
         if futures.len() > 8 {
             let (id, handle) = handle
                 .block_on(futures.next())
@@ -232,7 +233,7 @@ fn run_bench(
         let (id, handle) = jh.expect("join failed")?;
         ssts_by_id.insert(id, handle);
     }
-    println!("finished loading");
+    info!("finished loading");
     let ssts: Vec<SSTableHandle> = sst_ids
         .iter()
         .map(|id| ssts_by_id.get(id).expect("expected sst").clone())
@@ -243,12 +244,12 @@ fn run_bench(
         sorted_runs: vec![],
     };
     let start = std::time::Instant::now();
-    println!("start compaction job");
+    info!("start compaction job");
     executor.start_compaction(job);
-    let WorkerToOrchestoratorMsg::CompactionFinished(result) = rx.recv().expect("recv failed");
+    let WorkerToOrchestratorMsg::CompactionFinished(result) = rx.recv().expect("recv failed");
     match result {
         Ok(_) => {
-            println!("compaction finished in {:#?} millis", start.elapsed());
+            info!("compaction finished in {:#?} millis", start.elapsed());
         }
         Err(err) => return Err(err),
     }
@@ -288,7 +289,7 @@ fn load_options() -> Options {
         key_bytes: key_bytes.parse::<usize>().expect("invalid key bytes"),
         val_bytes: val_bytes.parse::<usize>().expect("invalid val bytes"),
     };
-    println!("Options: {:#?}", options);
+    info!("Options: {:#?}", options);
     options
 }
 

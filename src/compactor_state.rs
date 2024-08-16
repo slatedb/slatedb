@@ -2,6 +2,7 @@ use crate::compactor_state::CompactionStatus::Submitted;
 use crate::db_state::{CoreDbState, SSTableHandle, SortedRun};
 use crate::error::SlateDBError;
 use std::collections::{HashMap, HashSet, VecDeque};
+use tracing::info;
 use ulid::Ulid;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -105,7 +106,7 @@ impl CompactorState {
                 return Err(SlateDBError::InvalidCompaction);
             }
         }
-        println!("accepted submitted compaction: {:#?}", compaction);
+        info!("accepted submitted compaction: {:#?}", compaction);
         self.compactions.insert(compaction.destination, compaction);
         Ok(())
     }
@@ -140,7 +141,7 @@ impl CompactorState {
 
     pub(crate) fn finish_compaction(&mut self, output_sr: SortedRun) {
         if let Some(compaction) = self.compactions.get(&output_sr.id) {
-            println!("finished compaction: {:#?}", compaction);
+            info!("finished compaction: {:#?}", compaction);
             // reconstruct l0
             let compaction_l0s: HashSet<Ulid> = compaction
                 .sources
