@@ -1,5 +1,5 @@
 #[derive(thiserror::Error, Debug)]
-pub enum SlateDBError {
+pub (crate) enum SlateDBError {
     #[error("IO error")]
     IoError(#[from] std::io::Error),
 

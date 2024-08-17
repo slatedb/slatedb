@@ -38,6 +38,13 @@ default = ["aws"]
 aws = ["object_store/aws"]
 db_bench = ["aws"]
 
-[[bin]]
-name = "compaction-execute-bench"
-path = "src/compaction_execute_bench/compaction_execute_bench.rs"
+# [[bin]]
+# name = "compaction-execute-bench"
+# path = "src/compaction_execute_bench/compaction_execute_bench.rs"
+
+
+[[bench]]
+harness = false
+name = "benchmark"
+path = "compaction_execute_bench/compaction_execute_benchtest.rs"
+required-features = ["bench"]
