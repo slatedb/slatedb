@@ -313,7 +313,6 @@ impl Db {
 
         // Tell the notifier thread to shut down.
         self.flush_notifier.send(()).ok();
-        self.inner.memtable_flush_notifier.send(Shutdown).ok();
 
         if let Some(flush_task) = {
             // Scope the flush_thread lock so its lock isn't held while awaiting the join
@@ -324,6 +323,9 @@ impl Db {
         } {
             flush_task.await.expect("Failed to join flush thread");
         }
+
+        // Tell the memtable flush thread to shut down.
+        self.inner.memtable_flush_notifier.send(Shutdown).ok();
 
         if let Some(memtable_flush_task) = {
             let mut memtable_flush_task = self.memtable_flush_task.lock();

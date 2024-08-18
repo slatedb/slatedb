@@ -8,9 +8,11 @@ use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
+use futures::future::join_all;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::mem;
+use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use ulid::Ulid;
@@ -23,6 +25,8 @@ pub(crate) struct CompactionJob {
 
 pub(crate) trait CompactionExecutor {
     fn start_compaction(&self, compaction: CompactionJob);
+    fn stop(&self);
+    fn is_stopped(&self) -> bool;
 }
 
 pub(crate) struct TokioCompactionExecutor {
@@ -43,6 +47,7 @@ impl TokioCompactionExecutor {
                 worker_tx,
                 table_store,
                 tasks: Arc::new(Mutex::new(HashMap::new())),
+                is_stopped: AtomicBool::new(false),
             }),
         }
     }
@@ -52,10 +57,17 @@ impl CompactionExecutor for TokioCompactionExecutor {
     fn start_compaction(&self, compaction: CompactionJob) {
         self.inner.start_compaction(compaction);
     }
+
+    fn stop(&self) {
+        self.inner.stop()
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.inner.is_stopped()
+    }
 }
 
 struct TokioCompactionTask {
-    #[allow(dead_code)]
     task: JoinHandle<()>,
 }
 
@@ -65,6 +77,7 @@ pub(crate) struct TokioCompactionExecutorInner {
     worker_tx: crossbeam_channel::Sender<WorkerToOrchestoratorMsg>,
     table_store: Arc<TableStore>,
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
+    is_stopped: AtomicBool,
 }
 
 impl TokioCompactionExecutorInner {
@@ -119,6 +132,9 @@ impl TokioCompactionExecutorInner {
 
     fn start_compaction(self: &Arc<Self>, compaction: CompactionJob) {
         let mut tasks = self.tasks.lock();
+        if self.is_stopped.load(atomic::Ordering::SeqCst) {
+            return;
+        }
         let dst = compaction.destination;
         assert!(!tasks.contains_key(&dst));
         let this = self.clone();
@@ -132,5 +148,31 @@ impl TokioCompactionExecutorInner {
             tasks.remove(&dst);
         });
         tasks.insert(dst, TokioCompactionTask { task });
+    }
+
+    fn stop(&self) {
+        let mut tasks = self.tasks.lock();
+
+        for task in tasks.values() {
+            task.task.abort();
+        }
+
+        self.handle.block_on(async {
+            let results = join_all(tasks.drain().map(|(_, task)| task.task)).await;
+            for result in results {
+                match result {
+                    Err(e) if !e.is_cancelled() => {
+                        eprintln!("Shutdown error in compaction task: {:?}", e);
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        self.is_stopped.store(true, atomic::Ordering::SeqCst);
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.is_stopped.load(atomic::Ordering::SeqCst)
     }
 }
