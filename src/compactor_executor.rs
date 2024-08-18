@@ -12,6 +12,7 @@ use futures::future::join_all;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::mem;
+use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use ulid::Ulid;
@@ -45,6 +46,7 @@ impl TokioCompactionExecutor {
                 worker_tx,
                 table_store,
                 tasks: Arc::new(Mutex::new(HashMap::new())),
+                is_stopped: AtomicBool::new(false),
             }),
         }
     }
@@ -70,6 +72,7 @@ pub(crate) struct TokioCompactionExecutorInner {
     worker_tx: crossbeam_channel::Sender<WorkerToOrchestoratorMsg>,
     table_store: Arc<TableStore>,
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
+    is_stopped: AtomicBool,
 }
 
 impl TokioCompactionExecutorInner {
@@ -124,6 +127,9 @@ impl TokioCompactionExecutorInner {
 
     fn start_compaction(self: &Arc<Self>, compaction: CompactionJob) {
         let mut tasks = self.tasks.lock();
+        if self.is_stopped.load(atomic::Ordering::SeqCst) {
+            return;
+        }
         let dst = compaction.destination;
         assert!(!tasks.contains_key(&dst));
         let this = self.clone();
@@ -157,5 +163,7 @@ impl TokioCompactionExecutorInner {
                 }
             }
         });
+
+        self.is_stopped.store(true, atomic::Ordering::SeqCst);
     }
 }
