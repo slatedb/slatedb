@@ -26,6 +26,7 @@ pub(crate) struct CompactionJob {
 pub(crate) trait CompactionExecutor {
     fn start_compaction(&self, compaction: CompactionJob);
     fn stop(&self);
+    fn is_stopped(&self) -> bool;
 }
 
 pub(crate) struct TokioCompactionExecutor {
@@ -59,6 +60,10 @@ impl CompactionExecutor for TokioCompactionExecutor {
 
     fn stop(&self) {
         self.inner.stop()
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.inner.is_stopped()
     }
 }
 
@@ -165,5 +170,9 @@ impl TokioCompactionExecutorInner {
         });
 
         self.is_stopped.store(true, atomic::Ordering::SeqCst);
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.is_stopped.load(atomic::Ordering::SeqCst)
     }
 }
