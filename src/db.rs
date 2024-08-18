@@ -170,19 +170,16 @@ impl DbInner {
             };
             let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1);
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
-            while let Some(kv) = iter.next_entry().await? {
-                // TODO: it's not ideal that we have to take this lock for every kv. We can solve
-                //       this by either:
-                //       1. detaching this method from self and calling it before initializing
-                //          DbInner. The downside is we can't use member methods of DbInner
-                //          like maybe_freeze_wal
-                //       2. accumulating kv-pairs in memory and bulk-applying the writes
+            {
                 let mut guard = self.state.write();
-                match kv.value {
-                    ValueDeletable::Value(value) => {
-                        guard.memtable().put(kv.key.as_ref(), value.as_ref())
+                let memtable = guard.memtable();
+                while let Some(kv) = iter.next_entry().await? {
+                    match kv.value {
+                        ValueDeletable::Value(value) => {
+                            memtable.put(kv.key.as_ref(), value.as_ref())
+                        }
+                        ValueDeletable::Tombstone => memtable.delete(kv.key.as_ref()),
                     }
-                    ValueDeletable::Tombstone => guard.memtable().delete(kv.key.as_ref()),
                 }
             }
             {
