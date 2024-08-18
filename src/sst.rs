@@ -598,6 +598,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sstable_with_compression() {
+        #[allow(unused)]
+        async fn test_compression_inner(compression: CompressionCodec) {
+            let root_path = Path::from("");
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let format = SsTableFormat::new(4096, 0, Some(compression));
+            let table_store = TableStore::new(object_store, format, root_path);
+            let mut builder = table_store.table_builder();
+            builder.add(b"key1", Some(b"value1")).unwrap();
+            builder.add(b"key2", Some(b"value2")).unwrap();
+            let encoded = builder.build().unwrap();
+            let encoded_info = encoded.info.clone();
+            table_store
+                .write_sst(&SsTableId::Wal(0), encoded)
+                .await
+                .unwrap();
+            let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
+
+            assert_eq!(encoded_info, sst_handle.info);
+            let sst_info = sst_handle.info.borrow();
+            assert_eq!(1, sst_info.block_meta().len());
+            assert_eq!(
+                b"key1",
+                sst_info.first_key().unwrap().bytes(),
+                "first key in sst info should be correct"
+            );
+        }
+        #[cfg(feature = "snappy")]
+        test_compression_inner(CompressionCodec::Snappy).await;
+        #[cfg(feature = "zlib")]
+        test_compression_inner(CompressionCodec::Zlib).await;
+        #[cfg(feature = "lz4")]
+        test_compression_inner(CompressionCodec::Lz4).await;
+        #[cfg(feature = "zstd")]
+        test_compression_inner(CompressionCodec::Zstd).await;
+    }
+
+    #[tokio::test]
     async fn test_read_blocks() {
         // given:
         let root_path = Path::from("");
