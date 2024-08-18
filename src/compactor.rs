@@ -151,8 +151,10 @@ impl CompactorOrchestrator {
                     }
                 }
                 recv(self.external_rx) -> _ => {
+                    // Stop the executor. Don't return because there might
+                    // still be messages in `worker_rx`. Let the loop continue
+                    // to drain them until empty.
                     self.executor.stop();
-                    return;
                 }
             }
         }
