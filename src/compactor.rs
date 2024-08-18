@@ -148,6 +148,7 @@ impl CompactorOrchestrator {
                     }
                 }
                 recv(self.external_rx) -> _ => {
+                    self.executor.stop();
                     return;
                 }
             }

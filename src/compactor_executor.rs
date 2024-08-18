@@ -8,6 +8,7 @@ use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
+use futures::future::join_all;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::mem;
@@ -23,6 +24,7 @@ pub(crate) struct CompactionJob {
 
 pub(crate) trait CompactionExecutor {
     fn start_compaction(&self, compaction: CompactionJob);
+    fn stop(&self);
 }
 
 pub(crate) struct TokioCompactionExecutor {
@@ -52,10 +54,13 @@ impl CompactionExecutor for TokioCompactionExecutor {
     fn start_compaction(&self, compaction: CompactionJob) {
         self.inner.start_compaction(compaction);
     }
+
+    fn stop(&self) {
+        self.inner.stop()
+    }
 }
 
 struct TokioCompactionTask {
-    #[allow(dead_code)]
     task: JoinHandle<()>,
 }
 
@@ -132,5 +137,25 @@ impl TokioCompactionExecutorInner {
             tasks.remove(&dst);
         });
         tasks.insert(dst, TokioCompactionTask { task });
+    }
+
+    fn stop(&self) {
+        let mut tasks = self.tasks.lock();
+
+        for task in tasks.values() {
+            task.task.abort();
+        }
+
+        self.handle.block_on(async {
+            let results = join_all(tasks.drain().map(|(_, task)| task.task)).await;
+            for result in results {
+                match result {
+                    Err(e) if !e.is_cancelled() => {
+                        eprintln!("Shutdown error in compaction task: {:?}", e);
+                    }
+                    _ => {}
+                }
+            }
+        });
     }
 }
