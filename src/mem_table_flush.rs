@@ -73,6 +73,7 @@ impl DbInner {
         tokio_handle: &Handle,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let this = Arc::clone(self);
+        let mut is_shutdown = false;
         Some(tokio_handle.spawn(async move {
             let mut flusher = MemtableFlusher {
                 db_inner: this.clone(),
@@ -80,7 +81,10 @@ impl DbInner {
             };
             let mut manifest_poll_interval =
                 tokio::time::interval(this.options.manifest_poll_interval);
-            loop {
+
+            // Stop the loop when the shut down has been received *and* all
+            // remaining `rx` flushes have been drained.
+            while !(is_shutdown && rx.is_empty()) {
                 tokio::select! {
                     _ = manifest_poll_interval.tick() => {
                         if let Err(err) = flusher.load_manifest().await {
@@ -90,12 +94,7 @@ impl DbInner {
                     msg = rx.recv() => {
                         let msg = msg.expect("channel unexpectedly closed");
                         match msg {
-                            MemtableFlushThreadMsg::Shutdown => {
-                                if let Err(err) = flusher.write_manifest_safely().await {
-                                    print!("error writing manifest on shutdown: {}", err);
-                                }
-                                return;
-                            },
+                            MemtableFlushThreadMsg::Shutdown => is_shutdown = true,
                             MemtableFlushThreadMsg::FlushImmutableMemtables => {
                                 match flusher.flush_imm_memtables_to_l0().await {
                                     Ok(_) => {}
@@ -105,6 +104,10 @@ impl DbInner {
                         }
                     }
                 }
+            }
+
+            if let Err(err) = flusher.write_manifest_safely().await {
+                print!("error writing manifest on shutdown: {}", err);
             }
         }))
     }
