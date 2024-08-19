@@ -30,7 +30,7 @@ pub struct TableStore {
     //       the cache and get rid of this.
     //       https://github.com/slatedb/slatedb/issues/89
     filter_cache: RwLock<HashMap<SsTableId, Option<Arc<BloomFilter>>>>,
-    transactional_object_store: Arc<dyn TransactionalObjectStore>,
+    transactional_wal_store: Arc<dyn TransactionalObjectStore>,
 }
 
 struct ReadOnlyObject {
@@ -90,8 +90,8 @@ impl TableStore {
             compacted_path: "compacted",
             fp_registry,
             filter_cache: RwLock::new(HashMap::new()),
-            transactional_object_store: Arc::new(DelegatingTransactionalObjectStore::new(
-                root_path.clone(),
+            transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
+                root_path.child("wal"),
                 object_store.clone(),
             )),
         }
@@ -159,7 +159,6 @@ impl TableStore {
             )))
         );
 
-        let path = self.path(id);
         let total_size = encoded_sst
             .unconsumed_blocks
             .iter()
@@ -171,8 +170,12 @@ impl TableStore {
         }
 
         match id {
-            SsTableId::Wal(_) => {
-                match self.transactional_object_store.put_if_not_exists(&path, Bytes::from(data)).await {
+            SsTableId::Wal(wal_id) => {
+                let path = Path::from(format!(
+                    "{:020}.sst",
+                    wal_id,
+                ));
+                match self.transactional_wal_store.put_if_not_exists(&path, Bytes::from(data)).await {
                     Ok(_) => (),
                     Err(e) => match e {
                         object_store::Error::AlreadyExists { path: _, source: _} => return Err(SlateDBError::Fenced),
@@ -181,6 +184,7 @@ impl TableStore {
                 }
             }
             SsTableId::Compacted(_) => {
+                let path = self.path(id);
                 self.object_store
                 .put(&path, PutPayload::from(data))
                 .await
