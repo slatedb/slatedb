@@ -4,7 +4,9 @@ use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
-use crate::transactional_object_store:: {TransactionalObjectStore,DelegatingTransactionalObjectStore};
+use crate::transactional_object_store::{
+    DelegatingTransactionalObjectStore, TransactionalObjectStore,
+};
 use bytes::{BufMut, Bytes};
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::StreamExt;
@@ -171,14 +173,17 @@ impl TableStore {
 
         match id {
             SsTableId::Wal(wal_id) => {
-                let path = Path::from(format!(
-                    "{:020}.sst",
-                    wal_id,
-                ));
-                match self.transactional_wal_store.put_if_not_exists(&path, Bytes::from(data)).await {
+                let path = Path::from(format!("{:020}.sst", wal_id,));
+                match self
+                    .transactional_wal_store
+                    .put_if_not_exists(&path, Bytes::from(data))
+                    .await
+                {
                     Ok(_) => (),
                     Err(e) => match e {
-                        object_store::Error::AlreadyExists { path: _, source: _} => return Err(SlateDBError::Fenced),
+                        object_store::Error::AlreadyExists { path: _, source: _ } => {
+                            return Err(SlateDBError::Fenced)
+                        }
                         _ => return Err(SlateDBError::ObjectStoreError(e)),
                     },
                 }
@@ -186,13 +191,12 @@ impl TableStore {
             SsTableId::Compacted(_) => {
                 let path = self.path(id);
                 self.object_store
-                .put(&path, PutPayload::from(data))
-                .await
-                .map_err(SlateDBError::ObjectStoreError)?;
-    
+                    .put(&path, PutPayload::from(data))
+                    .await
+                    .map_err(SlateDBError::ObjectStoreError)?;
             }
         }
-       self.cache_filter(id.clone(), encoded_sst.filter);
+        self.cache_filter(id.clone(), encoded_sst.filter);
         Ok(SSTableHandle {
             id: id.clone(),
             info: encoded_sst.info,
