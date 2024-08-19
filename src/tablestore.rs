@@ -4,6 +4,7 @@ use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
+use crate::transactional_object_store:: {TransactionalObjectStore,DelegatingTransactionalObjectStore};
 use bytes::{BufMut, Bytes};
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::StreamExt;
@@ -29,6 +30,7 @@ pub struct TableStore {
     //       the cache and get rid of this.
     //       https://github.com/slatedb/slatedb/issues/89
     filter_cache: RwLock<HashMap<SsTableId, Option<Arc<BloomFilter>>>>,
+    transactional_object_store: Arc<dyn TransactionalObjectStore>,
 }
 
 struct ReadOnlyObject {
@@ -83,11 +85,15 @@ impl TableStore {
         Self {
             object_store: object_store.clone(),
             sst_format,
-            root_path,
+            root_path: root_path.clone(),
             wal_path: "wal",
             compacted_path: "compacted",
             fp_registry,
             filter_cache: RwLock::new(HashMap::new()),
+            transactional_object_store: Arc::new(DelegatingTransactionalObjectStore::new(
+                root_path.clone(),
+                object_store.clone(),
+            )),
         }
     }
 
@@ -163,11 +169,26 @@ impl TableStore {
         for chunk in encoded_sst.unconsumed_blocks {
             data.put_slice(chunk.as_ref())
         }
-        self.object_store
-            .put(&path, PutPayload::from(data))
-            .await
-            .map_err(SlateDBError::ObjectStoreError)?;
-        self.cache_filter(id.clone(), encoded_sst.filter);
+
+        match id {
+            SsTableId::Wal(_) => {
+                match self.transactional_object_store.put_if_not_exists(&path, Bytes::from(data)).await {
+                    Ok(_) => (),
+                    Err(e) => match e {
+                        object_store::Error::AlreadyExists { path: _, source: _} => return Err(SlateDBError::Fenced),
+                        _ => return Err(SlateDBError::ObjectStoreError(e)),
+                    },
+                }
+            }
+            SsTableId::Compacted(_) => {
+                self.object_store
+                .put(&path, PutPayload::from(data))
+                .await
+                .map_err(SlateDBError::ObjectStoreError)?;
+    
+            }
+        }
+       self.cache_filter(id.clone(), encoded_sst.filter);
         Ok(SSTableHandle {
             id: id.clone(),
             info: encoded_sst.info,
@@ -321,6 +342,7 @@ impl<'a> EncodedSsTableWriter<'a> {
 #[cfg(test)]
 mod tests {
     use crate::db_state::SsTableId;
+    use crate::error;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
@@ -370,5 +392,31 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_wal_write_should_fail_when_fenced() {
+        let os = Arc::new(object_store::memory::InMemory::new());
+        let format = SsTableFormat::new(32, 1, None);
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
+        let wal_id = SsTableId::Wal(1);
+
+        // write a wal sst
+        let mut sst1 = ts.table_builder();
+        sst1.add(b"key", Some(b"value")).unwrap();
+        let table = sst1.build().unwrap();
+        ts.write_sst(&wal_id, table).await.unwrap();
+
+        let mut sst2 = ts.table_builder();
+        sst2.add(b"key", Some(b"value")).unwrap();
+        let table2 = sst2.build().unwrap();
+
+        // write another walsst with the same id.
+        let result = ts.write_sst(&wal_id, table2).await;
+
+        match result {
+            Err(error::SlateDBError::Fenced) => (),
+            _ => assert!(false, "expecting fenced error"),
+        }
     }
 }
