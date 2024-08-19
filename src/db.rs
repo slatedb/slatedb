@@ -171,14 +171,17 @@ impl DbInner {
             let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1);
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
             {
-                let mut guard = self.state.write();
-                let memtable = guard.memtable();
+                let mut buf = Vec::new();
                 while let Some(kv) = iter.next_entry().await? {
+                    buf.push(kv);
+                }
+                let mut guard = self.state.write();
+                for kv in buf.into_iter() {
                     match kv.value {
                         ValueDeletable::Value(value) => {
-                            memtable.put(kv.key.as_ref(), value.as_ref())
+                            guard.memtable().put(kv.key.as_ref(), value.as_ref())
                         }
-                        ValueDeletable::Tombstone => memtable.delete(kv.key.as_ref()),
+                        ValueDeletable::Tombstone => guard.memtable().delete(kv.key.as_ref()),
                     }
                 }
             }
