@@ -424,7 +424,7 @@ mod tests {
 
         match result {
             Err(error::SlateDBError::Fenced) => (),
-            _ => assert!(false, "expecting fenced error"),
+            _ => panic!("expecting fenced error"),
         }
     }
 }
