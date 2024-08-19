@@ -161,6 +161,7 @@ impl DbInner {
             .get_wal_sst_list(wal_id_last_compacted)
             .await?;
         let mut last_sst_id = wal_id_last_compacted;
+        let mut wal_replay_buf = Vec::new();
         for sst_id in wal_sst_list {
             last_sst_id = sst_id;
             let sst = self.table_store.open_sst(&SsTableId::Wal(sst_id)).await?;
@@ -171,13 +172,15 @@ impl DbInner {
             let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1);
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
             {
-                let mut buf = Vec::new();
+                // buffer the WAL entries to bulk replay them into the memtable, this buffer is reused
+                // across replaying different WAL SSTs.
+                wal_replay_buf.clear();
                 while let Some(kv) = iter.next_entry().await? {
-                    buf.push(kv);
+                    wal_replay_buf.push(kv);
                 }
                 let mut guard = self.state.write();
-                for kv in buf.into_iter() {
-                    match kv.value {
+                for kv in wal_replay_buf.iter() {
+                    match &kv.value {
                         ValueDeletable::Value(value) => {
                             guard.memtable().put(kv.key.as_ref(), value.as_ref())
                         }
