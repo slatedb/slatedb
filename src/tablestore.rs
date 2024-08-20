@@ -172,8 +172,7 @@ impl TableStore {
         }
 
         let path = self.path(id);
-        self
-            .transactional_wal_store
+        self.transactional_wal_store
             .put_if_not_exists(&path, Bytes::from(data))
             .await
             .map_err(|e| match e {
