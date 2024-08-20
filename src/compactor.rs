@@ -230,7 +230,7 @@ impl CompactorOrchestrator {
     fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
         let result = self.state.submit_compaction(compaction.clone());
         if result.is_err() {
-            warn!("invalid compaction: {:#?}", result);
+            warn!("invalid compaction: {:?}", result);
             return Ok(());
         }
         self.start_compaction(compaction);

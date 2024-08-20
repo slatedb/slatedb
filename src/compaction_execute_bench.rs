@@ -137,7 +137,7 @@ async fn load_sst(
                 if retries >= 3 {
                     return Err(err);
                 } else {
-                    error!("error loading sst: {:#?}", err)
+                    error!("error loading sst: {:?}", err)
                 }
             }
         }
@@ -166,11 +166,7 @@ async fn do_load_sst(
         sst_writer.add(key.as_ref(), Some(val.as_ref())).await?;
     }
     let encoded = sst_writer.close().await?;
-    info!(
-        "wrote sst with id: {:#?} {:#?}",
-        &encoded.id,
-        start.elapsed()
-    );
+    info!("wrote sst with id: {:?} {:?}", &encoded.id, start.elapsed());
     Ok(())
 }
 
@@ -250,7 +246,7 @@ fn run_bench(
     let WorkerToOrchestratorMsg::CompactionFinished(result) = rx.recv().expect("recv failed");
     match result {
         Ok(_) => {
-            info!("compaction finished in {:#?} millis", start.elapsed());
+            info!("compaction finished in {:?} millis", start.elapsed());
         }
         Err(err) => return Err(err),
     }
@@ -297,7 +293,7 @@ fn load_options() -> Options {
         val_bytes: val_bytes.parse::<usize>().expect("invalid val bytes"),
         compression_codec,
     };
-    info!("Options: {:#?}", options);
+    info!("Options: {:?}", options);
     options
 }
 

@@ -73,8 +73,7 @@ impl SsTableFormat {
 
     /// Decompresses the compressed data using the specified compression codec.
     fn decompress(
-        #[allow(unused_variables)]
-        compressed_data: Bytes,
+        #[allow(unused_variables)] compressed_data: Bytes,
         compression_option: CompressionCodec,
     ) -> Result<Bytes, SlateDBError> {
         match compression_option {
@@ -268,8 +267,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
     /// Compresses the data using the specified compression codec.
     fn compress(
-        #[allow(unused_variables)]
-        data: Bytes,
+        #[allow(unused_variables)] data: Bytes,
         c: CompressionCodec,
     ) -> Result<Bytes, SlateDBError> {
         match c {
