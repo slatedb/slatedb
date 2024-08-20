@@ -12,7 +12,7 @@ use fail_parallel::{fail_point, FailPointRegistry};
 use futures::StreamExt;
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
-use object_store::{ObjectStore, PutPayload};
+use object_store::ObjectStore;
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
@@ -93,7 +93,7 @@ impl TableStore {
             fp_registry,
             filter_cache: RwLock::new(HashMap::new()),
             transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
-                root_path.child("wal"),
+                Path::from("/"),
                 object_store.clone(),
             )),
         }
@@ -171,31 +171,19 @@ impl TableStore {
             data.put_slice(chunk.as_ref())
         }
 
-        match id {
-            SsTableId::Wal(wal_id) => {
-                let path = Path::from(format!("{:020}.sst", wal_id,));
-                match self
-                    .transactional_wal_store
-                    .put_if_not_exists(&path, Bytes::from(data))
-                    .await
-                {
-                    Ok(_) => (),
-                    Err(e) => match e {
-                        object_store::Error::AlreadyExists { path: _, source: _ } => {
-                            return Err(SlateDBError::Fenced)
-                        }
-                        _ => return Err(SlateDBError::ObjectStoreError(e)),
-                    },
-                }
-            }
-            SsTableId::Compacted(_) => {
-                let path = self.path(id);
-                self.object_store
-                    .put(&path, PutPayload::from(data))
-                    .await
-                    .map_err(SlateDBError::ObjectStoreError)?;
-            }
-        }
+        let path = self.path(id);
+        self
+            .transactional_wal_store
+            .put_if_not_exists(&path, Bytes::from(data))
+            .await
+            .map_err(|e| match e {
+                object_store::Error::AlreadyExists { path: _, source: _ } => match id {
+                    SsTableId::Wal(_) => SlateDBError::Fenced,
+                    SsTableId::Compacted(_) => SlateDBError::ObjectStoreError(e),
+                },
+                _ => SlateDBError::ObjectStoreError(e),
+            })?;
+
         self.cache_filter(id.clone(), encoded_sst.filter);
         Ok(SSTableHandle {
             id: id.clone(),
@@ -421,10 +409,6 @@ mod tests {
 
         // write another walsst with the same id.
         let result = ts.write_sst(&wal_id, table2).await;
-
-        match result {
-            Err(error::SlateDBError::Fenced) => (),
-            _ => panic!("expecting fenced error"),
-        }
+        assert!(matches!(result, Err(error::SlateDBError::Fenced)));
     }
 }
