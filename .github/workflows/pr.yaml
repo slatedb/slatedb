@@ -1,5 +1,11 @@
-on: push
 name: PR Checks
+
+on:
+  push:
+      branches:
+        - main
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # Make sure CI fails on all warnings, including Clippy lints
 env:
@@ -46,4 +52,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Tests
-        run: cargo test --verbose
+        run: cargo test --all-features --verbose
