@@ -1,7 +1,8 @@
 use crate::block::Block;
 use crate::filter::{BloomFilter, BloomFilterBuilder};
 use crate::flatbuffer_types::{
-    BlockMeta, BlockMetaArgs, SsTableInfo, SsTableInfoArgs, SsTableInfoOwned,
+    BlockMeta, BlockMetaArgs, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned, SsTableInfo,
+    SsTableInfoArgs, SsTableInfoOwned,
 };
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
@@ -71,6 +72,39 @@ impl SsTableFormat {
         Ok(filter)
     }
 
+    pub(crate) async fn read_index(
+        &self,
+        info_owned: &SsTableInfoOwned,
+        obj: &impl ReadOnlyBlob,
+    ) -> Result<SsTableIndexOwned, SlateDBError> {
+        let info = info_owned.borrow();
+        let index_off = info.index_offset() as usize;
+        let index_end = index_off + info.index_len() as usize;
+        let index_bytes = obj.read_range(index_off..index_end).await?;
+        self.decode_index(index_bytes)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn read_index_raw(
+        &self,
+        info_owned: &SsTableInfoOwned,
+        sst_bytes: &Bytes,
+    ) -> Result<SsTableIndexOwned, SlateDBError> {
+        let info = info_owned.borrow();
+        let index_off = info.index_offset() as usize;
+        let index_end = index_off + info.index_len() as usize;
+        let index_bytes: Bytes = sst_bytes.slice(index_off..index_end);
+        self.decode_index(index_bytes)
+    }
+
+    fn decode_index(&self, index_bytes: Bytes) -> Result<SsTableIndexOwned, SlateDBError> {
+        let index_bytes = match self.compression_codec {
+            Some(c) => Self::decompress(index_bytes, c)?,
+            None => index_bytes,
+        };
+        Ok(SsTableIndexOwned::new(index_bytes)?)
+    }
+
     /// Decompresses the compressed data using the specified compression codec.
     fn decompress(
         #[allow(unused_variables)] compressed_data: Bytes,
@@ -107,39 +141,46 @@ impl SsTableFormat {
         }
     }
 
-    fn block_range(&self, blocks: Range<usize>, handle: &SsTableInfo) -> Range<usize> {
+    fn block_range(
+        &self,
+        blocks: Range<usize>,
+        handle: &SsTableInfo,
+        index: &SsTableIndex,
+    ) -> Range<usize> {
         let mut end_offset = handle.filter_offset() as usize;
-        if blocks.end < handle.block_meta().len() {
-            let next_block_meta = handle.block_meta().get(blocks.end);
+        if blocks.end < index.block_meta().len() {
+            let next_block_meta = index.block_meta().get(blocks.end);
             end_offset = next_block_meta.offset() as usize;
         }
-        let start_offset = handle.block_meta().get(blocks.start).offset() as usize;
+        let start_offset = index.block_meta().get(blocks.start).offset() as usize;
         start_offset..end_offset
     }
 
     pub(crate) async fn read_blocks(
         &self,
         info: &SsTableInfoOwned,
+        index_owned: &SsTableIndexOwned,
         blocks: Range<usize>,
         obj: &impl ReadOnlyBlob,
     ) -> Result<VecDeque<Block>, SlateDBError> {
         let handle = &info.borrow();
+        let index = index_owned.borrow();
         assert!(blocks.start <= blocks.end);
-        assert!(blocks.end <= handle.block_meta().len());
+        assert!(blocks.end <= index.block_meta().len());
         if blocks.start == blocks.end {
             return Ok(VecDeque::new());
         }
-        let range = self.block_range(blocks.clone(), handle);
+        let range = self.block_range(blocks.clone(), handle, &index);
         let start_offset = range.start;
         let bytes: Bytes = obj.read_range(range).await?;
         let mut decoded_blocks = VecDeque::new();
         for block in blocks {
-            let block_meta = handle.block_meta().get(block);
+            let block_meta = index.block_meta().get(block);
             let block_bytes_start = block_meta.offset() as usize - start_offset;
-            let block_bytes = if block == handle.block_meta().len() - 1 {
+            let block_bytes = if block == index.block_meta().len() - 1 {
                 bytes.slice(block_bytes_start..)
             } else {
-                let next_block_meta = handle.block_meta().get(block + 1);
+                let next_block_meta = index.block_meta().get(block + 1);
                 let block_bytes_end = next_block_meta.offset() as usize - start_offset;
                 bytes.slice(block_bytes_start..block_bytes_end)
             };
@@ -171,10 +212,11 @@ impl SsTableFormat {
     pub(crate) async fn read_block(
         &self,
         info: &SsTableInfoOwned,
+        index: &SsTableIndexOwned,
         block: usize,
         obj: &impl ReadOnlyBlob,
     ) -> Result<Block, SlateDBError> {
-        let mut blocks = self.read_blocks(info, block..block + 1, obj).await?;
+        let mut blocks = self.read_blocks(info, index, block..block + 1, obj).await?;
         Ok(blocks.pop_front().expect("expected a block to be returned"))
     }
 
@@ -182,11 +224,13 @@ impl SsTableFormat {
     pub(crate) fn read_block_raw(
         &self,
         info: &SsTableInfoOwned,
+        index_owned: &SsTableIndexOwned,
         block: usize,
         sst_bytes: &Bytes,
     ) -> Result<Block, SlateDBError> {
         let handle = &info.borrow();
-        let bytes: Bytes = sst_bytes.slice(self.block_range(block..block + 1, handle));
+        let index = index_owned.borrow();
+        let bytes: Bytes = sst_bytes.slice(self.block_range(block..block + 1, handle, &index));
         self.decode_block(bytes)
     }
 
@@ -205,12 +249,12 @@ impl SsTableInfoOwned {
         buf.put_u32(crc32fast::hash(info.data()));
     }
 
-    pub(crate) fn decode(raw_block_meta: Bytes) -> Result<SsTableInfoOwned, SlateDBError> {
-        if raw_block_meta.len() <= 4 {
+    pub(crate) fn decode(raw_info: Bytes) -> Result<SsTableInfoOwned, SlateDBError> {
+        if raw_info.len() <= 4 {
             return Err(SlateDBError::EmptyBlockMeta);
         }
-        let data = raw_block_meta.slice(..raw_block_meta.len() - 4).clone();
-        let checksum = raw_block_meta.slice(raw_block_meta.len() - 4..).get_u32();
+        let data = raw_info.slice(..raw_info.len() - 4).clone();
+        let checksum = raw_info.slice(raw_info.len() - 4..).get_u32();
         if checksum != crc32fast::hash(&data) {
             return Err(SlateDBError::ChecksumMismatch);
         }
@@ -229,9 +273,9 @@ pub(crate) struct EncodedSsTable {
 /// Builds an SSTable from key-value pairs.
 pub(crate) struct EncodedSsTableBuilder<'a> {
     builder: BlockBuilder,
-    sst_info_builder: flatbuffers::FlatBufferBuilder<'a, DefaultAllocator>,
+    index_builder: flatbuffers::FlatBufferBuilder<'a, DefaultAllocator>,
     first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
-    sst_first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
+    sst_first_key: Option<Bytes>,
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'a>>>,
     current_len: usize,
     blocks: VecDeque<Bytes>,
@@ -260,7 +304,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
             min_filter_keys,
             num_keys: 0,
             filter_builder: BloomFilterBuilder::new(10),
-            sst_info_builder: flatbuffers::FlatBufferBuilder::new(),
+            index_builder: flatbuffers::FlatBufferBuilder::new(),
             compression_codec,
         }
     }
@@ -317,10 +361,10 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
             // New block must always accept the first KV pair
             assert!(self.builder.add(key, value));
-            self.first_key = Some(self.sst_info_builder.create_vector(key));
+            self.first_key = Some(self.index_builder.create_vector(key));
         } else if self.sst_first_key.is_none() {
-            self.sst_first_key = Some(self.sst_info_builder.create_vector(key));
-            self.first_key = Some(self.sst_info_builder.create_vector(key));
+            self.sst_first_key = Some(Bytes::copy_from_slice(key));
+            self.first_key = Some(self.index_builder.create_vector(key));
         }
 
         self.filter_builder.add_key(key);
@@ -350,7 +394,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
         };
 
         let block_meta = BlockMeta::create(
-            &mut self.sst_info_builder,
+            &mut self.index_builder,
             &BlockMetaArgs {
                 offset: self.current_len as u64,
                 first_key: self.first_key,
@@ -379,21 +423,42 @@ impl<'a> EncodedSsTableBuilder<'a> {
             maybe_filter = Some(filter);
         }
 
-        let meta_offset = self.current_len + buf.len();
-        let vector = self.sst_info_builder.create_vector(&self.block_meta);
-        let info_wip_offset = SsTableInfo::create(
-            &mut self.sst_info_builder,
-            &SsTableInfoArgs {
-                first_key: self.sst_first_key,
+        // write the index block
+        let vector = self.index_builder.create_vector(&self.block_meta);
+        let index_wip = SsTableIndex::create(
+            &mut self.index_builder,
+            &SsTableIndexArgs {
                 block_meta: Some(vector),
+            },
+        );
+        self.index_builder.finish(index_wip, None);
+        let index_block = Bytes::from(self.index_builder.finished_data().to_vec());
+        let index_block = match self.compression_codec {
+            None => index_block,
+            Some(c) => Self::compress(index_block, c)?,
+        };
+        let index_offset = self.current_len + buf.len();
+        let index_len = index_block.len();
+        buf.put(index_block);
+
+        let mut sst_info_builder = flatbuffers::FlatBufferBuilder::new();
+        let first_key = self
+            .sst_first_key
+            .map(|k| sst_info_builder.create_vector(k.as_ref()));
+        let meta_offset = self.current_len + buf.len();
+        let info_wip_offset = SsTableInfo::create(
+            &mut sst_info_builder,
+            &SsTableInfoArgs {
+                first_key,
+                index_offset: index_offset as u64,
+                index_len: index_len as u64,
                 filter_offset: filter_offset as u64,
                 filter_len: filter_len as u64,
             },
         );
 
-        self.sst_info_builder.finish(info_wip_offset, None);
-        let info =
-            SsTableInfoOwned::new(Bytes::from(self.sst_info_builder.finished_data().to_vec()))?;
+        sst_info_builder.finish(info_wip_offset, None);
+        let info = SsTableInfoOwned::new(Bytes::from(sst_info_builder.finished_data().to_vec()))?;
 
         SsTableInfoOwned::encode(&info, &mut buf);
 
@@ -496,7 +561,10 @@ mod tests {
             raw_sst.put_slice(block.as_ref());
         }
         let raw_sst = Bytes::copy_from_slice(raw_sst.as_slice());
-        let block = format.read_block_raw(&encoded.info, 0, &raw_sst).unwrap();
+        let index = format.read_index_raw(&encoded.info, &raw_sst).unwrap();
+        let block = format
+            .read_block_raw(&encoded.info, &index, 0, &raw_sst)
+            .unwrap();
         let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
@@ -506,7 +574,9 @@ mod tests {
             )],
         )
         .await;
-        let block = format.read_block_raw(&encoded.info, 1, &raw_sst).unwrap();
+        let block = format
+            .read_block_raw(&encoded.info, &index, 1, &raw_sst)
+            .unwrap();
         let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
@@ -516,7 +586,9 @@ mod tests {
             )],
         )
         .await;
-        let block = format.read_block_raw(&encoded.info, 2, &raw_sst).unwrap();
+        let block = format
+            .read_block_raw(&encoded.info, &index, 2, &raw_sst)
+            .unwrap();
         let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
@@ -547,23 +619,21 @@ mod tests {
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
         let sst_info = sst_handle.info.borrow();
-        assert_eq!(1, sst_info.block_meta().len());
         assert_eq!(
             b"key1",
             sst_info.first_key().unwrap().bytes(),
             "first key in sst info should be correct"
         );
-        assert_eq!(
-            b"key1",
-            sst_info.block_meta().get(0).first_key().bytes(),
-            "first key in block meta should be correct"
-        );
 
         // construct sst info from the raw bytes and validate that it matches the original info.
         let sst_handle_from_store = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         assert_eq!(encoded_info, sst_handle_from_store.info);
+        let index = table_store
+            .read_index(&sst_handle_from_store)
+            .await
+            .unwrap();
         let sst_info_from_store = sst_handle_from_store.info.borrow();
-        assert_eq!(1, sst_info_from_store.block_meta().len());
+        assert_eq!(1, index.borrow().block_meta().len());
         assert_eq!(
             b"key1",
             sst_info_from_store.first_key().unwrap().bytes(),
@@ -571,7 +641,7 @@ mod tests {
         );
         assert_eq!(
             b"key1",
-            sst_info_from_store.block_meta().get(0).first_key().bytes(),
+            index.borrow().block_meta().get(0).first_key().bytes(),
             "first key in block meta should be correct after reading from store"
         );
     }
@@ -615,10 +685,11 @@ mod tests {
                 .await
                 .unwrap();
             let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
+            let index = table_store.read_index(&sst_handle).await.unwrap();
 
             assert_eq!(encoded_info, sst_handle.info);
             let sst_info = sst_handle.info.borrow();
-            assert_eq!(1, sst_info.block_meta().len());
+            assert_eq!(1, index.borrow().block_meta().len());
             assert_eq!(
                 b"key1",
                 sst_info.first_key().unwrap().bytes(),
@@ -654,12 +725,15 @@ mod tests {
             .unconsumed_blocks
             .iter()
             .for_each(|b| bytes.put(b.clone()));
-        let blob = BytesBlob {
-            bytes: bytes.freeze(),
-        };
+        let bytes = bytes.freeze();
+        let index = format.read_index_raw(&encoded.info, &bytes).unwrap();
+        let blob = BytesBlob { bytes };
 
         // when:
-        let mut blocks = format.read_blocks(&info, 0..2, &blob).await.unwrap();
+        let mut blocks = format
+            .read_blocks(&info, &index, 0..2, &blob)
+            .await
+            .unwrap();
 
         // then:
         let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
@@ -708,12 +782,15 @@ mod tests {
             .unconsumed_blocks
             .iter()
             .for_each(|b| bytes.put(b.clone()));
-        let blob = BytesBlob {
-            bytes: bytes.freeze(),
-        };
+        let bytes = bytes.freeze();
+        let index = format.read_index_raw(&encoded.info, &bytes).unwrap();
+        let blob = BytesBlob { bytes };
 
         // when:
-        let mut blocks = format.read_blocks(&info, 0..3, &blob).await.unwrap();
+        let mut blocks = format
+            .read_blocks(&info, &index, 0..3, &blob)
+            .await
+            .unwrap();
 
         // then:
         let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());

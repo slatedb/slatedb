@@ -16,13 +16,13 @@ pub(crate) struct SortedRunIterator<'a> {
 }
 
 impl<'a> SortedRunIterator<'a> {
-    pub(crate) fn new_from_key(
+    pub(crate) async fn new_from_key(
         sorted_run: &'a SortedRun,
         key: &'a [u8],
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
-    ) -> Self {
+    ) -> Result<Self, SlateDBError> {
         assert!(!sorted_run.ssts.is_empty());
         Self::new_opts(
             sorted_run,
@@ -32,14 +32,15 @@ impl<'a> SortedRunIterator<'a> {
             blocks_to_fetch,
             false,
         )
+        .await
     }
 
-    pub(crate) fn new_spawn(
+    pub(crate) async fn new_spawn(
         sorted_run: &'a SortedRun,
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
-    ) -> Self {
+    ) -> Result<Self, SlateDBError> {
         Self::new_opts(
             sorted_run,
             None,
@@ -48,15 +49,16 @@ impl<'a> SortedRunIterator<'a> {
             blocks_to_fetch,
             true,
         )
+        .await
     }
 
     #[allow(dead_code)]
-    pub(crate) fn new(
+    pub(crate) async fn new(
         sorted_run: &'a SortedRun,
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
-    ) -> Self {
+    ) -> Result<Self, SlateDBError> {
         Self::new_opts(
             sorted_run,
             None,
@@ -65,36 +67,41 @@ impl<'a> SortedRunIterator<'a> {
             blocks_to_fetch,
             false,
         )
+        .await
     }
 
-    pub(crate) fn new_opts(
+    pub(crate) async fn new_opts(
         sorted_run: &'a SortedRun,
         from_key: Option<&'a [u8]>,
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
         spawn: bool,
-    ) -> Self {
+    ) -> Result<Self, SlateDBError> {
         let mut sorted_run_iter = from_key
             .map(|from_key| Self::find_iter_from_key(from_key, sorted_run))
             .unwrap_or(sorted_run.ssts.iter());
-        let current_iter = sorted_run_iter.next().map(|h| {
-            SstIterator::new_opts(
-                h,
-                from_key,
-                table_store.clone(),
-                max_fetch_tasks,
-                blocks_to_fetch,
-                spawn,
-            )
-        });
-        Self {
+        let current_iter = match sorted_run_iter.next() {
+            None => None,
+            Some(h) => Some(
+                SstIterator::new_opts(
+                    h,
+                    from_key,
+                    table_store.clone(),
+                    max_fetch_tasks,
+                    blocks_to_fetch,
+                    spawn,
+                )
+                .await?,
+            ),
+        };
+        Ok(Self {
             current_iter,
             sorted_run_iter,
             table_store,
             blocks_to_fetch: max_fetch_tasks,
             blocks_to_buffer: blocks_to_fetch,
-        }
+        })
     }
 
     pub(crate) fn find_iter_from_key(
@@ -115,14 +122,18 @@ impl<'a> KeyValueIterator for SortedRunIterator<'a> {
                 if let Some(kv) = iter.next_entry().await? {
                     return Ok(Some(kv));
                 }
-                self.current_iter = self.sorted_run_iter.next().map(|h| {
-                    SstIterator::new(
-                        h,
-                        self.table_store.clone(),
-                        self.blocks_to_fetch,
-                        self.blocks_to_buffer,
-                    )
-                });
+                self.current_iter = match self.sorted_run_iter.next() {
+                    None => None,
+                    Some(h) => Some(
+                        SstIterator::new(
+                            h,
+                            self.table_store.clone(),
+                            self.blocks_to_fetch,
+                            self.blocks_to_buffer,
+                        )
+                        .await?,
+                    ),
+                };
             } else {
                 return Ok(None);
             }
@@ -159,7 +170,9 @@ mod tests {
             ssts: vec![handle],
         };
 
-        let mut iter = SortedRunIterator::new(&sr, table_store.clone(), 1, 1);
+        let mut iter = SortedRunIterator::new(&sr, table_store.clone(), 1, 1)
+            .await
+            .unwrap();
 
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
@@ -196,7 +209,9 @@ mod tests {
             ssts: vec![handle1, handle2],
         };
 
-        let mut iter = SortedRunIterator::new(&sr, table_store.clone(), 1, 1);
+        let mut iter = SortedRunIterator::new(&sr, table_store.clone(), 1, 1)
+            .await
+            .unwrap();
 
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
@@ -229,7 +244,9 @@ mod tests {
             let from_key = test_case_key_gen.next();
             _ = test_case_val_gen.next();
             let mut iter =
-                SortedRunIterator::new_from_key(&sr, from_key.as_ref(), table_store.clone(), 1, 1);
+                SortedRunIterator::new_from_key(&sr, from_key.as_ref(), table_store.clone(), 1, 1)
+                    .await
+                    .unwrap();
             for _ in 0..30 - i {
                 assert_kv(
                     &iter.next().await.unwrap().unwrap(),
@@ -253,7 +270,9 @@ mod tests {
         let mut expected_val_gen = val_gen.clone();
         let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
 
-        let mut iter = SortedRunIterator::new_from_key(&sr, &[b'a', 10], table_store.clone(), 1, 1);
+        let mut iter = SortedRunIterator::new_from_key(&sr, &[b'a', 10], table_store.clone(), 1, 1)
+            .await
+            .unwrap();
 
         for _ in 0..30 {
             assert_kv(
@@ -275,7 +294,9 @@ mod tests {
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
         let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
 
-        let mut iter = SortedRunIterator::new_from_key(&sr, &[b'z', 30], table_store.clone(), 1, 1);
+        let mut iter = SortedRunIterator::new_from_key(&sr, &[b'z', 30], table_store.clone(), 1, 1)
+            .await
+            .unwrap();
 
         assert!(iter.next().await.unwrap().is_none());
     }

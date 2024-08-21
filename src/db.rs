@@ -74,7 +74,8 @@ impl DbInner {
 
         for sst in &snapshot.state.core.l0 {
             if self.sst_may_include_key(sst, key).await? {
-                let mut iter = SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1);
+                let mut iter =
+                    SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1).await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
                         return Ok(entry.value.into_option());
@@ -85,7 +86,8 @@ impl DbInner {
         for sr in &snapshot.state.core.compacted {
             if self.sr_may_include_key(sr, key).await? {
                 let mut iter =
-                    SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1);
+                    SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1)
+                        .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
                         return Ok(entry.value.into_option());
@@ -168,7 +170,7 @@ impl DbInner {
                 SsTableId::Wal(id) => *id,
                 SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
             };
-            let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1);
+            let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1).await?;
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
             // buffer the WAL entries to bulk replay them into the memtable.
             let mut wal_replay_buf = Vec::new();
@@ -458,7 +460,9 @@ mod tests {
         assert_eq!(l0.len(), 3);
         for i in 0u8..3u8 {
             let sst1 = l0.get(2 - i as usize).unwrap();
-            let mut iter = SstIterator::new(sst1, table_store.clone(), 1, 1);
+            let mut iter = SstIterator::new(sst1, table_store.clone(), 1, 1)
+                .await
+                .unwrap();
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);
