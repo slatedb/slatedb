@@ -25,6 +25,7 @@ pub struct TableStore {
     root_path: Path,
     wal_path: &'static str,
     compacted_path: &'static str,
+    #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
     // TODO: we cache the filters here for now, so the db doesn't need to reload them
     //       for each read. This means that all the filters need to fit in memory.

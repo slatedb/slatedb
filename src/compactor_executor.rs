@@ -1,5 +1,5 @@
-use crate::compactor::WorkerToOrchestoratorMsg;
-use crate::compactor::WorkerToOrchestoratorMsg::CompactionFinished;
+use crate::compactor::WorkerToOrchestratorMsg;
+use crate::compactor::WorkerToOrchestratorMsg::CompactionFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SSTableHandle, SortedRun, SsTableId};
 use crate::error::SlateDBError;
@@ -37,7 +37,7 @@ impl TokioCompactionExecutor {
     pub(crate) fn new(
         handle: tokio::runtime::Handle,
         options: Arc<CompactorOptions>,
-        worker_tx: crossbeam_channel::Sender<WorkerToOrchestoratorMsg>,
+        worker_tx: crossbeam_channel::Sender<WorkerToOrchestratorMsg>,
         table_store: Arc<TableStore>,
     ) -> Self {
         Self {
@@ -74,7 +74,7 @@ struct TokioCompactionTask {
 pub(crate) struct TokioCompactionExecutorInner {
     options: Arc<CompactorOptions>,
     handle: tokio::runtime::Handle,
-    worker_tx: crossbeam_channel::Sender<WorkerToOrchestoratorMsg>,
+    worker_tx: crossbeam_channel::Sender<WorkerToOrchestratorMsg>,
     table_store: Arc<TableStore>,
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
     is_stopped: AtomicBool,
@@ -111,7 +111,6 @@ impl TokioCompactionExecutorInner {
                 .await?;
             current_size += kv.key.len() + value.map_or(0, |b| b.len());
             if current_size > self.options.max_sst_size {
-                println!("finish one sst");
                 current_size = 0;
                 let finished_writer = mem::replace(
                     &mut current_writer,
