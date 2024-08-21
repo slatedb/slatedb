@@ -453,7 +453,7 @@ mod tests {
                 Duration::from_secs(30),
             )
             .await;
-            
+
             // 1 empty wal at startup + 2 wal per iteration.
             assert_eq!(db_state.last_compacted_wal_sst_id, 1 + (i as u64) * 2 + 2);
             last_compacted = db_state.last_compacted_wal_sst_id
@@ -909,7 +909,8 @@ mod tests {
         )
         .await
         .unwrap();
-        db1.put_with_options(b"1", b"1", &WriteOptions { await_flush: false }).await;
+        db1.put_with_options(b"1", b"1", &WriteOptions { await_flush: false })
+            .await;
         db1.flush().await.unwrap();
 
         // open db2, causing it to write an empty wal and fence db1.
@@ -920,14 +921,13 @@ mod tests {
         )
         .await
         .unwrap();
-        
+
         // assert that db1 can no longer write.
-        db1.put_with_options(b"1", b"1", &WriteOptions { await_flush: false }).await;
-        assert!(matches!(
-            db1.flush().await,
-            Err(SlateDBError::Fenced)
-        ));
-        db2.put_with_options(b"2", b"2", &WriteOptions { await_flush: false }).await;
+        db1.put_with_options(b"1", b"1", &WriteOptions { await_flush: false })
+            .await;
+        assert!(matches!(db1.flush().await, Err(SlateDBError::Fenced)));
+        db2.put_with_options(b"2", b"2", &WriteOptions { await_flush: false })
+            .await;
         db2.flush().await.unwrap();
     }
 

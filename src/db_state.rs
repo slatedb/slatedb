@@ -181,8 +181,14 @@ impl DbState {
 
     pub fn add_empty_wal(&mut self) {
         let mut state = self.state_copy();
-        assert!(state.imm_wal.is_empty(), "expecting imm_wal to not have any wal when adding empty wal during startup");
-        state.imm_wal.push_front(Arc::new(ImmutableWal::new(state.core.next_wal_sst_id, WritableKVTable::new())));
+        assert!(
+            state.imm_wal.is_empty(),
+            "expecting imm_wal to not have any wal when adding empty wal during startup"
+        );
+        state.imm_wal.push_front(Arc::new(ImmutableWal::new(
+            state.core.next_wal_sst_id,
+            WritableKVTable::new(),
+        )));
         state.core.next_wal_sst_id += 1;
         self.update_state(state);
     }
