@@ -142,7 +142,9 @@ impl CompactorOrchestrator {
         while !(self.executor.is_stopped() && self.worker_rx.is_empty()) {
             crossbeam_channel::select! {
                 recv(ticker) -> _ => {
-                    self.load_manifest().expect("fatal error loading manifest");
+                    if !self.executor.is_stopped() {
+                        self.load_manifest().expect("fatal error loading manifest");
+                    }
                 }
                 recv(self.worker_rx) -> msg => {
                     let WorkerToOrchestratorMsg::CompactionFinished(result) = msg.expect("fatal error receiving worker msg");
