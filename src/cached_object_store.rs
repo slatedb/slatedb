@@ -1,17 +1,100 @@
 use bytes::Bytes;
+use bytes::BytesMut;
+use futures::stream;
 use futures::stream::BoxStream;
-use std::ops::Range;
+use futures::StreamExt;
+use object_store::GetResultPayload;
+use std::io::Read;
+use std::io::Write;
 use std::sync::Arc;
+use std::{fs::File, ops::Range};
 
 use object_store::{
     path::Path, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     PutMultipartOpts, PutOptions, PutPayload, PutResult,
 };
 
+use crate::error::SlateDBError;
+
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {
-    root_path: String,
+    root_path: std::path::PathBuf,
     object_store: Arc<dyn ObjectStore>,
+    part_size: usize, // 64mb
+}
+
+impl CachedObjectStore {
+    async fn save_get_result_as_parts(
+        &self,
+        path: &object_store::path::Path,
+        result: GetResult,
+    ) -> object_store::Result<()> {
+        let mut buffer = BytesMut::new();
+        let mut part_number = 0;
+
+        let mut stream = result.into_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            buffer.extend_from_slice(&chunk);
+
+            while buffer.len() >= self.part_size {
+                let to_write = buffer.split_to(self.part_size);
+                self.save_part_file(&path, part_number, to_write.as_ref())?;
+                part_number += 1;
+            }
+        }
+
+        if !buffer.is_empty() {
+            self.save_part_file(&path, part_number, buffer.as_ref())?;
+        }
+        Ok(())
+    }
+
+    async fn stream_from_parts(
+        &self,
+        path: &object_store::path::Path,
+        range: Option<Range<usize>>,
+    ) -> BoxStream<'static, object_store::Result<Bytes>> {
+        let path = path.clone();
+        let root_path = self.root_path.clone();
+
+        // TODO: get the part numbers first
+        let part_file_paths = stream::iter(vec!["".to_string()]);
+        part_file_paths
+            .then(move |part_file_path| async move {
+                let file = File::open(&part_file_path).unwrap();
+                let mut reader = std::io::BufReader::new(file);
+                let mut buffer = Vec::new();
+                reader.read_to_end(&mut buffer).unwrap();
+                Ok(Bytes::from(buffer))
+            })
+            .boxed()
+    }
+
+    fn save_part_file(
+        &self,
+        path: &object_store::path::Path,
+        part_number: usize,
+        buf: &[u8],
+    ) -> object_store::Result<()> {
+        // TODO: mkdir -p
+        let part_file_path = self.make_part_path(path, part_number);
+        let mut file = File::create(&part_file_path).unwrap();
+        file.write_all(&buf).unwrap();
+        Ok(())
+    }
+
+    fn make_part_path(
+        &self,
+        path: &object_store::path::Path,
+        part_number: usize,
+    ) -> std::path::PathBuf {
+        // TODO: pad with zeros
+        let part_file_path =
+            self.root_path
+                .join(&format!("{}._part-{}", path.to_string(), part_number));
+        part_file_path
+    }
 }
 
 impl std::fmt::Display for CachedObjectStore {
@@ -19,7 +102,8 @@ impl std::fmt::Display for CachedObjectStore {
         write!(
             f,
             "CachedObjectStore({}, {})",
-            self.root_path, self.object_store
+            self.root_path.to_str().unwrap_or_default(),
+            self.object_store
         )
     }
 }
