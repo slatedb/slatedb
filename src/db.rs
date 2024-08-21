@@ -45,6 +45,8 @@ impl DbInner {
             memtable_flush_notifier,
         };
         db_inner.replay_wal().await?;
+        db_inner.state.write().add_empty_wal();
+        db_inner.flush().await?;
         Ok(db_inner)
     }
 
@@ -451,7 +453,9 @@ mod tests {
                 Duration::from_secs(30),
             )
             .await;
-            assert_eq!(db_state.last_compacted_wal_sst_id, (i as u64) * 2 + 2);
+            
+            // 1 empty wal at startup + 2 wal per iteration.
+            assert_eq!(db_state.last_compacted_wal_sst_id, 1 + (i as u64) * 2 + 2);
             last_compacted = db_state.last_compacted_wal_sst_id
         }
 
@@ -529,6 +533,7 @@ mod tests {
     async fn test_basic_restore() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
+        let mut next_wal_id = 1;
         let kv_store = Db::open_with_opts(
             path.clone(),
             test_db_options(0, 128, None),
@@ -536,6 +541,7 @@ mod tests {
         )
         .await
         .unwrap();
+        next_wal_id += 1;
 
         // do a few writes that will result in l0 flushes
         let l0_count: u64 = 3;
@@ -546,6 +552,7 @@ mod tests {
             kv_store
                 .put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48])
                 .await;
+            next_wal_id += 2;
         }
 
         // write some smaller keys so that we populate wal without flushing to l0
@@ -553,6 +560,7 @@ mod tests {
         for i in 0..sst_count {
             kv_store.put(&i.to_be_bytes(), &i.to_be_bytes()).await;
             kv_store.flush().await.unwrap();
+            next_wal_id += 1;
         }
 
         kv_store.close().await.unwrap();
@@ -565,6 +573,7 @@ mod tests {
         )
         .await
         .unwrap();
+        next_wal_id += 1;
 
         for i in 0..l0_count {
             let val = kv_store_restored.get(&[b'a' + i as u8; 16]).await.unwrap();
@@ -576,12 +585,13 @@ mod tests {
             let val = kv_store_restored.get(&i.to_be_bytes()).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&i.to_be_bytes())));
         }
+        kv_store_restored.close().await.unwrap();
 
         // validate that the manifest file exists.
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap().unwrap();
         let db_state = stored_manifest.db_state();
-        assert_eq!(db_state.next_wal_sst_id, sst_count + 2 * l0_count + 1);
+        assert_eq!(db_state.next_wal_sst_id, next_wal_id);
     }
 
     #[tokio::test]
@@ -709,6 +719,7 @@ mod tests {
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
+        let mut next_wal_id = 1;
         let db = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 128, None),
@@ -717,14 +728,17 @@ mod tests {
         )
         .await
         .unwrap();
+        next_wal_id += 1;
 
         // write a few keys that will result in memtable flushes
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
         db.put(&key1, &value1).await;
+        next_wal_id += 1;
         let key2 = [b'c'; 32];
         let value2 = [b'd'; 96];
         db.put(&key2, &value2).await;
+        next_wal_id += 1;
 
         db.close().await.unwrap();
 
@@ -736,16 +750,17 @@ mod tests {
         )
         .await
         .unwrap();
+        next_wal_id += 1;
 
         // verify that we reload imm
         let snapshot = db.inner.state.read().snapshot();
         assert_eq!(snapshot.state.imm_memtable.len(), 2);
         assert_eq!(
             snapshot.state.imm_memtable.front().unwrap().last_wal_id(),
-            2
+            2 + 1
         );
-        assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 1);
-        assert_eq!(snapshot.state.core.next_wal_sst_id, 3);
+        assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 2);
+        assert_eq!(snapshot.state.core.next_wal_sst_id, next_wal_id);
         assert_eq!(
             db.get(&key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -851,6 +866,69 @@ mod tests {
             }),
         ))
         .await
+    }
+
+    #[tokio::test]
+    async fn test_db_open_should_write_empty_wal() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+
+        // assert that open db writes an empty wal.
+        let db = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.inner.state.read().state().core.next_wal_sst_id, 2);
+
+        db.put(b"1", b"1").await;
+
+        // assert that second open writes another empty wal.
+        let db = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.inner.state.read().state().core.next_wal_sst_id, 4);
+    }
+
+    #[tokio::test]
+    async fn test_empty_wal_should_fence_old_writer() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+
+        // open db1 and assert that it can write.
+        let db1 = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+        db1.put_with_options(b"1", b"1", &WriteOptions { await_flush: false }).await;
+        db1.flush().await.unwrap();
+
+        // open db2, causing it to write an empty wal and fence db1.
+        let db2 = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+        
+        // assert that db1 can no longer write.
+        db1.put_with_options(b"1", b"1", &WriteOptions { await_flush: false }).await;
+        assert!(matches!(
+            db1.flush().await,
+            Err(SlateDBError::Fenced)
+        ));
+        db2.put_with_options(b"2", b"2", &WriteOptions { await_flush: false }).await;
+        db2.flush().await.unwrap();
     }
 
     async fn wait_for_manifest_condition(
