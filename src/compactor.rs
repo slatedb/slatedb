@@ -435,7 +435,7 @@ mod tests {
 
     fn db_options(compactor_options: Option<CompactorOptions>) -> DbOptions {
         DbOptions {
-            flush_ms: 100,
+            flush_interval: Duration::from_millis(100),
             manifest_poll_interval: Duration::from_millis(100),
             min_filter_keys: 0,
             l0_sst_size_bytes: 128,
