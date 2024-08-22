@@ -56,8 +56,7 @@ impl WriteOptions {
 /// Configuration options for the database. These options are set on client startup.
 #[derive(Clone)]
 pub struct DbOptions {
-    /// How frequently to flush the write-ahead log to object storage (in
-    /// milliseconds).
+    /// How frequently to flush the write-ahead log to object storage.
     ///
     /// When setting this configuration, users must consider:
     ///
@@ -74,7 +73,7 @@ pub struct DbOptions {
     /// Keep in mind that the flush interval does not include the network latency. A
     /// 100ms flush interval will result in a 100ms + the time it takes to send the
     /// bytes to object storage.
-    pub flush_ms: usize,
+    pub flush_interval: Duration,
 
     /// How frequently to poll for new manifest files. Refreshing the manifest file
     /// allows writers to detect fencing operations and allows readers to detect newly
@@ -92,8 +91,8 @@ pub struct DbOptions {
 
     /// The minimum size a memtable needs to be before it is frozen and flushed to
     /// L0 object storage. Writes will still be flushed to the object storage WAL
-    /// (based on flush_ms) regardless of this value. Memtable sizes are checked
-    /// every `flush_ms` milliseconds.
+    /// (based on flush_interval) regardless of this value. Memtable sizes are checked
+    /// every `flush_interval`.
     ///
     /// When setting this configuration, users must consider:
     ///
@@ -126,7 +125,7 @@ pub struct DbOptions {
 impl DbOptions {
     pub const fn default() -> Self {
         Self {
-            flush_ms: 100,
+            flush_interval: Duration::from_millis(100),
             manifest_poll_interval: Duration::from_secs(1),
             min_filter_keys: 1000,
             l0_sst_size_bytes: 128,
