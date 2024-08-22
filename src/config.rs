@@ -75,6 +75,10 @@ pub struct DbOptions {
     /// bytes to object storage.
     pub flush_interval: Duration,
 
+    /// If set to false, SlateDB will disable the WAL and write directly into the memtable
+    #[cfg(feature = "wal_disable")]
+    pub wal_enabled: bool,
+
     /// How frequently to poll for new manifest files. Refreshing the manifest file
     /// allows writers to detect fencing operations and allows readers to detect newly
     /// compacted data.
@@ -126,6 +130,8 @@ impl DbOptions {
     pub const fn default() -> Self {
         Self {
             flush_interval: Duration::from_millis(100),
+            #[cfg(feature = "wal_disable")]
+            wal_enabled: true,
             manifest_poll_interval: Duration::from_secs(1),
             min_filter_keys: 1000,
             l0_sst_size_bytes: 128,

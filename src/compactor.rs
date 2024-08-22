@@ -439,6 +439,8 @@ mod tests {
     fn db_options(compactor_options: Option<CompactorOptions>) -> DbOptions {
         DbOptions {
             flush_interval: Duration::from_millis(100),
+            #[cfg(feature = "wal_disable")]
+            wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),
             min_filter_keys: 0,
             l0_sst_size_bytes: 128,
