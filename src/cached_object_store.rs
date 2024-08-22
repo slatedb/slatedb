@@ -3,6 +3,7 @@ use bytes::BytesMut;
 use futures::stream;
 use futures::stream::BoxStream;
 use futures::StreamExt;
+use object_store::GetRange;
 use object_store::GetResultPayload;
 use std::io::Read;
 use std::io::Write;
@@ -24,76 +25,20 @@ pub(crate) struct CachedObjectStore {
 }
 
 impl CachedObjectStore {
-    async fn save_get_result_as_parts(
+    fn read_range(
         &self,
-        path: &object_store::path::Path,
-        result: GetResult,
-    ) -> object_store::Result<()> {
-        let mut buffer = BytesMut::new();
-        let mut part_number = 0;
-
-        let mut stream = result.into_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            buffer.extend_from_slice(&chunk);
-
-            while buffer.len() >= self.part_size {
-                let to_write = buffer.split_to(self.part_size);
-                self.save_part_file(&path, part_number, to_write.as_ref())?;
-                part_number += 1;
-            }
-        }
-
-        if !buffer.is_empty() {
-            self.save_part_file(&path, part_number, buffer.as_ref())?;
-        }
-        Ok(())
+        location: &Path,
+        range: Option<GetRange>,
+    ) -> object_store::Result<BoxStream<'static, object_store::Result<Bytes>>> {
+        // split the parts by range
+        // parallel calling read_part, concatenate the stream
+        // adjust the offsets
+        todo!()
     }
 
-    async fn stream_from_parts(
-        &self,
-        path: &object_store::path::Path,
-        range: Option<Range<usize>>,
-    ) -> BoxStream<'static, object_store::Result<Bytes>> {
-        let path = path.clone();
-        let root_path = self.root_path.clone();
-
-        // TODO: get the part numbers first
-        let part_file_paths = stream::iter(vec!["".to_string()]);
-        part_file_paths
-            .then(move |part_file_path| async move {
-                let file = File::open(&part_file_path).unwrap();
-                let mut reader = std::io::BufReader::new(file);
-                let mut buffer = Vec::new();
-                reader.read_to_end(&mut buffer).unwrap();
-                Ok(Bytes::from(buffer))
-            })
-            .boxed()
-    }
-
-    fn save_part_file(
-        &self,
-        path: &object_store::path::Path,
-        part_number: usize,
-        buf: &[u8],
-    ) -> object_store::Result<()> {
-        // TODO: mkdir -p
-        let part_file_path = self.make_part_path(path, part_number);
-        let mut file = File::create(&part_file_path).unwrap();
-        file.write_all(&buf).unwrap();
-        Ok(())
-    }
-
-    fn make_part_path(
-        &self,
-        path: &object_store::path::Path,
-        part_number: usize,
-    ) -> std::path::PathBuf {
-        // TODO: pad with zeros
-        let part_file_path =
-            self.root_path
-                .join(&format!("{}._part-{}", path.to_string(), part_number));
-        part_file_path
+    /// Get from disk if the parts are cached, otherwise start a new GET request.
+    fn read_part(&self, partID: PartID) -> BoxStream<'static, object_store::Result<Bytes>> {
+        todo!()
     }
 }
 
@@ -142,18 +87,6 @@ impl ObjectStore for CachedObjectStore {
         self.get_opts(location, options).await
     }
 
-    async fn get_range(&self, location: &Path, range: Range<usize>) -> object_store::Result<Bytes> {
-        self.object_store.get_range(location, range).await
-    }
-
-    async fn get_ranges(
-        &self,
-        location: &Path,
-        ranges: &[Range<usize>],
-    ) -> object_store::Result<Vec<Bytes>> {
-        self.object_store.get_ranges(location, ranges).await
-    }
-
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
         self.object_store.head(location).await
     }
@@ -192,5 +125,93 @@ impl ObjectStore for CachedObjectStore {
 
     async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         self.object_store.rename_if_not_exists(from, to).await
+    }
+}
+
+struct DiskCacheEntry {
+    root_folder: std::path::PathBuf,
+    object_path: object_store::path::Path,
+    part_size: usize,
+}
+
+type PartID = usize;
+
+impl DiskCacheEntry {
+    /// Save the GetResult to the disk cache. The `range` is optional and if provided, it's expected to
+    /// be aligned with part_size (default 64mb).
+    pub async fn save_result(&self, result: GetResult) -> object_store::Result<()> {
+        // TODO: assert the range to be aligned with part_size
+        let mut buffer = BytesMut::new();
+        // TODO: part_number = result.range.start / part_size
+        let mut part_number = 0;
+
+        let mut stream = result.into_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            buffer.extend_from_slice(&chunk);
+
+            while buffer.len() >= self.part_size {
+                let to_write = buffer.split_to(self.part_size);
+                self.save_part(part_number, to_write.as_ref())?;
+                part_number += 1;
+            }
+        }
+
+        // the last part, which is less than part_size or empty, should be saved as well
+        // which allows us to determine the end of the object data.
+        self.save_part(part_number, buffer.as_ref())?;
+        Ok(())
+    }
+
+    pub async fn read_part(
+        &self,
+        partID: PartID,
+    ) -> Option<BoxStream<'static, object_store::Result<Bytes>>> {
+        let path = self.object_path.clone();
+        let root_path = self.root_folder.clone();
+
+        // TODO: get file part paths
+        let part_file_paths = stream::iter(vec!["".to_string()]);
+
+        let stream = part_file_paths
+            .then(move |part_file_path| async move {
+                let file = File::open(&part_file_path).unwrap();
+                let mut reader = std::io::BufReader::new(file);
+                let mut buffer = Vec::new();
+                reader.read_to_end(&mut buffer).unwrap();
+                Ok(Bytes::from(buffer))
+            })
+            .boxed();
+        Some(stream)
+    }
+
+    // return the downloaded parts and a boolean indicating if the parts in the range are all cached.
+    // if we still have not got the final part (which size is less than part_size), we can not determine
+    // the Offset and Suffix is cached or not, on these cases, we'd always return None.
+    pub async fn cached_parts(&self, range: GetRange) -> Option<(Vec<PartID>, bool)> {
+        todo!()
+    }
+
+    async fn get_part_file_paths(&self, range: Option<Range<usize>>) -> Vec<std::path::PathBuf> {
+        todo!()
+    }
+
+    fn save_part(&self, part_number: usize, buf: &[u8]) -> object_store::Result<()> {
+        // TODO: mkdir -p
+        // TODO: create a file with .tmp extension and rename it to the final name
+        let part_file_path = self.make_part_path(part_number);
+        let mut file = File::create(&part_file_path).unwrap();
+        file.write_all(&buf).unwrap();
+        Ok(())
+    }
+
+    fn make_part_path(&self, part_number: usize) -> std::path::PathBuf {
+        // TODO: pad with zeros
+        let part_file_path = self.root_folder.join(&format!(
+            "{}._part-{}",
+            self.object_path.to_string(),
+            part_number,
+        ));
+        part_file_path
     }
 }
