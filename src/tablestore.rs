@@ -3,6 +3,7 @@ use crate::block::Block;
 use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
+use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
@@ -234,6 +235,19 @@ impl TableStore {
         Ok(filter)
     }
 
+    pub(crate) async fn read_index(
+        &self,
+        handle: &SSTableHandle,
+    ) -> Result<SsTableIndexOwned, SlateDBError> {
+        let path = self.path(&handle.id);
+        let obj = ReadOnlyObject {
+            object_store: self.object_store.clone(),
+            path,
+        };
+        self.sst_format.read_index(&handle.info, &obj).await
+    }
+
+    #[allow(dead_code)]
     pub(crate) async fn read_blocks(
         &self,
         handle: &SSTableHandle,
@@ -244,8 +258,26 @@ impl TableStore {
             object_store: self.object_store.clone(),
             path,
         };
+        let index = self.sst_format.read_index(&handle.info, &obj).await?;
         self.sst_format
-            .read_blocks(&handle.info, blocks, &obj)
+            .read_blocks(&handle.info, &index, blocks, &obj)
+            .await
+    }
+
+    // TODO: we probably won't need this once we're caching the index
+    pub(crate) async fn read_blocks_using_index(
+        &self,
+        handle: &SSTableHandle,
+        index: Arc<SsTableIndexOwned>,
+        blocks: Range<usize>,
+    ) -> Result<VecDeque<Block>, SlateDBError> {
+        let path = self.path(&handle.id);
+        let obj = ReadOnlyObject {
+            object_store: self.object_store.clone(),
+            path,
+        };
+        self.sst_format
+            .read_blocks(&handle.info, index.as_ref(), blocks, &obj)
             .await
     }
 
@@ -260,7 +292,10 @@ impl TableStore {
             object_store: self.object_store.clone(),
             path,
         };
-        self.sst_format.read_block(&handle.info, block, &obj).await
+        let index = self.sst_format.read_index(&handle.info, &obj).await?;
+        self.sst_format
+            .read_block(&handle.info, &index, block, &obj)
+            .await
     }
 
     fn path(&self, id: &SsTableId) -> Path {
@@ -368,7 +403,7 @@ mod tests {
         let sst = writer.close().await.unwrap();
 
         // then:
-        let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1);
+        let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1).await.unwrap();
         assert_iterator(
             &mut iter,
             &[
