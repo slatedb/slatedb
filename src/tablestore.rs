@@ -1,4 +1,3 @@
-use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -8,9 +7,10 @@ use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
+use crate::{blob::ReadOnlyBlob, db::BlockCache};
 use bytes::{BufMut, Bytes};
 use fail_parallel::{fail_point, FailPointRegistry};
-use futures::StreamExt;
+use futures::{future::join_all, StreamExt};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -35,6 +35,8 @@ pub struct TableStore {
     //       https://github.com/slatedb/slatedb/issues/89
     filter_cache: RwLock<HashMap<SsTableId, Option<Arc<BloomFilter>>>>,
     transactional_wal_store: Arc<dyn TransactionalObjectStore>,
+    /// In-memory cache for blocks
+    block_cache: Option<Arc<BlockCache>>,
 }
 
 struct ReadOnlyObject {
@@ -71,12 +73,14 @@ impl TableStore {
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
         root_path: Path,
+        block_cache: Option<Arc<BlockCache>>,
     ) -> Self {
         Self::new_with_fp_registry(
             object_store,
             sst_format,
             root_path,
             Arc::new(FailPointRegistry::new()),
+            block_cache,
         )
     }
 
@@ -85,6 +89,7 @@ impl TableStore {
         sst_format: SsTableFormat,
         root_path: Path,
         fp_registry: Arc<FailPointRegistry>,
+        block_cache: Option<Arc<BlockCache>>,
     ) -> Self {
         Self {
             object_store: object_store.clone(),
@@ -98,6 +103,7 @@ impl TableStore {
                 Path::from("/"),
                 object_store.clone(),
             )),
+            block_cache,
         }
     }
 
@@ -270,15 +276,70 @@ impl TableStore {
         handle: &SSTableHandle,
         index: Arc<SsTableIndexOwned>,
         blocks: Range<usize>,
-    ) -> Result<VecDeque<Block>, SlateDBError> {
+    ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
         };
-        self.sst_format
-            .read_blocks(&handle.info, index.as_ref(), blocks, &obj)
-            .await
+        let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
+        let mut uncached_ranges = Vec::new();
+
+        if let Some(cache) = &self.block_cache {
+            let cached_blocks = join_all(
+                blocks
+                    .clone()
+                    .map(|block_num| async move { cache.get(&(handle.id, block_num)).await }),
+            )
+            .await;
+
+            let mut last_uncached_start = None;
+
+            for (index, block_result) in cached_blocks.into_iter().enumerate() {
+                match block_result {
+                    Some(cached_block) => {
+                        if let Some(start) = last_uncached_start.take() {
+                            uncached_ranges.push((blocks.start + start)..(blocks.start + index));
+                        }
+                        blocks_read.push_back(cached_block);
+                    }
+                    None => {
+                        last_uncached_start.get_or_insert(index);
+                    }
+                }
+            }
+
+            if let Some(start) = last_uncached_start {
+                uncached_ranges.push((blocks.start + start)..blocks.end);
+            }
+        } else {
+            uncached_ranges.push(blocks.clone());
+        }
+
+        // Read uncached blocks
+        let uncached_blocks = join_all(uncached_ranges.iter().map(|range| {
+            let obj_ref = &obj;
+            let index_ref = &index;
+            async move {
+                self.sst_format
+                    .read_blocks(&handle.info, index_ref, range.clone(), obj_ref)
+                    .await
+            }
+        }))
+        .await;
+
+        // Merge uncached blocks with blocks_read
+        for (range, range_blocks) in uncached_ranges.into_iter().zip(uncached_blocks) {
+            for (block_num, block_read) in range.zip(range_blocks?) {
+                let block = Arc::new(block_read);
+                if let Some(cache) = &self.block_cache {
+                    cache.insert((handle.id, block_num), block.clone()).await;
+                }
+                blocks_read.insert(block_num - blocks.start, block);
+            }
+        }
+
+        Ok(blocks_read)
     }
 
     #[allow(dead_code)]
@@ -372,15 +433,15 @@ impl<'a> EncodedSsTableWriter<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::db_state::SsTableId;
     use crate::error;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
+    use crate::{db::BlockCache, db_state::SsTableId};
     use bytes::Bytes;
-    use object_store::path::Path;
+    use object_store::{memory::InMemory, path::Path, ObjectStore};
     use std::sync::Arc;
     use ulid::Ulid;
 
@@ -391,7 +452,7 @@ mod tests {
         // given:
         let os = Arc::new(object_store::memory::InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
-        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
         let id = SsTableId::Compacted(Ulid::new());
 
         // when:
@@ -429,7 +490,7 @@ mod tests {
     async fn test_wal_write_should_fail_when_fenced() {
         let os = Arc::new(object_store::memory::InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
-        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
         let wal_id = SsTableId::Wal(1);
 
         // write a wal sst
@@ -445,5 +506,80 @@ mod tests {
         // write another walsst with the same id.
         let result = ts.write_sst(&wal_id, table2).await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
+    }
+
+    #[tokio::test]
+    async fn test_tablestore_sst_and_partial_cache_hits() {
+        // Setup
+        let os = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(20, 1, None);
+        let block_cache = Arc::new(BlockCache::new(1000));
+        let ts = Arc::new(TableStore::new(
+            os.clone(),
+            format,
+            Path::from("/root"),
+            Some(block_cache.clone()),
+        ));
+
+        // Create and write SST
+        let id = SsTableId::Compacted(Ulid::new());
+        let mut writer = ts.table_writer(id.clone());
+        for i in 0..20 {
+            writer.add(&[i], Some(&[i])).await.unwrap();
+        }
+        let handle = writer.close().await.unwrap();
+
+        // Read index
+        let index = Arc::new(ts.read_index(&handle).await.unwrap());
+
+        // Test 1: SST hit
+        let sst_blocks = ts
+            .read_blocks_using_index(&handle, index.clone(), 0..20)
+            .await
+            .unwrap();
+        assert_eq!(sst_blocks.len(), 20);
+
+        // Partially clear the cache (remove blocks 5..10 and 15..20)
+        for i in 5..10 {
+            block_cache.remove(&(handle.id.clone(), i)).await;
+        }
+        for i in 15..20 {
+            block_cache.remove(&(handle.id.clone(), i)).await;
+        }
+
+        // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
+        let result = ts
+            .read_blocks_using_index(&handle, index.clone(), 0..20)
+            .await;
+        assert_eq!(result.unwrap().len(), 20);
+
+        // Test 3: Verify deleted blocks were added back to cache
+        for i in 5..10 {
+            assert!(block_cache.get(&(handle.id.clone(), i)).await.is_some());
+        }
+        for i in 15..20 {
+            assert!(block_cache.get(&(handle.id.clone(), i)).await.is_some());
+        }
+
+        // Delete SST to see cache hit occurs for all blocks
+        let path = ts.path(&id);
+        os.delete(&path).await.unwrap();
+
+        // Test 4: All blocks should be in cache after SST deletion
+        let cache_only_result = ts
+            .read_blocks_using_index(&handle, index.clone(), 0..20)
+            .await;
+        assert_eq!(cache_only_result.unwrap().len(), 20);
+
+        // Test 5: Verify that reading specific ranges still works after SST deletion
+        let partial_result_1 = ts
+            .read_blocks_using_index(&handle, index.clone(), 5..10)
+            .await;
+        assert_eq!(partial_result_1.unwrap().len(), 5);
+
+        let partial_result_2 = ts
+            .read_blocks_using_index(&handle, index.clone(), 15..20)
+            .await;
+        assert_eq!(partial_result_2.unwrap().len(), 5);
     }
 }

@@ -120,7 +120,10 @@ pub struct DbOptions {
 
     /// Configuration options for the compactor.
     pub compactor_options: Option<CompactorOptions>,
+    /// The compression algorithm to use for SSTables.
     pub compression_codec: Option<CompressionCodec>,
+    /// Block cache size in bytes.
+    pub block_cache_size_bytes: Option<usize>,
 }
 
 impl DbOptions {
@@ -132,6 +135,7 @@ impl DbOptions {
             l0_sst_size_bytes: 128,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
+            block_cache_size_bytes: None,
         }
     }
 }

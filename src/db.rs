@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
@@ -16,12 +15,15 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
+use crate::{block::Block, compactor::Compactor};
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Handle;
+
+pub type BlockCache = moka::future::Cache<(SsTableId, usize), Arc<Block>>;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -248,6 +250,7 @@ impl Db {
             sst_format,
             path.clone(),
             fp_registry.clone(),
+            None,
         ));
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let manifest = Self::init_db(&manifest_store).await?;
@@ -435,6 +438,7 @@ mod tests {
             object_store.clone(),
             sst_format,
             path.clone(),
+            None,
         ));
 
         // Write data a few times such that each loop results in a memtable flush
@@ -884,6 +888,7 @@ mod tests {
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
+            block_cache_size_bytes: None,
         }
     }
 }

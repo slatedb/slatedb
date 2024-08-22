@@ -41,4 +41,7 @@ pub enum SlateDBError {
 
     #[error("Error Compressing Block")]
     BlockCompressionError,
+
+    #[error("Block cache is not unique")]
+    BlockCacheError,
 }

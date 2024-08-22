@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     block::{Block, TOMBSTONE},
     error::SlateDBError,
@@ -22,6 +24,16 @@ impl BlockLike for Block {
 }
 
 impl BlockLike for &Block {
+    fn data(&self) -> &Bytes {
+        &self.data
+    }
+
+    fn offsets(&self) -> &[u16] {
+        &self.offsets
+    }
+}
+
+impl BlockLike for Arc<Block> {
     fn data(&self) -> &Bytes {
         &self.data
     }

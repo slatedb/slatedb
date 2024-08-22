@@ -33,6 +33,7 @@ snap = { version = "1.1.1", optional = true }
 flate2 = { version = "1.0.31", optional = true }
 lz4_flex = { version = "0.11.3", optional = true }
 zstd = { version = "0.13.2", optional = true }
+moka = { version = "0.12.8", features = ["future"] }
 
 [dev-dependencies]
 tokio = { version = "1.37.0", features = ["rt-multi-thread"] }

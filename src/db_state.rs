@@ -24,7 +24,7 @@ impl SSTableHandle {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Hash, Eq)]
+#[derive(Clone, PartialEq, Debug, Hash, Eq, Copy)]
 pub enum SsTableId {
     Wal(u64),
     Compacted(Ulid),

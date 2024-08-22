@@ -65,6 +65,7 @@ pub fn run_compaction_execute_bench() -> Result<(), SlateDBError> {
         s3.clone(),
         sst_format,
         Path::from(options.path.as_str()),
+        None,
     ));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
