@@ -519,7 +519,7 @@ mod tests {
 
         // Create and write SST
         let id = SsTableId::Compacted(Ulid::new());
-        let mut writer = ts.table_writer(id.clone());
+        let mut writer = ts.table_writer(id);
         for i in 0..20 {
             writer.add(&[i], Some(&[i])).await.unwrap();
         }
@@ -537,10 +537,10 @@ mod tests {
 
         // Partially clear the cache (remove blocks 5..10 and 15..20)
         for i in 5..10 {
-            block_cache.remove(&(handle.id.clone(), i)).await;
+            block_cache.remove(&(handle.id, i)).await;
         }
         for i in 15..20 {
-            block_cache.remove(&(handle.id.clone(), i)).await;
+            block_cache.remove(&(handle.id, i)).await;
         }
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
@@ -551,10 +551,10 @@ mod tests {
 
         // Test 3: Verify deleted blocks were added back to cache
         for i in 5..10 {
-            assert!(block_cache.get(&(handle.id.clone(), i)).await.is_some());
+            assert!(block_cache.get(&(handle.id, i)).await.is_some());
         }
         for i in 15..20 {
-            assert!(block_cache.get(&(handle.id.clone(), i)).await.is_some());
+            assert!(block_cache.get(&(handle.id, i)).await.is_some());
         }
 
         // Delete SST to see cache hit occurs for all blocks
