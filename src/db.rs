@@ -872,7 +872,6 @@ mod tests {
     async fn test_db_open_should_write_empty_wal() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-
         // assert that open db writes an empty wal.
         let db = Db::open_with_opts(
             path.clone(),
@@ -882,9 +881,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(db.inner.state.read().state().core.next_wal_sst_id, 2);
-
         db.put(b"1", b"1").await;
-
         // assert that second open writes another empty wal.
         let db = Db::open_with_opts(
             path.clone(),
@@ -912,7 +909,6 @@ mod tests {
         db1.put_with_options(b"1", b"1", &WriteOptions { await_flush: false })
             .await;
         db1.flush().await.unwrap();
-
         // open db2, causing it to write an empty wal and fence db1.
         let db2 = Db::open_with_opts(
             path.clone(),
@@ -921,7 +917,6 @@ mod tests {
         )
         .await
         .unwrap();
-
         // assert that db1 can no longer write.
         db1.put_with_options(b"1", b"1", &WriteOptions { await_flush: false })
             .await;
