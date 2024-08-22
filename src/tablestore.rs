@@ -191,9 +191,9 @@ impl TableStore {
                 _ => SlateDBError::ObjectStoreError(e),
             })?;
 
-        self.cache_filter(id.clone(), encoded_sst.filter);
+        self.cache_filter(*id, encoded_sst.filter);
         Ok(SSTableHandle {
-            id: id.clone(),
+            id: *id,
             info: encoded_sst.info,
         })
     }
@@ -214,10 +214,7 @@ impl TableStore {
             path,
         };
         let info = self.sst_format.read_info(&obj).await?;
-        Ok(SSTableHandle {
-            id: id.clone(),
-            info,
-        })
+        Ok(SSTableHandle { id: *id, info })
     }
 
     pub(crate) async fn read_filter(
@@ -237,7 +234,7 @@ impl TableStore {
         };
         let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
         let mut wguard = self.filter_cache.write();
-        wguard.insert(handle.id.clone(), filter.clone());
+        wguard.insert(handle.id, filter.clone());
         Ok(filter)
     }
 
@@ -409,10 +406,9 @@ impl<'a> EncodedSsTableWriter<'a> {
             self.writer.write_all(block.as_ref()).await?;
         }
         self.writer.shutdown().await?;
-        self.table_store
-            .cache_filter(self.id.clone(), encoded_sst.filter);
+        self.table_store.cache_filter(self.id, encoded_sst.filter);
         Ok(SSTableHandle {
-            id: self.id.clone(),
+            id: self.id,
             info: encoded_sst.info,
         })
     }

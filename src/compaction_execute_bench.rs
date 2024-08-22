@@ -209,7 +209,7 @@ fn run_bench(
         FuturesUnordered::<JoinHandle<Result<(SsTableId, SSTableHandle), SlateDBError>>>::new();
     let mut ssts_by_id = HashMap::new();
     info!("load sst");
-    for id in sst_ids.iter() {
+    for id in sst_ids.clone().into_iter() {
         if futures.len() > 8 {
             let (id, handle) = handle
                 .block_on(futures.next())
@@ -217,11 +217,10 @@ fn run_bench(
                 .expect("join failed")?;
             ssts_by_id.insert(id, handle);
         }
-        let id_clone = id.clone();
         let table_store_clone = table_store.clone();
         let jh = handle.spawn(async move {
-            match table_store_clone.open_sst(&id_clone).await {
-                Ok(h) => Ok((id_clone, h)),
+            match table_store_clone.open_sst(&id).await {
+                Ok(h) => Ok((id, h)),
                 Err(err) => Err(err),
             }
         });
@@ -233,8 +232,8 @@ fn run_bench(
     }
     info!("finished loading");
     let ssts: Vec<SSTableHandle> = sst_ids
-        .iter()
-        .map(|id| ssts_by_id.get(id).expect("expected sst").clone())
+        .into_iter()
+        .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
         .collect();
     let job = CompactionJob {
         destination: 0,
