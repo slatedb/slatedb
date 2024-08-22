@@ -245,9 +245,8 @@ impl DbState {
 #[cfg(test)]
 mod tests {
     use crate::db_state::{CoreDbState, DbState, SSTableHandle, SsTableId};
-    use crate::flatbuffer_types::{BlockMeta, SsTableInfo, SsTableInfoArgs, SsTableInfoOwned};
+    use crate::flatbuffer_types::{SsTableInfo, SsTableInfoArgs, SsTableInfoOwned};
     use bytes::Bytes;
-    use flatbuffers::ForwardsUOffset;
     use ulid::Ulid;
 
     #[test]
@@ -309,12 +308,12 @@ mod tests {
 
     fn create_sst_info() -> SsTableInfoOwned {
         let mut builder = flatbuffers::FlatBufferBuilder::new();
-        let block_meta_wip = builder.create_vector::<ForwardsUOffset<BlockMeta>>(&[]);
         let wip = SsTableInfo::create(
             &mut builder,
             &SsTableInfoArgs {
                 first_key: None,
-                block_meta: Some(block_meta_wip),
+                index_offset: 0,
+                index_len: 0,
                 filter_offset: 0,
                 filter_len: 0,
             },

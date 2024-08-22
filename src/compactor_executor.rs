@@ -1,5 +1,5 @@
-use crate::compactor::WorkerToOrchestoratorMsg;
-use crate::compactor::WorkerToOrchestoratorMsg::CompactionFinished;
+use crate::compactor::WorkerToOrchestratorMsg;
+use crate::compactor::WorkerToOrchestratorMsg::CompactionFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SSTableHandle, SortedRun, SsTableId};
 use crate::error::SlateDBError;
@@ -37,7 +37,7 @@ impl TokioCompactionExecutor {
     pub(crate) fn new(
         handle: tokio::runtime::Handle,
         options: Arc<CompactorOptions>,
-        worker_tx: crossbeam_channel::Sender<WorkerToOrchestoratorMsg>,
+        worker_tx: crossbeam_channel::Sender<WorkerToOrchestratorMsg>,
         table_store: Arc<TableStore>,
     ) -> Self {
         Self {
@@ -74,30 +74,40 @@ struct TokioCompactionTask {
 pub(crate) struct TokioCompactionExecutorInner {
     options: Arc<CompactorOptions>,
     handle: tokio::runtime::Handle,
-    worker_tx: crossbeam_channel::Sender<WorkerToOrchestoratorMsg>,
+    worker_tx: crossbeam_channel::Sender<WorkerToOrchestratorMsg>,
     table_store: Arc<TableStore>,
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
     is_stopped: AtomicBool,
 }
 
 impl TokioCompactionExecutorInner {
+    async fn load_iterators<'a>(
+        &'a self,
+        compaction: &'a CompactionJob,
+    ) -> Result<
+        TwoMergeIterator<MergeIterator<SstIterator>, MergeIterator<SortedRunIterator>>,
+        SlateDBError,
+    > {
+        let mut l0_iters = VecDeque::new();
+        for l0 in compaction.ssts.iter() {
+            let iter = SstIterator::new_spawn(l0, self.table_store.clone(), 4, 256).await?;
+            l0_iters.push_back(iter);
+        }
+        let l0_merge_iter = MergeIterator::new(l0_iters).await?;
+        let mut sr_iters = VecDeque::new();
+        for sr in compaction.sorted_runs.iter() {
+            let iter = SortedRunIterator::new_spawn(sr, self.table_store.clone(), 4, 256).await?;
+            sr_iters.push_back(iter);
+        }
+        let sr_merge_iter = MergeIterator::new(sr_iters).await?;
+        TwoMergeIterator::new(l0_merge_iter, sr_merge_iter).await
+    }
+
     async fn execute_compaction(
         &self,
         compaction: CompactionJob,
     ) -> Result<SortedRun, SlateDBError> {
-        let l0_iters: VecDeque<SstIterator> = compaction
-            .ssts
-            .iter()
-            .map(|l0| SstIterator::new_spawn(l0, self.table_store.clone(), 4, 256))
-            .collect();
-        let l0_merge_iter = MergeIterator::new(l0_iters).await?;
-        let sr_iters: VecDeque<SortedRunIterator> = compaction
-            .sorted_runs
-            .iter()
-            .map(|sr| SortedRunIterator::new_spawn(sr, self.table_store.clone(), 4, 256))
-            .collect();
-        let sr_merge_iter = MergeIterator::new(sr_iters).await?;
-        let mut all_iter = TwoMergeIterator::new(l0_merge_iter, sr_merge_iter).await?;
+        let mut all_iter = self.load_iterators(&compaction).await?;
         let mut output_ssts = Vec::new();
         let mut current_writer = self
             .table_store
@@ -111,7 +121,6 @@ impl TokioCompactionExecutorInner {
                 .await?;
             current_size += kv.key.len() + value.map_or(0, |b| b.len());
             if current_size > self.options.max_sst_size {
-                println!("finish one sst");
                 current_size = 0;
                 let finished_writer = mem::replace(
                     &mut current_writer,

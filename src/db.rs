@@ -76,7 +76,8 @@ impl DbInner {
 
         for sst in &snapshot.state.core.l0 {
             if self.sst_may_include_key(sst, key).await? {
-                let mut iter = SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1);
+                let mut iter =
+                    SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1).await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
                         return Ok(entry.value.into_option());
@@ -87,7 +88,8 @@ impl DbInner {
         for sr in &snapshot.state.core.compacted {
             if self.sr_may_include_key(sr, key).await? {
                 let mut iter =
-                    SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1);
+                    SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1)
+                        .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
                         return Ok(entry.value.into_option());
@@ -170,25 +172,23 @@ impl DbInner {
                 SsTableId::Wal(id) => *id,
                 SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
             };
-            let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1);
+            let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1).await?;
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
+            // buffer the WAL entries to bulk replay them into the memtable.
+            let mut wal_replay_buf = Vec::new();
             while let Some(kv) = iter.next_entry().await? {
-                // TODO: it's not ideal that we have to take this lock for every kv. We can solve
-                //       this by either:
-                //       1. detaching this method from self and calling it before initializing
-                //          DbInner. The downside is we can't use member methods of DbInner
-                //          like maybe_freeze_wal
-                //       2. accumulating kv-pairs in memory and bulk-applying the writes
-                let mut guard = self.state.write();
-                match kv.value {
-                    ValueDeletable::Value(value) => {
-                        guard.memtable().put(kv.key.as_ref(), value.as_ref())
-                    }
-                    ValueDeletable::Tombstone => guard.memtable().delete(kv.key.as_ref()),
-                }
+                wal_replay_buf.push(kv);
             }
             {
                 let mut guard = self.state.write();
+                for kv in wal_replay_buf.iter() {
+                    match &kv.value {
+                        ValueDeletable::Value(value) => {
+                            guard.memtable().put(kv.key.as_ref(), value.as_ref())
+                        }
+                        ValueDeletable::Tombstone => guard.memtable().delete(kv.key.as_ref()),
+                    }
+                }
                 self.maybe_freeze_memtable(&mut guard, sst_id);
                 if guard.state().core.next_wal_sst_id == sst_id {
                     guard.increment_next_wal_id();
@@ -389,6 +389,7 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use std::time::Duration;
+    use tracing::info;
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -464,7 +465,9 @@ mod tests {
         assert_eq!(l0.len(), 3);
         for i in 0u8..3u8 {
             let sst1 = l0.get(2 - i as usize).unwrap();
-            let mut iter = SstIterator::new(sst1, table_store.clone(), 1, 1);
+            let mut iter = SstIterator::new(sst1, table_store.clone(), 1, 1)
+                .await
+                .unwrap();
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);
@@ -792,7 +795,7 @@ mod tests {
             Duration::from_secs(10),
         )
         .await;
-        println!(
+        info!(
             "1 l0: {} {}",
             db.inner.state.read().state().core.l0.len(),
             db.inner.state.read().state().core.compacted.len()
@@ -808,7 +811,7 @@ mod tests {
             Duration::from_secs(10),
         )
         .await;
-        println!(
+        info!(
             "2 l0: {} {}",
             db.inner.state.read().state().core.l0.len(),
             db.inner.state.read().state().core.compacted.len()
@@ -822,7 +825,7 @@ mod tests {
         let val = db.get(&[b'm'; 32]).await.unwrap();
         assert_eq!(val, Some(Bytes::copy_from_slice(&[129u8; 32])));
         for i in 1..4 {
-            println!(
+            info!(
                 "3 l0: {} {}",
                 db.inner.state.read().state().core.l0.len(),
                 db.inner.state.read().state().core.compacted.len()

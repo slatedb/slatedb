@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 use tokio::runtime::Handle;
+use tracing::{error, warn};
 use ulid::Ulid;
 
 pub(crate) trait CompactionScheduler {
@@ -22,7 +23,7 @@ enum CompactorMainMsg {
     Shutdown,
 }
 
-pub(crate) enum WorkerToOrchestoratorMsg {
+pub(crate) enum WorkerToOrchestratorMsg {
     CompactionFinished(Result<SortedRun, SlateDBError>),
 }
 
@@ -83,7 +84,7 @@ struct CompactorOrchestrator {
     scheduler: Box<dyn CompactionScheduler>,
     executor: Box<dyn CompactionExecutor>,
     external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
-    worker_rx: crossbeam_channel::Receiver<WorkerToOrchestoratorMsg>,
+    worker_rx: crossbeam_channel::Receiver<WorkerToOrchestratorMsg>,
 }
 
 impl CompactorOrchestrator {
@@ -141,13 +142,15 @@ impl CompactorOrchestrator {
         while !(self.executor.is_stopped() && self.worker_rx.is_empty()) {
             crossbeam_channel::select! {
                 recv(ticker) -> _ => {
-                    self.load_manifest().expect("fatal error loading manifest");
+                    if !self.executor.is_stopped() {
+                        self.load_manifest().expect("fatal error loading manifest");
+                    }
                 }
                 recv(self.worker_rx) -> msg => {
-                    let WorkerToOrchestoratorMsg::CompactionFinished(result) = msg.expect("fatal error receiving worker msg");
+                    let WorkerToOrchestratorMsg::CompactionFinished(result) = msg.expect("fatal error receiving worker msg");
                     match result {
                         Ok(sr) => self.finish_compaction(sr).expect("fatal error finishing compaction"),
-                        Err(err) => println!("error executing compaction: {:#?}", err)
+                        Err(err) => error!("error executing compaction: {:#?}", err)
                     }
                 }
                 recv(self.external_rx) -> _ => {
@@ -235,7 +238,7 @@ impl CompactorOrchestrator {
     fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
         let result = self.state.submit_compaction(compaction.clone());
         if result.is_err() {
-            println!("invalid compaction: {:#?}", result);
+            warn!("invalid compaction: {:?}", result);
             return Ok(());
         }
         self.start_compaction(compaction);
@@ -251,7 +254,7 @@ impl CompactorOrchestrator {
 
 #[cfg(test)]
 mod tests {
-    use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestoratorMsg};
+    use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestratorMsg};
     use crate::compactor_state::{Compaction, SourceId};
     use crate::config::DbOptions;
     use crate::db::Db;
@@ -306,7 +309,9 @@ mod tests {
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
-        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1);
+        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1)
+            .await
+            .unwrap();
         for i in 0..4 {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), &[b'a' + i as u8; 16]);
@@ -364,7 +369,7 @@ mod tests {
             .submit_compaction(Compaction::new(l0_ids_to_compact.clone(), 0))
             .unwrap();
         let msg = orchestrator.worker_rx.recv().unwrap();
-        let WorkerToOrchestoratorMsg::CompactionFinished(Ok(sr)) = msg else {
+        let WorkerToOrchestratorMsg::CompactionFinished(Ok(sr)) = msg else {
             panic!("compaction failed")
         };
 
