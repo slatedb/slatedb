@@ -544,6 +544,7 @@ mod tests {
         )
         .await
         .unwrap();
+        // increment wal id for the empty wal
         next_wal_id += 1;
 
         // do a few writes that will result in l0 flushes
@@ -576,6 +577,7 @@ mod tests {
         )
         .await
         .unwrap();
+        // increment wal id for the empty wal
         next_wal_id += 1;
 
         for i in 0..l0_count {
@@ -753,14 +755,17 @@ mod tests {
         )
         .await
         .unwrap();
+        // increment wal id for the empty wal
         next_wal_id += 1;
 
         // verify that we reload imm
         let snapshot = db.inner.state.read().snapshot();
         assert_eq!(snapshot.state.imm_memtable.len(), 2);
+
+        // one empty wal and two wals for the puts
         assert_eq!(
             snapshot.state.imm_memtable.front().unwrap().last_wal_id(),
-            2 + 1
+            1 + 2
         );
         assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 2);
         assert_eq!(snapshot.state.core.next_wal_sst_id, next_wal_id);
