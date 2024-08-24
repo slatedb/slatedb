@@ -21,7 +21,7 @@ use crate::error::SlateDBError;
 pub(crate) struct CachedObjectStore {
     root_path: std::path::PathBuf,
     object_store: Arc<dyn ObjectStore>,
-    part_size: usize, // 64mb
+    part_size: usize, // expected to be aligned with mb or kb, default 64mb
 }
 
 impl CachedObjectStore {
@@ -206,10 +206,18 @@ impl DiskCacheEntry {
     }
 
     fn make_part_path(&self, part_number: usize) -> std::path::PathBuf {
+        // containing the part size in the file name, allows user change the part size on
+        // the fly, without the need to invalidate the cache.
         // TODO: pad with zeros
+        let part_size_name = if self.part_size % (1024 * 1024) == 0 {
+            format!("{}mb", self.part_size / (1024 * 1024))
+        } else {
+            format!("{}kb", self.part_size / 1024)
+        };
         let part_file_path = self.root_folder.join(&format!(
-            "{}._part-{}",
+            "{}._part{}-{}",
             self.object_path.to_string(),
+            part_size_name,
             part_number,
         ));
         part_file_path
