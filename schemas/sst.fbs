@@ -8,6 +8,14 @@ table CompactedSsTable {
     info: SsTableInfo;
 }
 
+enum CompressionFormat: byte {
+    None,
+    Snappy,
+    Zlib,
+    Lz4,
+    Zstd
+}
+
 // Has metadata about a SST file.
 table SsTableInfo {
     // First key in the SST file.
@@ -24,6 +32,9 @@ table SsTableInfo {
 
     // Length of bloom filter. Length will be zero if filter is not present.
     filter_len: ulong;
+
+    // type of compression algorithm used.
+    compression_format: CompressionFormat;
 }
 
 table BlockMeta {
