@@ -48,7 +48,7 @@ pub(crate) struct WriteArgs {
     #[arg(long)]
     key_len: usize,
     #[arg(long, default_value_t = false)]
-    await_flush: bool,
+    await_durable: bool,
     #[arg(long)]
     pub(crate) write_rate: Option<u32>,
     #[arg(long, default_value_t = 4)]
@@ -72,7 +72,7 @@ impl WriteArgs {
 
     pub(crate) fn write_options(&self) -> WriteOptions {
         WriteOptions {
-            await_flush: self.await_flush,
+            await_durable: self.await_durable,
         }
     }
 }

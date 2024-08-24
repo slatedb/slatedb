@@ -69,7 +69,7 @@ impl DbInner {
             // flush to the memtable before notifying so that data is available for reads
             self.flush_imm_wal_to_memtable(wguard.memtable(), imm.table());
             self.maybe_freeze_memtable(&mut wguard, imm.id());
-            imm.table().notify_flush();
+            imm.table().notify_durable();
         }
         Ok(())
     }

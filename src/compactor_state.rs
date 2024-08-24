@@ -2,13 +2,29 @@ use crate::compactor_state::CompactionStatus::Submitted;
 use crate::db_state::{CoreDbState, SSTableHandle, SortedRun};
 use crate::error::SlateDBError;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::{Display, Formatter};
 use tracing::info;
 use ulid::Ulid;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum SourceId {
     SortedRun(u32),
     Sst(Ulid),
+}
+
+impl Display for SourceId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                SourceId::SortedRun(id) => {
+                    format!("{}", *id)
+                }
+                SourceId::Sst(_) => String::from("l0"),
+            }
+        )
+    }
 }
 
 impl SourceId {
@@ -47,10 +63,21 @@ pub(crate) enum CompactionStatus {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Compaction {
+pub struct Compaction {
     pub(crate) status: CompactionStatus,
     pub(crate) sources: Vec<SourceId>,
     pub(crate) destination: u32,
+}
+
+impl Display for Compaction {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let displayed_sources: Vec<_> = self.sources.iter().map(|s| format!("{}", s)).collect();
+        write!(
+            f,
+            "{:?} -> {}: {:?}",
+            displayed_sources, self.destination, self.status
+        )
+    }
 }
 
 impl Compaction {
@@ -63,7 +90,7 @@ impl Compaction {
     }
 }
 
-pub(crate) struct CompactorState {
+pub struct CompactorState {
     db_state: CoreDbState,
     compactions: HashMap<u32, Compaction>,
 }
@@ -73,7 +100,10 @@ impl CompactorState {
         &self.db_state
     }
 
-    #[allow(dead_code)]
+    pub(crate) fn num_compactions(&self) -> usize {
+        self.compactions.len()
+    }
+
     pub(crate) fn compactions(&self) -> Vec<Compaction> {
         self.compactions.values().cloned().collect()
     }
