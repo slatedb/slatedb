@@ -49,13 +49,14 @@ impl CachedObjectStore {
                 let (cached_parts, cached_last_part) = entry.cached_parts(None).await;
                 // if not fully cached, fallback to a single GET request (may helpful to reduce the API cost), and
                 // save the result into cached parts.
-                if !cached_last_part {
+                let last_part_id = if !cached_last_part {
                     let get_result = self.object_store.get(location).await?;
-                    entry.save_result(get_result).await?;
-                }
+                    entry.save_result(get_result).await?
+                } else {
+                    cached_parts.last().copied().unwrap()
+                };
                 // stream by parts, and concatenate them. please note that some of these part may not be cached,
                 // we'll still fallback to the object store to get the missing parts.
-                let last_part_id = cached_parts.last().copied().unwrap();
                 let stream = (0..=last_part_id)
                     .into_iter()
                     .map(|part_id| self.read_part(part_id))
@@ -172,7 +173,7 @@ type PartID = usize;
 impl DiskCacheEntry {
     /// Save the GetResult to the disk cache. The `range` is optional and if provided, it's expected to
     /// be aligned with part_size (default 64mb).
-    pub async fn save_result(&self, result: GetResult) -> object_store::Result<()> {
+    pub async fn save_result(&self, result: GetResult) -> object_store::Result<usize> {
         // TODO: assert the range to be aligned with part_size
         let mut buffer = BytesMut::new();
         // TODO: part_number = result.range.start / part_size
@@ -193,7 +194,7 @@ impl DiskCacheEntry {
         // the last part, which is less than part_size or empty, should be saved as well
         // which allows us to determine the end of the object data.
         self.save_part(part_number, buffer.as_ref()).await?;
-        Ok(())
+        Ok(part_number)
     }
 
     pub async fn read_part(
