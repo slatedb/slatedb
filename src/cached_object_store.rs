@@ -71,6 +71,7 @@ impl CachedObjectStore {
     }
 
     /// Get from disk if the parts are cached, otherwise start a new GET request.
+    /// if the range is out of bound, it'll still return a stream with empty Bytes.
     fn read_part(&self, partID: PartID) -> BoxStream<'static, object_store::Result<Bytes>> {
         todo!()
     }
@@ -244,8 +245,8 @@ impl DiskCacheEntry {
         part_paths.sort();
 
         // check if we've cached the last part or not. it's useful to determine the end of the object.
-        // if the last part is not cached, we can not response the GET request without range, or with
-        // Offset and Suffix.
+        // if the last part is not cached, we still need fallback to the object store to get the missing
+        // parts on the GET request without range, or with Offset and Suffix.
         let last_part_path = part_paths.last().unwrap();
         let last_part_size = tokio::fs::metadata(last_part_path)
             .await
@@ -271,37 +272,42 @@ impl DiskCacheEntry {
 
         // filter the parts by the range, we can assume the part range are always aligned with the part_size
         // here.
-        let filtered_part_numbers = match range {
-            None => part_numbers,
+        match range {
+            None => {
+                return Ok((part_numbers, cached_last_part));
+            }
             Some(range) => match range {
                 GetRange::Bounded(range) => {
                     let start_part = range.start / self.part_size;
                     let end_part = range.end / self.part_size;
-                    part_numbers
+                    let filtered_part_numbers = part_numbers
                         .into_iter()
-                        .filter(|part_number| {
-                            *part_number >= start_part && *part_number <= end_part
-                        })
-                        .collect()
+                        .filter(|part_number| *part_number >= start_part && *part_number < end_part)
+                        .collect();
+                    return Ok((filtered_part_numbers, cached_last_part));
                 }
                 GetRange::Suffix(suffix) => {
-                    let suffix_part = suffix / self.part_size;
-                    part_numbers
+                    if !cached_last_part {
+                        return Ok((vec![], false));
+                    }
+                    let last_part_number = part_numbers.last().copied().unwrap();
+                    let suffix_part_start = last_part_number - suffix / self.part_size + 1;
+                    let filtered_part_numbers = part_numbers
                         .into_iter()
-                        .filter(|part_number| *part_number >= suffix_part)
-                        .collect()
+                        .filter(|part_number| *part_number >= suffix_part_start)
+                        .collect();
+                    return Ok((filtered_part_numbers, true));
                 }
                 GetRange::Offset(offset) => {
                     let offset_part = offset / self.part_size;
-                    part_numbers
+                    let filtered_part_numbers = part_numbers
                         .into_iter()
                         .filter(|part_number| *part_number >= offset_part)
-                        .collect()
+                        .collect();
+                    return Ok((filtered_part_numbers, cached_last_part));
                 }
             },
         };
-
-        Ok((filtered_part_numbers, cached_last_part))
     }
 
     // if the disk is full, we'll get an error here.
