@@ -45,10 +45,6 @@ impl DbInner {
             table_store,
             memtable_flush_notifier,
         };
-        db_inner.replay_wal().await?;
-        if db_inner.wal_enabled(){
-            db_inner.fence_writers().await?;
-        }
         Ok(db_inner)
     }
 
@@ -102,19 +98,26 @@ impl DbInner {
         Ok(None)
     }
 
-    async fn fence_writers(&self) -> Result<(), SlateDBError>{
-        let mut empty_wal_id = self.state.read().state().core.next_wal_sst_id;
+    async fn fence_writers(&self, manifest: &mut FenceableManifest) -> Result<(), SlateDBError>{
+        let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
+        let max_wal_id = self
+            .table_store
+            .get_wal_sst_list(wal_id_last_compacted)
+            .await?
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+        let mut empty_wal_id = max_wal_id + 1;    
+        
         loop {
             let empty_wal = WritableKVTable::new();
             match self.flush_imm_table(&SsTableId::Wal(empty_wal_id), empty_wal.table().clone()).await {
                 Ok(_) => {
-                    let mut guard = self.state.write();
-                    guard.increment_next_wal_id();
                     return Ok(());
                 }
                 Err(SlateDBError::Fenced) => {
-                    let mut guard = self.state.write();
-                    guard.increment_next_wal_id();
+                    let updated_state = manifest.refresh().await?;
+                    self.state.write().refresh_db_state(updated_state);
                     empty_wal_id += 1;
                 }
                 Err(e) => {
@@ -307,7 +310,7 @@ impl Db {
             fp_registry.clone(),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
-        let manifest = Self::init_db(&manifest_store).await?;
+        let mut manifest = Self::init_db(&manifest_store).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
             DbInner::new(
@@ -318,6 +321,10 @@ impl Db {
             )
             .await?,
         );
+        if inner.wal_enabled() {
+            inner.fence_writers(&mut manifest).await?;
+        }        
+        inner.replay_wal().await?;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let tokio_handle = Handle::current();
         let flush_thread = if inner.wal_enabled() {
@@ -1051,6 +1058,7 @@ mod tests {
         db2.put_with_options(b"2", b"2", &WriteOptions { await_flush: false })
             .await;
         db2.flush().await.unwrap();
+        assert_eq!(db2.inner.state.read().state().core.next_wal_sst_id, 5);
     }
 
     async fn wait_for_manifest_condition(
