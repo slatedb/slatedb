@@ -9,16 +9,19 @@ use ulid::Ulid;
 #[allow(warnings)]
 #[rustfmt::skip]
 mod manifest_generated;
+use crate::config::CompressionCodec;
 use crate::db_state::SsTableId;
 use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
-use crate::flatbuffer_types::manifest_generated::{CompactedSsTable, CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun, SortedRunArgs};
+use crate::flatbuffer_types::manifest_generated::{
+    CompactedSsTable, CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat,
+    SortedRun, SortedRunArgs,
+};
 use crate::manifest::{Manifest, ManifestCodec};
 pub use manifest_generated::{
     BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
     SsTableInfo, SsTableInfoArgs,
 };
-use crate::config::CompressionCodec;
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct SsTableInfoOwned {
@@ -159,7 +162,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 index_len: info.index_len(),
                 filter_offset: info.filter_offset(),
                 filter_len: info.filter_len(),
-                compression_format: info.compression_format()
+                compression_format: info.compression_format(),
             },
         )
     }
@@ -262,9 +265,9 @@ impl<'b> DbFlatBufferBuilder<'b> {
     }
 }
 
-impl Into<CompressionFormat> for Option<CompressionCodec> {
-    fn into(self) -> CompressionFormat {
-        match self {
+impl From<Option<CompressionCodec>> for CompressionFormat {
+    fn from(value: Option<CompressionCodec>) -> Self {
+        match value {
             None => CompressionFormat::None,
             Some(codec) => match codec {
                 #[cfg(feature = "snappy")]
@@ -274,25 +277,24 @@ impl Into<CompressionFormat> for Option<CompressionCodec> {
                 #[cfg(feature = "lz4")]
                 CompressionCodec::Zlib => CompressionFormat::Zlib,
                 #[cfg(feature = "zstd")]
-                CompressionCodec::Zstd => CompressionFormat::Zstd
-            }
+                CompressionCodec::Zstd => CompressionFormat::Zstd,
+            },
         }
     }
 }
 
 impl From<CompressionFormat> for Option<CompressionCodec> {
     fn from(value: CompressionFormat) -> Self {
-       match value {
-           #[cfg(feature = "snappy")]
-           CompressionFormat::Snappy => Some(CompressionCodec::Snappy),
-           #[cfg(feature = "zlib")]
-           CompressionFormat::Lz4 => Some(CompressionCodec::Lz4),
-           #[cfg(feature = "lz4")]
-           CompressionFormat::Zlib => Some(CompressionCodec::Zlib),
-           #[cfg(feature = "zstd")]
-           CompressionFormat::Zstd => Some(CompressionCodec::Zstd),
-           _ => None
-       }
-
+        match value {
+            #[cfg(feature = "snappy")]
+            CompressionFormat::Snappy => Some(CompressionCodec::Snappy),
+            #[cfg(feature = "zlib")]
+            CompressionFormat::Lz4 => Some(CompressionCodec::Lz4),
+            #[cfg(feature = "lz4")]
+            CompressionFormat::Zlib => Some(CompressionCodec::Zlib),
+            #[cfg(feature = "zstd")]
+            CompressionFormat::Zstd => Some(CompressionCodec::Zstd),
+            _ => None,
+        }
     }
 }

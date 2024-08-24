@@ -99,7 +99,11 @@ impl SsTableFormat {
         self.decode_index(index_bytes, compression_codec.into())
     }
 
-    fn decode_index(&self, index_bytes: Bytes, compression_codec: Option<CompressionCodec>) -> Result<SsTableIndexOwned, SlateDBError> {
+    fn decode_index(
+        &self,
+        index_bytes: Bytes,
+        compression_codec: Option<CompressionCodec>,
+    ) -> Result<SsTableIndexOwned, SlateDBError> {
         let index_bytes = match compression_codec {
             Some(c) => Self::decompress(index_bytes, c)?,
             None => index_bytes,
@@ -456,7 +460,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
                 index_len: index_len as u64,
                 filter_offset: filter_offset as u64,
                 filter_len: filter_len as u64,
-                compression_format: self.compression_codec.into()
+                compression_format: self.compression_codec.into(),
             },
         );
 

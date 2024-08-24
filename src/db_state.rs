@@ -302,7 +302,7 @@ mod tests {
                 index_len: 0,
                 filter_offset: 0,
                 filter_len: 0,
-                compression_format: None.into()
+                compression_format: None.into(),
             },
         );
         builder.finish(wip, None);
