@@ -3,12 +3,17 @@ use bytes::BytesMut;
 use futures::stream;
 use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::TryFutureExt;
 use object_store::GetRange;
 use object_store::GetResultPayload;
 use std::io::Read;
 use std::io::Write;
+use std::ops::Range;
 use std::sync::Arc;
-use std::{fs::File, ops::Range};
+use tokio::fs;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 
 use object_store::{
     path::Path, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -152,14 +157,14 @@ impl DiskCacheEntry {
 
             while buffer.len() >= self.part_size {
                 let to_write = buffer.split_to(self.part_size);
-                self.save_part(part_number, to_write.as_ref())?;
+                self.save_part(part_number, to_write.as_ref()).await?;
                 part_number += 1;
             }
         }
 
         // the last part, which is less than part_size or empty, should be saved as well
         // which allows us to determine the end of the object data.
-        self.save_part(part_number, buffer.as_ref())?;
+        self.save_part(part_number, buffer.as_ref()).await?;
         Ok(())
     }
 
@@ -175,10 +180,10 @@ impl DiskCacheEntry {
 
         let stream = part_file_paths
             .then(move |part_file_path| async move {
-                let file = File::open(&part_file_path).unwrap();
-                let mut reader = std::io::BufReader::new(file);
+                let file = File::open(&part_file_path).await.unwrap();
+                let mut reader = tokio::io::BufReader::new(file);
                 let mut buffer = Vec::new();
-                reader.read_to_end(&mut buffer).unwrap();
+                reader.read_to_end(&mut buffer).await.unwrap();
                 Ok(Bytes::from(buffer))
             })
             .boxed();
@@ -196,12 +201,29 @@ impl DiskCacheEntry {
         todo!()
     }
 
-    fn save_part(&self, part_number: usize, buf: &[u8]) -> object_store::Result<()> {
-        // TODO: mkdir -p
-        // TODO: create a file with .tmp extension and rename it to the final name
+    // if the disk is full, we'll get an error here.
+    // TODO: this error can be ignored in the caller side and print a warning.
+    async fn save_part(&self, part_number: usize, buf: &[u8]) -> object_store::Result<()> {
         let part_file_path = self.make_part_path(part_number);
-        let mut file = File::create(&part_file_path).unwrap();
-        file.write_all(&buf).unwrap();
+
+        // ensure the parent folder exists
+        if let Some(part_file_folder) = part_file_path.parent() {
+            fs::create_dir_all(part_file_folder)
+                .await
+                .map_err(wrap_io_err)?;
+        }
+
+        // save the file content to tmp. if the disk is full, we'll get an error here.
+        let tmp_part_file_path = part_file_path.with_extension("tmp");
+        let mut file = File::create(&tmp_part_file_path)
+            .await
+            .map_err(wrap_io_err)?;
+        file.write_all(&buf).await.map_err(wrap_io_err)?;
+
+        // atomic rename
+        fs::rename(tmp_part_file_path, part_file_path)
+            .await
+            .map_err(wrap_io_err)?;
         Ok(())
     }
 
@@ -221,5 +243,12 @@ impl DiskCacheEntry {
             part_number,
         ));
         part_file_path
+    }
+}
+
+fn wrap_io_err(err: tokio::io::Error) -> object_store::Error {
+    object_store::Error::Generic {
+        store: "cached_object_store",
+        source: Box::new(err),
     }
 }
