@@ -30,7 +30,7 @@ pub(crate) struct CachedObjectStore {
 }
 
 impl CachedObjectStore {
-    fn read_range(
+    async fn read_range(
         &self,
         location: &Path,
         range: Option<GetRange>,
@@ -38,6 +38,34 @@ impl CachedObjectStore {
         // split the parts by range
         // parallel calling read_part, concatenate the stream
         // adjust the offsets
+        let range = match range {
+            None => {
+                // Get without range, check the is fully cached or not.
+                let entry = DiskCacheEntry {
+                    root_folder: self.root_path.clone(),
+                    object_path: location.clone(),
+                    part_size: self.part_size,
+                };
+                let (cached_parts, cached_last_part) = entry.cached_parts(None).await;
+                // if not fully cached, fallback to a single GET request (may helpful to reduce the API cost), and
+                // save the result into cached parts.
+                if !cached_last_part {
+                    let get_result = self.object_store.get(location).await?;
+                    entry.save_result(get_result).await?;
+                }
+                // stream by parts, and concatenate them. please note that some of these part may not be cached,
+                // we'll still fallback to the object store to get the missing parts.
+                let last_part_id = cached_parts.last().copied().unwrap();
+                let stream = (0..=last_part_id)
+                    .into_iter()
+                    .map(|part_id| self.read_part(part_id))
+                    .collect::<Vec<_>>();
+                return Ok(stream::iter(stream).flatten().boxed());
+            }
+            Some(range) => range,
+        };
+
+        // TODO: handle the range
         todo!()
     }
 
@@ -89,7 +117,7 @@ impl ObjectStore for CachedObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        self.get_opts(location, options).await
+        self.object_store.get_opts(location, options).await
     }
 
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
@@ -190,14 +218,11 @@ impl DiskCacheEntry {
         Some(stream)
     }
 
-    // return the downloaded parts and a boolean indicating if the parts in the range are all cached.
+    // return the downloaded parts and an bool about whether we've got the end of the object
+    // or not.
     // if we still have not got the final part (which size is less than part_size), we can not determine
-    // the Offset and Suffix is cached or not, on these cases, we'd always return None.
-    pub async fn cached_parts(&self, range: GetRange) -> Option<(Vec<PartID>, bool)> {
-        todo!()
-    }
-
-    async fn get_part_file_paths(&self, range: Option<Range<usize>>) -> Vec<std::path::PathBuf> {
+    // the Offset and Suffix is cached or not, on these cases, we'd always return empty.
+    pub async fn cached_parts(&self, range: Option<GetRange>) -> (Vec<PartID>, bool) {
         todo!()
     }
 
