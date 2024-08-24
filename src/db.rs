@@ -9,6 +9,7 @@ use crate::db_state::{CoreDbState, DbState, SSTableHandle, SortedRun, SsTableId}
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::mem_table:: WritableKVTable;
 use crate::mem_table_flush::MemtableFlushThreadMsg;
 use crate::mem_table_flush::MemtableFlushThreadMsg::Shutdown;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -45,8 +46,9 @@ impl DbInner {
             memtable_flush_notifier,
         };
         db_inner.replay_wal().await?;
-        db_inner.state.write().add_empty_wal();
-        db_inner.flush().await?;
+        if db_inner.wal_enabled(){
+            db_inner.fence_writers().await?;
+        }
         Ok(db_inner)
     }
 
@@ -98,6 +100,28 @@ impl DbInner {
             }
         }
         Ok(None)
+    }
+
+    async fn fence_writers(&self) -> Result<(), SlateDBError>{
+        let mut empty_wal_id = self.state.read().state().core.next_wal_sst_id;
+        loop {
+            let empty_wal = WritableKVTable::new();
+            match self.flush_imm_table(&SsTableId::Wal(empty_wal_id), empty_wal.table().clone()).await {
+                Ok(_) => {
+                    let mut guard = self.state.write();
+                    guard.increment_next_wal_id();
+                    return Ok(());
+                }
+                Err(SlateDBError::Fenced) => {
+                    let mut guard = self.state.write();
+                    guard.increment_next_wal_id();
+                    empty_wal_id += 1;
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
     }
 
     async fn sst_may_include_key(
