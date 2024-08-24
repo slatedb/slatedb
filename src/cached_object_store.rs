@@ -230,19 +230,14 @@ impl DiskCacheEntry {
     fn make_part_path(&self, part_number: usize) -> std::path::PathBuf {
         // containing the part size in the file name, allows user change the part size on
         // the fly, without the need to invalidate the cache.
-        // TODO: pad with zeros
         let part_size_name = if self.part_size % (1024 * 1024) == 0 {
             format!("{}mb", self.part_size / (1024 * 1024))
         } else {
             format!("{}kb", self.part_size / 1024)
         };
-        let part_file_path = self.root_folder.join(&format!(
-            "{}._part{}-{}",
-            self.object_path.to_string(),
-            part_size_name,
-            part_number,
-        ));
-        part_file_path
+        self.root_folder
+            .join(self.object_path.to_string())
+            .with_extension(format!("_part{}-{:09}", part_size_name, part_number))
     }
 }
 
