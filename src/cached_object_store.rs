@@ -46,7 +46,7 @@ impl CachedObjectStore {
                     object_path: location.clone(),
                     part_size: self.part_size,
                 };
-                let (cached_parts, cached_last_part) = entry.cached_parts(None).await;
+                let (cached_parts, cached_last_part) = entry.cached_parts(None).await?;
                 // if not fully cached, fallback to a single GET request (may helpful to reduce the API cost), and
                 // save the result into cached parts.
                 let last_part_id = if !cached_last_part {
@@ -225,8 +225,83 @@ impl DiskCacheEntry {
     // or not.
     // if we still have not got the final part (which size is less than part_size), we can not determine
     // the Offset and Suffix is cached or not, on these cases, we'd always return empty.
-    pub async fn cached_parts(&self, range: Option<GetRange>) -> (Vec<PartID>, bool) {
-        todo!()
+    pub async fn cached_parts(
+        &self,
+        range: Option<GetRange>,
+    ) -> object_store::Result<(Vec<PartID>, bool)> {
+        let pattern = self.make_part_path(0).with_extension("_part*");
+        let mut part_paths = glob::glob(&pattern.to_string_lossy())
+            .map_err(wrap_io_err)?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+
+        // not cached at all
+        if part_paths.is_empty() {
+            return Ok((vec![], false));
+        }
+
+        // sort the paths in alphabetical order
+        part_paths.sort();
+
+        // check if we've cached the last part or not. it's useful to determine the end of the object.
+        // if the last part is not cached, we can not response the GET request without range, or with
+        // Offset and Suffix.
+        let last_part_path = part_paths.last().unwrap();
+        let last_part_size = tokio::fs::metadata(last_part_path)
+            .await
+            .map(|m| m.len() as usize)
+            .map_err(wrap_io_err)?;
+        let cached_last_part = last_part_size < self.part_size;
+
+        // retrieve the part numbers from the paths
+        let mut part_numbers = Vec::with_capacity(part_paths.len());
+        for part_path in part_paths.iter() {
+            let file_ext = match part_path.extension() {
+                None => continue,
+                Some(ext) => ext.to_string_lossy(),
+            };
+            let part_number = file_ext
+                .rsplit('-')
+                .last()
+                .and_then(|part_number| part_number.parse::<usize>().ok());
+            if let Some(part_number) = part_number {
+                part_numbers.push(part_number);
+            }
+        }
+
+        // filter the parts by the range, we can assume the part range are always aligned with the part_size
+        // here.
+        let filtered_part_numbers = match range {
+            None => part_numbers,
+            Some(range) => match range {
+                GetRange::Bounded(range) => {
+                    let start_part = range.start / self.part_size;
+                    let end_part = range.end / self.part_size;
+                    part_numbers
+                        .into_iter()
+                        .filter(|part_number| {
+                            *part_number >= start_part && *part_number <= end_part
+                        })
+                        .collect()
+                }
+                GetRange::Suffix(suffix) => {
+                    let suffix_part = suffix / self.part_size;
+                    part_numbers
+                        .into_iter()
+                        .filter(|part_number| *part_number >= suffix_part)
+                        .collect()
+                }
+                GetRange::Offset(offset) => {
+                    let offset_part = offset / self.part_size;
+                    part_numbers
+                        .into_iter()
+                        .filter(|part_number| *part_number >= offset_part)
+                        .collect()
+                }
+            },
+        };
+
+        Ok((filtered_part_numbers, cached_last_part))
     }
 
     // if the disk is full, we'll get an error here.
@@ -269,7 +344,7 @@ impl DiskCacheEntry {
     }
 }
 
-fn wrap_io_err(err: tokio::io::Error) -> object_store::Error {
+fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_store::Error {
     object_store::Error::Generic {
         store: "cached_object_store",
         source: Box::new(err),
