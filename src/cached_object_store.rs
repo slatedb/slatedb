@@ -199,20 +199,22 @@ impl DiskCacheEntry {
 
     pub async fn read_part(
         &self,
-        partID: PartID,
+        part_id: PartID,
     ) -> Option<BoxStream<'static, object_store::Result<Bytes>>> {
-        let path = self.object_path.clone();
-        let root_path = self.root_folder.clone();
+        let part_path = self.make_part_path(part_id);
 
-        // TODO: get file part paths
-        let part_file_paths = stream::iter(vec!["".to_string()]);
+        // if the part file does not exist, return None
+        let exists = tokio::fs::try_exists(&part_path).await.unwrap_or(false);
+        if !exists {
+            return None;
+        }
 
-        let stream = part_file_paths
-            .then(move |part_file_path| async move {
-                let file = File::open(&part_file_path).await.unwrap();
+        let stream = stream::iter(vec![part_path])
+            .then(move |part_path| async move {
+                let file = File::open(&part_path).await.map_err(wrap_io_err)?;
                 let mut reader = tokio::io::BufReader::new(file);
                 let mut buffer = Vec::new();
-                reader.read_to_end(&mut buffer).await.unwrap();
+                reader.read_to_end(&mut buffer).await.map_err(wrap_io_err)?;
                 Ok(Bytes::from(buffer))
             })
             .boxed();
