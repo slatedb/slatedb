@@ -124,37 +124,68 @@ impl DbInner {
         Ok(false)
     }
 
+    fn wal_enabled(&self) -> bool {
+        #[cfg(feature = "wal_disable")]
+        return self.options.wal_enabled;
+        #[cfg(not(feature = "wal_disable"))]
+        return true;
+    }
+
     /// Put a key-value pair into the database. Key must not be empty.
+    #[allow(clippy::panic)]
     pub async fn put_with_options(&self, key: &[u8], value: &[u8], options: &WriteOptions) {
         assert!(!key.is_empty(), "key cannot be empty");
 
         // Clone memtable to avoid a deadlock with flusher thread.
-        let current_wal_table = {
+        let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
             let current_wal = guard.wal();
             current_wal.put(key, value);
             current_wal.table().clone()
+        } else {
+            if cfg!(not(feature = "wal_disable")) {
+                panic!("wal_disabled feature must be enabled");
+            }
+            let mut guard = self.state.write();
+            let current_memtable = guard.memtable();
+            current_memtable.put(key, value);
+            let table = current_memtable.table().clone();
+            let last_compacted = guard.state().core.last_compacted_wal_sst_id;
+            self.maybe_freeze_memtable(&mut guard, last_compacted);
+            table
         };
 
         if options.await_flush {
-            current_wal_table.await_flush().await;
+            current_table.await_flush().await;
         }
     }
 
     /// Delete a key from the database. Key must not be empty.
+    #[allow(clippy::panic)]
     pub async fn delete_with_options(&self, key: &[u8], options: &WriteOptions) {
         assert!(!key.is_empty(), "key cannot be empty");
 
         // Clone memtable to avoid a deadlock with flusher thread.
-        let current_wal_table = {
+        let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
             let current_wal = guard.wal();
             current_wal.delete(key);
             current_wal.table().clone()
+        } else {
+            if cfg!(not(feature = "wal_disable")) {
+                panic!("wal_disabled feature must be enabled");
+            }
+            let mut guard = self.state.write();
+            let current_memtable = guard.memtable();
+            current_memtable.delete(key);
+            let table = current_memtable.table().clone();
+            let last_compacted = guard.state().core.last_compacted_wal_sst_id;
+            self.maybe_freeze_memtable(&mut guard, last_compacted);
+            table
         };
 
         if options.await_flush {
-            current_wal_table.await_flush().await;
+            current_table.await_flush().await;
         }
     }
 
@@ -265,7 +296,11 @@ impl Db {
         );
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let tokio_handle = Handle::current();
-        let flush_thread = inner.spawn_flush_task(rx, &tokio_handle);
+        let flush_thread = if inner.wal_enabled() {
+            inner.spawn_flush_task(rx, &tokio_handle)
+        } else {
+            None
+        };
         let memtable_flush_task =
             inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
         let mut compactor = None;
@@ -386,6 +421,8 @@ mod tests {
     use super::*;
     use crate::config::CompactorOptions;
     use crate::sst_iter::SstIterator;
+    #[cfg(feature = "wal_disable")]
+    use crate::test_utils::assert_iterator;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use std::time::Duration;
@@ -413,6 +450,64 @@ mod tests {
         kv_store.delete(key).await;
         assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn test_wal_disabled() {
+        let mut options = test_db_options(0, 128, None);
+        options.wal_enabled = false;
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let sst_format = SsTableFormat::new(4096, 10, None);
+        let table_store = Arc::new(TableStore::new(
+            object_store.clone(),
+            sst_format,
+            path.clone(),
+        ));
+        let db = Db::open_with_opts(path.clone(), options, object_store.clone())
+            .await
+            .unwrap();
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let mut stored_manifest = StoredManifest::load(manifest_store.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let write_options = WriteOptions { await_flush: false };
+
+        db.put_with_options(&[b'a'; 32], &[b'j'; 32], &write_options)
+            .await;
+        db.delete_with_options(&[b'b'; 32], &write_options).await;
+        db.put_with_options(&[b'c'; 32], &[b'l'; 32], &write_options)
+            .await;
+
+        let state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| !s.l0.is_empty(),
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(state.l0.len(), 1);
+
+        let l0 = state.l0.front().unwrap();
+        let mut iter = SstIterator::new(l0, table_store.clone(), 1, 1)
+            .await
+            .unwrap();
+        assert_iterator(
+            &mut iter,
+            &[
+                (
+                    &[b'a'; 32],
+                    ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
+                ),
+                (&[b'b'; 32], ValueDeletable::Tombstone),
+                (
+                    &[b'c'; 32],
+                    ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
+                ),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -956,7 +1051,9 @@ mod tests {
         compactor_options: Option<CompactorOptions>,
     ) -> DbOptions {
         DbOptions {
-            flush_ms: 100,
+            flush_interval: Duration::from_millis(100),
+            #[cfg(feature = "wal_disable")]
+            wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),
             min_filter_keys,
             l0_sst_size_bytes,
