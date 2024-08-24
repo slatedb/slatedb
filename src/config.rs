@@ -40,6 +40,7 @@ impl ReadOptions {
 
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
+#[derive(Clone)]
 pub struct WriteOptions {
     /// Whether `put` calls should block until the write has been durably committed
     /// to the DB.
