@@ -4,12 +4,7 @@ use futures::future::BoxFuture;
 use futures::stream;
 use futures::stream::BoxStream;
 use futures::StreamExt;
-use futures::TryFutureExt;
 use object_store::GetRange;
-use object_store::GetResultPayload;
-use std::io::Read;
-use std::io::Write;
-use std::ops::Bound;
 use std::ops::Range;
 use std::sync::Arc;
 use tokio::fs;
@@ -21,8 +16,6 @@ use object_store::{
     path::Path, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     PutMultipartOpts, PutOptions, PutPayload, PutResult,
 };
-
-use crate::error::SlateDBError;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {
@@ -52,9 +45,7 @@ impl CachedObjectStore {
                     Some(object_size) => object_size,
                     None => {
                         let get_result = self.object_store.get(location).await?;
-                        let object_size = get_result.meta.size;
-                        entry.save_result(get_result).await?;
-                        object_size
+                        entry.save_result(get_result).await?
                     }
                 };
                 self.split_range_into_parts(None, object_size)
@@ -73,9 +64,7 @@ impl CachedObjectStore {
                                 ..Default::default()
                             };
                             let get_result = self.object_store.get_opts(location, opts).await?;
-                            let object_size = get_result.meta.size;
-                            entry.save_result(get_result).await?;
-                            object_size
+                            entry.save_result(get_result).await?
                         }
                     };
                     self.split_range_into_parts(Some(range.clone()), object_size)
@@ -91,9 +80,7 @@ impl CachedObjectStore {
                                 ..Default::default()
                             };
                             let get_result = self.object_store.get_opts(location, opts).await?;
-                            let object_size = get_result.meta.size;
-                            entry.save_result(get_result).await?;
-                            object_size
+                            entry.save_result(get_result).await?
                         }
                     };
                     self.split_range_into_parts(Some(range.clone()), object_size)
@@ -288,6 +275,7 @@ impl DiskCacheEntry {
 
         let mut buffer = BytesMut::new();
         let mut part_number = result.range.start / self.part_size;
+        let object_size = result.meta.size;
 
         let mut stream = result.into_stream();
         while let Some(chunk) = stream.next().await {
@@ -301,10 +289,20 @@ impl DiskCacheEntry {
             }
         }
 
-        // the last part, which is less than part_size or empty, should be saved as well
-        // which allows us to determine the end of the object data.
-        self.save_part(part_number, buffer.as_ref()).await?;
-        Ok(part_number)
+        // if the last part is not fully filled, save it to the disk cache. This is also useful
+        // to determined the end of the object.
+        if !buffer.is_empty() {
+            self.save_part(part_number, buffer.as_ref()).await?;
+        }
+
+        // if reached exactly the end of the object file, save an empty part file to indicate
+        // the end of the object.
+        if part_number * self.part_size == object_size {
+            self.save_part(part_number, buffer.as_ref()).await?;
+            return Ok(object_size);
+        }
+
+        Ok(object_size)
     }
 
     pub async fn read_part(&self, part_id: PartID) -> object_store::Result<Option<Bytes>> {
