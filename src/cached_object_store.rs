@@ -37,45 +37,7 @@ impl CachedObjectStore {
             part_size: self.part_size,
         };
 
-        // if the object size is known in cache, split the range into parts, and return the part id
-        // and the range, else fallback to the object store and pre-download the object in local parts.
-        // please note that the range in the fallback case SHOULD be aligned with the part size.
-        let object_size_hint = match &opts.range {
-            None => match entry.known_object_size().await? {
-                Some(object_size) => object_size,
-                None => {
-                    let get_result = self.object_store.get(location).await?;
-                    entry.save_result(get_result).await?
-                }
-            },
-            Some(range) => match range {
-                GetRange::Bounded(_) => 0,
-                GetRange::Suffix(suffix) => match entry.known_object_size().await? {
-                    Some(object_size) => object_size,
-                    None => {
-                        let suffix_aligned = *suffix + self.part_size - *suffix % self.part_size;
-                        let opts = GetOptions {
-                            range: Some(GetRange::Suffix(suffix_aligned)),
-                            ..Default::default()
-                        };
-                        let get_result = self.object_store.get_opts(location, opts).await?;
-                        entry.save_result(get_result).await?
-                    }
-                },
-                GetRange::Offset(offset) => match entry.known_object_size().await? {
-                    Some(object_size) => object_size,
-                    None => {
-                        let offset_aligned = *offset - *offset % self.part_size;
-                        let opts = GetOptions {
-                            range: Some(GetRange::Offset(offset_aligned)),
-                            ..Default::default()
-                        };
-                        let get_result = self.object_store.get_opts(location, opts).await?;
-                        entry.save_result(get_result).await?
-                    }
-                },
-            },
-        };
+        let object_size_hint = self.maybe_prefetch_range(&entry, &opts.range).await?;
         let parts = self.split_range_into_parts(opts.range.clone(), object_size_hint);
 
         // read parts, and concatenate them into a single stream. please note that some of these part may not be cached,
@@ -99,6 +61,59 @@ impl CachedObjectStore {
             attributes: Default::default(),
             payload: GetResultPayload::Stream(result_stream),
         })
+    }
+
+    // if the object size is unknown in local cache, we'll need to fetch the object from the object store
+    // to get the size. it's ok to not prefetch the object if you've got the object size hint, but prefetching
+    // is helpful to reduce the number of GET requests to the object store, it'll try to aggregate the parts
+    // into a single GET request, and save the related parts into local disks.
+    // when it sends GET requests to the object store, the range is expected to be aligned with the part
+    // size.
+    async fn maybe_prefetch_range(
+        &self,
+        entry: &DiskCacheEntry,
+        range: &Option<GetRange>,
+    ) -> object_store::Result<usize> {
+        let object_size_hint = match &range {
+            None => match entry.known_object_size().await? {
+                Some(object_size) => object_size,
+                None => {
+                    let get_result = self.object_store.get(&entry.location).await?;
+                    entry.save_result(get_result).await?
+                }
+            },
+            Some(range) => match range {
+                GetRange::Bounded(range) => {
+                    // TODO: send a get_opts with this bounded range
+                    range.len()
+                }
+                GetRange::Suffix(suffix) => match entry.known_object_size().await? {
+                    Some(object_size) => object_size,
+                    None => {
+                        let suffix_aligned = *suffix + self.part_size - *suffix % self.part_size;
+                        let opts = GetOptions {
+                            range: Some(GetRange::Suffix(suffix_aligned)),
+                            ..Default::default()
+                        };
+                        let get_result = self.object_store.get_opts(&entry.location, opts).await?;
+                        entry.save_result(get_result).await?
+                    }
+                },
+                GetRange::Offset(offset) => match entry.known_object_size().await? {
+                    Some(object_size) => object_size,
+                    None => {
+                        let offset_aligned = *offset - *offset % self.part_size;
+                        let opts = GetOptions {
+                            range: Some(GetRange::Offset(offset_aligned)),
+                            ..Default::default()
+                        };
+                        let get_result = self.object_store.get_opts(&entry.location, opts).await?;
+                        entry.save_result(get_result).await?
+                    }
+                },
+            },
+        };
+        Ok(object_size_hint)
     }
 
     // given the range and object size, return the canonicalized `Range<usize>`.
@@ -154,7 +169,9 @@ impl CachedObjectStore {
         return parts;
     }
 
-    /// Get from disk if the parts are cached, otherwise start a new GET request.
+    /// get from disk if the parts are cached, otherwise start a new GET request.
+    /// the io errors on reading the disk caches will be ignored, just fallback to
+    /// the object store.
     /// TODO: add metrics to track the cache hit rate here.
     fn read_part(
         &self,
