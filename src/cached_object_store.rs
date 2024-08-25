@@ -177,8 +177,7 @@ impl DiskCacheEntry {
     pub async fn save_result(&self, result: GetResult) -> object_store::Result<usize> {
         // TODO: assert the range to be aligned with part_size
         let mut buffer = BytesMut::new();
-        // TODO: part_number = result.range.start / part_size
-        let mut part_number = 0;
+        let mut part_number = result.range.start / self.part_size;
 
         let mut stream = result.into_stream();
         while let Some(chunk) = stream.next().await {
