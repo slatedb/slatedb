@@ -733,7 +733,7 @@ mod tests {
         );
         let path = Path::from("/");
         let manifest_store = Arc::new(ManifestStore::new(&path, local_object_store.clone()));
-        let sst_format = SsTableFormat::new(4096, 10, None);
+        let sst_format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
             local_object_store.clone(),
             sst_format,

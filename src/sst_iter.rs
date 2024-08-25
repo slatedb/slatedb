@@ -254,7 +254,10 @@ mod tests {
     async fn test_one_block_sst_iter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 3, None);
+        let format = SsTableFormat {
+            min_filter_keys: 3,
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
             object_store,
             format,
@@ -298,7 +301,10 @@ mod tests {
     async fn test_many_block_sst_iter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 3, None);
+        let format = SsTableFormat {
+            min_filter_keys: 3,
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
             object_store,
             format,
@@ -342,7 +348,11 @@ mod tests {
     async fn test_iter_from_key() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(128, 1, None);
+        let format = SsTableFormat {
+            block_size: 128,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
             object_store,
             format,
@@ -389,7 +399,11 @@ mod tests {
     async fn test_iter_from_key_smaller_than_first() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(128, 1, None);
+        let format = SsTableFormat {
+            block_size: 128,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
             object_store,
             format,
@@ -424,7 +438,11 @@ mod tests {
     async fn test_iter_from_key_larger_than_last() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(128, 1, None);
+        let format = SsTableFormat {
+            block_size: 128,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
             object_store,
             format,

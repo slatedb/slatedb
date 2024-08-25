@@ -99,6 +99,13 @@ pub struct DbOptions {
     /// faster without a bloom filter.
     pub min_filter_keys: u32,
 
+    /// The number of bits to use per key for bloom filters. We recommend setting this
+    /// to the default value of 10, which yields a filter with an expected fpp of ~.0082
+    /// Note that this is evaluated per-sorted-run, so the expected number of false positives
+    /// per request is the fpp * number of sorted runs. So for large dbs with lots of runs,
+    /// you may benefit from setting this higher (if you have enough memory available)
+    pub filter_bits_per_key: u32,
+
     /// The minimum size a memtable needs to be before it is frozen and flushed to
     /// L0 object storage. Writes will still be flushed to the object storage WAL
     /// (based on flush_interval) regardless of this value. Memtable sizes are checked
@@ -167,6 +174,7 @@ impl Default for DbOptions {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             block_cache_options: Some(InMemoryCacheOptions::default()),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
+            filter_bits_per_key: 10,
         }
     }
 }

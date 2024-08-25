@@ -546,6 +546,8 @@ mod tests {
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use ulid::Ulid;
 
+    use crate::inmemory_cache::{InMemoryCacheOptions, MokaCache};
+    use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
@@ -554,10 +556,6 @@ mod tests {
         block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
     };
     use crate::{error, tablestore::InMemoryCache};
-    use crate::{
-        inmemory_cache::{InMemoryCacheOptions, MokaCache},
-        sst::SsTableFormat,
-    };
 
     const ROOT: &str = "/root";
 
@@ -586,7 +584,11 @@ mod tests {
     async fn test_sst_writer_should_write_sst() {
         // given:
         let os = Arc::new(object_store::memory::InMemory::new());
-        let format = SsTableFormat::new(32, 1, None);
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
         let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
         let id = SsTableId::Compacted(Ulid::new());
 
@@ -626,7 +628,11 @@ mod tests {
     #[tokio::test]
     async fn test_wal_write_should_fail_when_fenced() {
         let os = Arc::new(object_store::memory::InMemory::new());
-        let format = SsTableFormat::new(32, 1, None);
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
         let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
         let wal_id = SsTableId::Wal(1);
 
@@ -649,7 +655,10 @@ mod tests {
     async fn test_tablestore_sst_and_partial_cache_hits() {
         // Setup
         let os = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 1, None);
+        let format = SsTableFormat {
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
         let block_cache = Arc::new(MokaCache::new(InMemoryCacheOptions::default()));
         let ts = Arc::new(TableStore::new(
             os.clone(),
@@ -769,7 +778,11 @@ mod tests {
     #[tokio::test]
     async fn test_list_compacted_ssts() {
         let os = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 1, None);
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
         let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
 
         // Create id1, id2, and i3 as three random UUIDs that have been sorted ascending.
@@ -824,7 +837,11 @@ mod tests {
     #[tokio::test]
     async fn test_list_wal_ssts() {
         let os = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 1, None);
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
         let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
 
         let id1 = SsTableId::Wal(1);
@@ -866,7 +883,11 @@ mod tests {
     #[tokio::test]
     async fn test_delete_sst() {
         let os = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 1, None);
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
         let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
 
         let id1 = SsTableId::Compacted(Ulid::new());

@@ -21,26 +21,26 @@ use crate::{block::BlockBuilder, error::SlateDBError};
 
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
-    block_size: usize,
-    min_filter_keys: u32,
-    sst_codec: Box<dyn SsTableInfoCodec>,
-    compression_codec: Option<CompressionCodec>,
+    pub(crate) block_size: usize,
+    pub(crate) min_filter_keys: u32,
+    pub(crate) sst_codec: Box<dyn SsTableInfoCodec>,
+    pub(crate) filter_bits_per_key: u32,
+    pub(crate) compression_codec: Option<CompressionCodec>,
+}
+
+impl Default for SsTableFormat {
+    fn default() -> Self {
+        Self {
+            block_size: 4096,
+            min_filter_keys: 0,
+            sst_codec: Box::new(FlatBufferSsTableInfoCodec {}),
+            filter_bits_per_key: 10,
+            compression_codec: None,
+        }
+    }
 }
 
 impl SsTableFormat {
-    pub fn new(
-        block_size: usize,
-        min_filter_keys: u32,
-        compression_codec: Option<CompressionCodec>,
-    ) -> Self {
-        Self {
-            block_size,
-            min_filter_keys,
-            sst_codec: Box::new(FlatBufferSsTableInfoCodec {}),
-            compression_codec,
-        }
-    }
-
     pub(crate) async fn read_info(
         &self,
         obj: &impl ReadOnlyBlob,
@@ -264,6 +264,7 @@ impl SsTableFormat {
             self.block_size,
             self.min_filter_keys,
             self.sst_codec.clone(),
+            self.filter_bits_per_key,
             self.compression_codec,
         )
     }
@@ -323,6 +324,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
         block_size: usize,
         min_filter_keys: u32,
         sst_codec: Box<dyn SsTableInfoCodec>,
+        filter_bits_per_key: u32,
         compression_codec: Option<CompressionCodec>,
     ) -> Self {
         Self {
@@ -335,7 +337,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
             builder: BlockBuilder::new(block_size),
             min_filter_keys,
             num_keys: 0,
-            filter_builder: BloomFilterBuilder::new(10),
+            filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
             compression_codec,
@@ -529,7 +531,10 @@ mod tests {
     async fn test_builder_should_make_blocks_available() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 0, None);
+        let format = SsTableFormat {
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
         let table_store = TableStore::new(object_store, format, root_path, None);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 8], Some(&[b'1'; 8])).unwrap();
@@ -573,7 +578,10 @@ mod tests {
     async fn test_builder_should_return_unconsumed_blocks() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 0, None);
+        let format = SsTableFormat {
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
         let table_store = TableStore::new(object_store, format.clone(), root_path, None);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 8], Some(&[b'1'; 8])).unwrap();
@@ -633,7 +641,7 @@ mod tests {
     async fn test_sstable() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 0, None);
+        let format = SsTableFormat::default();
         let table_store = TableStore::new(object_store, format, root_path, None);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
@@ -679,7 +687,10 @@ mod tests {
     async fn test_sstable_no_filter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 3, None);
+        let format = SsTableFormat {
+            min_filter_keys: 3,
+            ..SsTableFormat::default()
+        };
         let table_store = TableStore::new(object_store, format, root_path, None);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
@@ -696,12 +707,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sstable_builds_filter_with_correct_bits_per_key() {
+        async fn test_inner(filter_bits_per_key: u32) {
+            let root_path = Path::from("");
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let format = SsTableFormat {
+                filter_bits_per_key,
+                ..SsTableFormat::default()
+            };
+            let table_store = TableStore::new(object_store, format, root_path, None);
+            let mut builder = table_store.table_builder();
+            for k in 0..8 {
+                builder
+                    .add(format!("{}", k).as_bytes(), Some(b"value"))
+                    .unwrap();
+            }
+            let encoded = builder.build().unwrap();
+            let filter = encoded.filter.unwrap();
+            let bytes = filter.encode();
+            // filters are encoded as a 16-bit number of probes followed by the filter
+            assert_eq!(bytes.len() as u32, 2 + filter_bits_per_key);
+        }
+
+        test_inner(10).await;
+        test_inner(20).await;
+    }
+
+    #[tokio::test]
     async fn test_sstable_with_compression() {
         #[allow(unused)]
         async fn test_compression_inner(compression: CompressionCodec) {
             let root_path = Path::from("");
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let format = SsTableFormat::new(4096, 0, Some(compression));
+            let format = SsTableFormat {
+                compression_codec: Some(compression),
+                ..SsTableFormat::default()
+            };
             let table_store = TableStore::new(object_store, format, root_path, None);
             let mut builder = table_store.table_builder();
             builder.add(b"key1", Some(b"value1")).unwrap();
@@ -734,7 +775,10 @@ mod tests {
         ) {
             let root_path = Path::from("");
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let format = SsTableFormat::new(4096, 0, Some(compression));
+            let format = SsTableFormat {
+                compression_codec: Some(compression),
+                ..SsTableFormat::default()
+            };
             let table_store =
                 TableStore::new(object_store.clone(), format, root_path.clone(), None);
             let mut builder = table_store.table_builder();
@@ -748,7 +792,10 @@ mod tests {
                 .unwrap();
 
             // Decompression is independent of TableFormat. It uses the CompressionFormat from SSTable Info to decompress sst.
-            let format = SsTableFormat::new(4096, 0, Some(dummy_codec));
+            let format = SsTableFormat {
+                compression_codec: Some(dummy_codec),
+                ..SsTableFormat::default()
+            };
             let table_store = TableStore::new(object_store, format, root_path, None);
             let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
             let index = table_store.read_index(&sst_handle).await.unwrap();
@@ -792,7 +839,11 @@ mod tests {
         // given:
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 1, None);
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
         let table_store = TableStore::new(object_store, format.clone(), root_path, None);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 2], Some(&[1u8; 2])).unwrap();
@@ -849,7 +900,11 @@ mod tests {
         // given:
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 1, None);
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
         let table_store = TableStore::new(object_store, format.clone(), root_path, None);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 2], Some(&[1u8; 2])).unwrap();

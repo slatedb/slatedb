@@ -354,9 +354,12 @@ impl Db {
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         let db_stats = Arc::new(DbStats::new());
-        let sst_format =
-            SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
-
+        let sst_format = SsTableFormat {
+            min_filter_keys: options.min_filter_keys,
+            filter_bits_per_key: options.filter_bits_per_key,
+            compression_codec: options.compression_codec,
+            ..SsTableFormat::default()
+        };
         let maybe_cached_object_store = match &options.object_store_cache_options.root_folder {
             None => object_store.clone(),
             Some(cache_root_folder) => {
@@ -758,7 +761,7 @@ mod tests {
         options.wal_enabled = false;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let sst_format = SsTableFormat::new(4096, 10, None);
+        let sst_format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
             sst_format,
@@ -832,7 +835,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let sst_format = SsTableFormat::new(4096, 10, None);
+        let sst_format = SsTableFormat {
+            min_filter_keys: 10,
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
             sst_format,
@@ -1423,6 +1429,7 @@ mod tests {
             max_unflushed_memtable: 2,
             l0_max_ssts: 8,
             min_filter_keys,
+            filter_bits_per_key: 10,
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
