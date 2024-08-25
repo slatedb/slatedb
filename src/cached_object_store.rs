@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use bytes::BytesMut;
+use futures::future::BoxFuture;
 use futures::stream;
 use futures::stream::BoxStream;
 use futures::StreamExt;
@@ -60,11 +61,12 @@ impl CachedObjectStore {
                 let max_part_id = object_size.div_ceil(self.part_size);
                 // stream by parts, and concatenate them. please note that some of these part may not be cached,
                 // we'll still fallback to the object store to get the missing parts.
-                let stream = (0..=max_part_id)
+                let futures = (0..=max_part_id)
                     .into_iter()
-                    .map(|part_id| self.read_part(part_id))
+                    .map(|part_id| self.read_part(location, part_id))
                     .collect::<Vec<_>>();
-                return Ok(stream::iter(stream).flatten().boxed());
+                let stream = stream::iter(futures).then(|fut| fut).boxed();
+                return Ok(stream);
             }
             Some(range) => range,
         };
@@ -74,9 +76,34 @@ impl CachedObjectStore {
     }
 
     /// Get from disk if the parts are cached, otherwise start a new GET request.
-    /// if the range is out of bound, it'll still return a stream with empty Bytes.
-    fn read_part(&self, partID: PartID) -> BoxStream<'static, object_store::Result<Bytes>> {
-        todo!()
+    fn read_part(
+        &self,
+        location: &Path,
+        part_id: PartID,
+    ) -> BoxFuture<'static, object_store::Result<Bytes>> {
+        let part_size = self.part_size;
+        let object_store = self.object_store.clone();
+        let root_folder = self.root_path.clone();
+        let location = location.clone();
+        Box::pin(async move {
+            let entry = DiskCacheEntry {
+                root_folder,
+                object_path: location.clone(),
+                part_size: part_size,
+            };
+            if let Ok(Some(bytes)) = entry.read_part(part_id).await {
+                return Ok(bytes);
+            }
+
+            // if the part is not cached, fallback to the object store to get the missing part.
+            // the object stores is expected to return the result whenever the `start` of the range
+            // is not out of the object size.
+            let range = Range {
+                start: part_id * part_size,
+                end: (part_id + 1) * part_size,
+            };
+            object_store.get_range(&location, range).await
+        })
     }
 }
 
@@ -200,28 +227,20 @@ impl DiskCacheEntry {
         Ok(part_number)
     }
 
-    pub async fn read_part(
-        &self,
-        part_id: PartID,
-    ) -> Option<BoxStream<'static, object_store::Result<Bytes>>> {
+    pub async fn read_part(&self, part_id: PartID) -> object_store::Result<Option<Bytes>> {
         let part_path = self.make_part_path(part_id);
 
         // if the part file does not exist, return None
         let exists = tokio::fs::try_exists(&part_path).await.unwrap_or(false);
         if !exists {
-            return None;
+            return Ok(None);
         }
 
-        let stream = stream::iter(vec![part_path])
-            .then(move |part_path| async move {
-                let file = File::open(&part_path).await.map_err(wrap_io_err)?;
-                let mut reader = tokio::io::BufReader::new(file);
-                let mut buffer = Vec::new();
-                reader.read_to_end(&mut buffer).await.map_err(wrap_io_err)?;
-                Ok(Bytes::from(buffer))
-            })
-            .boxed();
-        Some(stream)
+        let file = File::open(&part_path).await.map_err(wrap_io_err)?;
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut buffer = Vec::new();
+        reader.read_to_end(&mut buffer).await.map_err(wrap_io_err)?;
+        Ok(Some(Bytes::from(buffer)))
     }
 
     // return the downloaded parts and an bool about whether we've got the end of the object
