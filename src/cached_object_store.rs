@@ -499,7 +499,6 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use futures::StreamExt;
     use object_store::path::Path;
     use object_store::{GetResult, ObjectStore, PutPayload};
     use rand::{thread_rng, Rng};
@@ -516,14 +515,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_save_part() -> object_store::Result<()> {
-        let payload = gen_rand_bytes(1024 * 12 + 32);
+    async fn test_save_result_not_aligned() -> object_store::Result<()> {
+        let payload = gen_rand_bytes(1024 * 3 + 32);
         let object_store = object_store::memory::InMemory::new();
         let test_cache_folder = reset_cache_folder();
         object_store
             .put(
                 &Path::from("/data/testfile1"),
-                PutPayload::from_bytes(payload),
+                PutPayload::from_bytes(payload.clone()),
             )
             .await?;
         let get_result = object_store.get(&Path::from("/data/testfile1")).await?;
@@ -534,11 +533,44 @@ mod tests {
             part_size: 1024,
         };
         let object_size_hint = entry.save_result(get_result).await?;
-        assert_eq!(object_size_hint, 1024 * 12 + 32);
+        assert_eq!(object_size_hint, 1024 * 3 + 32);
         let (cached_parts, known_cache_size) = entry.cached_parts().await?;
-        assert_eq!(cached_parts.len(), 13);
-        assert_eq!(known_cache_size, Some(1024 * 12 + 32));
+        assert_eq!(cached_parts.len(), 4);
+        assert_eq!(known_cache_size, Some(1024 * 3 + 32));
+        assert_eq!(entry.read_part(0).await?, Some(payload.slice(0..1024)));
+        assert_eq!(entry.read_part(1).await?, Some(payload.slice(1024..2048)));
+        assert_eq!(entry.read_part(2).await?, Some(payload.slice(2048..3072)));
+        assert_eq!(entry.read_part(3).await?, Some(payload.slice(3072..)));
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_save_result_aligned() -> object_store::Result<()> {
+        let payload = gen_rand_bytes(1024 * 3);
+        let object_store = object_store::memory::InMemory::new();
+        let test_cache_folder = reset_cache_folder();
+        object_store
+            .put(
+                &Path::from("/data/testfile1"),
+                PutPayload::from_bytes(payload.clone()),
+            )
+            .await?;
+        let get_result = object_store.get(&Path::from("/data/testfile1")).await?;
+
+        let entry = super::DiskCacheEntry {
+            root_folder: test_cache_folder,
+            location: Path::from("/data/testfile1"),
+            part_size: 1024,
+        };
+        let object_size_hint = entry.save_result(get_result).await?;
+        assert_eq!(object_size_hint, 1024 * 3);
+        let (cached_parts, known_cache_size) = entry.cached_parts().await?;
+        assert_eq!(cached_parts.len(), 4);
+        assert_eq!(known_cache_size, Some(1024 * 3));
+        assert_eq!(entry.read_part(0).await?, Some(payload.slice(0..1024)));
+        assert_eq!(entry.read_part(1).await?, Some(payload.slice(1024..2048)));
+        assert_eq!(entry.read_part(2).await?, Some(payload.slice(2048..3072)));
         Ok(())
     }
 }
