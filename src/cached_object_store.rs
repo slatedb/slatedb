@@ -63,56 +63,73 @@ impl CachedObjectStore {
         })
     }
 
-    // if the object size is unknown in local cache, we'll need to fetch the object from the object store
-    // to get the size. it's ok to not prefetch the object if you've got the object size hint, but prefetching
-    // is helpful to reduce the number of GET requests to the object store, it'll try to aggregate the parts
-    // into a single GET request, and save the related parts into local disks.
-    // when it sends GET requests to the object store, the range is expected to be aligned with the part
+    // maybe_prefetch_range will try to prefetch the object from the object store and save the parts
+    // into the local disk cache, it returns the object size hint, which is useful to transform `GetRange`
+    // into `Range<usize>`.
+    // it's ok to not prefetch the object if you've got the object size hint, but prefetching is helpful
+    // to reduce the number of GET requests to the object store, it'll try to aggregate the parts into a
+    // single GET request, and save the related parts into local disks together.
+    // when it sends GET requests to the object store, the range is expected to be ALIGNED with the part
     // size.
     async fn maybe_prefetch_range(
         &self,
         entry: &DiskCacheEntry,
         range: &Option<GetRange>,
     ) -> object_store::Result<usize> {
-        // if the object size is known in cache, return it directly.
-        match entry.known_object_size().await? {
-            Some(object_size) => return Ok(object_size),
-            None => {}
-        };
-
-        // otherwise, fetch the object from the object store to get the object size, and save the result
-        // into the local disk cache.
-        let object_size_hint = match &range {
+        let known_object_size = entry.known_object_size().await?;
+        let aligned_opts = match &range {
             None => {
-                let get_result = self.object_store.get(&entry.location).await?;
-                entry.save_result(get_result).await?
+                // GET without range, if the object size is unknown, we can prefetch the entire object.
+                if let Some(known_object_size) = known_object_size {
+                    return Ok(known_object_size);
+                }
+                GetOptions::default()
             }
             Some(range) => match range {
                 GetRange::Bounded(_) => {
-                    // TODO: send a get_opts with this bounded range
-                    0
+                    // GET without bounded range, do not need care about the object size. in practice,
+                    // Bounded range is often smaller than the cached part (64mb), so we can simply
+                    // not prefetch the object.
+                    // the object size hint is also not needed in the case of Bounded range, simply
+                    // return 0 ant not use it.
+                    return Ok(0);
                 }
                 GetRange::Suffix(suffix) => {
+                    // GET with suffix range, if the object size is unknown, we can not determine the
+                    // actual range to prefetch, so we'll fallback to the object store to get the missing
+                    // parts.
+                    if let Some(known_object_size) = known_object_size {
+                        return Ok(known_object_size);
+                    }
                     let suffix_aligned = *suffix + self.part_size - *suffix % self.part_size;
                     let opts = GetOptions {
                         range: Some(GetRange::Suffix(suffix_aligned)),
                         ..Default::default()
                     };
-                    let get_result = self.object_store.get_opts(&entry.location, opts).await?;
-                    entry.save_result(get_result).await?
+                    opts
                 }
                 GetRange::Offset(offset) => {
+                    // GET with offset, same as Suffix, if the object size is unknown, we can not determine
+                    // the actual range to prefetch, so fallback to the object store to get the missing
+                    // parts.
+                    if let Some(known_object_size) = known_object_size {
+                        return Ok(known_object_size);
+                    }
                     let offset_aligned = *offset - *offset % self.part_size;
                     let opts = GetOptions {
                         range: Some(GetRange::Offset(offset_aligned)),
                         ..Default::default()
                     };
-                    let get_result = self.object_store.get_opts(&entry.location, opts).await?;
-                    entry.save_result(get_result).await?
+                    opts
                 }
             },
         };
-        Ok(object_size_hint)
+
+        let get_result = self
+            .object_store
+            .get_opts(&entry.location, aligned_opts)
+            .await?;
+        entry.save_result(get_result).await
     }
 
     // given the range and object size, return the canonicalized `Range<usize>`.
