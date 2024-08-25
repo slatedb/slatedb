@@ -499,7 +499,7 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 mod tests {
     use bytes::Bytes;
     use object_store::path::Path;
-    use object_store::{GetResult, ObjectStore, PutPayload};
+    use object_store::{ObjectStore, PutPayload};
     use rand::{thread_rng, Rng};
 
     fn gen_rand_bytes(n: usize) -> Bytes {
@@ -508,16 +508,21 @@ mod tests {
         Bytes::from(random_bytes)
     }
 
-    fn reset_cache_folder() -> std::path::PathBuf {
-        let _ = std::fs::remove_dir_all("/tmp/testcache1");
-        std::path::PathBuf::from("/tmp/testcache1")
+    fn new_test_cache_folder() -> std::path::PathBuf {
+        let mut rng = rand::thread_rng();
+        let dir_name: String = (0..10)
+            .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
+            .collect();
+        let path = format!("/tmp/testcache-{}", dir_name);
+        let _ = std::fs::remove_dir_all(&path);
+        std::path::PathBuf::from(path)
     }
 
     #[tokio::test]
     async fn test_save_result_not_aligned() -> object_store::Result<()> {
         let payload = gen_rand_bytes(1024 * 3 + 32);
         let object_store = object_store::memory::InMemory::new();
-        let test_cache_folder = reset_cache_folder();
+        let test_cache_folder = new_test_cache_folder();
         object_store
             .put(
                 &Path::from("/data/testfile1"),
@@ -533,6 +538,8 @@ mod tests {
         };
         let object_size_hint = entry.save_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3 + 32);
+
+        // assert the parts
         let (cached_parts, known_cache_size) = entry.cached_parts().await?;
         assert_eq!(cached_parts.len(), 4);
         assert_eq!(known_cache_size, Some(1024 * 3 + 32));
@@ -541,6 +548,21 @@ mod tests {
         assert_eq!(entry.read_part(2).await?, Some(payload.slice(2048..3072)));
         assert_eq!(entry.read_part(3).await?, Some(payload.slice(3072..)));
 
+        // delete part 2, known_cache_size is still known
+        let evict_part_path = entry.make_part_path(2, false);
+        std::fs::remove_file(evict_part_path).unwrap();
+        assert_eq!(entry.read_part(2).await?, None);
+        let (cached_parts, known_cache_size) = entry.cached_parts().await?;
+        assert_eq!(cached_parts, vec![0, 1, 3]);
+        assert_eq!(known_cache_size, Some(1024 * 3 + 32));
+
+        // delete part 3, known_cache_size become None
+        let evict_part_path = entry.make_part_path(3, false);
+        std::fs::remove_file(evict_part_path).unwrap();
+        assert_eq!(entry.read_part(3).await?, None);
+        let (cached_parts, known_cache_size) = entry.cached_parts().await?;
+        assert_eq!(cached_parts, vec![0, 1]);
+        assert_eq!(known_cache_size, None);
         Ok(())
     }
 
@@ -548,7 +570,7 @@ mod tests {
     async fn test_save_result_aligned() -> object_store::Result<()> {
         let payload = gen_rand_bytes(1024 * 3);
         let object_store = object_store::memory::InMemory::new();
-        let test_cache_folder = reset_cache_folder();
+        let test_cache_folder = new_test_cache_folder();
         object_store
             .put(
                 &Path::from("/data/testfile1"),
@@ -570,6 +592,14 @@ mod tests {
         assert_eq!(entry.read_part(0).await?, Some(payload.slice(0..1024)));
         assert_eq!(entry.read_part(1).await?, Some(payload.slice(1024..2048)));
         assert_eq!(entry.read_part(2).await?, Some(payload.slice(2048..3072)));
+
+        let evict_part_path = entry.make_part_path(3, false);
+        std::fs::remove_file(evict_part_path).unwrap();
+        assert_eq!(entry.read_part(3).await?, None);
+
+        let (cached_parts, known_cache_size) = entry.cached_parts().await?;
+        assert_eq!(cached_parts.len(), 3);
+        assert_eq!(known_cache_size, None);
         Ok(())
     }
 }
