@@ -76,7 +76,7 @@ impl CachedObjectStore {
         entry: &DiskCacheEntry,
         range: &Option<GetRange>,
     ) -> object_store::Result<usize> {
-        let known_object_size = entry.known_object_size().await?;
+        let (_, known_object_size) = entry.cached_parts().await?;
         let aligned_opts = match &range {
             None => {
                 // GET without range, if the object size is unknown, we can prefetch the entire object.
@@ -379,7 +379,7 @@ impl DiskCacheEntry {
     }
 
     pub async fn read_part(&self, part_id: PartID) -> object_store::Result<Option<Bytes>> {
-        let part_path = self.make_part_path(part_id);
+        let part_path = self.make_part_path(part_id, false);
 
         // if the part file does not exist, return None
         let exists = tokio::fs::try_exists(&part_path).await.unwrap_or(false);
@@ -394,8 +394,8 @@ impl DiskCacheEntry {
         Ok(Some(Bytes::from(buffer)))
     }
 
-    pub async fn known_object_size(&self) -> object_store::Result<Option<usize>> {
-        let pattern = self.make_part_path(0).with_extension("_part*");
+    pub async fn cached_parts(&self) -> object_store::Result<(Vec<PartID>, Option<usize>)> {
+        let pattern = self.make_part_path(0, true);
         let mut part_paths = glob::glob(&pattern.to_string_lossy())
             .map_err(wrap_io_err)?
             .filter_map(Result::ok)
@@ -403,7 +403,7 @@ impl DiskCacheEntry {
 
         // not cached at all
         if part_paths.is_empty() {
-            return Ok(None);
+            return Ok((vec![], None));
         }
 
         // sort the paths in alphabetical order
@@ -417,7 +417,7 @@ impl DiskCacheEntry {
                 Some(ext) => ext.to_string_lossy(),
             };
             let part_number = file_ext
-                .rsplit('-')
+                .split('-')
                 .last()
                 .and_then(|part_number| part_number.parse::<usize>().ok());
             if let Some(part_number) = part_number {
@@ -437,17 +437,17 @@ impl DiskCacheEntry {
             part_numbers
                 .last()
                 .copied()
-                .map(|last_part_number| (last_part_number - 1) * self.part_size + last_part_size)
+                .map(|last_part_number| last_part_number * self.part_size + last_part_size)
         } else {
             None
         };
-        Ok(object_size)
+        Ok((part_numbers, object_size))
     }
 
     // if the disk is full, we'll get an error here.
     // TODO: this error can be ignored in the caller side and print a warning.
     async fn save_part(&self, part_number: usize, buf: &[u8]) -> object_store::Result<()> {
-        let part_file_path = self.make_part_path(part_number);
+        let part_file_path = self.make_part_path(part_number, false);
 
         // ensure the parent folder exists
         if let Some(part_file_folder) = part_file_path.parent() {
@@ -470,7 +470,7 @@ impl DiskCacheEntry {
         Ok(())
     }
 
-    fn make_part_path(&self, part_number: usize) -> std::path::PathBuf {
+    fn make_part_path(&self, part_number: usize, wildcard: bool) -> std::path::PathBuf {
         // containing the part size in the file name, allows user change the part size on
         // the fly, without the need to invalidate the cache.
         let part_size_name = if self.part_size % (1024 * 1024) == 0 {
@@ -478,9 +478,14 @@ impl DiskCacheEntry {
         } else {
             format!("{}kb", self.part_size / 1024)
         };
+        let part_number_str = if wildcard {
+            "*".to_string()
+        } else {
+            format!("{:09}", part_number)
+        };
         self.root_folder
             .join(self.location.to_string())
-            .with_extension(format!("_part{}-{:09}", part_size_name, part_number))
+            .with_extension(format!("_part{}-{}", part_size_name, part_number_str))
     }
 }
 
@@ -488,5 +493,52 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
     object_store::Error::Generic {
         store: "cached_object_store",
         source: Box::new(err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use futures::StreamExt;
+    use object_store::path::Path;
+    use object_store::{GetResult, ObjectStore, PutPayload};
+    use rand::{thread_rng, Rng};
+
+    fn gen_rand_bytes(n: usize) -> Bytes {
+        let mut rng = thread_rng();
+        let random_bytes: Vec<u8> = (0..n).map(|_| rng.gen()).collect();
+        Bytes::from(random_bytes)
+    }
+
+    fn reset_cache_folder() -> std::path::PathBuf {
+        let _ = std::fs::remove_dir_all("/tmp/testcache1");
+        std::path::PathBuf::from("/tmp/testcache1")
+    }
+
+    #[tokio::test]
+    async fn test_save_part() -> object_store::Result<()> {
+        let payload = gen_rand_bytes(1024 * 12 + 32);
+        let object_store = object_store::memory::InMemory::new();
+        let test_cache_folder = reset_cache_folder();
+        object_store
+            .put(
+                &Path::from("/data/testfile1"),
+                PutPayload::from_bytes(payload),
+            )
+            .await?;
+        let get_result = object_store.get(&Path::from("/data/testfile1")).await?;
+
+        let entry = super::DiskCacheEntry {
+            root_folder: test_cache_folder,
+            location: Path::from("/data/testfile1"),
+            part_size: 1024,
+        };
+        let object_size_hint = entry.save_result(get_result).await?;
+        assert_eq!(object_size_hint, 1024 * 12 + 32);
+        let (cached_parts, known_cache_size) = entry.cached_parts().await?;
+        assert_eq!(cached_parts.len(), 13);
+        assert_eq!(known_cache_size, Some(1024 * 12 + 32));
+
+        Ok(())
     }
 }
