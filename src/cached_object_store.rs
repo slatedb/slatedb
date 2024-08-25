@@ -128,7 +128,14 @@ impl CachedObjectStore {
             .object_store
             .get_opts(&entry.location, aligned_opts)
             .await?;
-        entry.save_result(get_result).await
+        let object_size_hint = get_result.meta.size;
+        // swallow the error on saving to disk here (the disk might be already full), just fallback
+        // to the object store.
+        // TODO: add a warning log here.
+        entry
+            .save_result(get_result)
+            .await
+            .or_else(|_| Ok(object_size_hint))
     }
 
     // given the range and object size, return the canonicalized `Range<usize>` with concrete start and
@@ -227,7 +234,8 @@ impl CachedObjectStore {
                 )
                 .await?;
 
-            // save it to the disk cache
+            // save it to the disk cache, we'll ignore the error on writing to disk here, just return
+            // the bytes from the object store.
             let result_meta = get_result.meta.clone();
             let result_range = get_result.range.clone();
             let result_attributes = get_result.attributes.clone();
@@ -242,7 +250,8 @@ impl CachedObjectStore {
                     range: result_range,
                     attributes: result_attributes,
                 })
-                .await?;
+                .await
+                .ok();
             Ok(bytes.slice(range_in_part))
         })
     }
