@@ -180,6 +180,7 @@ impl SsTableFormat {
         let start_offset = range.start;
         let bytes: Bytes = obj.read_range(range).await?;
         let mut decoded_blocks = VecDeque::new();
+        let compression_codec = handle.compression_format();
         for block in blocks {
             let block_meta = index.block_meta().get(block);
             let block_bytes_start = block_meta.offset() as usize - start_offset;
@@ -190,12 +191,16 @@ impl SsTableFormat {
                 let block_bytes_end = next_block_meta.offset() as usize - start_offset;
                 bytes.slice(block_bytes_start..block_bytes_end)
             };
-            decoded_blocks.push_back(self.decode_block(block_bytes)?);
+            decoded_blocks.push_back(self.decode_block(block_bytes, compression_codec.into())?);
         }
         Ok(decoded_blocks)
     }
 
-    fn decode_block(&self, bytes: Bytes) -> Result<Block, SlateDBError> {
+    fn decode_block(
+        &self,
+        bytes: Bytes,
+        compression_codec: Option<CompressionCodec>,
+    ) -> Result<Block, SlateDBError> {
         let checksum_sz = std::mem::size_of::<u32>();
         let block_bytes = bytes.slice(..bytes.len() - checksum_sz);
         let mut checksum_bytes = bytes.slice(bytes.len() - checksum_sz..);
@@ -205,7 +210,7 @@ impl SsTableFormat {
             return Err(SlateDBError::ChecksumMismatch);
         }
         let decoded_block = Block::decode(block_bytes);
-        let decompressed_bytes = match self.compression_codec {
+        let decompressed_bytes = match compression_codec {
             Some(c) => Self::decompress(decoded_block.data, c)?,
             None => decoded_block.data,
         };
@@ -237,7 +242,8 @@ impl SsTableFormat {
         let handle = &info.borrow();
         let index = index_owned.borrow();
         let bytes: Bytes = sst_bytes.slice(self.block_range(block..block + 1, handle, &index));
-        self.decode_block(bytes)
+        let compression_codec = handle.compression_format();
+        self.decode_block(bytes, compression_codec.into())
     }
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
