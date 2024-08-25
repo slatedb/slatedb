@@ -47,6 +47,7 @@ async fn main() {
         manifest_poll_interval: Duration::from_millis(100),
         #[cfg(feature = "wal_disable")] wal_enabled: true,
         min_filter_keys: 10,
+        filter_bits_per_key: 10,
         l0_sst_size_bytes: 128,
         l0_max_ssts: 8,
         max_unflushed_memtable: 2,

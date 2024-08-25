@@ -296,7 +296,7 @@ mod tests {
     use crate::iter::KeyValueIterator;
     use crate::manifest_store::{ManifestStore, StoredManifest};
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
-    use crate::sst::SsTableFormat;
+    use crate::sst::SsTableFormatBuilder;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
     use object_store::memory::InMemory;
@@ -463,7 +463,11 @@ mod tests {
         let db = Db::open_with_opts(Path::from(PATH), options.clone(), os.clone())
             .await
             .unwrap();
-        let sst_format = SsTableFormat::new(32, 10, options.compression_codec);
+        let sst_format = SsTableFormatBuilder::new()
+            .with_block_size(32)
+            .with_min_filter_keys(10)
+            .with_compression_codec(options.compression_codec)
+            .build();
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let table_store = Arc::new(TableStore::new(os.clone(), sst_format, Path::from(PATH)));
         (os, manifest_store, table_store, db)
@@ -476,6 +480,7 @@ mod tests {
             wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),
             min_filter_keys: 0,
+            filter_bits_per_key: 10,
             l0_sst_size_bytes: 128,
             max_unflushed_memtable: 2,
             l0_max_ssts: 8,

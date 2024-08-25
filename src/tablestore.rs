@@ -374,7 +374,7 @@ impl<'a> EncodedSsTableWriter<'a> {
 mod tests {
     use crate::db_state::SsTableId;
     use crate::error;
-    use crate::sst::SsTableFormat;
+    use crate::sst::SsTableFormatBuilder;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
@@ -390,7 +390,10 @@ mod tests {
     async fn test_sst_writer_should_write_sst() {
         // given:
         let os = Arc::new(object_store::memory::InMemory::new());
-        let format = SsTableFormat::new(32, 1, None);
+        let format = SsTableFormatBuilder::new()
+            .with_block_size(32)
+            .with_min_filter_keys(1)
+            .build();
         let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
         let id = SsTableId::Compacted(Ulid::new());
 
@@ -428,7 +431,10 @@ mod tests {
     #[tokio::test]
     async fn test_wal_write_should_fail_when_fenced() {
         let os = Arc::new(object_store::memory::InMemory::new());
-        let format = SsTableFormat::new(32, 1, None);
+        let format = SsTableFormatBuilder::new()
+            .with_block_size(32)
+            .with_min_filter_keys(1)
+            .build();
         let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
         let wal_id = SsTableId::Wal(1);
 

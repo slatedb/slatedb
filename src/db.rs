@@ -12,7 +12,7 @@ use crate::mem_table_flush::MemtableFlushThreadMsg;
 use crate::mem_table_flush::MemtableFlushThreadMsg::Shutdown;
 use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
-use crate::sst::SsTableFormat;
+use crate::sst::SsTableFormatBuilder;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
@@ -342,8 +342,11 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
-        let sst_format =
-            SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
+        let sst_format = SsTableFormatBuilder::new()
+            .with_min_filter_keys(options.min_filter_keys)
+            .with_filter_bits_per_key(options.filter_bits_per_key)
+            .with_compression_codec(options.compression_codec)
+            .build();
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             object_store.clone(),
             sst_format,
@@ -578,7 +581,7 @@ mod tests {
         options.wal_enabled = false;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let sst_format = SsTableFormat::new(4096, 10, None);
+        let sst_format = SsTableFormatBuilder::new().build();
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
             sst_format,
@@ -651,7 +654,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let sst_format = SsTableFormat::new(4096, 10, None);
+        let sst_format = SsTableFormatBuilder::new().with_min_filter_keys(10).build();
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
             sst_format,
@@ -1239,6 +1242,7 @@ mod tests {
             max_unflushed_memtable: 2,
             l0_max_ssts: 8,
             min_filter_keys,
+            filter_bits_per_key: 10,
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
