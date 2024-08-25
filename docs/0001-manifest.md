@@ -366,7 +366,7 @@ A full read-modify-write Manifest update contains the following steps:
 
 (4) is a CAS operation. Clients will use either real CAS (pattern (1)) or two-phase write (pattern (5)) to update the manifest.
 
-If the CAS write fails in (4), the client must retry the entire process. This is because the client now has. The client must find the (new) latest manifest and re-apply its changes.
+If the CAS write fails in (4), the client must retry the entire process. This is because the client now has an outdated view of the manifest. It must find the (new) latest manifest and re-apply its changes.
 
 Three different processes update the manifest:
 
