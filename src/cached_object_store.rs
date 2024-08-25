@@ -19,7 +19,7 @@ use object_store::{
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {
-    root_path: std::path::PathBuf,
+    root_folder: std::path::PathBuf,
     object_store: Arc<dyn ObjectStore>,
     part_size: usize, // expected to be aligned with mb or kb, default 64mb
 }
@@ -31,17 +31,17 @@ impl CachedObjectStore {
         range: Option<GetRange>,
     ) -> object_store::Result<BoxStream<'static, object_store::Result<Bytes>>> {
         let entry = DiskCacheEntry {
-            root_folder: self.root_path.clone(),
-            object_path: location.clone(),
+            root_folder: self.root_folder.clone(),
+            location: location.clone(),
             part_size: self.part_size,
         };
 
+        // if the object size is known in cache, split the range into parts, and return the part id
+        // and the range, else fallback to the object store and pre-download the object in local parts.
+        // please note that the range in the fallback case SHOULD be aligned with the part size.
         let parts = match &range {
             None => {
-                let (_, known_object_size) = entry.cached_parts(None).await?;
-                // if not fully cached, fallback to a single GET request (may helpful to reduce the API cost), and
-                // save the result into cached parts.
-                let object_size = match known_object_size {
+                let object_size = match entry.known_object_size().await? {
                     Some(object_size) => object_size,
                     None => {
                         let get_result = self.object_store.get(location).await?;
@@ -53,8 +53,7 @@ impl CachedObjectStore {
             Some(range) => match range {
                 GetRange::Bounded(_) => self.split_range_into_parts(Some(range.clone()), 0),
                 GetRange::Suffix(suffix) => {
-                    let (_, known_object_size) = entry.cached_parts(None).await?;
-                    let object_size = match known_object_size {
+                    let object_size = match entry.known_object_size().await? {
                         Some(object_size) => object_size,
                         None => {
                             let suffix_aligned =
@@ -70,8 +69,7 @@ impl CachedObjectStore {
                     self.split_range_into_parts(Some(range.clone()), object_size)
                 }
                 GetRange::Offset(offset) => {
-                    let (_, known_object_size) = entry.cached_parts(None).await?;
-                    let object_size = match known_object_size {
+                    let object_size = match entry.known_object_size().await? {
                         Some(object_size) => object_size,
                         None => {
                             let offset_aligned = *offset - *offset % self.part_size;
@@ -146,12 +144,12 @@ impl CachedObjectStore {
     ) -> BoxFuture<'static, object_store::Result<Bytes>> {
         let part_size = self.part_size;
         let object_store = self.object_store.clone();
-        let root_folder = self.root_path.clone();
+        let root_folder = self.root_folder.clone();
         let location = location.clone();
         Box::pin(async move {
             let entry = DiskCacheEntry {
                 root_folder,
-                object_path: location.clone(),
+                location: location.clone(),
                 part_size: part_size,
             };
             if let Ok(Some(bytes)) = entry.read_part(part_id).await {
@@ -178,7 +176,7 @@ impl std::fmt::Display for CachedObjectStore {
         write!(
             f,
             "CachedObjectStore({}, {})",
-            self.root_path.to_str().unwrap_or_default(),
+            self.root_folder.to_str().unwrap_or_default(),
             self.object_store
         )
     }
@@ -186,6 +184,18 @@ impl std::fmt::Display for CachedObjectStore {
 
 #[async_trait::async_trait]
 impl ObjectStore for CachedObjectStore {
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        self.object_store.get_opts(location, options).await
+    }
+
+    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+        self.object_store.head(location).await
+    }
+
     async fn put_opts(
         &self,
         location: &Path,
@@ -208,18 +218,6 @@ impl ObjectStore for CachedObjectStore {
         opts: PutMultipartOpts,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         self.object_store.put_multipart_opts(location, opts).await
-    }
-
-    async fn get_opts(
-        &self,
-        location: &Path,
-        options: GetOptions,
-    ) -> object_store::Result<GetResult> {
-        self.object_store.get_opts(location, options).await
-    }
-
-    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        self.object_store.head(location).await
     }
 
     async fn delete(&self, location: &Path) -> object_store::Result<()> {
@@ -261,7 +259,7 @@ impl ObjectStore for CachedObjectStore {
 
 struct DiskCacheEntry {
     root_folder: std::path::PathBuf,
-    object_path: object_store::path::Path,
+    location: object_store::path::Path,
     part_size: usize,
 }
 
@@ -293,15 +291,14 @@ impl DiskCacheEntry {
         // to determined the end of the object.
         if !buffer.is_empty() {
             self.save_part(part_number, buffer.as_ref()).await?;
+            return Ok(object_size);
         }
 
         // if reached exactly the end of the object file, save an empty part file to indicate
         // the end of the object.
         if part_number * self.part_size == object_size {
-            self.save_part(part_number, buffer.as_ref()).await?;
-            return Ok(object_size);
+            self.save_part(part_number, &[]).await?;
         }
-
         Ok(object_size)
     }
 
@@ -321,14 +318,7 @@ impl DiskCacheEntry {
         Ok(Some(Bytes::from(buffer)))
     }
 
-    // return the downloaded parts and an bool about whether we've got the end of the object
-    // or not.
-    // if we still have not got the final part (which size is less than part_size), we can not determine
-    // the Offset and Suffix is cached or not, on these cases, we'd always return empty.
-    pub async fn cached_parts(
-        &self,
-        range: Option<GetRange>,
-    ) -> object_store::Result<(Vec<PartID>, Option<usize>)> {
+    pub async fn known_object_size(&self) -> object_store::Result<Option<usize>> {
         let pattern = self.make_part_path(0).with_extension("_part*");
         let mut part_paths = glob::glob(&pattern.to_string_lossy())
             .map_err(wrap_io_err)?
@@ -337,7 +327,7 @@ impl DiskCacheEntry {
 
         // not cached at all
         if part_paths.is_empty() {
-            return Ok((vec![], None));
+            return Ok(None);
         }
 
         // sort the paths in alphabetical order
@@ -359,16 +349,15 @@ impl DiskCacheEntry {
             }
         }
 
-        // check if we've cached the last part or not. it's useful to determine the size of the object.
-        // if the last part is not cached, we still need fallback to the object store to get the missing
-        // parts on the GET request without range, or with Offset and Suffix.
+        // check if we've cached the last part or not. the last part is expected to be not fully filled or zero byte.
         let last_part_path = part_paths.last().unwrap();
         let last_part_size = tokio::fs::metadata(last_part_path)
             .await
             .map(|m| m.len() as usize)
             .map_err(wrap_io_err)?;
         let cached_last_part = last_part_size < self.part_size;
-        let known_object_size = if cached_last_part {
+
+        let object_size = if cached_last_part {
             part_numbers
                 .last()
                 .copied()
@@ -376,45 +365,7 @@ impl DiskCacheEntry {
         } else {
             None
         };
-
-        // filter the parts by the range, we can assume the part range are always aligned with the part_size
-        // here.
-        match range {
-            None => {
-                return Ok((part_numbers, known_object_size));
-            }
-            Some(range) => match range {
-                GetRange::Bounded(range) => {
-                    let start_part = range.start / self.part_size;
-                    let end_part = range.end / self.part_size;
-                    let filtered_part_numbers = part_numbers
-                        .into_iter()
-                        .filter(|part_number| *part_number >= start_part && *part_number < end_part)
-                        .collect();
-                    return Ok((filtered_part_numbers, known_object_size));
-                }
-                GetRange::Suffix(suffix) => {
-                    if !cached_last_part {
-                        return Ok((vec![], known_object_size));
-                    }
-                    let last_part_number = part_numbers.last().copied().unwrap();
-                    let suffix_part_start = last_part_number - suffix / self.part_size + 1;
-                    let filtered_part_numbers = part_numbers
-                        .into_iter()
-                        .filter(|part_number| *part_number >= suffix_part_start)
-                        .collect();
-                    return Ok((filtered_part_numbers, known_object_size));
-                }
-                GetRange::Offset(offset) => {
-                    let offset_part = offset / self.part_size;
-                    let filtered_part_numbers = part_numbers
-                        .into_iter()
-                        .filter(|part_number| *part_number >= offset_part)
-                        .collect();
-                    return Ok((filtered_part_numbers, known_object_size));
-                }
-            },
-        };
+        Ok(object_size)
     }
 
     // if the disk is full, we'll get an error here.
@@ -452,7 +403,7 @@ impl DiskCacheEntry {
             format!("{}kb", self.part_size / 1024)
         };
         self.root_folder
-            .join(self.object_path.to_string())
+            .join(self.location.to_string())
             .with_extension(format!("_part{}-{:09}", part_size_name, part_number))
     }
 }
