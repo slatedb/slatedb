@@ -71,8 +71,16 @@ impl CachedObjectStore {
             Some(range) => range,
         };
 
-        // TODO: handle the range
-        todo!()
+        // fallback to the object store
+        let get_opts = GetOptions {
+            range: Some(range.clone()),
+            ..Default::default()
+        };
+        Ok(self
+            .object_store
+            .get_opts(location, get_opts)
+            .await?
+            .into_stream())
     }
 
     /// Get from disk if the parts are cached, otherwise start a new GET request.
