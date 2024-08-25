@@ -40,7 +40,7 @@ impl CachedObjectStore {
         // if the object size is known in cache, split the range into parts, and return the part id
         // and the range, else fallback to the object store and pre-download the object in local parts.
         // please note that the range in the fallback case SHOULD be aligned with the part size.
-        let object_size = match &opts.range {
+        let object_size_hint = match &opts.range {
             None => match entry.known_object_size().await? {
                 Some(object_size) => object_size,
                 None => {
@@ -76,7 +76,7 @@ impl CachedObjectStore {
                 },
             },
         };
-        let parts = self.split_range_into_parts(opts.range.clone(), object_size);
+        let parts = self.split_range_into_parts(opts.range.clone(), object_size_hint);
 
         // read parts, and concatenate them into a single stream. please note that some of these part may not be cached,
         // we'll still fallback to the object store to get the missing parts.
@@ -85,11 +85,11 @@ impl CachedObjectStore {
             .map(|(part_id, range_in_part)| self.read_part(location, part_id, range_in_part))
             .collect::<Vec<_>>();
         let result_stream = stream::iter(futures).then(|fut| fut).boxed();
-        let result_range = self.canonicalize_range(opts.range, object_size);
+        let result_range = self.canonicalize_range(opts.range, object_size_hint);
 
         Ok(GetResult {
             meta: ObjectMeta {
-                size: object_size,
+                size: result_range.len(),
                 location: location.clone(),
                 last_modified: Default::default(),
                 e_tag: None,
@@ -97,7 +97,7 @@ impl CachedObjectStore {
             },
             range: result_range,
             attributes: Default::default(),
-            payload: GetResultPayload::Stream(Box::pin(result_stream)),
+            payload: GetResultPayload::Stream(result_stream),
         })
     }
 
@@ -123,17 +123,15 @@ impl CachedObjectStore {
 
     // given the range and object size, split the range into parts, and return the part id and the range
     // inside the part.
+    // the object_size_hint is not needed if the range is bounded, but it's needed in all other cases.
     fn split_range_into_parts(
         &self,
-        range: Option<GetRange>,
-        known_object_size: usize,
+        get_range: Option<GetRange>,
+        object_size_hint: usize,
     ) -> Vec<(PartID, Range<usize>)> {
-        let Range {
-            start: start_offset,
-            end: end_offset,
-        } = self.canonicalize_range(range, known_object_size);
-        let start_part = start_offset / self.part_size;
-        let end_part = end_offset.div_ceil(self.part_size);
+        let range = self.canonicalize_range(get_range, object_size_hint);
+        let start_part = range.start / self.part_size;
+        let end_part = range.end.div_ceil(self.part_size);
         let mut parts: Vec<_> = (start_part..end_part)
             .into_iter()
             .map(|part_id| {
@@ -150,13 +148,14 @@ impl CachedObjectStore {
             return vec![];
         }
         let first_part = parts.first_mut().unwrap();
-        first_part.1.start = start_offset % self.part_size;
+        first_part.1.start = range.start % self.part_size;
         let last_part = parts.last_mut().unwrap();
-        last_part.1.end = end_offset % self.part_size;
+        last_part.1.end = range.end % self.part_size;
         return parts;
     }
 
     /// Get from disk if the parts are cached, otherwise start a new GET request.
+    /// TODO: add metrics to track the cache hit rate here.
     fn read_part(
         &self,
         location: &Path,
