@@ -74,43 +74,42 @@ impl CachedObjectStore {
         entry: &DiskCacheEntry,
         range: &Option<GetRange>,
     ) -> object_store::Result<usize> {
+        // if the object size is known in cache, return it directly.
+        match entry.known_object_size().await? {
+            Some(object_size) => return Ok(object_size),
+            None => {}
+        };
+
+        // otherwise, fetch the object from the object store to get the object size, and save the result
+        // into the local disk cache.
         let object_size_hint = match &range {
-            None => match entry.known_object_size().await? {
-                Some(object_size) => object_size,
-                None => {
-                    let get_result = self.object_store.get(&entry.location).await?;
+            None => {
+                let get_result = self.object_store.get(&entry.location).await?;
+                entry.save_result(get_result).await?
+            }
+            Some(range) => match range {
+                GetRange::Bounded(_) => {
+                    // TODO: send a get_opts with this bounded range
+                    0
+                }
+                GetRange::Suffix(suffix) => {
+                    let suffix_aligned = *suffix + self.part_size - *suffix % self.part_size;
+                    let opts = GetOptions {
+                        range: Some(GetRange::Suffix(suffix_aligned)),
+                        ..Default::default()
+                    };
+                    let get_result = self.object_store.get_opts(&entry.location, opts).await?;
                     entry.save_result(get_result).await?
                 }
-            },
-            Some(range) => match range {
-                GetRange::Bounded(range) => {
-                    // TODO: send a get_opts with this bounded range
-                    range.len()
+                GetRange::Offset(offset) => {
+                    let offset_aligned = *offset - *offset % self.part_size;
+                    let opts = GetOptions {
+                        range: Some(GetRange::Offset(offset_aligned)),
+                        ..Default::default()
+                    };
+                    let get_result = self.object_store.get_opts(&entry.location, opts).await?;
+                    entry.save_result(get_result).await?
                 }
-                GetRange::Suffix(suffix) => match entry.known_object_size().await? {
-                    Some(object_size) => object_size,
-                    None => {
-                        let suffix_aligned = *suffix + self.part_size - *suffix % self.part_size;
-                        let opts = GetOptions {
-                            range: Some(GetRange::Suffix(suffix_aligned)),
-                            ..Default::default()
-                        };
-                        let get_result = self.object_store.get_opts(&entry.location, opts).await?;
-                        entry.save_result(get_result).await?
-                    }
-                },
-                GetRange::Offset(offset) => match entry.known_object_size().await? {
-                    Some(object_size) => object_size,
-                    None => {
-                        let offset_aligned = *offset - *offset % self.part_size;
-                        let opts = GetOptions {
-                            range: Some(GetRange::Offset(offset_aligned)),
-                            ..Default::default()
-                        };
-                        let get_result = self.object_store.get_opts(&entry.location, opts).await?;
-                        entry.save_result(get_result).await?
-                    }
-                },
             },
         };
         Ok(object_size_hint)
