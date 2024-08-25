@@ -102,11 +102,10 @@ impl CachedObjectStore {
                         return Ok(known_object_size);
                     }
                     let suffix_aligned = *suffix + self.part_size - *suffix % self.part_size;
-                    let opts = GetOptions {
+                    GetOptions {
                         range: Some(GetRange::Suffix(suffix_aligned)),
                         ..Default::default()
-                    };
-                    opts
+                    }
                 }
                 GetRange::Offset(offset) => {
                     // GET with offset, same as Suffix, if the object size is unknown, we can not determine
@@ -116,11 +115,10 @@ impl CachedObjectStore {
                         return Ok(known_object_size);
                     }
                     let offset_aligned = *offset - *offset % self.part_size;
-                    let opts = GetOptions {
+                    GetOptions {
                         range: Some(GetRange::Offset(offset_aligned)),
                         ..Default::default()
-                    };
-                    opts
+                    }
                 }
             },
         };
@@ -164,7 +162,6 @@ impl CachedObjectStore {
         let start_part = range.start / self.part_size;
         let end_part = range.end.div_ceil(self.part_size);
         let mut parts: Vec<_> = (start_part..end_part)
-            .into_iter()
             .map(|part_id| {
                 (
                     part_id,
@@ -178,11 +175,13 @@ impl CachedObjectStore {
         if parts.is_empty() {
             return vec![];
         }
-        let first_part = parts.first_mut().unwrap();
-        first_part.1.start = range.start % self.part_size;
-        let last_part = parts.last_mut().unwrap();
-        last_part.1.end = range.end % self.part_size;
-        return parts;
+        if let Some(first_part) = parts.first_mut() {
+            first_part.1.start = range.start % self.part_size;
+        }
+        if let Some(last_part) = parts.last_mut() {
+            last_part.1.end = range.end % self.part_size;
+        }
+        parts
     }
 
     /// get from disk if the parts are cached, otherwise start a new GET request.
@@ -203,7 +202,7 @@ impl CachedObjectStore {
             let entry = DiskCacheEntry {
                 root_folder,
                 location: location.clone(),
-                part_size: part_size,
+                part_size,
             };
             if let Ok(Some(bytes)) = entry.read_part(part_id).await {
                 return Ok(bytes.slice(range_in_part));
@@ -426,7 +425,7 @@ impl DiskCacheEntry {
         }
 
         // check if we've cached the last part or not. the last part is expected to be not fully filled or zero byte.
-        let last_part_path = part_paths.last().unwrap();
+        let last_part_path = part_paths.last().expect("part_paths is not empty");
         let last_part_size = tokio::fs::metadata(last_part_path)
             .await
             .map(|m| m.len() as usize)
@@ -461,7 +460,7 @@ impl DiskCacheEntry {
         let mut file = File::create(&tmp_part_file_path)
             .await
             .map_err(wrap_io_err)?;
-        file.write_all(&buf).await.map_err(wrap_io_err)?;
+        file.write_all(buf).await.map_err(wrap_io_err)?;
 
         // atomic rename
         fs::rename(tmp_part_file_path, part_file_path)
