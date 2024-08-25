@@ -26,10 +26,10 @@ pub(crate) struct CachedObjectStore {
 }
 
 impl CachedObjectStore {
-    async fn read_range(
+    async fn cached_get_opts(
         &self,
         location: &Path,
-        range: Option<GetRange>,
+        opts: GetOptions,
     ) -> object_store::Result<GetResult> {
         let entry = DiskCacheEntry {
             root_folder: self.root_folder.clone(),
@@ -40,7 +40,7 @@ impl CachedObjectStore {
         // if the object size is known in cache, split the range into parts, and return the part id
         // and the range, else fallback to the object store and pre-download the object in local parts.
         // please note that the range in the fallback case SHOULD be aligned with the part size.
-        let object_size = match &range {
+        let object_size = match &opts.range {
             None => match entry.known_object_size().await? {
                 Some(object_size) => object_size,
                 None => {
@@ -76,7 +76,7 @@ impl CachedObjectStore {
                 },
             },
         };
-        let parts = self.split_range_into_parts(range.clone(), object_size);
+        let parts = self.split_range_into_parts(opts.range.clone(), object_size);
 
         // read parts, and concatenate them into a single stream. please note that some of these part may not be cached,
         // we'll still fallback to the object store to get the missing parts.
@@ -85,7 +85,7 @@ impl CachedObjectStore {
             .map(|(part_id, range_in_part)| self.read_part(location, part_id, range_in_part))
             .collect::<Vec<_>>();
         let result_stream = stream::iter(futures).then(|fut| fut).boxed();
-        let result_range = self.canonicalize_range(range, object_size);
+        let result_range = self.canonicalize_range(opts.range, object_size);
 
         Ok(GetResult {
             meta: ObjectMeta {
@@ -210,8 +210,7 @@ impl ObjectStore for CachedObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        let stream = self.read_range(location, options.range).await?;
-        todo!()
+        self.cached_get_opts(location, options).await
     }
 
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
