@@ -68,21 +68,21 @@ impl CachedObjectStore {
     // into the local disk cache, it returns the object size hint, which is useful to transform `GetRange`
     // into `Range<usize>`.
     // it's ok to not prefetch the object if you've got the object size hint, but prefetching is helpful
-    // to reduce the number of GET requests to the object store, it'll try to aggregate the parts into a
-    // single GET request, and save the related parts into local disks together.
+    // to reduce the number of GET requests to the object store, it'll try to aggregate the parts among
+    // the range into a single GET request, and save the related parts into local disks together.
     // when it sends GET requests to the object store, the range is expected to be ALIGNED with the part
     // size.
     async fn maybe_prefetch_range(
         &self,
         entry: &DiskCacheEntry,
         range: &Option<GetRange>,
-    ) -> object_store::Result<usize> {
+    ) -> object_store::Result<Option<usize>> {
         let (_, known_object_size) = entry.cached_parts().await?;
         let aligned_opts = match &range {
             None => {
                 // GET without range, if the object size is unknown, we can prefetch the entire object.
                 if let Some(known_object_size) = known_object_size {
-                    return Ok(known_object_size);
+                    return Ok(Some(known_object_size));
                 }
                 GetOptions::default()
             }
@@ -93,14 +93,14 @@ impl CachedObjectStore {
                     // not prefetch the object.
                     // the object size hint is also not needed in the case of Bounded range, simply
                     // return 0 ant not use it.
-                    return Ok(0);
+                    return Ok(None);
                 }
                 GetRange::Suffix(suffix) => {
                     // GET with suffix range, if the object size is unknown, we can not determine the
                     // actual range to prefetch, so we'll fallback to the object store to get the missing
                     // parts.
                     if let Some(known_object_size) = known_object_size {
-                        return Ok(known_object_size);
+                        return Ok(Some(known_object_size));
                     }
                     let suffix_aligned = *suffix + self.part_size - *suffix % self.part_size;
                     GetOptions {
@@ -113,7 +113,7 @@ impl CachedObjectStore {
                     // the actual range to prefetch, so fallback to the object store to get the missing
                     // parts.
                     if let Some(known_object_size) = known_object_size {
-                        return Ok(known_object_size);
+                        return Ok(Some(known_object_size));
                     }
                     let offset_aligned = *offset - *offset % self.part_size;
                     GetOptions {
@@ -132,25 +132,29 @@ impl CachedObjectStore {
         // swallow the error on saving to disk here (the disk might be already full), just fallback
         // to the object store.
         // TODO: add a warning log here.
-        entry
-            .save_result(get_result)
-            .await
-            .or_else(|_| Ok(object_size_hint))
+        entry.save_result(get_result).await.ok();
+        Ok(Some(object_size_hint))
     }
 
     // given the range and object size, return the canonicalized `Range<usize>` with concrete start and
-    // end.
+    // end, caller must provide the object size hint if the range is not bounded.
     fn canonicalize_range(
         &self,
         range: Option<GetRange>,
-        known_object_size: usize,
+        object_size_hint: Option<usize>,
     ) -> Range<usize> {
         let (start_offset, end_offset) = match range {
-            None => (0, known_object_size),
+            None => (0, object_size_hint.expect("object size hint is required")),
             Some(range) => match range {
                 GetRange::Bounded(range) => (range.start, range.end),
-                GetRange::Offset(offset) => (offset, known_object_size),
-                GetRange::Suffix(suffix) => (known_object_size - suffix, known_object_size),
+                GetRange::Offset(offset) => (
+                    offset,
+                    object_size_hint.expect("object size hint is required"),
+                ),
+                GetRange::Suffix(suffix) => {
+                    let object_size_hint = object_size_hint.expect("object size hint is required");
+                    (object_size_hint - suffix, object_size_hint)
+                }
             },
         };
         Range {
@@ -165,7 +169,7 @@ impl CachedObjectStore {
     fn split_range_into_parts(
         &self,
         get_range: Option<GetRange>,
-        object_size_hint: usize,
+        object_size_hint: Option<usize>,
     ) -> Vec<(PartID, Range<usize>)> {
         let range = self.canonicalize_range(get_range, object_size_hint);
         let start_part = range.start / self.part_size;
