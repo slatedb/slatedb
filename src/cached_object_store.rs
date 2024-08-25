@@ -43,62 +43,88 @@ impl CachedObjectStore {
             part_size: self.part_size,
         };
 
-        match &range {
+        let parts = match &range {
             None => {
                 let (_, known_object_size) = entry.cached_parts(None).await?;
                 // if not fully cached, fallback to a single GET request (may helpful to reduce the API cost), and
                 // save the result into cached parts.
-                let object_size = if let Some(object_size) = known_object_size {
-                    object_size
-                } else {
-                    let get_result = self.object_store.get(location).await?;
-                    let object_size = get_result.meta.size;
-                    entry.save_result(get_result).await?;
-                    object_size
+                let object_size = match known_object_size {
+                    Some(object_size) => object_size,
+                    None => {
+                        let get_result = self.object_store.get(location).await?;
+                        let object_size = get_result.meta.size;
+                        entry.save_result(get_result).await?;
+                        object_size
+                    }
                 };
-                let max_part_id = object_size.div_ceil(self.part_size);
-                // stream by parts, and concatenate them. please note that some of these part may not be cached,
-                // we'll still fallback to the object store to get the missing parts.
-                let futures = (0..=max_part_id)
-                    .into_iter()
-                    .map(|part_id| self.read_part(location, part_id))
-                    .collect::<Vec<_>>();
-                let stream = stream::iter(futures).then(|fut| fut).boxed();
-                return Ok(stream);
+                self.split_range_into_parts(None, object_size)
             }
             Some(range) => match range {
-                GetRange::Bounded(range) => {}
-                GetRange::Suffix(suffix) => {}
-                GetRange::Offset(offset) => {}
+                GetRange::Bounded(_) => self.split_range_into_parts(Some(range.clone()), 0),
+                GetRange::Suffix(suffix) => {
+                    let (_, known_object_size) = entry.cached_parts(None).await?;
+                    let object_size = match known_object_size {
+                        Some(object_size) => object_size,
+                        None => {
+                            let suffix_aligned =
+                                *suffix + self.part_size - *suffix % self.part_size;
+                            let opts = GetOptions {
+                                range: Some(GetRange::Suffix(suffix_aligned)),
+                                ..Default::default()
+                            };
+                            let get_result = self.object_store.get_opts(location, opts).await?;
+                            let object_size = get_result.meta.size;
+                            entry.save_result(get_result).await?;
+                            object_size
+                        }
+                    };
+                    self.split_range_into_parts(Some(range.clone()), object_size)
+                }
+                GetRange::Offset(offset) => {
+                    let (_, known_object_size) = entry.cached_parts(None).await?;
+                    let object_size = match known_object_size {
+                        Some(object_size) => object_size,
+                        None => {
+                            let offset_aligned = *offset - *offset % self.part_size;
+                            let opts = GetOptions {
+                                range: Some(GetRange::Offset(offset_aligned)),
+                                ..Default::default()
+                            };
+                            let get_result = self.object_store.get_opts(location, opts).await?;
+                            let object_size = get_result.meta.size;
+                            entry.save_result(get_result).await?;
+                            object_size
+                        }
+                    };
+                    self.split_range_into_parts(Some(range.clone()), object_size)
+                }
             },
         };
 
-        // fallback to the object store
-        let get_opts = GetOptions {
-            range: range.clone(),
-            ..Default::default()
-        };
-        Ok(self
-            .object_store
-            .get_opts(location, get_opts)
-            .await?
-            .into_stream())
+        // stream by parts, and concatenate them. please note that some of these part may not be cached,
+        // we'll still fallback to the object store to get the missing parts.
+        let futures = parts
+            .into_iter()
+            .map(|(part_id, range_in_part)| self.read_part(location, part_id, range_in_part))
+            .collect::<Vec<_>>();
+        let stream = stream::iter(futures).then(|fut| fut).boxed();
+        return Ok(stream);
     }
 
     // given the range and object size, split the range into parts, and return the part id and the range
     // inside the part.
     fn split_range_into_parts(
         &self,
-        range: GetRange,
-        known_object_size: Option<usize>,
+        range: Option<GetRange>,
+        known_object_size: usize,
     ) -> Vec<(PartID, Range<usize>)> {
         let (start_offset, end_offset) = match range {
-            GetRange::Bounded(range) => (range.start, range.end),
-            GetRange::Offset(offset) => (offset, known_object_size.unwrap()),
-            GetRange::Suffix(suffix) => (
-                known_object_size.unwrap() - suffix,
-                known_object_size.unwrap(),
-            ),
+            None => (0, known_object_size),
+            Some(range) => match range {
+                GetRange::Bounded(range) => (range.start, range.end),
+                GetRange::Offset(offset) => (offset, known_object_size),
+                GetRange::Suffix(suffix) => (known_object_size - suffix, known_object_size),
+            },
         };
         let start_part = start_offset / self.part_size;
         let end_part = end_offset.div_ceil(self.part_size);
@@ -129,6 +155,7 @@ impl CachedObjectStore {
         &self,
         location: &Path,
         part_id: PartID,
+        range_in_part: Range<usize>,
     ) -> BoxFuture<'static, object_store::Result<Bytes>> {
         let part_size = self.part_size;
         let object_store = self.object_store.clone();
@@ -141,7 +168,7 @@ impl CachedObjectStore {
                 part_size: part_size,
             };
             if let Ok(Some(bytes)) = entry.read_part(part_id).await {
-                return Ok(bytes);
+                return Ok(bytes.slice(range_in_part));
             }
 
             // if the part is not cached, fallback to the object store to get the missing part.
@@ -151,7 +178,10 @@ impl CachedObjectStore {
                 start: part_id * part_size,
                 end: (part_id + 1) * part_size,
             };
-            object_store.get_range(&location, range).await
+            object_store
+                .get_range(&location, range)
+                .await
+                .map(|result| result.slice(range_in_part))
         })
     }
 }
@@ -254,7 +284,8 @@ impl DiskCacheEntry {
     /// Save the GetResult to the disk cache. The `range` is optional and if provided, it's expected to
     /// be aligned with part_size (default 64mb).
     pub async fn save_result(&self, result: GetResult) -> object_store::Result<usize> {
-        // TODO: assert the range to be aligned with part_size
+        assert!(result.range.start % self.part_size == 0);
+
         let mut buffer = BytesMut::new();
         let mut part_number = result.range.start / self.part_size;
 
