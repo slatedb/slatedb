@@ -200,10 +200,33 @@ impl CachedObjectStore {
                 start: part_id * part_size,
                 end: (part_id + 1) * part_size,
             };
-            object_store
-                .get_range(&location, range)
-                .await
-                .map(|result| result.slice(range_in_part))
+            let get_result = object_store
+                .get_opts(
+                    &location,
+                    GetOptions {
+                        range: Some(GetRange::Bounded(range)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+
+            // save it to the disk cache
+            let result_meta = get_result.meta.clone();
+            let result_range = get_result.range.clone();
+            let result_attributes = get_result.attributes.clone();
+            let bytes = get_result.bytes().await?;
+            let bytes_cloned = bytes.clone();
+            let result_payload =
+                GetResultPayload::Stream(stream::once(async move { Ok(bytes_cloned) }).boxed());
+            entry
+                .save_result(GetResult {
+                    payload: result_payload,
+                    meta: result_meta,
+                    range: result_range,
+                    attributes: result_attributes,
+                })
+                .await?;
+            Ok(bytes.slice(range_in_part))
         })
     }
 }
