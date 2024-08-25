@@ -46,18 +46,21 @@ impl CachedObjectStore {
                     object_path: location.clone(),
                     part_size: self.part_size,
                 };
-                let (cached_parts, cached_last_part) = entry.cached_parts(None).await?;
+                let (_, known_object_size) = entry.cached_parts(None).await?;
                 // if not fully cached, fallback to a single GET request (may helpful to reduce the API cost), and
                 // save the result into cached parts.
-                let last_part_id = if !cached_last_part {
-                    let get_result = self.object_store.get(location).await?;
-                    entry.save_result(get_result).await?
+                let object_size = if let Some(object_size) = known_object_size {
+                    object_size
                 } else {
-                    cached_parts.last().copied().unwrap()
+                    let get_result = self.object_store.get(location).await?;
+                    let object_size = get_result.meta.size;
+                    entry.save_result(get_result).await?;
+                    object_size
                 };
+                let max_part_id = object_size.div_ceil(self.part_size);
                 // stream by parts, and concatenate them. please note that some of these part may not be cached,
                 // we'll still fallback to the object store to get the missing parts.
-                let stream = (0..=last_part_id)
+                let stream = (0..=max_part_id)
                     .into_iter()
                     .map(|part_id| self.read_part(part_id))
                     .collect::<Vec<_>>();
@@ -228,7 +231,7 @@ impl DiskCacheEntry {
     pub async fn cached_parts(
         &self,
         range: Option<GetRange>,
-    ) -> object_store::Result<(Vec<PartID>, bool)> {
+    ) -> object_store::Result<(Vec<PartID>, Option<usize>)> {
         let pattern = self.make_part_path(0).with_extension("_part*");
         let mut part_paths = glob::glob(&pattern.to_string_lossy())
             .map_err(wrap_io_err)?
@@ -237,21 +240,11 @@ impl DiskCacheEntry {
 
         // not cached at all
         if part_paths.is_empty() {
-            return Ok((vec![], false));
+            return Ok((vec![], None));
         }
 
         // sort the paths in alphabetical order
         part_paths.sort();
-
-        // check if we've cached the last part or not. it's useful to determine the end of the object.
-        // if the last part is not cached, we still need fallback to the object store to get the missing
-        // parts on the GET request without range, or with Offset and Suffix.
-        let last_part_path = part_paths.last().unwrap();
-        let last_part_size = tokio::fs::metadata(last_part_path)
-            .await
-            .map(|m| m.len() as usize)
-            .map_err(wrap_io_err)?;
-        let cached_last_part = last_part_size < self.part_size;
 
         // retrieve the part numbers from the paths
         let mut part_numbers = Vec::with_capacity(part_paths.len());
@@ -269,11 +262,29 @@ impl DiskCacheEntry {
             }
         }
 
+        // check if we've cached the last part or not. it's useful to determine the size of the object.
+        // if the last part is not cached, we still need fallback to the object store to get the missing
+        // parts on the GET request without range, or with Offset and Suffix.
+        let last_part_path = part_paths.last().unwrap();
+        let last_part_size = tokio::fs::metadata(last_part_path)
+            .await
+            .map(|m| m.len() as usize)
+            .map_err(wrap_io_err)?;
+        let cached_last_part = last_part_size < self.part_size;
+        let known_object_size = if cached_last_part {
+            part_numbers
+                .last()
+                .copied()
+                .map(|last_part_number| (last_part_number - 1) * self.part_size + last_part_size)
+        } else {
+            None
+        };
+
         // filter the parts by the range, we can assume the part range are always aligned with the part_size
         // here.
         match range {
             None => {
-                return Ok((part_numbers, cached_last_part));
+                return Ok((part_numbers, known_object_size));
             }
             Some(range) => match range {
                 GetRange::Bounded(range) => {
@@ -283,11 +294,11 @@ impl DiskCacheEntry {
                         .into_iter()
                         .filter(|part_number| *part_number >= start_part && *part_number < end_part)
                         .collect();
-                    return Ok((filtered_part_numbers, cached_last_part));
+                    return Ok((filtered_part_numbers, known_object_size));
                 }
                 GetRange::Suffix(suffix) => {
                     if !cached_last_part {
-                        return Ok((vec![], false));
+                        return Ok((vec![], known_object_size));
                     }
                     let last_part_number = part_numbers.last().copied().unwrap();
                     let suffix_part_start = last_part_number - suffix / self.part_size + 1;
@@ -295,7 +306,7 @@ impl DiskCacheEntry {
                         .into_iter()
                         .filter(|part_number| *part_number >= suffix_part_start)
                         .collect();
-                    return Ok((filtered_part_numbers, true));
+                    return Ok((filtered_part_numbers, known_object_size));
                 }
                 GetRange::Offset(offset) => {
                     let offset_part = offset / self.part_size;
@@ -303,7 +314,7 @@ impl DiskCacheEntry {
                         .into_iter()
                         .filter(|part_number| *part_number >= offset_part)
                         .collect();
-                    return Ok((filtered_part_numbers, cached_last_part));
+                    return Ok((filtered_part_numbers, known_object_size));
                 }
             },
         };
