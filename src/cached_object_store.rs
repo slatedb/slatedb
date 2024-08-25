@@ -9,6 +9,7 @@ use object_store::GetRange;
 use object_store::GetResultPayload;
 use std::io::Read;
 use std::io::Write;
+use std::ops::Bound;
 use std::ops::Range;
 use std::sync::Arc;
 use tokio::fs;
@@ -36,17 +37,14 @@ impl CachedObjectStore {
         location: &Path,
         range: Option<GetRange>,
     ) -> object_store::Result<BoxStream<'static, object_store::Result<Bytes>>> {
-        // split the parts by range
-        // parallel calling read_part, concatenate the stream
-        // adjust the offsets
-        let range = match range {
+        let entry = DiskCacheEntry {
+            root_folder: self.root_path.clone(),
+            object_path: location.clone(),
+            part_size: self.part_size,
+        };
+
+        match &range {
             None => {
-                // Get without range, check the is fully cached or not.
-                let entry = DiskCacheEntry {
-                    root_folder: self.root_path.clone(),
-                    object_path: location.clone(),
-                    part_size: self.part_size,
-                };
                 let (_, known_object_size) = entry.cached_parts(None).await?;
                 // if not fully cached, fallback to a single GET request (may helpful to reduce the API cost), and
                 // save the result into cached parts.
@@ -68,12 +66,16 @@ impl CachedObjectStore {
                 let stream = stream::iter(futures).then(|fut| fut).boxed();
                 return Ok(stream);
             }
-            Some(range) => range,
+            Some(range) => match range {
+                GetRange::Bounded(range) => {}
+                GetRange::Suffix(suffix) => {}
+                GetRange::Offset(offset) => {}
+            },
         };
 
         // fallback to the object store
         let get_opts = GetOptions {
-            range: Some(range.clone()),
+            range: range.clone(),
             ..Default::default()
         };
         Ok(self
@@ -81,6 +83,45 @@ impl CachedObjectStore {
             .get_opts(location, get_opts)
             .await?
             .into_stream())
+    }
+
+    // given the range and object size, split the range into parts, and return the part id and the range
+    // inside the part.
+    fn split_range_into_parts(
+        &self,
+        range: GetRange,
+        known_object_size: Option<usize>,
+    ) -> Vec<(PartID, Range<usize>)> {
+        let (start_offset, end_offset) = match range {
+            GetRange::Bounded(range) => (range.start, range.end),
+            GetRange::Offset(offset) => (offset, known_object_size.unwrap()),
+            GetRange::Suffix(suffix) => (
+                known_object_size.unwrap() - suffix,
+                known_object_size.unwrap(),
+            ),
+        };
+        let start_part = start_offset / self.part_size;
+        let end_part = end_offset.div_ceil(self.part_size);
+        let mut parts: Vec<_> = (start_part..end_part)
+            .into_iter()
+            .map(|part_id| {
+                (
+                    part_id,
+                    Range {
+                        start: 0,
+                        end: self.part_size,
+                    },
+                )
+            })
+            .collect();
+        if parts.is_empty() {
+            return vec![];
+        }
+        let first_part = parts.first_mut().unwrap();
+        first_part.1.start = start_offset % self.part_size;
+        let last_part = parts.last_mut().unwrap();
+        last_part.1.end = end_offset % self.part_size;
+        return parts;
     }
 
     /// Get from disk if the parts are cached, otherwise start a new GET request.
