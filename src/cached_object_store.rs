@@ -18,6 +18,7 @@ use object_store::{
     PutMultipartOpts, PutOptions, PutPayload, PutResult,
 };
 
+#[allow(unused)]
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {
     root_folder: std::path::PathBuf,
@@ -130,7 +131,8 @@ impl CachedObjectStore {
         entry.save_result(get_result).await
     }
 
-    // given the range and object size, return the canonicalized `Range<usize>`.
+    // given the range and object size, return the canonicalized `Range<usize>` with concrete start and
+    // end.
     fn canonicalize_range(
         &self,
         range: Option<GetRange>,
@@ -338,8 +340,10 @@ struct DiskCacheEntry {
     part_size: usize,
 }
 
+#[allow(unused)]
 type PartID = usize;
 
+#[allow(unused)]
 impl DiskCacheEntry {
     /// save the GetResult to the disk cache, a GetResullt may contain multiple parts. please note
     /// that the `range` in the GetResult is expected to be aligned with the part size.
@@ -488,6 +492,7 @@ impl DiskCacheEntry {
     }
 }
 
+#[allow(unused)]
 fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_store::Error {
     object_store::Error::Generic {
         store: "cached_object_store",
