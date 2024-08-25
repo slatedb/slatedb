@@ -703,14 +703,51 @@ mod tests {
                 "first key in sst info should be correct"
             );
         }
+
+        #[allow(unused)]
+        async fn test_compression_using_sst_info(compression: CompressionCodec) {
+            let root_path = Path::from("");
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let format = SsTableFormat::new(4096, 0, Some(compression));
+            let table_store = TableStore::new(object_store.clone(), format, root_path.clone());
+            let mut builder = table_store.table_builder();
+            builder.add(b"key1", Some(b"value1")).unwrap();
+            builder.add(b"key2", Some(b"value2")).unwrap();
+            let encoded = builder.build().unwrap();
+            let encoded_info = encoded.info.clone();
+            table_store
+                .write_sst(&SsTableId::Wal(0), encoded)
+                .await
+                .unwrap();
+
+            // Decompression is independent of TableFormat. It uses the CompressionFormat from SSTable Info to decompress sst.
+            let format = SsTableFormat::new(4096, 0, Some(CompressionCodec::Snappy));
+            let table_store = TableStore::new(object_store, format, root_path);
+            let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
+            let index = table_store.read_index(&sst_handle).await.unwrap();
+
+            assert_eq!(encoded_info, sst_handle.info);
+            let sst_info = sst_handle.info.borrow();
+            assert_eq!(1, index.borrow().block_meta().len());
+            assert_eq!(
+                b"key1",
+                sst_info.first_key().unwrap().bytes(),
+                "first key in sst info should be correct"
+            );
+        }
+
         #[cfg(feature = "snappy")]
         test_compression_inner(CompressionCodec::Snappy).await;
+        test_compression_using_sst_info(CompressionCodec::Snappy).await;
         #[cfg(feature = "zlib")]
         test_compression_inner(CompressionCodec::Zlib).await;
+        test_compression_using_sst_info(CompressionCodec::Zlib).await;
         #[cfg(feature = "lz4")]
         test_compression_inner(CompressionCodec::Lz4).await;
+        test_compression_using_sst_info(CompressionCodec::Lz4).await;
         #[cfg(feature = "zstd")]
         test_compression_inner(CompressionCodec::Zstd).await;
+        test_compression_using_sst_info(CompressionCodec::Zstd).await;
     }
 
     #[tokio::test]

@@ -272,9 +272,9 @@ impl From<Option<CompressionCodec>> for CompressionFormat {
             Some(codec) => match codec {
                 #[cfg(feature = "snappy")]
                 CompressionCodec::Snappy => CompressionFormat::Snappy,
-                #[cfg(feature = "zlib")]
-                CompressionCodec::Lz4 => CompressionFormat::Lz4,
                 #[cfg(feature = "lz4")]
+                CompressionCodec::Lz4 => CompressionFormat::Lz4,
+                #[cfg(feature = "zlib")]
                 CompressionCodec::Zlib => CompressionFormat::Zlib,
                 #[cfg(feature = "zstd")]
                 CompressionCodec::Zstd => CompressionFormat::Zstd,
@@ -288,9 +288,9 @@ impl From<CompressionFormat> for Option<CompressionCodec> {
         match value {
             #[cfg(feature = "snappy")]
             CompressionFormat::Snappy => Some(CompressionCodec::Snappy),
-            #[cfg(feature = "zlib")]
-            CompressionFormat::Lz4 => Some(CompressionCodec::Lz4),
             #[cfg(feature = "lz4")]
+            CompressionFormat::Lz4 => Some(CompressionCodec::Lz4),
+            #[cfg(feature = "zlib")]
             CompressionFormat::Zlib => Some(CompressionCodec::Zlib),
             #[cfg(feature = "zstd")]
             CompressionFormat::Zstd => Some(CompressionCodec::Zstd),
