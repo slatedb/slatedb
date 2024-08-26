@@ -791,4 +791,28 @@ mod tests {
         let aligned = cached_store.align_range(&(1024 + 1..2048 + 4), 1024);
         assert_eq!(aligned, 1024..3072);
     }
+
+    #[test]
+    fn test_align_get_range() {
+        let object_store = object_store::memory::InMemory::new();
+        let test_cache_folder = new_test_cache_folder();
+        let cached_store = CachedObjectStore {
+            root_folder: test_cache_folder,
+            object_store: Arc::new(object_store),
+            part_size: 1024,
+        };
+
+        let aligned = cached_store.align_get_range(&GetRange::Bounded(9..1025));
+        assert_eq!(aligned, GetRange::Bounded(0..2048));
+        let aligned = cached_store.align_get_range(&GetRange::Bounded(9..2048));
+        assert_eq!(aligned, GetRange::Bounded(0..2048));
+        let aligned = cached_store.align_get_range(&GetRange::Suffix(12));
+        assert_eq!(aligned, GetRange::Suffix(1024));
+        let aligned = cached_store.align_get_range(&GetRange::Suffix(1024));
+        assert_eq!(aligned, GetRange::Suffix(1024));
+        let aligned = cached_store.align_get_range(&GetRange::Offset(1024));
+        assert_eq!(aligned, GetRange::Offset(1024));
+        let aligned = cached_store.align_get_range(&GetRange::Offset(12));
+        assert_eq!(aligned, GetRange::Offset(0));
+    }
 }
