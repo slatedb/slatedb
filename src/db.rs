@@ -148,8 +148,8 @@ impl DbInner {
             let current_memtable = guard.memtable();
             current_memtable.put(key, value);
             let table = current_memtable.table().clone();
-            let last_compacted = guard.state().core.last_compacted_wal_sst_id;
-            self.maybe_freeze_memtable(&mut guard, last_compacted);
+            let last_wal_id = guard.last_written_wal_id();
+            self.maybe_freeze_memtable(&mut guard, last_wal_id);
             table
         };
 
@@ -177,8 +177,8 @@ impl DbInner {
             let current_memtable = guard.memtable();
             current_memtable.delete(key);
             let table = current_memtable.table().clone();
-            let last_compacted = guard.state().core.last_compacted_wal_sst_id;
-            self.maybe_freeze_memtable(&mut guard, last_compacted);
+            let last_wal_id = guard.last_written_wal_id();
+            self.maybe_freeze_memtable(&mut guard, last_wal_id);
             table
         };
 
@@ -450,6 +450,41 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_disable_wal_after_wal_enabled() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        // open a db and write a wal entry
+        let options = test_db_options(0, 32, None);
+        let db = Db::open_with_opts(path.clone(), options, object_store.clone())
+            .await
+            .unwrap();
+        db.put(&[b'a'; 4], &[b'j'; 4]).await;
+        db.put(&[b'b'; 4], &[b'k'; 4]).await;
+        db.close().await.unwrap();
+
+        // open a db with wal disabled and write a memtable
+        let mut options = test_db_options(0, 32, None);
+        options.wal_enabled = false;
+        let db = Db::open_with_opts(path.clone(), options.clone(), object_store.clone())
+            .await
+            .unwrap();
+        db.delete_with_options(&[b'b'; 4], &WriteOptions { await_flush: false })
+            .await;
+        db.put(&[b'a'; 4], &[b'z'; 64]).await;
+        db.close().await.unwrap();
+
+        // ensure we don't overwrite the values we just put on a reload
+        let db = Db::open_with_opts(path.clone(), options.clone(), object_store.clone())
+            .await
+            .unwrap();
+        let val = db.get(&[b'a'; 4]).await.unwrap();
+        assert_eq!(val.unwrap(), Bytes::copy_from_slice(&[b'z'; 64]));
+        let val = db.get(&[b'b'; 4]).await.unwrap();
+        assert!(val.is_none());
+    }
+
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
     async fn test_wal_disabled() {
@@ -476,6 +511,7 @@ mod tests {
         db.put_with_options(&[b'a'; 32], &[b'j'; 32], &write_options)
             .await;
         db.delete_with_options(&[b'b'; 32], &write_options).await;
+        let write_options = WriteOptions { await_flush: true };
         db.put_with_options(&[b'c'; 32], &[b'l'; 32], &write_options)
             .await;
 

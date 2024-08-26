@@ -60,6 +60,7 @@ impl MemtableFlusher {
                 guard.move_imm_memtable_to_l0(imm_memtable.clone(), sst_handle);
             }
             self.write_manifest_safely().await?;
+            imm_memtable.table().notify_flush();
         }
         Ok(())
     }

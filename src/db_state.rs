@@ -138,6 +138,11 @@ impl DbState {
         }
     }
 
+    pub fn last_written_wal_id(&self) -> u64 {
+        assert!(self.state.core.next_wal_sst_id > 0);
+        self.state.core.next_wal_sst_id - 1
+    }
+
     // mutations
 
     pub fn wal(&mut self) -> &mut WritableKVTable {
