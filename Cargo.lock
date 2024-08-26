@@ -1290,6 +1290,8 @@ dependencies = [
  "parking_lot",
  "rand",
  "rand_xorshift",
+ "serde",
+ "serde_json",
  "siphasher",
  "snap",
  "thiserror",
