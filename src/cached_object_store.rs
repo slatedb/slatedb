@@ -173,7 +173,9 @@ impl CachedObjectStore {
             first_part.1.start = range.start % self.part_size;
         }
         if let Some(last_part) = parts.last_mut() {
-            last_part.1.end = range.end % self.part_size;
+            if range.end % self.part_size != 0 {
+                last_part.1.end = range.end % self.part_size;
+            }
         }
         parts
     }
@@ -577,10 +579,16 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use bytes::Bytes;
     use object_store::path::Path;
-    use object_store::{ObjectStore, PutPayload};
+    use object_store::{GetRange, ObjectStore, PutPayload};
     use rand::{thread_rng, Rng};
+
+    use crate::cached_object_store::PartID;
+
+    use super::CachedObjectStore;
 
     fn gen_rand_bytes(n: usize) -> Bytes {
         let mut rng = thread_rng();
@@ -680,5 +688,84 @@ mod tests {
         let cached_parts = entry.cached_parts().await?;
         assert_eq!(cached_parts.len(), 3);
         Ok(())
+    }
+
+    #[test]
+    fn test_split_range_into_parts() {
+        let object_store = object_store::memory::InMemory::new();
+        let test_cache_folder = new_test_cache_folder();
+        let cached_store = CachedObjectStore {
+            root_folder: test_cache_folder,
+            object_store: Arc::new(object_store),
+            part_size: 1024,
+        };
+
+        struct Test {
+            input: (Option<GetRange>, usize),
+            expect: Vec<(PartID, std::ops::Range<usize>)>,
+        }
+        let tests = [
+            Test {
+                input: (None, 1024 * 3),
+                expect: vec![(0, 0..1024), (1, 0..1024), (2, 0..1024)],
+            },
+            Test {
+                input: (None, 1024 * 3 + 12),
+                expect: vec![(0, 0..1024), (1, 0..1024), (2, 0..1024), (3, 0..12)],
+            },
+            Test {
+                input: (None, 12),
+                expect: vec![(0, 0..12)],
+            },
+            Test {
+                input: (Some(GetRange::Bounded(0..1024)), 1024),
+                expect: vec![(0, 0..1024)],
+            },
+            Test {
+                input: (Some(GetRange::Bounded(128..1024)), 2),
+                expect: vec![(0, 128..1024)],
+            },
+            Test {
+                input: (Some(GetRange::Bounded(128..1024 + 12)), 2),
+                expect: vec![(0, 128..1024), (1, 0..12)],
+            },
+            Test {
+                input: (Some(GetRange::Bounded(128..1024 * 2 + 12)), 2),
+                expect: vec![(0, 128..1024), (1, 0..1024), (2, 0..12)],
+            },
+            Test {
+                input: (Some(GetRange::Bounded(1024 * 2..1024 * 3 + 12)), 2),
+                expect: vec![(2, 0..1024), (3, 0..12)],
+            },
+            Test {
+                input: (Some(GetRange::Bounded(1024 * 2 - 2..1024 * 3 + 12)), 2),
+                expect: vec![(1, 1022..1024), (2, 0..1024), (3, 0..12)],
+            },
+            Test {
+                input: (Some(GetRange::Suffix(128)), 1024),
+                expect: vec![(0, 896..1024)],
+            },
+            Test {
+                input: (Some(GetRange::Suffix(1024 * 2 + 8)), 1024 * 4),
+                expect: vec![(1, 1016..1024), (2, 0..1024), (3, 0..1024)],
+            },
+            Test {
+                input: (Some(GetRange::Offset(8)), 1024 * 4),
+                expect: vec![(0, 8..1024), (1, 0..1024), (2, 0..1024), (3, 0..1024)],
+            },
+            Test {
+                input: (Some(GetRange::Offset(1024 * 2 + 8)), 1024 * 4),
+                expect: vec![(2, 8..1024), (3, 0..1024)],
+            },
+            Test {
+                input: (Some(GetRange::Offset(1024 * 2 + 8)), 1024 * 4 + 2),
+                expect: vec![(2, 8..1024), (3, 0..1024), (4, 0..2)],
+            },
+        ];
+
+        for t in tests.iter() {
+            let parts = cached_store.split_range_into_parts(t.input.0.clone(), t.input.1);
+            assert_eq!(parts, t.expect, "input: {:?}", t.input);
+        }
     }
 }
