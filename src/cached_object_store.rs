@@ -88,18 +88,14 @@ impl CachedObjectStore {
             None => GetOptions::default(),
             Some(range) => match range {
                 GetRange::Bounded(bounded) => {
-                    let start_aligned = bounded.start - bounded.start % self.part_size;
-                    let end_aligned = bounded.end + self.part_size - bounded.end % self.part_size;
+                    let aligned = self.align_range(bounded, self.part_size);
                     GetOptions {
-                        range: Some(GetRange::Bounded(Range {
-                            start: start_aligned,
-                            end: end_aligned,
-                        })),
+                        range: Some(GetRange::Bounded(aligned)),
                         ..Default::default()
                     }
                 }
                 GetRange::Suffix(suffix) => {
-                    let suffix_aligned = *suffix + self.part_size - *suffix % self.part_size;
+                    let suffix_aligned = self.align_range(&(0..*suffix), self.part_size).end;
                     GetOptions {
                         range: Some(GetRange::Suffix(suffix_aligned)),
                         ..Default::default()
@@ -153,8 +149,9 @@ impl CachedObjectStore {
         object_size_hint: usize,
     ) -> Vec<(PartID, Range<usize>)> {
         let range = self.canonicalize_range(get_range, object_size_hint);
-        let start_part = (range.start - range.start % self.part_size) / self.part_size;
-        let end_part = range.end.div_ceil(self.part_size);
+        let range_aligned = self.align_range(&range, self.part_size);
+        let start_part = range_aligned.start / self.part_size;
+        let end_part = range_aligned.end / self.part_size;
         let mut parts: Vec<_> = (start_part..end_part)
             .map(|part_id| {
                 (
@@ -229,6 +226,15 @@ impl CachedObjectStore {
             entry.save_part(part_id, &bytes.clone()).await.ok();
             Ok(bytes.slice(range_in_part))
         })
+    }
+
+    fn align_range(&self, range: &Range<usize>, alignment: usize) -> Range<usize> {
+        let start_aligned = range.start - range.start % alignment;
+        let end_aligned = ((range.end + alignment - 1) / alignment) * alignment;
+        Range {
+            start: start_aligned,
+            end: end_aligned,
+        }
     }
 }
 
@@ -767,5 +773,21 @@ mod tests {
             let parts = cached_store.split_range_into_parts(t.input.0.clone(), t.input.1);
             assert_eq!(parts, t.expect, "input: {:?}", t.input);
         }
+    }
+
+    #[test]
+    fn test_align_range() {
+        let object_store = object_store::memory::InMemory::new();
+        let test_cache_folder = new_test_cache_folder();
+        let cached_store = CachedObjectStore {
+            root_folder: test_cache_folder,
+            object_store: Arc::new(object_store),
+            part_size: 1024,
+        };
+
+        let aligned = cached_store.align_range(&(9..1025), 1024);
+        assert_eq!(aligned, 0..2048);
+        let aligned = cached_store.align_range(&(1024 + 1..2048 + 4), 1024);
+        assert_eq!(aligned, 1024..3072);
     }
 }
