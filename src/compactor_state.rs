@@ -576,7 +576,7 @@ mod tests {
         let rt = build_runtime();
         let (_, _, mut state) = build_test_state(rt.handle());
 
-        let mut l0_sst = &mut state.db_state().l0.clone();
+        let l0_sst = &mut state.db_state().l0.clone();
         let last_sst = l0_sst.pop_back();
         l0_sst.push_front(last_sst.unwrap());
         // when:
@@ -592,7 +592,7 @@ mod tests {
         let rt = build_runtime();
         let (_, _, mut state) = build_test_state(rt.handle());
 
-        let mut l0_sst = &mut state.db_state().l0.clone();
+        let l0_sst = &mut state.db_state().l0.clone();
         l0_sst.pop_back();
         // when:
         let result = state.submit_compaction(build_l0_compaction(l0_sst, 0));
@@ -608,7 +608,7 @@ mod tests {
         let (_, _, mut state) = build_test_state(rt.handle());
 
         let mut compaction = build_l0_compaction(&state.db_state().l0, 0);
-        &compaction.sources.push(SourceId::SortedRun(5));
+        let _ = compaction.sources.push(SourceId::SortedRun(5));
         // when:
         let result = state.submit_compaction(compaction);
 
