@@ -502,9 +502,12 @@ impl DiskCacheEntry {
         let meta_file_path = self.make_meta_path();
 
         // if the meta file exists and valid, do nothing
-        let exists = self.read_meta().await.is_ok();
-        if exists {
-            return Ok(());
+        match self.read_meta().await {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {}
+            Err(_) => {
+                // TODO: add a warning
+            }
         }
 
         // ensure the parent folder exists
