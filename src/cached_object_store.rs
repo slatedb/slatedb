@@ -58,7 +58,7 @@ impl CachedObjectStore {
         let result_range = self.canonicalize_range(opts.range, meta.size);
 
         Ok(GetResult {
-            meta: meta,
+            meta,
             range: result_range,
             attributes: Default::default(),
             payload: GetResultPayload::Stream(result_stream),
@@ -86,28 +86,9 @@ impl CachedObjectStore {
 
         let aligned_opts = match &range {
             None => GetOptions::default(),
-            Some(range) => match range {
-                GetRange::Bounded(bounded) => {
-                    let aligned = self.align_range(bounded, self.part_size);
-                    GetOptions {
-                        range: Some(GetRange::Bounded(aligned)),
-                        ..Default::default()
-                    }
-                }
-                GetRange::Suffix(suffix) => {
-                    let suffix_aligned = self.align_range(&(0..*suffix), self.part_size).end;
-                    GetOptions {
-                        range: Some(GetRange::Suffix(suffix_aligned)),
-                        ..Default::default()
-                    }
-                }
-                GetRange::Offset(offset) => {
-                    let offset_aligned = *offset - *offset % self.part_size;
-                    GetOptions {
-                        range: Some(GetRange::Offset(offset_aligned)),
-                        ..Default::default()
-                    }
-                }
+            Some(get_range) => GetOptions {
+                range: Some(self.align_get_range(get_range)),
+                ..Default::default()
             },
         };
 
@@ -115,29 +96,12 @@ impl CachedObjectStore {
             .object_store
             .get_opts(&entry.location, aligned_opts)
             .await?;
-        let object_meta = get_result.meta.clone();
+        let result_meta = get_result.meta.clone();
         // swallow the error on saving to disk here (the disk might be already full), just fallback
         // to the object store.
         // TODO: add a warning log here.
         entry.save_result(get_result).await.ok();
-        Ok(object_meta)
-    }
-
-    // given the range and object size, return the canonicalized `Range<usize>` with concrete start and
-    // end.
-    fn canonicalize_range(&self, range: Option<GetRange>, object_size_hint: usize) -> Range<usize> {
-        let (start_offset, end_offset) = match range {
-            None => (0, object_size_hint),
-            Some(range) => match range {
-                GetRange::Bounded(range) => (range.start, range.end),
-                GetRange::Offset(offset) => (offset, object_size_hint),
-                GetRange::Suffix(suffix) => (object_size_hint - suffix, object_size_hint),
-            },
-        };
-        Range {
-            start: start_offset,
-            end: end_offset,
-        }
+        Ok(result_meta)
     }
 
     // given the range and object size, split the range into parts, and return the part id and the range
@@ -226,6 +190,40 @@ impl CachedObjectStore {
             entry.save_part(part_id, &bytes.clone()).await.ok();
             Ok(bytes.slice(range_in_part))
         })
+    }
+
+    // given the range and object size, return the canonicalized `Range<usize>` with concrete start and
+    // end.
+    fn canonicalize_range(&self, range: Option<GetRange>, object_size_hint: usize) -> Range<usize> {
+        let (start_offset, end_offset) = match range {
+            None => (0, object_size_hint),
+            Some(range) => match range {
+                GetRange::Bounded(range) => (range.start, range.end),
+                GetRange::Offset(offset) => (offset, object_size_hint),
+                GetRange::Suffix(suffix) => (object_size_hint - suffix, object_size_hint),
+            },
+        };
+        Range {
+            start: start_offset,
+            end: end_offset,
+        }
+    }
+
+    fn align_get_range(&self, range: &GetRange) -> GetRange {
+        match range {
+            GetRange::Bounded(bounded) => {
+                let aligned = self.align_range(bounded, self.part_size);
+                GetRange::Bounded(aligned)
+            }
+            GetRange::Suffix(suffix) => {
+                let suffix_aligned = self.align_range(&(0..*suffix), self.part_size).end;
+                GetRange::Suffix(suffix_aligned)
+            }
+            GetRange::Offset(offset) => {
+                let offset_aligned = *offset - *offset % self.part_size;
+                GetRange::Offset(offset_aligned)
+            }
+        }
     }
 
     fn align_range(&self, range: &Range<usize>, alignment: usize) -> Range<usize> {
