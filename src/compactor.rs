@@ -5,12 +5,14 @@ use crate::config::CompactorOptions;
 use crate::db_state::{SSTableHandle, SortedRun};
 use crate::error::SlateDBError;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::metrics::DbStats;
 use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
 use crate::tablestore::TableStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::runtime::Handle;
 use tracing::{error, warn};
 use ulid::Ulid;
@@ -38,6 +40,7 @@ impl Compactor {
         table_store: Arc<TableStore>,
         options: CompactorOptions,
         tokio_handle: Handle,
+        db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let (err_tx, err_rx) = tokio::sync::oneshot::channel();
@@ -48,6 +51,7 @@ impl Compactor {
                 table_store.clone(),
                 tokio_handle,
                 external_rx,
+                db_stats,
             );
             let mut orchestrator = match load_result {
                 Ok(orchestrator) => orchestrator,
@@ -85,6 +89,7 @@ struct CompactorOrchestrator {
     executor: Box<dyn CompactionExecutor>,
     external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
     worker_rx: crossbeam_channel::Receiver<WorkerToOrchestratorMsg>,
+    db_stats: Arc<DbStats>,
 }
 
 impl CompactorOrchestrator {
@@ -94,6 +99,7 @@ impl CompactorOrchestrator {
         table_store: Arc<TableStore>,
         tokio_handle: Handle,
         external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
+        db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let options = Arc::new(options);
         let stored_manifest =
@@ -120,6 +126,7 @@ impl CompactorOrchestrator {
             executor: Box::new(executor),
             external_rx,
             worker_rx,
+            db_stats,
         };
         Ok(orchestrator)
     }
@@ -232,6 +239,12 @@ impl CompactorOrchestrator {
         self.state.finish_compaction(output_sr);
         self.write_manifest_safely()?;
         self.maybe_schedule_compactions()?;
+        self.db_stats.last_compaction_ts.set(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        );
         Ok(())
     }
 
@@ -346,6 +359,7 @@ mod tests {
             table_store.clone(),
             rt.handle().clone(),
             external_rx,
+            db.metrics(),
         )
         .unwrap();
         let l0_ids_to_compact: Vec<SourceId> = orchestrator

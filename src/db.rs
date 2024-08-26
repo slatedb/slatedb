@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
@@ -11,6 +9,7 @@ use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table_flush::MemtableFlushThreadMsg;
 use crate::mem_table_flush::MemtableFlushThreadMsg::Shutdown;
+use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
@@ -21,6 +20,7 @@ use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
+use std::sync::Arc;
 use tokio::runtime::Handle;
 
 pub(crate) struct DbInner {
@@ -28,6 +28,7 @@ pub(crate) struct DbInner {
     pub(crate) options: DbOptions,
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
+    pub(crate) db_stats: Arc<DbStats>,
 }
 
 impl DbInner {
@@ -43,6 +44,7 @@ impl DbInner {
             options,
             table_store,
             memtable_flush_notifier,
+            db_stats: Arc::new(DbStats::new()),
         };
         db_inner.replay_wal().await?;
         Ok(db_inner)
@@ -309,6 +311,7 @@ impl Db {
                     table_store.clone(),
                     compactor_options.clone(),
                     Handle::current(),
+                    inner.db_stats.clone(),
                 )
                 .await?,
             )
@@ -411,6 +414,10 @@ impl Db {
 
     pub async fn flush(&self) -> Result<(), SlateDBError> {
         self.inner.flush().await
+    }
+
+    pub fn metrics(&self) -> Arc<DbStats> {
+        self.inner.db_stats.clone()
     }
 }
 
@@ -604,6 +611,7 @@ mod tests {
             let kv = iter.next().await.unwrap();
             assert!(kv.is_none());
         }
+        assert!(kv_store.metrics().immutable_memtable_flushes.get() > 0);
     }
 
     #[tokio::test]

@@ -102,7 +102,7 @@ impl DbInner {
                             },
                             MemtableFlushThreadMsg::FlushImmutableMemtables => {
                                 match flusher.flush_imm_memtables_to_l0().await {
-                                    Ok(_) => {}
+                                    Ok(_) => { this.db_stats.immutable_memtable_flushes.inc(); }
                                     Err(err) => print!("error from memtable flush: {}", err),
                                 }
                             }
