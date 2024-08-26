@@ -6,6 +6,8 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use object_store::GetRange;
 use object_store::GetResultPayload;
+use rand::distributions::Alphanumeric;
+use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
 use std::ops::Range;
@@ -83,15 +85,9 @@ impl CachedObjectStore {
         };
 
         let aligned_opts = match &range {
-            None => {
-                // GET without range, if the object size is unknown, we need prefetch the entire object.
-                GetOptions::default()
-            }
+            None => GetOptions::default(),
             Some(range) => match range {
                 GetRange::Bounded(bounded) => {
-                    // GET without bounded range, do not need care about the object size. in practice,
-                    // Bounded range is often smaller than the cached part (64mb), so we can simply
-                    // not prefetch the object.
                     let start_aligned = bounded.start - bounded.start % self.part_size;
                     let end_aligned = bounded.end + self.part_size - bounded.end % self.part_size;
                     GetOptions {
@@ -103,9 +99,6 @@ impl CachedObjectStore {
                     }
                 }
                 GetRange::Suffix(suffix) => {
-                    // GET with suffix range, if the object size is unknown, we can not determine the
-                    // actual range to prefetch, so we'll fallback to the object store to get the missing
-                    // parts.
                     let suffix_aligned = *suffix + self.part_size - *suffix % self.part_size;
                     GetOptions {
                         range: Some(GetRange::Suffix(suffix_aligned)),
@@ -113,9 +106,6 @@ impl CachedObjectStore {
                     }
                 }
                 GetRange::Offset(offset) => {
-                    // GET with offset, same as Suffix, if the object size is unknown, we can not determine
-                    // the actual range to prefetch, so fallback to the object store to get the missing
-                    // parts.
                     let offset_aligned = *offset - *offset % self.part_size;
                     GetOptions {
                         range: Some(GetRange::Offset(offset_aligned)),
@@ -483,8 +473,8 @@ impl DiskCacheEntry {
         }
 
         // save the file content to tmp. if the disk is full, we'll get an error here.
-        // TODO: randomize the tmp path
-        let tmp_part_file_path = part_file_path.with_extension("tmp");
+        let tmp_part_file_path =
+            part_file_path.with_extension(format!("tmp{}", self.make_rand_suffix()));
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -527,8 +517,8 @@ impl DiskCacheEntry {
         };
         let buf = serde_json::to_vec(&meta).map_err(wrap_io_err)?;
 
-        // TODO: randomize the tmp path
-        let tmp_meta_file_path = meta_file_path.with_extension("tmp");
+        let tmp_meta_file_path =
+            meta_file_path.with_extension(format!("tmp{}", self.make_rand_suffix()));
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -569,6 +559,11 @@ impl DiskCacheEntry {
         self.root_folder
             .join(self.location.to_string())
             .with_extension("_meta")
+    }
+
+    fn make_rand_suffix(&self) -> String {
+        let mut rng = rand::thread_rng();
+        (0..6).map(|_| rng.sample(Alphanumeric) as char).collect()
     }
 }
 
