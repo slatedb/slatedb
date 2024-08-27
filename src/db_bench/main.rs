@@ -71,17 +71,19 @@ async fn main() {
     );
 
     let bench = match args.command {
-        DbBenchCommand::Write(write) => {
-            let key_gen_supplier = write.key_gen_supplier();
-            let write_options = write.write_options();
-            DbBench::write(
+        DbBenchCommand::ReadWrite(readwrite) => {
+            let key_gen_supplier = readwrite.key_gen_supplier();
+            let write_options = readwrite.write_options();
+            let read_options = readwrite.read_options();
+            DbBench::read_write(
                 key_gen_supplier,
-                write.val_len,
+                readwrite.val_len,
                 write_options,
-                write.write_rate,
-                write.write_tasks,
-                write.num_rows,
-                write.duration.map(|d| Duration::from_millis(d as u64)),
+                read_options,
+                readwrite.rate,
+                readwrite.tasks,
+                readwrite.num_rows,
+                readwrite.duration.map(|d| Duration::from_millis(d as u64)),
                 db.clone(),
             )
         }

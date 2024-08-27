@@ -1,8 +1,9 @@
 use crate::db_bench::{KeyGenerator, RandomKeyGenerator};
 use clap::builder::PossibleValue;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use slatedb::config::WriteOptions;
+use slatedb::config::{ReadOptions, WriteOptions};
 use std::fmt::{Display, Formatter};
+use slatedb::config::ReadLevel::{Commited, Uncommitted};
 
 #[derive(Parser, Clone)]
 #[command(version, about, long_about=None)]
@@ -33,11 +34,11 @@ pub(crate) fn parse_args() -> DbBenchArgs {
 
 #[derive(Subcommand, Clone)]
 pub(crate) enum DbBenchCommand {
-    Write(WriteArgs),
+    ReadWrite(ReadWriteArgs),
 }
 
 #[derive(Args, Clone)]
-pub(crate) struct WriteArgs {
+pub(crate) struct ReadWriteArgs {
     #[arg(long)]
     pub(crate) duration: Option<u32>,
     #[arg(
@@ -49,17 +50,19 @@ pub(crate) struct WriteArgs {
     key_len: usize,
     #[arg(long, default_value_t = false)]
     await_durable: bool,
+    #[arg(long, default_value_t = true)]
+    read_committed: bool,
     #[arg(long)]
-    pub(crate) write_rate: Option<u32>,
+    pub(crate) rate: Option<u32>,
     #[arg(long, default_value_t = 4)]
-    pub(crate) write_tasks: u32,
+    pub(crate) tasks: u32,
     #[arg(long)]
     pub(crate) num_rows: Option<u64>,
-    #[arg(long)]
+    #[arg(long, default_value_t = 128)]
     pub(crate) val_len: usize,
 }
 
-impl WriteArgs {
+impl ReadWriteArgs {
     pub(crate) fn key_gen_supplier(&self) -> Box<dyn Fn() -> Box<dyn KeyGenerator>> {
         let supplier = match self.key_distribution {
             KeyDistribution::Random => {
@@ -74,6 +77,15 @@ impl WriteArgs {
         WriteOptions {
             await_durable: self.await_durable,
         }
+    }
+
+    pub(crate) fn read_options(&self) -> ReadOptions {
+        let read_level = if self.read_committed {
+            Commited
+        } else {
+            Uncommitted
+        };
+        ReadOptions{ read_level, }
     }
 }
 

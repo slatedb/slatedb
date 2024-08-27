@@ -12,6 +12,7 @@ pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
 /// write is considered durably committed if all future calls to read are guaranteed
 /// to serve the data written by the write, until some later durably committed write
 /// updates the same key.
+#[derive(Clone)]
 pub enum ReadLevel {
     /// Client reads will only see data that's been committed durably to the DB.
     Commited,
@@ -23,6 +24,7 @@ pub enum ReadLevel {
 
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
+#[derive(Clone)]
 pub struct ReadOptions {
     /// The read commit level for read operations.
     pub read_level: ReadLevel,
