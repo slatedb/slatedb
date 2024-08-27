@@ -1,7 +1,6 @@
 use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::db_state::{SSTableHandle, SsTableId};
-use crate::disk_cache::{DiskCacheOptions, DiskCachedObjectStore};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
@@ -20,11 +19,6 @@ use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-
-#[derive(Default, Clone)]
-pub struct TableStoreOptions {
-    pub fp_registry: Option<Arc<FailPointRegistry>>,
-}
 
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
@@ -78,23 +72,20 @@ impl TableStore {
         sst_format: SsTableFormat,
         root_path: Path,
     ) -> Self {
-        Self::new_with_opts(
+        Self::new_with_fp_registry(
             object_store,
             sst_format,
             root_path,
-            TableStoreOptions { fp_registry: None },
+            Arc::new(FailPointRegistry::new()),
         )
     }
 
-    pub fn new_with_opts(
+    pub fn new_with_fp_registry(
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
         root_path: Path,
-        opts: TableStoreOptions,
+        fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
-        let fp_registry = opts
-            .fp_registry
-            .unwrap_or_else(|| Arc::new(FailPointRegistry::new()));
         Self {
             object_store: object_store.clone(),
             sst_format,

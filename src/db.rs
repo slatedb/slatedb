@@ -4,7 +4,7 @@ use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
 use crate::db_state::{CoreDbState, DbState, SSTableHandle, SortedRun, SsTableId};
-use crate::disk_cache::{self, DiskCacheOptions, DiskCachedObjectStore};
+use crate::disk_cache::{DiskCacheOptions, DiskCachedObjectStore};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -15,7 +15,7 @@ use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
-use crate::tablestore::{TableStore, TableStoreOptions};
+use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
@@ -320,14 +320,11 @@ impl Db {
             ));
         }
 
-        let table_store = Arc::new(TableStore::new_with_opts(
+        let table_store = Arc::new(TableStore::new_with_fp_registry(
             object_store.clone(),
             sst_format,
             path.clone(),
-            TableStoreOptions {
-                fp_registry: Some(fp_registry),
-                ..Default::default()
-            },
+            fp_registry,
         ));
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let mut manifest = Self::init_db(&manifest_store).await?;
