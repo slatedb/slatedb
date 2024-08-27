@@ -23,6 +23,12 @@ use object_store::{
     PutMultipartOpts, PutOptions, PutPayload, PutResult,
 };
 
+#[derive(Debug, Clone)]
+pub struct DiskCacheOptions {
+    pub root_folder: std::path::PathBuf,
+    pub part_size: usize,
+}
+
 #[allow(unused)]
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {
@@ -32,6 +38,14 @@ pub(crate) struct CachedObjectStore {
 }
 
 impl CachedObjectStore {
+    pub fn new(object_store: Arc<dyn ObjectStore>, opts: DiskCacheOptions) -> Self {
+        Self {
+            object_store,
+            root_folder: opts.root_folder,
+            part_size: opts.part_size,
+        }
+    }
+
     async fn cached_get_opts(
         &self,
         location: &Path,

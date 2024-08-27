@@ -247,6 +247,7 @@ impl Db {
             object_store.clone(),
             sst_format,
             path.clone(),
+            None,
             fp_registry.clone(),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
@@ -432,6 +433,7 @@ mod tests {
             object_store.clone(),
             sst_format,
             path.clone(),
+            None,
         ));
 
         // Write data a few times such that each loop results in a memtable flush

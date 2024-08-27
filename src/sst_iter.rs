@@ -229,7 +229,12 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 3, None);
-        let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path.clone(),
+            None,
+        ));
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
         builder.add(b"key2", Some(b"value2")).unwrap();
@@ -265,7 +270,12 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 3, None);
-        let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path.clone(),
+            None,
+        ));
         let mut builder = table_store.table_builder();
 
         for i in 0..1000 {
@@ -301,7 +311,12 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(128, 1, None);
-        let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path.clone(),
+            None,
+        ));
         let first_key = [b'a'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'z');
         let mut test_case_key_gen = key_gen.clone();
@@ -335,7 +350,12 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(128, 1, None);
-        let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path.clone(),
+            None,
+        ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
         let mut expected_key_gen = key_gen.clone();
@@ -362,7 +382,12 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(128, 1, None);
-        let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path.clone(),
+            None,
+        ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
         let first_val = [2u8; 16];

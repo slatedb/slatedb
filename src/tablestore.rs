@@ -1,5 +1,6 @@
 use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
+use crate::cached_object_store::{CachedObjectStore, DiskCacheOptions};
 use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
@@ -65,21 +66,27 @@ impl TableStore {
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
         root_path: Path,
+        disk_cache_opts: Option<DiskCacheOptions>,
     ) -> Self {
         Self::new_with_fp_registry(
             object_store,
             sst_format,
             root_path,
+            disk_cache_opts,
             Arc::new(FailPointRegistry::new()),
         )
     }
 
     pub fn new_with_fp_registry(
-        object_store: Arc<dyn ObjectStore>,
+        mut object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
         root_path: Path,
+        disk_cache_opts: Option<DiskCacheOptions>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
+        if let Some(disk_cache_opts) = disk_cache_opts {
+            object_store = Arc::new(CachedObjectStore::new(object_store, disk_cache_opts));
+        }
         Self {
             object_store: object_store.clone(),
             sst_format,
@@ -338,7 +345,7 @@ mod tests {
         // given:
         let os = Arc::new(object_store::memory::InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
-        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
         let id = SsTableId::Compacted(Ulid::new());
 
         // when:
