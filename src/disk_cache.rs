@@ -46,6 +46,18 @@ impl DiskCachedObjectStore {
         }
     }
 
+    async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+        let entry = DiskCacheEntry {
+            root_folder: self.root_folder.clone(),
+            location: location.clone(),
+            part_size: self.part_size,
+        };
+        match entry.read_meta().await {
+            Ok(Some(meta)) => Ok(meta),
+            _ => self.object_store.head(location).await,
+        }
+    }
+
     async fn cached_get_opts(
         &self,
         location: &Path,
@@ -299,7 +311,7 @@ impl ObjectStore for DiskCachedObjectStore {
     }
 
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        self.object_store.head(location).await
+        self.cached_head(location).await
     }
 
     async fn put_opts(
