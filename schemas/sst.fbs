@@ -8,21 +8,33 @@ table CompactedSsTable {
     info: SsTableInfo;
 }
 
+enum CompressionFormat: byte {
+    None,
+    Snappy,
+    Zlib,
+    Lz4,
+    Zstd
+}
+
 // Has metadata about a SST file.
 table SsTableInfo {
     // First key in the SST file.
     first_key: [ubyte];
 
-    // TODO: we should move this index out into its own object
-    //       https://github.com/slatedb/slatedb/issues/88
-    // Sequence of block metadata. SST files could have multiple blocks.
-    block_meta: [BlockMeta] (required);
+    // Offset of the index block.
+    index_offset: ulong;
+
+    // Length of the index block.
+    index_len: ulong;
 
     // Offset of the bloom filter.
     filter_offset: ulong;
 
     // Length of bloom filter. Length will be zero if filter is not present.
     filter_len: ulong;
+
+    // Type of compression algorithm used.
+    compression_format: CompressionFormat;
 }
 
 table BlockMeta {
@@ -31,4 +43,8 @@ table BlockMeta {
 
     // First key contained in the block.
     first_key: [ubyte] (required);
+}
+
+table SsTableIndex {
+    block_meta: [BlockMeta] (required);
 }

@@ -4,13 +4,17 @@ use crate::cached_object_store::{CachedObjectStore, DiskCacheOptions};
 use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
+use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
+use crate::transactional_object_store::{
+    DelegatingTransactionalObjectStore, TransactionalObjectStore,
+};
 use bytes::{BufMut, Bytes};
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::StreamExt;
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
-use object_store::{ObjectStore, PutPayload};
+use object_store::ObjectStore;
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
@@ -23,6 +27,7 @@ pub struct TableStore {
     root_path: Path,
     wal_path: &'static str,
     compacted_path: &'static str,
+    #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
     // TODO: we cache the filters here for now, so the db doesn't need to reload them
     //       for each read. This means that all the filters need to fit in memory.
@@ -30,6 +35,7 @@ pub struct TableStore {
     //       the cache and get rid of this.
     //       https://github.com/slatedb/slatedb/issues/89
     filter_cache: RwLock<HashMap<SsTableId, Option<Arc<BloomFilter>>>>,
+    transactional_wal_store: Arc<dyn TransactionalObjectStore>,
 }
 
 struct ReadOnlyObject {
@@ -90,11 +96,15 @@ impl TableStore {
         Self {
             object_store: object_store.clone(),
             sst_format,
-            root_path,
+            root_path: root_path.clone(),
             wal_path: "wal",
             compacted_path: "compacted",
             fp_registry,
             filter_cache: RwLock::new(HashMap::new()),
+            transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
+                Path::from("/"),
+                object_store.clone(),
+            )),
         }
     }
 
@@ -160,7 +170,6 @@ impl TableStore {
             )))
         );
 
-        let path = self.path(id);
         let total_size = encoded_sst
             .unconsumed_blocks
             .iter()
@@ -170,10 +179,19 @@ impl TableStore {
         for chunk in encoded_sst.unconsumed_blocks {
             data.put_slice(chunk.as_ref())
         }
-        self.object_store
-            .put(&path, PutPayload::from(data))
+
+        let path = self.path(id);
+        self.transactional_wal_store
+            .put_if_not_exists(&path, Bytes::from(data))
             .await
-            .map_err(SlateDBError::ObjectStoreError)?;
+            .map_err(|e| match e {
+                object_store::Error::AlreadyExists { path: _, source: _ } => match id {
+                    SsTableId::Wal(_) => SlateDBError::Fenced,
+                    SsTableId::Compacted(_) => SlateDBError::ObjectStoreError(e),
+                },
+                _ => SlateDBError::ObjectStoreError(e),
+            })?;
+
         self.cache_filter(id.clone(), encoded_sst.filter);
         Ok(SSTableHandle {
             id: id.clone(),
@@ -224,6 +242,19 @@ impl TableStore {
         Ok(filter)
     }
 
+    pub(crate) async fn read_index(
+        &self,
+        handle: &SSTableHandle,
+    ) -> Result<SsTableIndexOwned, SlateDBError> {
+        let path = self.path(&handle.id);
+        let obj = ReadOnlyObject {
+            object_store: self.object_store.clone(),
+            path,
+        };
+        self.sst_format.read_index(&handle.info, &obj).await
+    }
+
+    #[allow(dead_code)]
     pub(crate) async fn read_blocks(
         &self,
         handle: &SSTableHandle,
@@ -234,8 +265,26 @@ impl TableStore {
             object_store: self.object_store.clone(),
             path,
         };
+        let index = self.sst_format.read_index(&handle.info, &obj).await?;
         self.sst_format
-            .read_blocks(&handle.info, blocks, &obj)
+            .read_blocks(&handle.info, &index, blocks, &obj)
+            .await
+    }
+
+    // TODO: we probably won't need this once we're caching the index
+    pub(crate) async fn read_blocks_using_index(
+        &self,
+        handle: &SSTableHandle,
+        index: Arc<SsTableIndexOwned>,
+        blocks: Range<usize>,
+    ) -> Result<VecDeque<Block>, SlateDBError> {
+        let path = self.path(&handle.id);
+        let obj = ReadOnlyObject {
+            object_store: self.object_store.clone(),
+            path,
+        };
+        self.sst_format
+            .read_blocks(&handle.info, index.as_ref(), blocks, &obj)
             .await
     }
 
@@ -250,7 +299,10 @@ impl TableStore {
             object_store: self.object_store.clone(),
             path,
         };
-        self.sst_format.read_block(&handle.info, block, &obj).await
+        let index = self.sst_format.read_index(&handle.info, &obj).await?;
+        self.sst_format
+            .read_block(&handle.info, &index, block, &obj)
+            .await
     }
 
     fn path(&self, id: &SsTableId) -> Path {
@@ -328,6 +380,7 @@ impl<'a> EncodedSsTableWriter<'a> {
 #[cfg(test)]
 mod tests {
     use crate::db_state::SsTableId;
+    use crate::error;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
@@ -357,7 +410,7 @@ mod tests {
         let sst = writer.close().await.unwrap();
 
         // then:
-        let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1);
+        let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1).await.unwrap();
         assert_iterator(
             &mut iter,
             &[
@@ -377,5 +430,27 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_wal_write_should_fail_when_fenced() {
+        let os = Arc::new(object_store::memory::InMemory::new());
+        let format = SsTableFormat::new(32, 1, None);
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
+        let wal_id = SsTableId::Wal(1);
+
+        // write a wal sst
+        let mut sst1 = ts.table_builder();
+        sst1.add(b"key", Some(b"value")).unwrap();
+        let table = sst1.build().unwrap();
+        ts.write_sst(&wal_id, table).await.unwrap();
+
+        let mut sst2 = ts.table_builder();
+        sst2.add(b"key", Some(b"value")).unwrap();
+        let table2 = sst2.build().unwrap();
+
+        // write another walsst with the same id.
+        let result = ts.write_sst(&wal_id, table2).await;
+        assert!(matches!(result, Err(error::SlateDBError::Fenced)));
     }
 }

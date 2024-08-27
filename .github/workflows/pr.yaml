@@ -2,6 +2,8 @@ name: PR Checks
 
 on:
   push:
+      branches:
+        - main
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -50,4 +52,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Tests
-        run: cargo test --verbose
+        run: cargo test --all-features --verbose

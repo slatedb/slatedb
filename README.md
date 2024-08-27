@@ -43,8 +43,9 @@ async fn main() {
     // Setup
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let options = DbOptions {
-        flush_ms: 100,
+        flush_interval: Duration::from_millis(100),
         manifest_poll_interval: Duration::from_millis(100),
+        #[cfg(feature = "wal_disable")] wal_enabled: true,
         min_filter_keys: 10,
         l0_sst_size_bytes: 128,
         compactor_options: Some(CompactorOptions::default()),

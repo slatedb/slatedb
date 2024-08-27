@@ -69,7 +69,7 @@ SlateDB doesn't have compaction implemented at the moment. We don't have level-1
 
 ### Writes
 
-A `put()` is performed by inserting the key-value pair into `memtable`. Once `flush_ms` (a configuration value) has expired, a flusher thread (in `flush.rs`) locks `DbState` and performs the following operations:
+A `put()` is performed by inserting the key-value pair into `memtable`. Once `flush_interval` (a configuration value) has expired, a flusher thread (in `flush.rs`) locks `DbState` and performs the following operations:
 
 1. Replace `memtable` with a new (empty) MemTable.
 2. Insert the old `memtable` into index 0 of `imm_memtables`.
@@ -341,11 +341,11 @@ Whether this is reasonable or not depends on how frequently manifests are update
 
 SlateDB's WAL is a sequentially ordered contiguous list of SSTs. SST object names are formatted as 20 digit zero-padded numbers to fit u64's maximum integer and to support lexicographical sorting. Each SST contains zero or more sorted key-value pairs. The WAL is used to store writes that have not yet been compacted.
 
-Traditionally, LSMs store WAL data in a different format from the SSTs; this is because each `put()` call results in a single key-value write to the WAL. But SlateDB doesn't write to the WAL on each `put()`. Instead, `put()`'s are batched together based on `flush_ms`, `flush_bytes` ([#30](https://github.com/slatedb/slatedb/issues/30)), or `skip_memtable_bytes` ([#31](https://github.com/slatedb/slatedb/issues/31)). Based on these configurations, multiple key-value pairs are stored in the WAL in a single write. Thus, SlateDB uses SSTs for both the WAL and compacted files.
+Traditionally, LSMs store WAL data in a different format from the SSTs; this is because each `put()` call results in a single key-value write to the WAL. But SlateDB doesn't write to the WAL on each `put()`. Instead, `put()`'s are batched together based on `flush_interval`, `flush_bytes` ([#30](https://github.com/slatedb/slatedb/issues/30)), or `skip_memtable_bytes` ([#31](https://github.com/slatedb/slatedb/issues/31)). Based on these configurations, multiple key-value pairs are stored in the WAL in a single write. Thus, SlateDB uses SSTs for both the WAL and compacted files.
 
 _NOTE: We discussed using a different format for the WAL [here](https://github.com/slatedb/slatedb/pull/39/files#r1590087062), but decided against it._
 
-This design does not use [prefixes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-prefixes.html). AWS allows, "3,500 PUT/COPY/POST/DELETE or 5,500 GET/HEAD requests per second per partitioned Amazon S3 prefix." This limits a single writer to 3,500 writes and 5,500 reads per-second. With a `flush_ms` set to 1, a client would write 1,000 writes per-second (not including compactions). Wth caching, the client should be far below the 5,500 reads per-second limit.
+This design does not use [prefixes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-prefixes.html). AWS allows, "3,500 PUT/COPY/POST/DELETE or 5,500 GET/HEAD requests per second per partitioned Amazon S3 prefix." This limits a single writer to 3,500 writes and 5,500 reads per-second. With a `flush_interval` set to 1ms, a client would write 1,000 writes per-second (not including compactions). Wth caching, the client should be far below the 5,500 reads per-second limit.
 
 This design also does not expose writer epochs in WAL SST filenames (e.g. `[writer_epoch].[sequence_number].sst`). We discussed this in detail [here](https://github.com/slatedb/slatedb/pull/39/files#r1588892292) and [here](https://github.com/slatedb/slatedb/pull/24/files#r1585569744). Ultimately, we chose "un-namespaced" filenames (i.e. filenames without epoch prefix) because it's simpler to reason about.
 
@@ -366,7 +366,7 @@ A full read-modify-write Manifest update contains the following steps:
 
 (4) is a CAS operation. Clients will use either real CAS (pattern (1)) or two-phase write (pattern (5)) to update the manifest.
 
-If the CAS write fails in (4), the client must retry the entire process. This is because the client now has. The client must find the (new) latest manifest and re-apply its changes.
+If the CAS write fails in (4), the client must retry the entire process. This is because the client now has an outdated view of the manifest. It must find the (new) latest manifest and re-apply its changes.
 
 Three different processes update the manifest:
 
