@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::{compactor::Compactor, inmemory_cache::BlockCache};
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
@@ -16,6 +15,7 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
+use crate::{compactor::Compactor, inmemory_cache::BlockCache};
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
@@ -243,11 +243,9 @@ impl Db {
     ) -> Result<Self, SlateDBError> {
         let sst_format =
             SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
-        let block_cache = if let Some(block_cache_size) = options.block_cache_size_bytes {
-            Some(Arc::new(BlockCache::builder().max_capacity(block_cache_size).build()))
-        } else {
-            None
-        };
+        let block_cache = options.block_cache_size_bytes.map(|block_cache_size| {
+            Arc::new(BlockCache::builder().max_capacity(block_cache_size).build())
+        });
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             object_store.clone(),
             sst_format,
