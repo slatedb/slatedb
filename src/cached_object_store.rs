@@ -44,7 +44,8 @@ impl CachedObjectStore {
         };
 
         let meta = self.maybe_prefetch_range(&entry, &opts.range).await?;
-        let parts = self.split_range_into_parts(opts.range.clone(), meta.size);
+        let range = self.canonicalize_range(opts.range, meta.size)?;
+        let parts = self.split_range_into_parts(range.clone());
 
         // read parts, and concatenate them into a single stream. please note that some of these part may not be cached,
         // we'll still fallback to the object store to get the missing parts.
@@ -53,11 +54,10 @@ impl CachedObjectStore {
             .map(|(part_id, range_in_part)| self.read_part(location, part_id, range_in_part))
             .collect::<Vec<_>>();
         let result_stream = stream::iter(futures).then(|fut| fut).boxed();
-        let result_range = self.canonicalize_range(opts.range, meta.size);
 
         Ok(GetResult {
             meta,
-            range: result_range,
+            range,
             attributes: Default::default(),
             payload: GetResultPayload::Stream(result_stream),
         })
@@ -104,13 +104,7 @@ impl CachedObjectStore {
 
     // given the range and object size, split the range into parts, and return the part id and the range
     // inside the part.
-    // the object_size_hint is not needed if the range is bounded, but it's needed in all other cases.
-    fn split_range_into_parts(
-        &self,
-        get_range: Option<GetRange>,
-        object_size_hint: usize,
-    ) -> Vec<(PartID, Range<usize>)> {
-        let range = self.canonicalize_range(get_range, object_size_hint);
+    fn split_range_into_parts(&self, range: Range<usize>) -> Vec<(PartID, Range<usize>)> {
         let range_aligned = self.align_range(&range, self.part_size);
         let start_part = range_aligned.start / self.part_size;
         let end_part = range_aligned.end / self.part_size;
@@ -192,22 +186,54 @@ impl CachedObjectStore {
 
     // given the range and object size, return the canonicalized `Range<usize>` with concrete start and
     // end.
-    fn canonicalize_range(&self, range: Option<GetRange>, object_size_hint: usize) -> Range<usize> {
+    fn canonicalize_range(
+        &self,
+        range: Option<GetRange>,
+        object_size: usize,
+    ) -> object_store::Result<Range<usize>> {
         let (start_offset, end_offset) = match range {
-            None => (0, object_size_hint),
+            None => (0, object_size),
             Some(range) => match range {
-                GetRange::Bounded(range) => (range.start, range.end.min(object_size_hint)),
-                GetRange::Offset(offset) => (offset, object_size_hint),
-                GetRange::Suffix(suffix) => (
-                    object_size_hint.checked_sub(suffix).unwrap_or(0),
-                    object_size_hint,
-                ),
+                GetRange::Bounded(range) => {
+                    if range.start > object_size {
+                        return Err(object_store::Error::Generic {
+                            store: "cached_object_store",
+                            source: Box::new(InvalidGetRange::StartTooLarge {
+                                requested: range.start,
+                                length: object_size,
+                            }),
+                        });
+                    }
+                    if range.start > range.end {
+                        return Err(object_store::Error::Generic {
+                            store: "cached_object_store",
+                            source: Box::new(InvalidGetRange::Inconsistent {
+                                start: range.start,
+                                end: range.end,
+                            }),
+                        });
+                    }
+                    (range.start, range.end.min(object_size))
+                }
+                GetRange::Offset(offset) => {
+                    if offset > object_size {
+                        return Err(object_store::Error::Generic {
+                            store: "cached_object_store",
+                            source: Box::new(InvalidGetRange::StartTooLarge {
+                                requested: offset,
+                                length: object_size,
+                            }),
+                        });
+                    }
+                    (offset, object_size)
+                }
+                GetRange::Suffix(suffix) => (object_size.saturating_sub(suffix), object_size),
             },
         };
-        Range {
+        Ok(Range {
             start: start_offset,
             end: end_offset,
-        }
+        })
     }
 
     fn align_get_range(&self, range: &GetRange) -> GetRange {
@@ -330,6 +356,17 @@ struct DiskCacheMeta {
     pub size: usize,
     pub e_tag: Option<String>,
     pub version: Option<String>,
+}
+
+// it seems that object_store did not expose this error type, duplicate it here.
+// TODO: raise a pr to expose this error type in object_store.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum InvalidGetRange {
+    #[error("Range start too large, requested: {requested}, length: {length}")]
+    StartTooLarge { requested: usize, length: usize },
+
+    #[error("Range started at {start} and ended at {end}")]
+    Inconsistent { start: usize, end: usize },
 }
 
 struct DiskCacheEntry {
@@ -587,7 +624,6 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
     use std::sync::Arc;
 
     use bytes::Bytes;
@@ -731,23 +767,23 @@ mod tests {
                 expect: vec![(0, 0..1024)],
             },
             Test {
-                input: (Some(GetRange::Bounded(128..1024)), 2),
+                input: (Some(GetRange::Bounded(128..1024)), 20000),
                 expect: vec![(0, 128..1024)],
             },
             Test {
-                input: (Some(GetRange::Bounded(128..1024 + 12)), 2),
+                input: (Some(GetRange::Bounded(128..1024 + 12)), 20000),
                 expect: vec![(0, 128..1024), (1, 0..12)],
             },
             Test {
-                input: (Some(GetRange::Bounded(128..1024 * 2 + 12)), 2),
+                input: (Some(GetRange::Bounded(128..1024 * 2 + 12)), 20000),
                 expect: vec![(0, 128..1024), (1, 0..1024), (2, 0..12)],
             },
             Test {
-                input: (Some(GetRange::Bounded(1024 * 2..1024 * 3 + 12)), 2),
+                input: (Some(GetRange::Bounded(1024 * 2..1024 * 3 + 12)), 200000),
                 expect: vec![(2, 0..1024), (3, 0..12)],
             },
             Test {
-                input: (Some(GetRange::Bounded(1024 * 2 - 2..1024 * 3 + 12)), 2),
+                input: (Some(GetRange::Bounded(1024 * 2 - 2..1024 * 3 + 12)), 20000),
                 expect: vec![(1, 1022..1024), (2, 0..1024), (3, 0..12)],
             },
             Test {
@@ -773,7 +809,10 @@ mod tests {
         ];
 
         for t in tests.iter() {
-            let parts = cached_store.split_range_into_parts(t.input.0.clone(), t.input.1);
+            let range = cached_store
+                .canonicalize_range(t.input.0.clone(), t.input.1)
+                .unwrap();
+            let parts = cached_store.split_range_into_parts(range);
             assert_eq!(parts, t.expect, "input: {:?}", t.input);
         }
     }
@@ -845,7 +884,7 @@ mod tests {
             Some(GetRange::Offset(1000)),
             Some(GetRange::Offset(0)),
             Some(GetRange::Offset(1028)),
-            //Some(GetRange::Offset(260817)),
+            Some(GetRange::Offset(260817)),
         ];
 
         // test get a range
@@ -875,7 +914,9 @@ mod tests {
                     assert_eq!(want.bytes().await?, got.bytes().await?);
                 }
                 (Err(want), Err(got)) => {
-                    assert_eq!(want.type_id(), got.type_id());
+                    if want.to_string().to_lowercase().contains("range") {
+                        assert!(got.to_string().to_lowercase().contains("range"));
+                    }
                 }
                 (origin_result, cached_result) => {
                     panic!("expect: {:?}, got: {:?}", origin_result, cached_result);
