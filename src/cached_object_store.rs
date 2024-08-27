@@ -590,7 +590,7 @@ mod tests {
 
     use bytes::Bytes;
     use object_store::path::Path;
-    use object_store::{GetRange, ObjectStore, PutPayload};
+    use object_store::{GetOptions, GetRange, ObjectStore, PutPayload};
     use rand::{thread_rng, Rng};
 
     use crate::cached_object_store::PartID;
@@ -814,5 +814,59 @@ mod tests {
         assert_eq!(aligned, GetRange::Offset(1024));
         let aligned = cached_store.align_get_range(&GetRange::Offset(12));
         assert_eq!(aligned, GetRange::Offset(0));
+    }
+
+    #[tokio::test]
+    async fn test_cached_object_store_impl_object_store() -> object_store::Result<()> {
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let test_cache_folder = new_test_cache_folder();
+        let cached_store = CachedObjectStore {
+            root_folder: test_cache_folder,
+            object_store: object_store.clone(),
+            part_size: 1024,
+        };
+
+        let test_path = Path::from("/data/testdata1");
+        let test_payload = gen_rand_bytes(1024 * 3 + 2);
+        object_store
+            .put(&test_path, PutPayload::from_bytes(test_payload.clone()))
+            .await?;
+
+        // test get entire object
+        let result = cached_store.get(&test_path).await?;
+        assert_eq!(result.bytes().await?, test_payload);
+
+        let test_ranges = vec![
+            None,
+            Some(GetRange::Bounded(1000..2048)),
+            Some(GetRange::Suffix(10)),
+            Some(GetRange::Offset(1000)),
+            Some(GetRange::Offset(0)),
+            Some(GetRange::Offset(1028)),
+        ];
+
+        // test get a range
+        for range in test_ranges.iter() {
+            let origin_result = object_store
+                .get_opts(
+                    &test_path,
+                    GetOptions {
+                        range: range.clone(),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            let cached_result = cached_store
+                .get_opts(
+                    &test_path,
+                    GetOptions {
+                        range: range.clone(),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            assert_eq!(cached_result.bytes().await?, origin_result.bytes().await?);
+        }
+        Ok(())
     }
 }
