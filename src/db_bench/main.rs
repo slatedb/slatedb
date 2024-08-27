@@ -80,6 +80,7 @@ async fn main() {
                 readwrite.val_len,
                 write_options,
                 read_options,
+                readwrite.write_pct,
                 readwrite.rate,
                 readwrite.tasks,
                 readwrite.num_rows,

@@ -53,6 +53,8 @@ pub(crate) struct ReadWriteArgs {
     #[arg(long, default_value_t = true)]
     read_committed: bool,
     #[arg(long)]
+    pub(crate) write_pct: u32,
+    #[arg(long)]
     pub(crate) rate: Option<u32>,
     #[arg(long, default_value_t = 4)]
     pub(crate) tasks: u32,
