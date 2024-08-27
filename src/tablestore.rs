@@ -21,6 +21,12 @@ use std::ops::Range;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
+#[derive(Default, Clone)]
+pub struct TableStoreOptions {
+    pub fp_registry: Option<Arc<FailPointRegistry>>,
+    pub disk_cache_opts: Option<DiskCacheOptions>,
+}
+
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,
@@ -73,25 +79,29 @@ impl TableStore {
         sst_format: SsTableFormat,
         root_path: Path,
     ) -> Self {
-        Self::new_with_fp_registry(
+        Self::new_with_opts(
             object_store,
             sst_format,
             root_path,
-            None,
-            Arc::new(FailPointRegistry::new()),
+            TableStoreOptions {
+                fp_registry: None,
+                disk_cache_opts: None,
+            },
         )
     }
 
-    pub fn new_with_fp_registry(
+    pub fn new_with_opts(
         mut object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
         root_path: Path,
-        disk_cache_opts: Option<DiskCacheOptions>,
-        fp_registry: Arc<FailPointRegistry>,
+        opts: TableStoreOptions,
     ) -> Self {
-        if let Some(disk_cache_opts) = disk_cache_opts {
+        if let Some(disk_cache_opts) = opts.disk_cache_opts {
             object_store = Arc::new(CachedObjectStore::new(object_store, disk_cache_opts));
         }
+        let fp_registry = opts
+            .fp_registry
+            .unwrap_or_else(|| Arc::new(FailPointRegistry::new()));
         Self {
             object_store: object_store.clone(),
             sst_format,

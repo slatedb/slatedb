@@ -14,7 +14,7 @@ use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
-use crate::tablestore::TableStore;
+use crate::tablestore::{TableStore, TableStoreOptions};
 use crate::types::ValueDeletable;
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
@@ -308,12 +308,14 @@ impl Db {
     ) -> Result<Self, SlateDBError> {
         let sst_format =
             SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
-        let table_store = Arc::new(TableStore::new_with_fp_registry(
+        let table_store = Arc::new(TableStore::new_with_opts(
             object_store.clone(),
             sst_format,
             path.clone(),
-            None,
-            fp_registry.clone(),
+            TableStoreOptions {
+                fp_registry: Some(fp_registry),
+                ..Default::default()
+            },
         ));
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let mut manifest = Self::init_db(&manifest_store).await?;
