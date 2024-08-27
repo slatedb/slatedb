@@ -610,7 +610,6 @@ mod tests {
             object_store.clone(),
             sst_format,
             path.clone(),
-            None,
         ));
 
         // Write data a few times such that each loop results in a memtable flush

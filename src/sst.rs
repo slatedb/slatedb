@@ -514,7 +514,7 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(32, 0, None);
-        let table_store = TableStore::new(object_store, format, root_path, None);
+        let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 8], Some(&[b'1'; 8])).unwrap();
         builder.add(&[b'b'; 8], Some(&[b'2'; 8])).unwrap();
@@ -558,7 +558,7 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(32, 0, None);
-        let table_store = TableStore::new(object_store, format.clone(), root_path, None);
+        let table_store = TableStore::new(object_store, format.clone(), root_path);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 8], Some(&[b'1'; 8])).unwrap();
         builder.add(&[b'b'; 8], Some(&[b'2'; 8])).unwrap();
@@ -618,7 +618,7 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 0, None);
-        let table_store = TableStore::new(object_store, format, root_path, None);
+        let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
         builder.add(b"key2", Some(b"value2")).unwrap();
@@ -664,7 +664,7 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 3, None);
-        let table_store = TableStore::new(object_store, format, root_path, None);
+        let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
         builder.add(b"key2", Some(b"value2")).unwrap();
@@ -687,7 +687,7 @@ mod tests {
             let root_path = Path::from("");
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let format = SsTableFormat::new(4096, 0, Some(compression));
-            let table_store = TableStore::new(object_store, format, root_path, None);
+            let table_store = TableStore::new(object_store, format, root_path);
             let mut builder = table_store.table_builder();
             builder.add(b"key1", Some(b"value1")).unwrap();
             builder.add(b"key2", Some(b"value2")).unwrap();
@@ -718,8 +718,7 @@ mod tests {
             let root_path = Path::from("");
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let format = SsTableFormat::new(4096, 0, Some(compression));
-            let table_store =
-                TableStore::new(object_store.clone(), format, root_path.clone(), None);
+            let table_store = TableStore::new(object_store.clone(), format, root_path.clone());
             let mut builder = table_store.table_builder();
             builder.add(b"key1", Some(b"value1")).unwrap();
             builder.add(b"key2", Some(b"value2")).unwrap();
@@ -732,7 +731,7 @@ mod tests {
 
             // Decompression is independent of TableFormat. It uses the CompressionFormat from SSTable Info to decompress sst.
             let format = SsTableFormat::new(4096, 0, Some(dummy_codec));
-            let table_store = TableStore::new(object_store, format, root_path, None);
+            let table_store = TableStore::new(object_store, format, root_path);
             let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
             let index = table_store.read_index(&sst_handle).await.unwrap();
 
@@ -774,7 +773,7 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
-        let table_store = TableStore::new(object_store, format.clone(), root_path, None);
+        let table_store = TableStore::new(object_store, format.clone(), root_path);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 2], Some(&[1u8; 2])).unwrap();
         builder.add(&[b'b'; 2], Some(&[2u8; 2])).unwrap();
@@ -831,7 +830,7 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
-        let table_store = TableStore::new(object_store, format.clone(), root_path, None);
+        let table_store = TableStore::new(object_store, format.clone(), root_path);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 2], Some(&[1u8; 2])).unwrap();
         builder.add(&[b'b'; 2], Some(&[2u8; 2])).unwrap();
