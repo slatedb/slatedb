@@ -1,7 +1,7 @@
 use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
-use crate::disk_cache::{DiskCacheOptions, DiskCachedObjectStore};
 use crate::db_state::{SSTableHandle, SsTableId};
+use crate::disk_cache::{DiskCacheOptions, DiskCachedObjectStore};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
@@ -24,7 +24,6 @@ use tokio::io::AsyncWriteExt;
 #[derive(Default, Clone)]
 pub struct TableStoreOptions {
     pub fp_registry: Option<Arc<FailPointRegistry>>,
-    pub disk_cache_opts: Option<DiskCacheOptions>,
 }
 
 pub struct TableStore {
@@ -83,22 +82,16 @@ impl TableStore {
             object_store,
             sst_format,
             root_path,
-            TableStoreOptions {
-                fp_registry: None,
-                disk_cache_opts: None,
-            },
+            TableStoreOptions { fp_registry: None },
         )
     }
 
     pub fn new_with_opts(
-        mut object_store: Arc<dyn ObjectStore>,
+        object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
         root_path: Path,
         opts: TableStoreOptions,
     ) -> Self {
-        if let Some(disk_cache_opts) = opts.disk_cache_opts {
-            object_store = Arc::new(DiskCachedObjectStore::new(object_store, disk_cache_opts));
-        }
         let fp_registry = opts
             .fp_registry
             .unwrap_or_else(|| Arc::new(FailPointRegistry::new()));

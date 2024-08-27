@@ -4,6 +4,7 @@ use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
 use crate::db_state::{CoreDbState, DbState, SSTableHandle, SortedRun, SsTableId};
+use crate::disk_cache::{self, DiskCacheOptions, DiskCachedObjectStore};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -303,11 +304,22 @@ impl Db {
     pub async fn open_with_fp_registry(
         path: Path,
         options: DbOptions,
-        object_store: Arc<dyn ObjectStore>,
+        mut object_store: Arc<dyn ObjectStore>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         let sst_format =
             SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
+
+        if let Some(disk_cache_root_folder) = &options.disk_cache_root_folder {
+            object_store = Arc::new(DiskCachedObjectStore::new(
+                object_store,
+                DiskCacheOptions {
+                    root_folder: disk_cache_root_folder.clone(),
+                    part_size: 16 * 1024 * 1024,
+                },
+            ));
+        }
+
         let table_store = Arc::new(TableStore::new_with_opts(
             object_store.clone(),
             sst_format,
@@ -1141,6 +1153,7 @@ mod tests {
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
+            disk_cache_root_folder: None,
         }
     }
 }

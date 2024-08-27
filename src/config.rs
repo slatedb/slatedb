@@ -124,6 +124,9 @@ pub struct DbOptions {
     /// Configuration options for the compactor.
     pub compactor_options: Option<CompactorOptions>,
     pub compression_codec: Option<CompressionCodec>,
+
+    /// Configuration options for the disk cache.
+    pub disk_cache_root_folder: Option<std::path::PathBuf>,
 }
 
 impl DbOptions {
@@ -137,6 +140,7 @@ impl DbOptions {
             l0_sst_size_bytes: 128,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
+            disk_cache_root_folder: None,
         }
     }
 }

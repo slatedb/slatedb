@@ -24,9 +24,9 @@ use object_store::{
 };
 
 #[derive(Debug, Clone)]
-pub struct DiskCacheOptions {
-    pub root_folder: std::path::PathBuf,
-    pub part_size: usize,
+pub(crate) struct DiskCacheOptions {
+    pub(crate) root_folder: std::path::PathBuf,
+    pub(crate) part_size: usize,
 }
 
 #[allow(unused)]

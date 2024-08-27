@@ -460,6 +460,7 @@ mod tests {
             l0_sst_size_bytes: 128,
             compactor_options,
             compression_codec: None,
+            disk_cache_root_folder: None,
         }
     }
 }
