@@ -23,26 +23,24 @@ use object_store::{
     PutMultipartOpts, PutOptions, PutPayload, PutResult,
 };
 
-#[derive(Debug, Clone)]
-pub(crate) struct DiskCacheOptions {
-    pub(crate) root_folder: std::path::PathBuf,
-    pub(crate) part_size: usize,
-}
-
 #[allow(unused)]
 #[derive(Debug, Clone)]
 pub(crate) struct DiskCachedObjectStore {
     root_folder: std::path::PathBuf,
     object_store: Arc<dyn ObjectStore>,
-    part_size: usize, // expected to be aligned with mb or kb, default 64mb
+    part_size: usize, // expected to be aligned with mb or kb
 }
 
 impl DiskCachedObjectStore {
-    pub fn new(object_store: Arc<dyn ObjectStore>, opts: DiskCacheOptions) -> Self {
+    pub fn new(
+        object_store: Arc<dyn ObjectStore>,
+        root_folder: std::path::PathBuf,
+        part_size: usize,
+    ) -> Self {
         Self {
             object_store,
-            root_folder: opts.root_folder,
-            part_size: opts.part_size,
+            root_folder,
+            part_size,
         }
     }
 
@@ -565,7 +563,7 @@ impl DiskCacheEntry {
     async fn save_meta(&self, meta: &ObjectMeta) -> object_store::Result<()> {
         let meta_file_path = self.make_meta_path();
 
-        // if the meta file exists and valid, do nothing
+        // if the meta file exists and not corrupted, do nothing
         match self.read_meta().await {
             Ok(Some(_)) => return Ok(()),
             Ok(None) => {}
