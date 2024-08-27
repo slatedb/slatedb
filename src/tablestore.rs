@@ -436,7 +436,7 @@ mod tests {
     async fn test_wal_write_should_fail_when_fenced() {
         let os = Arc::new(object_store::memory::InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
-        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
         let wal_id = SsTableId::Wal(1);
 
         // write a wal sst
