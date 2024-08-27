@@ -506,6 +506,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_put_get_delete_with_cache() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut opts = test_db_options(0, 1024, None);
+        opts.disk_cache_root_folder = Some(std::path::PathBuf::from("/tmp/disk_cache"));
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store_with_cache"),
+            opts,
+            object_store,
+        )
+        .await
+        .unwrap();
+        let key = b"test_key";
+        let value = b"test_value";
+        kv_store.put(key, value).await;
+        kv_store.flush().await.unwrap();
+
+        assert_eq!(
+            kv_store.get(key).await.unwrap(),
+            Some(Bytes::from_static(value))
+        );
+        kv_store.delete(key).await;
+        assert_eq!(None, kv_store.get(key).await.unwrap());
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_disable_wal_after_wal_enabled() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
