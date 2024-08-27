@@ -7,6 +7,7 @@ pub(crate) const SIZEOF_U32: usize = std::mem::size_of::<u32>();
 /// "None" values are encoded by using the maximum u32 value as the value length.
 pub(crate) const TOMBSTONE: u32 = u32::MAX;
 
+#[derive(Debug)]
 pub struct Block {
     pub(crate) data: Bytes,
     pub(crate) offsets: Vec<u16>,

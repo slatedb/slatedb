@@ -309,7 +309,7 @@ mod tests {
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
-        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1)
+        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1, false)
             .await
             .unwrap();
         for i in 0..4 {

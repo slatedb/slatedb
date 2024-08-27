@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::{compactor::Compactor, inmemory_cache::BlockCache};
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
@@ -15,15 +16,12 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
-use crate::{block::Block, compactor::Compactor};
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Handle;
-
-pub type BlockCache = moka::future::Cache<(SsTableId, usize), Arc<Block>>;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -172,7 +170,7 @@ impl DbInner {
                 SsTableId::Wal(id) => *id,
                 SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
             };
-            let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1).await?;
+            let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1, true).await?;
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
             // buffer the WAL entries to bulk replay them into the memtable.
             let mut wal_replay_buf = Vec::new();
@@ -245,12 +243,17 @@ impl Db {
     ) -> Result<Self, SlateDBError> {
         let sst_format =
             SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
+        let block_cache = if let Some(block_cache_size) = options.block_cache_size_bytes {
+            Some(Arc::new(BlockCache::builder().max_capacity(block_cache_size).build()))
+        } else {
+            None
+        };
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             object_store.clone(),
             sst_format,
             path.clone(),
             fp_registry.clone(),
-            None,
+            block_cache,
         ));
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let manifest = Self::init_db(&manifest_store).await?;
@@ -465,7 +468,7 @@ mod tests {
         assert_eq!(l0.len(), 3);
         for i in 0u8..3u8 {
             let sst1 = l0.get(2 - i as usize).unwrap();
-            let mut iter = SstIterator::new(sst1, table_store.clone(), 1, 1)
+            let mut iter = SstIterator::new(sst1, table_store.clone(), 1, 1, true)
                 .await
                 .unwrap();
             let kv = iter.next().await.unwrap().unwrap();

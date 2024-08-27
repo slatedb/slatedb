@@ -90,7 +90,7 @@ impl TokioCompactionExecutorInner {
     > {
         let mut l0_iters = VecDeque::new();
         for l0 in compaction.ssts.iter() {
-            let iter = SstIterator::new_spawn(l0, self.table_store.clone(), 4, 256).await?;
+            let iter = SstIterator::new_spawn(l0, self.table_store.clone(), 4, 256, false).await?;
             l0_iters.push_back(iter);
         }
         let l0_merge_iter = MergeIterator::new(l0_iters).await?;

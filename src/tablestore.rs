@@ -1,4 +1,3 @@
-use crate::block::Block;
 use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
@@ -7,7 +6,11 @@ use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
-use crate::{blob::ReadOnlyBlob, db::BlockCache};
+use crate::{
+    blob::ReadOnlyBlob,
+    block::Block,
+    inmemory_cache::{BlockCache, CachedBlock},
+};
 use bytes::{BufMut, Bytes};
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::join_all, StreamExt};
@@ -273,6 +276,7 @@ impl TableStore {
         handle: &SSTableHandle,
         index: Arc<SsTableIndexOwned>,
         blocks: Range<usize>,
+        cache_blocks: bool,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
@@ -293,7 +297,7 @@ impl TableStore {
             let mut last_uncached_start = None;
 
             for (index, block_result) in cached_blocks.into_iter().enumerate() {
-                match block_result {
+                match block_result.and_then(|b| b.into()) {
                     Some(cached_block) => {
                         if let Some(start) = last_uncached_start.take() {
                             uncached_ranges.push((blocks.start + start)..(blocks.start + index));
@@ -329,8 +333,12 @@ impl TableStore {
         for (range, range_blocks) in uncached_ranges.into_iter().zip(uncached_blocks) {
             for (block_num, block_read) in range.zip(range_blocks?) {
                 let block = Arc::new(block_read);
-                if let Some(cache) = &self.block_cache {
-                    cache.insert((handle.id, block_num), block.clone()).await;
+                if cache_blocks {
+                    if let Some(cache) = &self.block_cache {
+                        cache
+                            .insert((handle.id, block_num), CachedBlock::Block(block.clone()))
+                            .await;
+                    }
                 }
                 blocks_read.insert(block_num - blocks.start, block);
             }
@@ -429,13 +437,13 @@ impl<'a> EncodedSsTableWriter<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::error;
+    use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
-    use crate::{db::BlockCache, db_state::SsTableId};
+    use crate::{error, tablestore::BlockCache};
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use std::sync::Arc;
@@ -460,7 +468,9 @@ mod tests {
         let sst = writer.close().await.unwrap();
 
         // then:
-        let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1).await.unwrap();
+        let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1, true)
+            .await
+            .unwrap();
         assert_iterator(
             &mut iter,
             &[
@@ -508,8 +518,8 @@ mod tests {
     async fn test_tablestore_sst_and_partial_cache_hits() {
         // Setup
         let os = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(20, 1, None);
-        let block_cache = Arc::new(BlockCache::new(1000));
+        let format = SsTableFormat::new(8, 1, None);
+        let block_cache = Arc::new(BlockCache::builder().max_capacity(1024).build());
         let ts = Arc::new(TableStore::new(
             os.clone(),
             format,
@@ -530,7 +540,7 @@ mod tests {
 
         // Test 1: SST hit
         let sst_blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20)
+            .read_blocks_using_index(&handle, index.clone(), 0..20, true)
             .await
             .unwrap();
         assert_eq!(sst_blocks.len(), 20);
@@ -545,37 +555,33 @@ mod tests {
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
         let result = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20)
-            .await;
-        assert_eq!(result.unwrap().len(), 20);
-
-        // Test 3: Verify deleted blocks were added back to cache
-        for i in 5..10 {
-            assert!(block_cache.get(&(handle.id, i)).await.is_some());
-        }
-        for i in 15..20 {
-            assert!(block_cache.get(&(handle.id, i)).await.is_some());
-        }
+            .read_blocks_using_index(&handle, index.clone(), 0..20, true)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 20);
 
         // Delete SST to see cache hit occurs for all blocks
         let path = ts.path(&id);
         os.delete(&path).await.unwrap();
 
-        // Test 4: All blocks should be in cache after SST deletion
+        // Test 3: All blocks should be in cache after SST deletion
         let cache_only_result = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20)
-            .await;
-        assert_eq!(cache_only_result.unwrap().len(), 20);
+            .read_blocks_using_index(&handle, index.clone(), 0..20, true)
+            .await
+            .unwrap();
+        assert_eq!(cache_only_result.len(), 20);
 
-        // Test 5: Verify that reading specific ranges still works after SST deletion
+        // Test 4: Verify that reading specific ranges still works after SST deletion
         let partial_result_1 = ts
-            .read_blocks_using_index(&handle, index.clone(), 5..10)
-            .await;
-        assert_eq!(partial_result_1.unwrap().len(), 5);
+            .read_blocks_using_index(&handle, index.clone(), 5..10, true)
+            .await
+            .unwrap();
+        assert_eq!(partial_result_1.len(), 5);
 
         let partial_result_2 = ts
-            .read_blocks_using_index(&handle, index.clone(), 15..20)
-            .await;
-        assert_eq!(partial_result_2.unwrap().len(), 5);
+            .read_blocks_using_index(&handle, index.clone(), 15..20, true)
+            .await
+            .unwrap();
+        assert_eq!(partial_result_2.len(), 5);
     }
 }

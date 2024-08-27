@@ -49,7 +49,7 @@ async fn main() {
         l0_sst_size_bytes: 128,
         compactor_options: Some(CompactorOptions::default()),
         compression_codec: None,
-        block_cache_size_bytes: None,
+        block_cache_size_bytes: Some(134_217_728),
     };
     let kv_store = Db::open_with_opts(
         Path::from("/tmp/test_kv_store"),

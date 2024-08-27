@@ -25,6 +25,7 @@ pub(crate) struct SstIterator<'a> {
     max_fetch_tasks: usize,
     blocks_to_fetch: usize,
     table_store: Arc<TableStore>,
+    cache_blocks: bool,
 }
 
 impl<'a> SstIterator<'a> {
@@ -70,6 +71,7 @@ impl<'a> SstIterator<'a> {
             max_fetch_tasks,
             blocks_to_fetch,
             false,
+            true,
         )
         .await
     }
@@ -79,6 +81,7 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
+        cache_blocks: bool,
     ) -> Result<Self, SlateDBError> {
         Self::new_opts(
             table,
@@ -87,6 +90,7 @@ impl<'a> SstIterator<'a> {
             max_fetch_tasks,
             blocks_to_fetch,
             true,
+            cache_blocks,
         )
         .await
     }
@@ -96,6 +100,7 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
+        cache_blocks: bool,
     ) -> Result<Self, SlateDBError> {
         Self::new_opts(
             table,
@@ -104,6 +109,7 @@ impl<'a> SstIterator<'a> {
             max_fetch_tasks,
             blocks_to_fetch,
             false,
+            cache_blocks,
         )
         .await
     }
@@ -115,6 +121,7 @@ impl<'a> SstIterator<'a> {
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
         spawn: bool,
+        cache_blocks: bool,
     ) -> Result<Self, SlateDBError> {
         assert!(max_fetch_tasks > 0);
         assert!(blocks_to_fetch > 0);
@@ -132,6 +139,7 @@ impl<'a> SstIterator<'a> {
             max_fetch_tasks,
             blocks_to_fetch,
             table_store,
+            cache_blocks,
         };
         if spawn {
             iter.spawn_fetches();
@@ -153,10 +161,16 @@ impl<'a> SstIterator<'a> {
             let blocks_start = self.next_block_idx_to_fetch;
             let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
             let index = self.index.clone();
+            let cache_blocks = self.cache_blocks;
             self.fetch_tasks
                 .push_back(FetchTask::InFlight(tokio::spawn(async move {
                     table_store
-                        .read_blocks_using_index(&table, index, blocks_start..blocks_end)
+                        .read_blocks_using_index(
+                            &table,
+                            index,
+                            blocks_start..blocks_end,
+                            cache_blocks,
+                        )
                         .await
                 })));
             self.next_block_idx_to_fetch = blocks_end;
@@ -256,7 +270,7 @@ mod tests {
         let index = table_store.read_index(&sst_handle).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 1);
 
-        let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 1, 1)
+        let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 1, 1, true)
             .await
             .unwrap();
         let kv = iter.next().await.unwrap().unwrap();
@@ -306,7 +320,7 @@ mod tests {
         let index = table_store.read_index(&sst_handle).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 6);
 
-        let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 3, 3)
+        let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 3, 3, true)
             .await
             .unwrap();
         for i in 0..1000 {

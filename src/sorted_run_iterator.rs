@@ -91,6 +91,7 @@ impl<'a> SortedRunIterator<'a> {
                     max_fetch_tasks,
                     blocks_to_fetch,
                     spawn,
+                    true,
                 )
                 .await?,
             ),
@@ -130,6 +131,7 @@ impl<'a> KeyValueIterator for SortedRunIterator<'a> {
                             self.table_store.clone(),
                             self.blocks_to_fetch,
                             self.blocks_to_buffer,
+                            true,
                         )
                         .await?,
                     ),
