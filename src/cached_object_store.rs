@@ -12,8 +12,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::UNIX_EPOCH;
 use tokio::fs;
 use tokio::fs::File;
 use tokio::fs::OpenOptions;
@@ -198,9 +196,12 @@ impl CachedObjectStore {
         let (start_offset, end_offset) = match range {
             None => (0, object_size_hint),
             Some(range) => match range {
-                GetRange::Bounded(range) => (range.start, range.end),
+                GetRange::Bounded(range) => (range.start, range.end.min(object_size_hint)),
                 GetRange::Offset(offset) => (offset, object_size_hint),
-                GetRange::Suffix(suffix) => (object_size_hint - suffix, object_size_hint),
+                GetRange::Suffix(suffix) => (
+                    object_size_hint.checked_sub(suffix).unwrap_or(0),
+                    object_size_hint,
+                ),
             },
         };
         Range {
@@ -325,7 +326,7 @@ impl ObjectStore for CachedObjectStore {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DiskCacheMeta {
     pub location: String,
-    pub last_modified_timestamp: u64,
+    pub last_modified: String,
     pub size: usize,
     pub e_tag: Option<String>,
     pub version: Option<String>,
@@ -419,7 +420,7 @@ impl DiskCacheEntry {
 
         Ok(Some(ObjectMeta {
             location: meta.location.into(),
-            last_modified: (UNIX_EPOCH + Duration::from_secs(meta.last_modified_timestamp)).into(),
+            last_modified: meta.last_modified.parse().map_err(wrap_io_err)?,
             size: meta.size,
             e_tag: meta.e_tag,
             version: meta.version,
@@ -519,7 +520,7 @@ impl DiskCacheEntry {
 
         let meta = DiskCacheMeta {
             location: meta.location.to_string(),
-            last_modified_timestamp: meta.last_modified.timestamp() as u64,
+            last_modified: meta.last_modified.to_rfc3339(),
             size: meta.size,
             e_tag: meta.e_tag.clone(),
             version: meta.version.clone(),
@@ -586,6 +587,7 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
     use std::sync::Arc;
 
     use bytes::Bytes;
@@ -833,21 +835,22 @@ mod tests {
             .await?;
 
         // test get entire object
-        let result = cached_store.get(&test_path).await?;
-        assert_eq!(result.bytes().await?, test_payload);
-
         let test_ranges = vec![
+            Some(GetRange::Offset(260817)),
             None,
             Some(GetRange::Bounded(1000..2048)),
+            Some(GetRange::Bounded(1000..260817)),
             Some(GetRange::Suffix(10)),
+            Some(GetRange::Suffix(260817)),
             Some(GetRange::Offset(1000)),
             Some(GetRange::Offset(0)),
             Some(GetRange::Offset(1028)),
+            //Some(GetRange::Offset(260817)),
         ];
 
         // test get a range
         for range in test_ranges.iter() {
-            let origin_result = object_store
+            let want = object_store
                 .get_opts(
                     &test_path,
                     GetOptions {
@@ -855,8 +858,8 @@ mod tests {
                         ..Default::default()
                     },
                 )
-                .await?;
-            let cached_result = cached_store
+                .await;
+            let got = cached_store
                 .get_opts(
                     &test_path,
                     GetOptions {
@@ -864,8 +867,20 @@ mod tests {
                         ..Default::default()
                     },
                 )
-                .await?;
-            assert_eq!(cached_result.bytes().await?, origin_result.bytes().await?);
+                .await;
+            match (want, got) {
+                (Ok(want), Ok(got)) => {
+                    assert_eq!(want.range, got.range);
+                    assert_eq!(want.meta, got.meta);
+                    assert_eq!(want.bytes().await?, got.bytes().await?);
+                }
+                (Err(want), Err(got)) => {
+                    assert_eq!(want.type_id(), got.type_id());
+                }
+                (origin_result, cached_result) => {
+                    panic!("expect: {:?}, got: {:?}", origin_result, cached_result);
+                }
+            }
         }
         Ok(())
     }
