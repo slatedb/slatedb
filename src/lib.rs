@@ -7,7 +7,7 @@
 mod blob;
 mod block;
 mod block_iterator;
-mod cached_object_store;
+mod disk_cache;
 #[cfg(feature = "db_bench")]
 pub mod compaction_execute_bench;
 mod compactor;

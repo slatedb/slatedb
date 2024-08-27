@@ -31,13 +31,13 @@ pub struct DiskCacheOptions {
 
 #[allow(unused)]
 #[derive(Debug, Clone)]
-pub(crate) struct CachedObjectStore {
+pub(crate) struct DiskCachedObjectStore {
     root_folder: std::path::PathBuf,
     object_store: Arc<dyn ObjectStore>,
     part_size: usize, // expected to be aligned with mb or kb, default 64mb
 }
 
-impl CachedObjectStore {
+impl DiskCachedObjectStore {
     pub fn new(object_store: Arc<dyn ObjectStore>, opts: DiskCacheOptions) -> Self {
         Self {
             object_store,
@@ -277,7 +277,7 @@ impl CachedObjectStore {
     }
 }
 
-impl std::fmt::Display for CachedObjectStore {
+impl std::fmt::Display for DiskCachedObjectStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -289,7 +289,7 @@ impl std::fmt::Display for CachedObjectStore {
 }
 
 #[async_trait::async_trait]
-impl ObjectStore for CachedObjectStore {
+impl ObjectStore for DiskCachedObjectStore {
     async fn get_opts(
         &self,
         location: &Path,
@@ -645,9 +645,9 @@ mod tests {
     use object_store::{GetOptions, GetRange, ObjectStore, PutPayload};
     use rand::{thread_rng, Rng};
 
-    use crate::cached_object_store::PartID;
+    use crate::disk_cache::{self, PartID};
 
-    use super::CachedObjectStore;
+    use super::DiskCachedObjectStore;
 
     fn gen_rand_bytes(n: usize) -> Bytes {
         let mut rng = thread_rng();
@@ -678,7 +678,7 @@ mod tests {
             .await?;
         let get_result = object_store.get(&Path::from("/data/testfile1")).await?;
 
-        let entry = super::DiskCacheEntry {
+        let entry = disk_cache::DiskCacheEntry {
             root_folder: test_cache_folder,
             location: Path::from("/data/testfile1"),
             part_size: 1024,
@@ -727,7 +727,7 @@ mod tests {
             .await?;
         let get_result = object_store.get(&Path::from("/data/testfile1")).await?;
 
-        let entry = super::DiskCacheEntry {
+        let entry = disk_cache::DiskCacheEntry {
             root_folder: test_cache_folder,
             location: Path::from("/data/testfile1"),
             part_size: 1024,
@@ -753,7 +753,7 @@ mod tests {
     fn test_split_range_into_parts() {
         let object_store = object_store::memory::InMemory::new();
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = CachedObjectStore {
+        let cached_store = DiskCachedObjectStore {
             root_folder: test_cache_folder,
             object_store: Arc::new(object_store),
             part_size: 1024,
@@ -835,7 +835,7 @@ mod tests {
     fn test_align_range() {
         let object_store = object_store::memory::InMemory::new();
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = CachedObjectStore {
+        let cached_store = DiskCachedObjectStore {
             root_folder: test_cache_folder,
             object_store: Arc::new(object_store),
             part_size: 1024,
@@ -851,7 +851,7 @@ mod tests {
     fn test_align_get_range() {
         let object_store = object_store::memory::InMemory::new();
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = CachedObjectStore {
+        let cached_store = DiskCachedObjectStore {
             root_folder: test_cache_folder,
             object_store: Arc::new(object_store),
             part_size: 1024,
@@ -875,7 +875,7 @@ mod tests {
     async fn test_cached_object_store_impl_object_store() -> object_store::Result<()> {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = CachedObjectStore {
+        let cached_store = DiskCachedObjectStore {
             root_folder: test_cache_folder,
             object_store: object_store.clone(),
             part_size: 1024,

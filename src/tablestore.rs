@@ -1,6 +1,6 @@
 use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
-use crate::cached_object_store::{CachedObjectStore, DiskCacheOptions};
+use crate::disk_cache::{DiskCacheOptions, DiskCachedObjectStore};
 use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
@@ -97,7 +97,7 @@ impl TableStore {
         opts: TableStoreOptions,
     ) -> Self {
         if let Some(disk_cache_opts) = opts.disk_cache_opts {
-            object_store = Arc::new(CachedObjectStore::new(object_store, disk_cache_opts));
+            object_store = Arc::new(DiskCachedObjectStore::new(object_store, disk_cache_opts));
         }
         let fp_registry = opts
             .fp_registry
