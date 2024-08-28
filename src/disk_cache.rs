@@ -219,7 +219,7 @@ impl DiskCachedObjectStore {
             None => (0, object_size),
             Some(range) => match range {
                 GetRange::Bounded(range) => {
-                    if range.start > object_size {
+                    if range.start >= object_size {
                         return Err(object_store::Error::Generic {
                             store: "cached_object_store",
                             source: Box::new(InvalidGetRange::StartTooLarge {
@@ -228,7 +228,7 @@ impl DiskCachedObjectStore {
                             }),
                         });
                     }
-                    if range.start > range.end {
+                    if range.start >= range.end {
                         return Err(object_store::Error::Generic {
                             store: "cached_object_store",
                             source: Box::new(InvalidGetRange::Inconsistent {
@@ -240,7 +240,7 @@ impl DiskCachedObjectStore {
                     (range.start, range.end.min(object_size))
                 }
                 GetRange::Offset(offset) => {
-                    if offset > object_size {
+                    if offset >= object_size {
                         return Err(object_store::Error::Generic {
                             store: "cached_object_store",
                             source: Box::new(InvalidGetRange::StartTooLarge {
@@ -909,6 +909,10 @@ mod tests {
             Some(GetRange::Offset(0)),
             Some(GetRange::Offset(1028)),
             Some(GetRange::Offset(260817)),
+            Some(GetRange::Offset(1024 * 3 + 2)),
+            Some(GetRange::Offset(1024 * 3 + 1)),
+            Some(GetRange::Bounded(2900..2048)),
+            Some(GetRange::Bounded(10..10)),
         ];
 
         // test get a range
