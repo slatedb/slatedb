@@ -81,7 +81,8 @@ impl SsTableFormat {
         let index_off = info.index_offset() as usize;
         let index_end = index_off + info.index_len() as usize;
         let index_bytes = obj.read_range(index_off..index_end).await?;
-        self.decode_index(index_bytes)
+        let compression_codec = info.compression_format();
+        self.decode_index(index_bytes, compression_codec.into())
     }
 
     #[allow(dead_code)]
@@ -94,11 +95,16 @@ impl SsTableFormat {
         let index_off = info.index_offset() as usize;
         let index_end = index_off + info.index_len() as usize;
         let index_bytes: Bytes = sst_bytes.slice(index_off..index_end);
-        self.decode_index(index_bytes)
+        let compression_codec = info.compression_format();
+        self.decode_index(index_bytes, compression_codec.into())
     }
 
-    fn decode_index(&self, index_bytes: Bytes) -> Result<SsTableIndexOwned, SlateDBError> {
-        let index_bytes = match self.compression_codec {
+    fn decode_index(
+        &self,
+        index_bytes: Bytes,
+        compression_codec: Option<CompressionCodec>,
+    ) -> Result<SsTableIndexOwned, SlateDBError> {
+        let index_bytes = match compression_codec {
             Some(c) => Self::decompress(index_bytes, c)?,
             None => index_bytes,
         };
@@ -174,6 +180,7 @@ impl SsTableFormat {
         let start_offset = range.start;
         let bytes: Bytes = obj.read_range(range).await?;
         let mut decoded_blocks = VecDeque::new();
+        let compression_codec = handle.compression_format();
         for block in blocks {
             let block_meta = index.block_meta().get(block);
             let block_bytes_start = block_meta.offset() as usize - start_offset;
@@ -184,12 +191,16 @@ impl SsTableFormat {
                 let block_bytes_end = next_block_meta.offset() as usize - start_offset;
                 bytes.slice(block_bytes_start..block_bytes_end)
             };
-            decoded_blocks.push_back(self.decode_block(block_bytes)?);
+            decoded_blocks.push_back(self.decode_block(block_bytes, compression_codec.into())?);
         }
         Ok(decoded_blocks)
     }
 
-    fn decode_block(&self, bytes: Bytes) -> Result<Block, SlateDBError> {
+    fn decode_block(
+        &self,
+        bytes: Bytes,
+        compression_codec: Option<CompressionCodec>,
+    ) -> Result<Block, SlateDBError> {
         let checksum_sz = std::mem::size_of::<u32>();
         let block_bytes = bytes.slice(..bytes.len() - checksum_sz);
         let mut checksum_bytes = bytes.slice(bytes.len() - checksum_sz..);
@@ -199,7 +210,7 @@ impl SsTableFormat {
             return Err(SlateDBError::ChecksumMismatch);
         }
         let decoded_block = Block::decode(block_bytes);
-        let decompressed_bytes = match self.compression_codec {
+        let decompressed_bytes = match compression_codec {
             Some(c) => Self::decompress(decoded_block.data, c)?,
             None => decoded_block.data,
         };
@@ -231,7 +242,8 @@ impl SsTableFormat {
         let handle = &info.borrow();
         let index = index_owned.borrow();
         let bytes: Bytes = sst_bytes.slice(self.block_range(block..block + 1, handle, &index));
-        self.decode_block(bytes)
+        let compression_codec = handle.compression_format();
+        self.decode_block(bytes, compression_codec.into())
     }
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
@@ -454,6 +466,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
                 index_len: index_len as u64,
                 filter_offset: filter_offset as u64,
                 filter_len: filter_len as u64,
+                compression_format: self.compression_codec.into(),
             },
         );
 
@@ -696,14 +709,62 @@ mod tests {
                 "first key in sst info should be correct"
             );
         }
+
+        #[allow(unused)]
+        async fn test_compression_using_sst_info(
+            compression: CompressionCodec,
+            dummy_codec: CompressionCodec,
+        ) {
+            let root_path = Path::from("");
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let format = SsTableFormat::new(4096, 0, Some(compression));
+            let table_store = TableStore::new(object_store.clone(), format, root_path.clone());
+            let mut builder = table_store.table_builder();
+            builder.add(b"key1", Some(b"value1")).unwrap();
+            builder.add(b"key2", Some(b"value2")).unwrap();
+            let encoded = builder.build().unwrap();
+            let encoded_info = encoded.info.clone();
+            table_store
+                .write_sst(&SsTableId::Wal(0), encoded)
+                .await
+                .unwrap();
+
+            // Decompression is independent of TableFormat. It uses the CompressionFormat from SSTable Info to decompress sst.
+            let format = SsTableFormat::new(4096, 0, Some(dummy_codec));
+            let table_store = TableStore::new(object_store, format, root_path);
+            let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
+            let index = table_store.read_index(&sst_handle).await.unwrap();
+
+            assert_eq!(encoded_info, sst_handle.info);
+            let sst_info = sst_handle.info.borrow();
+            assert_eq!(1, index.borrow().block_meta().len());
+            assert_eq!(
+                b"key1",
+                sst_info.first_key().unwrap().bytes(),
+                "first key in sst info should be correct"
+            );
+        }
+
         #[cfg(feature = "snappy")]
-        test_compression_inner(CompressionCodec::Snappy).await;
+        {
+            test_compression_inner(CompressionCodec::Snappy).await;
+            test_compression_using_sst_info(CompressionCodec::Snappy, CompressionCodec::Zlib).await;
+        }
         #[cfg(feature = "zlib")]
-        test_compression_inner(CompressionCodec::Zlib).await;
+        {
+            test_compression_inner(CompressionCodec::Zlib).await;
+            test_compression_using_sst_info(CompressionCodec::Zlib, CompressionCodec::Lz4).await;
+        }
         #[cfg(feature = "lz4")]
-        test_compression_inner(CompressionCodec::Lz4).await;
+        {
+            test_compression_inner(CompressionCodec::Lz4).await;
+            test_compression_using_sst_info(CompressionCodec::Lz4, CompressionCodec::Zstd).await;
+        }
         #[cfg(feature = "zstd")]
-        test_compression_inner(CompressionCodec::Zstd).await;
+        {
+            test_compression_inner(CompressionCodec::Zstd).await;
+            test_compression_using_sst_info(CompressionCodec::Zstd, CompressionCodec::Snappy).await;
+        }
     }
 
     #[tokio::test]

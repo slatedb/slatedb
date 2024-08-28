@@ -1,5 +1,4 @@
-use std::sync::Arc;
-
+use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
@@ -8,8 +7,10 @@ use crate::db_state::{CoreDbState, DbState, SSTableHandle, SortedRun, SsTableId}
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushThreadMsg;
 use crate::mem_table_flush::MemtableFlushThreadMsg::Shutdown;
+use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
@@ -21,6 +22,7 @@ use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
+use std::sync::Arc;
 use tokio::runtime::Handle;
 
 pub(crate) struct DbInner {
@@ -28,6 +30,7 @@ pub(crate) struct DbInner {
     pub(crate) options: DbOptions,
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
+    pub(crate) db_stats: Arc<DbStats>,
 }
 
 impl DbInner {
@@ -43,8 +46,8 @@ impl DbInner {
             options,
             table_store,
             memtable_flush_notifier,
+            db_stats: Arc::new(DbStats::new()),
         };
-        db_inner.replay_wal().await?;
         Ok(db_inner)
     }
 
@@ -98,6 +101,38 @@ impl DbInner {
         Ok(None)
     }
 
+    async fn fence_writers(&self, manifest: &mut FenceableManifest) -> Result<(), SlateDBError> {
+        let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
+        let max_wal_id = self
+            .table_store
+            .get_wal_sst_list(wal_id_last_compacted)
+            .await?
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+        let mut empty_wal_id = max_wal_id + 1;
+
+        loop {
+            let empty_wal = WritableKVTable::new();
+            match self
+                .flush_imm_table(&SsTableId::Wal(empty_wal_id), empty_wal.table().clone())
+                .await
+            {
+                Ok(_) => {
+                    return Ok(());
+                }
+                Err(SlateDBError::Fenced) => {
+                    let updated_state = manifest.refresh().await?;
+                    self.state.write().refresh_db_state(updated_state);
+                    empty_wal_id += 1;
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+    }
+
     async fn sst_may_include_key(
         &self,
         sst: &SSTableHandle,
@@ -122,37 +157,68 @@ impl DbInner {
         Ok(false)
     }
 
+    fn wal_enabled(&self) -> bool {
+        #[cfg(feature = "wal_disable")]
+        return self.options.wal_enabled;
+        #[cfg(not(feature = "wal_disable"))]
+        return true;
+    }
+
     /// Put a key-value pair into the database. Key must not be empty.
+    #[allow(clippy::panic)]
     pub async fn put_with_options(&self, key: &[u8], value: &[u8], options: &WriteOptions) {
         assert!(!key.is_empty(), "key cannot be empty");
 
         // Clone memtable to avoid a deadlock with flusher thread.
-        let current_wal_table = {
+        let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
             let current_wal = guard.wal();
             current_wal.put(key, value);
             current_wal.table().clone()
+        } else {
+            if cfg!(not(feature = "wal_disable")) {
+                panic!("wal_disabled feature must be enabled");
+            }
+            let mut guard = self.state.write();
+            let current_memtable = guard.memtable();
+            current_memtable.put(key, value);
+            let table = current_memtable.table().clone();
+            let last_wal_id = guard.last_written_wal_id();
+            self.maybe_freeze_memtable(&mut guard, last_wal_id);
+            table
         };
 
         if options.await_flush {
-            current_wal_table.await_flush().await;
+            current_table.await_flush().await;
         }
     }
 
     /// Delete a key from the database. Key must not be empty.
+    #[allow(clippy::panic)]
     pub async fn delete_with_options(&self, key: &[u8], options: &WriteOptions) {
         assert!(!key.is_empty(), "key cannot be empty");
 
         // Clone memtable to avoid a deadlock with flusher thread.
-        let current_wal_table = {
+        let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
             let current_wal = guard.wal();
             current_wal.delete(key);
             current_wal.table().clone()
+        } else {
+            if cfg!(not(feature = "wal_disable")) {
+                panic!("wal_disabled feature must be enabled");
+            }
+            let mut guard = self.state.write();
+            let current_memtable = guard.memtable();
+            current_memtable.delete(key);
+            let table = current_memtable.table().clone();
+            let last_wal_id = guard.last_written_wal_id();
+            self.maybe_freeze_memtable(&mut guard, last_wal_id);
+            table
         };
 
         if options.await_flush {
-            current_wal_table.await_flush().await;
+            current_table.await_flush().await;
         }
     }
 
@@ -254,7 +320,7 @@ impl Db {
             block_cache,
         ));
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
-        let manifest = Self::init_db(&manifest_store).await?;
+        let mut manifest = Self::init_db(&manifest_store).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
             DbInner::new(
@@ -265,9 +331,17 @@ impl Db {
             )
             .await?,
         );
+        if inner.wal_enabled() {
+            inner.fence_writers(&mut manifest).await?;
+        }
+        inner.replay_wal().await?;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let tokio_handle = Handle::current();
-        let flush_thread = inner.spawn_flush_task(rx, &tokio_handle);
+        let flush_thread = if inner.wal_enabled() {
+            inner.spawn_flush_task(rx, &tokio_handle)
+        } else {
+            None
+        };
         let memtable_flush_task =
             inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
         let mut compactor = None;
@@ -278,6 +352,7 @@ impl Db {
                     table_store.clone(),
                     compactor_options.clone(),
                     Handle::current(),
+                    inner.db_stats.clone(),
                 )
                 .await?,
             )
@@ -381,6 +456,10 @@ impl Db {
     pub async fn flush(&self) -> Result<(), SlateDBError> {
         self.inner.flush().await
     }
+
+    pub fn metrics(&self) -> Arc<DbStats> {
+        self.inner.db_stats.clone()
+    }
 }
 
 #[cfg(test)]
@@ -388,6 +467,8 @@ mod tests {
     use super::*;
     use crate::config::CompactorOptions;
     use crate::sst_iter::SstIterator;
+    #[cfg(feature = "wal_disable")]
+    use crate::test_utils::assert_iterator;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use std::time::Duration;
@@ -415,6 +496,100 @@ mod tests {
         kv_store.delete(key).await;
         assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_disable_wal_after_wal_enabled() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        // open a db and write a wal entry
+        let options = test_db_options(0, 32, None);
+        let db = Db::open_with_opts(path.clone(), options, object_store.clone())
+            .await
+            .unwrap();
+        db.put(&[b'a'; 4], &[b'j'; 4]).await;
+        db.put(&[b'b'; 4], &[b'k'; 4]).await;
+        db.close().await.unwrap();
+
+        // open a db with wal disabled and write a memtable
+        let mut options = test_db_options(0, 32, None);
+        options.wal_enabled = false;
+        let db = Db::open_with_opts(path.clone(), options.clone(), object_store.clone())
+            .await
+            .unwrap();
+        db.delete_with_options(&[b'b'; 4], &WriteOptions { await_flush: false })
+            .await;
+        db.put(&[b'a'; 4], &[b'z'; 64]).await;
+        db.close().await.unwrap();
+
+        // ensure we don't overwrite the values we just put on a reload
+        let db = Db::open_with_opts(path.clone(), options.clone(), object_store.clone())
+            .await
+            .unwrap();
+        let val = db.get(&[b'a'; 4]).await.unwrap();
+        assert_eq!(val.unwrap(), Bytes::copy_from_slice(&[b'z'; 64]));
+        let val = db.get(&[b'b'; 4]).await.unwrap();
+        assert!(val.is_none());
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn test_wal_disabled() {
+        let mut options = test_db_options(0, 128, None);
+        options.wal_enabled = false;
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let sst_format = SsTableFormat::new(4096, 10, None);
+        let table_store = Arc::new(TableStore::new(
+            object_store.clone(),
+            sst_format,
+            path.clone(),
+        ));
+        let db = Db::open_with_opts(path.clone(), options, object_store.clone())
+            .await
+            .unwrap();
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let mut stored_manifest = StoredManifest::load(manifest_store.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let write_options = WriteOptions { await_flush: false };
+
+        db.put_with_options(&[b'a'; 32], &[b'j'; 32], &write_options)
+            .await;
+        db.delete_with_options(&[b'b'; 32], &write_options).await;
+        let write_options = WriteOptions { await_flush: true };
+        db.put_with_options(&[b'c'; 32], &[b'l'; 32], &write_options)
+            .await;
+
+        let state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| !s.l0.is_empty(),
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(state.l0.len(), 1);
+
+        let l0 = state.l0.front().unwrap();
+        let mut iter = SstIterator::new(l0, table_store.clone(), 1, 1)
+            .await
+            .unwrap();
+        assert_iterator(
+            &mut iter,
+            &[
+                (
+                    &[b'a'; 32],
+                    ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
+                ),
+                (&[b'b'; 32], ValueDeletable::Tombstone),
+                (
+                    &[b'c'; 32],
+                    ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
+                ),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -457,7 +632,9 @@ mod tests {
                 Duration::from_secs(30),
             )
             .await;
-            assert_eq!(db_state.last_compacted_wal_sst_id, (i as u64) * 2 + 2);
+
+            // 1 empty wal at startup + 2 wal per iteration.
+            assert_eq!(db_state.last_compacted_wal_sst_id, 1 + (i as u64) * 2 + 2);
             last_compacted = db_state.last_compacted_wal_sst_id
         }
 
@@ -478,6 +655,7 @@ mod tests {
             let kv = iter.next().await.unwrap();
             assert!(kv.is_none());
         }
+        assert!(kv_store.metrics().immutable_memtable_flushes.get() > 0);
     }
 
     #[tokio::test]
@@ -537,6 +715,7 @@ mod tests {
     async fn test_basic_restore() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
+        let mut next_wal_id = 1;
         let kv_store = Db::open_with_opts(
             path.clone(),
             test_db_options(0, 128, None),
@@ -544,6 +723,8 @@ mod tests {
         )
         .await
         .unwrap();
+        // increment wal id for the empty wal
+        next_wal_id += 1;
 
         // do a few writes that will result in l0 flushes
         let l0_count: u64 = 3;
@@ -554,6 +735,7 @@ mod tests {
             kv_store
                 .put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48])
                 .await;
+            next_wal_id += 2;
         }
 
         // write some smaller keys so that we populate wal without flushing to l0
@@ -561,6 +743,7 @@ mod tests {
         for i in 0..sst_count {
             kv_store.put(&i.to_be_bytes(), &i.to_be_bytes()).await;
             kv_store.flush().await.unwrap();
+            next_wal_id += 1;
         }
 
         kv_store.close().await.unwrap();
@@ -573,6 +756,8 @@ mod tests {
         )
         .await
         .unwrap();
+        // increment wal id for the empty wal
+        next_wal_id += 1;
 
         for i in 0..l0_count {
             let val = kv_store_restored.get(&[b'a' + i as u8; 16]).await.unwrap();
@@ -584,12 +769,13 @@ mod tests {
             let val = kv_store_restored.get(&i.to_be_bytes()).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&i.to_be_bytes())));
         }
+        kv_store_restored.close().await.unwrap();
 
         // validate that the manifest file exists.
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap().unwrap();
         let db_state = stored_manifest.db_state();
-        assert_eq!(db_state.next_wal_sst_id, sst_count + 2 * l0_count + 1);
+        assert_eq!(db_state.next_wal_sst_id, next_wal_id);
     }
 
     #[tokio::test]
@@ -717,6 +903,7 @@ mod tests {
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
+        let mut next_wal_id = 1;
         let db = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 128, None),
@@ -725,14 +912,17 @@ mod tests {
         )
         .await
         .unwrap();
+        next_wal_id += 1;
 
         // write a few keys that will result in memtable flushes
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
         db.put(&key1, &value1).await;
+        next_wal_id += 1;
         let key2 = [b'c'; 32];
         let value2 = [b'd'; 96];
         db.put(&key2, &value2).await;
+        next_wal_id += 1;
 
         db.close().await.unwrap();
 
@@ -744,16 +934,20 @@ mod tests {
         )
         .await
         .unwrap();
+        // increment wal id for the empty wal
+        next_wal_id += 1;
 
         // verify that we reload imm
         let snapshot = db.inner.state.read().snapshot();
         assert_eq!(snapshot.state.imm_memtable.len(), 2);
+
+        // one empty wal and two wals for the puts
         assert_eq!(
             snapshot.state.imm_memtable.front().unwrap().last_wal_id(),
-            2
+            1 + 2
         );
-        assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 1);
-        assert_eq!(snapshot.state.core.next_wal_sst_id, 3);
+        assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 2);
+        assert_eq!(snapshot.state.core.next_wal_sst_id, next_wal_id);
         assert_eq!(
             db.get(&key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -861,6 +1055,65 @@ mod tests {
         .await
     }
 
+    #[tokio::test]
+    async fn test_db_open_should_write_empty_wal() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        // assert that open db writes an empty wal.
+        let db = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.inner.state.read().state().core.next_wal_sst_id, 2);
+        db.put(b"1", b"1").await;
+        // assert that second open writes another empty wal.
+        let db = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.inner.state.read().state().core.next_wal_sst_id, 4);
+    }
+
+    #[tokio::test]
+    async fn test_empty_wal_should_fence_old_writer() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+
+        // open db1 and assert that it can write.
+        let db1 = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+        db1.put_with_options(b"1", b"1", &WriteOptions { await_flush: false })
+            .await;
+        db1.flush().await.unwrap();
+        // open db2, causing it to write an empty wal and fence db1.
+        let db2 = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+        // assert that db1 can no longer write.
+        db1.put_with_options(b"1", b"1", &WriteOptions { await_flush: false })
+            .await;
+        assert!(matches!(db1.flush().await, Err(SlateDBError::Fenced)));
+        db2.put_with_options(b"2", b"2", &WriteOptions { await_flush: false })
+            .await;
+        db2.flush().await.unwrap();
+        assert_eq!(db2.inner.state.read().state().core.next_wal_sst_id, 5);
+    }
+
     async fn wait_for_manifest_condition(
         sm: &mut StoredManifest,
         cond: impl Fn(&CoreDbState) -> bool,
@@ -883,7 +1136,9 @@ mod tests {
         compactor_options: Option<CompactorOptions>,
     ) -> DbOptions {
         DbOptions {
-            flush_ms: 100,
+            flush_interval: Duration::from_millis(100),
+            #[cfg(feature = "wal_disable")]
+            wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),
             min_filter_keys,
             l0_sst_size_bytes,

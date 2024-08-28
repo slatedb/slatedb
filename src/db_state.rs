@@ -138,6 +138,11 @@ impl DbState {
         }
     }
 
+    pub fn last_written_wal_id(&self) -> u64 {
+        assert!(self.state.core.next_wal_sst_id > 0);
+        self.state.core.next_wal_sst_id - 1
+    }
+
     // mutations
 
     pub fn wal(&mut self) -> &mut WritableKVTable {
@@ -290,6 +295,7 @@ mod tests {
                 index_len: 0,
                 filter_offset: 0,
                 filter_len: 0,
+                compression_format: None.into(),
             },
         );
         builder.finish(wip, None);

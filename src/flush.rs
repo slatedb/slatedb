@@ -6,7 +6,6 @@ use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
 use crate::types::ValueDeletable;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::select;
 
@@ -82,8 +81,7 @@ impl DbInner {
     ) -> Option<tokio::task::JoinHandle<()>> {
         let this = Arc::clone(self);
         Some(tokio_handle.spawn(async move {
-            let mut ticker =
-                tokio::time::interval(Duration::from_millis(this.options.flush_ms as u64));
+            let mut ticker = tokio::time::interval(this.options.flush_interval);
             loop {
                 select! {
                   // Tick to freeze and flush the memtable
