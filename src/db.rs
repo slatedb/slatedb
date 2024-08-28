@@ -1114,6 +1114,7 @@ mod tests {
                     SizeTieredCompactionSchedulerOptions::default(),
                 )),
                 max_concurrent_compactions: 1,
+                compaction_runtime: None,
             }),
         ))
         .await;
@@ -1131,6 +1132,7 @@ mod tests {
                     SizeTieredCompactionSchedulerOptions::default(),
                 )),
                 max_concurrent_compactions: 1,
+                compaction_runtime: None,
             }),
         ))
         .await

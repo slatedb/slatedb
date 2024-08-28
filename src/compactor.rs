@@ -44,6 +44,7 @@ impl Compactor {
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let (err_tx, err_rx) = tokio::sync::oneshot::channel();
+        let tokio_handle = options.compaction_runtime.as_ref().map(|h| h.clone()).unwrap_or(tokio_handle);
         let main_thread = thread::spawn(move || {
             let load_result = CompactorOrchestrator::new(
                 options,
@@ -497,6 +498,7 @@ mod tests {
                 SizeTieredCompactionSchedulerOptions::default(),
             )),
             max_concurrent_compactions: 1,
+            compaction_runtime: None,
         }
     }
 }
