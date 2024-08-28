@@ -1,4 +1,3 @@
-use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
@@ -545,6 +544,7 @@ mod tests {
             object_store.clone(),
             sst_format,
             path.clone(),
+            None,
         ));
         let db = Db::open_with_opts(path.clone(), options, object_store.clone())
             .await
@@ -572,7 +572,7 @@ mod tests {
         assert_eq!(state.l0.len(), 1);
 
         let l0 = state.l0.front().unwrap();
-        let mut iter = SstIterator::new(l0, table_store.clone(), 1, 1)
+        let mut iter = SstIterator::new(l0, table_store.clone(), 1, 1, false)
             .await
             .unwrap();
         assert_iterator(

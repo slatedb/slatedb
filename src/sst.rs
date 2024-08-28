@@ -718,7 +718,8 @@ mod tests {
             let root_path = Path::from("");
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let format = SsTableFormat::new(4096, 0, Some(compression));
-            let table_store = TableStore::new(object_store.clone(), format, root_path.clone());
+            let table_store =
+                TableStore::new(object_store.clone(), format, root_path.clone(), None);
             let mut builder = table_store.table_builder();
             builder.add(b"key1", Some(b"value1")).unwrap();
             builder.add(b"key2", Some(b"value2")).unwrap();
@@ -731,7 +732,7 @@ mod tests {
 
             // Decompression is independent of TableFormat. It uses the CompressionFormat from SSTable Info to decompress sst.
             let format = SsTableFormat::new(4096, 0, Some(dummy_codec));
-            let table_store = TableStore::new(object_store, format, root_path);
+            let table_store = TableStore::new(object_store, format, root_path, None);
             let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
             let index = table_store.read_index(&sst_handle).await.unwrap();
 
