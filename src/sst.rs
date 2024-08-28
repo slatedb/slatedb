@@ -525,7 +525,7 @@ mod tests {
         assert_iterator(
             &mut iter,
             &[(
-                &[b'a'; 8],
+                [b'a'; 8].into(),
                 ValueDeletable::Value(Bytes::copy_from_slice(&[b'1'; 8])),
             )],
         )
@@ -534,7 +534,7 @@ mod tests {
         assert_iterator(
             &mut iter,
             &[(
-                &[b'b'; 8],
+                vec![b'b'; 8],
                 ValueDeletable::Value(Bytes::copy_from_slice(&[b'2'; 8])),
             )],
         )
@@ -545,7 +545,7 @@ mod tests {
         assert_iterator(
             &mut iter,
             &[(
-                &[b'c'; 8],
+                vec![b'c'; 8],
                 ValueDeletable::Value(Bytes::copy_from_slice(&[b'3'; 8])),
             )],
         )
@@ -582,7 +582,7 @@ mod tests {
         assert_iterator(
             &mut iter,
             &[(
-                &[b'a'; 8],
+                vec![b'a'; 8],
                 ValueDeletable::Value(Bytes::copy_from_slice(&[b'1'; 8])),
             )],
         )
@@ -594,7 +594,7 @@ mod tests {
         assert_iterator(
             &mut iter,
             &[(
-                &[b'b'; 8],
+                vec![b'b'; 8],
                 ValueDeletable::Value(Bytes::copy_from_slice(&[b'2'; 8])),
             )],
         )
@@ -606,7 +606,7 @@ mod tests {
         assert_iterator(
             &mut iter,
             &[(
-                &[b'c'; 8],
+                vec![b'c'; 8],
                 ValueDeletable::Value(Bytes::copy_from_slice(&[b'3'; 8])),
             )],
         )
@@ -803,11 +803,11 @@ mod tests {
             &mut iter,
             &[
                 (
-                    &[b'a'; 2],
+                    vec![b'a'; 2],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 2])),
                 ),
                 (
-                    &[b'b'; 2],
+                    vec![b'b'; 2],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 2])),
                 ),
             ],
@@ -817,7 +817,7 @@ mod tests {
         assert_iterator(
             &mut iter,
             &[(
-                &[b'c'; 20],
+                vec![b'c'; 20],
                 ValueDeletable::Value(Bytes::copy_from_slice(&[3u8; 20])),
             )],
         )
@@ -860,11 +860,11 @@ mod tests {
             &mut iter,
             &[
                 (
-                    &[b'a'; 2],
+                    vec![b'a'; 2],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 2])),
                 ),
                 (
-                    &[b'b'; 2],
+                    vec![b'b'; 2],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 2])),
                 ),
             ],
@@ -874,7 +874,7 @@ mod tests {
         assert_iterator(
             &mut iter,
             &[(
-                &[b'c'; 20],
+                vec![b'c'; 20],
                 ValueDeletable::Value(Bytes::copy_from_slice(&[3u8; 20])),
             )],
         )
@@ -883,7 +883,7 @@ mod tests {
         assert_iterator(
             &mut iter,
             &[(
-                &[b'd'; 20],
+                vec![b'd'; 20],
                 ValueDeletable::Value(Bytes::copy_from_slice(&[4u8; 20])),
             )],
         )

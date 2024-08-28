@@ -579,12 +579,12 @@ mod tests {
             &mut iter,
             &[
                 (
-                    &[b'a'; 32],
+                    vec![b'a'; 32],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
                 ),
-                (&[b'b'; 32], ValueDeletable::Tombstone),
+                (vec![b'b'; 32], ValueDeletable::Tombstone),
                 (
-                    &[b'c'; 32],
+                    vec![b'c'; 32],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
                 ),
             ],

@@ -437,16 +437,18 @@ impl<'a> EncodedSsTableWriter<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
+    use crate::{
+        block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
+    };
     use crate::{error, tablestore::BlockCache};
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
-    use std::sync::Arc;
+    use std::{collections::VecDeque, sync::Arc};
     use ulid::Ulid;
 
     const ROOT: &str = "/root";
@@ -475,16 +477,16 @@ mod tests {
             &mut iter,
             &[
                 (
-                    &[b'a'; 16],
+                    vec![b'a'; 16],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 16])),
                 ),
                 (
-                    &[b'b'; 16],
+                    vec![b'b'; 16],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 16])),
                 ),
-                (&[b'c'; 16], ValueDeletable::Tombstone),
+                (vec![b'c'; 16], ValueDeletable::Tombstone),
                 (
-                    &[b'd'; 16],
+                    vec![b'd'; 16],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[4u8; 16])),
                 ),
             ],
@@ -518,7 +520,7 @@ mod tests {
     async fn test_tablestore_sst_and_partial_cache_hits() {
         // Setup
         let os = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(8, 1, None);
+        let format = SsTableFormat::new(32, 1, None);
         let block_cache = Arc::new(BlockCache::builder().max_capacity(1024).build());
         let ts = Arc::new(TableStore::new(
             os.clone(),
@@ -531,19 +533,41 @@ mod tests {
         let id = SsTableId::Compacted(Ulid::new());
         let mut writer = ts.table_writer(id);
         for i in 0..20 {
-            writer.add(&[i], Some(&[i])).await.unwrap();
+            let key = [i as u8; 16];
+            let value = [(i + 1) as u8; 16];
+            writer.add(&key, Some(&value)).await.unwrap();
         }
         let handle = writer.close().await.unwrap();
 
-        // Read index
+        // Read the index
         let index = Arc::new(ts.read_index(&handle).await.unwrap());
 
         // Test 1: SST hit
-        let sst_blocks = ts
+        let blocks = ts
             .read_blocks_using_index(&handle, index.clone(), 0..20, true)
             .await
             .unwrap();
-        assert_eq!(sst_blocks.len(), 20);
+
+        let mut expected_data = Vec::with_capacity(20);
+        for i in 0..20 {
+            let key = [i as u8; 16];
+            let value = [(i + 1) as u8; 16];
+            expected_data.push((
+                Vec::from(key.as_slice()),
+                ValueDeletable::Value(Bytes::copy_from_slice(&value)),
+            ));
+        }
+
+        assert_blocks(&blocks, &expected_data).await;
+
+        // Check that all blocks are now in cache
+        for i in 0..20 {
+            assert!(
+                block_cache.get(&(handle.id, i)).await.is_some(),
+                "Block {} should be in cache",
+                i
+            );
+        }
 
         // Partially clear the cache (remove blocks 5..10 and 15..20)
         for i in 5..10 {
@@ -554,34 +578,67 @@ mod tests {
         }
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
-        let result = ts
+        let blocks = ts
             .read_blocks_using_index(&handle, index.clone(), 0..20, true)
             .await
             .unwrap();
-        assert_eq!(result.len(), 20);
+        assert_blocks(&blocks, &expected_data).await;
 
-        // Delete SST to see cache hit occurs for all blocks
+        // Check that all blocks are again in cache
+        for i in 0..20 {
+            assert!(
+                block_cache.get(&(handle.id, i)).await.is_some(),
+                "Block {} should be in cache after partial hit",
+                i
+            );
+        }
+
+        // Replace SST file with an empty file
         let path = ts.path(&id);
-        os.delete(&path).await.unwrap();
+        os.put(&path, Bytes::new().into()).await.unwrap();
 
-        // Test 3: All blocks should be in cache after SST deletion
-        let cache_only_result = ts
+        // Test 3: All blocks should be in cache after SST file is emptied
+        let blocks = ts
             .read_blocks_using_index(&handle, index.clone(), 0..20, true)
             .await
             .unwrap();
-        assert_eq!(cache_only_result.len(), 20);
+        assert_blocks(&blocks, &expected_data).await;
 
-        // Test 4: Verify that reading specific ranges still works after SST deletion
-        let partial_result_1 = ts
+        // Check that all blocks are still in cache
+        for i in 0..20 {
+            assert!(
+                block_cache.get(&(handle.id, i)).await.is_some(),
+                "Block {} should be in cache after SST emptying",
+                i
+            );
+        }
+
+        // Test 4: Verify that reading specific ranges still works after SST file is emptied
+        let blocks = ts
             .read_blocks_using_index(&handle, index.clone(), 5..10, true)
             .await
             .unwrap();
-        assert_eq!(partial_result_1.len(), 5);
+        assert_blocks(&blocks, &expected_data[5..10]).await;
 
-        let partial_result_2 = ts
+        let blocks = ts
             .read_blocks_using_index(&handle, index.clone(), 15..20, true)
             .await
             .unwrap();
-        assert_eq!(partial_result_2.len(), 5);
+        assert_blocks(&blocks, &expected_data[15..20]).await;
+    }
+
+    async fn assert_blocks(blocks: &VecDeque<Arc<Block>>, expected: &[(Vec<u8>, ValueDeletable)]) {
+        let mut block_iter = blocks.iter();
+        let mut expected_iter = expected.iter();
+
+        while let (Some(block), Some(expected_item)) = (block_iter.next(), expected_iter.next()) {
+            let mut iter = BlockIterator::from_first_key(block.clone());
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key, expected_item.0);
+            assert_eq!(ValueDeletable::Value(kv.value), expected_item.1);
+        }
+
+        assert!(block_iter.next().is_none());
+        assert!(expected_iter.next().is_none());
     }
 }

@@ -179,15 +179,24 @@ mod tests {
         assert_iterator(
             &mut merge_iter,
             &[
-                (b"aaaa", ValueDeletable::Value(Bytes::from("1111"))),
-                (b"bbbb", ValueDeletable::Value(Bytes::from("2222"))),
-                (b"cccc", ValueDeletable::Value(Bytes::from("3333"))),
-                (b"dddd", ValueDeletable::Value(Bytes::from("4444"))),
-                (b"eeee", ValueDeletable::Value(Bytes::from("5555"))),
-                (b"gggg", ValueDeletable::Value(Bytes::from("7777"))),
-                (b"xxxx", ValueDeletable::Value(Bytes::from("24242424"))),
-                (b"yyyy", ValueDeletable::Value(Bytes::from("25252525"))),
-                (b"zzzz", ValueDeletable::Value(Bytes::from("26262626"))),
+                ("aaaa".into(), ValueDeletable::Value(Bytes::from("1111"))),
+                ("bbbb".into(), ValueDeletable::Value(Bytes::from("2222"))),
+                ("cccc".into(), ValueDeletable::Value(Bytes::from("3333"))),
+                ("dddd".into(), ValueDeletable::Value(Bytes::from("4444"))),
+                ("eeee".into(), ValueDeletable::Value(Bytes::from("5555"))),
+                ("gggg".into(), ValueDeletable::Value(Bytes::from("7777"))),
+                (
+                    "xxxx".into(),
+                    ValueDeletable::Value(Bytes::from("24242424")),
+                ),
+                (
+                    "yyyy".into(),
+                    ValueDeletable::Value(Bytes::from("25252525")),
+                ),
+                (
+                    "zzzz".into(),
+                    ValueDeletable::Value(Bytes::from("26262626")),
+                ),
             ],
         )
         .await;
@@ -218,14 +227,14 @@ mod tests {
         assert_iterator(
             &mut merge_iter,
             &[
-                (b"aaaa", ValueDeletable::Value(Bytes::from("1111"))),
-                (b"bbbb", ValueDeletable::Value(Bytes::from("2222"))),
+                ("aaaa".into(), ValueDeletable::Value(Bytes::from("1111"))),
+                ("bbbb".into(), ValueDeletable::Value(Bytes::from("2222"))),
                 (
-                    b"cccc",
+                    "cccc".into(),
                     ValueDeletable::Value(Bytes::from("use this one c")),
                 ),
                 (
-                    b"xxxx",
+                    "xxxx".into(),
                     ValueDeletable::Value(Bytes::from("use this one x")),
                 ),
             ],
@@ -249,12 +258,21 @@ mod tests {
         assert_iterator(
             &mut merge_iter,
             &[
-                (b"aaaa", ValueDeletable::Value(Bytes::from("1111"))),
-                (b"bbbb", ValueDeletable::Value(Bytes::from("2222"))),
-                (b"cccc", ValueDeletable::Value(Bytes::from("3333"))),
-                (b"xxxx", ValueDeletable::Value(Bytes::from("24242424"))),
-                (b"yyyy", ValueDeletable::Value(Bytes::from("25252525"))),
-                (b"zzzz", ValueDeletable::Value(Bytes::from("26262626"))),
+                ("aaaa".into(), ValueDeletable::Value(Bytes::from("1111"))),
+                ("bbbb".into(), ValueDeletable::Value(Bytes::from("2222"))),
+                ("cccc".into(), ValueDeletable::Value(Bytes::from("3333"))),
+                (
+                    "xxxx".into(),
+                    ValueDeletable::Value(Bytes::from("24242424")),
+                ),
+                (
+                    "yyyy".into(),
+                    ValueDeletable::Value(Bytes::from("25252525")),
+                ),
+                (
+                    "zzzz".into(),
+                    ValueDeletable::Value(Bytes::from("26262626")),
+                ),
             ],
         )
         .await;
@@ -274,12 +292,15 @@ mod tests {
         assert_iterator(
             &mut merge_iter,
             &[
-                (b"aaaa", ValueDeletable::Value(Bytes::from("1111"))),
+                ("aaaa".into(), ValueDeletable::Value(Bytes::from("1111"))),
                 (
-                    b"cccc",
+                    "cccc".into(),
                     ValueDeletable::Value(Bytes::from("use this one c")),
                 ),
-                (b"xxxx", ValueDeletable::Value(Bytes::from("24242424"))),
+                (
+                    "xxxx".into(),
+                    ValueDeletable::Value(Bytes::from("24242424")),
+                ),
             ],
         )
         .await;

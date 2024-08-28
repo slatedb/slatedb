@@ -7,7 +7,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 #[allow(dead_code)]
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(
     iterator: &mut T,
-    entries: &[(&'static [u8], ValueDeletable)],
+    entries: &[(Vec<u8>, ValueDeletable)],
 ) {
     for (expected_k, expected_v) in entries.iter() {
         let kv = iterator
@@ -15,7 +15,7 @@ pub(crate) async fn assert_iterator<T: KeyValueIterator>(
             .await
             .expect("iterator next_entry failed")
             .expect("expected iterator to return a value");
-        assert_eq!(kv.key, Bytes::from(*expected_k));
+        assert_eq!(kv.key, Bytes::from(expected_k.clone()));
         assert_eq!(kv.value, *expected_v);
     }
     assert!(iterator
