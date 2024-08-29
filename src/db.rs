@@ -304,27 +304,30 @@ impl Db {
     pub async fn open_with_fp_registry(
         path: Path,
         options: DbOptions,
-        mut object_store: Arc<dyn ObjectStore>,
+        object_store: Arc<dyn ObjectStore>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         let sst_format =
             SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
 
-        if let Some(disk_cache_root_folder) = &options.disk_cache_root_folder {
-            object_store = Arc::new(DiskCachedObjectStore::new(
-                object_store,
-                disk_cache_root_folder.clone(),
-                16 * 1024 * 1024,
-            ));
-        }
+        let maybe_cached_object_store =
+            if let Some(disk_cache_root_folder) = &options.disk_cache_root_folder {
+                Arc::new(DiskCachedObjectStore::new(
+                    object_store,
+                    disk_cache_root_folder.clone(),
+                    16 * 1024 * 1024,
+                ))
+            } else {
+                object_store
+            };
 
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            object_store.clone(),
+            maybe_cached_object_store.clone(),
             sst_format,
             path.clone(),
             fp_registry,
         ));
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
         let mut manifest = Self::init_db(&manifest_store).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
