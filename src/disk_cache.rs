@@ -52,7 +52,11 @@ impl DiskCachedObjectStore {
         };
         match entry.read_meta().await {
             Ok(Some(meta)) => Ok(meta),
-            _ => self.object_store.head(location).await,
+            _ => {
+                let meta = self.object_store.head(location).await?;
+                entry.save_meta(&meta).await.ok();
+                Ok(meta)
+            }
         }
     }
 
