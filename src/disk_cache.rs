@@ -126,8 +126,7 @@ impl DiskCachedObjectStore {
         Ok(result_meta)
     }
 
-    // given the range and object size, split the range into parts, and return the part id and the range
-    // inside the part.
+    // split the range into parts, and return the part id and the range inside the part.
     fn split_range_into_parts(&self, range: Range<usize>) -> Vec<(PartID, Range<usize>)> {
         let range_aligned = self.align_range(&range, self.part_size);
         let start_part = range_aligned.start / self.part_size;
@@ -404,11 +403,12 @@ type PartID = usize;
 
 #[allow(unused)]
 impl DiskCacheEntry {
-    /// save the GetResult to the disk cache, a GetResult may be transformed into multiple parts
-    /// file and a meta file. please note that the `range` in the GetResult is expected to be
+    /// save the GetResult to the disk cache, a GetResult may be transformed into multiple part
+    /// files and a meta file. please note that the `range` in the GetResult is expected to be
     /// aligned with the part size.
     pub async fn save_result(&self, result: GetResult) -> object_store::Result<usize> {
         assert!(result.range.start % self.part_size == 0);
+        assert!(result.range.end % self.part_size == 0 || result.range.end == result.meta.size);
 
         self.save_meta(&result.meta).await?;
 
@@ -428,17 +428,10 @@ impl DiskCacheEntry {
             }
         }
 
-        // if the last part is not fully filled, save it as the last part. This is useful
-        // to determined the end of the object.
+        // if the last part is not fully filled, save it as the last part.
         if !buffer.is_empty() {
             self.save_part(part_number, buffer.as_ref()).await?;
             return Ok(object_size);
-        }
-
-        // if reached exactly the end of the object file, save an empty part file to indicate
-        // the end of the object.
-        if part_number * self.part_size == object_size {
-            self.save_part(part_number, &[]).await?;
         }
 
         Ok(object_size)
@@ -745,17 +738,17 @@ mod tests {
         let object_size_hint = entry.save_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3);
         let cached_parts = entry.cached_parts().await?;
-        assert_eq!(cached_parts.len(), 4);
+        assert_eq!(cached_parts.len(), 3);
         assert_eq!(entry.read_part(0).await?, Some(payload.slice(0..1024)));
         assert_eq!(entry.read_part(1).await?, Some(payload.slice(1024..2048)));
         assert_eq!(entry.read_part(2).await?, Some(payload.slice(2048..3072)));
 
-        let evict_part_path = entry.make_part_path(3, false);
+        let evict_part_path = entry.make_part_path(2, false);
         std::fs::remove_file(evict_part_path).unwrap();
-        assert_eq!(entry.read_part(3).await?, None);
+        assert_eq!(entry.read_part(2).await?, None);
 
         let cached_parts = entry.cached_parts().await?;
-        assert_eq!(cached_parts.len(), 3);
+        assert_eq!(cached_parts.len(), 2);
         Ok(())
     }
 
