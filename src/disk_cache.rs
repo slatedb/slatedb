@@ -37,6 +37,8 @@ impl DiskCachedObjectStore {
         root_folder: std::path::PathBuf,
         part_size: usize,
     ) -> Self {
+        assert!(part_size % 1024 == 0);
+
         Self {
             object_store,
             root_folder,
