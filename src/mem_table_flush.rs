@@ -20,8 +20,7 @@ pub(crate) struct MemtableFlusher {
 impl MemtableFlusher {
     pub(crate) async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
         let current_manifest = self.manifest.refresh().await?;
-        let mut wguard_state = self.db_inner.state.write();
-        wguard_state.refresh_db_state(current_manifest);
+        self.db_inner.load_current_state(current_manifest);
         Ok(())
     }
 

@@ -139,6 +139,13 @@ impl TableStore {
         self.sst_format.table_builder()
     }
 
+    pub(crate) fn clear_caches_for_sst(&self, ids: &[SsTableId]) {
+        let mut wguard = self.filter_cache.write();
+        for id in ids.iter() {
+            wguard.remove(id);
+        }
+    }
+
     pub(crate) async fn write_sst(
         &self,
         id: &SsTableId,

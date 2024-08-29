@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
@@ -255,6 +256,26 @@ impl DbInner {
             };
             table.await_flush_to_l0().await
         }
+    }
+
+    pub(crate) fn load_current_state(&self, state: &CoreDbState) {
+        let mut wguard_state = self.state.write();
+        let old_snap = wguard_state.snapshot();
+        let old_state = &old_snap.state.core;
+        wguard_state.refresh_db_state(state);
+        let current_ssts: HashSet<_> = state.l0.iter()
+            .chain(state.compacted.iter().flat_map(|sr| sr.ssts.iter()))
+            .map(|h| h.id.clone())
+            .collect();
+        let deleted: Vec<_> = old_state.l0.iter()
+            .chain(old_state.compacted.iter().flat_map(|sr| sr.ssts.iter()))
+            .filter_map(|h| if current_ssts.contains(&h.id) {
+                None
+            } else {
+                Some(h.id.clone())
+            })
+            .collect();
+        self.table_store.clear_caches_for_sst(&deleted);
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
