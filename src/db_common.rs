@@ -14,7 +14,7 @@ impl DbInner {
         }
         guard.freeze_memtable(wal_id);
         self.memtable_flush_notifier
-            .send(FlushImmutableMemtables)
+            .send(FlushImmutableMemtables(None))
             .expect("failed to send memtable flush msg");
     }
 }
