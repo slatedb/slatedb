@@ -144,7 +144,7 @@ impl Default for DbOptions {
             wal_enabled: true,
             manifest_poll_interval: Duration::from_secs(1),
             min_filter_keys: 1000,
-            l0_sst_size_bytes: 128,
+            l0_sst_size_bytes: 64 * 1024 * 1024,
             max_unflushed_memtable: 2,
             l0_max_ssts: 8,
             compactor_options: Some(CompactorOptions::default()),
