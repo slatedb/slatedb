@@ -243,6 +243,7 @@ mod tests {
     use super::*;
     use crate::compactor_state::CompactionStatus::Submitted;
     use crate::compactor_state::SourceId::Sst;
+    use crate::config::{CompactorOptions, DbOptions};
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::manifest_store::{ManifestStore, StoredManifest};
@@ -532,8 +533,20 @@ mod tests {
     }
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
+        let opts = DbOptions {
+            flush_interval: Duration::from_millis(100),
+            #[cfg(feature = "wal_disable")]
+            wal_enabled: true,
+            manifest_poll_interval: Duration::from_secs(1),
+            min_filter_keys: 1000,
+            l0_sst_size_bytes: 128,
+            max_unflushed_memtable: 2,
+            l0_max_ssts: 8,
+            compactor_options: Some(CompactorOptions::default()),
+            compression_codec: None,
+        };
         tokio_handle
-            .block_on(Db::open(Path::from(PATH), os))
+            .block_on(Db::open_with_opts(Path::from(PATH), opts, os))
             .unwrap()
     }
 
