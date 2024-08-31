@@ -450,6 +450,7 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
 
     async fn read_part(&self, part_number: PartID) -> object_store::Result<Option<Bytes>>;
 
+    #[cfg(test)]
     async fn cached_parts(&self) -> object_store::Result<Vec<PartID>>;
 
     async fn save_meta(&self, meta: &ObjectMeta) -> object_store::Result<()>;
@@ -584,6 +585,7 @@ impl LocalCacheEntry for DiskCacheEntry {
         Ok(Some(Bytes::from(buffer)))
     }
 
+    #[cfg(test)]
     async fn cached_parts(&self) -> object_store::Result<Vec<PartID>> {
         let file_path = self.root_folder.join(self.location.to_string());
         let directory_path = match file_path.parent() {
@@ -967,6 +969,7 @@ mod tests {
             Some(GetRange::Offset(260817)),
             Some(GetRange::Offset(1024 * 3 + 2)),
             Some(GetRange::Offset(1024 * 3 + 1)),
+            #[deny(clippy::reversed_empty_ranges)]
             Some(GetRange::Bounded(2900..2048)),
             Some(GetRange::Bounded(10..10)),
         ];

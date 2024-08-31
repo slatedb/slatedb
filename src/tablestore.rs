@@ -385,7 +385,6 @@ impl<'a> EncodedSsTableWriter<'a> {
 #[cfg(test)]
 mod tests {
     use crate::db_state::SsTableId;
-    use crate::disk_cache::CacheableObjectStore;
     use crate::error;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
