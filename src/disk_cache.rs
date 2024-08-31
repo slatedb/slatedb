@@ -30,6 +30,7 @@ pub(crate) struct CacheableGetOptions {
     pub cache_enabled: bool,
     /// the lower the rank, the less likely the object will be evicted.
     /// if set to Some(0), the object will never be evicted.
+    #[allow(unused)]
     pub cache_rank: Option<u8>,
 }
 
@@ -457,58 +458,9 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
 }
 
 #[derive(Debug)]
-struct DummyStorage {}
-
-impl LocalCacheStorage for DummyStorage {
-    fn entry(
-        &self,
-        _location: &object_store::path::Path,
-        _part_size: usize,
-    ) -> Box<dyn LocalCacheEntry> {
-        Box::new(DummyEntry {})
-    }
-}
-
-impl Display for DummyStorage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "NoCache")
-    }
-}
-
-#[derive(Debug)]
-struct DummyEntry {}
-
-#[async_trait::async_trait]
-impl LocalCacheEntry for DummyEntry {
-    async fn save_part(&self, _part_number: PartID, _buf: Bytes) -> object_store::Result<()> {
-        Ok(())
-    }
-
-    async fn read_part(&self, _part_number: PartID) -> object_store::Result<Option<Bytes>> {
-        Ok(None)
-    }
-
-    async fn cached_parts(&self) -> object_store::Result<Vec<PartID>> {
-        Ok(vec![])
-    }
-
-    async fn save_meta(&self, _meta: &ObjectMeta) -> object_store::Result<()> {
-        Ok(())
-    }
-
-    async fn read_meta(&self) -> object_store::Result<Option<ObjectMeta>> {
-        Ok(None)
-    }
-}
-
-impl DiskCacheStorage {}
-
-#[derive(Debug)]
 struct DiskCacheStorage {
     root_folder: std::path::PathBuf,
 }
-
-impl DiskCacheStorage {}
 
 impl LocalCacheStorage for DiskCacheStorage {
     fn entry(
