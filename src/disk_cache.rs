@@ -5,12 +5,15 @@ use futures::stream;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use object_store::buffered::BufWriter;
+use object_store::local;
+use object_store::Attributes;
 use object_store::GetRange;
 use object_store::GetResultPayload;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::ops::Range;
 use std::sync::Arc;
@@ -143,11 +146,22 @@ impl CacheableObjectStoreInner {
 
     pub async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
         let entry = self.storage.entry(location, self.part_size);
-        match entry.read_meta().await {
-            Ok(Some(meta)) => Ok(meta),
+        match entry.read_head().await {
+            Ok(Some((meta, _))) => Ok(meta),
             _ => {
-                let meta = self.object_store.head(location).await?;
-                entry.save_meta(&meta).await.ok();
+                let result = self
+                    .object_store
+                    .get_opts(
+                        location,
+                        GetOptions {
+                            range: Some(GetRange::Bounded(0..0)),
+                            head: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                let meta = result.meta.clone();
+                self.save_result(result).await.ok();
                 Ok(meta)
             }
         }
@@ -171,7 +185,7 @@ impl CacheableObjectStoreInner {
                 .await;
         }
 
-        let meta = self.maybe_prefetch_range(location, &opts.range).await?;
+        let (meta, attributes) = self.maybe_prefetch_range(location, &opts.range).await?;
         let range = self.canonicalize_range(opts.range, meta.size)?;
         let parts = self.split_range_into_parts(range.clone());
 
@@ -186,7 +200,7 @@ impl CacheableObjectStoreInner {
         Ok(GetResult {
             meta,
             range,
-            attributes: Default::default(),
+            attributes,
             payload: GetResultPayload::Stream(result_stream),
         })
     }
@@ -201,10 +215,10 @@ impl CacheableObjectStoreInner {
         &self,
         location: &Path,
         range: &Option<GetRange>,
-    ) -> object_store::Result<ObjectMeta> {
+    ) -> object_store::Result<(ObjectMeta, Attributes)> {
         let entry = self.storage.entry(location, self.part_size);
-        match entry.read_meta().await {
-            Ok(Some(meta)) => return Ok(meta),
+        match entry.read_head().await {
+            Ok(Some((meta, attrs))) => return Ok((meta, attrs)),
             Ok(None) => {}
             Err(_) => {
                 // TODO: add a warning log
@@ -221,11 +235,12 @@ impl CacheableObjectStoreInner {
 
         let get_result = self.object_store.get_opts(location, aligned_opts).await?;
         let result_meta = get_result.meta.clone();
+        let result_attrs = get_result.attributes.clone();
         // swallow the error on saving to disk here (the disk might be already full), just fallback
         // to the object store.
         // TODO: add a warning log here.
         self.save_result(get_result).await.ok();
-        Ok(result_meta)
+        Ok((result_meta, result_attrs))
     }
 
     /// save the GetResult to the disk cache, a GetResult may be transformed into multiple part
@@ -236,7 +251,7 @@ impl CacheableObjectStoreInner {
         assert!(result.range.end % self.part_size == 0 || result.range.end == result.meta.size);
 
         let entry = self.storage.entry(&result.meta.location, self.part_size);
-        entry.save_meta(&result.meta).await?;
+        entry.save_head((&result.meta, &result.attributes)).await?;
 
         let mut buffer = BytesMut::new();
         let mut part_number = result.range.start / self.part_size;
@@ -332,8 +347,9 @@ impl CacheableObjectStoreInner {
             // save it to the disk cache, we'll ignore the error on writing to disk here, just return
             // the bytes from the object store.
             let meta = get_result.meta.clone();
+            let attrs = get_result.attributes.clone();
             let bytes = get_result.bytes().await?;
-            entry.save_meta(&meta).await.ok();
+            entry.save_head((&meta, &attrs)).await.ok();
             entry.save_part(part_id, bytes.clone()).await.ok();
             Ok(bytes.slice(range_in_part))
         })
@@ -429,12 +445,42 @@ impl std::fmt::Display for CacheableObjectStoreInner {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct LocalCacheMeta {
+struct LocalCacheHead {
     pub location: String,
     pub last_modified: String,
     pub size: usize,
     pub e_tag: Option<String>,
     pub version: Option<String>,
+    pub attributes: HashMap<String, String>,
+}
+
+impl LocalCacheHead {
+    pub fn meta(&self) -> ObjectMeta {
+        ObjectMeta {
+            location: self.location.clone().into(),
+            last_modified: self.last_modified.parse().unwrap(),
+            size: self.size,
+            e_tag: self.e_tag.clone(),
+            version: self.version.clone(),
+        }
+    }
+
+    pub fn attributes(&self) -> Attributes {
+        todo!()
+    }
+}
+
+impl From<(&ObjectMeta, &Attributes)> for LocalCacheHead {
+    fn from((meta, attrs): (&ObjectMeta, &Attributes)) -> Self {
+        LocalCacheHead {
+            location: meta.location.to_string(),
+            last_modified: meta.last_modified.to_rfc3339(),
+            size: meta.size,
+            e_tag: meta.e_tag.clone(),
+            version: meta.version.clone(),
+            attributes: todo!(),
+        }
+    }
 }
 
 // it seems that object_store did not expose this error type, duplicate it here.
@@ -465,9 +511,9 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
     #[cfg(test)]
     async fn cached_parts(&self) -> object_store::Result<Vec<PartID>>;
 
-    async fn save_meta(&self, meta: &ObjectMeta) -> object_store::Result<()>;
+    async fn save_head(&self, meta: (&ObjectMeta, &Attributes)) -> object_store::Result<()>;
 
-    async fn read_meta(&self) -> object_store::Result<Option<ObjectMeta>>;
+    async fn read_head(&self) -> object_store::Result<Option<(ObjectMeta, Attributes)>>;
 }
 
 #[derive(Debug)]
@@ -503,6 +549,25 @@ struct DiskCacheEntry {
 }
 
 impl DiskCacheEntry {
+    async fn atomic_write(&self, path: &std::path::Path, buf: Bytes) -> object_store::Result<()> {
+        let tmp_path = path.with_extension(format!("_tmp{}", self.make_rand_suffix()));
+
+        // ensure the parent folder exists
+        if let Some(folder_path) = tmp_path.parent() {
+            fs::create_dir_all(folder_path).await.map_err(wrap_io_err)?;
+        }
+
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .await
+            .map_err(wrap_io_err)?;
+        file.write_all(&buf).await.map_err(wrap_io_err)?;
+        fs::rename(tmp_path, path).await.map_err(wrap_io_err)
+    }
+
     fn make_part_path(
         root_folder: std::path::PathBuf,
         location: &Path,
@@ -517,15 +582,15 @@ impl DiskCacheEntry {
             format!("{}kb", part_size / 1024)
         };
         let part_number_str = format!("{:09}", part_number);
-        root_folder
-            .join(location.to_string())
-            .with_extension(format!("_part{}-{}", part_size_name, part_number_str))
+        let mut path = root_folder.join(location.to_string());
+        path.push(format!("._part{}-{}", part_size_name, part_number_str));
+        path
     }
 
-    fn make_meta_path(&self) -> std::path::PathBuf {
-        self.root_folder
-            .join(self.location.to_string())
-            .with_extension("_meta")
+    fn make_head_path(root_folder: std::path::PathBuf, location: &Path) -> std::path::PathBuf {
+        let mut path = root_folder.join(location.to_string());
+        path.push("._head");
+        path
     }
 
     fn make_rand_suffix(&self) -> String {
@@ -549,31 +614,7 @@ impl LocalCacheEntry for DiskCacheEntry {
             return Ok(());
         }
 
-        // ensure the parent folder exists
-        if let Some(part_file_folder) = part_path.parent() {
-            fs::create_dir_all(part_file_folder)
-                .await
-                .map_err(wrap_io_err)?;
-        }
-
-        // save the file content to tmp. if the disk is full, we'll get an error here.
-        let tmp_part_file_path =
-            part_path.with_extension(format!("tmp{}", self.make_rand_suffix()));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_part_file_path)
-            .await
-            .map_err(wrap_io_err)?;
-        file.write_all(&buf).await.map_err(wrap_io_err)?;
-
-        // rename the file
-        fs::rename(tmp_part_file_path, part_path)
-            .await
-            .map_err(wrap_io_err)
-            .ok();
-        Ok(())
+        self.atomic_write(&part_path, buf).await
     }
 
     async fn read_part(&self, part_number: usize) -> object_store::Result<Option<Bytes>> {
@@ -643,11 +684,9 @@ impl LocalCacheEntry for DiskCacheEntry {
         Ok(part_numbers)
     }
 
-    async fn save_meta(&self, meta: &ObjectMeta) -> object_store::Result<()> {
-        let meta_file_path = self.make_meta_path();
-
+    async fn save_head(&self, head: (&ObjectMeta, &Attributes)) -> object_store::Result<()> {
         // if the meta file exists and not corrupted, do nothing
-        match self.read_meta().await {
+        match self.read_head().await {
             Ok(Some(_)) => return Ok(()),
             Ok(None) => {}
             Err(_) => {
@@ -655,41 +694,15 @@ impl LocalCacheEntry for DiskCacheEntry {
             }
         }
 
-        // ensure the parent folder exists
-        if let Some(part_file_folder) = meta_file_path.parent() {
-            fs::create_dir_all(part_file_folder)
-                .await
-                .map_err(wrap_io_err)?;
-        }
+        let head: LocalCacheHead = head.into();
+        let buf = serde_json::to_vec(&head).map_err(wrap_io_err)?;
 
-        let meta = LocalCacheMeta {
-            location: meta.location.to_string(),
-            last_modified: meta.last_modified.to_rfc3339(),
-            size: meta.size,
-            e_tag: meta.e_tag.clone(),
-            version: meta.version.clone(),
-        };
-        let buf = serde_json::to_vec(&meta).map_err(wrap_io_err)?;
-
-        let tmp_meta_file_path =
-            meta_file_path.with_extension(format!("tmp{}", self.make_rand_suffix()));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_meta_file_path)
-            .await
-            .map_err(wrap_io_err)?;
-        file.write_all(&buf).await.map_err(wrap_io_err)?;
-
-        // rename the tmp file to meta_file_path, if the target file already exists, it'll be overwritten.
-        fs::rename(tmp_meta_file_path, meta_file_path)
-            .await
-            .map_err(wrap_io_err)
+        let meta_path = Self::make_head_path(self.root_folder.clone(), &self.location);
+        self.atomic_write(&meta_path, buf.into()).await
     }
 
-    async fn read_meta(&self) -> object_store::Result<Option<ObjectMeta>> {
-        let meta_path = self.make_meta_path();
+    async fn read_head(&self) -> object_store::Result<Option<(ObjectMeta, Attributes)>> {
+        let meta_path = Self::make_head_path(self.root_folder.clone(), &self.location);
 
         let exists = fs::try_exists(&meta_path).await.unwrap_or(false);
         if !exists {
@@ -705,15 +718,8 @@ impl LocalCacheEntry for DiskCacheEntry {
             .await
             .map_err(wrap_io_err)?;
 
-        let meta: LocalCacheMeta = serde_json::from_str(&content).map_err(wrap_io_err)?;
-
-        Ok(Some(ObjectMeta {
-            location: meta.location.into(),
-            last_modified: meta.last_modified.parse().map_err(wrap_io_err)?,
-            size: meta.size,
-            e_tag: meta.e_tag,
-            version: meta.version,
-        }))
+        let head: LocalCacheHead = serde_json::from_str(&content).map_err(wrap_io_err)?;
+        Ok(Some((head.meta(), head.attributes())))
     }
 }
 
@@ -779,8 +785,8 @@ mod tests {
         assert_eq!(object_size_hint, 1024 * 3 + 32);
 
         // assert the cached meta
-        let meta = entry.read_meta().await?;
-        assert_eq!(meta.unwrap().size, 1024 * 3 + 32);
+        let head = entry.read_head().await?;
+        assert_eq!(head.unwrap().0.size, 1024 * 3 + 32);
 
         // assert the parts
         let cached_parts = entry.cached_parts().await?;
