@@ -77,17 +77,16 @@ impl CacheableObjectStore {
         location: &Path,
         opts: CacheableGetOptions,
     ) -> object_store::Result<GetResult> {
-        let object_store = match (opts.cache_enabled, self) {
-            (true, Self::Cached(inner)) => return inner.cached_get_opts(location, opts).await,
-            (false, Self::Cached(inner)) => inner.object_store.clone(),
-            (_, Self::Direct(object_store)) => object_store.clone(),
-        };
-
-        let get_opts = GetOptions {
-            range: opts.range,
-            ..Default::default()
-        };
-        object_store.get_opts(location, get_opts).await
+        match self {
+            Self::Cached(inner) => return inner.cached_get_opts(location, opts).await,
+            Self::Direct(object_store) => {
+                let get_opts = GetOptions {
+                    range: opts.range,
+                    ..Default::default()
+                };
+                object_store.get_opts(location, get_opts).await
+            }
+        }
     }
 
     pub fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, object_store::Result<ObjectMeta>> {
@@ -159,6 +158,19 @@ impl CacheableObjectStoreInner {
         location: &Path,
         opts: CacheableGetOptions,
     ) -> object_store::Result<GetResult> {
+        if !opts.cache_enabled {
+            return self
+                .object_store
+                .get_opts(
+                    location,
+                    GetOptions {
+                        range: opts.range,
+                        ..Default::default()
+                    },
+                )
+                .await;
+        }
+
         let meta = self.maybe_prefetch_range(location, &opts.range).await?;
         let range = self.canonicalize_range(opts.range, meta.size)?;
         let parts = self.split_range_into_parts(range.clone());

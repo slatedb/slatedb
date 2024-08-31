@@ -79,7 +79,7 @@ impl ReadOnlyBlob for ReadOnlyObject {
 impl TableStore {
     #[allow(dead_code)]
     pub fn new(
-        object_store: impl Into<CacheableObjectStore> + 'static,
+        object_store: impl Into<CacheableObjectStore>,
         sst_format: SsTableFormat,
         root_path: Path,
     ) -> Self {
