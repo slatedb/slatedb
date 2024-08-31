@@ -1,9 +1,5 @@
-use std::sync::Arc;
-
-use futures::stream::BoxStream;
 use object_store::{
-    buffered::BufWriter, path::Path, GetRange, GetResult, ObjectMeta, ObjectStore, PutOptions,
-    PutPayload, PutResult,
+    path::Path, GetRange, GetResult, ObjectMeta, PutOptions, PutPayload, PutResult,
 };
 
 pub(crate) struct GetOptions {
@@ -31,7 +27,7 @@ impl Default for GetOptions {
 /// methods that are needed by SlateDB. and also to allow us to slightly
 /// extend the object store trait to capabilities like cache control.
 #[async_trait::async_trait]
-pub trait ObjectStoreAccess: Send + Sync + 'static + std::fmt::Debug {
+pub trait ObjectStoreAccess: Send + Sync + 'static {
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta>;
 
     async fn get_opts(&self, location: &Path, opts: GetOptions) -> object_store::Result<GetResult>;
@@ -42,16 +38,13 @@ pub trait ObjectStoreAccess: Send + Sync + 'static + std::fmt::Debug {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult>;
-
-    fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, object_store::Result<ObjectMeta>>;
-
-    fn buf_writer(&self, path: &Path) -> BufWriter;
 }
 
 #[async_trait::async_trait]
-impl ObjectStoreAccess for Arc<dyn ObjectStore> {
+impl<T: object_store::ObjectStore> ObjectStoreAccess for T {
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        self.as_ref().head(location).await
+        let obj_store = self as &dyn object_store::ObjectStore;
+        obj_store.head(location).await
     }
 
     async fn get_opts(&self, location: &Path, opts: GetOptions) -> object_store::Result<GetResult> {
@@ -60,11 +53,7 @@ impl ObjectStoreAccess for Arc<dyn ObjectStore> {
             range: opts.range,
             ..Default::default()
         };
-        self.as_ref().get_opts(location, opts).await
-    }
-
-    fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, object_store::Result<ObjectMeta>> {
-        self.as_ref().list(prefix)
+        obj_store.get_opts(location, opts).await
     }
 
     async fn put_opts(
@@ -73,10 +62,7 @@ impl ObjectStoreAccess for Arc<dyn ObjectStore> {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
-        self.as_ref().put_opts(location, payload, opts).await
-    }
-
-    fn buf_writer(&self, path: &Path) -> BufWriter {
-        BufWriter::new(self.clone(), path.to_owned())
+        let obj_store = self as &dyn object_store::ObjectStore;
+        obj_store.put_opts(location, payload, opts).await
     }
 }

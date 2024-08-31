@@ -4,7 +4,6 @@ use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
-use crate::object_store_access::{GetOptions, ObjectStoreAccess};
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
@@ -14,7 +13,7 @@ use fail_parallel::{fail_point, FailPointRegistry};
 use futures::StreamExt;
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
-use object_store::{GetRange, ObjectStore};
+use object_store::ObjectStore;
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
@@ -22,7 +21,7 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 pub struct TableStore {
-    object_store: Arc<dyn ObjectStoreAccess>,
+    object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,
     root_path: Path,
     wal_path: &'static str,
@@ -39,7 +38,7 @@ pub struct TableStore {
 }
 
 struct ReadOnlyObject {
-    object_store: Arc<dyn ObjectStoreAccess>,
+    object_store: Arc<dyn ObjectStore>,
     path: Path,
 }
 
@@ -54,21 +53,14 @@ impl ReadOnlyBlob for ReadOnlyObject {
     }
 
     async fn read_range(&self, range: Range<usize>) -> Result<Bytes, SlateDBError> {
-        let opts = GetOptions {
-            range: Some(GetRange::Bounded(range)),
-            ..Default::default()
-        };
-        let result = self
-            .object_store
-            .get_opts(&self.path, opts)
+        self.object_store
+            .get_range(&self.path, range)
             .await
-            .map_err(SlateDBError::ObjectStoreError)?;
-        result.bytes().await.map_err(SlateDBError::ObjectStoreError)
+            .map_err(SlateDBError::ObjectStoreError)
     }
 
     async fn read(&self) -> Result<Bytes, SlateDBError> {
-        let opts = GetOptions::default();
-        let file = self.object_store.get_opts(&self.path, opts).await?;
+        let file = self.object_store.get(&self.path).await?;
         file.bytes().await.map_err(SlateDBError::ObjectStoreError)
     }
 }
@@ -95,7 +87,7 @@ impl TableStore {
         fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
         Self {
-            object_store: Arc::new(object_store.clone()),
+            object_store: object_store.clone(),
             sst_format,
             root_path: root_path.clone(),
             wal_path: "wal",
@@ -137,7 +129,7 @@ impl TableStore {
         EncodedSsTableWriter {
             id,
             builder: self.sst_format.table_builder(),
-            writer: self.object_store.buf_writer(&path),
+            writer: BufWriter::new(self.object_store.clone(), path),
             table_store: self,
             blocks_written: 0,
         }
