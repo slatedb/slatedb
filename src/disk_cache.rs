@@ -969,7 +969,7 @@ mod tests {
             Some(GetRange::Offset(260817)),
             Some(GetRange::Offset(1024 * 3 + 2)),
             Some(GetRange::Offset(1024 * 3 + 1)),
-            #[deny(clippy::reversed_empty_ranges)]
+            #[allow(clippy::reversed_empty_ranges)]
             Some(GetRange::Bounded(2900..2048)),
             Some(GetRange::Bounded(10..10)),
         ];
