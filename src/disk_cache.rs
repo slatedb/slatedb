@@ -78,7 +78,7 @@ impl CacheableObjectStore {
         opts: CacheableGetOptions,
     ) -> object_store::Result<GetResult> {
         match self {
-            Self::Cached(inner) => return inner.cached_get_opts(location, opts).await,
+            Self::Cached(inner) => inner.cached_get_opts(location, opts).await,
             Self::Direct(object_store) => {
                 let get_opts = GetOptions {
                     range: opts.range,
