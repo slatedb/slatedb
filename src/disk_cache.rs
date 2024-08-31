@@ -154,7 +154,7 @@ impl CacheableObjectStoreInner {
                     .get_opts(
                         location,
                         GetOptions {
-                            range: Some(GetRange::Bounded(0..0)),
+                            range: None,
                             head: true,
                             ..Default::default()
                         },
@@ -607,16 +607,23 @@ impl DiskCacheEntry {
         } else {
             format!("{}kb", part_size / 1024)
         };
-        let part_number_str = format!("{:09}", part_number);
-        let mut path = root_folder.join(location.to_string());
-        path.push(format!("._part{}-{}", part_size_name, part_number_str));
-        path
+        let suffix = format!("_part-{}-{:09}", part_size_name, part_number);
+        let path = root_folder.join(location.to_string());
+        let new_ext = path
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_string() + "." + &suffix)
+            .unwrap_or(suffix);
+        path.with_extension(new_ext)
     }
 
     fn make_head_path(root_folder: std::path::PathBuf, location: &Path) -> std::path::PathBuf {
-        let mut path = root_folder.join(location.to_string());
-        path.push("._head");
-        path
+        let suffix = "._head".to_string();
+        let path = root_folder.join(location.to_string());
+        let new_ext = path
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_string() + "." + &suffix)
+            .unwrap_or(suffix);
+        path.with_extension(new_ext)
     }
 
     fn make_rand_suffix(&self) -> String {
