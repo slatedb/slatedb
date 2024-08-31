@@ -603,10 +603,7 @@ impl LocalCacheEntry {
             .map_err(wrap_io_err)?;
         file.write_all(&buf).await.map_err(wrap_io_err)?;
 
-        // rename the tmp file to meta_file_path
-        if fs::try_exists(&meta_file_path).await.unwrap_or(false) {
-            fs::remove_file(&meta_file_path);
-        }
+        // rename the tmp file to meta_file_path, if the target file already exists, it'll be overwritten.
         fs::rename(tmp_meta_file_path, meta_file_path)
             .await
             .map_err(wrap_io_err)
