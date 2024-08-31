@@ -1,13 +1,12 @@
+use crate::compactor::CompactionScheduler;
+use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
 
 use crate::error::SlateDBError;
+use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
 pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
-pub const DEFAULT_DB_OPTIONS: &DbOptions = &DbOptions::default();
-
-#[allow(dead_code)]
-pub const DEFAULT_COMPACTOR_OPTIONS: &CompactorOptions = &CompactorOptions::default();
 
 /// Whether reads see only writes that have been committed durably to the DB.  A
 /// write is considered durably committed if all future calls to read are guaranteed
@@ -40,16 +39,19 @@ impl ReadOptions {
 
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
+#[derive(Clone)]
 pub struct WriteOptions {
     /// Whether `put` calls should block until the write has been durably committed
     /// to the DB.
-    pub await_flush: bool,
+    pub await_durable: bool,
 }
 
 impl WriteOptions {
-    /// Create a new `WriteOptions`` with `await_flush` set to `true`.
+    /// Create a new `WriteOptions`` with `await_durable` set to `true`.
     const fn default() -> Self {
-        Self { await_flush: true }
+        Self {
+            await_durable: true,
+        }
     }
 }
 
@@ -121,6 +123,14 @@ pub struct DbOptions {
     ///   secondary readers to see new data.
     pub l0_sst_size_bytes: usize,
 
+    /// Defines the max number of SSTs in l0. Memtables will not be flushed if there are more
+    /// l0 ssts than this value, until compaction can compact the ssts into compacted.
+    pub l0_max_ssts: usize,
+
+    /// Defines the max number of unflushed memtables. Writes will be paused if there
+    /// are more unflushed memtables than this value
+    pub max_unflushed_memtable: usize,
+
     /// Configuration options for the compactor.
     pub compactor_options: Option<CompactorOptions>,
     pub compression_codec: Option<CompressionCodec>,
@@ -131,33 +141,22 @@ pub struct DbOptions {
     pub disk_cache_root_folder: Option<std::path::PathBuf>,
 }
 
-impl DbOptions {
-    pub const fn default() -> Self {
+impl Default for DbOptions {
+    fn default() -> Self {
         Self {
             flush_interval: Duration::from_millis(100),
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
             manifest_poll_interval: Duration::from_secs(1),
             min_filter_keys: 1000,
-            l0_sst_size_bytes: 128,
+            l0_sst_size_bytes: 64 * 1024 * 1024,
+            max_unflushed_memtable: 2,
+            l0_max_ssts: 8,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             disk_cache_root_folder: None,
         }
     }
-}
-
-/// Options for the compactor.
-#[derive(Clone)]
-pub struct CompactorOptions {
-    /// The interval at which the compactor checks for a new manifest and decides
-    /// if a compaction must be scheduled
-    pub(crate) poll_interval: Duration,
-
-    /// A compacted SSTable's maximum size (in bytes). If more data needs to be
-    /// written to a Sorted Run during a compaction, a new SSTable will be created
-    /// in the Sorted Run when this size is exceeded.
-    pub(crate) max_sst_size: usize,
 }
 
 /// The compression algorithm to use for SSTables.
@@ -195,15 +194,67 @@ impl FromStr for CompressionCodec {
     }
 }
 
+pub trait CompactionSchedulerSupplier: Send + Sync {
+    fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler>;
+}
+
+/// Options for the compactor.
+#[derive(Clone)]
+pub struct CompactorOptions {
+    /// The interval at which the compactor checks for a new manifest and decides
+    /// if a compaction must be scheduled
+    pub poll_interval: Duration,
+
+    /// A compacted SSTable's maximum size (in bytes). If more data needs to be
+    /// written to a Sorted Run during a compaction, a new SSTable will be created
+    /// in the Sorted Run when this size is exceeded.
+    pub max_sst_size: usize,
+
+    /// Supplies the compaction scheduler to use to select the compactions that should be
+    /// scheduled. Currently, the only provided implementation is
+    /// SizeTieredCompactionSchedulerSupplier
+    pub compaction_scheduler: Arc<dyn CompactionSchedulerSupplier>,
+
+    /// The maximum number of concurrent compactions to execute at once
+    pub max_concurrent_compactions: usize,
+}
+
 /// Default options for the compactor. Currently, only a
 /// `SizeTieredCompactionScheduler` compaction strategy is implemented.
-impl CompactorOptions {
+impl Default for CompactorOptions {
     /// Returns a `CompactorOptions` with a 5 second poll interval and a 1GB max
     /// SSTable size.
-    pub const fn default() -> Self {
+    fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(5),
             max_sst_size: 1024 * 1024 * 1024,
+            compaction_scheduler: Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+                SizeTieredCompactionSchedulerOptions::default(),
+            )),
+            max_concurrent_compactions: 4,
+        }
+    }
+}
+
+#[derive(Clone)]
+/// Options for the Size-Tiered Compaction Scheduler
+pub struct SizeTieredCompactionSchedulerOptions {
+    /// The minimum number of sources to include together in a single compaction step.
+    pub min_compaction_sources: usize,
+    /// The maximum number of sources to include together in a single compaction step.
+    pub max_compaction_sources: usize,
+    /// The size threshold that the scheduler will use to determine if a sorted run should
+    /// be included in a given compaction. A sorted run S will be added to a compaction C if S's
+    /// size is less than this value times the min size of the runs currently included in C.
+    pub include_size_threshold: f32,
+}
+
+impl SizeTieredCompactionSchedulerOptions {
+    pub const fn default() -> Self {
+        Self {
+            min_compaction_sources: 4,
+            max_compaction_sources: 8,
+            include_size_threshold: 4.0,
         }
     }
 }
