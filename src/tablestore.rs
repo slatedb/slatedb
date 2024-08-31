@@ -141,7 +141,7 @@ impl TableStore {
         EncodedSsTableWriter {
             id,
             builder: self.sst_format.table_builder(),
-            writer: self.object_store.buf_write(path),
+            writer: self.object_store.buf_writer(path),
             table_store: self,
             blocks_written: 0,
         }

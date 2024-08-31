@@ -99,7 +99,7 @@ impl CacheableObjectStore {
         }
     }
 
-    pub fn buf_write(&self, location: Path) -> BufWriter {
+    pub fn buf_writer(&self, location: Path) -> BufWriter {
         BufWriter::new(self.object_store(), location)
     }
 
