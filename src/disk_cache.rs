@@ -40,14 +40,14 @@ impl LocalCachedObjectStore {
     ) -> Self {
         assert!(part_size % 1024 == 0);
 
-        let local_cache_store = Arc::new(DiskCacheStorage {
+        let storage = Arc::new(DiskCacheStorage {
             root_folder: root_folder.clone(),
         });
         Self {
             object_store,
             part_size,
             root_folder,
-            storage: local_cache_store,
+            storage,
         }
     }
 
@@ -319,7 +319,7 @@ impl std::fmt::Display for LocalCachedObjectStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "CachedObjectStore({}, {})",
+            "LocalCachedObjectStore({}, {})",
             self.root_folder.to_str().unwrap_or_default(),
             self.object_store
         )
