@@ -4,7 +4,7 @@ use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
 use crate::db_state::{CoreDbState, DbState, SSTableHandle, SortedRun, SsTableId};
-use crate::disk_cache::DiskCachedObjectStore;
+use crate::disk_cache::LocalCachedObjectStore;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -312,7 +312,7 @@ impl Db {
 
         let maybe_cached_object_store =
             if let Some(disk_cache_root_folder) = &options.disk_cache_root_folder {
-                Arc::new(DiskCachedObjectStore::new(
+                Arc::new(LocalCachedObjectStore::new(
                     object_store,
                     disk_cache_root_folder.clone(),
                     16 * 1024 * 1024,
