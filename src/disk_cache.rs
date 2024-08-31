@@ -26,9 +26,10 @@ use object_store::{
 #[allow(unused)]
 #[derive(Debug, Clone)]
 pub(crate) struct LocalCachedObjectStore {
-    root_folder: std::path::PathBuf,
     object_store: Arc<dyn ObjectStore>,
     part_size: usize, // expected to be aligned with mb or kb
+    root_folder: std::path::PathBuf,
+    storage: Arc<dyn LocalCacheStorage>,
 }
 
 impl LocalCachedObjectStore {
@@ -39,19 +40,19 @@ impl LocalCachedObjectStore {
     ) -> Self {
         assert!(part_size % 1024 == 0);
 
+        let local_cache_store = Arc::new(DiskCacheStorage {
+            root_folder: root_folder.clone(),
+        });
         Self {
             object_store,
-            root_folder,
             part_size,
+            root_folder,
+            storage: local_cache_store,
         }
     }
 
     async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        let entry = LocalCacheEntry {
-            root_folder: self.root_folder.clone(),
-            location: location.clone(),
-            part_size: self.part_size,
-        };
+        let entry = self.storage.entry(location, self.part_size);
         match entry.read_meta().await {
             Ok(Some(meta)) => Ok(meta),
             _ => {
@@ -67,13 +68,7 @@ impl LocalCachedObjectStore {
         location: &Path,
         opts: GetOptions,
     ) -> object_store::Result<GetResult> {
-        let entry = LocalCacheEntry {
-            root_folder: self.root_folder.clone(),
-            location: location.clone(),
-            part_size: self.part_size,
-        };
-
-        let meta = self.maybe_prefetch_range(&entry, &opts.range).await?;
+        let meta = self.maybe_prefetch_range(location, &opts.range).await?;
         let range = self.canonicalize_range(opts.range, meta.size)?;
         let parts = self.split_range_into_parts(range.clone());
 
@@ -101,9 +96,10 @@ impl LocalCachedObjectStore {
     // size.
     async fn maybe_prefetch_range(
         &self,
-        entry: &LocalCacheEntry,
+        location: &Path,
         range: &Option<GetRange>,
     ) -> object_store::Result<ObjectMeta> {
+        let entry = self.storage.entry(location, self.part_size);
         match entry.read_meta().await {
             Ok(Some(meta)) => return Ok(meta),
             Ok(None) => {}
@@ -120,16 +116,48 @@ impl LocalCachedObjectStore {
             },
         };
 
-        let get_result = self
-            .object_store
-            .get_opts(&entry.location, aligned_opts)
-            .await?;
+        let get_result = self.object_store.get_opts(location, aligned_opts).await?;
         let result_meta = get_result.meta.clone();
         // swallow the error on saving to disk here (the disk might be already full), just fallback
         // to the object store.
         // TODO: add a warning log here.
-        entry.save_result(get_result).await.ok();
+        self.save_result(get_result).await.ok();
         Ok(result_meta)
+    }
+
+    /// save the GetResult to the disk cache, a GetResult may be transformed into multiple part
+    /// files and a meta file. please note that the `range` in the GetResult is expected to be
+    /// aligned with the part size.
+    async fn save_result(&self, result: GetResult) -> object_store::Result<usize> {
+        assert!(result.range.start % self.part_size == 0);
+        assert!(result.range.end % self.part_size == 0 || result.range.end == result.meta.size);
+
+        let entry = self.storage.entry(&result.meta.location, self.part_size);
+        entry.save_meta(&result.meta).await?;
+
+        let mut buffer = BytesMut::new();
+        let mut part_number = result.range.start / self.part_size;
+        let object_size = result.meta.size;
+
+        let mut stream = result.into_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            buffer.extend_from_slice(&chunk);
+
+            while buffer.len() >= self.part_size {
+                let to_write = buffer.split_to(self.part_size);
+                entry.save_part(part_number, to_write.into()).await?;
+                part_number += 1;
+            }
+        }
+
+        // if the last part is not fully filled, save it as the last part.
+        if !buffer.is_empty() {
+            entry.save_part(part_number, buffer.into()).await?;
+            return Ok(object_size);
+        }
+
+        Ok(object_size)
     }
 
     // split the range into parts, and return the part id and the range inside the part.
@@ -174,14 +202,9 @@ impl LocalCachedObjectStore {
     ) -> BoxFuture<'static, object_store::Result<Bytes>> {
         let part_size = self.part_size;
         let object_store = self.object_store.clone();
-        let root_folder = self.root_folder.clone();
         let location = location.clone();
+        let entry = self.storage.entry(&location, self.part_size);
         Box::pin(async move {
-            let entry = LocalCacheEntry {
-                root_folder,
-                location: location.clone(),
-                part_size,
-            };
             if let Ok(Some(bytes)) = entry.read_part(part_id).await {
                 return Ok(bytes.slice(range_in_part));
             }
@@ -208,7 +231,7 @@ impl LocalCachedObjectStore {
             let meta = get_result.meta.clone();
             let bytes = get_result.bytes().await?;
             entry.save_meta(&meta).await.ok();
-            entry.save_part(part_id, &bytes.clone()).await.ok();
+            entry.save_part(part_id, bytes.clone()).await.ok();
             Ok(bytes.slice(range_in_part))
         })
     }
@@ -398,53 +421,136 @@ pub(crate) enum InvalidGetRange {
     Inconsistent { start: usize, end: usize },
 }
 
-struct LocalCacheEntry {
+pub trait LocalCacheStorage: Send + Sync + std::fmt::Debug + 'static {
+    fn entry(
+        &self,
+        location: &object_store::path::Path,
+        part_size: usize,
+    ) -> Box<dyn LocalCacheEntry>;
+}
+
+#[async_trait::async_trait]
+pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
+    async fn save_part(&self, part_number: PartID, buf: Bytes) -> object_store::Result<()>;
+
+    async fn read_part(&self, part_number: PartID) -> object_store::Result<Option<Bytes>>;
+
+    async fn cached_parts(&self) -> object_store::Result<Vec<PartID>>;
+
+    async fn save_meta(&self, meta: &ObjectMeta) -> object_store::Result<()>;
+
+    async fn read_meta(&self) -> object_store::Result<Option<ObjectMeta>>;
+}
+
+#[derive(Debug)]
+struct DiskCacheStorage {
     root_folder: std::path::PathBuf,
-    location: object_store::path::Path,
+}
+
+impl DiskCacheStorage {}
+
+impl LocalCacheStorage for DiskCacheStorage {
+    fn entry(
+        &self,
+        location: &object_store::path::Path,
+        part_size: usize,
+    ) -> Box<dyn LocalCacheEntry> {
+        Box::new(DiskCacheEntry {
+            root_folder: self.root_folder.clone(),
+            location: location.clone(),
+            part_size,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct DiskCacheEntry {
+    root_folder: std::path::PathBuf,
+    location: Path,
     part_size: usize,
 }
 
-#[allow(unused)]
-type PartID = usize;
-
-#[allow(unused)]
-impl LocalCacheEntry {
-    /// save the GetResult to the disk cache, a GetResult may be transformed into multiple part
-    /// files and a meta file. please note that the `range` in the GetResult is expected to be
-    /// aligned with the part size.
-    pub async fn save_result(&self, result: GetResult) -> object_store::Result<usize> {
-        assert!(result.range.start % self.part_size == 0);
-        assert!(result.range.end % self.part_size == 0 || result.range.end == result.meta.size);
-
-        self.save_meta(&result.meta).await?;
-
-        let mut buffer = BytesMut::new();
-        let mut part_number = result.range.start / self.part_size;
-        let object_size = result.meta.size;
-
-        let mut stream = result.into_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            buffer.extend_from_slice(&chunk);
-
-            while buffer.len() >= self.part_size {
-                let to_write = buffer.split_to(self.part_size);
-                self.save_part(part_number, to_write.as_ref()).await?;
-                part_number += 1;
-            }
-        }
-
-        // if the last part is not fully filled, save it as the last part.
-        if !buffer.is_empty() {
-            self.save_part(part_number, buffer.as_ref()).await?;
-            return Ok(object_size);
-        }
-
-        Ok(object_size)
+impl DiskCacheEntry {
+    fn make_part_path(
+        root_folder: &std::path::PathBuf,
+        location: &Path,
+        part_number: usize,
+        part_size: usize,
+    ) -> std::path::PathBuf {
+        // containing the part size in the file name, allows user change the part size on
+        // the fly, without the need to invalidate the cache.
+        let part_size_name = if part_size % (1024 * 1024) == 0 {
+            format!("{}mb", part_size / (1024 * 1024))
+        } else {
+            format!("{}kb", part_size / 1024)
+        };
+        let part_number_str = format!("{:09}", part_number);
+        root_folder
+            .join(location.to_string())
+            .with_extension(format!("_part{}-{}", part_size_name, part_number_str))
     }
 
-    pub async fn read_part(&self, part_id: PartID) -> object_store::Result<Option<Bytes>> {
-        let part_path = self.make_part_path(part_id, false);
+    fn make_meta_path(&self) -> std::path::PathBuf {
+        self.root_folder
+            .join(self.location.to_string())
+            .with_extension("_meta")
+    }
+
+    fn make_rand_suffix(&self) -> String {
+        let mut rng = rand::thread_rng();
+        (0..6).map(|_| rng.sample(Alphanumeric) as char).collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl LocalCacheEntry for DiskCacheEntry {
+    async fn save_part(&self, part_number: usize, buf: Bytes) -> object_store::Result<()> {
+        let part_path = Self::make_part_path(
+            &self.root_folder,
+            &self.location,
+            part_number,
+            self.part_size,
+        );
+
+        // if the part already exists, do not save again.
+        if Some(true) == fs::try_exists(&part_path).await.ok() {
+            return Ok(());
+        }
+
+        // ensure the parent folder exists
+        if let Some(part_file_folder) = part_path.parent() {
+            fs::create_dir_all(part_file_folder)
+                .await
+                .map_err(wrap_io_err)?;
+        }
+
+        // save the file content to tmp. if the disk is full, we'll get an error here.
+        let tmp_part_file_path =
+            part_path.with_extension(format!("tmp{}", self.make_rand_suffix()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_part_file_path)
+            .await
+            .map_err(wrap_io_err)?;
+        file.write_all(&buf).await.map_err(wrap_io_err)?;
+
+        // rename the file
+        fs::rename(tmp_part_file_path, part_path)
+            .await
+            .map_err(wrap_io_err)
+            .ok();
+        Ok(())
+    }
+
+    async fn read_part(&self, part_number: usize) -> object_store::Result<Option<Bytes>> {
+        let part_path = Self::make_part_path(
+            &self.root_folder,
+            &self.location,
+            part_number,
+            self.part_size,
+        );
 
         // if the part file does not exist, return None
         let exists = fs::try_exists(&part_path).await.unwrap_or(false);
@@ -459,36 +565,7 @@ impl LocalCacheEntry {
         Ok(Some(Bytes::from(buffer)))
     }
 
-    pub async fn read_meta(&self) -> object_store::Result<Option<ObjectMeta>> {
-        let meta_path = self.make_meta_path();
-
-        let exists = fs::try_exists(&meta_path).await.unwrap_or(false);
-        if !exists {
-            return Ok(None);
-        }
-
-        // TODO: process not found err here instead of check exists
-        let file = File::open(&meta_path).await.map_err(wrap_io_err)?;
-        let mut reader = tokio::io::BufReader::new(file);
-        let mut content = String::new();
-        reader
-            .read_to_string(&mut content)
-            .await
-            .map_err(wrap_io_err)?;
-
-        let meta: LocalCacheMeta = serde_json::from_str(&content).map_err(wrap_io_err)?;
-
-        Ok(Some(ObjectMeta {
-            location: meta.location.into(),
-            last_modified: meta.last_modified.parse().map_err(wrap_io_err)?,
-            size: meta.size,
-            e_tag: meta.e_tag,
-            version: meta.version,
-        }))
-    }
-
-    // only used in test
-    pub async fn cached_parts(&self) -> object_store::Result<Vec<PartID>> {
+    async fn cached_parts(&self) -> object_store::Result<Vec<PartID>> {
         let file_path = self.root_folder.join(self.location.to_string());
         let directory_path = file_path.parent().unwrap();
         let target_prefix = self.location.filename().unwrap().to_string() + "._part";
@@ -525,43 +602,6 @@ impl LocalCacheEntry {
         }
 
         Ok(part_numbers)
-    }
-
-    // if the disk is full, we'll get an error here.
-    // TODO: this error can be ignored in the caller side and print a warning.
-    async fn save_part(&self, part_number: usize, buf: &[u8]) -> object_store::Result<()> {
-        let part_file_path = self.make_part_path(part_number, false);
-
-        // if the part already exists, do not save again.
-        if Some(true) == fs::try_exists(&part_file_path).await.ok() {
-            return Ok(());
-        }
-
-        // ensure the parent folder exists
-        if let Some(part_file_folder) = part_file_path.parent() {
-            fs::create_dir_all(part_file_folder)
-                .await
-                .map_err(wrap_io_err)?;
-        }
-
-        // save the file content to tmp. if the disk is full, we'll get an error here.
-        let tmp_part_file_path =
-            part_file_path.with_extension(format!("tmp{}", self.make_rand_suffix()));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_part_file_path)
-            .await
-            .map_err(wrap_io_err)?;
-        file.write_all(buf).await.map_err(wrap_io_err)?;
-
-        // rename the file
-        fs::rename(tmp_part_file_path, part_file_path)
-            .await
-            .map_err(wrap_io_err)
-            .ok();
-        Ok(())
     }
 
     async fn save_meta(&self, meta: &ObjectMeta) -> object_store::Result<()> {
@@ -609,35 +649,37 @@ impl LocalCacheEntry {
             .map_err(wrap_io_err)
     }
 
-    fn make_part_path(&self, part_number: usize, wildcard: bool) -> std::path::PathBuf {
-        // containing the part size in the file name, allows user change the part size on
-        // the fly, without the need to invalidate the cache.
-        let part_size_name = if self.part_size % (1024 * 1024) == 0 {
-            format!("{}mb", self.part_size / (1024 * 1024))
-        } else {
-            format!("{}kb", self.part_size / 1024)
-        };
-        let part_number_str = if wildcard {
-            "*".to_string()
-        } else {
-            format!("{:09}", part_number)
-        };
-        self.root_folder
-            .join(self.location.to_string())
-            .with_extension(format!("_part{}-{}", part_size_name, part_number_str))
-    }
+    async fn read_meta(&self) -> object_store::Result<Option<ObjectMeta>> {
+        let meta_path = self.make_meta_path();
 
-    fn make_meta_path(&self) -> std::path::PathBuf {
-        self.root_folder
-            .join(self.location.to_string())
-            .with_extension("_meta")
-    }
+        let exists = fs::try_exists(&meta_path).await.unwrap_or(false);
+        if !exists {
+            return Ok(None);
+        }
 
-    fn make_rand_suffix(&self) -> String {
-        let mut rng = rand::thread_rng();
-        (0..6).map(|_| rng.sample(Alphanumeric) as char).collect()
+        // TODO: process not found err here instead of check exists
+        let file = File::open(&meta_path).await.map_err(wrap_io_err)?;
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut content = String::new();
+        reader
+            .read_to_string(&mut content)
+            .await
+            .map_err(wrap_io_err)?;
+
+        let meta: LocalCacheMeta = serde_json::from_str(&content).map_err(wrap_io_err)?;
+
+        Ok(Some(ObjectMeta {
+            location: meta.location.into(),
+            last_modified: meta.last_modified.parse().map_err(wrap_io_err)?,
+            size: meta.size,
+            e_tag: meta.e_tag,
+            version: meta.version,
+        }))
     }
 }
+
+#[allow(unused)]
+type PartID = usize;
 
 #[allow(unused)]
 fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_store::Error {
@@ -656,7 +698,7 @@ mod tests {
     use object_store::{GetOptions, GetRange, ObjectStore, PutPayload};
     use rand::{thread_rng, Rng};
 
-    use crate::disk_cache::{self, PartID};
+    use crate::disk_cache::{DiskCacheEntry, PartID};
 
     use super::LocalCachedObjectStore;
 
@@ -679,7 +721,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_result_not_aligned() -> object_store::Result<()> {
         let payload = gen_rand_bytes(1024 * 3 + 32);
-        let object_store = object_store::memory::InMemory::new();
+        let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
         object_store
             .put(
@@ -687,14 +729,14 @@ mod tests {
                 PutPayload::from_bytes(payload.clone()),
             )
             .await?;
-        let get_result = object_store.get(&Path::from("/data/testfile1")).await?;
+        let location = Path::from("/data/testfile1");
+        let get_result = object_store.get(&location).await?;
 
-        let entry = disk_cache::LocalCacheEntry {
-            root_folder: test_cache_folder,
-            location: Path::from("/data/testfile1"),
-            part_size: 1024,
-        };
-        let object_size_hint = entry.save_result(get_result).await?;
+        let cached_store =
+            LocalCachedObjectStore::new(object_store.clone(), test_cache_folder.clone(), 1024);
+        let entry = cached_store.storage.entry(&location, 1024);
+
+        let object_size_hint = cached_store.save_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3 + 32);
 
         // assert the cached meta
@@ -710,14 +752,16 @@ mod tests {
         assert_eq!(entry.read_part(3).await?, Some(payload.slice(3072..)));
 
         // delete part 2, known_cache_size is still known
-        let evict_part_path = entry.make_part_path(2, false);
+        let evict_part_path =
+            DiskCacheEntry::make_part_path(&test_cache_folder, &location, 2, 1024);
         std::fs::remove_file(evict_part_path).unwrap();
         assert_eq!(entry.read_part(2).await?, None);
         let cached_parts = entry.cached_parts().await?;
         assert_eq!(cached_parts, vec![0, 1, 3]);
 
         // delete part 3, known_cache_size become None
-        let evict_part_path = entry.make_part_path(3, false);
+        let evict_part_path =
+            DiskCacheEntry::make_part_path(&test_cache_folder, &location, 3, 1024);
         std::fs::remove_file(evict_part_path).unwrap();
         assert_eq!(entry.read_part(3).await?, None);
         let cached_parts = entry.cached_parts().await?;
@@ -728,7 +772,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_result_aligned() -> object_store::Result<()> {
         let payload = gen_rand_bytes(1024 * 3);
-        let object_store = object_store::memory::InMemory::new();
+        let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
         object_store
             .put(
@@ -736,14 +780,14 @@ mod tests {
                 PutPayload::from_bytes(payload.clone()),
             )
             .await?;
-        let get_result = object_store.get(&Path::from("/data/testfile1")).await?;
+        let location = Path::from("/data/testfile1");
+        let get_result = object_store.get(&location).await?;
+        let part_size = 1024;
 
-        let entry = disk_cache::LocalCacheEntry {
-            root_folder: test_cache_folder,
-            location: Path::from("/data/testfile1"),
-            part_size: 1024,
-        };
-        let object_size_hint = entry.save_result(get_result).await?;
+        let cached_store =
+            LocalCachedObjectStore::new(object_store, test_cache_folder.clone(), part_size);
+        let entry = cached_store.storage.entry(&location, part_size);
+        let object_size_hint = cached_store.save_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3);
         let cached_parts = entry.cached_parts().await?;
         assert_eq!(cached_parts.len(), 3);
@@ -751,7 +795,8 @@ mod tests {
         assert_eq!(entry.read_part(1).await?, Some(payload.slice(1024..2048)));
         assert_eq!(entry.read_part(2).await?, Some(payload.slice(2048..3072)));
 
-        let evict_part_path = entry.make_part_path(2, false);
+        let evict_part_path =
+            DiskCacheEntry::make_part_path(&test_cache_folder, &location, 2, part_size);
         std::fs::remove_file(evict_part_path).unwrap();
         assert_eq!(entry.read_part(2).await?, None);
 
@@ -762,13 +807,9 @@ mod tests {
 
     #[test]
     fn test_split_range_into_parts() {
-        let object_store = object_store::memory::InMemory::new();
+        let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = LocalCachedObjectStore {
-            root_folder: test_cache_folder,
-            object_store: Arc::new(object_store),
-            part_size: 1024,
-        };
+        let cached_store = LocalCachedObjectStore::new(object_store, test_cache_folder, 1024);
 
         struct Test {
             input: (Option<GetRange>, usize),
@@ -844,13 +885,9 @@ mod tests {
 
     #[test]
     fn test_align_range() {
-        let object_store = object_store::memory::InMemory::new();
+        let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = LocalCachedObjectStore {
-            root_folder: test_cache_folder,
-            object_store: Arc::new(object_store),
-            part_size: 1024,
-        };
+        let cached_store = LocalCachedObjectStore::new(object_store, test_cache_folder, 1024);
 
         let aligned = cached_store.align_range(&(9..1025), 1024);
         assert_eq!(aligned, 0..2048);
@@ -860,13 +897,9 @@ mod tests {
 
     #[test]
     fn test_align_get_range() {
-        let object_store = object_store::memory::InMemory::new();
+        let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = LocalCachedObjectStore {
-            root_folder: test_cache_folder,
-            object_store: Arc::new(object_store),
-            part_size: 1024,
-        };
+        let cached_store = LocalCachedObjectStore::new(object_store, test_cache_folder, 1024);
 
         let aligned = cached_store.align_get_range(&GetRange::Bounded(9..1025));
         assert_eq!(aligned, GetRange::Bounded(0..2048));
@@ -886,11 +919,8 @@ mod tests {
     async fn test_cached_object_store_impl_object_store() -> object_store::Result<()> {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = LocalCachedObjectStore {
-            root_folder: test_cache_folder,
-            object_store: object_store.clone(),
-            part_size: 1024,
-        };
+        let cached_store =
+            LocalCachedObjectStore::new(object_store.clone(), test_cache_folder, 1024);
 
         let test_path = Path::from("/data/testdata1");
         let test_payload = gen_rand_bytes(1024 * 3 + 2);
