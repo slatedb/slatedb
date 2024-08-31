@@ -10,6 +10,7 @@ use rand::distributions::Alphanumeric;
 use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
+use std::fmt::Display;
 use std::ops::Range;
 use std::sync::Arc;
 use tokio::fs;
@@ -28,7 +29,6 @@ use object_store::{
 pub(crate) struct LocalCachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
     part_size: usize, // expected to be aligned with mb or kb
-    root_folder: std::path::PathBuf,
     storage: Arc<dyn LocalCacheStorage>,
 }
 
@@ -46,7 +46,6 @@ impl LocalCachedObjectStore {
         Self {
             object_store,
             part_size,
-            root_folder,
             storage,
         }
     }
@@ -320,8 +319,7 @@ impl std::fmt::Display for LocalCachedObjectStore {
         write!(
             f,
             "LocalCachedObjectStore({}, {})",
-            self.root_folder.to_str().unwrap_or_default(),
-            self.object_store
+            self.object_store, self.storage
         )
     }
 }
@@ -421,7 +419,7 @@ pub(crate) enum InvalidGetRange {
     Inconsistent { start: usize, end: usize },
 }
 
-pub trait LocalCacheStorage: Send + Sync + std::fmt::Debug + 'static {
+pub trait LocalCacheStorage: Send + Sync + std::fmt::Debug + Display + 'static {
     fn entry(
         &self,
         location: &object_store::path::Path,
@@ -460,6 +458,12 @@ impl LocalCacheStorage for DiskCacheStorage {
             location: location.clone(),
             part_size,
         })
+    }
+}
+
+impl Display for DiskCacheStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DiskCacheStorage({})", self.root_folder.display())
     }
 }
 
