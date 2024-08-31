@@ -534,6 +534,9 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
 
     async fn read_part(&self, part_number: PartID) -> object_store::Result<Option<Bytes>>;
 
+    /// might be useful on rewriting GET request on the prefetch phase. the cached files are
+    /// expected to be in the same folder, so it'd be expected to be fast without expensive
+    /// globbing.
     #[cfg(test)]
     async fn cached_parts(&self) -> object_store::Result<Vec<PartID>>;
 
@@ -608,22 +611,16 @@ impl DiskCacheEntry {
             format!("{}kb", part_size / 1024)
         };
         let suffix = format!("_part-{}-{:09}", part_size_name, part_number);
-        let path = root_folder.join(location.to_string());
-        let new_ext = path
-            .extension()
-            .map(|ext| ext.to_string_lossy().to_string() + "." + &suffix)
-            .unwrap_or(suffix);
-        path.with_extension(new_ext)
+        let mut path = root_folder.join(location.to_string());
+        path.push(suffix);
+        path
     }
 
     fn make_head_path(root_folder: std::path::PathBuf, location: &Path) -> std::path::PathBuf {
-        let suffix = "._head".to_string();
-        let path = root_folder.join(location.to_string());
-        let new_ext = path
-            .extension()
-            .map(|ext| ext.to_string_lossy().to_string() + "." + &suffix)
-            .unwrap_or(suffix);
-        path.with_extension(new_ext)
+        let suffix = "_head".to_string();
+        let mut path = root_folder.join(location.to_string());
+        path.push(suffix);
+        path
     }
 
     fn make_rand_suffix(&self) -> String {
@@ -673,23 +670,24 @@ impl LocalCacheEntry for DiskCacheEntry {
 
     #[cfg(test)]
     async fn cached_parts(&self) -> object_store::Result<Vec<PartID>> {
-        let file_path = self.root_folder.join(self.location.to_string());
-        let directory_path = match file_path.parent() {
-            None => return Ok(vec![]),
+        let head_path = Self::make_head_path(self.root_folder.clone(), &self.location);
+        let directory_path = match head_path.parent() {
             Some(directory_path) => directory_path,
-        };
-        let target_prefix = match self.location.filename() {
             None => return Ok(vec![]),
-            Some(file_name) => file_name.to_string() + "._part",
         };
+        let target_prefix = "_part";
 
         let mut entries = fs::read_dir(directory_path).await.map_err(wrap_io_err)?;
 
         let mut part_file_names = vec![];
         while let Some(entry) = entries.next_entry().await.map_err(wrap_io_err)? {
+            let metadata = entry.metadata().await.map_err(wrap_io_err)?;
+            if metadata.is_dir() {
+                continue;
+            }
             let file_name = entry.file_name();
             let file_name_str = file_name.to_string_lossy();
-            if file_name_str.starts_with(&target_prefix) {
+            if file_name_str.starts_with(target_prefix) {
                 part_file_names.push(file_name_str.to_string());
             }
         }
