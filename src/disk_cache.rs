@@ -491,7 +491,7 @@ struct DiskCacheEntry {
 
 impl DiskCacheEntry {
     fn make_part_path(
-        root_folder: &std::path::PathBuf,
+        root_folder: std::path::PathBuf,
         location: &Path,
         part_number: usize,
         part_size: usize,
@@ -525,7 +525,7 @@ impl DiskCacheEntry {
 impl LocalCacheEntry for DiskCacheEntry {
     async fn save_part(&self, part_number: usize, buf: Bytes) -> object_store::Result<()> {
         let part_path = Self::make_part_path(
-            &self.root_folder,
+            self.root_folder.clone(),
             &self.location,
             part_number,
             self.part_size,
@@ -565,7 +565,7 @@ impl LocalCacheEntry for DiskCacheEntry {
 
     async fn read_part(&self, part_number: usize) -> object_store::Result<Option<Bytes>> {
         let part_path = Self::make_part_path(
-            &self.root_folder,
+            self.root_folder.clone(),
             &self.location,
             part_number,
             self.part_size,
@@ -586,8 +586,14 @@ impl LocalCacheEntry for DiskCacheEntry {
 
     async fn cached_parts(&self) -> object_store::Result<Vec<PartID>> {
         let file_path = self.root_folder.join(self.location.to_string());
-        let directory_path = file_path.parent().unwrap();
-        let target_prefix = self.location.filename().unwrap().to_string() + "._part";
+        let directory_path = match file_path.parent() {
+            None => return Ok(vec![]),
+            Some(directory_path) => directory_path,
+        };
+        let target_prefix = match self.location.filename() {
+            None => return Ok(vec![]),
+            Some(file_name) => file_name.to_string() + "._part",
+        };
 
         let mut entries = fs::read_dir(directory_path).await.map_err(wrap_io_err)?;
 
@@ -772,7 +778,7 @@ mod tests {
 
         // delete part 2, known_cache_size is still known
         let evict_part_path =
-            DiskCacheEntry::make_part_path(&test_cache_folder, &location, 2, 1024);
+            DiskCacheEntry::make_part_path(test_cache_folder.clone(), &location, 2, 1024);
         std::fs::remove_file(evict_part_path).unwrap();
         assert_eq!(entry.read_part(2).await?, None);
         let cached_parts = entry.cached_parts().await?;
@@ -780,7 +786,7 @@ mod tests {
 
         // delete part 3, known_cache_size become None
         let evict_part_path =
-            DiskCacheEntry::make_part_path(&test_cache_folder, &location, 3, 1024);
+            DiskCacheEntry::make_part_path(test_cache_folder.clone(), &location, 3, 1024);
         std::fs::remove_file(evict_part_path).unwrap();
         assert_eq!(entry.read_part(3).await?, None);
         let cached_parts = entry.cached_parts().await?;
@@ -815,7 +821,7 @@ mod tests {
         assert_eq!(entry.read_part(2).await?, Some(payload.slice(2048..3072)));
 
         let evict_part_path =
-            DiskCacheEntry::make_part_path(&test_cache_folder, &location, 2, part_size);
+            DiskCacheEntry::make_part_path(test_cache_folder.clone(), &location, 2, part_size);
         std::fs::remove_file(evict_part_path).unwrap();
         assert_eq!(entry.read_part(2).await?, None);
 

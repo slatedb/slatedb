@@ -63,10 +63,7 @@ impl ReadOnlyBlob for ReadOnlyObject {
             .get_opts(&self.path, opts)
             .await
             .map_err(SlateDBError::ObjectStoreError)?;
-        Ok(result
-            .bytes()
-            .await
-            .map_err(SlateDBError::ObjectStoreError)?)
+        result.bytes().await.map_err(SlateDBError::ObjectStoreError)
     }
 
     async fn read(&self) -> Result<Bytes, SlateDBError> {
