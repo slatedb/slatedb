@@ -489,28 +489,33 @@ impl LocalCacheEntry {
 
     // only used in test
     pub async fn cached_parts(&self) -> object_store::Result<Vec<PartID>> {
-        let pattern = self.make_part_path(0, true);
-        let mut part_paths = glob::glob(&pattern.to_string_lossy())
-            .map_err(wrap_io_err)?
-            .filter_map(Result::ok)
-            .collect::<Vec<_>>();
+        let file_path = self.root_folder.join(self.location.to_string());
+        let directory_path = file_path.parent().unwrap();
+        let target_prefix = self.location.filename().unwrap().to_string() + "._part";
+
+        let mut entries = fs::read_dir(directory_path).await.map_err(wrap_io_err)?;
+
+        let mut part_file_names = vec![];
+        while let Some(entry) = entries.next_entry().await.map_err(wrap_io_err)? {
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+            if file_name_str.starts_with(&target_prefix) {
+                part_file_names.push(file_name_str.to_string());
+            }
+        }
 
         // not cached at all
-        if part_paths.is_empty() {
+        if part_file_names.is_empty() {
             return Ok(vec![]);
         }
 
         // sort the paths in alphabetical order
-        part_paths.sort();
+        part_file_names.sort();
 
         // retrieve the part numbers from the paths
-        let mut part_numbers = Vec::with_capacity(part_paths.len());
-        for part_path in part_paths.iter() {
-            let file_ext = match part_path.extension() {
-                None => continue,
-                Some(ext) => ext.to_string_lossy(),
-            };
-            let part_number = file_ext
+        let mut part_numbers = Vec::with_capacity(part_file_names.len());
+        for part_file_name in part_file_names.iter() {
+            let part_number = part_file_name
                 .split('-')
                 .last()
                 .and_then(|part_number| part_number.parse::<usize>().ok());
