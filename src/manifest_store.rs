@@ -177,6 +177,7 @@ impl ManifestStore {
             manifest_suffix: "manifest",
         }
     }
+
     pub(crate) async fn write_manifest(
         &self,
         id: u64,

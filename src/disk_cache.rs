@@ -4,6 +4,7 @@ use futures::future::BoxFuture;
 use futures::stream;
 use futures::stream::BoxStream;
 use futures::StreamExt;
+use object_store::buffered::BufWriter;
 use object_store::GetRange;
 use object_store::GetResultPayload;
 use rand::distributions::Alphanumeric;
@@ -19,20 +20,110 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
-use object_store::{
-    path::Path, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOpts, PutOptions, PutPayload, PutResult,
-};
+use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
+
+pub(crate) struct CacheableGetOptions {
+    /// the range of the object to get, if None, the entire object will be fetched.
+    pub range: Option<GetRange>,
+    /// the cache strategy to use for this request, you can choose to
+    /// disable caching.
+    pub cache_enabled: bool,
+    /// the lower the rank, the less likely the object will be evicted.
+    /// if set to Some(0), the object will never be evicted.
+    pub cache_rank: Option<u8>,
+}
+
+impl Default for CacheableGetOptions {
+    fn default() -> Self {
+        Self {
+            range: None,
+            cache_enabled: true,
+            cache_rank: None,
+        }
+    }
+}
+
+/// CachableObjectStore is a wrapper around ObjectStore, it caches the object
+/// in the local, and serves the object from the cache if possible.
+#[derive(Clone, Debug)]
+pub(crate) enum CacheableObjectStore {
+    Cached(Arc<CacheableObjectStoreInner>),
+    Direct(Arc<dyn ObjectStore>),
+}
+
+impl CacheableObjectStore {
+    pub fn new(
+        object_store: Arc<dyn ObjectStore>,
+        root_folder: std::path::PathBuf,
+        part_size: usize,
+    ) -> Self {
+        Self::Cached(Arc::new(CacheableObjectStoreInner::new(
+            object_store,
+            root_folder,
+            part_size,
+        )))
+    }
+
+    pub async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+        match self {
+            Self::Cached(inner) => inner.cached_head(location).await,
+            Self::Direct(object_store) => object_store.head(location).await,
+        }
+    }
+
+    pub async fn get_opts(
+        &self,
+        location: &Path,
+        opts: CacheableGetOptions,
+    ) -> object_store::Result<GetResult> {
+        let object_store = match (opts.cache_enabled, self) {
+            (true, Self::Cached(inner)) => return inner.cached_get_opts(location, opts).await,
+            (false, Self::Cached(inner)) => inner.object_store.clone(),
+            (_, Self::Direct(object_store)) => object_store.clone(),
+        };
+
+        let get_opts = GetOptions {
+            range: opts.range,
+            ..Default::default()
+        };
+        object_store.get_opts(location, get_opts).await
+    }
+
+    pub fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, object_store::Result<ObjectMeta>> {
+        match self {
+            Self::Cached(inner) => inner.object_store.list(prefix),
+            Self::Direct(object_store) => object_store.list(prefix),
+        }
+    }
+
+    pub fn buf_write(&self, location: Path) -> BufWriter {
+        BufWriter::new(self.object_store(), location)
+    }
+
+    /// TODO: make this private
+    pub fn object_store(&self) -> Arc<dyn ObjectStore> {
+        match self {
+            Self::Cached(inner) => inner.object_store.clone(),
+            Self::Direct(object_store) => object_store.clone(),
+        }
+    }
+}
+
+impl From<Arc<dyn ObjectStore + 'static>> for CacheableObjectStore {
+    fn from(object_store: Arc<dyn ObjectStore + 'static>) -> Self {
+        Self::Direct(object_store)
+    }
+}
 
 #[allow(unused)]
 #[derive(Debug, Clone)]
-pub(crate) struct LocalCachedObjectStore {
+pub(crate) struct CacheableObjectStoreInner {
     object_store: Arc<dyn ObjectStore>,
     part_size: usize, // expected to be aligned with mb or kb
     storage: Arc<dyn LocalCacheStorage>,
 }
 
-impl LocalCachedObjectStore {
+impl CacheableObjectStoreInner {
     pub fn new(
         object_store: Arc<dyn ObjectStore>,
         root_folder: std::path::PathBuf,
@@ -50,7 +141,7 @@ impl LocalCachedObjectStore {
         }
     }
 
-    async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+    pub async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
         let entry = self.storage.entry(location, self.part_size);
         match entry.read_meta().await {
             Ok(Some(meta)) => Ok(meta),
@@ -62,10 +153,10 @@ impl LocalCachedObjectStore {
         }
     }
 
-    async fn cached_get_opts(
+    pub async fn cached_get_opts(
         &self,
         location: &Path,
-        opts: GetOptions,
+        opts: CacheableGetOptions,
     ) -> object_store::Result<GetResult> {
         let meta = self.maybe_prefetch_range(location, &opts.range).await?;
         let range = self.canonicalize_range(opts.range, meta.size)?;
@@ -314,88 +405,13 @@ impl LocalCachedObjectStore {
     }
 }
 
-impl std::fmt::Display for LocalCachedObjectStore {
+impl std::fmt::Display for CacheableObjectStoreInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "LocalCachedObjectStore({}, {})",
             self.object_store, self.storage
         )
-    }
-}
-
-#[async_trait::async_trait]
-impl ObjectStore for LocalCachedObjectStore {
-    async fn get_opts(
-        &self,
-        location: &Path,
-        options: GetOptions,
-    ) -> object_store::Result<GetResult> {
-        self.cached_get_opts(location, options).await
-    }
-
-    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        self.cached_head(location).await
-    }
-
-    async fn put_opts(
-        &self,
-        location: &Path,
-        payload: PutPayload,
-        opts: PutOptions,
-    ) -> object_store::Result<PutResult> {
-        self.object_store.put_opts(location, payload, opts).await
-    }
-
-    async fn put_multipart(
-        &self,
-        location: &Path,
-    ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        self.object_store.put_multipart(location).await
-    }
-
-    async fn put_multipart_opts(
-        &self,
-        location: &Path,
-        opts: PutMultipartOpts,
-    ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        self.object_store.put_multipart_opts(location, opts).await
-    }
-
-    async fn delete(&self, location: &Path) -> object_store::Result<()> {
-        self.object_store.delete(location).await
-    }
-
-    fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, object_store::Result<ObjectMeta>> {
-        self.object_store.list(prefix)
-    }
-
-    fn list_with_offset(
-        &self,
-        prefix: Option<&Path>,
-        offset: &Path,
-    ) -> BoxStream<'_, object_store::Result<ObjectMeta>> {
-        self.object_store.list_with_offset(prefix, offset)
-    }
-
-    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
-        self.object_store.list_with_delimiter(prefix).await
-    }
-
-    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.object_store.copy(from, to).await
-    }
-
-    async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.object_store.rename(from, to).await
-    }
-
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.object_store.copy_if_not_exists(from, to).await
-    }
-
-    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.object_store.rename_if_not_exists(from, to).await
     }
 }
 
@@ -439,6 +455,53 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
 
     async fn read_meta(&self) -> object_store::Result<Option<ObjectMeta>>;
 }
+
+#[derive(Debug)]
+struct DummyStorage {}
+
+impl LocalCacheStorage for DummyStorage {
+    fn entry(
+        &self,
+        _location: &object_store::path::Path,
+        _part_size: usize,
+    ) -> Box<dyn LocalCacheEntry> {
+        Box::new(DummyEntry {})
+    }
+}
+
+impl Display for DummyStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NoCache")
+    }
+}
+
+#[derive(Debug)]
+struct DummyEntry {}
+
+#[async_trait::async_trait]
+impl LocalCacheEntry for DummyEntry {
+    async fn save_part(&self, _part_number: PartID, _buf: Bytes) -> object_store::Result<()> {
+        Ok(())
+    }
+
+    async fn read_part(&self, _part_number: PartID) -> object_store::Result<Option<Bytes>> {
+        Ok(None)
+    }
+
+    async fn cached_parts(&self) -> object_store::Result<Vec<PartID>> {
+        Ok(vec![])
+    }
+
+    async fn save_meta(&self, _meta: &ObjectMeta) -> object_store::Result<()> {
+        Ok(())
+    }
+
+    async fn read_meta(&self) -> object_store::Result<Option<ObjectMeta>> {
+        Ok(None)
+    }
+}
+
+impl DiskCacheStorage {}
 
 #[derive(Debug)]
 struct DiskCacheStorage {
@@ -702,9 +765,9 @@ mod tests {
     use object_store::{GetOptions, GetRange, ObjectStore, PutPayload};
     use rand::{thread_rng, Rng};
 
-    use crate::disk_cache::{DiskCacheEntry, PartID};
+    use crate::disk_cache::{CacheableGetOptions, DiskCacheEntry, PartID};
 
-    use super::LocalCachedObjectStore;
+    use super::CacheableObjectStoreInner;
 
     fn gen_rand_bytes(n: usize) -> Bytes {
         let mut rng = thread_rng();
@@ -737,7 +800,7 @@ mod tests {
         let get_result = object_store.get(&location).await?;
 
         let cached_store =
-            LocalCachedObjectStore::new(object_store.clone(), test_cache_folder.clone(), 1024);
+            CacheableObjectStoreInner::new(object_store.clone(), test_cache_folder.clone(), 1024);
         let entry = cached_store.storage.entry(&location, 1024);
 
         let object_size_hint = cached_store.save_result(get_result).await?;
@@ -789,7 +852,7 @@ mod tests {
         let part_size = 1024;
 
         let cached_store =
-            LocalCachedObjectStore::new(object_store, test_cache_folder.clone(), part_size);
+            CacheableObjectStoreInner::new(object_store, test_cache_folder.clone(), part_size);
         let entry = cached_store.storage.entry(&location, part_size);
         let object_size_hint = cached_store.save_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3);
@@ -813,7 +876,7 @@ mod tests {
     fn test_split_range_into_parts() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = LocalCachedObjectStore::new(object_store, test_cache_folder, 1024);
+        let cached_store = CacheableObjectStoreInner::new(object_store, test_cache_folder, 1024);
 
         struct Test {
             input: (Option<GetRange>, usize),
@@ -891,7 +954,7 @@ mod tests {
     fn test_align_range() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = LocalCachedObjectStore::new(object_store, test_cache_folder, 1024);
+        let cached_store = CacheableObjectStoreInner::new(object_store, test_cache_folder, 1024);
 
         let aligned = cached_store.align_range(&(9..1025), 1024);
         assert_eq!(aligned, 0..2048);
@@ -903,7 +966,7 @@ mod tests {
     fn test_align_get_range() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = LocalCachedObjectStore::new(object_store, test_cache_folder, 1024);
+        let cached_store = CacheableObjectStoreInner::new(object_store, test_cache_folder, 1024);
 
         let aligned = cached_store.align_get_range(&GetRange::Bounded(9..1025));
         assert_eq!(aligned, GetRange::Bounded(0..2048));
@@ -924,7 +987,7 @@ mod tests {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
         let cached_store =
-            LocalCachedObjectStore::new(object_store.clone(), test_cache_folder, 1024);
+            CacheableObjectStoreInner::new(object_store.clone(), test_cache_folder, 1024);
 
         let test_path = Path::from("/data/testdata1");
         let test_payload = gen_rand_bytes(1024 * 3 + 2);
@@ -962,9 +1025,9 @@ mod tests {
                 )
                 .await;
             let got = cached_store
-                .get_opts(
+                .cached_get_opts(
                     &test_path,
-                    GetOptions {
+                    CacheableGetOptions {
                         range: range.clone(),
                         ..Default::default()
                     },

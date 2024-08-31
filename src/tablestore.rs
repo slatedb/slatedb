@@ -1,6 +1,7 @@
 use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::db_state::{SSTableHandle, SsTableId};
+use crate::disk_cache::{CacheableGetOptions, CacheableObjectStore};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
@@ -13,7 +14,7 @@ use fail_parallel::{fail_point, FailPointRegistry};
 use futures::StreamExt;
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
-use object_store::ObjectStore;
+use object_store::GetRange;
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
@@ -21,7 +22,7 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 pub struct TableStore {
-    object_store: Arc<dyn ObjectStore>,
+    object_store: CacheableObjectStore,
     sst_format: SsTableFormat,
     root_path: Path,
     wal_path: &'static str,
@@ -38,7 +39,7 @@ pub struct TableStore {
 }
 
 struct ReadOnlyObject {
-    object_store: Arc<dyn ObjectStore>,
+    object_store: CacheableObjectStore,
     path: Path,
 }
 
@@ -53,14 +54,27 @@ impl ReadOnlyBlob for ReadOnlyObject {
     }
 
     async fn read_range(&self, range: Range<usize>) -> Result<Bytes, SlateDBError> {
-        self.object_store
-            .get_range(&self.path, range)
+        let opts = CacheableGetOptions {
+            range: Some(GetRange::Bounded(range)),
+            ..Default::default()
+        };
+        let result = self
+            .object_store
+            .get_opts(&self.path, opts)
             .await
-            .map_err(SlateDBError::ObjectStoreError)
+            .map_err(SlateDBError::ObjectStoreError)?;
+        Ok(result
+            .bytes()
+            .await
+            .map_err(SlateDBError::ObjectStoreError)?)
     }
 
     async fn read(&self) -> Result<Bytes, SlateDBError> {
-        let file = self.object_store.get(&self.path).await?;
+        let opts = CacheableGetOptions {
+            range: None,
+            ..Default::default()
+        };
+        let file = self.object_store.get_opts(&self.path, opts).await?;
         file.bytes().await.map_err(SlateDBError::ObjectStoreError)
     }
 }
@@ -68,12 +82,12 @@ impl ReadOnlyBlob for ReadOnlyObject {
 impl TableStore {
     #[allow(dead_code)]
     pub fn new(
-        object_store: Arc<dyn ObjectStore>,
+        object_store: impl Into<CacheableObjectStore> + 'static,
         sst_format: SsTableFormat,
         root_path: Path,
     ) -> Self {
         Self::new_with_fp_registry(
-            object_store,
+            object_store.into(),
             sst_format,
             root_path,
             Arc::new(FailPointRegistry::new()),
@@ -81,13 +95,14 @@ impl TableStore {
     }
 
     pub fn new_with_fp_registry(
-        object_store: Arc<dyn ObjectStore>,
+        cacheable_object_store: impl Into<CacheableObjectStore>,
         sst_format: SsTableFormat,
         root_path: Path,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
+        let cacheable_object_store = cacheable_object_store.into();
         Self {
-            object_store: object_store.clone(),
+            object_store: cacheable_object_store.clone(),
             sst_format,
             root_path: root_path.clone(),
             wal_path: "wal",
@@ -96,7 +111,7 @@ impl TableStore {
             filter_cache: RwLock::new(HashMap::new()),
             transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
                 Path::from("/"),
-                object_store.clone(),
+                cacheable_object_store.object_store(),
             )),
         }
     }
@@ -129,7 +144,7 @@ impl TableStore {
         EncodedSsTableWriter {
             id,
             builder: self.sst_format.table_builder(),
-            writer: BufWriter::new(self.object_store.clone(), path),
+            writer: self.object_store.buf_write(path),
             table_store: self,
             blocks_written: 0,
         }
@@ -373,6 +388,7 @@ impl<'a> EncodedSsTableWriter<'a> {
 #[cfg(test)]
 mod tests {
     use crate::db_state::SsTableId;
+    use crate::disk_cache::CacheableObjectStore;
     use crate::error;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
@@ -381,6 +397,7 @@ mod tests {
     use crate::types::ValueDeletable;
     use bytes::Bytes;
     use object_store::path::Path;
+    use object_store::ObjectStore;
     use std::sync::Arc;
     use ulid::Ulid;
 
@@ -389,7 +406,7 @@ mod tests {
     #[tokio::test]
     async fn test_sst_writer_should_write_sst() {
         // given:
-        let os = Arc::new(object_store::memory::InMemory::new());
+        let os: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
         let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
         let id = SsTableId::Compacted(Ulid::new());
@@ -427,7 +444,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wal_write_should_fail_when_fenced() {
-        let os = Arc::new(object_store::memory::InMemory::new());
+        let os: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
         let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
         let wal_id = SsTableId::Wal(1);

@@ -4,7 +4,7 @@ use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
 use crate::db_state::{CoreDbState, DbState, SSTableHandle, SortedRun, SsTableId};
-use crate::disk_cache::LocalCachedObjectStore;
+use crate::disk_cache::{CacheableObjectStore, CacheableObjectStoreInner};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -346,24 +346,27 @@ impl Db {
         let sst_format =
             SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
 
-        let maybe_cached_object_store =
+        let cacheable_object_store =
             if let Some(disk_cache_root_folder) = &options.disk_cache_root_folder {
-                Arc::new(LocalCachedObjectStore::new(
+                CacheableObjectStore::new(
                     object_store,
                     disk_cache_root_folder.clone(),
                     16 * 1024 * 1024,
-                ))
+                )
             } else {
-                object_store
+                CacheableObjectStore::Direct(object_store.clone())
             };
 
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            maybe_cached_object_store.clone(),
+            cacheable_object_store.clone(),
             sst_format,
             path.clone(),
             fp_registry,
         ));
-        let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &path,
+            cacheable_object_store.object_store(),
+        ));
         let mut manifest = Self::init_db(&manifest_store).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
