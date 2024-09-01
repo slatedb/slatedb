@@ -99,9 +99,12 @@ impl WritableKVTable {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn size(&self) -> usize {
+    pub(crate) fn total_size_bytes(&self) -> usize {
         self.size
+    }
+
+    pub(crate) fn num_entries(&self) -> usize {
+        self.table.map.len()
     }
 
     pub(crate) fn table(&self) -> &Arc<KVTable> {
@@ -277,15 +280,15 @@ mod tests {
         let mut table = WritableKVTable::new();
 
         table.put(b"abc333", b"val1");
-        assert_eq!(table.size(), 10);
+        assert_eq!(table.total_size_bytes(), 10);
 
         table.put(b"def456", b"blablabla");
-        assert_eq!(table.size(), 25);
+        assert_eq!(table.total_size_bytes(), 25);
 
         table.put(b"def456", b"blabla");
-        assert_eq!(table.size(), 22);
+        assert_eq!(table.total_size_bytes(), 22);
 
         table.delete(b"abc333");
-        assert_eq!(table.size(), 18)
+        assert_eq!(table.total_size_bytes(), 18)
     }
 }

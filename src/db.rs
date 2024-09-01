@@ -31,6 +31,7 @@ pub(crate) struct DbInner {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
     pub(crate) db_stats: Arc<DbStats>,
+    pub(crate) sst_format: SsTableFormat,
 }
 
 impl DbInner {
@@ -39,6 +40,7 @@ impl DbInner {
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
         memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
+        sst_format: SsTableFormat,
     ) -> Result<Self, SlateDBError> {
         let state = DbState::new(core_db_state);
         let db_inner = Self {
@@ -47,6 +49,7 @@ impl DbInner {
             table_store,
             memtable_flush_notifier,
             db_stats: Arc::new(DbStats::new()),
+            sst_format,
         };
         Ok(db_inner)
     }
@@ -235,6 +238,8 @@ impl DbInner {
         rx.await.expect("receive error on memtable flush")
     }
 
+    /// This function bounds the number of memtables in memory by awaiting for
+    /// excess memtables to be flushed.
     async fn maybe_apply_backpressure(&self) {
         loop {
             let table = {
@@ -346,7 +351,7 @@ impl Db {
             SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             object_store.clone(),
-            sst_format,
+            sst_format.clone(),
             path.clone(),
             fp_registry.clone(),
         ));
@@ -359,6 +364,7 @@ impl Db {
                 table_store.clone(),
                 manifest.db_state()?.clone(),
                 memtable_flush_tx,
+                sst_format,
             )
             .await?,
         );

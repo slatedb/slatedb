@@ -253,6 +253,17 @@ impl SsTableFormat {
             self.compression_codec,
         )
     }
+
+    pub(crate) fn estimate_sst_size(
+        &self,
+        num_entries: usize,
+        total_entry_size_bytes: usize,
+    ) -> usize {
+        // u16 for key size, u32 for value size
+        let per_entry_overhead = std::mem::size_of::<u16>() + std::mem::size_of::<u32>();
+
+        total_entry_size_bytes + per_entry_overhead * num_entries
+    }
 }
 
 impl SsTableInfoOwned {
