@@ -901,6 +901,42 @@ mod tests {
         assert!(blocks.is_empty())
     }
 
+    #[test]
+    fn test_estimate_sst_size() {
+        let format = SsTableFormat::new(4096, 0, None);
+        let per_entry_overhead = std::mem::size_of::<u16>() + std::mem::size_of::<u32>();
+
+        // Test case 1: Empty SSTable
+        assert_eq!(format.estimate_sst_size(0, 0), 0);
+
+        // Test case 2: Single small entry
+        let num_entries = 1;
+        let total_entry_size = 10;
+        let expected_size = 10 + per_entry_overhead;
+        assert_eq!(
+            format.estimate_sst_size(num_entries, total_entry_size),
+            expected_size
+        );
+
+        // Test case 3: Multiple entries
+        let num_entries = 100;
+        let total_entry_size = 1000;
+        let expected_size = 1000 + 100 * per_entry_overhead;
+        assert_eq!(
+            format.estimate_sst_size(num_entries, total_entry_size),
+            expected_size
+        );
+
+        // Test case 4: Large entries
+        let num_entries = 10000;
+        let total_entry_size = 1_000_000;
+        let expected_size = 1_000_000 + 10000 * per_entry_overhead;
+        assert_eq!(
+            format.estimate_sst_size(num_entries, total_entry_size),
+            expected_size
+        );
+    }
+
     struct BytesBlob {
         bytes: Bytes,
     }
