@@ -718,7 +718,10 @@ mod tests {
                 .unwrap();
             let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
             let index = table_store.read_index(&sst_handle).await.unwrap();
+            let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
 
+            assert!(filter.has_key(b"key1"));
+            assert!(filter.has_key(b"key2"));
             assert_eq!(encoded_info, sst_handle.info);
             let sst_info = sst_handle.info.borrow();
             assert_eq!(1, index.borrow().block_meta().len());
@@ -753,7 +756,10 @@ mod tests {
             let table_store = TableStore::new(object_store, format, root_path);
             let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
             let index = table_store.read_index(&sst_handle).await.unwrap();
+            let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
 
+            assert!(filter.has_key(b"key1"));
+            assert!(filter.has_key(b"key2"));
             assert_eq!(encoded_info, sst_handle.info);
             let sst_info = sst_handle.info.borrow();
             assert_eq!(1, index.borrow().block_meta().len());
