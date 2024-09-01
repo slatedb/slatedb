@@ -1,4 +1,4 @@
-use crate::block::Block;
+use crate::block::{Block, SIZEOF_U16, SIZEOF_U32};
 use crate::filter::{BloomFilter, BloomFilterBuilder};
 use crate::flatbuffer_types::{
     BlockMeta, BlockMetaArgs, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned, SsTableInfo,
@@ -260,7 +260,9 @@ impl SsTableFormat {
         total_entry_size_bytes: usize,
     ) -> usize {
         // u16 for key size, u32 for value size
-        let per_entry_overhead = std::mem::size_of::<u16>() + std::mem::size_of::<u32>();
+        let entry_key_and_val_size_header_offset = SIZEOF_U16 + SIZEOF_U32;
+        let entry_offset_overhead = SIZEOF_U16;
+        let per_entry_overhead = entry_key_and_val_size_header_offset + entry_offset_overhead;
 
         total_entry_size_bytes + per_entry_overhead * num_entries
     }
