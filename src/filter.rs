@@ -2,6 +2,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use siphasher::sip::SipHasher13;
 use std::mem::size_of;
 
+pub const DEFAULT_BITS_PER_KEY: u32 = 10;
+
 pub(crate) struct BloomFilterBuilder {
     bits_per_key: u32,
     key_hashes: Vec<u64>,
@@ -25,6 +27,7 @@ impl BloomFilterBuilder {
         self.key_hashes.push(filter_hash(key))
     }
 
+    // TODO: make this function static and use it in the estimator?
     fn filter_bytes(&self, num_keys: u32, bits_per_key: u32) -> usize {
         let filter_bits = num_keys * bits_per_key;
         // compute filter bytes rounded up to the number of bytes required to fit the filter
@@ -213,7 +216,7 @@ mod tests {
     fn test_filter_effective() {
         let keys_to_test = 100000;
         let key_sz = size_of::<u32>();
-        let mut builder = BloomFilterBuilder::new(10);
+        let mut builder = BloomFilterBuilder::new(DEFAULT_BITS_PER_KEY);
         for i in 0..keys_to_test {
             let mut bytes = BytesMut::with_capacity(key_sz);
             bytes.reserve(key_sz);

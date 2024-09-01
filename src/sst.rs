@@ -1,5 +1,5 @@
 use crate::block::{Block, SIZEOF_U16, SIZEOF_U32};
-use crate::filter::{BloomFilter, BloomFilterBuilder};
+use crate::filter::{BloomFilter, BloomFilterBuilder, DEFAULT_BITS_PER_KEY};
 use crate::flatbuffer_types::{
     BlockMeta, BlockMetaArgs, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned, SsTableInfo,
     SsTableInfoArgs, SsTableInfoOwned,
@@ -254,6 +254,8 @@ impl SsTableFormat {
         )
     }
 
+    /// Estimate the SsTable size given a memtable, including key, value length
+    /// headers, offset ptrs, bloom filter sizes, and block overheads.
     pub(crate) fn estimate_sst_size(
         &self,
         num_entries: usize,
@@ -264,7 +266,19 @@ impl SsTableFormat {
         let entry_offset_overhead = SIZEOF_U16;
         let per_entry_overhead = entry_key_and_val_size_header_offset + entry_offset_overhead;
 
-        total_entry_size_bytes + per_entry_overhead * num_entries
+        // TODO: this is a copy of the bloom filter calculation; make that
+        // calculation function static, to de-duplicate.
+        let bloom_filter_bytes_for_filter = if self.min_filter_keys as usize <= num_entries {
+            ((num_entries * DEFAULT_BITS_PER_KEY as usize) + 7) / 8
+        } else {
+            0
+        };
+        let bloom_filter_header = SIZEOF_U16;
+        let bloom_filter_total_size = bloom_filter_header + bloom_filter_bytes_for_filter;
+
+        // TODO: calculate number of blocks.
+        let _per_block_overhead = SIZEOF_U16; // Number of key-value pairs in the block.
+        total_entry_size_bytes + per_entry_overhead * num_entries + bloom_filter_total_size
     }
 }
 
@@ -328,7 +342,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
             builder: BlockBuilder::new(block_size),
             min_filter_keys,
             num_keys: 0,
-            filter_builder: BloomFilterBuilder::new(10),
+            filter_builder: BloomFilterBuilder::new(DEFAULT_BITS_PER_KEY),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             compression_codec,
         }
@@ -905,16 +919,22 @@ mod tests {
 
     #[test]
     fn test_estimate_sst_size() {
+        // TODO maybe this test could just serialize a full sstable and verify that the estimate is correct (pre-compression).
         let format = SsTableFormat::new(4096, 0, None);
-        let per_entry_overhead = std::mem::size_of::<u16>() + std::mem::size_of::<u32>();
 
         // Test case 1: Empty SSTable
-        assert_eq!(format.estimate_sst_size(0, 0), 0);
+        assert_eq!(
+            format.estimate_sst_size(0, 0),
+            2 /* u16 for bloom filter header */
+        );
 
         // Test case 2: Single small entry
         let num_entries = 1;
         let total_entry_size = 10;
-        let expected_size = 10 + per_entry_overhead;
+
+        /* 10 bytes + 1 * per-key overhead of 6 bytes (u16 + u32) + 2 (u16) offsets header + 2 bytes for bloom filter header + 2 bytes for bloom filter */
+        let expected_size = 22;
+
         assert_eq!(
             format.estimate_sst_size(num_entries, total_entry_size),
             expected_size
@@ -923,7 +943,7 @@ mod tests {
         // Test case 3: Multiple entries
         let num_entries = 100;
         let total_entry_size = 1000;
-        let expected_size = 1000 + 100 * per_entry_overhead;
+        let expected_size = 1927;
         assert_eq!(
             format.estimate_sst_size(num_entries, total_entry_size),
             expected_size
@@ -932,7 +952,7 @@ mod tests {
         // Test case 4: Large entries
         let num_entries = 10000;
         let total_entry_size = 1_000_000;
-        let expected_size = 1_000_000 + 10000 * per_entry_overhead;
+        let expected_size = 1092502;
         assert_eq!(
             format.estimate_sst_size(num_entries, total_entry_size),
             expected_size
