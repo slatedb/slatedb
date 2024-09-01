@@ -7,6 +7,9 @@ pub(crate) const SIZEOF_U32: usize = std::mem::size_of::<u32>();
 /// "None" values are encoded by using the maximum u32 value as the value length.
 pub(crate) const TOMBSTONE: u32 = u32::MAX;
 
+/// The default block size in bytes.
+pub(crate) const BLOCK_SIZE_BYTES: usize = 4096;
+
 pub struct Block {
     pub(crate) data: Bytes,
     pub(crate) offsets: Vec<u16>,
@@ -122,7 +125,7 @@ mod tests {
 
     #[test]
     fn test_block() {
-        let mut builder = BlockBuilder::new(4096);
+        let mut builder = BlockBuilder::new(BLOCK_SIZE_BYTES);
         assert!(builder.add(b"key1", Some(b"value1")));
         assert!(builder.add(b"key2", Some(b"value2")));
         let block = builder.build().unwrap();
@@ -134,7 +137,7 @@ mod tests {
 
     #[test]
     fn test_block_with_tombstone() {
-        let mut builder = BlockBuilder::new(4096);
+        let mut builder = BlockBuilder::new(BLOCK_SIZE_BYTES);
         assert!(builder.add(b"key1", Some(b"value1")));
         assert!(builder.add(b"key2", None));
         assert!(builder.add(b"key3", Some(b"value3")));

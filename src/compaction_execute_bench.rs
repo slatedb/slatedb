@@ -64,7 +64,7 @@ fn open_object_store(options: &Options) -> Result<Arc<dyn ObjectStore>, SlateDBE
 pub fn run_compaction_execute_bench() -> Result<(), SlateDBError> {
     let options = load_options();
     let s3 = open_object_store(&options)?;
-    let sst_format = SsTableFormat::new(4096, 1, options.compression_codec);
+    let sst_format = SsTableFormat::new(BLOCK_SIZE_BYTES, 1, options.compression_codec);
     let table_store = Arc::new(TableStore::new(
         s3.clone(),
         sst_format,

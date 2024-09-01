@@ -515,6 +515,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::block::BLOCK_SIZE_BYTES;
     use crate::block_iterator::BlockIterator;
     use crate::db_state::SsTableId;
     use crate::tablestore::TableStore;
@@ -644,7 +645,7 @@ mod tests {
     async fn test_sstable() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 0, None);
+        let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
         let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
@@ -690,7 +691,7 @@ mod tests {
     async fn test_sstable_no_filter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 3, None);
+        let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 3, None);
         let table_store = TableStore::new(object_store, format, root_path);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
@@ -713,7 +714,7 @@ mod tests {
         async fn test_compression_inner(compression: CompressionCodec) {
             let root_path = Path::from("");
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let format = SsTableFormat::new(4096, 0, Some(compression));
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, Some(compression));
             let table_store = TableStore::new(object_store, format, root_path);
             let mut builder = table_store.table_builder();
             builder.add(b"key1", Some(b"value1")).unwrap();
@@ -744,7 +745,7 @@ mod tests {
         ) {
             let root_path = Path::from("");
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let format = SsTableFormat::new(4096, 0, Some(compression));
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, Some(compression));
             let table_store = TableStore::new(object_store.clone(), format, root_path.clone());
             let mut builder = table_store.table_builder();
             builder.add(b"key1", Some(b"value1")).unwrap();
@@ -757,7 +758,7 @@ mod tests {
                 .unwrap();
 
             // Decompression is independent of TableFormat. It uses the CompressionFormat from SSTable Info to decompress sst.
-            let format = SsTableFormat::new(4096, 0, Some(dummy_codec));
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, Some(dummy_codec));
             let table_store = TableStore::new(object_store, format, root_path);
             let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
             let index = table_store.read_index(&sst_handle).await.unwrap();
@@ -920,7 +921,7 @@ mod tests {
     #[test]
     fn test_estimate_sst_size() {
         // TODO maybe this test could just serialize a full sstable and verify that the estimate is correct (pre-compression).
-        let format = SsTableFormat::new(4096, 0, None);
+        let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
 
         // Test case 1: Empty SSTable
         assert_eq!(
