@@ -351,7 +351,7 @@ impl Db {
                 CacheableObjectStore::new(
                     object_store,
                     disk_cache_root_folder.clone(),
-                    16 * 1024 * 1024,
+                    4 * 1024 * 1024,
                 )
             } else {
                 CacheableObjectStore::Direct(object_store.clone())
