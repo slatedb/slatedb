@@ -1,4 +1,4 @@
-use crate::compactor::CompactionScheduler;
+use crate::{compactor::CompactionScheduler, inmemory_cache::BlockCacheOptions};
 use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
 use tokio::runtime::Handle;
@@ -134,10 +134,12 @@ pub struct DbOptions {
 
     /// Configuration options for the compactor.
     pub compactor_options: Option<CompactorOptions>,
+
     /// The compression algorithm to use for SSTables.
     pub compression_codec: Option<CompressionCodec>,
+
     /// Block cache size in bytes.
-    pub block_cache_size_bytes: Option<u64>,
+    pub block_cache_options: Option<BlockCacheOptions>,
 }
 
 impl Default for DbOptions {
@@ -153,7 +155,7 @@ impl Default for DbOptions {
             l0_max_ssts: 8,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
-            block_cache_size_bytes: Some(65_536 * 1024), // 64MB
+            block_cache_options: Some(BlockCacheOptions::default()),
         }
     }
 }

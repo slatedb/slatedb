@@ -85,18 +85,20 @@ impl TokioCompactionExecutorInner {
         &'a self,
         compaction: &'a CompactionJob,
     ) -> Result<
-        TwoMergeIterator<MergeIterator<SstIterator>, MergeIterator<SortedRunIterator>>,
+        TwoMergeIterator<MergeIterator<SstIterator<'a>>, MergeIterator<SortedRunIterator<'a>>>,
         SlateDBError,
     > {
         let mut l0_iters = VecDeque::new();
         for l0 in compaction.ssts.iter() {
+            // block cache is disabled here so that we dont clobber the cache
             let iter = SstIterator::new_spawn(l0, self.table_store.clone(), 4, 256, false).await?;
             l0_iters.push_back(iter);
         }
         let l0_merge_iter = MergeIterator::new(l0_iters).await?;
         let mut sr_iters = VecDeque::new();
         for sr in compaction.sorted_runs.iter() {
-            let iter = SortedRunIterator::new_spawn(sr, self.table_store.clone(), 16, 256).await?;
+            let iter =
+                SortedRunIterator::new_spawn(sr, self.table_store.clone(), 16, 256, false).await?;
             sr_iters.push_back(iter);
         }
         let sr_merge_iter = MergeIterator::new(sr_iters).await?;

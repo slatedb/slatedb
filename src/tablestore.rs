@@ -39,7 +39,7 @@ pub struct TableStore {
     filter_cache: RwLock<HashMap<SsTableId, Option<Arc<BloomFilter>>>>,
     transactional_wal_store: Arc<dyn TransactionalObjectStore>,
     /// In-memory cache for blocks
-    block_cache: Option<Arc<BlockCache>>,
+    block_cache: Option<Arc<dyn BlockCache>>,
 }
 
 struct ReadOnlyObject {
@@ -76,7 +76,7 @@ impl TableStore {
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
         root_path: Path,
-        block_cache: Option<Arc<BlockCache>>,
+        block_cache: Option<Arc<dyn BlockCache>>,
     ) -> Self {
         Self::new_with_fp_registry(
             object_store,
@@ -92,7 +92,7 @@ impl TableStore {
         sst_format: SsTableFormat,
         root_path: Path,
         fp_registry: Arc<FailPointRegistry>,
-        block_cache: Option<Arc<BlockCache>>,
+        block_cache: Option<Arc<dyn BlockCache>>,
     ) -> Self {
         Self {
             object_store: object_store.clone(),
@@ -270,7 +270,11 @@ impl TableStore {
             .await
     }
 
-    // TODO: we probably won't need this once we're caching the index
+    /// Reads specified blocks from an SSTable using the provided index.
+    ///
+    /// This function attempts to read blocks from the cache if available, and falls back to reading
+    /// from storage for uncached blocks, using an async fetch for each contiguous range that blocks are not cached. It can optionally cache newly read blocks.
+    /// TODO: we probably won't need this once we're caching the index
     pub(crate) async fn read_blocks_using_index(
         &self,
         handle: &SSTableHandle,
@@ -278,46 +282,55 @@ impl TableStore {
         blocks: Range<usize>,
         cache_blocks: bool,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
+        // Create a ReadOnlyObject for accessing the SSTable file
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
         };
+
+        // Initialize the result vector and a vector to track uncached ranges
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
 
+        // If block cache is available, try to retrieve cached blocks
         if let Some(cache) = &self.block_cache {
-            let cached_blocks = join_all(
-                blocks
-                    .clone()
-                    .map(|block_num| async move { cache.get(&(handle.id, block_num)).await }),
-            )
-            .await;
+            // Attempt to get all requested blocks from cache concurrently
+            let cached_blocks =
+                join_all(blocks.clone().map(|block_num| async move {
+                    cache.get((handle.id, block_num)).await.block()
+                }))
+                .await;
 
             let mut last_uncached_start = None;
 
+            // Process cached block results
             for (index, block_result) in cached_blocks.into_iter().enumerate() {
-                match block_result.and_then(|b| b.into()) {
+                match block_result {
                     Some(cached_block) => {
+                        // If a cached block is found, add it to blocks_read
                         if let Some(start) = last_uncached_start.take() {
                             uncached_ranges.push((blocks.start + start)..(blocks.start + index));
                         }
                         blocks_read.push_back(cached_block);
                     }
                     None => {
+                        // If a block is not in cache, mark the start of an uncached range
                         last_uncached_start.get_or_insert(index);
                     }
                 }
             }
 
+            // Add the last uncached range if it exists
             if let Some(start) = last_uncached_start {
                 uncached_ranges.push((blocks.start + start)..blocks.end);
             }
         } else {
+            // If no cache is available, treat all blocks as uncached
             uncached_ranges.push(blocks.clone());
         }
 
-        // Read uncached blocks
+        // Read uncached blocks concurrently
         let uncached_blocks = join_all(uncached_ranges.iter().map(|range| {
             let obj_ref = &obj;
             let index_ref = &index;
@@ -329,18 +342,25 @@ impl TableStore {
         }))
         .await;
 
-        // Merge uncached blocks with blocks_read
+        // Merge uncached blocks with blocks_read and prepare blocks for caching
+        let mut blocks_to_cache = vec![];
         for (range, range_blocks) in uncached_ranges.into_iter().zip(uncached_blocks) {
             for (block_num, block_read) in range.zip(range_blocks?) {
                 let block = Arc::new(block_read);
                 if cache_blocks {
-                    if let Some(cache) = &self.block_cache {
-                        cache
-                            .insert((handle.id, block_num), CachedBlock::Block(block.clone()))
-                            .await;
-                    }
+                    blocks_to_cache.push((handle.id, block_num, block.clone()));
                 }
                 blocks_read.insert(block_num - blocks.start, block);
+            }
+        }
+
+        // Cache the newly read blocks if caching is enabled
+        if let Some(cache) = &self.block_cache {
+            if blocks_to_cache.is_empty() {
+                join_all(blocks_to_cache.into_iter().map(|(id, block_num, block)| {
+                    cache.insert((id, block_num), CachedBlock::Block(block))
+                }))
+                .await;
             }
         }
 
@@ -437,7 +457,6 @@ impl<'a> EncodedSsTableWriter<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
@@ -446,6 +465,10 @@ mod tests {
         block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
     };
     use crate::{error, tablestore::BlockCache};
+    use crate::{
+        inmemory_cache::{BlockCacheOptions, MokaCache},
+        sst::SsTableFormat,
+    };
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use std::{collections::VecDeque, sync::Arc};
@@ -521,7 +544,7 @@ mod tests {
         // Setup
         let os = Arc::new(InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
-        let block_cache = Arc::new(BlockCache::builder().max_capacity(1024).build());
+        let block_cache = Arc::new(MokaCache::new(&BlockCacheOptions::default()));
         let ts = Arc::new(TableStore::new(
             os.clone(),
             format,
@@ -532,9 +555,14 @@ mod tests {
         // Create and write SST
         let id = SsTableId::Compacted(Ulid::new());
         let mut writer = ts.table_writer(id);
+        let mut expected_data = Vec::with_capacity(20);
         for i in 0..20 {
             let key = [i as u8; 16];
             let value = [(i + 1) as u8; 16];
+            expected_data.push((
+                Vec::from(key.as_slice()),
+                ValueDeletable::Value(Bytes::copy_from_slice(&value)),
+            ));
             writer.add(&key, Some(&value)).await.unwrap();
         }
         let handle = writer.close().await.unwrap();
@@ -548,22 +576,12 @@ mod tests {
             .await
             .unwrap();
 
-        let mut expected_data = Vec::with_capacity(20);
-        for i in 0..20 {
-            let key = [i as u8; 16];
-            let value = [(i + 1) as u8; 16];
-            expected_data.push((
-                Vec::from(key.as_slice()),
-                ValueDeletable::Value(Bytes::copy_from_slice(&value)),
-            ));
-        }
-
         assert_blocks(&blocks, &expected_data).await;
 
         // Check that all blocks are now in cache
         for i in 0..20 {
             assert!(
-                block_cache.get(&(handle.id, i)).await.is_some(),
+                block_cache.get((handle.id, i)).await.block().is_some(),
                 "Block {} should be in cache",
                 i
             );
@@ -571,10 +589,10 @@ mod tests {
 
         // Partially clear the cache (remove blocks 5..10 and 15..20)
         for i in 5..10 {
-            block_cache.remove(&(handle.id, i)).await;
+            block_cache.remove((handle.id, i)).await;
         }
         for i in 15..20 {
-            block_cache.remove(&(handle.id, i)).await;
+            block_cache.remove((handle.id, i)).await;
         }
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
@@ -587,7 +605,7 @@ mod tests {
         // Check that all blocks are again in cache
         for i in 0..20 {
             assert!(
-                block_cache.get(&(handle.id, i)).await.is_some(),
+                block_cache.get((handle.id, i)).await.block().is_some(),
                 "Block {} should be in cache after partial hit",
                 i
             );
@@ -607,7 +625,7 @@ mod tests {
         // Check that all blocks are still in cache
         for i in 0..20 {
             assert!(
-                block_cache.get(&(handle.id, i)).await.is_some(),
+                block_cache.get((handle.id, i)).await.block().is_some(),
                 "Block {} should be in cache after SST emptying",
                 i
             );

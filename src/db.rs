@@ -1,4 +1,4 @@
-use crate::config::ReadLevel::Uncommitted;
+use crate::compactor::Compactor;
 use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
@@ -15,7 +15,7 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
-use crate::{compactor::Compactor, inmemory_cache::BlockCache};
+use crate::{config::ReadLevel::Uncommitted, inmemory_cache::create_block_cache};
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use log::warn;
@@ -89,7 +89,7 @@ impl DbInner {
         for sr in &snapshot.state.core.compacted {
             if self.sr_may_include_key(sr, key).await? {
                 let mut iter =
-                    SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1)
+                    SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1, true) // cache blocks
                         .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
@@ -344,15 +344,12 @@ impl Db {
     ) -> Result<Self, SlateDBError> {
         let sst_format =
             SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
-        let block_cache = options.block_cache_size_bytes.map(|block_cache_size| {
-            Arc::new(BlockCache::builder().max_capacity(block_cache_size).build())
-        });
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             object_store.clone(),
             sst_format,
             path.clone(),
             fp_registry.clone(),
-            block_cache,
+            create_block_cache(options.block_cache_options),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let mut manifest = Self::init_db(&manifest_store).await?;
@@ -1101,7 +1098,7 @@ mod tests {
             let val = db.get(&[b's' + i; 32]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[19u8 + i; 32])));
         }
-        let neg_lookup = db.get(&[b'a', b'b', b'c']).await;
+        let neg_lookup = db.get(b"abc").await;
         assert!(neg_lookup.unwrap().is_none());
     }
 
@@ -1250,7 +1247,7 @@ mod tests {
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
-            block_cache_size_bytes: None,
+            block_cache_options: None,
         }
     }
 }
