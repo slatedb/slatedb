@@ -56,7 +56,7 @@ pub(crate) struct MokaCache {
 impl MokaCache {
     pub fn new(options: BlockCacheOptions) -> Self {
         let mut builder = moka::future::Cache::builder()
-            .weigher(move |_, _| return options.cached_block_size)
+            .weigher(move |_, _| options.cached_block_size)
             .max_capacity(options.max_capacity);
 
         if let Some(ttl) = options.time_to_live {
@@ -93,7 +93,9 @@ impl BlockCache for MokaCache {
 }
 
 /// Factory function to create the appropriate cache based on BlockCacheOptions
-pub fn create_block_cache(options: Option<BlockCacheOptions>) -> Option<Arc<dyn BlockCache>> {
+pub(crate) fn create_block_cache(
+    options: Option<BlockCacheOptions>,
+) -> Option<Arc<dyn BlockCache>> {
     if let Some(options) = options {
         match options.cache_type {
             CacheType::Moka => Some(Arc::new(MokaCache::new(options))),
@@ -107,7 +109,7 @@ pub fn create_block_cache(options: Option<BlockCacheOptions>) -> Option<Arc<dyn 
 pub struct CachedBlockOption(Option<CachedBlock>);
 
 impl CachedBlockOption {
-    pub fn block(&self) -> Option<Arc<Block>> {
+    pub(crate) fn block(&self) -> Option<Arc<Block>> {
         match self {
             CachedBlockOption(Some(CachedBlock::Block(block))) => Some(block.clone()),
             _ => None,
@@ -115,7 +117,7 @@ impl CachedBlockOption {
     }
 
     #[allow(dead_code)]
-    pub fn sst_index(&self) -> Option<Arc<SsTableIndexOwned>> {
+    pub(crate) fn sst_index(&self) -> Option<Arc<SsTableIndexOwned>> {
         match self {
             CachedBlockOption(Some(CachedBlock::Index(index))) => Some(index.clone()),
             _ => None,
@@ -123,7 +125,7 @@ impl CachedBlockOption {
     }
 
     #[allow(dead_code)]
-    pub fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
+    pub(crate) fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
         match self {
             CachedBlockOption(Some(CachedBlock::Filter(filter))) => Some(filter.clone()),
             _ => None,
