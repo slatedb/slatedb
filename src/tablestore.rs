@@ -356,7 +356,7 @@ impl TableStore {
 
         // Cache the newly read blocks if caching is enabled
         if let Some(cache) = &self.block_cache {
-            if blocks_to_cache.is_empty() {
+            if !blocks_to_cache.is_empty() {
                 join_all(blocks_to_cache.into_iter().map(|(id, block_num, block)| {
                     cache.insert((id, block_num), CachedBlock::Block(block))
                 }))
@@ -544,7 +544,7 @@ mod tests {
         // Setup
         let os = Arc::new(InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
-        let block_cache = Arc::new(MokaCache::new(&BlockCacheOptions::default()));
+        let block_cache = Arc::new(MokaCache::new(BlockCacheOptions::default()));
         let ts = Arc::new(TableStore::new(
             os.clone(),
             format,
