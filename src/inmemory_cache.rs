@@ -106,7 +106,7 @@ pub(crate) fn create_block_cache(
 }
 
 /// wrapper around Option<CachedBlock> to provide helper functions
-pub struct CachedBlockOption(Option<CachedBlock>);
+pub(crate) struct CachedBlockOption(Option<CachedBlock>);
 
 impl CachedBlockOption {
     pub(crate) fn block(&self) -> Option<Arc<Block>> {

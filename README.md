@@ -35,7 +35,7 @@ Then you can use SlateDB in your Rust code:
 use bytes::Bytes;
 use object_store::{ObjectStore, memory::InMemory, path::Path};
 use slatedb::db::Db;
-use slatedb::in_memory::BlockCacheOptions;
+use slatedb::inmemory_cache::BlockCacheOptions;
 use slatedb::config::{CompactorOptions, DbOptions};
 use std::{sync::Arc, time::Duration};
 
