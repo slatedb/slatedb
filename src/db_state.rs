@@ -2,6 +2,7 @@ use crate::flatbuffer_types::SsTableInfoOwned;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use tracing::info;
 use ulid::Ulid;
 use SsTableId::Compacted;
 
@@ -22,6 +23,15 @@ impl SSTableHandle {
         }
         false
     }
+
+    pub(crate) fn estimate_size(&self) -> u64 {
+        let info = self.info.borrow();
+        // this is a hacky estimate of the sst size since we don't have it stored anywhere
+        // right now. Just use the index's offset and add the index length. Since the index
+        // is the last thing we put in the SST before the info footer, this should be a good
+        // estimate for now.
+        info.index_offset() + info.index_len()
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Hash, Eq, Copy)]
@@ -41,12 +51,16 @@ impl SsTableId {
 }
 
 #[derive(Clone, PartialEq)]
-pub(crate) struct SortedRun {
+pub struct SortedRun {
     pub(crate) id: u32,
     pub(crate) ssts: Vec<SSTableHandle>,
 }
 
 impl SortedRun {
+    pub(crate) fn estimate_size(&self) -> u64 {
+        self.ssts.iter().map(|sst| sst.estimate_size()).sum()
+    }
+
     pub(crate) fn find_sst_with_range_covering_key_idx(&self, key: &[u8]) -> Option<usize> {
         // returns the sst after the one whose range includes the key
         let first_sst = self.ssts.partition_point(|sst| {
@@ -85,7 +99,7 @@ pub(crate) struct COWDbState {
 }
 // represents the core db state that we persist in the manifest
 #[derive(Clone, PartialEq)]
-pub(crate) struct CoreDbState {
+pub struct CoreDbState {
     pub(crate) l0_last_compacted: Option<Ulid>,
     pub(crate) l0: VecDeque<SSTableHandle>,
     pub(crate) compacted: Vec<SortedRun>,
@@ -102,6 +116,20 @@ impl CoreDbState {
             next_wal_sst_id: 1,
             last_compacted_wal_sst_id: 0,
         }
+    }
+
+    pub(crate) fn log_db_runs(&self) {
+        let l0s: Vec<_> = self.l0.iter().map(|l0| l0.estimate_size()).collect();
+        let compacted: Vec<_> = self
+            .compacted
+            .iter()
+            .map(|sr| (sr.id, sr.estimate_size()))
+            .collect();
+        info!("DB Levels:");
+        info!("-----------------");
+        info!("{:?}", l0s);
+        info!("{:?}", compacted);
+        info!("-----------------");
     }
 }
 

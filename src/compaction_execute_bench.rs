@@ -1,7 +1,9 @@
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
-use crate::config::DEFAULT_COMPACTOR_OPTIONS;
+use crate::compactor_state::{Compaction, SourceId};
+use crate::config::CompactorOptions;
 use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
+use crate::manifest_store::{ManifestStore, StoredManifest};
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 use crate::test_utils::OrderedBytesGenerator;
@@ -16,6 +18,7 @@ use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 use ulid::Ulid;
@@ -32,6 +35,7 @@ struct Options {
     num_ssts: usize,
     key_bytes: usize,
     val_bytes: usize,
+    compaction: Option<Compaction>,
     compression_codec: Option<CompressionCodec>,
 }
 
@@ -71,7 +75,7 @@ pub fn run_compaction_execute_bench() -> Result<(), SlateDBError> {
         .enable_all()
         .build()?;
     match options.mode.as_str() {
-        "RUN" => run_bench(&options, runtime.handle().clone(), table_store),
+        "RUN" => run_bench(&options, runtime.handle().clone(), table_store, s3.clone()),
         "LOAD" => runtime.block_on(run_load(&options, table_store)),
         "CLEAR" => run_clear(&options, runtime.handle().clone(), s3.clone()),
         invalid => panic!("invalid mode: {}", invalid),
@@ -191,19 +195,11 @@ fn run_clear(
     Ok(())
 }
 
-fn run_bench(
+fn load_compaction_job(
     options: &Options,
-    handle: tokio::runtime::Handle,
-    table_store: Arc<TableStore>,
-) -> Result<(), SlateDBError> {
-    let (tx, rx) = crossbeam_channel::unbounded();
-    let compactor_options = DEFAULT_COMPACTOR_OPTIONS.clone();
-    let executor = TokioCompactionExecutor::new(
-        handle.clone(),
-        Arc::new(compactor_options),
-        tx,
-        table_store.clone(),
-    );
+    handle: &Handle,
+    table_store: &Arc<TableStore>,
+) -> Result<CompactionJob, SlateDBError> {
     let sst_ids: Vec<SsTableId> = (0u32..options.num_ssts as u32).map(sst_id).collect();
     let mut futures =
         FuturesUnordered::<JoinHandle<Result<(SsTableId, SSTableHandle), SlateDBError>>>::new();
@@ -235,10 +231,64 @@ fn run_bench(
         .into_iter()
         .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
         .collect();
-    let job = CompactionJob {
+    Ok(CompactionJob {
         destination: 0,
         ssts,
         sorted_runs: vec![],
+    })
+}
+
+fn load_compaction_as_job(manifest: StoredManifest, compaction: &Compaction) -> CompactionJob {
+    let state = manifest.db_state();
+    let srs_by_id: HashMap<_, _> = state
+        .compacted
+        .iter()
+        .map(|sr| (sr.id, sr.clone()))
+        .collect();
+    let srs: Vec<_> = compaction
+        .sources
+        .iter()
+        .map(|sr| {
+            srs_by_id
+                .get(&sr.unwrap_sorted_run())
+                .expect("expected src")
+                .clone()
+        })
+        .collect();
+    info!("loaded compaction job");
+    CompactionJob {
+        destination: 0,
+        ssts: vec![],
+        sorted_runs: srs,
+    }
+}
+
+fn run_bench(
+    options: &Options,
+    handle: tokio::runtime::Handle,
+    table_store: Arc<TableStore>,
+    os: Arc<dyn ObjectStore>,
+) -> Result<(), SlateDBError> {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let compactor_options = CompactorOptions::default();
+    let executor = TokioCompactionExecutor::new(
+        handle.clone(),
+        Arc::new(compactor_options),
+        tx,
+        table_store.clone(),
+    );
+    info!("load compaction job");
+    let job = match &options.compaction {
+        Some(compaction) => {
+            info!("load job from existing compaction");
+            let path = Path::from(options.path.as_str());
+            let manifest_store = Arc::new(ManifestStore::new(&path, os.clone()));
+            let manifest = handle
+                .block_on(StoredManifest::load(manifest_store))?
+                .expect("expected manifest to be present");
+            load_compaction_as_job(manifest, compaction)
+        }
+        None => load_compaction_job(options, &handle, &table_store)?,
     };
     let start = std::time::Instant::now();
     info!("start compaction job");
@@ -279,6 +329,7 @@ fn load_options() -> Options {
             .parse::<CompressionCodec>()
             .expect("invalid compression codec")
     });
+    let compaction = std::env::var("COMPACTION").ok().map(parse_compaction);
 
     let options = Options {
         aws_key,
@@ -291,10 +342,20 @@ fn load_options() -> Options {
         num_ssts: num_ssts.parse::<usize>().expect("invalid num ssts"),
         key_bytes: key_bytes.parse::<usize>().expect("invalid key bytes"),
         val_bytes: val_bytes.parse::<usize>().expect("invalid val bytes"),
+        compaction,
         compression_codec,
     };
     info!("Options: {:?}", options);
     options
+}
+
+fn parse_compaction(as_str: String) -> Compaction {
+    let parts = as_str.split(',');
+    let srs: Vec<_> = parts
+        .map(|p| SourceId::SortedRun(p.parse::<u32>().expect("invalid sr id")))
+        .collect();
+    let dst = srs.last().expect("no srs provided").unwrap_sorted_run();
+    Compaction::new(srs, dst)
 }
 
 #[allow(clippy::panic)]
