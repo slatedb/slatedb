@@ -445,11 +445,11 @@ impl<'a> EncodedSsTableBuilder<'a> {
         if self.num_keys >= self.min_filter_keys {
             let filter = Arc::new(self.filter_builder.build());
             let encoded_filter = filter.encode();
-            filter_len = encoded_filter.len();
             let compressed_filter = match self.compression_codec {
                 None => encoded_filter,
                 Some(c) => Self::compress(encoded_filter, c)?,
             };
+            filter_len = compressed_filter.len();
             buf.put(compressed_filter);
             maybe_filter = Some(filter);
         }
