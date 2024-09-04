@@ -101,6 +101,10 @@ impl CacheableObjectStore {
             Self::Direct(object_store) => object_store.clone(),
         }
     }
+
+    pub fn as_direct(&self) -> Self {
+        Self::Direct(self.object_store().clone())
+    }
 }
 
 impl From<Arc<dyn ObjectStore + 'static>> for CacheableObjectStore {
@@ -114,7 +118,7 @@ impl From<Arc<dyn ObjectStore + 'static>> for CacheableObjectStore {
 pub(crate) struct CacheableObjectStoreInner {
     object_store: Arc<dyn ObjectStore>,
     part_size: usize, // expected to be aligned with mb or kb
-    storage: Arc<dyn LocalCacheStorage>,
+    pub(crate) cache_storage: Arc<dyn LocalCacheStorage>,
     db_stats: Arc<DbStats>,
 }
 
@@ -133,13 +137,13 @@ impl CacheableObjectStoreInner {
         Self {
             object_store,
             part_size,
-            storage,
+            cache_storage: storage,
             db_stats,
         }
     }
 
     pub async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        let entry = self.storage.entry(location, self.part_size);
+        let entry = self.cache_storage.entry(location, self.part_size);
         match entry.read_head().await {
             Ok(Some((meta, _))) => Ok(meta),
             _ => {
@@ -210,7 +214,7 @@ impl CacheableObjectStoreInner {
         location: &Path,
         range: &Option<GetRange>,
     ) -> object_store::Result<(ObjectMeta, Attributes)> {
-        let entry = self.storage.entry(location, self.part_size);
+        let entry = self.cache_storage.entry(location, self.part_size);
         match entry.read_head().await {
             Ok(Some((meta, attrs))) => return Ok((meta, attrs)),
             Ok(None) => {}
@@ -244,7 +248,9 @@ impl CacheableObjectStoreInner {
         assert!(result.range.start % self.part_size == 0);
         assert!(result.range.end % self.part_size == 0 || result.range.end == result.meta.size);
 
-        let entry = self.storage.entry(&result.meta.location, self.part_size);
+        let entry = self
+            .cache_storage
+            .entry(&result.meta.location, self.part_size);
         entry.save_head((&result.meta, &result.attributes)).await?;
 
         let mut buffer = BytesMut::new();
@@ -315,7 +321,7 @@ impl CacheableObjectStoreInner {
         let part_size = self.part_size;
         let object_store = self.object_store.clone();
         let location = location.clone();
-        let entry = self.storage.entry(&location, self.part_size);
+        let entry = self.cache_storage.entry(&location, self.part_size);
         let db_stats = self.db_stats.clone();
         Box::pin(async move {
             db_stats.object_store_cache_part_access.inc();
@@ -437,7 +443,7 @@ impl std::fmt::Display for CacheableObjectStoreInner {
         write!(
             f,
             "LocalCachedObjectStore({}, {})",
-            self.object_store, self.storage
+            self.object_store, self.cache_storage
         )
     }
 }
@@ -818,7 +824,7 @@ mod tests {
             1024,
             db_stats,
         );
-        let entry = cached_store.storage.entry(&location, 1024);
+        let entry = cached_store.cache_storage.entry(&location, 1024);
 
         let object_size_hint = cached_store.save_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3 + 32);
@@ -875,7 +881,7 @@ mod tests {
             part_size,
             db_stats,
         );
-        let entry = cached_store.storage.entry(&location, part_size);
+        let entry = cached_store.cache_storage.entry(&location, part_size);
         let object_size_hint = cached_store.save_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3);
         let cached_parts = entry.cached_parts().await?;

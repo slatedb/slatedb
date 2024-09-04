@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 pub struct TableStore {
-    object_store: CacheableObjectStore,
+    pub(crate) object_store: CacheableObjectStore,
     sst_format: SsTableFormat,
     root_path: Path,
     wal_path: &'static str,

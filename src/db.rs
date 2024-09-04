@@ -522,6 +522,7 @@ mod tests {
     use crate::sst_iter::SstIterator;
     #[cfg(feature = "wal_disable")]
     use crate::test_utils::assert_iterator;
+    use futures::StreamExt;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use std::time::Duration;
@@ -556,8 +557,12 @@ mod tests {
     async fn test_put_get_delete_with_cache() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut opts = test_db_options(0, 1024, None);
-        let temp_dir = TempDir::new().unwrap();
-        opts.disk_cache_root_folder = Some(std::path::PathBuf::from(temp_dir.path()));
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_cache_test_")
+            .tempdir_in("/tmp")
+            .unwrap();
+
+        opts.disk_cache_root_folder = Some(std::path::PathBuf::from(temp_dir.into_path()));
         let kv_store = Db::open_with_opts(
             Path::from("/tmp/test_kv_store_with_cache"),
             opts,
@@ -565,6 +570,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let cacheable_object_store = kv_store.inner.table_store.object_store.clone();
 
         let access_count0 = kv_store.metrics().object_store_cache_part_access.get();
         let key = b"test_key";
@@ -578,6 +584,24 @@ mod tests {
         assert!(access_count1 > 0);
         assert!(access_count1 >= access_count0);
         assert!(kv_store.metrics().object_store_cache_part_hits.get() >= 1);
+
+        assert_eq!(
+            cacheable_object_store
+                .list(None)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .filter_map(Result::ok)
+                .map(|meta| meta.location.to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "tmp/test_kv_store_with_cache/manifest/00000000000000000001.manifest".to_string(),
+                "tmp/test_kv_store_with_cache/manifest/00000000000000000002.manifest".to_string(),
+                "tmp/test_kv_store_with_cache/wal/00000000000000000001.sst".to_string(),
+                "tmp/test_kv_store_with_cache/wal/00000000000000000002.sst".to_string(),
+            ],
+        );
+        // TODO: ensure the wal not being cached, but manifest is cached
 
         kv_store.delete(key).await;
         assert_eq!(None, kv_store.get(key).await.unwrap());
