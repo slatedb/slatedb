@@ -272,8 +272,10 @@ impl TableStore {
 
     /// Reads specified blocks from an SSTable using the provided index.
     ///
-    /// This function attempts to read blocks from the cache if available, and falls back to reading
-    /// from storage for uncached blocks, using an async fetch for each contiguous range that blocks are not cached. It can optionally cache newly read blocks.
+    /// This function attempts to read blocks from the cache if available
+    /// and falls back to reading from storage for uncached blocks
+    /// using an async fetch for each contiguous range that blocks are not cached.
+    /// It can optionally cache newly read blocks.
     /// TODO: we probably won't need this once we're caching the index
     pub(crate) async fn read_blocks_using_index(
         &self,
