@@ -138,7 +138,7 @@ pub struct DbOptions {
     /// The compression algorithm to use for SSTables.
     pub compression_codec: Option<CompressionCodec>,
 
-    /// Block cache size in bytes.
+    /// Block cache options.
     pub block_cache_options: Option<BlockCacheOptions>,
 }
 

@@ -78,7 +78,8 @@ impl DbInner {
         for sst in &snapshot.state.core.l0 {
             if self.sst_may_include_key(sst, key).await? {
                 let mut iter =
-                    SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1).await?;
+                    SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1, true)
+                        .await?; // cache blocks that are being read
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
                         return Ok(entry.value.into_option());

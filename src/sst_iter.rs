@@ -63,6 +63,7 @@ impl<'a> SstIterator<'a> {
         from_key: &'a [u8],
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
+        cache_blocks: bool,
     ) -> Result<Self, SlateDBError> {
         Self::new_opts(
             table,
@@ -71,7 +72,7 @@ impl<'a> SstIterator<'a> {
             max_fetch_tasks,
             blocks_to_fetch,
             false,
-            true,
+            cache_blocks,
         )
         .await
     }
@@ -358,10 +359,16 @@ mod tests {
             let mut expected_val_gen = test_case_val_gen.clone();
             let from_key = test_case_key_gen.next();
             let _ = test_case_val_gen.next();
-            let mut iter =
-                SstIterator::new_from_key(&sst, table_store.clone(), from_key.as_ref(), 1, 1)
-                    .await
-                    .unwrap();
+            let mut iter = SstIterator::new_from_key(
+                &sst,
+                table_store.clone(),
+                from_key.as_ref(),
+                1,
+                1,
+                false,
+            )
+            .await
+            .unwrap();
             for _ in 0..nkeys - i {
                 let e = iter.next().await.unwrap().unwrap();
                 assert_kv(
@@ -393,9 +400,10 @@ mod tests {
         let mut expected_val_gen = val_gen.clone();
         let (sst, nkeys) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
-        let mut iter = SstIterator::new_from_key(&sst, table_store.clone(), &[b'a'; 16], 1, 1)
-            .await
-            .unwrap();
+        let mut iter =
+            SstIterator::new_from_key(&sst, table_store.clone(), &[b'a'; 16], 1, 1, false)
+                .await
+                .unwrap();
 
         for _ in 0..nkeys {
             let e = iter.next().await.unwrap().unwrap();
@@ -425,9 +433,10 @@ mod tests {
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
         let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
-        let mut iter = SstIterator::new_from_key(&sst, table_store.clone(), &[b'z'; 16], 1, 1)
-            .await
-            .unwrap();
+        let mut iter =
+            SstIterator::new_from_key(&sst, table_store.clone(), &[b'z'; 16], 1, 1, false)
+                .await
+                .unwrap();
 
         assert!(iter.next().await.unwrap().is_none());
     }
