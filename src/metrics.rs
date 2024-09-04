@@ -2,7 +2,7 @@ use atomic::{Atomic, Ordering};
 use bytemuck::NoUninit;
 use std::sync::Arc;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Counter {
     pub value: Arc<Atomic<u64>>,
 }
@@ -25,12 +25,12 @@ impl Default for Counter {
     }
 }
 
-#[derive(Clone)]
-pub struct Gauge<T> {
+#[derive(Clone, Debug)]
+pub struct Gauge<T: std::fmt::Debug + NoUninit> {
     value: Arc<Atomic<T>>,
 }
 
-impl<T: NoUninit> Gauge<T> {
+impl<T: NoUninit + std::fmt::Debug> Gauge<T> {
     pub fn get(&self) -> T {
         self.value.load(Ordering::Relaxed)
     }
@@ -40,7 +40,7 @@ impl<T: NoUninit> Gauge<T> {
     }
 }
 
-impl<T: Default> Default for Gauge<T> {
+impl<T: Default + NoUninit + std::fmt::Debug> Default for Gauge<T> {
     fn default() -> Self {
         Self {
             value: Arc::new(Atomic::<T>::default()),
@@ -48,10 +48,12 @@ impl<T: Default> Default for Gauge<T> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DbStats {
     pub immutable_memtable_flushes: Counter,
     pub last_compaction_ts: Gauge<u64>,
+    pub object_store_cache_part_hits: Counter,
+    pub object_store_cache_part_access: Counter,
 }
 
 impl DbStats {
@@ -59,6 +61,8 @@ impl DbStats {
         Self {
             immutable_memtable_flushes: Counter::default(),
             last_compaction_ts: Gauge::default(),
+            object_store_cache_part_hits: Counter::default(),
+            object_store_cache_part_access: Counter::default(),
         }
     }
 }

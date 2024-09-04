@@ -40,6 +40,7 @@ impl DbInner {
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
         memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
+        db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let state = DbState::new(core_db_state);
         let db_inner = Self {
@@ -47,7 +48,7 @@ impl DbInner {
             options,
             table_store,
             memtable_flush_notifier,
-            db_stats: Arc::new(DbStats::new()),
+            db_stats,
         };
         Ok(db_inner)
     }
@@ -343,6 +344,7 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
+        let db_stats = Arc::new(DbStats::new());
         let sst_format =
             SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
 
@@ -352,6 +354,7 @@ impl Db {
                     object_store,
                     disk_cache_root_folder.clone(),
                     4 * 1024 * 1024,
+                    db_stats.clone(),
                 )
             } else {
                 CacheableObjectStore::Direct(object_store.clone())
@@ -375,6 +378,7 @@ impl Db {
                 table_store.clone(),
                 manifest.db_state()?.clone(),
                 memtable_flush_tx,
+                db_stats.clone(),
             )
             .await?,
         );
@@ -561,15 +565,20 @@ mod tests {
         )
         .await
         .unwrap();
+
+        let access_count0 = kv_store.metrics().object_store_cache_part_access.get();
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await;
         kv_store.flush().await.unwrap();
 
-        assert_eq!(
-            kv_store.get(key).await.unwrap(),
-            Some(Bytes::from_static(value))
-        );
+        let got = kv_store.get(key).await.unwrap();
+        let access_count1 = kv_store.metrics().object_store_cache_part_access.get();
+        assert_eq!(got, Some(Bytes::from_static(value)));
+        assert!(access_count1 > 0);
+        assert!(access_count1 >= access_count0);
+        assert!(kv_store.metrics().object_store_cache_part_hits.get() >= 1);
+
         kv_store.delete(key).await;
         assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();

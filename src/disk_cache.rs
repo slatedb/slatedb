@@ -12,6 +12,8 @@ use tokio::{
 
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 
+use crate::metrics::DbStats;
+
 pub(crate) struct CacheableGetOptions {
     /// the range of the object to get, if None, the entire object will be fetched.
     pub range: Option<GetRange>,
@@ -47,11 +49,13 @@ impl CacheableObjectStore {
         object_store: Arc<dyn ObjectStore>,
         root_folder: std::path::PathBuf,
         part_size: usize,
+        db_stats: Arc<DbStats>,
     ) -> Self {
         Self::Cached(Arc::new(CacheableObjectStoreInner::new(
             object_store,
             root_folder,
             part_size,
+            db_stats,
         )))
     }
 
@@ -111,6 +115,7 @@ pub(crate) struct CacheableObjectStoreInner {
     object_store: Arc<dyn ObjectStore>,
     part_size: usize, // expected to be aligned with mb or kb
     storage: Arc<dyn LocalCacheStorage>,
+    db_stats: Arc<DbStats>,
 }
 
 impl CacheableObjectStoreInner {
@@ -118,6 +123,7 @@ impl CacheableObjectStoreInner {
         object_store: Arc<dyn ObjectStore>,
         root_folder: std::path::PathBuf,
         part_size: usize,
+        db_stats: Arc<DbStats>,
     ) -> Self {
         assert!(part_size % 1024 == 0);
 
@@ -128,6 +134,7 @@ impl CacheableObjectStoreInner {
             object_store,
             part_size,
             storage,
+            db_stats,
         }
     }
 
@@ -309,8 +316,12 @@ impl CacheableObjectStoreInner {
         let object_store = self.object_store.clone();
         let location = location.clone();
         let entry = self.storage.entry(&location, self.part_size);
+        let db_stats = self.db_stats.clone();
         Box::pin(async move {
+            db_stats.object_store_cache_part_access.inc();
+
             if let Ok(Some(bytes)) = entry.read_part(part_id).await {
+                db_stats.object_store_cache_part_hits.inc();
                 return Ok(bytes.slice(range_in_part));
             }
 
@@ -763,7 +774,10 @@ mod tests {
     use object_store::{path::Path, GetOptions, GetRange, ObjectStore, PutPayload};
     use rand::{thread_rng, Rng};
 
-    use crate::disk_cache::{CacheableGetOptions, DiskCacheEntry, PartID};
+    use crate::{
+        disk_cache::{CacheableGetOptions, DiskCacheEntry, PartID},
+        metrics::DbStats,
+    };
 
     use super::CacheableObjectStoreInner;
 
@@ -788,6 +802,7 @@ mod tests {
         let payload = gen_rand_bytes(1024 * 3 + 32);
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
+        let db_stats = Arc::new(DbStats::new());
         object_store
             .put(
                 &Path::from("/data/testfile1"),
@@ -797,8 +812,12 @@ mod tests {
         let location = Path::from("/data/testfile1");
         let get_result = object_store.get(&location).await?;
 
-        let cached_store =
-            CacheableObjectStoreInner::new(object_store.clone(), test_cache_folder.clone(), 1024);
+        let cached_store = CacheableObjectStoreInner::new(
+            object_store.clone(),
+            test_cache_folder.clone(),
+            1024,
+            db_stats,
+        );
         let entry = cached_store.storage.entry(&location, 1024);
 
         let object_size_hint = cached_store.save_result(get_result).await?;
@@ -839,6 +858,7 @@ mod tests {
         let payload = gen_rand_bytes(1024 * 3);
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
+        let db_stats = Arc::new(DbStats::new());
         object_store
             .put(
                 &Path::from("/data/testfile1"),
@@ -849,8 +869,12 @@ mod tests {
         let get_result = object_store.get(&location).await?;
         let part_size = 1024;
 
-        let cached_store =
-            CacheableObjectStoreInner::new(object_store, test_cache_folder.clone(), part_size);
+        let cached_store = CacheableObjectStoreInner::new(
+            object_store,
+            test_cache_folder.clone(),
+            part_size,
+            db_stats,
+        );
         let entry = cached_store.storage.entry(&location, part_size);
         let object_size_hint = cached_store.save_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3);
@@ -874,7 +898,9 @@ mod tests {
     fn test_split_range_into_parts() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = CacheableObjectStoreInner::new(object_store, test_cache_folder, 1024);
+        let db_stats = Arc::new(DbStats::new());
+        let cached_store =
+            CacheableObjectStoreInner::new(object_store, test_cache_folder, 1024, db_stats);
 
         struct Test {
             input: (Option<GetRange>, usize),
@@ -952,7 +978,9 @@ mod tests {
     fn test_align_range() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = CacheableObjectStoreInner::new(object_store, test_cache_folder, 1024);
+        let db_stats = Arc::new(DbStats::new());
+        let cached_store =
+            CacheableObjectStoreInner::new(object_store, test_cache_folder, 1024, db_stats);
 
         let aligned = cached_store.align_range(&(9..1025), 1024);
         assert_eq!(aligned, 0..2048);
@@ -964,7 +992,9 @@ mod tests {
     fn test_align_get_range() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = CacheableObjectStoreInner::new(object_store, test_cache_folder, 1024);
+        let db_stats = Arc::new(DbStats::new());
+        let cached_store =
+            CacheableObjectStoreInner::new(object_store, test_cache_folder, 1024, db_stats);
 
         let aligned = cached_store.align_get_range(&GetRange::Bounded(9..1025));
         assert_eq!(aligned, GetRange::Bounded(0..2048));
@@ -984,8 +1014,12 @@ mod tests {
     async fn test_cached_object_store_impl_object_store() -> object_store::Result<()> {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let cached_store =
-            CacheableObjectStoreInner::new(object_store.clone(), test_cache_folder, 1024);
+        let cached_store = CacheableObjectStoreInner::new(
+            object_store.clone(),
+            test_cache_folder,
+            1024,
+            Arc::new(DbStats::new()),
+        );
 
         let test_path = Path::from("/data/testdata1");
         let test_payload = gen_rand_bytes(1024 * 3 + 2);
