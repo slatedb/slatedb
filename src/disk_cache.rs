@@ -1,27 +1,14 @@
-use bytes::Bytes;
-use bytes::BytesMut;
-use futures::future::BoxFuture;
-use futures::stream;
-use futures::stream::BoxStream;
-use futures::StreamExt;
-use object_store::buffered::BufWriter;
-use object_store::Attribute;
-use object_store::Attributes;
-use object_store::GetRange;
-use object_store::GetResultPayload;
-use rand::distributions::Alphanumeric;
-use rand::Rng;
-use serde::Deserialize;
-use serde::Serialize;
-use std::collections::HashMap;
-use std::fmt::Display;
-use std::ops::Range;
-use std::sync::Arc;
-use tokio::fs;
-use tokio::fs::File;
-use tokio::fs::OpenOptions;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
+use bytes::{Bytes, BytesMut};
+use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
+use object_store::{buffered::BufWriter, Attribute, Attributes, GetRange, GetResultPayload};
+use rand::{distributions::Alphanumeric, Rng};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
+use tokio::{
+    fs,
+    fs::{File, OpenOptions},
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 
@@ -770,8 +757,7 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
-    use object_store::path::Path;
-    use object_store::{GetOptions, GetRange, ObjectStore, PutPayload};
+    use object_store::{path::Path, GetOptions, GetRange, ObjectStore, PutPayload};
     use rand::{thread_rng, Rng};
 
     use crate::disk_cache::{CacheableGetOptions, DiskCacheEntry, PartID};
