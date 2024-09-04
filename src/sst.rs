@@ -67,9 +67,24 @@ impl SsTableFormat {
             let filter_end = handle.filter_offset() + handle.filter_len();
             let filter_offset_range = handle.filter_offset() as usize..filter_end as usize;
             let filter_bytes = obj.read_range(filter_offset_range).await?;
-            filter = Some(Arc::new(BloomFilter::decode(&filter_bytes)));
+            let compression_codec = handle.compression_format();
+            filter = Some(Arc::new(
+                self.decode_filter(filter_bytes, compression_codec.into())?,
+            ));
         }
         Ok(filter)
+    }
+
+    pub(crate) fn decode_filter(
+        &self,
+        filter_bytes: Bytes,
+        compression_codec: Option<CompressionCodec>,
+    ) -> Result<BloomFilter, SlateDBError> {
+        let filter_bytes = match compression_codec {
+            Some(c) => Self::decompress(filter_bytes, c)?,
+            None => filter_bytes,
+        };
+        Ok(BloomFilter::decode(&filter_bytes))
     }
 
     pub(crate) async fn read_index(
@@ -430,8 +445,12 @@ impl<'a> EncodedSsTableBuilder<'a> {
         if self.num_keys >= self.min_filter_keys {
             let filter = Arc::new(self.filter_builder.build());
             let encoded_filter = filter.encode();
-            filter_len = encoded_filter.len();
-            buf.put(encoded_filter);
+            let compressed_filter = match self.compression_codec {
+                None => encoded_filter,
+                Some(c) => Self::compress(encoded_filter, c)?,
+            };
+            filter_len = compressed_filter.len();
+            buf.put(compressed_filter);
             maybe_filter = Some(filter);
         }
 
@@ -699,7 +718,10 @@ mod tests {
                 .unwrap();
             let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
             let index = table_store.read_index(&sst_handle).await.unwrap();
+            let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
 
+            assert!(filter.has_key(b"key1"));
+            assert!(filter.has_key(b"key2"));
             assert_eq!(encoded_info, sst_handle.info);
             let sst_info = sst_handle.info.borrow();
             assert_eq!(1, index.borrow().block_meta().len());
@@ -734,7 +756,10 @@ mod tests {
             let table_store = TableStore::new(object_store, format, root_path);
             let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
             let index = table_store.read_index(&sst_handle).await.unwrap();
+            let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
 
+            assert!(filter.has_key(b"key1"));
+            assert!(filter.has_key(b"key2"));
             assert_eq!(encoded_info, sst_handle.info);
             let sst_info = sst_handle.info.borrow();
             assert_eq!(1, index.borrow().block_meta().len());
