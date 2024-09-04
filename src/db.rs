@@ -521,6 +521,7 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use std::time::Duration;
+    use tempfile::TempDir;
     use tracing::info;
 
     #[tokio::test]
@@ -551,7 +552,8 @@ mod tests {
     async fn test_put_get_delete_with_cache() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut opts = test_db_options(0, 1024, None);
-        opts.disk_cache_root_folder = Some(std::path::PathBuf::from("/tmp/disk_cache"));
+        let temp_dir = TempDir::new().unwrap();
+        opts.disk_cache_root_folder = Some(std::path::PathBuf::from(temp_dir.path()));
         let kv_store = Db::open_with_opts(
             Path::from("/tmp/test_kv_store_with_cache"),
             opts,

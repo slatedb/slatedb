@@ -44,6 +44,7 @@ serde_json = "1.0"
 [dev-dependencies]
 tokio = { version = "1.37.0", features = ["rt-multi-thread"] }
 fail-parallel = { version = "0.5.1", features = ["failpoints"] }
+tempfile = "3.3"
 
 [features]
 default = ["aws"]
