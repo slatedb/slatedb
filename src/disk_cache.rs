@@ -584,6 +584,9 @@ impl DiskCacheEntry {
         fs::rename(tmp_path, path).await.map_err(wrap_io_err)
     }
 
+    // every origin file will be split into multiple parts, and all the parts will be saved in the same
+    // folder. the part file name is expected to be in the format of `_part{part_size}-{part_number}`,
+    // examples: /tmp/mydata.csv/_part1mb-000000001
     fn make_part_path(
         root_folder: std::path::PathBuf,
         location: &Path,
@@ -597,7 +600,7 @@ impl DiskCacheEntry {
         } else {
             format!("{}kb", part_size / 1024)
         };
-        let suffix = format!("_part-{}-{:09}", part_size_name, part_number);
+        let suffix = format!("_part{}-{:09}", part_size_name, part_number);
         let mut path = root_folder.join(location.to_string());
         path.push(suffix);
         path
