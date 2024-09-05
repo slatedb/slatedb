@@ -1,10 +1,12 @@
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::{Display, Formatter};
+
+use tracing::info;
+use ulid::Ulid;
+
 use crate::compactor_state::CompactionStatus::Submitted;
 use crate::db_state::{CoreDbState, SSTableHandle, SortedRun};
 use crate::error::SlateDBError;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::fmt::{Display, Formatter};
-use tracing::info;
-use ulid::Ulid;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum SourceId {
@@ -240,6 +242,15 @@ impl CompactorState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::thread::sleep;
+    use std::time::{Duration, SystemTime};
+
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+    use tokio::runtime::{Handle, Runtime};
+
     use super::*;
     use crate::compactor_state::CompactionStatus::Submitted;
     use crate::compactor_state::SourceId::Sst;
@@ -247,13 +258,6 @@ mod tests {
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::manifest_store::{ManifestStore, StoredManifest};
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
-    use std::sync::Arc;
-    use std::thread::sleep;
-    use std::time::{Duration, SystemTime};
-    use tokio::runtime::{Handle, Runtime};
 
     const PATH: &str = "/test/db";
 

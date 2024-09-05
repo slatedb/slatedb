@@ -1,6 +1,7 @@
+use std::sync::Arc;
+
 use atomic::{Atomic, Ordering};
 use bytemuck::NoUninit;
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Counter {

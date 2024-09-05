@@ -1,3 +1,14 @@
+use std::collections::VecDeque;
+#[cfg(feature = "snappy")]
+use std::io::Read;
+#[cfg(feature = "lz4")]
+use std::io::Write;
+use std::ops::Range;
+use std::sync::Arc;
+
+use bytes::{Buf, BufMut, Bytes};
+use flatbuffers::DefaultAllocator;
+
 use crate::block::Block;
 use crate::filter::{BloomFilter, BloomFilterBuilder};
 use crate::flatbuffer_types::{
@@ -6,17 +17,6 @@ use crate::flatbuffer_types::{
 };
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
-use bytes::{Buf, BufMut, Bytes};
-use flatbuffers::DefaultAllocator;
-use std::collections::VecDeque;
-use std::ops::Range;
-use std::sync::Arc;
-
-#[cfg(feature = "snappy")]
-use std::io::Read;
-
-#[cfg(feature = "lz4")]
-use std::io::Write;
 
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
@@ -507,18 +507,19 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use bytes::BytesMut;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+
+    use super::*;
     use crate::block_iterator::BlockIterator;
     use crate::db_state::SsTableId;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
-    use bytes::BytesMut;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
-    use std::sync::Arc;
-
-    use super::*;
 
     fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIterator<Block> {
         let block = builder.next_block();

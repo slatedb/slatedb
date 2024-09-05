@@ -1,10 +1,11 @@
+use bytes::{Buf, Bytes};
+
 use crate::{
     block::{Block, TOMBSTONE},
     error::SlateDBError,
     iter::KeyValueIterator,
     types::{KeyValueDeletable, ValueDeletable},
 };
-use bytes::{Buf, Bytes};
 
 pub trait BlockLike {
     fn data(&self) -> &Bytes;
