@@ -108,14 +108,6 @@ impl CacheableObjectStoreRef {
         BufWriter::new(self.object_store(), location)
     }
 
-    /// TODO: make this private
-    pub fn object_store(&self) -> Arc<dyn ObjectStore> {
-        match self {
-            Self::Cached(inner) => inner.object_store.clone(),
-            Self::Direct(object_store) => object_store.clone(),
-        }
-    }
-
     pub fn as_direct(&self) -> Self {
         Self::Direct(self.object_store().clone())
     }
@@ -125,6 +117,13 @@ impl CacheableObjectStoreRef {
         match self {
             Self::Cached(inner) => Some(inner.as_ref().clone()),
             Self::Direct(_) => None,
+        }
+    }
+
+    fn object_store(&self) -> Arc<dyn ObjectStore> {
+        match self {
+            Self::Cached(inner) => inner.object_store.clone(),
+            Self::Direct(object_store) => object_store.clone(),
         }
     }
 }
