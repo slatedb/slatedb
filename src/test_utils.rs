@@ -1,6 +1,7 @@
+use bytes::{BufMut, Bytes, BytesMut};
+
 use crate::iter::KeyValueIterator;
 use crate::types::{KeyValue, ValueDeletable};
-use bytes::{BufMut, Bytes, BytesMut};
 
 // this complains because we include these in the db_bench feature but they are only
 // used for cfg(test)
@@ -84,8 +85,9 @@ impl OrderedBytesGenerator {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::OrderedBytesGenerator;
     use bytes::{BufMut, Bytes};
+
+    use crate::test_utils::OrderedBytesGenerator;
 
     #[test]
     fn test_should_generate_ordered_bytes() {

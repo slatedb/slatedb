@@ -1,18 +1,18 @@
+use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
+
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
 use object_store::{
     buffered::BufWriter, Attribute, Attributes, GetRange, GetResultPayload, PutResult,
 };
+use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
 use tokio::{
     fs,
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncWriteExt},
 };
-
-use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 
 use crate::metrics::DbStats;
 
@@ -820,12 +820,11 @@ mod tests {
     use object_store::{path::Path, GetOptions, GetRange, ObjectStore, PutPayload};
     use rand::{thread_rng, Rng};
 
+    use super::CacheableObjectStoreInner;
     use crate::{
         disk_cache::{CacheableGetOptions, DiskCacheEntry, PartID},
         metrics::DbStats,
     };
-
-    use super::CacheableObjectStoreInner;
 
     fn gen_rand_bytes(n: usize) -> Bytes {
         let mut rng = thread_rng();

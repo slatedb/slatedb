@@ -1,7 +1,9 @@
-use crate::compactor::CompactionScheduler;
 use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
 
+use tokio::runtime::Handle;
+
+use crate::compactor::CompactionScheduler;
 use crate::error::SlateDBError;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
@@ -217,6 +219,10 @@ pub struct CompactorOptions {
 
     /// The maximum number of concurrent compactions to execute at once
     pub max_concurrent_compactions: usize,
+
+    /// An optional tokio runtime handle to use for scheduling compaction work. You can use
+    /// this to isolate compactions to a dedicated thread pool.
+    pub compaction_runtime: Option<Handle>,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -232,6 +238,7 @@ impl Default for CompactorOptions {
                 SizeTieredCompactionSchedulerOptions::default(),
             )),
             max_concurrent_compactions: 4,
+            compaction_runtime: None,
         }
     }
 }

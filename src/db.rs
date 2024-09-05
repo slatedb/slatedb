@@ -1,3 +1,13 @@
+use std::sync::Arc;
+
+use bytes::Bytes;
+use fail_parallel::FailPointRegistry;
+use log::warn;
+use object_store::path::Path;
+use object_store::ObjectStore;
+use parking_lot::{Mutex, RwLock};
+use tokio::runtime::Handle;
+
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
@@ -17,14 +27,6 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
-use bytes::Bytes;
-use fail_parallel::FailPointRegistry;
-use log::warn;
-use object_store::path::Path;
-use object_store::ObjectStore;
-use parking_lot::{Mutex, RwLock};
-use std::sync::Arc;
-use tokio::runtime::Handle;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -514,17 +516,23 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+    use std::time::Duration;
+
+    use futures::StreamExt;
+    use object_store::memory::InMemory;
+    use object_store::memory::InMemory;
+    use object_store::ObjectStore;
+    use object_store::ObjectStore;
+    use tracing::info;
+    use tracing::info;
+
     use super::*;
     use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
     #[cfg(feature = "wal_disable")]
     use crate::test_utils::assert_iterator;
-    use futures::StreamExt;
-    use object_store::memory::InMemory;
-    use object_store::ObjectStore;
-    use std::time::Duration;
-    use tracing::info;
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -1213,6 +1221,7 @@ mod tests {
                     SizeTieredCompactionSchedulerOptions::default(),
                 )),
                 max_concurrent_compactions: 1,
+                compaction_runtime: None,
             }),
         ))
         .await;
@@ -1230,6 +1239,7 @@ mod tests {
                     SizeTieredCompactionSchedulerOptions::default(),
                 )),
                 max_concurrent_compactions: 1,
+                compaction_runtime: None,
             }),
         ))
         .await

@@ -1,3 +1,19 @@
+use std::collections::HashMap;
+use std::mem;
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::BufMut;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
+use object_store::path::Path;
+use object_store::ObjectStore;
+use rand::{RngCore, SeedableRng};
+use tokio::runtime::Handle;
+use tokio::task::JoinHandle;
+use tracing::{error, info};
+use ulid::Ulid;
+
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, SourceId};
 use crate::config::CompactorOptions;
@@ -8,20 +24,6 @@ use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 use crate::test_utils::OrderedBytesGenerator;
 use crate::{compactor::WorkerToOrchestratorMsg, config::CompressionCodec};
-use bytes::BufMut;
-use futures::stream::FuturesUnordered;
-use futures::StreamExt;
-use object_store::path::Path;
-use object_store::ObjectStore;
-use rand::{RngCore, SeedableRng};
-use std::collections::HashMap;
-use std::mem;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::runtime::Handle;
-use tokio::task::JoinHandle;
-use tracing::{error, info};
-use ulid::Ulid;
 
 #[derive(Debug)]
 struct Options {

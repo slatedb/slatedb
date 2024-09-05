@@ -99,15 +99,17 @@ impl TransactionalObjectStore for DelegatingTransactionalObjectStore {
 
 #[cfg(test)]
 mod tests {
-    use crate::transactional_object_store::{
-        DelegatingTransactionalObjectStore, TransactionalObjectStore,
-    };
+    use std::sync::Arc;
+
     use bytes::Bytes;
     use futures::StreamExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{ObjectStore, PutPayload};
-    use std::sync::Arc;
+
+    use crate::transactional_object_store::{
+        DelegatingTransactionalObjectStore, TransactionalObjectStore,
+    };
 
     const ROOT_PATH: &str = "/root/path";
 

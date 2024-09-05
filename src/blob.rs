@@ -1,6 +1,8 @@
-use crate::error::SlateDBError;
-use bytes::Bytes;
 use std::ops::Range;
+
+use bytes::Bytes;
+
+use crate::error::SlateDBError;
 
 pub(crate) trait ReadOnlyBlob {
     async fn len(&self) -> Result<usize, SlateDBError>;

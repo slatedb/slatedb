@@ -1,6 +1,7 @@
+use std::mem::size_of;
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use siphasher::sip::SipHasher13;
-use std::mem::size_of;
 
 pub(crate) struct BloomFilterBuilder {
     bits_per_key: u32,
@@ -25,7 +26,9 @@ impl BloomFilterBuilder {
         self.key_hashes.push(filter_hash(key))
     }
 
-    fn filter_bytes(&self, num_keys: u32, bits_per_key: u32) -> usize {
+    fn filter_size_bytes(&self) -> usize {
+        let num_keys = self.key_hashes.len() as u32;
+        let bits_per_key = self.bits_per_key;
         let filter_bits = num_keys * bits_per_key;
         // compute filter bytes rounded up to the number of bytes required to fit the filter
         ((filter_bits + 7) / 8) as usize
@@ -33,7 +36,7 @@ impl BloomFilterBuilder {
 
     pub(crate) fn build(&self) -> BloomFilter {
         let num_probes = optimal_num_probes(self.bits_per_key);
-        let filter_bytes = self.filter_bytes(self.key_hashes.len() as u32, self.bits_per_key);
+        let filter_bytes = self.filter_size_bytes();
         let filter_bits = (filter_bytes * 8) as u32;
         let mut buffer = vec![0x00; filter_bytes];
         for k in self.key_hashes.iter() {

@@ -1,3 +1,14 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::thread;
+use std::thread::JoinHandle;
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use tokio::runtime::Handle;
+use tracing::{error, info, warn};
+use ulid::Ulid;
+
 use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, CompactorState};
@@ -7,15 +18,6 @@ use crate::error::SlateDBError;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::metrics::DbStats;
 use crate::tablestore::TableStore;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::thread;
-use std::thread::JoinHandle;
-use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::runtime::Handle;
-use tracing::{error, info, warn};
-use ulid::Ulid;
 
 pub trait CompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
@@ -44,6 +46,7 @@ impl Compactor {
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let (err_tx, err_rx) = tokio::sync::oneshot::channel();
+        let tokio_handle = options.compaction_runtime.clone().unwrap_or(tokio_handle);
         let main_thread = thread::spawn(move || {
             let load_result = CompactorOrchestrator::new(
                 options,
@@ -289,6 +292,16 @@ impl CompactorOrchestrator {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+    use tokio::runtime::Runtime;
+    use ulid::Ulid;
+
     use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestratorMsg};
     use crate::compactor_state::{Compaction, SourceId};
     use crate::config::{DbOptions, SizeTieredCompactionSchedulerOptions};
@@ -299,14 +312,6 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
-    use std::future::Future;
-    use std::sync::Arc;
-    use std::time::{Duration, SystemTime};
-    use tokio::runtime::Runtime;
-    use ulid::Ulid;
 
     const PATH: &str = "/test/db";
 
@@ -493,6 +498,7 @@ mod tests {
                 SizeTieredCompactionSchedulerOptions::default(),
             )),
             max_concurrent_compactions: 1,
+            compaction_runtime: None,
         }
     }
 }

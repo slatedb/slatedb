@@ -1,3 +1,14 @@
+use std::sync::Arc;
+use std::sync::Arc;
+
+use futures::StreamExt;
+use futures::StreamExt;
+use object_store::path::Path;
+use object_store::path::Path;
+use object_store::Error::AlreadyExists;
+use object_store::Error::AlreadyExists;
+use object_store::ObjectStore;
+
 use crate::db_state::CoreDbState;
 use crate::disk_cache::CacheableObjectStoreRef;
 use crate::error::SlateDBError;
@@ -7,10 +18,6 @@ use crate::manifest::{Manifest, ManifestCodec};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
-use futures::StreamExt;
-use object_store::path::Path;
-use object_store::Error::AlreadyExists;
-use std::sync::Arc;
 
 pub(crate) struct FenceableManifest {
     stored_manifest: StoredManifest,
@@ -256,13 +263,18 @@ impl ManifestStore {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::Arc;
+
+    use object_store::memory::InMemory;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+
     use crate::db_state::CoreDbState;
     use crate::error;
     use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
-    use std::sync::Arc;
 
     const ROOT: &str = "/root/path";
 
