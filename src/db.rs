@@ -563,7 +563,7 @@ mod tests {
             .tempdir_in("/tmp")
             .unwrap();
 
-        opts.object_store_cache_root_folder = Some(std::path::PathBuf::from(temp_dir.into_path()));
+        opts.object_store_cache_root_folder = Some(temp_dir.into_path());
         let kv_store = Db::open_with_opts(
             Path::from("/tmp/test_kv_store_with_cache"),
             opts,
@@ -693,7 +693,7 @@ mod tests {
         let db = Db::open_with_opts(path.clone(), options, object_store.clone())
             .await
             .unwrap();
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.into()));
         let mut stored_manifest = StoredManifest::load(manifest_store.clone())
             .await
             .unwrap()

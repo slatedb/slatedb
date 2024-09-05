@@ -284,7 +284,7 @@ fn run_bench(
         Some(compaction) => {
             info!("load job from existing compaction");
             let path = Path::from(options.path.as_str());
-            let manifest_store = Arc::new(ManifestStore::new(&path, os.clone()));
+            let manifest_store = Arc::new(ManifestStore::new(&path, os.into()));
             let manifest = handle
                 .block_on(StoredManifest::load(manifest_store))?
                 .expect("expected manifest to be present");
