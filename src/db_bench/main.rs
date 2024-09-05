@@ -1,5 +1,6 @@
-use crate::args::{parse_args, DbBenchArgs, DbBenchCommand, Provider};
-use crate::db_bench::DbBench;
+use std::sync::Arc;
+use std::time::Duration;
+
 use object_store::aws::{DynamoCommit, S3ConditionalPut};
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -7,8 +8,9 @@ use s3::load_aws_creds;
 use slatedb::config::DbOptions;
 use slatedb::db::Db;
 use slatedb::error::SlateDBError;
-use std::sync::Arc;
-use std::time::Duration;
+
+use crate::args::{parse_args, DbBenchArgs, DbBenchCommand, Provider};
+use crate::db_bench::DbBench;
 
 mod args;
 mod db_bench;

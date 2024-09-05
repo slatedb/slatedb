@@ -1,3 +1,13 @@
+use std::collections::{HashMap, VecDeque};
+use std::mem;
+use std::sync::atomic::{self, AtomicBool};
+use std::sync::Arc;
+
+use futures::future::join_all;
+use parking_lot::Mutex;
+use tokio::task::JoinHandle;
+use ulid::Ulid;
+
 use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor::WorkerToOrchestratorMsg::CompactionFinished;
 use crate::config::CompactorOptions;
@@ -8,14 +18,6 @@ use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
-use futures::future::join_all;
-use parking_lot::Mutex;
-use std::collections::{HashMap, VecDeque};
-use std::mem;
-use std::sync::atomic::{self, AtomicBool};
-use std::sync::Arc;
-use tokio::task::JoinHandle;
-use ulid::Ulid;
 
 pub(crate) struct CompactionJob {
     pub(crate) destination: u32,
