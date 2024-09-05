@@ -1,14 +1,21 @@
-use crate::db_state;
-use crate::db_state::{CoreDbState, SSTableHandle};
+use std::collections::VecDeque;
+
 use bytes::Bytes;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
-use std::collections::VecDeque;
 use ulid::Ulid;
+
+use crate::db_state;
+use crate::db_state::{CoreDbState, SSTableHandle};
 
 #[path = "./generated/manifest_generated.rs"]
 #[allow(warnings)]
 #[rustfmt::skip]
 mod manifest_generated;
+pub use manifest_generated::{
+    BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
+    SsTableInfo, SsTableInfoArgs,
+};
+
 use crate::config::CompressionCodec;
 use crate::db_state::SsTableId;
 use crate::db_state::SsTableId::Compacted;
@@ -18,10 +25,6 @@ use crate::flatbuffer_types::manifest_generated::{
     SortedRun, SortedRunArgs,
 };
 use crate::manifest::{Manifest, ManifestCodec};
-pub use manifest_generated::{
-    BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
-    SsTableInfo, SsTableInfoArgs,
-};
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct SsTableInfoOwned {

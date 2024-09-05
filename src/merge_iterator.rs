@@ -1,8 +1,9 @@
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, VecDeque};
+
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::KeyValueDeletable;
-use std::cmp::{Ordering, Reverse};
-use std::collections::{BinaryHeap, VecDeque};
 
 pub(crate) struct TwoMergeIterator<T1: KeyValueIterator, T2: KeyValueIterator> {
     iterator1: (T1, Option<KeyValueDeletable>),
@@ -144,13 +145,15 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
+    use bytes::Bytes;
+
     use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
     use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
     use crate::test_utils::assert_iterator;
     use crate::types::{KeyValueDeletable, ValueDeletable};
-    use bytes::Bytes;
-    use std::collections::VecDeque;
 
     #[tokio::test]
     async fn test_merge_iterator_should_include_entries_in_order() {

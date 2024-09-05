@@ -1,12 +1,13 @@
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use bytes::Bytes;
 use leaky_bucket::RateLimiter;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use slatedb::config::WriteOptions;
 use slatedb::db::Db;
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::time::Instant;
 
 pub trait KeyGenerator: Send {

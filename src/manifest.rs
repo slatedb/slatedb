@@ -1,6 +1,7 @@
+use bytes::Bytes;
+
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
-use bytes::Bytes;
 
 #[derive(Clone)]
 pub(crate) struct Manifest {

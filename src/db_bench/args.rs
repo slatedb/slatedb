@@ -1,8 +1,10 @@
-use crate::db_bench::{KeyGenerator, RandomKeyGenerator};
+use std::fmt::{Display, Formatter};
+
 use clap::builder::PossibleValue;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use slatedb::config::WriteOptions;
-use std::fmt::{Display, Formatter};
+
+use crate::db_bench::{KeyGenerator, RandomKeyGenerator};
 
 #[derive(Parser, Clone)]
 #[command(version, about, long_about=None)]

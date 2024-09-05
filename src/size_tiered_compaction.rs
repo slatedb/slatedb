@@ -1,11 +1,12 @@
-use crate::compactor::CompactionScheduler;
-use crate::compactor_state::{Compaction, CompactorState, SourceId};
-use crate::config::{CompactionSchedulerSupplier, SizeTieredCompactionSchedulerOptions};
-use crate::db_state::CoreDbState;
 use std::cmp::min;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter::Peekable;
 use std::slice::Iter;
+
+use crate::compactor::CompactionScheduler;
+use crate::compactor_state::{Compaction, CompactorState, SourceId};
+use crate::config::{CompactionSchedulerSupplier, SizeTieredCompactionSchedulerOptions};
+use crate::db_state::CoreDbState;
 
 const MAX_IN_FLIGHT_COMPACTIONS: usize = 4;
 
@@ -329,14 +330,16 @@ impl CompactionSchedulerSupplier for SizeTieredCompactionSchedulerSupplier {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
+    use bytes::Bytes;
+
     use crate::compactor::CompactionScheduler;
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
     use crate::config::SizeTieredCompactionSchedulerOptions;
     use crate::db_state::{CoreDbState, SSTableHandle, SortedRun, SsTableId};
     use crate::flatbuffer_types::{SsTableInfo, SsTableInfoArgs, SsTableInfoOwned};
     use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
-    use bytes::Bytes;
-    use std::collections::VecDeque;
 
     #[test]
     fn test_should_compact_l0s_to_first_sr() {
@@ -485,7 +488,7 @@ mod tests {
             vec![create_sr2(2, 2), create_sr2(1, 2), create_sr4(0, 2)],
         ));
 
-        //when:
+        // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
 
         // then:
@@ -515,7 +518,7 @@ mod tests {
             ],
         ));
 
-        //when:
+        // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
 
         // then:
@@ -552,7 +555,7 @@ mod tests {
             .submit_compaction(create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]))
             .unwrap();
 
-        //when:
+        // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
 
         // then:
@@ -582,7 +585,7 @@ mod tests {
             .submit_compaction(create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]))
             .unwrap();
 
-        //when:
+        // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
 
         // then:
@@ -609,7 +612,7 @@ mod tests {
             ],
         ));
 
-        //when:
+        // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
 
         // then:

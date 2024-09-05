@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use bytes::{Buf, Bytes};
 
 use crate::{
     block::{Block, TOMBSTONE},
@@ -6,7 +7,6 @@ use crate::{
     iter::KeyValueIterator,
     types::{KeyValueDeletable, ValueDeletable},
 };
-use bytes::{Buf, Bytes};
 
 pub trait BlockLike {
     fn data(&self) -> &Bytes;

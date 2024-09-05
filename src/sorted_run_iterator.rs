@@ -1,11 +1,12 @@
+use std::slice::Iter;
+use std::sync::Arc;
+
 use crate::db_state::{SSTableHandle, SortedRun};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::KeyValueDeletable;
-use std::slice::Iter;
-use std::sync::Arc;
 
 pub(crate) struct SortedRunIterator<'a> {
     current_iter: Option<SstIterator<'a>>,
@@ -154,14 +155,16 @@ impl<'a> KeyValueIterator for SortedRunIterator<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use object_store::path::Path;
+    use object_store::{memory::InMemory, ObjectStore};
+    use ulid::Ulid;
+
     use super::*;
     use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
     use crate::test_utils::{assert_kv, OrderedBytesGenerator};
-    use object_store::path::Path;
-    use object_store::{memory::InMemory, ObjectStore};
-    use std::sync::Arc;
-    use ulid::Ulid;
 
     #[tokio::test]
     async fn test_one_sst_sr_iter() {

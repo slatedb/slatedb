@@ -1,8 +1,10 @@
 use crate::{compactor::CompactionScheduler, inmemory_cache::BlockCacheOptions};
 use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
+
 use tokio::runtime::Handle;
 
+use crate::compactor::CompactionScheduler;
 use crate::error::SlateDBError;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 

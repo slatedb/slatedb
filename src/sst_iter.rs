@@ -1,3 +1,9 @@
+use std::cmp::min;
+use std::collections::VecDeque;
+use std::sync::Arc;
+
+use tokio::task::JoinHandle;
+
 use crate::db_state::SSTableHandle;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
@@ -5,10 +11,6 @@ use crate::{
     block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, tablestore::TableStore,
     types::KeyValueDeletable,
 };
-use std::cmp::min;
-use std::collections::VecDeque;
-use std::sync::Arc;
-use tokio::task::JoinHandle;
 
 enum FetchTask {
     InFlight(JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
@@ -238,13 +240,15 @@ impl<'a> KeyValueIterator for SstIterator<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use object_store::path::Path;
+    use object_store::{memory::InMemory, ObjectStore};
+
     use super::*;
     use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
     use crate::test_utils::{assert_kv, OrderedBytesGenerator};
-    use object_store::path::Path;
-    use object_store::{memory::InMemory, ObjectStore};
-    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_one_block_sst_iter() {
