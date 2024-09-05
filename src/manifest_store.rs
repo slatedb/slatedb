@@ -1,13 +1,8 @@
 use std::sync::Arc;
-use std::sync::Arc;
 
 use futures::StreamExt;
-use futures::StreamExt;
-use object_store::path::Path;
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
-use object_store::Error::AlreadyExists;
-use object_store::ObjectStore;
 
 use crate::db_state::CoreDbState;
 use crate::disk_cache::CacheableObjectStoreRef;
@@ -264,11 +259,8 @@ impl ManifestStore {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::Arc;
 
     use object_store::memory::InMemory;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
     use object_store::path::Path;
     use object_store::ObjectStore;
 

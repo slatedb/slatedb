@@ -517,14 +517,10 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
-    use std::time::Duration;
 
     use futures::StreamExt;
     use object_store::memory::InMemory;
-    use object_store::memory::InMemory;
     use object_store::ObjectStore;
-    use object_store::ObjectStore;
-    use tracing::info;
     use tracing::info;
 
     use super::*;

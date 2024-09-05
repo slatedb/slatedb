@@ -120,6 +120,7 @@ impl CacheableObjectStoreRef {
         Self::Direct(self.object_store().clone())
     }
 
+    #[cfg(test)]
     pub fn into_cached(self) -> Option<CacheableObjectStoreInner> {
         match self {
             Self::Cached(inner) => Some(inner.as_ref().clone()),
