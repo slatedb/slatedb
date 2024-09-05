@@ -598,10 +598,38 @@ mod tests {
             ],
         );
         // TODO: ensure the wal not being cached, but manifest is cached
+        let cached_store = cacheable_object_store.clone().into_cached().unwrap();
 
-        kv_store.delete(key).await;
-        assert_eq!(None, kv_store.get(key).await.unwrap());
-        kv_store.close().await.unwrap();
+        let tests = vec![
+            (
+                "tmp/test_kv_store_with_cache/manifest/00000000000000000001.manifest",
+                0,
+            ),
+            (
+                "tmp/test_kv_store_with_cache/manifest/00000000000000000002.manifest",
+                1,
+            ),
+            (
+                "tmp/test_kv_store_with_cache/wal/00000000000000000001.sst",
+                0,
+            ),
+            (
+                "tmp/test_kv_store_with_cache/wal/00000000000000000002.sst",
+                0,
+            ),
+        ];
+        for (path, expected) in tests {
+            let entry = cached_store.cache_storage.entry(
+                &object_store::path::Path::from(path),
+                cached_store.part_size,
+            );
+            assert_eq!(
+                entry.cached_parts().await.unwrap().len(),
+                expected,
+                "{}",
+                path
+            );
+        }
     }
 
     #[tokio::test]

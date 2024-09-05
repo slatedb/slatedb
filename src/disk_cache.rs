@@ -119,6 +119,13 @@ impl CacheableObjectStoreRef {
     pub fn as_direct(&self) -> Self {
         Self::Direct(self.object_store().clone())
     }
+
+    pub fn into_cached(self) -> Option<CacheableObjectStoreInner> {
+        match self {
+            Self::Cached(inner) => Some(inner.as_ref().clone()),
+            Self::Direct(_) => None,
+        }
+    }
 }
 
 impl From<Arc<dyn ObjectStore + 'static>> for CacheableObjectStoreRef {
@@ -131,7 +138,7 @@ impl From<Arc<dyn ObjectStore + 'static>> for CacheableObjectStoreRef {
 #[derive(Debug, Clone)]
 pub(crate) struct CacheableObjectStoreInner {
     object_store: Arc<dyn ObjectStore>,
-    part_size: usize, // expected to be aligned with mb or kb
+    pub(crate) part_size: usize, // expected to be aligned with mb or kb
     pub(crate) cache_storage: Arc<dyn LocalCacheStorage>,
     db_stats: Arc<DbStats>,
 }
@@ -708,7 +715,16 @@ impl LocalCacheEntry for DiskCacheEntry {
         };
         let target_prefix = "_part";
 
-        let mut entries = fs::read_dir(directory_path).await.map_err(wrap_io_err)?;
+        let mut entries = match fs::read_dir(directory_path).await {
+            Ok(entries) => entries,
+            Err(err) => {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(vec![]);
+                } else {
+                    return Err(wrap_io_err(err));
+                }
+            }
+        };
 
         let mut part_file_names = vec![];
         while let Some(entry) = entries.next_entry().await.map_err(wrap_io_err)? {
