@@ -266,14 +266,15 @@ impl DbInner {
             .get_wal_sst_list(wal_id_last_compacted)
             .await?;
         let mut last_sst_id = wal_id_last_compacted;
+        let table_store = self.table_store.as_uncached();
         for sst_id in wal_sst_list {
             last_sst_id = sst_id;
-            let sst = self.table_store.open_sst(&SsTableId::Wal(sst_id)).await?;
+            let sst = table_store.open_sst(&SsTableId::Wal(sst_id)).await?;
             let sst_id = match &sst.id {
                 SsTableId::Wal(id) => *id,
                 SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
             };
-            let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1).await?;
+            let mut iter = SstIterator::new(&sst, table_store.clone(), 1, 1).await?;
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
             // buffer the WAL entries to bulk replay them into the memtable.
             let mut wal_replay_buf = Vec::new();
@@ -597,9 +598,9 @@ mod tests {
                 "tmp/test_kv_store_with_cache/wal/00000000000000000002.sst".to_string(),
             ],
         );
-        // TODO: ensure the wal not being cached, but manifest is cached
-        let cached_store = cacheable_object_store.clone().into_cached().unwrap();
 
+        // ensure the wal not being cached, but manifest is cached
+        let cached_store = cacheable_object_store.clone().into_cached().unwrap();
         let tests = vec![
             (
                 "tmp/test_kv_store_with_cache/manifest/00000000000000000001.manifest",

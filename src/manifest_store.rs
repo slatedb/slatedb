@@ -10,7 +10,6 @@ use crate::transactional_object_store::{
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
-use object_store::ObjectStore;
 use std::sync::Arc;
 
 pub(crate) struct FenceableManifest {

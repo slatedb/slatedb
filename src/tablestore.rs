@@ -113,6 +113,19 @@ impl TableStore {
         }
     }
 
+    pub(crate) fn as_uncached(&self) -> Arc<TableStore> {
+        Arc::new(TableStore {
+            object_store: self.object_store.as_direct(),
+            sst_format: self.sst_format.clone(),
+            root_path: self.root_path.clone(),
+            wal_path: self.wal_path,
+            compacted_path: self.compacted_path,
+            fp_registry: self.fp_registry.clone(),
+            filter_cache: RwLock::new(HashMap::new()),
+            transactional_wal_store: self.transactional_wal_store.clone(),
+        })
+    }
+
     pub(crate) async fn get_wal_sst_list(
         &self,
         wal_id_last_compacted: u64,
