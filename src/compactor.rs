@@ -486,7 +486,7 @@ mod tests {
             l0_max_ssts: 8,
             compactor_options,
             compression_codec: None,
-            disk_cache_root_folder: None,
+            object_store_cache_root_folder: None,
         }
     }
 

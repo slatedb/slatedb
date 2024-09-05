@@ -352,7 +352,7 @@ impl Db {
             SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
 
         let cacheable_object_store =
-            if let Some(disk_cache_root_folder) = &options.disk_cache_root_folder {
+            if let Some(disk_cache_root_folder) = &options.object_store_cache_root_folder {
                 CacheableObjectStoreRef::new(
                     object_store,
                     disk_cache_root_folder.clone(),
@@ -555,7 +555,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_put_get_delete_with_cache() {
+    async fn test_get_with_object_store_cache() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut opts = test_db_options(0, 1024, None);
         let temp_dir = tempfile::Builder::new()
@@ -563,7 +563,7 @@ mod tests {
             .tempdir_in("/tmp")
             .unwrap();
 
-        opts.disk_cache_root_folder = Some(std::path::PathBuf::from(temp_dir.into_path()));
+        opts.object_store_cache_root_folder = Some(std::path::PathBuf::from(temp_dir.into_path()));
         let kv_store = Db::open_with_opts(
             Path::from("/tmp/test_kv_store_with_cache"),
             opts,
@@ -1350,7 +1350,7 @@ mod tests {
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
-            disk_cache_root_folder: None,
+            object_store_cache_root_folder: None,
         }
     }
 }
