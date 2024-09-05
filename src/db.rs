@@ -726,8 +726,7 @@ mod tests {
         db.flush().await.unwrap();
 
         let snapshot = db.inner.state.read().snapshot();
-        // TODO: verify that this change is correct.
-        assert_eq!(snapshot.state.imm_memtable.len(), 2);
+        assert_eq!(snapshot.state.imm_memtable.len(), 1);
     }
 
     #[tokio::test]

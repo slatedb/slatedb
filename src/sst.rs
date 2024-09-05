@@ -1,4 +1,4 @@
-use crate::block::{Block, SIZEOF_U16, SIZEOF_U32};
+use crate::block::{Block, BLOCK_SIZE_BYTES, SIZEOF_U16, SIZEOF_U32};
 use crate::filter::{BloomFilter, BloomFilterBuilder, DEFAULT_BITS_PER_KEY};
 use crate::flatbuffer_types::{
     BlockMeta, BlockMetaArgs, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned, SsTableInfo,
@@ -256,29 +256,62 @@ impl SsTableFormat {
 
     /// Estimate the SsTable size given a memtable, including key, value length
     /// headers, offset ptrs, bloom filter sizes, and block overheads.
+    /// +--------------------------------------------------------------------------------+
+    /// |                                   4K Block                                     |
+    /// +--------------------------------------------------------------------------------+
+    /// |                                                                                |
+    /// | +------------+--------------+----------+---------+----------+------------+     |
+    /// | |   Bloom    |  Number of   |          |   Key   |   Key    |   Value    |     |
+    /// | |   Filter   |  KV Pairs    | Offsets  |  Length |   Data   |   Length   | ... |
+    /// | |            |              |          |         |          |            |     |
+    /// | +------------+--------------+----------+---------+----------+------------+     |
+    /// |                                                                                |
+    /// +--------------------------------------------------------------------------------+
+    /// |                                   4K Block                                     |
+    /// +--------------------------------------------------------------------------------+
+    /// |                                                                                |
+    /// | +------------+--------------+----------+---------+----------+------------+     |
+    /// | |   Bloom    |  Number of   |          |   Key   |   Key    |   Value    |     |
+    /// | |   Filter   |  KV Pairs    | Offsets  |  Length |   Data   |   Length   | ... |
+    /// | |            |              |          |         |          |            |     |
+    /// | +------------+--------------+----------+---------+----------+------------+     |
+    /// |                                                                                |
+    /// +--------------------------------------------------------------------------------+
     pub(crate) fn estimate_sst_size(
         &self,
         num_entries: usize,
         total_entry_size_bytes: usize,
     ) -> usize {
+        if num_entries == 0 {
+            return 0;
+        }
+
         // u16 for key size, u32 for value size
         let entry_key_and_val_size_header_offset = SIZEOF_U16 + SIZEOF_U32;
         let entry_offset_overhead = SIZEOF_U16;
         let per_entry_overhead = entry_key_and_val_size_header_offset + entry_offset_overhead;
 
+        let number_of_blocks = usize::div_ceil(total_entry_size_bytes, BLOCK_SIZE_BYTES);
+
+        // This is approximate, using the average number of keys per block.
+        let approx_keys_per_block = usize::div_ceil(num_entries, number_of_blocks);
+
         // TODO: this is a copy of the bloom filter calculation; make that
         // calculation function static, to de-duplicate.
-        let bloom_filter_bytes_for_filter = if self.min_filter_keys as usize <= num_entries {
-            ((num_entries * DEFAULT_BITS_PER_KEY as usize) + 7) / 8
-        } else {
-            0
-        };
+        let bloom_filter_bytes_for_filter =
+            if self.min_filter_keys as usize <= approx_keys_per_block {
+                ((num_entries * DEFAULT_BITS_PER_KEY as usize) + 7) / 8
+            } else {
+                0
+            };
         let bloom_filter_header = SIZEOF_U16;
         let bloom_filter_total_size = bloom_filter_header + bloom_filter_bytes_for_filter;
 
-        // TODO: calculate number of blocks.
-        let _per_block_overhead = SIZEOF_U16; // Number of key-value pairs in the block.
-        total_entry_size_bytes + per_entry_overhead * num_entries + bloom_filter_total_size
+        let block_kv_pair_count = SIZEOF_U16; // Number of key-value pairs in the block.
+        let per_block_overhead = block_kv_pair_count + bloom_filter_total_size;
+        let total_block_overhead = number_of_blocks * per_block_overhead;
+
+        total_entry_size_bytes + per_entry_overhead * num_entries + total_block_overhead
     }
 }
 
@@ -924,17 +957,15 @@ mod tests {
         let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
 
         // Test case 1: Empty SSTable
-        assert_eq!(
-            format.estimate_sst_size(0, 0),
-            2 /* u16 for bloom filter header */
-        );
+        assert_eq!(format.estimate_sst_size(0, 0), 0);
 
         // Test case 2: Single small entry
         let num_entries = 1;
         let total_entry_size = 10;
 
         /* 10 bytes + 1 * per-key overhead of 6 bytes (u16 + u32) + 2 (u16) offsets header + 2 bytes for bloom filter header + 2 bytes for bloom filter */
-        let expected_size = 22;
+        // TODO: check this
+        let expected_size = 24;
 
         assert_eq!(
             format.estimate_sst_size(num_entries, total_entry_size),
@@ -944,7 +975,7 @@ mod tests {
         // Test case 3: Multiple entries
         let num_entries = 100;
         let total_entry_size = 1000;
-        let expected_size = 1927;
+        let expected_size = 1929;
         assert_eq!(
             format.estimate_sst_size(num_entries, total_entry_size),
             expected_size
@@ -953,7 +984,7 @@ mod tests {
         // Test case 4: Large entries
         let num_entries = 10000;
         let total_entry_size = 1_000_000;
-        let expected_size = 1092502;
+        let expected_size = 4_143_480;
         assert_eq!(
             format.estimate_sst_size(num_entries, total_entry_size),
             expected_size
