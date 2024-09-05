@@ -137,9 +137,9 @@ pub struct DbOptions {
     pub compactor_options: Option<CompactorOptions>,
     pub compression_codec: Option<CompressionCodec>,
 
-    /// Configuration options for the disk cache. If set, when reading from object
-    /// storage, SlateDB will cache the data on disk. This can reduce the number of
-    /// network calls to object storage and speed up reads.
+    /// Configuration options for the cache for object store. If set, when reading from object
+    /// store, SlateDB will cache the data on disk. This can reduce the number of network calls 
+    /// to object storage and speed up reads.
     pub object_store_cache_root_folder: Option<std::path::PathBuf>,
 }
 
