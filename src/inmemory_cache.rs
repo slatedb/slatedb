@@ -1,8 +1,10 @@
+use std::{sync::Arc, time::Duration};
+
+use async_trait::async_trait;
+
 use crate::{
     block::Block, db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned,
 };
-use async_trait::async_trait;
-use std::{sync::Arc, time::Duration};
 
 #[derive(Clone)]
 pub(crate) enum CachedBlock {

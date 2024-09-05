@@ -1,11 +1,19 @@
 use std::sync::Arc;
+use std::sync::Arc;
 
 use bytes::Bytes;
+use bytes::Bytes;
+use fail_parallel::FailPointRegistry;
 use fail_parallel::FailPointRegistry;
 use log::warn;
+use log::warn;
+use object_store::path::Path;
 use object_store::path::Path;
 use object_store::ObjectStore;
+use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
+use parking_lot::{Mutex, RwLock};
+use tokio::runtime::Handle;
 use tokio::runtime::Handle;
 
 use crate::compactor::Compactor;
@@ -26,14 +34,6 @@ use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
 use crate::{config::ReadLevel::Uncommitted, inmemory_cache::create_block_cache};
-use bytes::Bytes;
-use fail_parallel::FailPointRegistry;
-use log::warn;
-use object_store::path::Path;
-use object_store::ObjectStore;
-use parking_lot::{Mutex, RwLock};
-use std::sync::Arc;
-use tokio::runtime::Handle;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
