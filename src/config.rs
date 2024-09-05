@@ -5,8 +5,8 @@ use tokio::runtime::Handle;
 
 use crate::compactor::CompactionScheduler;
 use crate::error::SlateDBError;
-use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::inmemory_cache::BlockCacheOptions;
+use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
 pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();

@@ -461,8 +461,8 @@ impl<'a> EncodedSsTableWriter<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::collections::VecDeque;
+    use std::sync::Arc;
 
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
