@@ -52,7 +52,7 @@ async fn main() {
         max_unflushed_memtable: 2,
         compactor_options: Some(CompactorOptions::default()),
         compression_codec: None,
-        disk_cache_root_folder: None,
+        object_store_cache_root_folder: None,
     };
     let kv_store = Db::open_with_opts(
         Path::from("/tmp/test_kv_store"),
