@@ -1,6 +1,8 @@
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
-use object_store::{buffered::BufWriter, Attribute, Attributes, GetRange, GetResultPayload};
+use object_store::{
+    buffered::BufWriter, Attribute, Attributes, GetRange, GetResultPayload, PutResult,
+};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
@@ -39,12 +41,12 @@ impl Default for CacheableGetOptions {
 /// CachableObjectStore is a wrapper around ObjectStore, it caches the object
 /// in the local, and serves the object from the cache if possible.
 #[derive(Clone, Debug)]
-pub(crate) enum CacheableObjectStore {
+pub(crate) enum CacheableObjectStoreRef {
     Cached(Arc<CacheableObjectStoreInner>),
     Direct(Arc<dyn ObjectStore>),
 }
 
-impl CacheableObjectStore {
+impl CacheableObjectStoreRef {
     pub fn new(
         object_store: Arc<dyn ObjectStore>,
         root_folder: std::path::PathBuf,
@@ -83,6 +85,18 @@ impl CacheableObjectStore {
         }
     }
 
+    pub async fn put_opts(
+        &self,
+        location: &Path,
+        payload: object_store::PutPayload,
+        opts: object_store::PutOptions,
+    ) -> object_store::Result<PutResult> {
+        match self {
+            Self::Cached(inner) => inner.cached_put_opts(location, payload, opts).await,
+            Self::Direct(object_store) => object_store.put_opts(location, payload, opts).await,
+        }
+    }
+
     pub fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, object_store::Result<ObjectMeta>> {
         match self {
             Self::Cached(inner) => inner.object_store.list(prefix),
@@ -107,7 +121,7 @@ impl CacheableObjectStore {
     }
 }
 
-impl From<Arc<dyn ObjectStore + 'static>> for CacheableObjectStore {
+impl From<Arc<dyn ObjectStore + 'static>> for CacheableObjectStoreRef {
     fn from(object_store: Arc<dyn ObjectStore + 'static>) -> Self {
         Self::Direct(object_store)
     }
@@ -201,6 +215,16 @@ impl CacheableObjectStoreInner {
             attributes,
             payload: GetResultPayload::Stream(result_stream),
         })
+    }
+
+    // TODO: cover PUT with cache, maybe need an CacheablePutOptions
+    async fn cached_put_opts(
+        &self,
+        location: &Path,
+        payload: object_store::PutPayload,
+        opts: object_store::PutOptions,
+    ) -> object_store::Result<PutResult> {
+        self.object_store.put_opts(location, payload, opts).await
     }
 
     // if an object is not cached before, maybe_prefetch_range will try to prefetch the object from the

@@ -1,7 +1,7 @@
 use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::db_state::{SSTableHandle, SsTableId};
-use crate::disk_cache::{CacheableGetOptions, CacheableObjectStore};
+use crate::disk_cache::{CacheableGetOptions, CacheableObjectStoreRef};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 pub struct TableStore {
-    pub(crate) object_store: CacheableObjectStore,
+    pub(crate) object_store: CacheableObjectStoreRef,
     sst_format: SsTableFormat,
     root_path: Path,
     wal_path: &'static str,
@@ -39,7 +39,7 @@ pub struct TableStore {
 }
 
 struct ReadOnlyObject {
-    object_store: CacheableObjectStore,
+    object_store: CacheableObjectStoreRef,
     path: Path,
 }
 
@@ -79,7 +79,7 @@ impl ReadOnlyBlob for ReadOnlyObject {
 impl TableStore {
     #[allow(dead_code)]
     pub fn new(
-        object_store: impl Into<CacheableObjectStore>,
+        object_store: impl Into<CacheableObjectStoreRef>,
         sst_format: SsTableFormat,
         root_path: Path,
     ) -> Self {
@@ -92,7 +92,7 @@ impl TableStore {
     }
 
     pub fn new_with_fp_registry(
-        cacheable_object_store: impl Into<CacheableObjectStore>,
+        cacheable_object_store: impl Into<CacheableObjectStoreRef>,
         sst_format: SsTableFormat,
         root_path: Path,
         fp_registry: Arc<FailPointRegistry>,
@@ -108,7 +108,7 @@ impl TableStore {
             filter_cache: RwLock::new(HashMap::new()),
             transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
                 Path::from("/"),
-                cacheable_object_store.object_store(),
+                cacheable_object_store.as_direct(),
             )),
         }
     }

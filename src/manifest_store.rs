@@ -1,4 +1,5 @@
 use crate::db_state::CoreDbState;
+use crate::disk_cache::CacheableObjectStoreRef;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::InvalidDBState;
 use crate::flatbuffer_types::FlatBufferManifestCodec;
@@ -167,7 +168,7 @@ pub(crate) struct ManifestStore {
 }
 
 impl ManifestStore {
-    pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
+    pub(crate) fn new(root_path: &Path, object_store: CacheableObjectStoreRef) -> Self {
         Self {
             object_store: Box::new(DelegatingTransactionalObjectStore::new(
                 root_path.child("manifest"),
@@ -261,14 +262,15 @@ mod tests {
     use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use object_store::ObjectStore;
     use std::sync::Arc;
 
     const ROOT: &str = "/root/path";
 
     #[tokio::test]
     async fn test_should_fail_write_on_version_conflict() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.into()));
         let state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -286,8 +288,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_write_with_new_version() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.into()));
         let state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -301,8 +303,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_update_local_state_on_write() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.into()));
         let mut state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -315,8 +317,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_refresh() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.into()));
         let mut state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -333,8 +335,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_bump_writer_epoch() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.into()));
         let state = CoreDbState::new();
         StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -349,8 +351,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_fail_on_writer_fenced() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.into()));
         let mut state = CoreDbState::new();
         let sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -371,8 +373,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_bump_compactor_epoch() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.into()));
         let state = CoreDbState::new();
         StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -387,8 +389,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_fail_on_compactor_fenced() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.into()));
         let mut state = CoreDbState::new();
         let sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await

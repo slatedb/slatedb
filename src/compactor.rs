@@ -464,7 +464,7 @@ mod tests {
             .await
             .unwrap();
         let sst_format = SsTableFormat::new(32, 10, options.compression_codec);
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone().into()));
         let table_store = Arc::new(TableStore::new(os.clone(), sst_format, Path::from(PATH)));
         (os, manifest_store, table_store, db)
     }

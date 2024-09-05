@@ -4,7 +4,7 @@ use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
 use crate::db_state::{CoreDbState, DbState, SSTableHandle, SortedRun, SsTableId};
-use crate::disk_cache::CacheableObjectStore;
+use crate::disk_cache::CacheableObjectStoreRef;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -350,14 +350,14 @@ impl Db {
 
         let cacheable_object_store =
             if let Some(disk_cache_root_folder) = &options.disk_cache_root_folder {
-                CacheableObjectStore::new(
+                CacheableObjectStoreRef::new(
                     object_store,
                     disk_cache_root_folder.clone(),
                     4 * 1024 * 1024,
                     db_stats.clone(),
                 )
             } else {
-                CacheableObjectStore::Direct(object_store.clone())
+                CacheableObjectStoreRef::Direct(object_store.clone())
             };
 
         let table_store = Arc::new(TableStore::new_with_fp_registry(
@@ -366,10 +366,7 @@ impl Db {
             path.clone(),
             fp_registry,
         ));
-        let manifest_store = Arc::new(ManifestStore::new(
-            &path,
-            cacheable_object_store.object_store(),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&path, cacheable_object_store));
         let mut manifest = Self::init_db(&manifest_store).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
@@ -526,7 +523,6 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use std::time::Duration;
-    use tempfile::TempDir;
     use tracing::info;
 
     #[tokio::test]
@@ -723,7 +719,7 @@ mod tests {
         .await
         .unwrap();
 
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone().into()));
         let mut stored_manifest = StoredManifest::load(manifest_store.clone())
             .await
             .unwrap()
@@ -910,7 +906,7 @@ mod tests {
         kv_store_restored.close().await.unwrap();
 
         // validate that the manifest file exists.
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.into()));
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap().unwrap();
         let db_state = stored_manifest.db_state();
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
@@ -1111,7 +1107,7 @@ mod tests {
         let db = Db::open_with_opts(path.clone(), options, object_store.clone())
             .await
             .unwrap();
-        let ms = ManifestStore::new(&path, object_store.clone());
+        let ms = ManifestStore::new(&path, object_store.into());
         let mut sm = StoredManifest::load(Arc::new(ms)).await.unwrap().unwrap();
 
         // write enough to fill up a few l0 SSTs

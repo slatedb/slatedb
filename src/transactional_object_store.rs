@@ -4,9 +4,10 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::{
-    path, Error, GetResult, ObjectMeta, ObjectStore, PutMode, PutOptions, PutPayload, PutResult,
+    path, Error, GetResult, ObjectMeta, PutMode, PutOptions, PutPayload, PutResult,
 };
-use std::sync::Arc;
+
+use crate::disk_cache::{CacheableGetOptions, CacheableObjectStoreRef};
 
 // Implements transactional object inserts using some safe protocol
 #[async_trait]
@@ -26,11 +27,11 @@ pub(crate) trait TransactionalObjectStore: Send + Sync {
 // is generally not appropriate for S3.
 pub(crate) struct DelegatingTransactionalObjectStore {
     root_path: Path,
-    object_store: Arc<dyn ObjectStore>,
+    object_store: CacheableObjectStoreRef,
 }
 
 impl DelegatingTransactionalObjectStore {
-    pub(crate) fn new(root_path: Path, object_store: Arc<dyn ObjectStore>) -> Self {
+    pub(crate) fn new(root_path: Path, object_store: CacheableObjectStoreRef) -> Self {
         Self {
             root_path,
             object_store,
@@ -73,7 +74,9 @@ impl TransactionalObjectStore for DelegatingTransactionalObjectStore {
 
     async fn get(&self, path: &Path) -> Result<GetResult, Error> {
         let path = self.path(path);
-        self.object_store.get(&path).await
+        self.object_store
+            .get_opts(&path, CacheableGetOptions::default())
+            .await
     }
 
     fn list(&self, path: Option<&Path>) -> BoxStream<'_, Result<ObjectMeta, Error>> {
@@ -111,8 +114,8 @@ mod tests {
     #[tokio::test]
     async fn test_delegating_should_fail_put_if_exists() {
         // given:
-        let os = Arc::new(InMemory::new());
-        let txnl_os = DelegatingTransactionalObjectStore::new(Path::from(ROOT_PATH), os.clone());
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let txnl_os = DelegatingTransactionalObjectStore::new(Path::from(ROOT_PATH), os.into());
         txnl_os
             .put_if_not_exists(
                 &Path::from("obj"),
@@ -145,8 +148,8 @@ mod tests {
     #[tokio::test]
     async fn test_delegating_should_get_put() {
         // given:
-        let os = Arc::new(InMemory::new());
-        let txnl_os = DelegatingTransactionalObjectStore::new(Path::from(ROOT_PATH), os.clone());
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let txnl_os = DelegatingTransactionalObjectStore::new(Path::from(ROOT_PATH), os.into());
         txnl_os
             .put_if_not_exists(
                 &Path::from("obj"),
@@ -168,8 +171,9 @@ mod tests {
     #[tokio::test]
     async fn test_delegating_should_list() {
         // given:
-        let os = Arc::new(InMemory::new());
-        let txnl_os = DelegatingTransactionalObjectStore::new(Path::from(ROOT_PATH), os.clone());
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let txnl_os =
+            DelegatingTransactionalObjectStore::new(Path::from(ROOT_PATH), os.clone().into());
         txnl_os
             .put_if_not_exists(
                 &Path::from("obj"),
@@ -201,8 +205,9 @@ mod tests {
     #[tokio::test]
     async fn test_delegating_should_put_with_prefix() {
         // given:
-        let os = Arc::new(InMemory::new());
-        let txnl_os = DelegatingTransactionalObjectStore::new(Path::from(ROOT_PATH), os.clone());
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let txnl_os =
+            DelegatingTransactionalObjectStore::new(Path::from(ROOT_PATH), os.clone().into());
         txnl_os
             .put_if_not_exists(
                 &Path::from("obj"),
