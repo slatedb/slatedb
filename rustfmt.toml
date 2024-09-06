@@ -1,4 +1,2 @@
 edition = "2021"
 reorder_imports = true
-group_imports = "StdExternalCrate"
-normalize_comments = true
