@@ -346,7 +346,7 @@ mod tests {
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
-        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1)
+        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1, false)
             .await
             .unwrap();
         for i in 0..4 {
@@ -470,7 +470,12 @@ mod tests {
             .unwrap();
         let sst_format = SsTableFormat::new(32, 10, options.compression_codec);
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
-        let table_store = Arc::new(TableStore::new(os.clone(), sst_format, Path::from(PATH)));
+        let table_store = Arc::new(TableStore::new(
+            os.clone(),
+            sst_format,
+            Path::from(PATH),
+            None,
+        ));
         (os, manifest_store, table_store, db)
     }
 
@@ -486,6 +491,7 @@ mod tests {
             l0_max_ssts: 8,
             compactor_options,
             compression_codec: None,
+            block_cache_options: None,
         }
     }
 

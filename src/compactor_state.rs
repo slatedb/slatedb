@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(state.db_state().l0.len(), 0);
         assert_eq!(state.db_state().compacted.len(), 1);
         assert_eq!(state.db_state().compacted.first().unwrap().id, sr.id);
-        let expected_ids: Vec<SsTableId> = sr.ssts.iter().map(|h| h.id.clone()).collect();
+        let expected_ids: Vec<SsTableId> = sr.ssts.iter().map(|h| h.id).collect();
         let found_ids: Vec<SsTableId> = state
             .db_state()
             .compacted
@@ -317,7 +317,7 @@ mod tests {
             .unwrap()
             .ssts
             .iter()
-            .map(|h| h.id.clone())
+            .map(|h| h.id)
             .collect();
         assert_eq!(expected_ids, found_ids);
     }
@@ -509,7 +509,7 @@ mod tests {
     fn sorted_run_to_description(sr: &SortedRun) -> SortedRunDescription {
         SortedRunDescription {
             id: sr.id,
-            ssts: sr.ssts.iter().map(|h| h.id.clone()).collect(),
+            ssts: sr.ssts.iter().map(|h| h.id).collect(),
         }
     }
 

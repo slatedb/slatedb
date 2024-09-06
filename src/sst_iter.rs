@@ -13,20 +13,21 @@ use crate::{
 };
 
 enum FetchTask {
-    InFlight(JoinHandle<Result<VecDeque<Block>, SlateDBError>>),
-    Finished(VecDeque<Block>),
+    InFlight(JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
+    Finished(VecDeque<Arc<Block>>),
 }
 
 pub(crate) struct SstIterator<'a> {
     table: &'a SSTableHandle,
     index: Arc<SsTableIndexOwned>,
-    current_iter: Option<BlockIterator<Block>>,
+    current_iter: Option<BlockIterator<Arc<Block>>>,
     from_key: Option<&'a [u8]>,
     next_block_idx_to_fetch: usize,
     fetch_tasks: VecDeque<FetchTask>,
     max_fetch_tasks: usize,
     blocks_to_fetch: usize,
     table_store: Arc<TableStore>,
+    cache_blocks: bool,
 }
 
 impl<'a> SstIterator<'a> {
@@ -64,6 +65,7 @@ impl<'a> SstIterator<'a> {
         from_key: &'a [u8],
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
+        cache_blocks: bool,
     ) -> Result<Self, SlateDBError> {
         Self::new_opts(
             table,
@@ -72,6 +74,7 @@ impl<'a> SstIterator<'a> {
             max_fetch_tasks,
             blocks_to_fetch,
             false,
+            cache_blocks,
         )
         .await
     }
@@ -81,6 +84,7 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
+        cache_blocks: bool,
     ) -> Result<Self, SlateDBError> {
         Self::new_opts(
             table,
@@ -89,6 +93,7 @@ impl<'a> SstIterator<'a> {
             max_fetch_tasks,
             blocks_to_fetch,
             true,
+            cache_blocks,
         )
         .await
     }
@@ -98,6 +103,7 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
+        cache_blocks: bool,
     ) -> Result<Self, SlateDBError> {
         Self::new_opts(
             table,
@@ -106,6 +112,7 @@ impl<'a> SstIterator<'a> {
             max_fetch_tasks,
             blocks_to_fetch,
             false,
+            cache_blocks,
         )
         .await
     }
@@ -117,6 +124,7 @@ impl<'a> SstIterator<'a> {
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
         spawn: bool,
+        cache_blocks: bool,
     ) -> Result<Self, SlateDBError> {
         assert!(max_fetch_tasks > 0);
         assert!(blocks_to_fetch > 0);
@@ -134,6 +142,7 @@ impl<'a> SstIterator<'a> {
             max_fetch_tasks,
             blocks_to_fetch,
             table_store,
+            cache_blocks,
         };
         if spawn {
             iter.spawn_fetches();
@@ -155,17 +164,23 @@ impl<'a> SstIterator<'a> {
             let blocks_start = self.next_block_idx_to_fetch;
             let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
             let index = self.index.clone();
+            let cache_blocks = self.cache_blocks;
             self.fetch_tasks
                 .push_back(FetchTask::InFlight(tokio::spawn(async move {
                     table_store
-                        .read_blocks_using_index(&table, index, blocks_start..blocks_end)
+                        .read_blocks_using_index(
+                            &table,
+                            index,
+                            blocks_start..blocks_end,
+                            cache_blocks,
+                        )
                         .await
                 })));
             self.next_block_idx_to_fetch = blocks_end;
         }
     }
 
-    async fn next_iter(&mut self) -> Result<Option<BlockIterator<Block>>, SlateDBError> {
+    async fn next_iter(&mut self) -> Result<Option<BlockIterator<Arc<Block>>>, SlateDBError> {
         loop {
             self.spawn_fetches();
             if let Some(fetch_task) = self.fetch_tasks.front_mut() {
@@ -240,7 +255,12 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 3, None);
-        let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path.clone(),
+            None,
+        ));
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
         builder.add(b"key2", Some(b"value2")).unwrap();
@@ -255,7 +275,7 @@ mod tests {
         let index = table_store.read_index(&sst_handle).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 1);
 
-        let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 1, 1)
+        let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 1, 1, true)
             .await
             .unwrap();
         let kv = iter.next().await.unwrap().unwrap();
@@ -279,7 +299,12 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(4096, 3, None);
-        let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path.clone(),
+            None,
+        ));
         let mut builder = table_store.table_builder();
 
         for i in 0..1000 {
@@ -300,7 +325,7 @@ mod tests {
         let index = table_store.read_index(&sst_handle).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 6);
 
-        let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 3, 3)
+        let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 3, 3, true)
             .await
             .unwrap();
         for i in 0..1000 {
@@ -318,7 +343,12 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(128, 1, None);
-        let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path.clone(),
+            None,
+        ));
         let first_key = [b'a'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'z');
         let mut test_case_key_gen = key_gen.clone();
@@ -333,10 +363,16 @@ mod tests {
             let mut expected_val_gen = test_case_val_gen.clone();
             let from_key = test_case_key_gen.next();
             let _ = test_case_val_gen.next();
-            let mut iter =
-                SstIterator::new_from_key(&sst, table_store.clone(), from_key.as_ref(), 1, 1)
-                    .await
-                    .unwrap();
+            let mut iter = SstIterator::new_from_key(
+                &sst,
+                table_store.clone(),
+                from_key.as_ref(),
+                1,
+                1,
+                false,
+            )
+            .await
+            .unwrap();
             for _ in 0..nkeys - i {
                 let e = iter.next().await.unwrap().unwrap();
                 assert_kv(
@@ -354,7 +390,12 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(128, 1, None);
-        let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path.clone(),
+            None,
+        ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
         let mut expected_key_gen = key_gen.clone();
@@ -363,9 +404,10 @@ mod tests {
         let mut expected_val_gen = val_gen.clone();
         let (sst, nkeys) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
-        let mut iter = SstIterator::new_from_key(&sst, table_store.clone(), &[b'a'; 16], 1, 1)
-            .await
-            .unwrap();
+        let mut iter =
+            SstIterator::new_from_key(&sst, table_store.clone(), &[b'a'; 16], 1, 1, false)
+                .await
+                .unwrap();
 
         for _ in 0..nkeys {
             let e = iter.next().await.unwrap().unwrap();
@@ -383,16 +425,22 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::new(128, 1, None);
-        let table_store = Arc::new(TableStore::new(object_store, format, root_path.clone()));
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path.clone(),
+            None,
+        ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
         let first_val = [2u8; 16];
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
         let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
-        let mut iter = SstIterator::new_from_key(&sst, table_store.clone(), &[b'z'; 16], 1, 1)
-            .await
-            .unwrap();
+        let mut iter =
+            SstIterator::new_from_key(&sst, table_store.clone(), &[b'z'; 16], 1, 1, false)
+                .await
+                .unwrap();
 
         assert!(iter.next().await.unwrap().is_none());
     }
