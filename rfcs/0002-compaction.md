@@ -171,7 +171,7 @@ The writer is responsible for compacting the WAL to the first level of the datab
 Let’s look at the write and recovery protocols in more detail:
 
 write:
-1. `put` adds the key-value to the current memtable and updates the WAL using the protocol described in [the manifest design](https://github.com/slatedb/slatedb/blob/main/docs/0001-manifest.md). 
+1. `put` adds the key-value to the current memtable and updates the WAL using the protocol described in [the manifest design](https://github.com/slatedb/slatedb/blob/main/rfcs/0001-manifest.md). 
 2. If the current memtable is larger than `l0_sst_size`, freeze the memtable by converting it to an immutable memtable, and write the memtable to a new ULID-named SST S in `compacted`.
 3. When S and all earlier SSTs S’, S’’, … for unflushed immutable tables are written:
     1. update L0 in-memory by prepending S, S’, S’’, … to the list of SSTs in L0.
@@ -190,7 +190,7 @@ write:
 5. If CAS from (3) succeeds, remove the immutable memtable.
 
 write-recovery:
-1. Fence older writers as described in the [manifest design](https://github.com/slatedb/slatedb/blob/main/docs/0001-manifest.md).
+1. Fence older writers as described in the [manifest design](https://github.com/slatedb/slatedb/blob/main/rfcs/0001-manifest.md).
 2. Create a new mutable memtable
 3. For every WAL SST W after `last_compacted`, reapply the writes as described above in the write protocol.
 
