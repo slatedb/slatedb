@@ -5,7 +5,7 @@ use tokio::runtime::Handle;
 
 use crate::compactor::CompactionScheduler;
 use crate::error::SlateDBError;
-use crate::inmemory_cache::BlockCacheOptions;
+use crate::inmemory_cache::InMemoryCacheOptions;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
@@ -141,7 +141,7 @@ pub struct DbOptions {
     pub compression_codec: Option<CompressionCodec>,
 
     /// Block cache options.
-    pub block_cache_options: Option<BlockCacheOptions>,
+    pub block_cache_options: Option<InMemoryCacheOptions>,
 }
 
 impl Default for DbOptions {
@@ -157,7 +157,7 @@ impl Default for DbOptions {
             l0_max_ssts: 8,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
-            block_cache_options: Some(BlockCacheOptions::default()),
+            block_cache_options: Some(InMemoryCacheOptions::default()),
         }
     }
 }

@@ -22,7 +22,7 @@ use crate::transactional_object_store::{
 use crate::{
     blob::ReadOnlyBlob,
     block::Block,
-    inmemory_cache::{BlockCache, CachedBlock},
+    inmemory_cache::{CachedBlock, InMemoryCache},
 };
 
 pub struct TableStore {
@@ -41,7 +41,7 @@ pub struct TableStore {
     filter_cache: RwLock<HashMap<SsTableId, Option<Arc<BloomFilter>>>>,
     transactional_wal_store: Arc<dyn TransactionalObjectStore>,
     /// In-memory cache for blocks
-    block_cache: Option<Arc<dyn BlockCache>>,
+    block_cache: Option<Arc<dyn InMemoryCache>>,
 }
 
 struct ReadOnlyObject {
@@ -78,7 +78,7 @@ impl TableStore {
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
         root_path: Path,
-        block_cache: Option<Arc<dyn BlockCache>>,
+        block_cache: Option<Arc<dyn InMemoryCache>>,
     ) -> Self {
         Self::new_with_fp_registry(
             object_store,
@@ -94,7 +94,7 @@ impl TableStore {
         sst_format: SsTableFormat,
         root_path: Path,
         fp_registry: Arc<FailPointRegistry>,
-        block_cache: Option<Arc<dyn BlockCache>>,
+        block_cache: Option<Arc<dyn InMemoryCache>>,
     ) -> Self {
         Self {
             object_store: object_store.clone(),
@@ -475,9 +475,9 @@ mod tests {
     use crate::{
         block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
     };
-    use crate::{error, tablestore::BlockCache};
+    use crate::{error, tablestore::InMemoryCache};
     use crate::{
-        inmemory_cache::{BlockCacheOptions, MokaCache},
+        inmemory_cache::{InMemoryCacheOptions, MokaCache},
         sst::SsTableFormat,
     };
 
@@ -551,7 +551,7 @@ mod tests {
         // Setup
         let os = Arc::new(InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
-        let block_cache = Arc::new(MokaCache::new(BlockCacheOptions::default()));
+        let block_cache = Arc::new(MokaCache::new(InMemoryCacheOptions::default()));
         let ts = Arc::new(TableStore::new(
             os.clone(),
             format,

@@ -21,7 +21,7 @@ pub enum CacheType {
 }
 
 #[derive(Clone, Copy)]
-pub struct BlockCacheOptions {
+pub struct InMemoryCacheOptions {
     pub max_capacity: u64,
     pub cached_block_size: u32,
     pub time_to_live: Option<Duration>,
@@ -29,7 +29,7 @@ pub struct BlockCacheOptions {
     pub cache_type: CacheType,
 }
 
-impl Default for BlockCacheOptions {
+impl Default for InMemoryCacheOptions {
     fn default() -> Self {
         Self {
             max_capacity: 64 * 1024 * 1024, // 64MB default max capacity
@@ -42,7 +42,7 @@ impl Default for BlockCacheOptions {
 }
 
 #[async_trait]
-pub(crate) trait BlockCache: Send + Sync + 'static {
+pub(crate) trait InMemoryCache: Send + Sync + 'static {
     async fn get(&self, key: (SsTableId, usize)) -> CachedBlockOption;
     async fn insert(&self, key: (SsTableId, usize), value: CachedBlock);
     #[allow(dead_code)]
@@ -56,7 +56,7 @@ pub(crate) struct MokaCache {
 }
 
 impl MokaCache {
-    pub fn new(options: BlockCacheOptions) -> Self {
+    pub fn new(options: InMemoryCacheOptions) -> Self {
         let mut builder = moka::future::Cache::builder()
             .weigher(move |_, _| options.cached_block_size)
             .max_capacity(options.max_capacity);
@@ -76,7 +76,7 @@ impl MokaCache {
 }
 
 #[async_trait]
-impl BlockCache for MokaCache {
+impl InMemoryCache for MokaCache {
     async fn get(&self, key: (SsTableId, usize)) -> CachedBlockOption {
         CachedBlockOption(self.inner.get(&key).await)
     }
@@ -94,10 +94,10 @@ impl BlockCache for MokaCache {
     }
 }
 
-/// Factory function to create the appropriate cache based on BlockCacheOptions
+/// Factory function to create the appropriate cache based on InMemoryCacheOptions
 pub(crate) fn create_block_cache(
-    options: Option<BlockCacheOptions>,
-) -> Option<Arc<dyn BlockCache>> {
+    options: Option<InMemoryCacheOptions>,
+) -> Option<Arc<dyn InMemoryCache>> {
     if let Some(options) = options {
         match options.cache_type {
             CacheType::Moka => Some(Arc::new(MokaCache::new(options))),
