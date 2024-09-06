@@ -1,16 +1,18 @@
-use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
-use crate::types::{KeyValueDeletable, ValueDeletable};
+use std::ops::Bound;
+use std::sync::Arc;
+
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
-use std::ops::Bound;
-use std::sync::Arc;
 use tokio::sync::Notify;
+
+use crate::error::SlateDBError;
+use crate::iter::KeyValueIterator;
+use crate::types::{KeyValueDeletable, ValueDeletable};
 
 pub(crate) struct KVTable {
     map: SkipMap<Bytes, ValueDeletable>,
-    flush_notify: Arc<Notify>,
+    durable_notify: Arc<Notify>,
 }
 
 pub(crate) struct WritableKVTable {
@@ -21,6 +23,7 @@ pub(crate) struct WritableKVTable {
 pub(crate) struct ImmutableMemtable {
     last_wal_id: u64,
     table: Arc<KVTable>,
+    flush_notify: Arc<Notify>,
 }
 
 pub(crate) struct ImmutableWal {
@@ -52,6 +55,7 @@ impl ImmutableMemtable {
         Self {
             table: table.table,
             last_wal_id,
+            flush_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -61,6 +65,14 @@ impl ImmutableMemtable {
 
     pub(crate) fn last_wal_id(&self) -> u64 {
         self.last_wal_id
+    }
+
+    pub(crate) async fn await_flush_to_l0(&self) {
+        self.flush_notify.notified().await;
+    }
+
+    pub(crate) fn notify_flush_to_l0(&self) {
+        self.flush_notify.notify_waiters()
     }
 }
 
@@ -126,7 +138,7 @@ impl KVTable {
     fn new() -> Self {
         Self {
             map: SkipMap::new(),
-            flush_notify: Arc::new(Notify::new()),
+            durable_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -170,12 +182,12 @@ impl KVTable {
             .insert(Bytes::copy_from_slice(key), ValueDeletable::Tombstone);
     }
 
-    pub(crate) async fn await_flush(&self) {
-        self.flush_notify.notified().await;
+    pub(crate) async fn await_durable(&self) {
+        self.durable_notify.notified().await;
     }
 
-    pub(crate) fn notify_flush(&self) {
-        self.flush_notify.notify_waiters()
+    pub(crate) fn notify_durable(&self) {
+        self.durable_notify.notify_waiters()
     }
 }
 

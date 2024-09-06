@@ -1,3 +1,8 @@
+use std::sync::Arc;
+
+use tokio::runtime::Handle;
+use tokio::select;
+
 use crate::db::DbInner;
 use crate::db_state;
 use crate::db_state::SSTableHandle;
@@ -5,9 +10,6 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
 use crate::types::ValueDeletable;
-use std::sync::Arc;
-use tokio::runtime::Handle;
-use tokio::select;
 
 impl DbInner {
     pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
@@ -69,7 +71,7 @@ impl DbInner {
             // flush to the memtable before notifying so that data is available for reads
             self.flush_imm_wal_to_memtable(wguard.memtable(), imm.table());
             self.maybe_freeze_memtable(&mut wguard, imm.id());
-            imm.table().notify_flush();
+            imm.table().notify_durable();
         }
         Ok(())
     }

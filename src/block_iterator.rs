@@ -1,10 +1,13 @@
+use std::sync::Arc;
+
+use bytes::{Buf, Bytes};
+
 use crate::{
     block::{Block, TOMBSTONE},
     error::SlateDBError,
     iter::KeyValueIterator,
     types::{KeyValueDeletable, ValueDeletable},
 };
-use bytes::{Buf, Bytes};
 
 pub trait BlockLike {
     fn data(&self) -> &Bytes;
@@ -22,6 +25,16 @@ impl BlockLike for Block {
 }
 
 impl BlockLike for &Block {
+    fn data(&self) -> &Bytes {
+        &self.data
+    }
+
+    fn offsets(&self) -> &[u16] {
+        &self.offsets
+    }
+}
+
+impl BlockLike for Arc<Block> {
     fn data(&self) -> &Bytes {
         &self.data
     }

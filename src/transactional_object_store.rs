@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -6,7 +8,6 @@ use object_store::path::Path;
 use object_store::{
     path, Error, GetResult, ObjectMeta, ObjectStore, PutMode, PutOptions, PutPayload, PutResult,
 };
-use std::sync::Arc;
 
 // Implements transactional object inserts using some safe protocol
 #[async_trait]
@@ -96,15 +97,17 @@ impl TransactionalObjectStore for DelegatingTransactionalObjectStore {
 
 #[cfg(test)]
 mod tests {
-    use crate::transactional_object_store::{
-        DelegatingTransactionalObjectStore, TransactionalObjectStore,
-    };
+    use std::sync::Arc;
+
     use bytes::Bytes;
     use futures::StreamExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{ObjectStore, PutPayload};
-    use std::sync::Arc;
+
+    use crate::transactional_object_store::{
+        DelegatingTransactionalObjectStore, TransactionalObjectStore,
+    };
 
     const ROOT_PATH: &str = "/root/path";
 

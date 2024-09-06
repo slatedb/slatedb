@@ -35,6 +35,7 @@ Then you can use SlateDB in your Rust code:
 use bytes::Bytes;
 use object_store::{ObjectStore, memory::InMemory, path::Path};
 use slatedb::db::Db;
+use slatedb::inmemory_cache::InMemoryCacheOptions;
 use slatedb::config::{CompactorOptions, DbOptions};
 use std::{sync::Arc, time::Duration};
 
@@ -48,8 +49,11 @@ async fn main() {
         #[cfg(feature = "wal_disable")] wal_enabled: true,
         min_filter_keys: 10,
         l0_sst_size_bytes: 128,
+        l0_max_ssts: 8,
+        max_unflushed_memtable: 2,
         compactor_options: Some(CompactorOptions::default()),
         compression_codec: None,
+        block_cache_options: Some(InMemoryCacheOptions::default()),
     };
     let kv_store = Db::open_with_opts(
         Path::from("/tmp/test_kv_store"),

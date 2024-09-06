@@ -1,16 +1,33 @@
-use crate::compactor_state::CompactionStatus::Submitted;
-use crate::db_state::{CoreDbState, SSTableHandle, SortedRun};
-use crate::error::SlateDBError;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::{Display, Formatter};
 use std::iter::{Chain, Peekable};
 use std::slice::Iter;
 use tracing::info;
 use ulid::Ulid;
 
-#[derive(Clone, Debug, PartialEq)]
+use crate::compactor_state::CompactionStatus::Submitted;
+use crate::db_state::{CoreDbState, SSTableHandle, SortedRun};
+use crate::error::SlateDBError;
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum SourceId {
     SortedRun(u32),
     Sst(Ulid),
+}
+
+impl Display for SourceId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                SourceId::SortedRun(id) => {
+                    format!("{}", *id)
+                }
+                SourceId::Sst(_) => String::from("l0"),
+            }
+        )
+    }
 }
 
 impl SourceId {
@@ -49,10 +66,21 @@ pub(crate) enum CompactionStatus {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Compaction {
+pub struct Compaction {
     pub(crate) status: CompactionStatus,
     pub(crate) sources: Vec<SourceId>,
     pub(crate) destination: u32,
+}
+
+impl Display for Compaction {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let displayed_sources: Vec<_> = self.sources.iter().map(|s| format!("{}", s)).collect();
+        write!(
+            f,
+            "{:?} -> {}: {:?}",
+            displayed_sources, self.destination, self.status
+        )
+    }
 }
 
 impl Compaction {
@@ -65,7 +93,7 @@ impl Compaction {
     }
 }
 
-pub(crate) struct CompactorState {
+pub struct CompactorState {
     db_state: CoreDbState,
     compactions: HashMap<u32, Compaction>,
 }
@@ -75,7 +103,10 @@ impl CompactorState {
         &self.db_state
     }
 
-    #[allow(dead_code)]
+    pub(crate) fn num_compactions(&self) -> usize {
+        self.compactions.len()
+    }
+
     pub(crate) fn compactions(&self) -> Vec<Compaction> {
         self.compactions.values().cloned().collect()
     }
@@ -343,19 +374,22 @@ impl CompactorState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::compactor_state::CompactionStatus::Submitted;
-    use crate::compactor_state::SourceId::Sst;
-    use crate::db::Db;
-    use crate::db_state::SsTableId;
-    use crate::manifest_store::{ManifestStore, StoredManifest};
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
     use std::sync::Arc;
     use std::thread::sleep;
     use std::time::{Duration, SystemTime};
+
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
     use tokio::runtime::{Handle, Runtime};
+
+    use super::*;
+    use crate::compactor_state::CompactionStatus::Submitted;
+    use crate::compactor_state::SourceId::Sst;
+    use crate::config::DbOptions;
+    use crate::db::Db;
+    use crate::db_state::SsTableId;
+    use crate::manifest_store::{ManifestStore, StoredManifest};
 
     const PATH: &str = "/test/db";
 
@@ -407,7 +441,7 @@ mod tests {
         assert_eq!(state.db_state().l0.len(), 0);
         assert_eq!(state.db_state().compacted.len(), 1);
         assert_eq!(state.db_state().compacted.first().unwrap().id, sr.id);
-        let expected_ids: Vec<SsTableId> = sr.ssts.iter().map(|h| h.id.clone()).collect();
+        let expected_ids: Vec<SsTableId> = sr.ssts.iter().map(|h| h.id).collect();
         let found_ids: Vec<SsTableId> = state
             .db_state()
             .compacted
@@ -415,7 +449,7 @@ mod tests {
             .unwrap()
             .ssts
             .iter()
-            .map(|h| h.id.clone())
+            .map(|h| h.id)
             .collect();
         assert_eq!(expected_ids, found_ids);
     }
@@ -653,7 +687,7 @@ mod tests {
     fn sorted_run_to_description(sr: &SortedRun) -> SortedRunDescription {
         SortedRunDescription {
             id: sr.id,
-            ssts: sr.ssts.iter().map(|h| h.id.clone()).collect(),
+            ssts: sr.ssts.iter().map(|h| h.id).collect(),
         }
     }
 
@@ -681,8 +715,12 @@ mod tests {
     }
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
+        let opts = DbOptions {
+            l0_sst_size_bytes: 128,
+            ..Default::default()
+        };
         tokio_handle
-            .block_on(Db::open(Path::from(PATH), os))
+            .block_on(Db::open_with_opts(Path::from(PATH), opts, os))
             .unwrap()
     }
 

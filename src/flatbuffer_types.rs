@@ -1,26 +1,30 @@
-use crate::db_state;
-use crate::db_state::{CoreDbState, SSTableHandle};
+use std::collections::VecDeque;
+
 use bytes::Bytes;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
-use std::collections::VecDeque;
 use ulid::Ulid;
+
+use crate::db_state;
+use crate::db_state::{CoreDbState, SSTableHandle};
 
 #[path = "./generated/manifest_generated.rs"]
 #[allow(warnings)]
 #[rustfmt::skip]
 mod manifest_generated;
-use crate::db_state::SsTableId;
-use crate::db_state::SsTableId::Compacted;
-use crate::error::SlateDBError;
-use crate::flatbuffer_types::manifest_generated::{
-    CompactedSsTable, CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, SortedRun,
-    SortedRunArgs,
-};
-use crate::manifest::{Manifest, ManifestCodec};
 pub use manifest_generated::{
     BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
     SsTableInfo, SsTableInfoArgs,
 };
+
+use crate::config::CompressionCodec;
+use crate::db_state::SsTableId;
+use crate::db_state::SsTableId::Compacted;
+use crate::error::SlateDBError;
+use crate::flatbuffer_types::manifest_generated::{
+    CompactedSsTable, CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat,
+    SortedRun, SortedRunArgs,
+};
+use crate::manifest::{Manifest, ManifestCodec};
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct SsTableInfoOwned {
@@ -161,6 +165,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 index_len: info.index_len(),
                 filter_offset: info.filter_offset(),
                 filter_len: info.filter_len(),
+                compression_format: info.compression_format(),
             },
         )
     }
@@ -260,5 +265,39 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let copy = self.add_sst_info_copy(sst_info);
         self.builder.finish(copy, None);
         Bytes::copy_from_slice(self.builder.finished_data())
+    }
+}
+
+impl From<Option<CompressionCodec>> for CompressionFormat {
+    fn from(value: Option<CompressionCodec>) -> Self {
+        match value {
+            None => CompressionFormat::None,
+            Some(codec) => match codec {
+                #[cfg(feature = "snappy")]
+                CompressionCodec::Snappy => CompressionFormat::Snappy,
+                #[cfg(feature = "lz4")]
+                CompressionCodec::Lz4 => CompressionFormat::Lz4,
+                #[cfg(feature = "zlib")]
+                CompressionCodec::Zlib => CompressionFormat::Zlib,
+                #[cfg(feature = "zstd")]
+                CompressionCodec::Zstd => CompressionFormat::Zstd,
+            },
+        }
+    }
+}
+
+impl From<CompressionFormat> for Option<CompressionCodec> {
+    fn from(value: CompressionFormat) -> Self {
+        match value {
+            #[cfg(feature = "snappy")]
+            CompressionFormat::Snappy => Some(CompressionCodec::Snappy),
+            #[cfg(feature = "lz4")]
+            CompressionFormat::Lz4 => Some(CompressionCodec::Lz4),
+            #[cfg(feature = "zlib")]
+            CompressionFormat::Zlib => Some(CompressionCodec::Zlib),
+            #[cfg(feature = "zstd")]
+            CompressionFormat::Zstd => Some(CompressionCodec::Zstd),
+            _ => None,
+        }
     }
 }

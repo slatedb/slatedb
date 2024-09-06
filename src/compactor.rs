@@ -1,3 +1,14 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::thread;
+use std::thread::JoinHandle;
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use tokio::runtime::Handle;
+use tracing::{error, info, warn};
+use ulid::Ulid;
+
 use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, CompactorState};
@@ -5,17 +16,10 @@ use crate::config::CompactorOptions;
 use crate::db_state::{SSTableHandle, SortedRun};
 use crate::error::SlateDBError;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
-use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
+use crate::metrics::DbStats;
 use crate::tablestore::TableStore;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::thread;
-use std::thread::JoinHandle;
-use tokio::runtime::Handle;
-use tracing::{error, warn};
-use ulid::Ulid;
 
-pub(crate) trait CompactionScheduler {
+pub trait CompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
 }
 
@@ -38,9 +42,11 @@ impl Compactor {
         table_store: Arc<TableStore>,
         options: CompactorOptions,
         tokio_handle: Handle,
+        db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let (err_tx, err_rx) = tokio::sync::oneshot::channel();
+        let tokio_handle = options.compaction_runtime.clone().unwrap_or(tokio_handle);
         let main_thread = thread::spawn(move || {
             let load_result = CompactorOrchestrator::new(
                 options,
@@ -48,6 +54,7 @@ impl Compactor {
                 table_store.clone(),
                 tokio_handle,
                 external_rx,
+                db_stats,
             );
             let mut orchestrator = match load_result {
                 Ok(orchestrator) => orchestrator,
@@ -85,6 +92,7 @@ struct CompactorOrchestrator {
     executor: Box<dyn CompactionExecutor>,
     external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
     worker_rx: crossbeam_channel::Receiver<WorkerToOrchestratorMsg>,
+    db_stats: Arc<DbStats>,
 }
 
 impl CompactorOrchestrator {
@@ -94,6 +102,7 @@ impl CompactorOrchestrator {
         table_store: Arc<TableStore>,
         tokio_handle: Handle,
         external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
+        db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let options = Arc::new(options);
         let stored_manifest =
@@ -120,13 +129,13 @@ impl CompactorOrchestrator {
             executor: Box::new(executor),
             external_rx,
             worker_rx,
+            db_stats,
         };
         Ok(orchestrator)
     }
 
-    fn load_compaction_scheduler(_options: &CompactorOptions) -> Box<dyn CompactionScheduler> {
-        // todo: return the right type based on the configured scheduler
-        Box::new(SizeTieredCompactionScheduler {})
+    fn load_compaction_scheduler(options: &CompactorOptions) -> Box<dyn CompactionScheduler> {
+        options.compaction_scheduler.compaction_scheduler()
     }
 
     fn load_state(stored_manifest: &FenceableManifest) -> Result<CompactorState, SlateDBError> {
@@ -136,11 +145,15 @@ impl CompactorOrchestrator {
 
     fn run(&mut self) {
         let ticker = crossbeam_channel::tick(self.options.poll_interval);
+        let db_runs_log_ticker = crossbeam_channel::tick(Duration::from_secs(10));
 
         // Stop the loop when the executor is shut down *and* all remaining
         // `worker_rx` messages have been drained.
         while !(self.executor.is_stopped() && self.worker_rx.is_empty()) {
             crossbeam_channel::select! {
+                recv(db_runs_log_ticker) -> _ => {
+                    self.log_compaction_state();
+                }
                 recv(ticker) -> _ => {
                     if !self.executor.is_stopped() {
                         self.load_manifest().expect("fatal error loading manifest");
@@ -181,7 +194,7 @@ impl CompactorOrchestrator {
             match self.write_manifest() {
                 Ok(_) => return Ok(()),
                 Err(SlateDBError::ManifestVersionExists) => {
-                    print!("conflicting manifest version. retry write");
+                    warn!("conflicting manifest version. retry write");
                 }
                 Err(err) => return Err(err),
             }
@@ -191,12 +204,22 @@ impl CompactorOrchestrator {
     fn maybe_schedule_compactions(&mut self) -> Result<(), SlateDBError> {
         let compactions = self.scheduler.maybe_schedule_compaction(&self.state);
         for compaction in compactions.iter() {
+            if self.state.num_compactions() >= self.options.max_concurrent_compactions {
+                println!(
+                    "already running {} compactions, which is at the max {}. Won't run compaction {:?}",
+                    self.state.num_compactions(),
+                    self.options.max_concurrent_compactions,
+                    compaction
+                );
+                break;
+            }
             self.submit_compaction(compaction.clone())?;
         }
         Ok(())
     }
 
     fn start_compaction(&mut self, compaction: Compaction) {
+        self.log_compaction_state();
         let db_state = self.state.db_state();
         let compacted_sst_iter = db_state.compacted.iter().flat_map(|sr| sr.ssts.iter());
         let ssts_by_id: HashMap<Ulid, &SSTableHandle> = db_state
@@ -230,8 +253,15 @@ impl CompactorOrchestrator {
 
     fn finish_compaction(&mut self, output_sr: SortedRun) -> Result<(), SlateDBError> {
         self.state.finish_compaction(output_sr);
+        self.log_compaction_state();
         self.write_manifest_safely()?;
         self.maybe_schedule_compactions()?;
+        self.db_stats.last_compaction_ts.set(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        );
         Ok(())
     }
 
@@ -250,38 +280,45 @@ impl CompactorOrchestrator {
         self.maybe_schedule_compactions()?;
         Ok(())
     }
+
+    fn log_compaction_state(&self) {
+        self.state.db_state().log_db_runs();
+        let compactions = self.state.compactions();
+        for compaction in compactions.iter() {
+            info!("in-flight compaction: {}", compaction);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestratorMsg};
-    use crate::compactor_state::{Compaction, SourceId};
-    use crate::config::DbOptions;
-    use crate::db::Db;
-    use crate::iter::KeyValueIterator;
-    use crate::manifest_store::{ManifestStore, StoredManifest};
-    use crate::sst::SsTableFormat;
-    use crate::sst_iter::SstIterator;
-    use crate::tablestore::TableStore;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
     use std::future::Future;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
+
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
     use tokio::runtime::Runtime;
     use ulid::Ulid;
 
+    use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestratorMsg};
+    use crate::compactor_state::{Compaction, SourceId};
+    use crate::config::{DbOptions, SizeTieredCompactionSchedulerOptions};
+    use crate::db::Db;
+    use crate::iter::KeyValueIterator;
+    use crate::manifest_store::{ManifestStore, StoredManifest};
+    use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
+    use crate::sst::SsTableFormat;
+    use crate::sst_iter::SstIterator;
+    use crate::tablestore::TableStore;
+
     const PATH: &str = "/test/db";
-    const COMPACTOR_OPTIONS: CompactorOptions = CompactorOptions {
-        poll_interval: Duration::from_millis(100),
-        max_sst_size: 1024 * 1024 * 1024,
-    };
 
     #[tokio::test]
     async fn test_compactor_compacts_l0() {
         // given:
-        let options = db_options(Some(COMPACTOR_OPTIONS.clone()));
+        let options = db_options(Some(compactor_options()));
         let (_, manifest_store, table_store, db) = build_test_db(options).await;
         for i in 0..4 {
             db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48]).await;
@@ -309,7 +346,7 @@ mod tests {
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
-        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1)
+        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1, false)
             .await
             .unwrap();
         for i in 0..4 {
@@ -341,11 +378,12 @@ mod tests {
         rt.block_on(db.close()).unwrap();
         let (_, external_rx) = crossbeam_channel::unbounded();
         let mut orchestrator = CompactorOrchestrator::new(
-            COMPACTOR_OPTIONS.clone(),
+            compactor_options(),
             manifest_store.clone(),
             table_store.clone(),
             rt.handle().clone(),
             external_rx,
+            db.metrics(),
         )
         .unwrap();
         let l0_ids_to_compact: Vec<SourceId> = orchestrator
@@ -432,7 +470,12 @@ mod tests {
             .unwrap();
         let sst_format = SsTableFormat::new(32, 10, options.compression_codec);
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
-        let table_store = Arc::new(TableStore::new(os.clone(), sst_format, Path::from(PATH)));
+        let table_store = Arc::new(TableStore::new(
+            os.clone(),
+            sst_format,
+            Path::from(PATH),
+            None,
+        ));
         (os, manifest_store, table_store, db)
     }
 
@@ -444,8 +487,23 @@ mod tests {
             manifest_poll_interval: Duration::from_millis(100),
             min_filter_keys: 0,
             l0_sst_size_bytes: 128,
+            max_unflushed_memtable: 2,
+            l0_max_ssts: 8,
             compactor_options,
             compression_codec: None,
+            block_cache_options: None,
+        }
+    }
+
+    fn compactor_options() -> CompactorOptions {
+        CompactorOptions {
+            poll_interval: Duration::from_millis(100),
+            max_sst_size: 1024 * 1024 * 1024,
+            compaction_scheduler: Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+                SizeTieredCompactionSchedulerOptions::default(),
+            )),
+            max_concurrent_compactions: 1,
+            compaction_runtime: None,
         }
     }
 }
