@@ -21,6 +21,7 @@ pub mod error;
 mod filter;
 mod flatbuffer_types;
 mod flush;
+pub mod inmemory_cache;
 mod iter;
 mod manifest;
 mod manifest_store;

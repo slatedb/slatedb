@@ -5,6 +5,7 @@ use tokio::runtime::Handle;
 
 use crate::compactor::CompactionScheduler;
 use crate::error::SlateDBError;
+use crate::inmemory_cache::InMemoryCacheOptions;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
@@ -135,6 +136,8 @@ pub struct DbOptions {
 
     /// Configuration options for the compactor.
     pub compactor_options: Option<CompactorOptions>,
+
+    /// The compression algorithm to use for SSTables.
     pub compression_codec: Option<CompressionCodec>,
 
     /// Configuration options for the disk cache. If set, when reading from object storage,
@@ -145,6 +148,9 @@ pub struct DbOptions {
     /// Define the size of the cache part in the object store cache. By default, the cache
     /// part size is 4mb. This value should be aligned to 1kb.
     pub object_store_cache_part_bytes: usize,
+
+    /// Block cache options.
+    pub block_cache_options: Option<InMemoryCacheOptions>,
 }
 
 impl Default for DbOptions {
@@ -162,6 +168,7 @@ impl Default for DbOptions {
             compression_codec: None,
             object_store_cache_root_folder: None,
             object_store_cache_part_bytes: 4 * 1024 * 1024,
+            block_cache_options: Some(InMemoryCacheOptions::default()),
         }
     }
 }

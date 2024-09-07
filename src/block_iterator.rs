@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bytes::{Buf, Bytes};
 
 use crate::{
@@ -23,6 +25,16 @@ impl BlockLike for Block {
 }
 
 impl BlockLike for &Block {
+    fn data(&self) -> &Bytes {
+        &self.data
+    }
+
+    fn offsets(&self) -> &[u16] {
+        &self.offsets
+    }
+}
+
+impl BlockLike for Arc<Block> {
     fn data(&self) -> &Bytes {
         &self.data
     }

@@ -4,15 +4,13 @@ use std::sync::Arc;
 
 use bytes::{BufMut, Bytes};
 use fail_parallel::{fail_point, FailPointRegistry};
-use futures::StreamExt;
+use futures::{future::join_all, StreamExt};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::RwLock;
 use tokio::io::AsyncWriteExt;
 
-use crate::blob::ReadOnlyBlob;
-use crate::block::Block;
 use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
@@ -20,6 +18,11 @@ use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
+};
+use crate::{
+    blob::ReadOnlyBlob,
+    block::Block,
+    inmemory_cache::{CachedBlock, InMemoryCache},
 };
 
 pub struct TableStore {
@@ -37,6 +40,8 @@ pub struct TableStore {
     //       https://github.com/slatedb/slatedb/issues/89
     filter_cache: RwLock<HashMap<SsTableId, Option<Arc<BloomFilter>>>>,
     transactional_wal_store: Arc<dyn TransactionalObjectStore>,
+    /// In-memory cache for blocks
+    block_cache: Option<Arc<dyn InMemoryCache>>,
 }
 
 struct ReadOnlyObject {
@@ -73,12 +78,14 @@ impl TableStore {
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
         root_path: Path,
+        block_cache: Option<Arc<dyn InMemoryCache>>,
     ) -> Self {
         Self::new_with_fp_registry(
             object_store,
             sst_format,
             root_path,
             Arc::new(FailPointRegistry::new()),
+            block_cache,
         )
     }
 
@@ -87,6 +94,7 @@ impl TableStore {
         sst_format: SsTableFormat,
         root_path: Path,
         fp_registry: Arc<FailPointRegistry>,
+        block_cache: Option<Arc<dyn InMemoryCache>>,
     ) -> Self {
         Self {
             object_store: object_store.clone(),
@@ -100,6 +108,7 @@ impl TableStore {
                 Path::from("/"),
                 object_store.clone(),
             )),
+            block_cache,
         }
     }
 
@@ -187,9 +196,9 @@ impl TableStore {
                 _ => SlateDBError::ObjectStoreError(e),
             })?;
 
-        self.cache_filter(id.clone(), encoded_sst.filter);
+        self.cache_filter(*id, encoded_sst.filter);
         Ok(SSTableHandle {
-            id: id.clone(),
+            id: *id,
             info: encoded_sst.info,
         })
     }
@@ -210,10 +219,7 @@ impl TableStore {
             path,
         };
         let info = self.sst_format.read_info(&obj).await?;
-        Ok(SSTableHandle {
-            id: id.clone(),
-            info,
-        })
+        Ok(SSTableHandle { id: *id, info })
     }
 
     pub(crate) async fn read_filter(
@@ -233,7 +239,7 @@ impl TableStore {
         };
         let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
         let mut wguard = self.filter_cache.write();
-        wguard.insert(handle.id.clone(), filter.clone());
+        wguard.insert(handle.id, filter.clone());
         Ok(filter)
     }
 
@@ -266,21 +272,103 @@ impl TableStore {
             .await
     }
 
-    // TODO: we probably won't need this once we're caching the index
+    /// Reads specified blocks from an SSTable using the provided index.
+    ///
+    /// This function attempts to read blocks from the cache if available
+    /// and falls back to reading from storage for uncached blocks
+    /// using an async fetch for each contiguous range that blocks are not cached.
+    /// It can optionally cache newly read blocks.
+    /// TODO: we probably won't need this once we're caching the index
     pub(crate) async fn read_blocks_using_index(
         &self,
         handle: &SSTableHandle,
         index: Arc<SsTableIndexOwned>,
         blocks: Range<usize>,
-    ) -> Result<VecDeque<Block>, SlateDBError> {
+        cache_blocks: bool,
+    ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
+        // Create a ReadOnlyObject for accessing the SSTable file
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
         };
-        self.sst_format
-            .read_blocks(&handle.info, index.as_ref(), blocks, &obj)
-            .await
+
+        // Initialize the result vector and a vector to track uncached ranges
+        let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
+        let mut uncached_ranges = Vec::new();
+
+        // If block cache is available, try to retrieve cached blocks
+        if let Some(cache) = &self.block_cache {
+            // Attempt to get all requested blocks from cache concurrently
+            let cached_blocks =
+                join_all(blocks.clone().map(|block_num| async move {
+                    cache.get((handle.id, block_num)).await.block()
+                }))
+                .await;
+
+            let mut last_uncached_start = None;
+
+            // Process cached block results
+            for (index, block_result) in cached_blocks.into_iter().enumerate() {
+                match block_result {
+                    Some(cached_block) => {
+                        // If a cached block is found, add it to blocks_read
+                        if let Some(start) = last_uncached_start.take() {
+                            uncached_ranges.push((blocks.start + start)..(blocks.start + index));
+                        }
+                        blocks_read.push_back(cached_block);
+                    }
+                    None => {
+                        // If a block is not in cache, mark the start of an uncached range
+                        last_uncached_start.get_or_insert(index);
+                    }
+                }
+            }
+
+            // Add the last uncached range if it exists
+            if let Some(start) = last_uncached_start {
+                uncached_ranges.push((blocks.start + start)..blocks.end);
+            }
+        } else {
+            // If no cache is available, treat all blocks as uncached
+            uncached_ranges.push(blocks.clone());
+        }
+
+        // Read uncached blocks concurrently
+        let uncached_blocks = join_all(uncached_ranges.iter().map(|range| {
+            let obj_ref = &obj;
+            let index_ref = &index;
+            async move {
+                self.sst_format
+                    .read_blocks(&handle.info, index_ref, range.clone(), obj_ref)
+                    .await
+            }
+        }))
+        .await;
+
+        // Merge uncached blocks with blocks_read and prepare blocks for caching
+        let mut blocks_to_cache = vec![];
+        for (range, range_blocks) in uncached_ranges.into_iter().zip(uncached_blocks) {
+            for (block_num, block_read) in range.zip(range_blocks?) {
+                let block = Arc::new(block_read);
+                if cache_blocks {
+                    blocks_to_cache.push((handle.id, block_num, block.clone()));
+                }
+                blocks_read.insert(block_num - blocks.start, block);
+            }
+        }
+
+        // Cache the newly read blocks if caching is enabled
+        if let Some(cache) = &self.block_cache {
+            if !blocks_to_cache.is_empty() {
+                join_all(blocks_to_cache.into_iter().map(|(id, block_num, block)| {
+                    cache.insert((id, block_num), CachedBlock::Block(block))
+                }))
+                .await;
+            }
+        }
+
+        Ok(blocks_read)
     }
 
     #[allow(dead_code)]
@@ -350,10 +438,9 @@ impl<'a> EncodedSsTableWriter<'a> {
             self.writer.write_all(block.as_ref()).await?;
         }
         self.writer.shutdown().await?;
-        self.table_store
-            .cache_filter(self.id.clone(), encoded_sst.filter);
+        self.table_store.cache_filter(self.id, encoded_sst.filter);
         Ok(SSTableHandle {
-            id: self.id.clone(),
+            id: self.id,
             info: encoded_sst.info,
         })
     }
@@ -374,19 +461,25 @@ impl<'a> EncodedSsTableWriter<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::Arc;
 
     use bytes::Bytes;
-    use object_store::path::Path;
+    use object_store::{memory::InMemory, path::Path, ObjectStore};
     use ulid::Ulid;
 
-    use crate::db_state::SsTableId;
-    use crate::error;
-    use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
+    use crate::{
+        block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
+    };
+    use crate::{error, tablestore::InMemoryCache};
+    use crate::{
+        inmemory_cache::{InMemoryCacheOptions, MokaCache},
+        sst::SsTableFormat,
+    };
 
     const ROOT: &str = "/root";
 
@@ -395,7 +488,7 @@ mod tests {
         // given:
         let os = Arc::new(object_store::memory::InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
-        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
         let id = SsTableId::Compacted(Ulid::new());
 
         // when:
@@ -407,21 +500,23 @@ mod tests {
         let sst = writer.close().await.unwrap();
 
         // then:
-        let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1).await.unwrap();
+        let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1, true)
+            .await
+            .unwrap();
         assert_iterator(
             &mut iter,
             &[
                 (
-                    &[b'a'; 16],
+                    vec![b'a'; 16],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 16])),
                 ),
                 (
-                    &[b'b'; 16],
+                    vec![b'b'; 16],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 16])),
                 ),
-                (&[b'c'; 16], ValueDeletable::Tombstone),
+                (vec![b'c'; 16], ValueDeletable::Tombstone),
                 (
-                    &[b'd'; 16],
+                    vec![b'd'; 16],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[4u8; 16])),
                 ),
             ],
@@ -433,7 +528,7 @@ mod tests {
     async fn test_wal_write_should_fail_when_fenced() {
         let os = Arc::new(object_store::memory::InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
-        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
         let wal_id = SsTableId::Wal(1);
 
         // write a wal sst
@@ -449,5 +544,126 @@ mod tests {
         // write another walsst with the same id.
         let result = ts.write_sst(&wal_id, table2).await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
+    }
+
+    #[tokio::test]
+    async fn test_tablestore_sst_and_partial_cache_hits() {
+        // Setup
+        let os = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(32, 1, None);
+        let block_cache = Arc::new(MokaCache::new(InMemoryCacheOptions::default()));
+        let ts = Arc::new(TableStore::new(
+            os.clone(),
+            format,
+            Path::from("/root"),
+            Some(block_cache.clone()),
+        ));
+
+        // Create and write SST
+        let id = SsTableId::Compacted(Ulid::new());
+        let mut writer = ts.table_writer(id);
+        let mut expected_data = Vec::with_capacity(20);
+        for i in 0..20 {
+            let key = [i as u8; 16];
+            let value = [(i + 1) as u8; 16];
+            expected_data.push((
+                Vec::from(key.as_slice()),
+                ValueDeletable::Value(Bytes::copy_from_slice(&value)),
+            ));
+            writer.add(&key, Some(&value)).await.unwrap();
+        }
+        let handle = writer.close().await.unwrap();
+
+        // Read the index
+        let index = Arc::new(ts.read_index(&handle).await.unwrap());
+
+        // Test 1: SST hit
+        let blocks = ts
+            .read_blocks_using_index(&handle, index.clone(), 0..20, true)
+            .await
+            .unwrap();
+
+        assert_blocks(&blocks, &expected_data).await;
+
+        // Check that all blocks are now in cache
+        for i in 0..20 {
+            assert!(
+                block_cache.get((handle.id, i)).await.block().is_some(),
+                "Block {} should be in cache",
+                i
+            );
+        }
+
+        // Partially clear the cache (remove blocks 5..10 and 15..20)
+        for i in 5..10 {
+            block_cache.remove((handle.id, i)).await;
+        }
+        for i in 15..20 {
+            block_cache.remove((handle.id, i)).await;
+        }
+
+        // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
+        let blocks = ts
+            .read_blocks_using_index(&handle, index.clone(), 0..20, true)
+            .await
+            .unwrap();
+        assert_blocks(&blocks, &expected_data).await;
+
+        // Check that all blocks are again in cache
+        for i in 0..20 {
+            assert!(
+                block_cache.get((handle.id, i)).await.block().is_some(),
+                "Block {} should be in cache after partial hit",
+                i
+            );
+        }
+
+        // Replace SST file with an empty file
+        let path = ts.path(&id);
+        os.put(&path, Bytes::new().into()).await.unwrap();
+
+        // Test 3: All blocks should be in cache after SST file is emptied
+        let blocks = ts
+            .read_blocks_using_index(&handle, index.clone(), 0..20, true)
+            .await
+            .unwrap();
+        assert_blocks(&blocks, &expected_data).await;
+
+        // Check that all blocks are still in cache
+        for i in 0..20 {
+            assert!(
+                block_cache.get((handle.id, i)).await.block().is_some(),
+                "Block {} should be in cache after SST emptying",
+                i
+            );
+        }
+
+        // Test 4: Verify that reading specific ranges still works after SST file is emptied
+        let blocks = ts
+            .read_blocks_using_index(&handle, index.clone(), 5..10, true)
+            .await
+            .unwrap();
+        assert_blocks(&blocks, &expected_data[5..10]).await;
+
+        let blocks = ts
+            .read_blocks_using_index(&handle, index.clone(), 15..20, true)
+            .await
+            .unwrap();
+        assert_blocks(&blocks, &expected_data[15..20]).await;
+    }
+
+    async fn assert_blocks(blocks: &VecDeque<Arc<Block>>, expected: &[(Vec<u8>, ValueDeletable)]) {
+        let mut block_iter = blocks.iter();
+        let mut expected_iter = expected.iter();
+
+        while let (Some(block), Some(expected_item)) = (block_iter.next(), expected_iter.next()) {
+            let mut iter = BlockIterator::from_first_key(block.clone());
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key, expected_item.0);
+            assert_eq!(ValueDeletable::Value(kv.value), expected_item.1);
+        }
+
+        assert!(block_iter.next().is_none());
+        assert!(expected_iter.next().is_none());
     }
 }

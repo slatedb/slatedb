@@ -8,15 +8,31 @@ use crate::types::{KeyValue, ValueDeletable};
 #[allow(dead_code)]
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(
     iterator: &mut T,
-    entries: &[(&'static [u8], ValueDeletable)],
+    entries: &[(Vec<u8>, ValueDeletable)],
 ) {
+    // We use Vec<u8> instead of &[u8] for the keys in the entries for several reasons:
+    // 1. Ownership and Lifetime: Vec<u8> owns its data, while &[u8] is a borrowed slice.
+    //    Using Vec<u8> allows us to store and manipulate the data without worrying about lifetimes.
+
+    // 2. Flexibility: Vec<u8> can be easily cloned, extended, or modified if needed.
+    //    This is particularly useful when working with keys that might need to be adjusted or compared.
+
+    // 3. Consistency with Bytes: The iterator returns keys as Bytes, which is similar to Vec<u8> in that
+    //    it owns its data. Using Vec<u8> in our test data maintains this consistency.
+
+    // 4. Avoid Slice Referencing Issues: Using &[u8] could lead to complicated lifetime issues,
+    //    especially if the original data the slice refers to goes out of scope.
+
+    // 5. Performance: While Vec<u8> has a slight overhead compared to &[u8], the difference is
+    //    negligible for most use cases, especially in tests where convenience and clarity are prioritized.
+
     for (expected_k, expected_v) in entries.iter() {
         let kv = iterator
             .next_entry()
             .await
             .expect("iterator next_entry failed")
             .expect("expected iterator to return a value");
-        assert_eq!(kv.key, Bytes::from(*expected_k));
+        assert_eq!(kv.key, Bytes::from(expected_k.clone()));
         assert_eq!(kv.value, *expected_v);
     }
     assert!(iterator

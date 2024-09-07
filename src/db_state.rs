@@ -36,7 +36,7 @@ impl SSTableHandle {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Hash, Eq)]
+#[derive(Clone, PartialEq, Debug, Hash, Eq, Copy)]
 pub enum SsTableId {
     Wal(u64),
     Compacted(Ulid),
@@ -285,14 +285,8 @@ mod tests {
         db_state.refresh_db_state(&compactor_state);
 
         // then:
-        let expected: Vec<SsTableId> = compactor_state.l0.iter().map(|l0| l0.id.clone()).collect();
-        let merged: Vec<SsTableId> = db_state
-            .state
-            .core
-            .l0
-            .iter()
-            .map(|l0| l0.id.clone())
-            .collect();
+        let expected: Vec<SsTableId> = compactor_state.l0.iter().map(|l0| l0.id).collect();
+        let merged: Vec<SsTableId> = db_state.state.core.l0.iter().map(|l0| l0.id).collect();
         assert_eq!(expected, merged);
     }
 
@@ -307,14 +301,8 @@ mod tests {
         db_state.refresh_db_state(&CoreDbState::new());
 
         // then:
-        let expected: Vec<SsTableId> = l0s.iter().map(|l0| l0.id.clone()).collect();
-        let merged: Vec<SsTableId> = db_state
-            .state
-            .core
-            .l0
-            .iter()
-            .map(|l0| l0.id.clone())
-            .collect();
+        let expected: Vec<SsTableId> = l0s.iter().map(|l0| l0.id).collect();
+        let merged: Vec<SsTableId> = db_state.state.core.l0.iter().map(|l0| l0.id).collect();
         assert_eq!(expected, merged);
     }
 
