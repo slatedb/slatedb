@@ -6,6 +6,7 @@ use object_store::{
     buffered::BufWriter, Attribute, Attributes, GetRange, GetResultPayload, PutResult,
 };
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
+use object_store::{ListResult, MultipartUpload, PutMultipartOpts, PutOptions, PutPayload};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -18,14 +19,14 @@ use crate::metrics::DbStats;
 
 #[allow(unused)]
 #[derive(Debug, Clone)]
-pub(crate) struct CacheableObjectStore {
+pub(crate) struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
     pub(crate) part_size: usize, // expected to be aligned with mb or kb
     pub(crate) cache_storage: Arc<dyn LocalCacheStorage>,
     db_stats: Arc<DbStats>,
 }
 
-impl CacheableObjectStore {
+impl CachedObjectStore {
     pub fn new(
         object_store: Arc<dyn ObjectStore>,
         root_folder: std::path::PathBuf,
@@ -338,13 +339,90 @@ impl CacheableObjectStore {
     }
 }
 
-impl std::fmt::Display for CacheableObjectStore {
+impl std::fmt::Display for CachedObjectStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "LocalCachedObjectStore({}, {})",
+            "CachedObjectStore({}, {})",
             self.object_store, self.cache_storage
         )
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for CachedObjectStore {
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        self.cached_get_opts(location, options).await
+    }
+
+    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+        self.cached_head(location).await
+    }
+
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        // TODO: update the cache on put
+        self.object_store.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart(
+        &self,
+        location: &Path,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.object_store.put_multipart(location).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        opts: PutMultipartOpts,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.object_store.put_multipart_opts(location, opts).await
+    }
+
+    async fn delete(&self, location: &Path) -> object_store::Result<()> {
+        // TODO: handle cache eviction
+        self.object_store.delete(location).await
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, object_store::Result<ObjectMeta>> {
+        self.object_store.list(prefix)
+    }
+
+    fn list_with_offset(
+        &self,
+        prefix: Option<&Path>,
+        offset: &Path,
+    ) -> BoxStream<'_, object_store::Result<ObjectMeta>> {
+        self.object_store.list_with_offset(prefix, offset)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.object_store.list_with_delimiter(prefix).await
+    }
+
+    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.object_store.copy(from, to).await
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.object_store.rename(from, to).await
+    }
+
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.object_store.copy_if_not_exists(from, to).await
+    }
+
+    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.object_store.rename_if_not_exists(from, to).await
     }
 }
 
@@ -689,7 +767,7 @@ mod tests {
     use object_store::{path::Path, GetOptions, GetRange, ObjectStore, PutPayload};
     use rand::{thread_rng, Rng};
 
-    use super::CacheableObjectStore;
+    use super::CachedObjectStore;
     use crate::{
         disk_cache::{DiskCacheEntry, PartID},
         metrics::DbStats,
@@ -726,7 +804,7 @@ mod tests {
         let location = Path::from("/data/testfile1");
         let get_result = object_store.get(&location).await?;
 
-        let cached_store = CacheableObjectStore::new(
+        let cached_store = CachedObjectStore::new(
             object_store.clone(),
             test_cache_folder.clone(),
             1024,
@@ -784,7 +862,7 @@ mod tests {
         let part_size = 1024;
 
         let cached_store =
-            CacheableObjectStore::new(object_store, test_cache_folder.clone(), part_size, db_stats);
+            CachedObjectStore::new(object_store, test_cache_folder.clone(), part_size, db_stats);
         let entry = cached_store.cache_storage.entry(&location, part_size);
         let object_size_hint = cached_store.save_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3);
@@ -809,8 +887,7 @@ mod tests {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
-        let cached_store =
-            CacheableObjectStore::new(object_store, test_cache_folder, 1024, db_stats);
+        let cached_store = CachedObjectStore::new(object_store, test_cache_folder, 1024, db_stats);
 
         struct Test {
             input: (Option<GetRange>, usize),
@@ -889,8 +966,7 @@ mod tests {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
-        let cached_store =
-            CacheableObjectStore::new(object_store, test_cache_folder, 1024, db_stats);
+        let cached_store = CachedObjectStore::new(object_store, test_cache_folder, 1024, db_stats);
 
         let aligned = cached_store.align_range(&(9..1025), 1024);
         assert_eq!(aligned, 0..2048);
@@ -903,8 +979,7 @@ mod tests {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
-        let cached_store =
-            CacheableObjectStore::new(object_store, test_cache_folder, 1024, db_stats);
+        let cached_store = CachedObjectStore::new(object_store, test_cache_folder, 1024, db_stats);
 
         let aligned = cached_store.align_get_range(&GetRange::Bounded(9..1025));
         assert_eq!(aligned, GetRange::Bounded(0..2048));
@@ -924,7 +999,7 @@ mod tests {
     async fn test_cached_object_store_impl_object_store() -> object_store::Result<()> {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = CacheableObjectStore::new(
+        let cached_store = CachedObjectStore::new(
             object_store.clone(),
             test_cache_folder,
             1024,
