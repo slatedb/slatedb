@@ -14,7 +14,6 @@ use tokio::{
 };
 
 use crate::metrics::DbStats;
-
 #[allow(unused)]
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {

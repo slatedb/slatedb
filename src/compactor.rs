@@ -304,7 +304,7 @@ mod tests {
 
     use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestratorMsg};
     use crate::compactor_state::{Compaction, SourceId};
-    use crate::config::{DbOptions, SizeTieredCompactionSchedulerOptions};
+    use crate::config::{DbOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions};
     use crate::db::Db;
     use crate::iter::KeyValueIterator;
     use crate::manifest_store::{ManifestStore, StoredManifest};
@@ -491,8 +491,7 @@ mod tests {
             l0_max_ssts: 8,
             compactor_options,
             compression_codec: None,
-            object_store_cache_part_bytes: 1024,
-            object_store_cache_root_folder: None,
+            object_store_cache_options: ObjectStoreCacheOptions::default(),
             block_cache_options: None,
         }
     }

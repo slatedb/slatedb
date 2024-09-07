@@ -351,10 +351,10 @@ impl Db {
         let sst_format =
             SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
 
-        let maybe_cached_object_store = match &options.object_store_cache_root_folder {
+        let maybe_cached_object_store = match &options.object_store_cache_options.root_folder {
             None => object_store,
             Some(cache_root_folder) => {
-                let part_size_bytes = options.object_store_cache_part_bytes;
+                let part_size_bytes = options.object_store_cache_options.part_size_bytes;
                 if part_size_bytes == 0 || part_size_bytes % 1024 != 0 {
                     return Err(SlateDBError::InvalidCachePartSize);
                 }
@@ -529,7 +529,9 @@ mod tests {
     use tracing::info;
 
     use super::*;
-    use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
+    use crate::config::{
+        CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
+    };
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
     #[cfg(feature = "wal_disable")]
@@ -576,7 +578,7 @@ mod tests {
             db_stats.clone(),
         ));
 
-        opts.object_store_cache_root_folder = Some(temp_dir.into_path());
+        opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
         let kv_store = Db::open_with_opts(
             Path::from("/tmp/test_kv_store_with_cache"),
             opts,
@@ -1362,8 +1364,7 @@ mod tests {
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
-            object_store_cache_part_bytes: 1024,
-            object_store_cache_root_folder: None,
+            object_store_cache_options: ObjectStoreCacheOptions::default(),
             block_cache_options: None,
         }
     }
