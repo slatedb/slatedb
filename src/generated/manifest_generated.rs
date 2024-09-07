@@ -256,18 +256,18 @@ impl<'a> CompactedSsTable<'a> {
 
 
   #[inline]
-  pub fn id(&self) -> Option<CompactedSstId<'a>> {
+  pub fn id(&self) -> CompactedSstId<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<CompactedSstId>>(CompactedSsTable::VT_ID, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<CompactedSstId>>(CompactedSsTable::VT_ID, None).unwrap()}
   }
   #[inline]
-  pub fn info(&self) -> Option<SsTableInfo<'a>> {
+  pub fn info(&self) -> SsTableInfo<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<SsTableInfo>>(CompactedSsTable::VT_INFO, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<SsTableInfo>>(CompactedSsTable::VT_INFO, None).unwrap()}
   }
 }
 
@@ -278,8 +278,8 @@ impl flatbuffers::Verifiable for CompactedSsTable<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<flatbuffers::ForwardsUOffset<CompactedSstId>>("id", Self::VT_ID, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<SsTableInfo>>("info", Self::VT_INFO, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<CompactedSstId>>("id", Self::VT_ID, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<SsTableInfo>>("info", Self::VT_INFO, true)?
      .finish();
     Ok(())
   }
@@ -292,8 +292,8 @@ impl<'a> Default for CompactedSsTableArgs<'a> {
   #[inline]
   fn default() -> Self {
     CompactedSsTableArgs {
-      id: None,
-      info: None,
+      id: None, // required field
+      info: None, // required field
     }
   }
 }
@@ -322,6 +322,8 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableBuilder<'a, 'b,
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<CompactedSsTable<'a>> {
     let o = self.fbb_.end_table(self.start_);
+    self.fbb_.required(o, CompactedSsTable::VT_ID,"id");
+    self.fbb_.required(o, CompactedSsTable::VT_INFO,"info");
     flatbuffers::WIPOffset::new(o.value())
   }
 }
