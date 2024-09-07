@@ -23,7 +23,6 @@ pub(crate) struct CompactionJob {
     pub(crate) destination: u32,
     pub(crate) ssts: Vec<SSTableHandle>,
     pub(crate) sorted_runs: Vec<SortedRun>,
-    // pub(crate) use_bloom_filter_for_last_sorted_run: bool,
 }
 
 pub(crate) trait CompactionExecutor {
