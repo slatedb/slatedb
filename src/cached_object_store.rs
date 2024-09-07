@@ -210,7 +210,6 @@ impl CachedObjectStore {
     /// get from disk if the parts are cached, otherwise start a new GET request.
     /// the io errors on reading the disk caches will be ignored, just fallback to
     /// the object store.
-    /// TODO: add metrics to track the cache hit rate here.
     fn read_part(
         &self,
         location: &Path,
