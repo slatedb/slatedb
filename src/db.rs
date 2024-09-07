@@ -625,11 +625,11 @@ mod tests {
             ),
             (
                 "tmp/test_kv_store_with_cache/manifest/00000000000000000002.manifest",
-                1,
+                2,
             ),
             (
                 "tmp/test_kv_store_with_cache/wal/00000000000000000001.sst",
-                1,
+                2,
             ),
             (
                 "tmp/test_kv_store_with_cache/wal/00000000000000000002.sst",
