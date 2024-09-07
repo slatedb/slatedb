@@ -35,13 +35,13 @@ impl CachedObjectStore {
     ) -> Self {
         assert!(part_size % 1024 == 0);
 
-        let storage = Arc::new(DiskCacheStorage {
+        let cache_storage = Arc::new(DiskCacheStorage {
             root_folder: root_folder.clone(),
         });
         Self {
             object_store,
             part_size,
-            cache_storage: storage,
+            cache_storage,
             db_stats,
         }
     }
@@ -94,7 +94,7 @@ impl CachedObjectStore {
         })
     }
 
-    // TODO: cover PUT with cache, maybe need an CacheablePutOptions
+    // TODO: implement the put with cache here
     async fn cached_put_opts(
         &self,
         location: &Path,
