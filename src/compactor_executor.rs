@@ -127,7 +127,11 @@ impl TokioCompactionExecutorInner {
                     self.table_store
                         .table_writer(SsTableId::Compacted(Ulid::new())),
                 );
-                output_ssts.push(finished_writer.close(true).await?);
+                output_ssts.push(
+                    finished_writer
+                        .close(!self.options.disable_bloom_filter_for_oldest_sorted_run)
+                        .await?,
+                );
             }
             // Add to SST
             let value = kv.value.into_option();
