@@ -271,7 +271,12 @@ impl SizeTieredCompactionSchedulerOptions {
     }
 }
 
-/// Options for the object store cache.
+/// Options for the object store cache. This cache is not enabled unless an explicit cache
+/// root folder is set. The object store cache will split an object into align-sized parts
+/// in the local, and save them into the local cache storage.
+///
+/// The local cache default uses file system as storage, it can also be extended to use other
+/// like RocksDB, Redis, etc.
 #[derive(Clone, Debug)]
 pub struct ObjectStoreCacheOptions {
     /// The root folder where the cache files are stored. If not set, the cache will be
@@ -279,8 +284,7 @@ pub struct ObjectStoreCacheOptions {
     pub root_folder: Option<std::path::PathBuf>,
 
     /// The size of each part file, the part size is expected to be aligned with 1kb,
-    /// its default value is 4mb. The object store cache splits the object into multiple
-    /// parts, and save them into these part files.
+    /// its default value is 4mb.
     pub part_size_bytes: usize,
 }
 
