@@ -221,6 +221,10 @@ pub struct CompactorOptions {
     /// The maximum number of concurrent compactions to execute at once
     pub max_concurrent_compactions: usize,
 
+    /// Do not store a bloom filter for the oldest sorted run when compacting. This can save space
+    /// in cases where lookups are likely to succeed.
+    pub disable_bloom_filter_for_oldest_sorted_run: bool,
+
     /// An optional tokio runtime handle to use for scheduling compaction work. You can use
     /// this to isolate compactions to a dedicated thread pool.
     pub compaction_runtime: Option<Handle>,
@@ -239,6 +243,7 @@ impl Default for CompactorOptions {
                 SizeTieredCompactionSchedulerOptions::default(),
             )),
             max_concurrent_compactions: 4,
+            disable_bloom_filter_for_oldest_sorted_run: false,
             compaction_runtime: None,
         }
     }

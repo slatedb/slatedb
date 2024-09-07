@@ -23,6 +23,7 @@ pub(crate) struct CompactionJob {
     pub(crate) destination: u32,
     pub(crate) ssts: Vec<SSTableHandle>,
     pub(crate) sorted_runs: Vec<SortedRun>,
+    // pub(crate) use_bloom_filter_for_last_sorted_run: bool,
 }
 
 pub(crate) trait CompactionExecutor {
@@ -118,12 +119,7 @@ impl TokioCompactionExecutorInner {
             .table_writer(SsTableId::Compacted(Ulid::new()));
         let mut current_size = 0usize;
         while let Some(kv) = all_iter.next_entry().await? {
-            // Add to SST
-            let value = kv.value.into_option();
-            current_writer
-                .add(kv.key.as_ref(), value.as_ref().map(|b| b.as_ref()))
-                .await?;
-            current_size += kv.key.len() + value.map_or(0, |b| b.len());
+            // Complete this SST if we exceed the max size
             if current_size > self.options.max_sst_size {
                 current_size = 0;
                 let finished_writer = mem::replace(
@@ -131,11 +127,22 @@ impl TokioCompactionExecutorInner {
                     self.table_store
                         .table_writer(SsTableId::Compacted(Ulid::new())),
                 );
-                output_ssts.push(finished_writer.close().await?);
+                output_ssts.push(finished_writer.close(true).await?);
             }
+            // Add to SST
+            let value = kv.value.into_option();
+            current_writer
+                .add(kv.key.as_ref(), value.as_ref().map(|b| b.as_ref()))
+                .await?;
+            current_size += kv.key.len() + value.map_or(0, |b| b.len());
         }
+        // FIXME: The whole thing is a sorted run; how to know if it's the last?!?
         if current_size > 0 {
-            output_ssts.push(current_writer.close().await?);
+            output_ssts.push(
+                current_writer
+                    .close(!self.options.disable_bloom_filter_for_oldest_sorted_run)
+                    .await?,
+            );
         }
         Ok(SortedRun {
             id: compaction.destination,

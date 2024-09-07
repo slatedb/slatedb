@@ -1115,6 +1115,8 @@ mod tests {
             Some(CompactorOptions {
                 poll_interval: Duration::from_millis(100),
                 max_sst_size: 256,
+
+                disable_bloom_filter_for_oldest_sorted_run: false,
                 compaction_scheduler: Arc::new(SizeTieredCompactionSchedulerSupplier::new(
                     SizeTieredCompactionSchedulerOptions::default(),
                 )),
@@ -1133,6 +1135,8 @@ mod tests {
             Some(CompactorOptions {
                 poll_interval: Duration::from_millis(100),
                 max_sst_size: 256,
+
+                disable_bloom_filter_for_oldest_sorted_run: false,
                 compaction_scheduler: Arc::new(SizeTieredCompactionSchedulerSupplier::new(
                     SizeTieredCompactionSchedulerOptions::default(),
                 )),

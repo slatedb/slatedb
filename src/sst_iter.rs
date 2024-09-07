@@ -266,7 +266,7 @@ mod tests {
         builder.add(b"key2", Some(b"value2")).unwrap();
         builder.add(b"key3", Some(b"value3")).unwrap();
         builder.add(b"key4", Some(b"value4")).unwrap();
-        let encoded = builder.build().unwrap();
+        let encoded = builder.build(true).unwrap();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded)
             .await
@@ -316,7 +316,7 @@ mod tests {
                 .unwrap();
         }
 
-        let encoded = builder.build().unwrap();
+        let encoded = builder.build(true).unwrap();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded)
             .await
@@ -460,6 +460,6 @@ mod tests {
                 .unwrap();
             nkeys += 1;
         }
-        (writer.close().await.unwrap(), nkeys)
+        (writer.close(true).await.unwrap(), nkeys)
     }
 }

@@ -181,7 +181,7 @@ mod tests {
         builder.add(b"key1", Some(b"value1")).unwrap();
         builder.add(b"key2", Some(b"value2")).unwrap();
         builder.add(b"key3", Some(b"value3")).unwrap();
-        let encoded = builder.build().unwrap();
+        let encoded = builder.build(true).unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let handle = table_store.write_sst(&id, encoded).await.unwrap();
         let sr = SortedRun {
@@ -220,12 +220,12 @@ mod tests {
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
         builder.add(b"key2", Some(b"value2")).unwrap();
-        let encoded = builder.build().unwrap();
+        let encoded = builder.build(true).unwrap();
         let id1 = SsTableId::Compacted(Ulid::new());
         let handle1 = table_store.write_sst(&id1, encoded).await.unwrap();
         let mut builder = table_store.table_builder();
         builder.add(b"key3", Some(b"value3")).unwrap();
-        let encoded = builder.build().unwrap();
+        let encoded = builder.build(true).unwrap();
         let id2 = SsTableId::Compacted(Ulid::new());
         let handle2 = table_store.write_sst(&id2, encoded).await.unwrap();
         let sr = SortedRun {
@@ -364,7 +364,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            ssts.push(writer.close().await.unwrap());
+            ssts.push(writer.close(true).await.unwrap());
         }
         SortedRun { id: 0, ssts }
     }

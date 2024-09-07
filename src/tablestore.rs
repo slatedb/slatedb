@@ -432,8 +432,8 @@ impl<'a> EncodedSsTableWriter<'a> {
         self.drain_blocks().await
     }
 
-    pub async fn close(mut self) -> Result<SSTableHandle, SlateDBError> {
-        let mut encoded_sst = self.builder.build()?;
+    pub async fn close(mut self, use_bloom_filter: bool) -> Result<SSTableHandle, SlateDBError> {
+        let mut encoded_sst = self.builder.build(use_bloom_filter)?;
         while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
             self.writer.write_all(block.as_ref()).await?;
         }
@@ -497,7 +497,7 @@ mod tests {
         writer.add(&[b'b'; 16], Some(&[2u8; 16])).await.unwrap();
         writer.add(&[b'c'; 16], None).await.unwrap();
         writer.add(&[b'd'; 16], Some(&[4u8; 16])).await.unwrap();
-        let sst = writer.close().await.unwrap();
+        let sst = writer.close(true).await.unwrap();
 
         // then:
         let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1, true)
@@ -534,12 +534,12 @@ mod tests {
         // write a wal sst
         let mut sst1 = ts.table_builder();
         sst1.add(b"key", Some(b"value")).unwrap();
-        let table = sst1.build().unwrap();
+        let table = sst1.build(true).unwrap();
         ts.write_sst(&wal_id, table).await.unwrap();
 
         let mut sst2 = ts.table_builder();
         sst2.add(b"key", Some(b"value")).unwrap();
-        let table2 = sst2.build().unwrap();
+        let table2 = sst2.build(true).unwrap();
 
         // write another walsst with the same id.
         let result = ts.write_sst(&wal_id, table2).await;
@@ -572,7 +572,7 @@ mod tests {
             ));
             writer.add(&key, Some(&value)).await.unwrap();
         }
-        let handle = writer.close().await.unwrap();
+        let handle = writer.close(true).await.unwrap();
 
         // Read the index
         let index = Arc::new(ts.read_index(&handle).await.unwrap());

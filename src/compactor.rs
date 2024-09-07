@@ -503,6 +503,7 @@ mod tests {
                 SizeTieredCompactionSchedulerOptions::default(),
             )),
             max_concurrent_compactions: 1,
+            disable_bloom_filter_for_oldest_sorted_run: false,
             compaction_runtime: None,
         }
     }

@@ -36,7 +36,7 @@ impl DbInner {
             }
         }
 
-        let encoded_sst = sst_builder.build()?;
+        let encoded_sst = sst_builder.build(true)?;
         let handle = self.table_store.write_sst(id, encoded_sst).await?;
         Ok(handle)
     }

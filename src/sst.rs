@@ -437,12 +437,12 @@ impl<'a> EncodedSsTableBuilder<'a> {
         Ok(Some(block))
     }
 
-    pub fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
+    pub fn build(mut self, use_bloom_filter: bool) -> Result<EncodedSsTable, SlateDBError> {
         let mut buf = self.finish_block()?.unwrap_or(Vec::new());
         let mut maybe_filter = None;
         let mut filter_len = 0;
         let filter_offset = self.current_len + buf.len();
-        if self.num_keys >= self.min_filter_keys {
+        if use_bloom_filter && self.num_keys >= self.min_filter_keys {
             let filter = Arc::new(self.filter_builder.build());
             let encoded_filter = filter.encode();
             let compressed_filter = match self.compression_codec {
@@ -585,7 +585,7 @@ mod tests {
         builder.add(&[b'c'; 8], Some(&[b'3'; 8])).unwrap();
         let first_block = builder.next_block();
 
-        let mut encoded = builder.build().unwrap();
+        let mut encoded = builder.build(true).unwrap();
 
         let mut raw_sst = Vec::<u8>::new();
         raw_sst.put_slice(first_block.unwrap().as_ref());
@@ -642,7 +642,7 @@ mod tests {
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
         builder.add(b"key2", Some(b"value2")).unwrap();
-        let encoded = builder.build().unwrap();
+        let encoded = builder.build(true).unwrap();
         let encoded_info = encoded.info.clone();
 
         // write sst and validate that the handle returned has the correct content.
@@ -688,7 +688,7 @@ mod tests {
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
         builder.add(b"key2", Some(b"value2")).unwrap();
-        let encoded = builder.build().unwrap();
+        let encoded = builder.build(true).unwrap();
         let encoded_info = encoded.info.clone();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded)
@@ -711,7 +711,7 @@ mod tests {
             let mut builder = table_store.table_builder();
             builder.add(b"key1", Some(b"value1")).unwrap();
             builder.add(b"key2", Some(b"value2")).unwrap();
-            let encoded = builder.build().unwrap();
+            let encoded = builder.build(true).unwrap();
             let encoded_info = encoded.info.clone();
             table_store
                 .write_sst(&SsTableId::Wal(0), encoded)
@@ -746,7 +746,7 @@ mod tests {
             let mut builder = table_store.table_builder();
             builder.add(b"key1", Some(b"value1")).unwrap();
             builder.add(b"key2", Some(b"value2")).unwrap();
-            let encoded = builder.build().unwrap();
+            let encoded = builder.build(true).unwrap();
             let encoded_info = encoded.info.clone();
             table_store
                 .write_sst(&SsTableId::Wal(0), encoded)
@@ -806,7 +806,7 @@ mod tests {
         builder.add(&[b'b'; 2], Some(&[2u8; 2])).unwrap();
         builder.add(&[b'c'; 20], Some(&[3u8; 20])).unwrap();
         builder.add(&[b'd'; 20], Some(&[4u8; 20])).unwrap();
-        let encoded = builder.build().unwrap();
+        let encoded = builder.build(true).unwrap();
         let info = encoded.info.clone();
         let mut bytes = BytesMut::new();
         encoded
@@ -863,7 +863,7 @@ mod tests {
         builder.add(&[b'b'; 2], Some(&[2u8; 2])).unwrap();
         builder.add(&[b'c'; 20], Some(&[3u8; 20])).unwrap();
         builder.add(&[b'd'; 20], Some(&[4u8; 20])).unwrap();
-        let encoded = builder.build().unwrap();
+        let encoded = builder.build(true).unwrap();
         let info = encoded.info.clone();
         let mut bytes = BytesMut::new();
         encoded
