@@ -469,7 +469,7 @@ mod tests {
             .await
             .unwrap();
         let sst_format = SsTableFormat::new(32, 10, options.compression_codec);
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone().into()));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let table_store = Arc::new(TableStore::new(os.clone(), sst_format, Path::from(PATH)));
         (os, manifest_store, table_store, db)
     }
@@ -486,7 +486,6 @@ mod tests {
             l0_max_ssts: 8,
             compactor_options,
             compression_codec: None,
-            object_store_cache_root_folder: None,
         }
     }
 

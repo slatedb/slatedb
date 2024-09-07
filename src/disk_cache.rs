@@ -16,134 +16,16 @@ use tokio::{
 
 use crate::metrics::DbStats;
 
-pub(crate) struct CacheableGetOptions {
-    /// the range of the object to get, if None, the entire object will be fetched.
-    pub range: Option<GetRange>,
-    /// the cache strategy to use for this request, you can choose to
-    /// disable caching.
-    pub cache_enabled: bool,
-    /// the lower the rank, the less likely the object will be evicted.
-    /// if set to Some(0), the object will never be evicted.
-    #[allow(unused)]
-    pub cache_rank: Option<u8>,
-}
-
-impl Default for CacheableGetOptions {
-    fn default() -> Self {
-        Self {
-            range: None,
-            cache_enabled: true,
-            cache_rank: None,
-        }
-    }
-}
-
-/// CachableObjectStore is a wrapper around ObjectStore, it caches the object
-/// in the local, and serves the object from the cache if possible.
-#[derive(Clone, Debug)]
-pub(crate) enum CacheableObjectStoreRef {
-    Cached(Arc<CacheableObjectStoreInner>),
-    Direct(Arc<dyn ObjectStore>),
-}
-
-impl CacheableObjectStoreRef {
-    pub fn new(
-        object_store: Arc<dyn ObjectStore>,
-        root_folder: std::path::PathBuf,
-        part_size: usize,
-        db_stats: Arc<DbStats>,
-    ) -> Self {
-        Self::Cached(Arc::new(CacheableObjectStoreInner::new(
-            object_store,
-            root_folder,
-            part_size,
-            db_stats,
-        )))
-    }
-
-    pub async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        match self {
-            Self::Cached(inner) => inner.cached_head(location).await,
-            Self::Direct(object_store) => object_store.head(location).await,
-        }
-    }
-
-    pub async fn get_opts(
-        &self,
-        location: &Path,
-        opts: CacheableGetOptions,
-    ) -> object_store::Result<GetResult> {
-        match self {
-            Self::Cached(inner) => inner.cached_get_opts(location, opts).await,
-            Self::Direct(object_store) => {
-                let get_opts = GetOptions {
-                    range: opts.range,
-                    ..Default::default()
-                };
-                object_store.get_opts(location, get_opts).await
-            }
-        }
-    }
-
-    pub async fn put_opts(
-        &self,
-        location: &Path,
-        payload: object_store::PutPayload,
-        opts: object_store::PutOptions,
-    ) -> object_store::Result<PutResult> {
-        match self {
-            Self::Cached(inner) => inner.cached_put_opts(location, payload, opts).await,
-            Self::Direct(object_store) => object_store.put_opts(location, payload, opts).await,
-        }
-    }
-
-    pub fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, object_store::Result<ObjectMeta>> {
-        match self {
-            Self::Cached(inner) => inner.object_store.list(prefix),
-            Self::Direct(object_store) => object_store.list(prefix),
-        }
-    }
-
-    pub fn buf_writer(&self, location: Path) -> BufWriter {
-        BufWriter::new(self.object_store(), location)
-    }
-
-    pub fn as_direct(&self) -> Self {
-        Self::Direct(self.object_store().clone())
-    }
-
-    #[cfg(test)]
-    pub fn into_cached(self) -> Option<CacheableObjectStoreInner> {
-        match self {
-            Self::Cached(inner) => Some(inner.as_ref().clone()),
-            Self::Direct(_) => None,
-        }
-    }
-
-    fn object_store(&self) -> Arc<dyn ObjectStore> {
-        match self {
-            Self::Cached(inner) => inner.object_store.clone(),
-            Self::Direct(object_store) => object_store.clone(),
-        }
-    }
-}
-
-impl From<Arc<dyn ObjectStore + 'static>> for CacheableObjectStoreRef {
-    fn from(object_store: Arc<dyn ObjectStore + 'static>) -> Self {
-        Self::Direct(object_store)
-    }
-}
-
 #[allow(unused)]
 #[derive(Debug, Clone)]
-pub(crate) struct CacheableObjectStoreInner {
+pub(crate) struct CacheableObjectStore {
     object_store: Arc<dyn ObjectStore>,
     pub(crate) part_size: usize, // expected to be aligned with mb or kb
     pub(crate) cache_storage: Arc<dyn LocalCacheStorage>,
     db_stats: Arc<DbStats>,
 }
 
-impl CacheableObjectStoreInner {
+impl CacheableObjectStore {
     pub fn new(
         object_store: Arc<dyn ObjectStore>,
         root_folder: std::path::PathBuf,
@@ -189,21 +71,8 @@ impl CacheableObjectStoreInner {
     pub async fn cached_get_opts(
         &self,
         location: &Path,
-        opts: CacheableGetOptions,
+        opts: GetOptions,
     ) -> object_store::Result<GetResult> {
-        if !opts.cache_enabled {
-            return self
-                .object_store
-                .get_opts(
-                    location,
-                    GetOptions {
-                        range: opts.range,
-                        ..Default::default()
-                    },
-                )
-                .await;
-        }
-
         let (meta, attributes) = self.maybe_prefetch_range(location, &opts.range).await?;
         let range = self.canonicalize_range(opts.range, meta.size)?;
         let parts = self.split_range_into_parts(range.clone());
@@ -469,7 +338,7 @@ impl CacheableObjectStoreInner {
     }
 }
 
-impl std::fmt::Display for CacheableObjectStoreInner {
+impl std::fmt::Display for CacheableObjectStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -820,9 +689,9 @@ mod tests {
     use object_store::{path::Path, GetOptions, GetRange, ObjectStore, PutPayload};
     use rand::{thread_rng, Rng};
 
-    use super::CacheableObjectStoreInner;
+    use super::CacheableObjectStore;
     use crate::{
-        disk_cache::{CacheableGetOptions, DiskCacheEntry, PartID},
+        disk_cache::{DiskCacheEntry, PartID},
         metrics::DbStats,
     };
 
@@ -857,7 +726,7 @@ mod tests {
         let location = Path::from("/data/testfile1");
         let get_result = object_store.get(&location).await?;
 
-        let cached_store = CacheableObjectStoreInner::new(
+        let cached_store = CacheableObjectStore::new(
             object_store.clone(),
             test_cache_folder.clone(),
             1024,
@@ -914,12 +783,8 @@ mod tests {
         let get_result = object_store.get(&location).await?;
         let part_size = 1024;
 
-        let cached_store = CacheableObjectStoreInner::new(
-            object_store,
-            test_cache_folder.clone(),
-            part_size,
-            db_stats,
-        );
+        let cached_store =
+            CacheableObjectStore::new(object_store, test_cache_folder.clone(), part_size, db_stats);
         let entry = cached_store.cache_storage.entry(&location, part_size);
         let object_size_hint = cached_store.save_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3);
@@ -945,7 +810,7 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CacheableObjectStoreInner::new(object_store, test_cache_folder, 1024, db_stats);
+            CacheableObjectStore::new(object_store, test_cache_folder, 1024, db_stats);
 
         struct Test {
             input: (Option<GetRange>, usize),
@@ -1025,7 +890,7 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CacheableObjectStoreInner::new(object_store, test_cache_folder, 1024, db_stats);
+            CacheableObjectStore::new(object_store, test_cache_folder, 1024, db_stats);
 
         let aligned = cached_store.align_range(&(9..1025), 1024);
         assert_eq!(aligned, 0..2048);
@@ -1039,7 +904,7 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CacheableObjectStoreInner::new(object_store, test_cache_folder, 1024, db_stats);
+            CacheableObjectStore::new(object_store, test_cache_folder, 1024, db_stats);
 
         let aligned = cached_store.align_get_range(&GetRange::Bounded(9..1025));
         assert_eq!(aligned, GetRange::Bounded(0..2048));
@@ -1059,7 +924,7 @@ mod tests {
     async fn test_cached_object_store_impl_object_store() -> object_store::Result<()> {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let cached_store = CacheableObjectStoreInner::new(
+        let cached_store = CacheableObjectStore::new(
             object_store.clone(),
             test_cache_folder,
             1024,
@@ -1105,7 +970,7 @@ mod tests {
             let got = cached_store
                 .cached_get_opts(
                     &test_path,
-                    CacheableGetOptions {
+                    GetOptions {
                         range: range.clone(),
                         ..Default::default()
                     },

@@ -7,14 +7,13 @@ use fail_parallel::{fail_point, FailPointRegistry};
 use futures::StreamExt;
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
-use object_store::GetRange;
+use object_store::ObjectStore;
 use parking_lot::RwLock;
 use tokio::io::AsyncWriteExt;
 
 use crate::blob::ReadOnlyBlob;
 use crate::block::Block;
 use crate::db_state::{SSTableHandle, SsTableId};
-use crate::disk_cache::{CacheableGetOptions, CacheableObjectStoreRef};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
@@ -24,7 +23,7 @@ use crate::transactional_object_store::{
 };
 
 pub struct TableStore {
-    pub(crate) object_store: CacheableObjectStoreRef,
+    object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,
     root_path: Path,
     wal_path: &'static str,
@@ -41,7 +40,7 @@ pub struct TableStore {
 }
 
 struct ReadOnlyObject {
-    object_store: CacheableObjectStoreRef,
+    object_store: Arc<dyn ObjectStore>,
     path: Path,
 }
 
@@ -56,24 +55,14 @@ impl ReadOnlyBlob for ReadOnlyObject {
     }
 
     async fn read_range(&self, range: Range<usize>) -> Result<Bytes, SlateDBError> {
-        let opts = CacheableGetOptions {
-            range: Some(GetRange::Bounded(range)),
-            ..Default::default()
-        };
-        let result = self
-            .object_store
-            .get_opts(&self.path, opts)
+        self.object_store
+            .get_range(&self.path, range)
             .await
-            .map_err(SlateDBError::ObjectStoreError)?;
-        result.bytes().await.map_err(SlateDBError::ObjectStoreError)
+            .map_err(SlateDBError::ObjectStoreError)
     }
 
     async fn read(&self) -> Result<Bytes, SlateDBError> {
-        let opts = CacheableGetOptions {
-            range: None,
-            ..Default::default()
-        };
-        let file = self.object_store.get_opts(&self.path, opts).await?;
+        let file = self.object_store.get(&self.path).await?;
         file.bytes().await.map_err(SlateDBError::ObjectStoreError)
     }
 }
@@ -81,12 +70,12 @@ impl ReadOnlyBlob for ReadOnlyObject {
 impl TableStore {
     #[allow(dead_code)]
     pub fn new(
-        object_store: impl Into<CacheableObjectStoreRef>,
+        object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
         root_path: Path,
     ) -> Self {
         Self::new_with_fp_registry(
-            object_store.into(),
+            object_store,
             sst_format,
             root_path,
             Arc::new(FailPointRegistry::new()),
@@ -94,14 +83,13 @@ impl TableStore {
     }
 
     pub fn new_with_fp_registry(
-        cacheable_object_store: impl Into<CacheableObjectStoreRef>,
+        object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
         root_path: Path,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
-        let cacheable_object_store = cacheable_object_store.into();
         Self {
-            object_store: cacheable_object_store.clone(),
+            object_store: object_store.clone(),
             sst_format,
             root_path: root_path.clone(),
             wal_path: "wal",
@@ -110,22 +98,9 @@ impl TableStore {
             filter_cache: RwLock::new(HashMap::new()),
             transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
                 Path::from("/"),
-                cacheable_object_store.as_direct(),
+                object_store.clone(),
             )),
         }
-    }
-
-    pub(crate) fn as_uncached(&self) -> Arc<TableStore> {
-        Arc::new(TableStore {
-            object_store: self.object_store.as_direct(),
-            sst_format: self.sst_format.clone(),
-            root_path: self.root_path.clone(),
-            wal_path: self.wal_path,
-            compacted_path: self.compacted_path,
-            fp_registry: self.fp_registry.clone(),
-            filter_cache: RwLock::new(HashMap::new()),
-            transactional_wal_store: self.transactional_wal_store.clone(),
-        })
     }
 
     pub(crate) async fn get_wal_sst_list(
@@ -156,7 +131,7 @@ impl TableStore {
         EncodedSsTableWriter {
             id,
             builder: self.sst_format.table_builder(),
-            writer: self.object_store.buf_writer(path),
+            writer: BufWriter::new(self.object_store.clone(), path),
             table_store: self,
             blocks_written: 0,
         }
@@ -403,7 +378,6 @@ mod tests {
 
     use bytes::Bytes;
     use object_store::path::Path;
-    use object_store::ObjectStore;
     use ulid::Ulid;
 
     use crate::db_state::SsTableId;
@@ -419,7 +393,7 @@ mod tests {
     #[tokio::test]
     async fn test_sst_writer_should_write_sst() {
         // given:
-        let os: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let os = Arc::new(object_store::memory::InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
         let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
         let id = SsTableId::Compacted(Ulid::new());
@@ -457,7 +431,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wal_write_should_fail_when_fenced() {
-        let os: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let os = Arc::new(object_store::memory::InMemory::new());
         let format = SsTableFormat::new(32, 1, None);
         let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT)));
         let wal_id = SsTableId::Wal(1);

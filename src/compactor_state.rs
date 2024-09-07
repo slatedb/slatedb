@@ -557,7 +557,7 @@ mod tests {
             tokio_handle.block_on(db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48]));
         }
         tokio_handle.block_on(db.close()).unwrap();
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone().into()));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let stored_manifest = tokio_handle
             .block_on(StoredManifest::load(manifest_store))
             .unwrap()

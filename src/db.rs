@@ -14,7 +14,6 @@ use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
 use crate::db_state::{CoreDbState, DbState, SSTableHandle, SortedRun, SsTableId};
-use crate::disk_cache::CacheableObjectStoreRef;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -42,7 +41,6 @@ impl DbInner {
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
         memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
-        db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let state = DbState::new(core_db_state);
         let db_inner = Self {
@@ -50,7 +48,7 @@ impl DbInner {
             options,
             table_store,
             memtable_flush_notifier,
-            db_stats,
+            db_stats: Arc::new(DbStats::new()),
         };
         Ok(db_inner)
     }
@@ -268,15 +266,14 @@ impl DbInner {
             .get_wal_sst_list(wal_id_last_compacted)
             .await?;
         let mut last_sst_id = wal_id_last_compacted;
-        let table_store = self.table_store.as_uncached();
         for sst_id in wal_sst_list {
             last_sst_id = sst_id;
-            let sst = table_store.open_sst(&SsTableId::Wal(sst_id)).await?;
+            let sst = self.table_store.open_sst(&SsTableId::Wal(sst_id)).await?;
             let sst_id = match &sst.id {
                 SsTableId::Wal(id) => *id,
                 SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
             };
-            let mut iter = SstIterator::new(&sst, table_store.clone(), 1, 1).await?;
+            let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1).await?;
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
             // buffer the WAL entries to bulk replay them into the memtable.
             let mut wal_replay_buf = Vec::new();
@@ -347,29 +344,15 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
-        let db_stats = Arc::new(DbStats::new());
         let sst_format =
             SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
-
-        let cacheable_object_store =
-            if let Some(disk_cache_root_folder) = &options.object_store_cache_root_folder {
-                CacheableObjectStoreRef::new(
-                    object_store,
-                    disk_cache_root_folder.clone(),
-                    4 * 1024 * 1024,
-                    db_stats.clone(),
-                )
-            } else {
-                CacheableObjectStoreRef::Direct(object_store.clone())
-            };
-
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            cacheable_object_store.clone(),
+            object_store.clone(),
             sst_format,
             path.clone(),
-            fp_registry,
+            fp_registry.clone(),
         ));
-        let manifest_store = Arc::new(ManifestStore::new(&path, cacheable_object_store));
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let mut manifest = Self::init_db(&manifest_store).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
@@ -378,7 +361,6 @@ impl Db {
                 table_store.clone(),
                 manifest.db_state()?.clone(),
                 memtable_flush_tx,
-                db_stats.clone(),
             )
             .await?,
         );
@@ -518,7 +500,6 @@ impl Db {
 mod tests {
     use std::time::Duration;
 
-    use futures::StreamExt;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use tracing::info;
@@ -552,89 +533,6 @@ mod tests {
         kv_store.delete(key).await;
         assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_get_with_object_store_cache() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let mut opts = test_db_options(0, 1024, None);
-        let temp_dir = tempfile::Builder::new()
-            .prefix("objstore_cache_test_")
-            .tempdir_in("/tmp")
-            .unwrap();
-
-        opts.object_store_cache_root_folder = Some(temp_dir.into_path());
-        let kv_store = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store_with_cache"),
-            opts,
-            object_store,
-        )
-        .await
-        .unwrap();
-        let cacheable_object_store = kv_store.inner.table_store.object_store.clone();
-
-        let access_count0 = kv_store.metrics().object_store_cache_part_access.get();
-        let key = b"test_key";
-        let value = b"test_value";
-        kv_store.put(key, value).await;
-        kv_store.flush().await.unwrap();
-
-        let got = kv_store.get(key).await.unwrap();
-        let access_count1 = kv_store.metrics().object_store_cache_part_access.get();
-        assert_eq!(got, Some(Bytes::from_static(value)));
-        assert!(access_count1 > 0);
-        assert!(access_count1 >= access_count0);
-        assert!(kv_store.metrics().object_store_cache_part_hits.get() >= 1);
-
-        assert_eq!(
-            cacheable_object_store
-                .list(None)
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .filter_map(Result::ok)
-                .map(|meta| meta.location.to_string())
-                .collect::<Vec<_>>(),
-            vec![
-                "tmp/test_kv_store_with_cache/manifest/00000000000000000001.manifest".to_string(),
-                "tmp/test_kv_store_with_cache/manifest/00000000000000000002.manifest".to_string(),
-                "tmp/test_kv_store_with_cache/wal/00000000000000000001.sst".to_string(),
-                "tmp/test_kv_store_with_cache/wal/00000000000000000002.sst".to_string(),
-            ],
-        );
-
-        // ensure the wal not being cached, but manifest is cached
-        let cached_store = cacheable_object_store.clone().into_cached().unwrap();
-        let tests = vec![
-            (
-                "tmp/test_kv_store_with_cache/manifest/00000000000000000001.manifest",
-                0,
-            ),
-            (
-                "tmp/test_kv_store_with_cache/manifest/00000000000000000002.manifest",
-                1,
-            ),
-            (
-                "tmp/test_kv_store_with_cache/wal/00000000000000000001.sst",
-                0,
-            ),
-            (
-                "tmp/test_kv_store_with_cache/wal/00000000000000000002.sst",
-                0,
-            ),
-        ];
-        for (path, expected) in tests {
-            let entry = cached_store.cache_storage.entry(
-                &object_store::path::Path::from(path),
-                cached_store.part_size,
-            );
-            assert_eq!(
-                entry.cached_parts().await.unwrap().len(),
-                expected,
-                "{}",
-                path
-            );
-        }
     }
 
     #[tokio::test]
@@ -693,7 +591,7 @@ mod tests {
         let db = Db::open_with_opts(path.clone(), options, object_store.clone())
             .await
             .unwrap();
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.into()));
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let mut stored_manifest = StoredManifest::load(manifest_store.clone())
             .await
             .unwrap()
@@ -752,7 +650,7 @@ mod tests {
         .await
         .unwrap();
 
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone().into()));
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let mut stored_manifest = StoredManifest::load(manifest_store.clone())
             .await
             .unwrap()
@@ -939,7 +837,7 @@ mod tests {
         kv_store_restored.close().await.unwrap();
 
         // validate that the manifest file exists.
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.into()));
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap().unwrap();
         let db_state = stored_manifest.db_state();
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
@@ -1140,7 +1038,7 @@ mod tests {
         let db = Db::open_with_opts(path.clone(), options, object_store.clone())
             .await
             .unwrap();
-        let ms = ManifestStore::new(&path, object_store.into());
+        let ms = ManifestStore::new(&path, object_store.clone());
         let mut sm = StoredManifest::load(Arc::new(ms)).await.unwrap().unwrap();
 
         // write enough to fill up a few l0 SSTs
@@ -1350,7 +1248,6 @@ mod tests {
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
-            object_store_cache_root_folder: None,
         }
     }
 }

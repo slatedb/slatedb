@@ -136,11 +136,6 @@ pub struct DbOptions {
     /// Configuration options for the compactor.
     pub compactor_options: Option<CompactorOptions>,
     pub compression_codec: Option<CompressionCodec>,
-
-    /// Configuration options for the cache for object store. If set, when reading from object
-    /// store, SlateDB will cache the data on disk. This can reduce the number of network calls
-    /// to object storage and speed up reads.
-    pub object_store_cache_root_folder: Option<std::path::PathBuf>,
 }
 
 impl Default for DbOptions {
@@ -156,7 +151,6 @@ impl Default for DbOptions {
             l0_max_ssts: 8,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
-            object_store_cache_root_folder: None,
         }
     }
 }
