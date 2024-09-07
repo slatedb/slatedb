@@ -276,7 +276,7 @@ impl SizeTieredCompactionSchedulerOptions {
 /// in the local, and save them into the local cache storage.
 ///
 /// The local cache default uses file system as storage, it can also be extended to use other
-/// like RocksDB, Redis, etc.
+/// like RocksDB, Redis, etc. in the future.
 #[derive(Clone, Debug)]
 pub struct ObjectStoreCacheOptions {
     /// The root folder where the cache files are stored. If not set, the cache will be
