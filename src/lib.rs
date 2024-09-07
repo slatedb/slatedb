@@ -16,7 +16,7 @@ pub mod config;
 pub mod db;
 mod db_common;
 mod db_state;
-mod disk_cache;
+mod cached_object_store;
 pub mod error;
 mod filter;
 mod flatbuffer_types;

@@ -2,10 +2,8 @@ use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
-use object_store::{
-    buffered::BufWriter, Attribute, Attributes, GetRange, GetResultPayload, PutResult,
-};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
+use object_store::{Attribute, Attributes, GetRange, GetResultPayload, PutResult};
 use object_store::{ListResult, MultipartUpload, PutMultipartOpts, PutOptions, PutPayload};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -769,7 +767,7 @@ mod tests {
 
     use super::CachedObjectStore;
     use crate::{
-        disk_cache::{DiskCacheEntry, PartID},
+        cached_object_store::{DiskCacheEntry, PartID},
         metrics::DbStats,
     };
 
