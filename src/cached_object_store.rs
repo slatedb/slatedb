@@ -93,6 +93,7 @@ impl CachedObjectStore {
     }
 
     // TODO: implement the put with cache here
+    #[allow(unused)]
     async fn cached_put_opts(
         &self,
         location: &Path,
