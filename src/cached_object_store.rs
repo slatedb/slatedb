@@ -14,7 +14,7 @@ use tokio::{
 };
 
 use crate::metrics::DbStats;
-#[allow(unused)]
+
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
@@ -32,7 +32,7 @@ impl CachedObjectStore {
     ) -> Self {
         assert!(part_size % 1024 == 0);
 
-        let cache_storage = Arc::new(DiskCacheStorage {
+        let cache_storage = Arc::new(FsCacheStorage {
             root_folder: root_folder.clone(),
         });
         Self {
@@ -525,17 +525,17 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
 }
 
 #[derive(Debug)]
-struct DiskCacheStorage {
+struct FsCacheStorage {
     root_folder: std::path::PathBuf,
 }
 
-impl LocalCacheStorage for DiskCacheStorage {
+impl LocalCacheStorage for FsCacheStorage {
     fn entry(
         &self,
         location: &object_store::path::Path,
         part_size: usize,
     ) -> Box<dyn LocalCacheEntry> {
-        Box::new(DiskCacheEntry {
+        Box::new(FsCacheEntry {
             root_folder: self.root_folder.clone(),
             location: location.clone(),
             part_size,
@@ -543,20 +543,20 @@ impl LocalCacheStorage for DiskCacheStorage {
     }
 }
 
-impl Display for DiskCacheStorage {
+impl Display for FsCacheStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "DiskCacheStorage({})", self.root_folder.display())
+        write!(f, "FsCacheStorage({})", self.root_folder.display())
     }
 }
 
 #[derive(Debug)]
-struct DiskCacheEntry {
+struct FsCacheEntry {
     root_folder: std::path::PathBuf,
     location: Path,
     part_size: usize,
 }
 
-impl DiskCacheEntry {
+impl FsCacheEntry {
     async fn atomic_write(&self, path: &std::path::Path, buf: Bytes) -> object_store::Result<()> {
         let tmp_path = path.with_extension(format!("_tmp{}", self.make_rand_suffix()));
 
@@ -612,7 +612,7 @@ impl DiskCacheEntry {
 }
 
 #[async_trait::async_trait]
-impl LocalCacheEntry for DiskCacheEntry {
+impl LocalCacheEntry for FsCacheEntry {
     async fn save_part(&self, part_number: usize, buf: Bytes) -> object_store::Result<()> {
         let part_path = Self::make_part_path(
             self.root_folder.clone(),
@@ -745,10 +745,8 @@ impl LocalCacheEntry for DiskCacheEntry {
     }
 }
 
-#[allow(unused)]
 type PartID = usize;
 
-#[allow(unused)]
 fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_store::Error {
     object_store::Error::Generic {
         store: "cached_object_store",
@@ -766,7 +764,7 @@ mod tests {
 
     use super::CachedObjectStore;
     use crate::{
-        cached_object_store::{DiskCacheEntry, PartID},
+        cached_object_store::{FsCacheEntry, PartID},
         metrics::DbStats,
     };
 
@@ -826,7 +824,7 @@ mod tests {
 
         // delete part 2, known_cache_size is still known
         let evict_part_path =
-            DiskCacheEntry::make_part_path(test_cache_folder.clone(), &location, 2, 1024);
+            FsCacheEntry::make_part_path(test_cache_folder.clone(), &location, 2, 1024);
         std::fs::remove_file(evict_part_path).unwrap();
         assert_eq!(entry.read_part(2).await?, None);
         let cached_parts = entry.cached_parts().await?;
@@ -834,7 +832,7 @@ mod tests {
 
         // delete part 3, known_cache_size become None
         let evict_part_path =
-            DiskCacheEntry::make_part_path(test_cache_folder.clone(), &location, 3, 1024);
+            FsCacheEntry::make_part_path(test_cache_folder.clone(), &location, 3, 1024);
         std::fs::remove_file(evict_part_path).unwrap();
         assert_eq!(entry.read_part(3).await?, None);
         let cached_parts = entry.cached_parts().await?;
@@ -870,7 +868,7 @@ mod tests {
         assert_eq!(entry.read_part(2).await?, Some(payload.slice(2048..3072)));
 
         let evict_part_path =
-            DiskCacheEntry::make_part_path(test_cache_folder.clone(), &location, 2, part_size);
+            FsCacheEntry::make_part_path(test_cache_folder.clone(), &location, 2, part_size);
         std::fs::remove_file(evict_part_path).unwrap();
         assert_eq!(entry.read_part(2).await?, None);
 
