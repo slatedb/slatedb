@@ -14,6 +14,7 @@ use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
 use crate::db_state::{CoreDbState, DbState, SSTableHandle, SortedRun, SsTableId};
+use crate::disk_cache::CachedObjectStore;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -41,6 +42,7 @@ impl DbInner {
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
         memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
+        db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let state = DbState::new(core_db_state);
         let db_inner = Self {
@@ -48,7 +50,7 @@ impl DbInner {
             options,
             table_store,
             memtable_flush_notifier,
-            db_stats: Arc::new(DbStats::new()),
+            db_stats,
         };
         Ok(db_inner)
     }
@@ -344,15 +346,33 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
+        let db_stats = Arc::new(DbStats::new());
         let sst_format =
             SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
+
+        let maybe_cached_object_store = match &options.object_store_cache_root_folder {
+            None => object_store,
+            Some(cache_root_folder) => {
+                let part_size_bytes = options.object_store_cache_part_bytes;
+                if part_size_bytes == 0 || part_size_bytes % 1024 != 0 {
+                    return Err(SlateDBError::InvalidCachePartSize);
+                }
+                Arc::new(CachedObjectStore::new(
+                    object_store,
+                    cache_root_folder.clone(),
+                    part_size_bytes,
+                    db_stats.clone(),
+                ))
+            }
+        };
+
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            object_store.clone(),
+            maybe_cached_object_store.clone(),
             sst_format,
             path.clone(),
             fp_registry.clone(),
         ));
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
         let mut manifest = Self::init_db(&manifest_store).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
@@ -361,6 +381,7 @@ impl Db {
                 table_store.clone(),
                 manifest.db_state()?.clone(),
                 memtable_flush_tx,
+                db_stats,
             )
             .await?,
         );
@@ -1248,6 +1269,8 @@ mod tests {
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
+            object_store_cache_part_bytes: 1024,
+            object_store_cache_root_folder: None,
         }
     }
 }
