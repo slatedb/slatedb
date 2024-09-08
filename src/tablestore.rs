@@ -252,6 +252,7 @@ impl TableStore {
     ) -> Result<(), SlateDBError> {
         let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
 
+        // TODO Exclude snapshot SSTs from GC once snapshots are implemented
         // Get all active SSTs
         let l0_sst_ids: Vec<SsTableId> = state.l0.iter().map(|h| h.id).collect();
         let compacted_sst_ids: Vec<SsTableId> = state
