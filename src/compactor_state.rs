@@ -69,6 +69,7 @@ pub struct Compaction {
     pub(crate) status: CompactionStatus,
     pub(crate) sources: Vec<SourceId>,
     pub(crate) destination: u32,
+    pub(crate) is_last_sorted_run: bool,
 }
 
 impl Display for Compaction {
@@ -83,11 +84,12 @@ impl Display for Compaction {
 }
 
 impl Compaction {
-    pub(crate) fn new(sources: Vec<SourceId>, destination: u32) -> Self {
+    pub(crate) fn new(sources: Vec<SourceId>, destination: u32, is_last_sorted_run: bool) -> Self {
         Self {
             status: Submitted,
             sources,
             destination,
+            is_last_sorted_run,
         }
     }
 }
@@ -385,6 +387,7 @@ mod tests {
             .submit_compaction(Compaction::new(
                 vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
                 0,
+                false,
             ))
             .unwrap();
         state.finish_compaction(SortedRun {
@@ -442,6 +445,7 @@ mod tests {
                     .map(|h| Sst(h.id.unwrap_compacted_id()))
                     .collect(),
                 0,
+                false,
             ))
             .unwrap();
         state.finish_compaction(SortedRun {
@@ -533,7 +537,7 @@ mod tests {
             .iter()
             .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
             .collect();
-        Compaction::new(sources, dst)
+        Compaction::new(sources, dst, false)
     }
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {

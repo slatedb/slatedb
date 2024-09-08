@@ -246,6 +246,7 @@ impl CompactorOrchestrator {
             destination: compaction.destination,
             ssts,
             sorted_runs,
+            is_last_sorted_run: compaction.is_last_sorted_run,
         });
     }
 
@@ -404,7 +405,7 @@ mod tests {
         rt.block_on(db.put(&[b'j'; 32], &[b'k'; 96]));
         rt.block_on(db.close()).unwrap();
         orchestrator
-            .submit_compaction(Compaction::new(l0_ids_to_compact.clone(), 0))
+            .submit_compaction(Compaction::new(l0_ids_to_compact.clone(), 0, false))
             .unwrap();
         let msg = orchestrator.worker_rx.recv().unwrap();
         let WorkerToOrchestratorMsg::CompactionFinished(Ok(sr)) = msg else {

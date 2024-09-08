@@ -210,13 +210,15 @@ impl SizeTieredCompactionScheduler {
                 .map_or(0, |sr| sr.source.unwrap_sorted_run() + 1);
             let next_sr = srs.first();
             if checker.check_compaction(&l0_candidates, dst, next_sr) {
-                return Some(self.create_compaction(l0_candidates, dst));
+                return Some(self.create_compaction(l0_candidates, dst, next_sr.is_none()));
             }
         }
 
         // try to compact the lower levels
         let mut srs_iter = srs.iter().peekable();
         while srs_iter.peek().is_some() {
+            // FIXME: I think here we can know that we generated a
+            // compaction for the _last_ (in srs) sorted run!
             let compactable_run = Self::build_compactable_run(
                 self.options.include_size_threshold,
                 srs_iter.clone(),
@@ -230,7 +232,12 @@ impl SizeTieredCompactionScheduler {
                     .expect("expected non-empty compactable run")
                     .source
                     .unwrap_sorted_run();
-                return Some(self.create_compaction(compactable_run, dst));
+                let is_last_sorted_run = srs_iter
+                    .clone()
+                    .rev()
+                    .next()
+                    .map_or(false, |last| last.source.unwrap_sorted_run() == dst);
+                return Some(self.create_compaction(compactable_run, dst, is_last_sorted_run));
             }
             srs_iter.next();
         }
@@ -251,9 +258,14 @@ impl SizeTieredCompactionScheduler {
         sources
     }
 
-    fn create_compaction(&self, sources: VecDeque<CompactionSource>, dst: u32) -> Compaction {
+    fn create_compaction(
+        &self,
+        sources: VecDeque<CompactionSource>,
+        dst: u32,
+        is_last_sorted_run: bool,
+    ) -> Compaction {
         let sources: Vec<SourceId> = sources.iter().map(|src| src.source.clone()).collect();
-        Compaction::new(sources, dst)
+        Compaction::new(sources, dst, is_last_sorted_run)
     }
 
     // looks for a series of sorted runs with similar sizes and assemble to a vecdequeue,
@@ -679,6 +691,7 @@ mod tests {
                 .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
                 .collect(),
             dst,
+            false,
         )
     }
 
@@ -686,6 +699,7 @@ mod tests {
         Compaction::new(
             srs.iter().map(|sr| SourceId::SortedRun(*sr)).collect(),
             *srs.last().unwrap(),
+            false,
         )
     }
 }
