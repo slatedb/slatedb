@@ -1,5 +1,7 @@
 use std::sync::Arc;
+use std::time::Duration;
 
+use chrono::Utc;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
@@ -179,12 +181,13 @@ impl ManifestStore {
             manifest_suffix: "manifest",
         }
     }
+
     pub(crate) async fn write_manifest(
         &self,
         id: u64,
         manifest: &Manifest,
     ) -> Result<(), SlateDBError> {
-        let manifest_path = &Path::from(format!("{:020}.{}", id, self.manifest_suffix));
+        let manifest_path = &self.get_manifest_path(id);
 
         self.object_store
             .put_if_not_exists(manifest_path, self.codec.encode(manifest))
@@ -197,6 +200,33 @@ impl ManifestStore {
                 }
             })?;
 
+        Ok(())
+    }
+
+    // TODO add tests
+    /// Delete a manifest from the object store.
+    pub(crate) async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError> {
+        // TODO add safety checks to prevent deletions of active manifests
+        let manifest_path = &self.get_manifest_path(id);
+        self.object_store.delete(manifest_path).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn collect_garbage(&self, min_age: Duration) -> Result<(), SlateDBError> {
+        let manifest_path = &Path::from("/");
+        let mut files_stream = self.object_store.list(Some(manifest_path));
+        let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
+
+        // TODO Exclude snapshot manifests from GC when they are referenced by the current manifest
+        while let Some(file) = match files_stream.next().await.transpose() {
+            Ok(file) => file,
+            Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
+        } {
+            if file.last_modified.signed_duration_since(Utc::now()) > min_age {
+                let id = self.parse_id(&file.location, "manifest")?;
+                self.delete_manifest(id).await?;
+            }
+        }
         Ok(())
     }
 
@@ -252,6 +282,10 @@ impl ManifestStore {
                 .map_err(|_| InvalidDBState),
             _ => Err(InvalidDBState),
         }
+    }
+
+    fn get_manifest_path(&self, id: u64) -> Path {
+        Path::from(format!("{:020}.{}", id, self.manifest_suffix))
     }
 }
 

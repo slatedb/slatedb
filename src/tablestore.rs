@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::{BufMut, Bytes};
 use fail_parallel::{fail_point, FailPointRegistry};
@@ -208,6 +209,36 @@ impl TableStore {
             let mut wguard = self.filter_cache.write();
             wguard.insert(sst, filter);
         }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
+        let path = self.path(id);
+        self.object_store
+            .delete(&path)
+            .await
+            .map_err(SlateDBError::ObjectStoreError)
+    }
+
+    pub(crate) async fn collect_garbage_wal(
+        &self,
+        min_age: Duration,
+        wal_id_last_compacted: u64,
+    ) -> Result<(), SlateDBError> {
+        let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
+        let wal_list = self.get_wal_sst_list(wal_id_last_compacted).await?;
+        for wal_id in wal_list {
+            let path = self.path(&SsTableId::Wal(wal_id));
+            let metadata = self.object_store.head(&path).await?;
+            if metadata
+                .last_modified
+                .signed_duration_since(chrono::Utc::now())
+                > min_age
+            {
+                self.object_store.delete(&path).await?;
+            }
+        }
+        Ok(())
     }
 
     // todo: clean up the warning suppression when we start using open_sst outside tests

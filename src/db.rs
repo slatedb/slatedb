@@ -14,6 +14,7 @@ use crate::config::{
 };
 use crate::db_state::{CoreDbState, DbState, SSTableHandle, SortedRun, SsTableId};
 use crate::error::SlateDBError;
+use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::WritableKVTable;
@@ -315,6 +316,7 @@ pub struct Db {
     flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     compactor: Mutex<Option<Compactor>>,
+    garbage_collector: Mutex<Option<GarbageCollector>>,
 }
 
 impl Db {
@@ -392,12 +394,26 @@ impl Db {
                 .await?,
             )
         }
+        let mut garbage_collector = None;
+        if let Some(gc_options) = &inner.options.garbage_collector_options {
+            garbage_collector = Some(
+                GarbageCollector::new(
+                    manifest_store.clone(),
+                    table_store.clone(),
+                    gc_options.clone(),
+                    Handle::current(),
+                    inner.db_stats.clone(),
+                )
+                .await?,
+            )
+        };
         Ok(Self {
             inner,
             flush_notifier: tx,
             flush_task: Mutex::new(flush_thread),
             memtable_flush_task: Mutex::new(memtable_flush_task),
             compactor: Mutex::new(compactor),
+            garbage_collector: Mutex::new(garbage_collector),
         })
     }
 
@@ -423,6 +439,13 @@ impl Db {
             maybe_compactor.take()
         } {
             compactor.close().await;
+        }
+
+        if let Some(gc) = {
+            let mut maybe_gc = self.garbage_collector.lock();
+            maybe_gc.take()
+        } {
+            gc.close().await;
         }
 
         // Tell the notifier thread to shut down.
@@ -1253,6 +1276,7 @@ mod tests {
             compactor_options,
             compression_codec: None,
             block_cache_options: None,
+            garbage_collector_options: None,
         }
     }
 }

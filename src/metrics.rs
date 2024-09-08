@@ -53,6 +53,9 @@ impl<T: Default> Default for Gauge<T> {
 pub struct DbStats {
     pub immutable_memtable_flushes: Counter,
     pub last_compaction_ts: Gauge<u64>,
+    pub gc_manifest_count: Counter,
+    pub gc_wal_count: Counter,
+    pub gc_compacted_count: Counter,
 }
 
 impl DbStats {
@@ -60,6 +63,9 @@ impl DbStats {
         Self {
             immutable_memtable_flushes: Counter::default(),
             last_compaction_ts: Gauge::default(),
+            gc_manifest_count: Counter::default(),
+            gc_wal_count: Counter::default(),
+            gc_compacted_count: Counter::default(),
         }
     }
 }

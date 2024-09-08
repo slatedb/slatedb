@@ -39,6 +39,7 @@ flate2 = { version = "1.0.33", optional = true }
 lz4_flex = { version = "0.11.3", optional = true }
 zstd = { version = "0.13.2", optional = true }
 moka = { version = "0.12.8", features = ["future"] }
+chrono = "0.4.38"
 
 [dev-dependencies]
 tokio = { version = "1.40.0", features = ["rt-multi-thread"] }

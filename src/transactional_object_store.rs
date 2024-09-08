@@ -16,6 +16,8 @@ pub(crate) trait TransactionalObjectStore: Send + Sync {
 
     async fn get(&self, path: &Path) -> Result<GetResult, Error>;
 
+    async fn delete(&self, path: &Path) -> Result<(), Error>;
+
     fn list(&self, path: Option<&Path>) -> BoxStream<'_, Result<ObjectMeta, Error>>;
 }
 
@@ -75,6 +77,12 @@ impl TransactionalObjectStore for DelegatingTransactionalObjectStore {
     async fn get(&self, path: &Path) -> Result<GetResult, Error> {
         let path = self.path(path);
         self.object_store.get(&path).await
+    }
+
+    // TODO Add tests
+    async fn delete(&self, path: &Path) -> Result<(), Error> {
+        let path = self.path(path);
+        self.object_store.delete(&path).await
     }
 
     fn list(&self, path: Option<&Path>) -> BoxStream<'_, Result<ObjectMeta, Error>> {

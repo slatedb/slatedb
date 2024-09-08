@@ -20,6 +20,7 @@ pub mod error;
 mod filter;
 mod flatbuffer_types;
 mod flush;
+mod garbage_collector;
 pub mod inmemory_cache;
 mod iter;
 mod manifest;

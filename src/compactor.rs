@@ -492,6 +492,7 @@ mod tests {
             compactor_options,
             compression_codec: None,
             block_cache_options: None,
+            garbage_collector_options: None,
         }
     }
 
