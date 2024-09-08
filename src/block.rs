@@ -67,6 +67,7 @@ impl BlockBuilder {
         }
     }
 
+    // TODO: this may need adjustment, it returns a num of bytes + num of elements.
     #[rustfmt::skip]
     fn estimated_size(&self) -> usize {
         SIZEOF_U16           // number of key-value pairs in the block

@@ -256,26 +256,48 @@ impl SsTableFormat {
 
     /// Estimate the SsTable size given a memtable, including key, value length
     /// headers, offset ptrs, bloom filter sizes, and block overheads.
+    /// TODO: Add byte sizes to diagram.
+    /// TODO: Add 2 checksums, one per block and one on the SST.
     /// +--------------------------------------------------------------------------------+
-    /// |                                   4K Block                                     |
+    /// |                                Data Blocks                                     |
     /// +--------------------------------------------------------------------------------+
-    /// |                                                                                |
-    /// | +------------+--------------+----------+---------+----------+------------+     |
-    /// | |   Bloom    |  Number of   |          |   Key   |   Key    |   Value    |     |
-    /// | |   Filter   |  KV Pairs    | Offsets  |  Length |   Data   |   Length   | ... |
-    /// | |            |              |          |         |          |            |     |
-    /// | +------------+--------------+----------+---------+----------+------------+     |
-    /// |                                                                                |
-    /// +--------------------------------------------------------------------------------+
-    /// |                                   4K Block                                     |
     /// +--------------------------------------------------------------------------------+
     /// |                                                                                |
-    /// | +------------+--------------+----------+---------+----------+------------+     |
-    /// | |   Bloom    |  Number of   |          |   Key   |   Key    |   Value    |     |
-    /// | |   Filter   |  KV Pairs    | Offsets  |  Length |   Data   |   Length   | ... |
-    /// | |            |              |          |         |          |            |     |
-    /// | +------------+--------------+----------+---------+----------+------------+     |
+    /// | +--------------+----------+---------+-----------+------------+-----------+----+|
+    /// | |  Number of   | K-V      |   Key   |   Key     |   Value    | Value     |    ||
+    /// | |  KV Pairs    | Offsets  |  Length |   Data    |   Length   | Data      | .. ||
+    /// | |    (2B)      | (2B each)|   (2B)  | (variable)|    (4B)    | (variable)|    ||
+    /// | +--------------+----------+---------+-----------+------------+-----------+----+|
+    /// |                                               followed by:   | Checksum |      |
+    /// |                                                              |   (4B)   |      |
+    /// +--------------------------------------------------------------------------------+
+    /// |                             More Data Blocks                                   |
+    /// +--------------------------------------------------------------------------------+
     /// |                                                                                |
+    /// |                        ... (Additional Data Blocks) ...                        |
+    /// |                                                                                |
+    /// +--------------------------------------------------------------------------------+
+    /// |                               Index Block                                      |
+    /// +--------------------------------------------------------------------------------+
+    /// +--------------------------------------------------------------------------------+
+    /// |                              Bloom filter                                      |
+    /// |                                                                                |
+    /// |                (variable size, bits_per_key * num keys)                        |
+    /// +--------------------------------------------------------------------------------+
+    /// |                     Index: per data block metadata                             |
+    /// |                                                                                |
+    /// |    (Index Data: first key(variable) + Offset per Data Blocks) (variable size)  |
+    /// +--------------------------------------------------------------------------------+
+    /// |                              SSTable Info                                      |
+    /// |                                                                                |
+    /// | First Key (variable) | Index Offset (8B) | Index Length (8B) |                 |
+    /// | Filter Offset (8B) | Filter Length (8B) | Compression Format (1B)              |
+    /// |                                                                                |
+    /// +--------------------------------------------------------------------------------+
+    /// |                           Metadata Offset (4 bytes)                            |
+    /// |                           (points to SSTable Info)                             |
+    /// +--------------------------------------------------------------------------------+
+    /// |                              SST Checksum (4 bytes)                            |
     /// +--------------------------------------------------------------------------------+
     pub(crate) fn estimate_sst_size(
         &self,
@@ -295,6 +317,8 @@ impl SsTableFormat {
 
         // This is approximate, using the average number of keys per block.
         let approx_keys_per_block = usize::div_ceil(num_entries, number_of_blocks);
+
+        // TODO: Use BlockBuilder.estimated_size() for some of these calcs.
 
         // TODO: this is a copy of the bloom filter calculation; make that
         // calculation function static, to de-duplicate.
@@ -484,6 +508,8 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
     pub fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
         let mut buf = self.finish_block()?.unwrap_or(Vec::new());
+        // write the index block
+        // 1. maybe serialize the bloom filter
         let mut maybe_filter = None;
         let mut filter_len = 0;
         let filter_offset = self.current_len + buf.len();
@@ -495,7 +521,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
             maybe_filter = Some(filter);
         }
 
-        // write the index block
+        // 2. write the index data, containing metadata per data block.
         let vector = self.index_builder.create_vector(&self.block_meta);
         let index_wip = SsTableIndex::create(
             &mut self.index_builder,
@@ -513,6 +539,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
         let index_len = index_block.len();
         buf.put(index_block);
 
+        // 3. write the SST info.
         let mut sst_info_builder = flatbuffers::FlatBufferBuilder::new();
         let first_key = self
             .sst_first_key
