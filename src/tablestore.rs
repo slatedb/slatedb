@@ -12,7 +12,7 @@ use object_store::ObjectStore;
 use parking_lot::RwLock;
 use tokio::io::AsyncWriteExt;
 
-use crate::db_state::{SSTableHandle, SsTableId};
+use crate::db_state::{CoreDbState, SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
@@ -223,10 +223,11 @@ impl TableStore {
     pub(crate) async fn collect_garbage_wal(
         &self,
         min_age: Duration,
-        wal_id_last_compacted: u64,
+        state: &CoreDbState,
     ) -> Result<(), SlateDBError> {
         let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
-        let wal_list = self.get_wal_sst_list(wal_id_last_compacted).await?;
+        // TODO should get wall list that are before not after wal_id_last_compacted
+        let wal_list = self.get_wal_sst_list(state.last_compacted_wal_sst_id).await?;
         for wal_id in wal_list {
             let path = self.path(&SsTableId::Wal(wal_id));
             let metadata = self.object_store.head(&path).await?;
@@ -238,6 +239,48 @@ impl TableStore {
                 self.object_store.delete(&path).await?;
             }
         }
+        Ok(())
+    }
+
+    pub(crate) async fn collect_garbage_ssts(
+        &self,
+        min_age: Duration,
+        state: &CoreDbState,
+    ) -> Result<(), SlateDBError> {
+        // Get all active SSTs
+        let l0_sst_ids: Vec<SsTableId> = state.l0
+            .iter()
+            .map(|h| h.id)
+            .collect();
+        let compacted_sst_ids: Vec<SsTableId> = state.compacted
+            .iter()
+            .flat_map(|h| h.ssts.iter().map(|h| h.id))
+            .collect();
+        let active_sst_id_set = l0_sst_ids
+            .iter()
+            .chain(compacted_sst_ids.iter())
+            .collect::<std::collections::HashSet<_>>();
+
+        // List all SSTs in the object store
+        let mut sst_list: Vec<SsTableId> = Vec::new();
+        let sst_path = &Path::from(format!("{}/{}/", &self.root_path, self.compacted_path));
+        let mut files_stream = self.object_store.list(Some(sst_path));
+
+        // Delete all SSTs that are not in the active set and are older than min_age
+        while let Some(file) = files_stream.next().await.transpose()? {
+            match self.parse_id(&file.location, "sst") {
+                Ok(sst_id) => {
+                    if !active_sst_id_set.contains(&SsTableId::Compacted(sst_id))
+                        && file.last_modified.signed_duration_since(chrono::Utc::now()) > min_age
+                    {
+                        let path = self.path(&SsTableId::Compacted(sst_id));
+                        self.object_store.delete(&path).await?;
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+
         Ok(())
     }
 

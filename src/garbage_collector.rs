@@ -157,7 +157,7 @@ impl GarbageCollectorOrchestrator {
                     match self.tokio_handle.block_on(
                         self.table_store.collect_garbage_wal(
                             min_age,
-                            self.stored_manifest.db_state().last_compacted_wal_sst_id
+                            self.stored_manifest.db_state(),
                         )
                     ) {
                         Ok(_) => {
