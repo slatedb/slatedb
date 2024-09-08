@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::ops::Range;
+use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -114,9 +114,9 @@ impl TableStore {
         }
     }
 
-    pub(crate) async fn get_wal_sst_list(
+    pub(crate) async fn get_wal_sst_list<R: RangeBounds<u64>>(
         &self,
-        wal_id_last_compacted: u64,
+        id_range: R,
     ) -> Result<Vec<u64>, SlateDBError> {
         let mut wal_list: Vec<u64> = Vec::new();
         let wal_path = &Path::from(format!("{}/{}/", &self.root_path, self.wal_path));
@@ -125,7 +125,7 @@ impl TableStore {
         while let Some(file) = files_stream.next().await.transpose()? {
             match Self::parse_id(&self.root_path, &file.location) {
                 Ok(Some(SsTableId::Wal(wal_id))) => {
-                    if wal_id > wal_id_last_compacted {
+                    if id_range.contains(&wal_id) {
                         wal_list.push(wal_id);
                     }
                 }
@@ -227,9 +227,9 @@ impl TableStore {
         state: &CoreDbState,
     ) -> Result<(), SlateDBError> {
         let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
-        // TODO should get wall list that are before not after wal_id_last_compacted
         let wal_list = self
-            .get_wal_sst_list(state.last_compacted_wal_sst_id)
+            // Delete all SSTs up to (but not including) the last compacted WAL SST
+            .get_wal_sst_list(..state.last_compacted_wal_sst_id)
             .await?;
         for wal_id in wal_list {
             let path = self.path(&SsTableId::Wal(wal_id));

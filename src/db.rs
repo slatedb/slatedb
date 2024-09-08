@@ -109,7 +109,7 @@ impl DbInner {
         let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
         let max_wal_id = self
             .table_store
-            .get_wal_sst_list(wal_id_last_compacted)
+            .get_wal_sst_list((wal_id_last_compacted + 1)..)
             .await?
             .into_iter()
             .max()
@@ -265,7 +265,7 @@ impl DbInner {
         let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
         let wal_sst_list = self
             .table_store
-            .get_wal_sst_list(wal_id_last_compacted)
+            .get_wal_sst_list((wal_id_last_compacted + 1)..)
             .await?;
         let mut last_sst_id = wal_id_last_compacted;
         for sst_id in wal_sst_list {
