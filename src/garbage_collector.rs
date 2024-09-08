@@ -169,8 +169,37 @@ impl GarbageCollectorOrchestrator {
                     }
                 }
                 recv(compacted_ticker) -> _ => {
+                    let min_age = self.options.compacted_options.map_or(
+                        std::time::Duration::from_secs(86400),
+                        |opts| opts.min_age
+                    );
+
+                    // Refresh the manifest so we have the latest SSTs
+                    match self.tokio_handle.block_on(self.stored_manifest.refresh()) {
+                        Ok(_) => {}
+                        Err(err) => {
+                            log::error!("Error refreshing manifest: {}", err);
+                            continue;
+                        }
+                    }
+
+                    // Collect garbage SSTs
+                    match self.tokio_handle.block_on(
+                        self.table_store.collect_garbage_ssts(
+                            min_age,
+                            self.stored_manifest.db_state(),
+                        )
+                    ) {
+                        Ok(_) => {
+                            self.db_stats.gc_compacted_count.inc();
+                        }
+                        Err(err) => {
+                            log::error!("Error collecting garbage compacted tables: {}", err);
+                        }
+                    }
                 }
                 recv(self.external_rx) -> _ => {
+                    // Shutdown
                     break;
                 }
             }

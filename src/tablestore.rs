@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +11,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::RwLock;
 use tokio::io::AsyncWriteExt;
+use ulid::Ulid;
 
 use crate::db_state::{CoreDbState, SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -122,13 +123,13 @@ impl TableStore {
         let mut files_stream = self.object_store.list(Some(wal_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
-            match self.parse_id(&file.location, "sst") {
-                Ok(wal_id) => {
+            match Self::parse_id(&self.root_path, &file.location) {
+                Ok(Some(SsTableId::Wal(wal_id))) => {
                     if wal_id > wal_id_last_compacted {
                         wal_list.push(wal_id);
                     }
                 }
-                Err(_) => continue,
+                _ => continue,
             }
         }
 
@@ -227,7 +228,9 @@ impl TableStore {
     ) -> Result<(), SlateDBError> {
         let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
         // TODO should get wall list that are before not after wal_id_last_compacted
-        let wal_list = self.get_wal_sst_list(state.last_compacted_wal_sst_id).await?;
+        let wal_list = self
+            .get_wal_sst_list(state.last_compacted_wal_sst_id)
+            .await?;
         for wal_id in wal_list {
             let path = self.path(&SsTableId::Wal(wal_id));
             let metadata = self.object_store.head(&path).await?;
@@ -247,37 +250,35 @@ impl TableStore {
         min_age: Duration,
         state: &CoreDbState,
     ) -> Result<(), SlateDBError> {
+        let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
+
         // Get all active SSTs
-        let l0_sst_ids: Vec<SsTableId> = state.l0
-            .iter()
-            .map(|h| h.id)
-            .collect();
-        let compacted_sst_ids: Vec<SsTableId> = state.compacted
+        let l0_sst_ids: Vec<SsTableId> = state.l0.iter().map(|h| h.id).collect();
+        let compacted_sst_ids: Vec<SsTableId> = state
+            .compacted
             .iter()
             .flat_map(|h| h.ssts.iter().map(|h| h.id))
             .collect();
-        let active_sst_id_set = l0_sst_ids
-            .iter()
-            .chain(compacted_sst_ids.iter())
-            .collect::<std::collections::HashSet<_>>();
+        let mut active_sst_id_set: HashSet<SsTableId> = HashSet::new();
+        active_sst_id_set.extend(l0_sst_ids);
+        active_sst_id_set.extend(compacted_sst_ids);
 
         // List all SSTs in the object store
-        let mut sst_list: Vec<SsTableId> = Vec::new();
         let sst_path = &Path::from(format!("{}/{}/", &self.root_path, self.compacted_path));
         let mut files_stream = self.object_store.list(Some(sst_path));
 
         // Delete all SSTs that are not in the active set and are older than min_age
         while let Some(file) = files_stream.next().await.transpose()? {
-            match self.parse_id(&file.location, "sst") {
-                Ok(sst_id) => {
-                    if !active_sst_id_set.contains(&SsTableId::Compacted(sst_id))
+            match Self::parse_id(&self.root_path, &file.location) {
+                Ok(Some(sst_id)) => {
+                    if !active_sst_id_set.contains(&sst_id)
                         && file.last_modified.signed_duration_since(chrono::Utc::now()) > min_age
                     {
-                        let path = self.path(&SsTableId::Compacted(sst_id));
+                        let path = self.path(&sst_id);
                         self.object_store.delete(&path).await?;
                     }
                 }
-                Err(_) => continue,
+                _ => continue,
             }
         }
 
@@ -477,17 +478,29 @@ impl TableStore {
         }
     }
 
-    fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {
-        match path.extension() {
-            Some(ext) if ext == expected_extension => path
-                .filename()
-                .expect("invalid wal file")
-                .split('.')
-                .next()
-                .ok_or_else(|| SlateDBError::InvalidDBState)?
-                .parse()
-                .map_err(|_| SlateDBError::InvalidDBState),
-            _ => Err(SlateDBError::InvalidDBState),
+    /// Parses the SsTableId from a given path
+    fn parse_id(root_path: &Path, path: &Path) -> Result<Option<SsTableId>, SlateDBError> {
+        if let Some(mut suffix_iter) = path.prefix_match(root_path) {
+            let next_part = suffix_iter.next().map(|s| s.as_ref().to_owned());
+            match next_part.as_deref() {
+                Some("wal") => suffix_iter
+                    .next()
+                    .map(|s| s.as_ref().split('.').next().map(|s| s.parse::<u64>()))
+                    .flatten()
+                    .transpose()
+                    .map(|r| r.map(SsTableId::Wal))
+                    .map_err(|_| SlateDBError::InvalidDBState),
+                Some("compacted") => suffix_iter
+                    .next()
+                    .map(|s| s.as_ref().split('.').next().map(|s| Ulid::from_string(s.as_ref())))
+                    .flatten()
+                    .transpose()
+                    .map(|r| r.map(SsTableId::Compacted))
+                    .map_err(|_| SlateDBError::InvalidDBState),
+                _ => Ok(None),
+            }
+        } else {
+            Ok(None)
         }
     }
 }
@@ -556,6 +569,28 @@ mod tests {
     };
 
     const ROOT: &str = "/root";
+
+    #[tokio::test]
+    async fn test_parse_id() {
+        let root = Path::from(ROOT);
+        let path = Path::from("/root/wal/00000000000000000003.sst");
+        let id = TableStore::parse_id(&root, &path).unwrap();
+        assert_eq!(id, Some(SsTableId::Wal(3)));
+
+        let path = Path::from("/root/compacted/01J79C21YKR31J2BS1EFXJZ7MR.sst");
+        let id = TableStore::parse_id(&root, &path).unwrap();
+        assert_eq!(
+            id,
+            Some(SsTableId::Compacted(Ulid::from_string(
+                "01J79C21YKR31J2BS1EFXJZ7MR"
+            )
+            .unwrap()))
+        );
+
+        let path = Path::from("/root/invalid/00000000000000000001.sst");
+        let id = TableStore::parse_id(&root, &path).unwrap();
+        assert_eq!(id, None);
+    }
 
     #[tokio::test]
     async fn test_sst_writer_should_write_sst() {
