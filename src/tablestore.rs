@@ -486,15 +486,13 @@ impl TableStore {
             match next_part.as_deref() {
                 Some("wal") => suffix_iter
                     .next()
-                    .map(|s| s.as_ref().split('.').next().map(|s| s.parse::<u64>()))
-                    .flatten()
+                    .and_then(|s| s.as_ref().split('.').next().map(|s| s.parse::<u64>()))
                     .transpose()
                     .map(|r| r.map(SsTableId::Wal))
                     .map_err(|_| SlateDBError::InvalidDBState),
                 Some("compacted") => suffix_iter
                     .next()
-                    .map(|s| s.as_ref().split('.').next().map(|s| Ulid::from_string(s.as_ref())))
-                    .flatten()
+                    .and_then(|s| s.as_ref().split('.').next().map(Ulid::from_string))
                     .transpose()
                     .map(|r| r.map(SsTableId::Compacted))
                     .map_err(|_| SlateDBError::InvalidDBState),
@@ -582,10 +580,9 @@ mod tests {
         let id = TableStore::parse_id(&root, &path).unwrap();
         assert_eq!(
             id,
-            Some(SsTableId::Compacted(Ulid::from_string(
-                "01J79C21YKR31J2BS1EFXJZ7MR"
-            )
-            .unwrap()))
+            Some(SsTableId::Compacted(
+                Ulid::from_string("01J79C21YKR31J2BS1EFXJZ7MR").unwrap()
+            ))
         );
 
         let path = Path::from("/root/invalid/00000000000000000001.sst");
