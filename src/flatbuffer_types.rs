@@ -93,11 +93,9 @@ impl FlatBufferManifestCodec {
             .map(|id| Ulid::from((id.high(), id.low())));
         let mut l0 = VecDeque::new();
         for man_sst in manifest.l0().iter() {
-            let man_sst_id = man_sst.id().expect("SSTs in manifest must have IDs");
+            let man_sst_id = man_sst.id();
             let sst_id = Compacted(Ulid::from((man_sst_id.high(), man_sst_id.low())));
-            let sst_info = SsTableInfoOwned::create_copy(
-                &man_sst.info().expect("SSTs in manifest must have info"),
-            );
+            let sst_info = SsTableInfoOwned::create_copy(&man_sst.info());
             let l0_sst = SSTableHandle::new(sst_id, sst_info);
             l0.push_back(l0_sst);
         }
@@ -105,10 +103,8 @@ impl FlatBufferManifestCodec {
         for manifest_sr in manifest.compacted().iter() {
             let mut ssts = Vec::new();
             for manifest_sst in manifest_sr.ssts().iter() {
-                let id = Compacted(manifest_sst.id().expect("sst must have id").ulid());
-                let info = SsTableInfoOwned::create_copy(
-                    &manifest_sst.info().expect("sst must have info"),
-                );
+                let id = Compacted(manifest_sst.id().ulid());
+                let info = SsTableInfoOwned::create_copy(&manifest_sst.info());
                 ssts.push(SSTableHandle::new(id, info));
             }
             compacted.push(db_state::SortedRun {
