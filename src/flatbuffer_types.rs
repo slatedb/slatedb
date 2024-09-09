@@ -1,14 +1,21 @@
-use crate::db_state;
-use crate::db_state::{CoreDbState, SSTableHandle};
+use std::collections::VecDeque;
+
 use bytes::Bytes;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
-use std::collections::VecDeque;
 use ulid::Ulid;
+
+use crate::db_state;
+use crate::db_state::{CoreDbState, SSTableHandle};
 
 #[path = "./generated/manifest_generated.rs"]
 #[allow(warnings)]
 #[rustfmt::skip]
 mod manifest_generated;
+pub use manifest_generated::{
+    BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
+    SsTableInfo, SsTableInfoArgs,
+};
+
 use crate::config::CompressionCodec;
 use crate::db_state::SsTableId;
 use crate::db_state::SsTableId::Compacted;
@@ -18,10 +25,6 @@ use crate::flatbuffer_types::manifest_generated::{
     SortedRun, SortedRunArgs,
 };
 use crate::manifest::{Manifest, ManifestCodec};
-pub use manifest_generated::{
-    BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
-    SsTableInfo, SsTableInfoArgs,
-};
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct SsTableInfoOwned {
@@ -90,11 +93,9 @@ impl FlatBufferManifestCodec {
             .map(|id| Ulid::from((id.high(), id.low())));
         let mut l0 = VecDeque::new();
         for man_sst in manifest.l0().iter() {
-            let man_sst_id = man_sst.id().expect("SSTs in manifest must have IDs");
+            let man_sst_id = man_sst.id();
             let sst_id = Compacted(Ulid::from((man_sst_id.high(), man_sst_id.low())));
-            let sst_info = SsTableInfoOwned::create_copy(
-                &man_sst.info().expect("SSTs in manifest must have info"),
-            );
+            let sst_info = SsTableInfoOwned::create_copy(&man_sst.info());
             let l0_sst = SSTableHandle::new(sst_id, sst_info);
             l0.push_back(l0_sst);
         }
@@ -102,10 +103,8 @@ impl FlatBufferManifestCodec {
         for manifest_sr in manifest.compacted().iter() {
             let mut ssts = Vec::new();
             for manifest_sst in manifest_sr.ssts().iter() {
-                let id = Compacted(manifest_sst.id().expect("sst must have id").ulid());
-                let info = SsTableInfoOwned::create_copy(
-                    &manifest_sst.info().expect("sst must have info"),
-                );
+                let id = Compacted(manifest_sst.id().ulid());
+                let info = SsTableInfoOwned::create_copy(&manifest_sst.info());
                 ssts.push(SSTableHandle::new(id, info));
             }
             compacted.push(db_state::SortedRun {

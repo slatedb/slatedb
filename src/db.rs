@@ -1,6 +1,15 @@
+use std::sync::Arc;
+
+use bytes::Bytes;
+use fail_parallel::FailPointRegistry;
+use log::warn;
+use object_store::path::Path;
+use object_store::ObjectStore;
+use parking_lot::{Mutex, RwLock};
+use tokio::runtime::Handle;
+
 use crate::block::BLOCK_SIZE_BYTES;
 use crate::compactor::Compactor;
-use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
@@ -17,14 +26,7 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
-use bytes::Bytes;
-use fail_parallel::FailPointRegistry;
-use log::warn;
-use object_store::path::Path;
-use object_store::ObjectStore;
-use parking_lot::{Mutex, RwLock};
-use std::sync::Arc;
-use tokio::runtime::Handle;
+use crate::{config::ReadLevel::Uncommitted, inmemory_cache::create_block_cache};
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -82,7 +84,8 @@ impl DbInner {
         for sst in &snapshot.state.core.l0 {
             if self.sst_may_include_key(sst, key).await? {
                 let mut iter =
-                    SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1).await?;
+                    SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1, true)
+                        .await?; // cache blocks that are being read
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
                         return Ok(entry.value.into_option());
@@ -93,7 +96,7 @@ impl DbInner {
         for sr in &snapshot.state.core.compacted {
             if self.sr_may_include_key(sr, key).await? {
                 let mut iter =
-                    SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1)
+                    SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1, true) // cache blocks
                         .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
@@ -277,7 +280,7 @@ impl DbInner {
                 SsTableId::Wal(id) => *id,
                 SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
             };
-            let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1).await?;
+            let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1, true).await?;
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
             // buffer the WAL entries to bulk replay them into the memtable.
             let mut wal_replay_buf = Vec::new();
@@ -358,6 +361,7 @@ impl Db {
             sst_format.clone(),
             path.clone(),
             fp_registry.clone(),
+            create_block_cache(options.block_cache_options),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let mut manifest = Self::init_db(&manifest_store).await?;
@@ -506,16 +510,18 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use object_store::memory::InMemory;
+    use object_store::ObjectStore;
+    use tracing::info;
+
     use super::*;
     use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
     #[cfg(feature = "wal_disable")]
     use crate::test_utils::assert_iterator;
-    use object_store::memory::InMemory;
-    use object_store::ObjectStore;
-    use std::time::Duration;
-    use tracing::info;
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -593,6 +599,7 @@ mod tests {
             object_store.clone(),
             sst_format,
             path.clone(),
+            None,
         ));
         let db = Db::open_with_opts(path.clone(), options, object_store.clone())
             .await
@@ -624,19 +631,19 @@ mod tests {
         assert_eq!(state.l0.len(), 1);
 
         let l0 = state.l0.front().unwrap();
-        let mut iter = SstIterator::new(l0, table_store.clone(), 1, 1)
+        let mut iter = SstIterator::new(l0, table_store.clone(), 1, 1, false)
             .await
             .unwrap();
         assert_iterator(
             &mut iter,
             &[
                 (
-                    &[b'a'; 32],
+                    vec![b'a'; 32],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
                 ),
-                (&[b'b'; 32], ValueDeletable::Tombstone),
+                (vec![b'b'; 32], ValueDeletable::Tombstone),
                 (
-                    &[b'c'; 32],
+                    vec![b'c'; 32],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
                 ),
             ],
@@ -666,6 +673,7 @@ mod tests {
             object_store.clone(),
             sst_format,
             path.clone(),
+            None,
         ));
 
         // Write data a few times such that each loop results in a memtable flush
@@ -694,7 +702,7 @@ mod tests {
         assert_eq!(l0.len(), 3);
         for i in 0u8..3u8 {
             let sst1 = l0.get(2 - i as usize).unwrap();
-            let mut iter = SstIterator::new(sst1, table_store.clone(), 1, 1)
+            let mut iter = SstIterator::new(sst1, table_store.clone(), 1, 1, true)
                 .await
                 .unwrap();
             let kv = iter.next().await.unwrap().unwrap();
@@ -1105,7 +1113,7 @@ mod tests {
             let val = db.get(&[b's' + i; 32]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[19u8 + i; 32])));
         }
-        let neg_lookup = db.get(&[b'a', b'b', b'c']).await;
+        let neg_lookup = db.get(b"abc").await;
         assert!(neg_lookup.unwrap().is_none());
     }
 
@@ -1254,6 +1262,7 @@ mod tests {
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
+            block_cache_options: None,
         }
     }
 }

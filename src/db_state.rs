@@ -1,10 +1,12 @@
-use crate::flatbuffer_types::SsTableInfoOwned;
-use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
 use std::collections::VecDeque;
 use std::sync::Arc;
+
 use tracing::info;
 use ulid::Ulid;
 use SsTableId::Compacted;
+
+use crate::flatbuffer_types::SsTableInfoOwned;
+use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
 
 #[derive(Clone, PartialEq)]
 pub struct SSTableHandle {
@@ -34,7 +36,7 @@ impl SSTableHandle {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Hash, Eq)]
+#[derive(Clone, PartialEq, Debug, Hash, Eq, Copy)]
 pub enum SsTableId {
     Wal(u64),
     Compacted(Ulid),
@@ -263,10 +265,11 @@ impl DbState {
 
 #[cfg(test)]
 mod tests {
-    use crate::db_state::{CoreDbState, DbState, SSTableHandle, SsTableId};
-    use crate::flatbuffer_types::{SsTableInfo, SsTableInfoArgs, SsTableInfoOwned};
     use bytes::Bytes;
     use ulid::Ulid;
+
+    use crate::db_state::{CoreDbState, DbState, SSTableHandle, SsTableId};
+    use crate::flatbuffer_types::{SsTableInfo, SsTableInfoArgs, SsTableInfoOwned};
 
     #[test]
     fn test_should_refresh_db_state_with_l0s_up_to_last_compacted() {
@@ -282,14 +285,8 @@ mod tests {
         db_state.refresh_db_state(&compactor_state);
 
         // then:
-        let expected: Vec<SsTableId> = compactor_state.l0.iter().map(|l0| l0.id.clone()).collect();
-        let merged: Vec<SsTableId> = db_state
-            .state
-            .core
-            .l0
-            .iter()
-            .map(|l0| l0.id.clone())
-            .collect();
+        let expected: Vec<SsTableId> = compactor_state.l0.iter().map(|l0| l0.id).collect();
+        let merged: Vec<SsTableId> = db_state.state.core.l0.iter().map(|l0| l0.id).collect();
         assert_eq!(expected, merged);
     }
 
@@ -304,14 +301,8 @@ mod tests {
         db_state.refresh_db_state(&CoreDbState::new());
 
         // then:
-        let expected: Vec<SsTableId> = l0s.iter().map(|l0| l0.id.clone()).collect();
-        let merged: Vec<SsTableId> = db_state
-            .state
-            .core
-            .l0
-            .iter()
-            .map(|l0| l0.id.clone())
-            .collect();
+        let expected: Vec<SsTableId> = l0s.iter().map(|l0| l0.id).collect();
+        let merged: Vec<SsTableId> = db_state.state.core.l0.iter().map(|l0| l0.id).collect();
         assert_eq!(expected, merged);
     }
 

@@ -1,3 +1,14 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::thread;
+use std::thread::JoinHandle;
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use tokio::runtime::Handle;
+use tracing::{error, info, warn};
+use ulid::Ulid;
+
 use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, CompactorState};
@@ -7,15 +18,6 @@ use crate::error::SlateDBError;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::metrics::DbStats;
 use crate::tablestore::TableStore;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::thread;
-use std::thread::JoinHandle;
-use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::runtime::Handle;
-use tracing::{error, info, warn};
-use ulid::Ulid;
 
 pub trait CompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
@@ -290,6 +292,16 @@ impl CompactorOrchestrator {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+    use tokio::runtime::Runtime;
+    use ulid::Ulid;
+
     use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestratorMsg};
     use crate::compactor_state::{Compaction, SourceId};
     use crate::config::{DbOptions, SizeTieredCompactionSchedulerOptions};
@@ -300,14 +312,6 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
-    use std::future::Future;
-    use std::sync::Arc;
-    use std::time::{Duration, SystemTime};
-    use tokio::runtime::Runtime;
-    use ulid::Ulid;
 
     const PATH: &str = "/test/db";
 
@@ -342,7 +346,7 @@ mod tests {
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
-        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1)
+        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1, false)
             .await
             .unwrap();
         for i in 0..4 {
@@ -466,7 +470,12 @@ mod tests {
             .unwrap();
         let sst_format = SsTableFormat::new(32, 10, options.compression_codec);
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
-        let table_store = Arc::new(TableStore::new(os.clone(), sst_format, Path::from(PATH)));
+        let table_store = Arc::new(TableStore::new(
+            os.clone(),
+            sst_format,
+            Path::from(PATH),
+            None,
+        ));
         (os, manifest_store, table_store, db)
     }
 
@@ -482,6 +491,7 @@ mod tests {
             l0_max_ssts: 8,
             compactor_options,
             compression_codec: None,
+            block_cache_options: None,
         }
     }
 

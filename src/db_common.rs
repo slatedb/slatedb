@@ -1,7 +1,8 @@
+use parking_lot::RwLockWriteGuard;
+
 use crate::db::DbInner;
 use crate::db_state::DbState;
 use crate::mem_table_flush::MemtableFlushThreadMsg::FlushImmutableMemtables;
-use parking_lot::RwLockWriteGuard;
 
 impl DbInner {
     pub(crate) fn maybe_freeze_memtable(

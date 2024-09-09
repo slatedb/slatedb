@@ -1,6 +1,7 @@
+use std::mem::size_of;
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use siphasher::sip::SipHasher13;
-use std::mem::size_of;
 
 pub const DEFAULT_BITS_PER_KEY: u32 = 10;
 

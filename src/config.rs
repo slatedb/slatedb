@@ -1,9 +1,11 @@
-use crate::compactor::CompactionScheduler;
 use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
+
 use tokio::runtime::Handle;
 
+use crate::compactor::CompactionScheduler;
 use crate::error::SlateDBError;
+use crate::inmemory_cache::InMemoryCacheOptions;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
@@ -134,7 +136,12 @@ pub struct DbOptions {
 
     /// Configuration options for the compactor.
     pub compactor_options: Option<CompactorOptions>,
+
+    /// The compression algorithm to use for SSTables.
     pub compression_codec: Option<CompressionCodec>,
+
+    /// Block cache options.
+    pub block_cache_options: Option<InMemoryCacheOptions>,
 }
 
 impl Default for DbOptions {
@@ -150,6 +157,7 @@ impl Default for DbOptions {
             l0_max_ssts: 8,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
+            block_cache_options: Some(InMemoryCacheOptions::default()),
         }
     }
 }

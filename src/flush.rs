@@ -1,3 +1,8 @@
+use std::sync::Arc;
+
+use tokio::runtime::Handle;
+use tokio::select;
+
 use crate::db::DbInner;
 use crate::db_state;
 use crate::db_state::SSTableHandle;
@@ -5,9 +10,6 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
 use crate::types::ValueDeletable;
-use std::sync::Arc;
-use tokio::runtime::Handle;
-use tokio::select;
 
 impl DbInner {
     pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {

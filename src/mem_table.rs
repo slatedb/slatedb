@@ -1,12 +1,14 @@
-use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
-use crate::types::{KeyValueDeletable, ValueDeletable};
+use std::ops::Bound;
+use std::sync::Arc;
+
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
-use std::ops::Bound;
-use std::sync::Arc;
 use tokio::sync::Notify;
+
+use crate::error::SlateDBError;
+use crate::iter::KeyValueIterator;
+use crate::types::{KeyValueDeletable, ValueDeletable};
 
 pub(crate) struct KVTable {
     map: SkipMap<Bytes, ValueDeletable>,
