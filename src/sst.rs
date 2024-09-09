@@ -1,4 +1,4 @@
-use crate::block::{Block, BLOCK_SIZE_BYTES, SIZEOF_U16, SIZEOF_U32};
+use crate::block::{self, Block, BLOCK_SIZE_BYTES, SIZEOF_U16, SIZEOF_U32, SIZEOF_U64};
 use crate::filter::{BloomFilter, BloomFilterBuilder, DEFAULT_BITS_PER_KEY};
 use crate::flatbuffer_types::{
     BlockMeta, BlockMetaArgs, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned, SsTableInfo,
@@ -256,7 +256,7 @@ impl SsTableFormat {
 
     /// Estimate the SsTable size given a memtable, including key, value length
     /// headers, offset ptrs, bloom filter sizes, and block overheads.
-    /// TODO: Add byte sizes to diagram.
+    /// TODO: Consider BlockBuilder.estimated_size() for some of these calcs.
     /// TODO: Add 2 checksums, one per block and one on the SST.
     /// +--------------------------------------------------------------------------------+
     /// |                                Data Blocks                                     |
@@ -308,34 +308,45 @@ impl SsTableFormat {
             return 0;
         }
 
+        // Data Blocks.
+
         // u16 for key size, u32 for value size
         let entry_key_and_val_size_header_offset = SIZEOF_U16 + SIZEOF_U32;
         let entry_offset_overhead = SIZEOF_U16;
         let per_entry_overhead = entry_key_and_val_size_header_offset + entry_offset_overhead;
 
         let number_of_blocks = usize::div_ceil(total_entry_size_bytes, BLOCK_SIZE_BYTES);
-
-        // This is approximate, using the average number of keys per block.
-        let approx_keys_per_block = usize::div_ceil(num_entries, number_of_blocks);
-
-        // TODO: Use BlockBuilder.estimated_size() for some of these calcs.
-
-        // TODO: this is a copy of the bloom filter calculation; make that
-        // calculation function static, to de-duplicate.
-        let bloom_filter_bytes_for_filter =
-            if self.min_filter_keys as usize <= approx_keys_per_block {
-                ((num_entries * DEFAULT_BITS_PER_KEY as usize) + 7) / 8
-            } else {
-                0
-            };
-        let bloom_filter_header = SIZEOF_U16;
-        let bloom_filter_total_size = bloom_filter_header + bloom_filter_bytes_for_filter;
-
         let block_kv_pair_count = SIZEOF_U16; // Number of key-value pairs in the block.
-        let per_block_overhead = block_kv_pair_count + bloom_filter_total_size;
+        let block_checksum = SIZEOF_U16; // checksum at the end of the block.
+        let per_block_overhead = block_kv_pair_count + block_checksum;
         let total_block_overhead = number_of_blocks * per_block_overhead;
+        let total_data_blocks_bytes =
+            total_entry_size_bytes + per_entry_overhead * num_entries + total_block_overhead;
 
-        total_entry_size_bytes + per_entry_overhead * num_entries + total_block_overhead
+        // Index Block calculation.
+        // 1. Bloom filter
+        let bloom_filter_header = SIZEOF_U16;
+        let bloom_filter_bytes_for_filter = if self.min_filter_keys as usize <= num_entries {
+            BloomFilterBuilder::filter_size_bytes(num_entries, DEFAULT_BITS_PER_KEY as usize)
+        } else {
+            0
+        };
+        let bloom_filter_total_size = bloom_filter_header + bloom_filter_bytes_for_filter;
+        // 2. Per-block meta.
+        let guess_at_average_first_key_size_bytes = 12;
+        let per_block_metadata_size = number_of_blocks
+            * (guess_at_average_first_key_size_bytes + SIZEOF_U16/* offsets in block */);
+        // 3. SST Info section (see SsTableInfoArgs).
+        let sst_info_size = guess_at_average_first_key_size_bytes + 4 * SIZEOF_U64 + 1;
+        let sst_checksum = SIZEOF_U64;
+
+        let index_block_size = bloom_filter_total_size
+            + per_block_metadata_size
+            + sst_info_size
+            + sst_checksum
+            + block_checksum;
+
+        total_data_blocks_bytes + index_block_size
     }
 }
 
@@ -978,44 +989,113 @@ mod tests {
         assert!(blocks.is_empty())
     }
 
-    #[test]
-    fn test_estimate_sst_size() {
-        // TODO maybe this test could just serialize a full sstable and verify that the estimate is correct (pre-compression).
-        let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
+    #[cfg(test)]
+    mod estimate_sst_size_tests {
+        use super::*;
+        use crate::iter::KeyValueIterator;
+        use crate::mem_table::WritableKVTable;
+        use crate::tablestore::TableStore;
+        use object_store::memory::InMemory;
+        use object_store::path::Path;
+        use std::sync::Arc;
 
-        // Test case 1: Empty SSTable
-        assert_eq!(format.estimate_sst_size(0, 0), 0);
+        fn create_table_store() -> Arc<TableStore> {
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
+            Arc::new(TableStore::new(object_store, format, Path::from("")))
+        }
 
-        // Test case 2: Single small entry
-        let num_entries = 1;
-        let total_entry_size = 10;
+        async fn serialize_memtable_to_sst(memtable: &WritableKVTable) -> usize {
+            let table_store = create_table_store();
+            let mut builder = table_store.table_builder();
 
-        /* 10 bytes + 1 * per-key overhead of 6 bytes (u16 + u32) + 2 (u16) offsets header + 2 bytes for bloom filter header + 2 bytes for bloom filter */
-        // TODO: check this
-        let expected_size = 24;
+            let iter = &mut memtable.table().iter();
+            while let Ok(Some(next_val)) = iter.next().await {
+                builder.add(&next_val.key, Some(&next_val.value)).unwrap();
+            }
 
-        assert_eq!(
-            format.estimate_sst_size(num_entries, total_entry_size),
-            expected_size
-        );
+            let encoded = &mut builder.build().unwrap();
+            let mut total_size = 0;
+            while let Some(block) = encoded.unconsumed_blocks.pop_front() {
+                total_size += block.len();
+            }
+            total_size
+        }
 
-        // Test case 3: Multiple entries
-        let num_entries = 100;
-        let total_entry_size = 1000;
-        let expected_size = 1929;
-        assert_eq!(
-            format.estimate_sst_size(num_entries, total_entry_size),
-            expected_size
-        );
+        #[tokio::test]
+        async fn test_empty_sst() {
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
+            let memtable = WritableKVTable::new();
+            let actual_size = serialize_memtable_to_sst(&memtable).await;
+            let estimated_size = format.estimate_sst_size(0, 0);
 
-        // Test case 4: Large entries
-        let num_entries = 10000;
-        let total_entry_size = 1_000_000;
-        let expected_size = 4_143_480;
-        assert_eq!(
-            format.estimate_sst_size(num_entries, total_entry_size),
-            expected_size
-        );
+            assert_eq!(actual_size, estimated_size);
+        }
+
+        #[tokio::test]
+        async fn test_single_small_entry() {
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
+            let mut memtable = WritableKVTable::new();
+            memtable.put(b"0123456789ab", b"value");
+
+            let actual_size = serialize_memtable_to_sst(&memtable).await;
+            let estimated_size = format.estimate_sst_size(1, 8);
+
+            assert!(
+                (actual_size as i64 - estimated_size as i64).abs() <= 50,
+                "Actual size: {}, Estimated size: {}",
+                actual_size,
+                estimated_size
+            );
+        }
+
+        #[tokio::test]
+        async fn test_multiple_entries() {
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
+            let mut memtable = WritableKVTable::new();
+            let mut total_size = 0;
+
+            for i in 0..100 {
+                let key = format!("key{:03}", i);
+                let value = format!("value{:03}", i);
+                memtable.put(key.as_bytes(), value.as_bytes());
+                total_size += key.len() + value.len();
+            }
+
+            let actual_size = serialize_memtable_to_sst(&memtable).await;
+            let estimated_size = format.estimate_sst_size(100, total_size);
+
+            assert!(
+                (actual_size as i64 - estimated_size as i64).abs() <= 500,
+                "Actual size: {}, Estimated size: {}",
+                actual_size,
+                estimated_size
+            );
+        }
+
+        #[tokio::test]
+        async fn test_large_entries() {
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
+            let mut memtable = WritableKVTable::new();
+            let mut total_size = 0;
+
+            for i in 0..10000 {
+                let key = format!("key{:05}", i);
+                let value = "a".repeat(95);
+                memtable.put(key.as_bytes(), value.as_bytes());
+                total_size += key.len() + value.len();
+            }
+
+            let actual_size = serialize_memtable_to_sst(&memtable).await;
+            let estimated_size = format.estimate_sst_size(10000, total_size);
+
+            assert!(
+                (actual_size as i64 - estimated_size as i64).abs() <= 50000,
+                "Actual size: {}, Estimated size: {}",
+                actual_size,
+                estimated_size
+            );
+        }
     }
 
     struct BytesBlob {
