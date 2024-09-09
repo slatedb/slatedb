@@ -27,18 +27,17 @@ impl BloomFilterBuilder {
         self.key_hashes.push(filter_hash(key))
     }
 
-    // TODO: make this function static and use it in the estimator?
-    fn filter_size_bytes(&self) -> usize {
-        let num_keys = self.key_hashes.len() as u32;
-        let bits_per_key = self.bits_per_key;
+    /// Calculates the size of a bloom filter.
+    pub(crate) fn filter_size_bytes(num_keys: usize, bits_per_key: usize) -> usize {
         let filter_bits = num_keys * bits_per_key;
         // compute filter bytes rounded up to the number of bytes required to fit the filter
-        ((filter_bits + 7) / 8) as usize
+        (filter_bits + 7) / 8
     }
 
     pub(crate) fn build(&self) -> BloomFilter {
         let num_probes = optimal_num_probes(self.bits_per_key);
-        let filter_bytes = self.filter_size_bytes();
+        let filter_bytes =
+            Self::filter_size_bytes(self.key_hashes.len(), self.bits_per_key as usize);
         let filter_bits = (filter_bytes * 8) as u32;
         let mut buffer = vec![0x00; filter_bytes];
         for k in self.key_hashes.iter() {
