@@ -138,44 +138,56 @@ impl CompactorState {
             }
         }
 
-        self.validate_compaction(
-            &compaction.sources,
-            compaction.destination,
-        )?;
-
+        self.validate_compaction(&compaction.sources, compaction.destination)?;
 
         info!("accepted submitted compaction: {:?}", compaction);
         self.compactions.insert(compaction.destination, compaction);
         Ok(())
     }
 
-
-    pub(crate) fn validate_compaction(&mut self, sources: &[SourceId], destination: u32) -> Result<(), SlateDBError> {
+    pub(crate) fn validate_compaction(
+        &mut self,
+        sources: &[SourceId],
+        destination: u32,
+    ) -> Result<(), SlateDBError> {
         let compacted = &self.db_state.compacted;
-        let sources_logical_order: Vec<SourceId> = self.db_state.l0.iter()
+        let sources_logical_order: Vec<SourceId> = self
+            .db_state
+            .l0
+            .iter()
             .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
             .chain(compacted.iter().map(|sr| SourceId::SortedRun(sr.id)))
             .collect();
 
-
         let sources_set: HashSet<_> = sources.iter().collect();
 
-
-        if !sources.iter().all(|src| sources_logical_order.contains(src)) {
+        if !sources
+            .iter()
+            .all(|src| sources_logical_order.contains(src))
+        {
             return Err(SlateDBError::InvalidCompaction);
         }
 
-        let start = sources.iter().filter_map(|src| sources_logical_order.iter().position(|id| id == src)).min();
-        let end = sources.iter().filter_map(|src| sources_logical_order.iter().rposition(|id| id == src)).max();
+        let start = sources
+            .iter()
+            .filter_map(|src| sources_logical_order.iter().position(|id| id == src))
+            .min();
+        let end = sources
+            .iter()
+            .filter_map(|src| sources_logical_order.iter().rposition(|id| id == src))
+            .max();
 
         if let (Some(start_idx), Some(end_idx)) = (start, end) {
-            if !sources_logical_order[start_idx..=end_idx].iter().filter(|id| sources_set.contains(id)).eq(sources.iter()) {
+            if !sources_logical_order[start_idx..=end_idx]
+                .iter()
+                .filter(|id| sources_set.contains(id))
+                .eq(sources.iter())
+            {
                 return Err(SlateDBError::InvalidCompaction);
             }
         } else {
             return Err(SlateDBError::InvalidCompaction);
         }
-
 
         match sources.last() {
             Some(SourceId::Sst(_)) => {
@@ -569,7 +581,7 @@ mod tests {
         let (_, _, mut state) = build_test_state(rt.handle());
 
         let mut compaction = build_l0_compaction(&state.db_state().l0, 0);
-        let _ = compaction.sources.push(SourceId::SortedRun(5));
+        compaction.sources.push(SourceId::SortedRun(5));
         // when:
         let result = state.submit_compaction(compaction);
 
@@ -584,15 +596,15 @@ mod tests {
         let (_os, mut _sm, mut state) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
-        let result = state
-            .submit_compaction(Compaction::new(
-                original_l0s.iter()
-                    .enumerate()
-                    .filter(|(i,_e)| i > &2usize)
-                    .map(|(_i,x)|Sst(x.id.unwrap_compacted_id()))
-                    .collect::<Vec<SourceId>>(),
-                0,
-            ));
+        let result = state.submit_compaction(Compaction::new(
+            original_l0s
+                .iter()
+                .enumerate()
+                .filter(|(i, _e)| i > &2usize)
+                .map(|(_i, x)| Sst(x.id.unwrap_compacted_id()))
+                .collect::<Vec<SourceId>>(),
+            0,
+        ));
 
         // then:
         assert!(matches!(result, Ok(())));
