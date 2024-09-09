@@ -1,7 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
-use std::iter::{Chain, Peekable};
-use std::slice::Iter;
 use tracing::info;
 use ulid::Ulid;
 
@@ -140,139 +138,66 @@ impl CompactorState {
             }
         }
 
-        let existing_sst_ids = self
-            .db_state
-            .l0
-            .iter()
-            .map(|x| x.id.unwrap_compacted_id())
-            .collect::<Vec<_>>();
-        let existing_sr_ids = self
-            .db_state
-            .compacted
-            .iter()
-            .map(|sr| sr.id)
-            .collect::<Vec<_>>();
+        self.validate_compaction(
+            &compaction.sources,
+            compaction.destination,
+        )?;
 
-        let sources_sst = compaction
-            .sources
-            .iter()
-            .filter(|id| id.maybe_unwrap_sst().is_some())
-            .cloned()
-            .collect::<Vec<_>>();
-        let consecutive_sst =
-            Self::find_consecutive_sst_ids(existing_sst_ids.clone(), sources_sst.first())
-                .map_or(vec![], |vec| vec);
-        if consecutive_sst.len() != sources_sst.len() {
-            return Err(SlateDBError::InvalidCompaction);
-        }
-
-        let sources_sr: Vec<SourceId> = compaction
-            .sources
-            .iter()
-            .filter(|s| s.maybe_unwrap_sorted_run().is_some())
-            .cloned()
-            .collect();
-        let consecutive_sr =
-            Self::find_consecutive_sr_ids(existing_sr_ids.clone(), sources_sr.first())
-                .map_or(vec![], |vec| vec);
-        if consecutive_sr.len() != sources_sr.len() {
-            return Err(SlateDBError::InvalidCompaction);
-        }
-
-        let destination = &vec![SourceId::SortedRun(compaction.destination)];
-        let mut all_sources = compaction.sources.iter().chain(destination).peekable();
-
-        let first_source = compaction.sources.first();
-        match first_source {
-            Some(SourceId::Sst(_)) => {
-                if consecutive_sst.iter().any(|id| {
-                    if let Some(SourceId::Sst(source_id)) = all_sources.next() {
-                        if *source_id != *id {
-                            return true;
-                        }
-                    } else {
-                        return true;
-                    }
-                    false
-                }) {
-                    return Err(SlateDBError::InvalidCompaction);
-                }
-
-                if all_sources.peek().is_some() {
-                    //Validate source sorted run + destination existing sorted run
-                    if let Some(value) =
-                        Self::validate_sorted_run(&consecutive_sr, &mut all_sources)
-                    {
-                        return value;
-                    }
-                }
-            }
-            Some(SourceId::SortedRun(_)) => {
-                if let Some(value) = Self::validate_sorted_run(&consecutive_sr, &mut all_sources) {
-                    return value;
-                }
-            }
-            _ => return Err(SlateDBError::InvalidCompaction),
-        };
-
-        if all_sources.peek().is_some() {
-            //validate new destination sr
-            if let Some(SourceId::SortedRun(source_id)) = all_sources.next() {
-                let last_sr = &self.db_state.compacted.last().map_or(0, |sr| sr.id);
-                println!("source_id: {:#?}, compacted value:{:?}", source_id, last_sr);
-                if source_id < last_sr {
-                    return Err(SlateDBError::InvalidCompaction);
-                }
-            } else {
-                return Err(SlateDBError::InvalidCompaction);
-            }
-        }
 
         info!("accepted submitted compaction: {:?}", compaction);
         self.compactions.insert(compaction.destination, compaction);
         Ok(())
     }
 
-    fn validate_sorted_run<'a>(
-        c_sr: &Vec<u32>,
-        all_sources: &mut Peekable<Chain<Iter<'a, SourceId>, Iter<'a, SourceId>>>,
-    ) -> Option<Result<(), SlateDBError>> {
-        for current_sr in c_sr {
-            if let Some(SourceId::SortedRun(source_id)) = all_sources.next() {
-                if source_id != current_sr {
-                    return Some(Err(SlateDBError::InvalidCompaction));
-                }
-            }
-        }
-        None
-    }
 
-    fn find_consecutive_sst_ids(sources: Vec<Ulid>, value: Option<&SourceId>) -> Option<Vec<Ulid>> {
-        if let Some(value) = value {
-            match value {
-                SourceId::Sst(sst_id) => {
-                    if let Some(index) = sources.iter().position(|x| x == sst_id) {
-                        return Some(sources[index..].to_vec());
+    pub(crate) fn validate_compaction(&mut self, sources: &[SourceId], destination: u32) -> Result<(), SlateDBError> {
+        let compacted = &self.db_state.compacted;
+        let sources_logical_order: Vec<SourceId> = self.db_state.l0.iter()
+            .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+            .chain(compacted.iter().map(|sr| SourceId::SortedRun(sr.id)))
+            .collect();
+
+
+        let sources_set: HashSet<_> = sources.iter().collect();
+
+
+        if !sources.iter().all(|src| sources_logical_order.contains(src)) {
+            return Err(SlateDBError::InvalidCompaction);
+        }
+
+        let start = sources.iter().filter_map(|src| sources_logical_order.iter().position(|id| id == src)).min();
+        let end = sources.iter().filter_map(|src| sources_logical_order.iter().rposition(|id| id == src)).max();
+
+        if let (Some(start_idx), Some(end_idx)) = (start, end) {
+            if !sources_logical_order[start_idx..=end_idx].iter().filter(|id| sources_set.contains(id)).eq(sources.iter()) {
+                return Err(SlateDBError::InvalidCompaction);
+            }
+        } else {
+            return Err(SlateDBError::InvalidCompaction);
+        }
+
+
+        match sources.last() {
+            Some(SourceId::Sst(_)) => {
+                if let Some(first_sr) = compacted.first() {
+                    if destination < first_sr.id {
+                        return Err(SlateDBError::InvalidCompaction);
                     }
                 }
-                _ => return None,
             }
-        }
-        None
-    }
-
-    fn find_consecutive_sr_ids(sources: Vec<u32>, value: Option<&SourceId>) -> Option<Vec<u32>> {
-        if let Some(value) = value {
-            match value {
-                SourceId::SortedRun(sr_id) => {
-                    if let Some(index) = sources.iter().position(|x| x == sr_id) {
-                        return Some(sources[index..].to_vec());
+            Some(SourceId::SortedRun(last_sr)) => {
+                if compacted.iter().any(|sr| sr.id == destination) {
+                    if destination != *last_sr {
+                        return Err(SlateDBError::InvalidCompaction);
                     }
+                } else {
+                    return Err(SlateDBError::InvalidCompaction);
                 }
-                _ => return None,
             }
+            None => return Err(SlateDBError::InvalidCompaction),
         }
-        None
+
+        Ok(())
     }
 
     pub(crate) fn refresh_db_state(&mut self, writer_state: &CoreDbState) {
@@ -627,6 +552,8 @@ mod tests {
         let (_, _, mut state) = build_test_state(rt.handle());
 
         let l0_sst = &mut state.db_state().l0.clone();
+        let last_sst = l0_sst.pop_back().unwrap();
+        l0_sst.push_front(last_sst);
         l0_sst.pop_back();
         // when:
         let result = state.submit_compaction(build_l0_compaction(l0_sst, 0));
@@ -648,6 +575,27 @@ mod tests {
 
         // then:
         assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
+    }
+
+    #[test]
+    fn test_should_submit_correct_compaction() {
+        // given:
+        let rt = build_runtime();
+        let (_os, mut _sm, mut state) = build_test_state(rt.handle());
+        // compact the last sst
+        let original_l0s = &state.db_state().clone().l0;
+        let result = state
+            .submit_compaction(Compaction::new(
+                original_l0s.iter()
+                    .enumerate()
+                    .filter(|(i,_e)| i > &2usize)
+                    .map(|(_i,x)|Sst(x.id.unwrap_compacted_id()))
+                    .collect::<Vec<SourceId>>(),
+                0,
+            ));
+
+        // then:
+        assert!(matches!(result, Ok(())));
     }
 
     // test helpers
