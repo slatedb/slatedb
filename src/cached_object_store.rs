@@ -74,8 +74,9 @@ impl CachedObjectStore {
         location: &Path,
         opts: GetOptions,
     ) -> object_store::Result<GetResult> {
-        let (meta, attributes) = self.maybe_prefetch_range(location, &opts.range).await?;
-        let range = self.canonicalize_range(opts.range, meta.size)?;
+        let get_range = opts.range.clone();
+        let (meta, attributes) = self.maybe_prefetch_range(location, opts).await?;
+        let range = self.canonicalize_range(get_range, meta.size)?;
         let parts = self.split_range_into_parts(range.clone());
 
         // read parts, and concatenate them into a single stream. please note that some of these part may not be cached,
@@ -114,7 +115,7 @@ impl CachedObjectStore {
     async fn maybe_prefetch_range(
         &self,
         location: &Path,
-        range: &Option<GetRange>,
+        mut opts: GetOptions,
     ) -> object_store::Result<(ObjectMeta, Attributes)> {
         let entry = self.cache_storage.entry(location, self.part_size);
         match entry.read_head().await {
@@ -125,15 +126,12 @@ impl CachedObjectStore {
             }
         };
 
-        let aligned_opts = match &range {
-            None => GetOptions::default(),
-            Some(get_range) => GetOptions {
-                range: Some(self.align_get_range(get_range)),
-                ..Default::default()
-            },
-        };
+        // it's strange that GetOptions did not derive Clone. maybe we could add a derive(Clone) to object_store.
+        if let Some(range) = &opts.range {
+            opts.range = Some(self.align_get_range(range));
+        }
 
-        let get_result = self.object_store.get_opts(location, aligned_opts).await?;
+        let get_result = self.object_store.get_opts(location, opts).await?;
         let result_meta = get_result.meta.clone();
         let result_attrs = get_result.attributes.clone();
         // swallow the error on saving to disk here (the disk might be already full), just fallback
