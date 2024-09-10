@@ -9,7 +9,7 @@ use std::sync::Arc;
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
 
-use crate::block::{self, Block, BLOCK_SIZE_BYTES, SIZEOF_U16, SIZEOF_U32, SIZEOF_U64};
+use crate::block::{Block, BLOCK_SIZE_BYTES, SIZEOF_U16, SIZEOF_U32, SIZEOF_U64};
 use crate::filter::{BloomFilter, BloomFilterBuilder, DEFAULT_BITS_PER_KEY};
 
 use crate::flatbuffer_types::{
@@ -1030,7 +1030,7 @@ mod tests {
         fn create_table_store() -> Arc<TableStore> {
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
-            Arc::new(TableStore::new(object_store, format, Path::from("")))
+            Arc::new(TableStore::new(object_store, format, Path::from(""), None))
         }
 
         async fn serialize_memtable_to_sst(memtable: &WritableKVTable) -> usize {

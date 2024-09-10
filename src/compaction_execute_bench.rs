@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info};
 use ulid::Ulid;
 
+use crate::block::BLOCK_SIZE_BYTES;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, SourceId};
 use crate::config::CompactorOptions;
