@@ -174,9 +174,9 @@ impl TokioCompactionExecutorInner {
             let results = join_all(tasks.drain().map(|(_, task)| task.task)).await;
             for result in results {
                 match result {
-                    Err(e) if !e.is_cancelled() => {
+                    // Err(e) if !e.is_cancelled() => {
                         // eprintln!("Shutdown error in compaction task: {:?}", e);
-                    }
+                    // }
                     _ => {}
                 }
             }
