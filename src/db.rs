@@ -629,6 +629,7 @@ mod tests {
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await;
+        kv_store.flush().await.unwrap();
 
         assert_eq!(
             cached_object_store
@@ -640,29 +641,33 @@ mod tests {
                 .map(|meta| meta.location.to_string())
                 .collect::<Vec<_>>(),
             vec![
-                "tmp/test_kv_store_with_cache/manifest/00000000000000000001.manifest".to_string(),
-                "tmp/test_kv_store_with_cache/manifest/00000000000000000002.manifest".to_string(),
-                "tmp/test_kv_store_with_cache/wal/00000000000000000001.sst".to_string(),
-                "tmp/test_kv_store_with_cache/wal/00000000000000000002.sst".to_string(),
+                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest"
+                    .to_string(),
+                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest"
+                    .to_string(),
+                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst"
+                    .to_string(),
+                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst"
+                    .to_string(),
             ],
         );
 
         // check the files are cached as expected
         let tests = vec![
             (
-                "tmp/test_kv_store_with_cache/manifest/00000000000000000001.manifest",
+                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest",
                 0,
             ),
             (
-                "tmp/test_kv_store_with_cache/manifest/00000000000000000002.manifest",
+                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest",
                 2,
             ),
             (
-                "tmp/test_kv_store_with_cache/wal/00000000000000000001.sst",
+                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst",
                 2,
             ),
             (
-                "tmp/test_kv_store_with_cache/wal/00000000000000000002.sst",
+                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst",
                 0,
             ),
         ];
