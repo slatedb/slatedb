@@ -610,7 +610,7 @@ impl FsCacheEntry {
 
     fn make_rand_suffix(&self) -> String {
         let mut rng = rand::thread_rng();
-        (0..6).map(|_| rng.sample(Alphanumeric) as char).collect()
+        (0..24).map(|_| rng.sample(Alphanumeric) as char).collect()
     }
 }
 
