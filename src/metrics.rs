@@ -49,12 +49,40 @@ impl<T: Default + NoUninit + std::fmt::Debug> Default for Gauge<T> {
     }
 }
 
+impl Gauge<i64> {
+    pub fn add(&self, value: i64) -> i64 {
+        self.value.fetch_add(value, Ordering::Relaxed)
+    }
+
+    pub fn inc(&self) -> i64 {
+        self.add(1)
+    }
+
+    pub fn sub(&self, value: i64) -> i64 {
+        self.value.fetch_add(-value, Ordering::Relaxed)
+    }
+
+    pub fn dec(&self) -> i64 {
+        self.sub(1)
+    }
+}
+
+impl<T: Default> Default for Gauge<T> {
+    fn default() -> Self {
+        Self {
+            value: Arc::new(Atomic::<T>::default()),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DbStats {
     pub immutable_memtable_flushes: Counter,
     pub last_compaction_ts: Gauge<u64>,
     pub object_store_cache_part_hits: Counter,
     pub object_store_cache_part_access: Counter,
+    pub running_compactions: Gauge<i64>,
+    pub bytes_compacted: Gauge<i64>,
 }
 
 impl DbStats {
@@ -64,6 +92,8 @@ impl DbStats {
             last_compaction_ts: Gauge::default(),
             object_store_cache_part_hits: Counter::default(),
             object_store_cache_part_access: Counter::default(),
+            running_compactions: Gauge::default(),
+            bytes_compacted: Gauge::default(),
         }
     }
 }
@@ -98,5 +128,15 @@ mod tests {
         assert!(gauge.get());
         gauge.set(false);
         assert!(!gauge.get());
+    }
+
+    #[test]
+    fn test_gauge_i64() {
+        let gauge = Gauge::<i64>::default();
+        assert_eq!(gauge.get(), 0);
+        gauge.add(200);
+        assert_eq!(gauge.get(), 200);
+        gauge.sub(42);
+        assert_eq!(gauge.get(), 158);
     }
 }

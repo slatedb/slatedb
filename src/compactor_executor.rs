@@ -15,6 +15,7 @@ use crate::db_state::{SSTableHandle, SortedRun, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
+use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
@@ -41,6 +42,7 @@ impl TokioCompactionExecutor {
         options: Arc<CompactorOptions>,
         worker_tx: crossbeam_channel::Sender<WorkerToOrchestratorMsg>,
         table_store: Arc<TableStore>,
+        db_stats: Arc<DbStats>,
     ) -> Self {
         Self {
             inner: Arc::new(TokioCompactionExecutorInner {
@@ -50,6 +52,7 @@ impl TokioCompactionExecutor {
                 table_store,
                 tasks: Arc::new(Mutex::new(HashMap::new())),
                 is_stopped: AtomicBool::new(false),
+                db_stats,
             }),
         }
     }
@@ -80,6 +83,7 @@ pub(crate) struct TokioCompactionExecutorInner {
     table_store: Arc<TableStore>,
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
     is_stopped: AtomicBool,
+    db_stats: Arc<DbStats>,
 }
 
 impl TokioCompactionExecutorInner {
@@ -120,10 +124,12 @@ impl TokioCompactionExecutorInner {
         while let Some(kv) = all_iter.next_entry().await? {
             // Add to SST
             let value = kv.value.into_option();
+            let size = kv.key.len() + value.as_ref().map_or(0, |b| b.len());
+            self.db_stats.bytes_compacted.add(size as i64);
             current_writer
                 .add(kv.key.as_ref(), value.as_ref().map(|b| b.as_ref()))
                 .await?;
-            current_size += kv.key.len() + value.map_or(0, |b| b.len());
+            current_size += size;
             if current_size > self.options.max_sst_size {
                 current_size = 0;
                 let finished_writer = mem::replace(
@@ -133,6 +139,7 @@ impl TokioCompactionExecutorInner {
                 );
                 output_ssts.push(finished_writer.close().await?);
             }
+            self.db_stats.bytes_compacted.sub(size as i64);
         }
         if current_size > 0 {
             output_ssts.push(current_writer.close().await?);

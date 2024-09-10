@@ -119,6 +119,7 @@ impl CompactorOrchestrator {
             options.clone(),
             worker_tx,
             table_store.clone(),
+            db_stats.clone(),
         );
         let orchestrator = Self {
             options,
@@ -262,6 +263,7 @@ impl CompactorOrchestrator {
                 .unwrap_or_default()
                 .as_secs(),
         );
+        self.db_stats.running_compactions.dec();
         Ok(())
     }
 
@@ -272,6 +274,7 @@ impl CompactorOrchestrator {
             return Ok(());
         }
         self.start_compaction(compaction);
+        self.db_stats.running_compactions.inc();
         Ok(())
     }
 
