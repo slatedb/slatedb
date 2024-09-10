@@ -573,7 +573,7 @@ mod tests {
         let mut opts = test_db_options(0, 1024, None);
         let temp_dir = tempfile::Builder::new()
             .prefix("objstore_cache_test_")
-            .tempdir_in("/tmp")
+            .tempdir()
             .unwrap();
         let db_stats = Arc::new(DbStats::new());
         let part_size = 1024;
