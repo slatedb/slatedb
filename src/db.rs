@@ -568,7 +568,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_with_object_store_cache() {
+    async fn test_get_with_object_store_cache_metrics() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut opts = test_db_options(0, 1024, None);
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_cache_test_")
+            .tempdir()
+            .unwrap();
+
+        opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
+        opts.object_store_cache_options.part_size_bytes = 1024;
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store_with_cache_metrics"),
+            opts,
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        let access_count0 = kv_store.metrics().object_store_cache_part_access.get();
+        let key = b"test_key";
+        let value = b"test_value";
+        kv_store.put(key, value).await;
+        kv_store.flush().await.unwrap();
+
+        let got = kv_store.get(key).await.unwrap();
+        let access_count1 = kv_store.metrics().object_store_cache_part_access.get();
+        assert_eq!(got, Some(Bytes::from_static(value)));
+        assert!(access_count1 > 0);
+        assert!(access_count1 >= access_count0);
+        assert!(kv_store.metrics().object_store_cache_part_hits.get() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_with_object_store_cache_stored_files() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut opts = test_db_options(0, 1024, None);
         let temp_dir = tempfile::Builder::new()
@@ -587,25 +620,15 @@ mod tests {
 
         opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
         let kv_store = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store_with_cache"),
+            Path::from("/tmp/test_kv_store_with_cache_stored_files"),
             opts,
             cached_object_store.clone(),
         )
         .await
         .unwrap();
-
-        let access_count0 = kv_store.metrics().object_store_cache_part_access.get();
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await;
-        kv_store.flush().await.unwrap();
-
-        let got = kv_store.get(key).await.unwrap();
-        let access_count1 = kv_store.metrics().object_store_cache_part_access.get();
-        assert_eq!(got, Some(Bytes::from_static(value)));
-        assert!(access_count1 > 0);
-        assert!(access_count1 >= access_count0);
-        assert!(kv_store.metrics().object_store_cache_part_hits.get() >= 1);
 
         assert_eq!(
             cached_object_store
