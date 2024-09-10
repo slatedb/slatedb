@@ -352,11 +352,11 @@ impl Db {
             SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
 
         let maybe_cached_object_store = match &options.object_store_cache_options.root_folder {
-            None => object_store,
+            None => object_store.clone(),
             Some(cache_root_folder) => {
                 let part_size_bytes = options.object_store_cache_options.part_size_bytes;
                 CachedObjectStore::new(
-                    object_store,
+                    object_store.clone(),
                     cache_root_folder.clone(),
                     part_size_bytes,
                     db_stats.clone(),
@@ -366,11 +366,12 @@ impl Db {
 
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             maybe_cached_object_store.clone(),
-            sst_format,
+            sst_format.clone(),
             path.clone(),
             fp_registry.clone(),
             create_block_cache(options.block_cache_options),
         ));
+
         let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
         let mut manifest = Self::init_db(&manifest_store).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -399,10 +400,18 @@ impl Db {
             inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
         let mut compactor = None;
         if let Some(compactor_options) = &inner.options.compactor_options {
+            // not to pollute the cache during compaction
+            let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
+                object_store.clone(),
+                sst_format,
+                path.clone(),
+                fp_registry.clone(),
+                None,
+            ));
             compactor = Some(
                 Compactor::new(
                     manifest_store.clone(),
-                    table_store.clone(),
+                    uncached_table_store.clone(),
                     compactor_options.clone(),
                     Handle::current(),
                     inner.db_stats.clone(),
