@@ -9,8 +9,9 @@ use std::sync::Arc;
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
 
-use crate::block::Block;
-use crate::filter::{BloomFilter, BloomFilterBuilder};
+use crate::block::{Block, BLOCK_SIZE_BYTES, SIZEOF_U16, SIZEOF_U32, SIZEOF_U64};
+use crate::filter::{BloomFilter, BloomFilterBuilder, DEFAULT_BITS_PER_KEY};
+
 use crate::flatbuffer_types::{
     BlockMeta, BlockMetaArgs, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned, SsTableInfo,
     SsTableInfoArgs, SsTableInfoOwned,
@@ -268,6 +269,101 @@ impl SsTableFormat {
             self.compression_codec,
         )
     }
+
+    /// Estimate the SsTable size given a memtable, including key, value length
+    /// headers, offset ptrs, bloom filter sizes, and block overheads.
+    /// TODO: Consider BlockBuilder.estimated_size() for some of these calcs.
+    /// TODO: Add 2 checksums, one per block and one on the SST.
+    /// +--------------------------------------------------------------------------------+
+    /// |                                Data Blocks                                     |
+    /// +--------------------------------------------------------------------------------+
+    /// +--------------------------------------------------------------------------------+
+    /// |                                                                                |
+    /// | +--------------+----------+---------+-----------+------------+-----------+----+|
+    /// | |  Number of   | K-V      |   Key   |   Key     |   Value    | Value     |    ||
+    /// | |  KV Pairs    | Offsets  |  Length |   Data    |   Length   | Data      | .. ||
+    /// | |    (2B)      | (2B each)|   (2B)  | (variable)|    (4B)    | (variable)|    ||
+    /// | +--------------+----------+---------+-----------+------------+-----------+----+|
+    /// |                                               followed by:   | Checksum |      |
+    /// |                                                              |   (4B)   |      |
+    /// +--------------------------------------------------------------------------------+
+    /// |                             More Data Blocks                                   |
+    /// +--------------------------------------------------------------------------------+
+    /// |                                                                                |
+    /// |                        ... (Additional Data Blocks) ...                        |
+    /// |                                                                                |
+    /// +--------------------------------------------------------------------------------+
+    /// |                               Index Block                                      |
+    /// +--------------------------------------------------------------------------------+
+    /// +--------------------------------------------------------------------------------+
+    /// |                              Bloom filter                                      |
+    /// |                                                                                |
+    /// |                (variable size, bits_per_key * num keys)                        |
+    /// +--------------------------------------------------------------------------------+
+    /// |                     Index: per data block metadata                             |
+    /// |                                                                                |
+    /// |    (Index Data: first key(variable) + Offset per Data Blocks) (variable size)  |
+    /// +--------------------------------------------------------------------------------+
+    /// |                              SSTable Info                                      |
+    /// |                                                                                |
+    /// | First Key (variable) | Index Offset (8B) | Index Length (8B) |                 |
+    /// | Filter Offset (8B) | Filter Length (8B) | Compression Format (1B)              |
+    /// |                                                                                |
+    /// +--------------------------------------------------------------------------------+
+    /// |                           Metadata Offset (4 bytes)                            |
+    /// |                           (points to SSTable Info)                             |
+    /// +--------------------------------------------------------------------------------+
+    /// |                              SST Checksum (4 bytes)                            |
+    /// +--------------------------------------------------------------------------------+
+    pub(crate) fn estimate_sst_size(
+        &self,
+        num_entries: usize,
+        total_entry_size_bytes: usize,
+    ) -> usize {
+        if num_entries == 0 {
+            return 0;
+        }
+
+        // Data Blocks.
+
+        // u16 for key size, u32 for value size
+        let entry_key_and_val_size_header_offset = SIZEOF_U16 + SIZEOF_U32;
+        let entry_offset_overhead = SIZEOF_U16;
+        let per_entry_overhead = entry_key_and_val_size_header_offset + entry_offset_overhead;
+
+        let number_of_blocks = usize::div_ceil(total_entry_size_bytes, BLOCK_SIZE_BYTES);
+        let block_kv_pair_count = SIZEOF_U16; // Number of key-value pairs in the block.
+        let block_checksum = SIZEOF_U16; // checksum at the end of the block.
+        let per_block_overhead = block_kv_pair_count + block_checksum;
+        let total_block_overhead = number_of_blocks * per_block_overhead;
+        let total_data_blocks_bytes =
+            total_entry_size_bytes + per_entry_overhead * num_entries + total_block_overhead;
+
+        // Index Block calculation.
+        // 1. Bloom filter
+        let bloom_filter_header = SIZEOF_U16;
+        let bloom_filter_bytes_for_filter = if self.min_filter_keys as usize <= num_entries {
+            BloomFilterBuilder::filter_size_bytes(num_entries, DEFAULT_BITS_PER_KEY as usize)
+        } else {
+            0
+        };
+        let bloom_filter_total_size = bloom_filter_header + bloom_filter_bytes_for_filter;
+        // 2. Per-block meta.
+        let guess_at_average_first_key_size_bytes = 12;
+        let per_block_metadata_size = number_of_blocks
+            * (guess_at_average_first_key_size_bytes + SIZEOF_U16/* offsets in block */);
+        // 3. SST Info section (see SsTableInfoArgs).
+        let sst_info_size = guess_at_average_first_key_size_bytes + 4 * SIZEOF_U64 + 1;
+        let sst_checksum = SIZEOF_U64;
+
+        let index_block_size = bloom_filter_total_size
+            + per_block_metadata_size
+            + sst_info_size
+            + sst_checksum
+            + block_checksum;
+
+        total_data_blocks_bytes + index_block_size
+    }
 }
 
 impl SsTableInfoOwned {
@@ -330,7 +426,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
             builder: BlockBuilder::new(block_size),
             min_filter_keys,
             num_keys: 0,
-            filter_builder: BloomFilterBuilder::new(10),
+            filter_builder: BloomFilterBuilder::new(DEFAULT_BITS_PER_KEY),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             compression_codec,
         }
@@ -439,6 +535,8 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
     pub fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
         let mut buf = self.finish_block()?.unwrap_or(Vec::new());
+        // write the index block
+        // 1. maybe serialize the bloom filter
         let mut maybe_filter = None;
         let mut filter_len = 0;
         let filter_offset = self.current_len + buf.len();
@@ -454,7 +552,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
             maybe_filter = Some(filter);
         }
 
-        // write the index block
+        // 2. write the index data, containing metadata per data block.
         let vector = self.index_builder.create_vector(&self.block_meta);
         let index_wip = SsTableIndex::create(
             &mut self.index_builder,
@@ -472,6 +570,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
         let index_len = index_block.len();
         buf.put(index_block);
 
+        // 3. write the SST info.
         let mut sst_info_builder = flatbuffers::FlatBufferBuilder::new();
         let first_key = self
             .sst_first_key
@@ -515,6 +614,7 @@ mod tests {
     use object_store::ObjectStore;
 
     use super::*;
+    use crate::block::BLOCK_SIZE_BYTES;
     use crate::block_iterator::BlockIterator;
     use crate::db_state::SsTableId;
     use crate::tablestore::TableStore;
@@ -637,7 +737,7 @@ mod tests {
     async fn test_sstable() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 0, None);
+        let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
         let table_store = TableStore::new(object_store, format, root_path, None);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
@@ -683,7 +783,7 @@ mod tests {
     async fn test_sstable_no_filter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 3, None);
+        let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 3, None);
         let table_store = TableStore::new(object_store, format, root_path, None);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
@@ -706,7 +806,7 @@ mod tests {
         async fn test_compression_inner(compression: CompressionCodec) {
             let root_path = Path::from("");
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let format = SsTableFormat::new(4096, 0, Some(compression));
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, Some(compression));
             let table_store = TableStore::new(object_store, format, root_path, None);
             let mut builder = table_store.table_builder();
             builder.add(b"key1", Some(b"value1")).unwrap();
@@ -740,7 +840,7 @@ mod tests {
         ) {
             let root_path = Path::from("");
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let format = SsTableFormat::new(4096, 0, Some(compression));
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, Some(compression));
             let table_store =
                 TableStore::new(object_store.clone(), format, root_path.clone(), None);
             let mut builder = table_store.table_builder();
@@ -754,7 +854,7 @@ mod tests {
                 .unwrap();
 
             // Decompression is independent of TableFormat. It uses the CompressionFormat from SSTable Info to decompress sst.
-            let format = SsTableFormat::new(4096, 0, Some(dummy_codec));
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, Some(dummy_codec));
             let table_store = TableStore::new(object_store, format, root_path, None);
             let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
             let index = table_store.read_index(&sst_handle).await.unwrap();
@@ -915,6 +1015,115 @@ mod tests {
         )
         .await;
         assert!(blocks.is_empty())
+    }
+
+    #[cfg(test)]
+    mod estimate_sst_size_tests {
+        use super::*;
+        use crate::iter::KeyValueIterator;
+        use crate::mem_table::WritableKVTable;
+        use crate::tablestore::TableStore;
+        use object_store::memory::InMemory;
+        use object_store::path::Path;
+        use std::sync::Arc;
+
+        fn create_table_store() -> Arc<TableStore> {
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
+            Arc::new(TableStore::new(object_store, format, Path::from(""), None))
+        }
+
+        async fn serialize_memtable_to_sst(memtable: &WritableKVTable) -> usize {
+            let table_store = create_table_store();
+            let mut builder = table_store.table_builder();
+
+            let iter = &mut memtable.table().iter();
+            while let Ok(Some(next_val)) = iter.next().await {
+                builder.add(&next_val.key, Some(&next_val.value)).unwrap();
+            }
+
+            let encoded = &mut builder.build().unwrap();
+            let mut total_size = 0;
+            while let Some(block) = encoded.unconsumed_blocks.pop_front() {
+                total_size += block.len();
+            }
+            total_size
+        }
+
+        #[tokio::test]
+        async fn test_empty_sst() {
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
+            let memtable = WritableKVTable::new();
+            let actual_size = serialize_memtable_to_sst(&memtable).await;
+            let estimated_size = format.estimate_sst_size(0, 0);
+
+            assert_eq!(actual_size, estimated_size);
+        }
+
+        #[tokio::test]
+        async fn test_single_small_entry() {
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
+            let mut memtable = WritableKVTable::new();
+            memtable.put(b"0123456789ab", b"value");
+
+            let actual_size = serialize_memtable_to_sst(&memtable).await;
+            let estimated_size = format.estimate_sst_size(1, 8);
+
+            assert!(
+                (actual_size as i64 - estimated_size as i64).abs() <= 50,
+                "Actual size: {}, Estimated size: {}",
+                actual_size,
+                estimated_size
+            );
+        }
+
+        #[tokio::test]
+        async fn test_multiple_entries() {
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
+            let mut memtable = WritableKVTable::new();
+            let mut total_size = 0;
+
+            for i in 0..100 {
+                let key = format!("key{:03}", i);
+                let value = format!("value{:03}", i);
+                memtable.put(key.as_bytes(), value.as_bytes());
+                total_size += key.len() + value.len();
+            }
+
+            let actual_size = serialize_memtable_to_sst(&memtable).await;
+            let estimated_size = format.estimate_sst_size(100, total_size);
+
+            assert!(
+                (actual_size as i64 - estimated_size as i64).abs() <= 500,
+                "Actual size: {}, Estimated size: {}",
+                actual_size,
+                estimated_size
+            );
+        }
+
+        #[tokio::test]
+        async fn test_large_entries() {
+            let format = SsTableFormat::new(BLOCK_SIZE_BYTES, 0, None);
+            let mut memtable = WritableKVTable::new();
+            let mut total_size = 0;
+
+            for i in 0..10000 {
+                let key = format!("key{:05}", i);
+                let value = "a".repeat(95);
+                memtable.put(key.as_bytes(), value.as_bytes());
+                total_size += key.len() + value.len();
+            }
+
+            let actual_size = serialize_memtable_to_sst(&memtable).await;
+            let estimated_size = format.estimate_sst_size(10000, total_size);
+
+            assert!(
+                (actual_size as i64 - estimated_size as i64).abs() <= 50000,
+                "Actual size: {}, Estimated size: {}",
+                actual_size,
+                estimated_size
+            );
+        }
     }
 
     struct BytesBlob {

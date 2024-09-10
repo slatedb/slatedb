@@ -8,6 +8,7 @@ use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Handle;
 
+use crate::block::BLOCK_SIZE_BYTES;
 use crate::compactor::Compactor;
 use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
@@ -33,6 +34,7 @@ pub(crate) struct DbInner {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
     pub(crate) db_stats: Arc<DbStats>,
+    pub(crate) sst_format: SsTableFormat,
 }
 
 impl DbInner {
@@ -41,6 +43,7 @@ impl DbInner {
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
         memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
+        sst_format: SsTableFormat,
     ) -> Result<Self, SlateDBError> {
         let state = DbState::new(core_db_state);
         let db_inner = Self {
@@ -49,6 +52,7 @@ impl DbInner {
             table_store,
             memtable_flush_notifier,
             db_stats: Arc::new(DbStats::new()),
+            sst_format,
         };
         Ok(db_inner)
     }
@@ -238,6 +242,8 @@ impl DbInner {
         rx.await.expect("receive error on memtable flush")
     }
 
+    /// This function bounds the number of memtables in memory by awaiting for
+    /// excess memtables to be flushed.
     async fn maybe_apply_backpressure(&self) {
         loop {
             let table = {
@@ -345,11 +351,14 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
-        let sst_format =
-            SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
+        let sst_format = SsTableFormat::new(
+            BLOCK_SIZE_BYTES,
+            options.min_filter_keys,
+            options.compression_codec,
+        );
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             object_store.clone(),
-            sst_format,
+            sst_format.clone(),
             path.clone(),
             fp_registry.clone(),
             create_block_cache(options.block_cache_options),
@@ -363,6 +372,7 @@ impl Db {
                 table_store.clone(),
                 manifest.db_state()?.clone(),
                 memtable_flush_tx,
+                sst_format,
             )
             .await?,
         );
@@ -584,7 +594,7 @@ mod tests {
         options.wal_enabled = false;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let sst_format = SsTableFormat::new(4096, 10, None);
+        let sst_format = SsTableFormat::new(BLOCK_SIZE_BYTES, 10, None);
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
             sst_format,
@@ -658,7 +668,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let sst_format = SsTableFormat::new(4096, 10, None);
+        let sst_format = SsTableFormat::new(BLOCK_SIZE_BYTES, 10, None);
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
             sst_format,

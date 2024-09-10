@@ -4,9 +4,13 @@ use crate::error::SlateDBError;
 
 pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
 pub(crate) const SIZEOF_U32: usize = std::mem::size_of::<u32>();
+pub(crate) const SIZEOF_U64: usize = std::mem::size_of::<u64>();
 
 /// "None" values are encoded by using the maximum u32 value as the value length.
 pub(crate) const TOMBSTONE: u32 = u32::MAX;
+
+/// The default block size in bytes.
+pub(crate) const BLOCK_SIZE_BYTES: usize = 4096;
 
 pub struct Block {
     pub(crate) data: Bytes,
@@ -65,6 +69,7 @@ impl BlockBuilder {
         }
     }
 
+    // TODO: this may need adjustment, it returns a num of bytes + num of elements.
     #[rustfmt::skip]
     fn estimated_size(&self) -> usize {
         SIZEOF_U16           // number of key-value pairs in the block
@@ -123,7 +128,7 @@ mod tests {
 
     #[test]
     fn test_block() {
-        let mut builder = BlockBuilder::new(4096);
+        let mut builder = BlockBuilder::new(BLOCK_SIZE_BYTES);
         assert!(builder.add(b"key1", Some(b"value1")));
         assert!(builder.add(b"key2", Some(b"value2")));
         let block = builder.build().unwrap();
@@ -135,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_block_with_tombstone() {
-        let mut builder = BlockBuilder::new(4096);
+        let mut builder = BlockBuilder::new(BLOCK_SIZE_BYTES);
         assert!(builder.add(b"key1", Some(b"value1")));
         assert!(builder.add(b"key2", None));
         assert!(builder.add(b"key3", Some(b"value3")));
