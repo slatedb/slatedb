@@ -355,15 +355,12 @@ impl Db {
             None => object_store,
             Some(cache_root_folder) => {
                 let part_size_bytes = options.object_store_cache_options.part_size_bytes;
-                if part_size_bytes == 0 || part_size_bytes % 1024 != 0 {
-                    return Err(SlateDBError::InvalidCachePartSize);
-                }
-                Arc::new(CachedObjectStore::new(
+                CachedObjectStore::new(
                     object_store,
                     cache_root_folder.clone(),
                     part_size_bytes,
                     db_stats.clone(),
-                ))
+                )?
             }
         };
 
@@ -571,12 +568,13 @@ mod tests {
             .unwrap();
         let db_stats = Arc::new(DbStats::new());
         let part_size = 1024;
-        let cached_object_store = Arc::new(CachedObjectStore::new(
+        let cached_object_store = CachedObjectStore::new(
             object_store.clone(),
             temp_dir.path().to_path_buf(),
             part_size,
             db_stats.clone(),
-        ));
+        )
+        .unwrap();
 
         opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
         let kv_store = Db::open_with_opts(
