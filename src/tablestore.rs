@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{BufMut, Bytes};
+use chrono::Utc;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::join_all, StreamExt};
 use object_store::buffered::BufWriter;
@@ -234,10 +235,7 @@ impl TableStore {
         for wal_id in wal_list {
             let path = self.path(&SsTableId::Wal(wal_id));
             let metadata = self.object_store.head(&path).await?;
-            if metadata
-                .last_modified
-                .signed_duration_since(chrono::Utc::now())
-                > min_age
+            if Utc::now().signed_duration_since(metadata.last_modified) > min_age
             {
                 self.object_store.delete(&path).await?;
             }
@@ -273,7 +271,7 @@ impl TableStore {
             match Self::parse_id(&self.root_path, &file.location) {
                 Ok(Some(sst_id)) => {
                     if !active_sst_id_set.contains(&sst_id)
-                        && file.last_modified.signed_duration_since(chrono::Utc::now()) > min_age
+                        && Utc::now().signed_duration_since(file.last_modified) > min_age
                     {
                         let path = self.path(&sst_id);
                         self.object_store.delete(&path).await?;

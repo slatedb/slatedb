@@ -222,7 +222,7 @@ impl ManifestStore {
             Ok(file) => file,
             Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
         } {
-            if file.last_modified.signed_duration_since(Utc::now()) > min_age {
+            if Utc::now().signed_duration_since(file.last_modified) > min_age {
                 let id = self.parse_id(&file.location, "manifest")?;
                 self.delete_manifest(id).await?;
             }
