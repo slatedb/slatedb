@@ -215,7 +215,14 @@ impl ManifestStore {
 
     /// Delete a manifest from the object store.
     pub(crate) async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError> {
-        // TODO add safety checks to prevent deletions of active manifests
+        // TODO Once we implement snapshots, we should check if the manifest is snapshotted as well
+        let (active_id, _) = self
+            .read_latest_manifest()
+            .await?
+            .ok_or(SlateDBError::ManifestMissing)?;
+        if active_id == id {
+            return Err(SlateDBError::InvalidDeletion);
+        }
         let manifest_path = &self.get_manifest_path(id);
         self.object_store.delete(manifest_path).await?;
         Ok(())
@@ -501,5 +508,23 @@ mod tests {
         let manifests = ms.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
         assert_eq!(manifests[0].id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_active_manifest_should_fail() {
+        let os = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+        sm.update_db_state(state.clone()).await.unwrap();
+        let manifests = ms.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 2);
+        assert_eq!(manifests[0].id, 1);
+        assert_eq!(manifests[1].id, 2);
+
+        let result = ms.delete_manifest(2).await;
+        assert!(matches!(result, Err(error::SlateDBError::InvalidDeletion)));
     }
 }

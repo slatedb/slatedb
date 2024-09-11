@@ -24,6 +24,9 @@ pub enum SlateDBError {
     #[error("Manifest missing")]
     ManifestMissing,
 
+    #[error("Invalid deletion")]
+    InvalidDeletion,
+
     #[error("Invalid sst error")]
     InvalidFlatbuffer(#[from] flatbuffers::InvalidFlatbuffer),
 
