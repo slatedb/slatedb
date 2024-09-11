@@ -482,15 +482,14 @@ impl TableStore {
     /// Parses the SsTableId from a given path
     fn parse_id(root_path: &Path, path: &Path) -> Result<Option<SsTableId>, SlateDBError> {
         if let Some(mut suffix_iter) = path.prefix_match(root_path) {
-            let next_part = suffix_iter.next().map(|s| s.as_ref().to_owned());
-            match next_part.as_deref() {
-                Some("wal") => suffix_iter
+            match suffix_iter.next() {
+                Some(a) if a.as_ref() == "wal" => suffix_iter
                     .next()
                     .and_then(|s| s.as_ref().split('.').next().map(|s| s.parse::<u64>()))
                     .transpose()
                     .map(|r| r.map(SsTableId::Wal))
                     .map_err(|_| SlateDBError::InvalidDBState),
-                Some("compacted") => suffix_iter
+                Some(a) if a.as_ref() == "compacted" => suffix_iter
                     .next()
                     .and_then(|s| s.as_ref().split('.').next().map(Ulid::from_string))
                     .transpose()
