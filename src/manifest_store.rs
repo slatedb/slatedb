@@ -228,7 +228,8 @@ impl ManifestStore {
         Ok(())
     }
 
-    /// Read a manifest from the object store.
+    /// Read a manifest from the object store. The last element in an unbounded
+    /// range is the current manifest.
     /// # Arguments
     /// * `id_range` - The range of IDs to list
     pub(crate) async fn list_manifests<R: RangeBounds<u64>>(
