@@ -213,7 +213,6 @@ impl ManifestStore {
         Ok(())
     }
 
-    // TODO add tests
     /// Delete a manifest from the object store.
     pub(crate) async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError> {
         // TODO add safety checks to prevent deletions of active manifests
@@ -482,5 +481,25 @@ mod tests {
         let manifests = ms.list_manifests(..2).await.unwrap();
         assert_eq!(manifests.len(), 1);
         assert_eq!(manifests[0].id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_delete_manifest() {
+        let os = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+        sm.update_db_state(state.clone()).await.unwrap();
+        let manifests = ms.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 2);
+        assert_eq!(manifests[0].id, 1);
+        assert_eq!(manifests[1].id, 2);
+
+        ms.delete_manifest(1).await.unwrap();
+        let manifests = ms.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].id, 2);
     }
 }
