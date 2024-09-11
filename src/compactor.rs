@@ -263,7 +263,6 @@ impl CompactorOrchestrator {
                 .unwrap_or_default()
                 .as_secs(),
         );
-        self.db_stats.running_compactions.dec();
         Ok(())
     }
 
@@ -274,7 +273,6 @@ impl CompactorOrchestrator {
             return Ok(());
         }
         self.start_compaction(compaction);
-        self.db_stats.running_compactions.inc();
         Ok(())
     }
 

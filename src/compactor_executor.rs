@@ -160,12 +160,14 @@ impl TokioCompactionExecutorInner {
         let this = self.clone();
         let task = self.handle.spawn(async move {
             let dst = compaction.destination;
+            this.db_stats.clone().running_compactions.inc();
             let result = this.execute_compaction(compaction).await;
             this.worker_tx
                 .send(CompactionFinished(result))
                 .expect("failed to send compaction finished msg");
             let mut tasks = this.tasks.lock();
             tasks.remove(&dst);
+            this.db_stats.running_compactions.dec();
         });
         tasks.insert(dst, TokioCompactionTask { task });
     }

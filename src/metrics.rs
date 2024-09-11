@@ -1,3 +1,4 @@
+use std::fmt::{write, Display, Formatter};
 use std::sync::Arc;
 
 use atomic::{Atomic, Ordering};
@@ -67,14 +68,6 @@ impl Gauge<i64> {
     }
 }
 
-impl<T: Default> Default for Gauge<T> {
-    fn default() -> Self {
-        Self {
-            value: Arc::new(Atomic::<T>::default()),
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct DbStats {
     pub immutable_memtable_flushes: Counter,
@@ -97,6 +90,12 @@ impl DbStats {
         }
     }
 }
+
+// impl Display for DbStats {
+//     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+//         write!(f, )
+//     }
+// }
 
 #[cfg(test)]
 mod tests {

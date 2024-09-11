@@ -17,9 +17,11 @@ use ulid::Ulid;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, SourceId};
 use crate::config::CompactorOptions;
+use crate::db::Db;
 use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::manifest_store::{ManifestStore, StoredManifest};
+use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 use crate::test_utils::OrderedBytesGenerator;
@@ -273,11 +275,13 @@ fn run_bench(
 ) -> Result<(), SlateDBError> {
     let (tx, rx) = crossbeam_channel::unbounded();
     let compactor_options = CompactorOptions::default();
+    let db_stats = Arc::new(DbStats::new());
     let executor = TokioCompactionExecutor::new(
         handle.clone(),
         Arc::new(compactor_options),
         tx,
         table_store.clone(),
+        db_stats.clone(),
     );
     info!("load compaction job");
     let job = match &options.compaction {
@@ -293,12 +297,24 @@ fn run_bench(
         None => load_compaction_job(options, &handle, &table_store)?,
     };
     let start = std::time::Instant::now();
+    let db_stats_log = db_stats.clone();
+    let log_thread_handler = handle.spawn(async move {
+        loop {
+            info!(
+                "metrics: {}, {}",
+                db_stats_log.running_compactions.get(),
+                db_stats_log.bytes_compacted.get()
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
     info!("start compaction job");
     executor.start_compaction(job);
     let WorkerToOrchestratorMsg::CompactionFinished(result) = rx.recv().expect("recv failed");
     match result {
         Ok(_) => {
             info!("compaction finished in {:?} millis", start.elapsed());
+            log_thread_handler.abort();
         }
         Err(err) => return Err(err),
     }
