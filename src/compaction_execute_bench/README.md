@@ -61,7 +61,7 @@ To load random data into the object store, set MODE=LOAD and run:
 export MODE=LOAD
 
 // Run the command
-cargo run --bin compaction-execute-bench --release
+cargo run --bin compaction-execute-bench --release --features="db_bench"
 ```
 
 2. Run Compaction : 
@@ -71,7 +71,7 @@ To perform a compaction job on the loaded SSTables, set MODE=RUN and run:
 export MODE=RUN
 
 // Run the command
-cargo run --bin compaction-execute-bench --release
+cargo run --bin compaction-execute-bench --release --features="db_bench"
 ```
 
 3. Clear Data : 
@@ -81,6 +81,6 @@ To delete all SSTables from the object store, set MODE=CLEAR and run:
 export MODE=CLEAR
 
 // Run the command
-cargo run --bin compaction-execute-bench --release
+cargo run --bin compaction-execute-bench --release --features="db_bench"
 ```
 

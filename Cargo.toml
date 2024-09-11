@@ -39,6 +39,8 @@ flate2 = { version = "1.0.33", optional = true }
 lz4_flex = { version = "0.11.3", optional = true }
 zstd = { version = "0.13.2", optional = true }
 moka = { version = "0.12.8", features = ["future"] }
+tracing-subscriber = { version = "0.3.18", optional = true}
+tracing-appender = { version = "0.2.3", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
@@ -47,7 +49,7 @@ fail-parallel = { version = "0.5.1", features = ["failpoints"] }
 [features]
 default = ["aws"]
 aws = ["object_store/aws"]
-db_bench = ["aws", "env_logger", "leaky-bucket", "clap", "clap/derive", "wal_disable"]
+db_bench = ["aws", "env_logger", "leaky-bucket", "clap", "clap/derive", "wal_disable", "tracing-appender", "tracing-subscriber"]
 compression = ["snappy"]
 snappy = ["dep:snap"]
 zlib = ["dep:flate2"]
