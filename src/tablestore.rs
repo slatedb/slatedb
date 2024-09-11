@@ -18,7 +18,6 @@ use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
-use crate::manifest_store::ManifestFileMetadata;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
@@ -78,7 +77,7 @@ impl ReadOnlyBlob for ReadOnlyObject {
 
 /// Represents the metadata of an SST file in the compacted directory.
 pub(crate) struct SstFileMetadata {
-    pub(crate) id: Ulid,
+    pub(crate) id: SsTableId,
     #[allow(dead_code)]
     pub(crate) location: Path,
     pub(crate) last_modified: chrono::DateTime<Utc>,
@@ -129,8 +128,8 @@ impl TableStore {
     pub(crate) async fn list_wal_ssts<R: RangeBounds<u64>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<ManifestFileMetadata>, SlateDBError> {
-        let mut wal_list: Vec<ManifestFileMetadata> = Vec::new();
+    ) -> Result<Vec<SstFileMetadata>, SlateDBError> {
+        let mut wal_list: Vec<SstFileMetadata> = Vec::new();
         let wal_path = &Path::from(format!("{}/{}/", &self.root_path, self.wal_path));
         let mut files_stream = self.object_store.list(Some(wal_path));
 
@@ -138,8 +137,8 @@ impl TableStore {
             match Self::parse_id(&self.root_path, &file.location) {
                 Ok(Some(SsTableId::Wal(id))) => {
                     if id_range.contains(&id) {
-                        wal_list.push(ManifestFileMetadata {
-                            id,
+                        wal_list.push(SstFileMetadata {
+                            id: SsTableId::Wal(id),
                             location: file.location,
                             last_modified: file.last_modified,
                             size: file.size,
@@ -149,7 +148,7 @@ impl TableStore {
                 _ => continue,
             }
         }
-        wal_list.sort_by_key(|m| m.id);
+        wal_list.sort_by_key(|m| m.id.unwrap_wal_id());
         Ok(wal_list)
     }
 
@@ -257,7 +256,7 @@ impl TableStore {
                 Ok(Some(SsTableId::Compacted(id))) => {
                     if id_range.contains(&id) {
                         sst_list.push(SstFileMetadata {
-                            id,
+                            id: SsTableId::Compacted(id),
                             location: file.location,
                             last_modified: file.last_modified,
                             size: file.size,
@@ -276,7 +275,7 @@ impl TableStore {
             }
         }
 
-        sst_list.sort_by_key(|m| m.id);
+        sst_list.sort_by_key(|m| m.id.unwrap_compacted_id());
         Ok(sst_list)
     }
 
@@ -778,11 +777,15 @@ mod tests {
         // and the random suffix is used to break the tie, which might be out of order.
         let mut ulids = (0..3).map(|_| Ulid::new()).collect::<Vec<Ulid>>();
         ulids.sort();
-        let (id1, id2, id3) = (ulids[0], ulids[1], ulids[2]);
+        let (id1, id2, id3) = (
+            SsTableId::Compacted(ulids[0]),
+            SsTableId::Compacted(ulids[1]),
+            SsTableId::Compacted(ulids[2]),
+        );
 
-        let path1 = ts.path(&SsTableId::Compacted(id1));
-        let path2 = ts.path(&SsTableId::Compacted(id2));
-        let path3 = ts.path(&SsTableId::Compacted(id3));
+        let path1 = ts.path(&id1);
+        let path2 = ts.path(&id2);
+        let path3 = ts.path(&id3);
 
         os.put(&path1, Bytes::new().into()).await.unwrap();
         os.put(&path2, Bytes::new().into()).await.unwrap();
@@ -794,16 +797,25 @@ mod tests {
         assert_eq!(ssts[1].id, id2);
         assert_eq!(ssts[2].id, id3);
 
-        let ssts = ts.list_compacted_ssts(id2..id3).await.unwrap();
+        let ssts = ts
+            .list_compacted_ssts(id2.unwrap_compacted_id()..id3.unwrap_compacted_id())
+            .await
+            .unwrap();
         assert_eq!(ssts.len(), 1);
         assert_eq!(ssts[0].id, id2);
 
-        let ssts = ts.list_compacted_ssts(id2..).await.unwrap();
+        let ssts = ts
+            .list_compacted_ssts(id2.unwrap_compacted_id()..)
+            .await
+            .unwrap();
         assert_eq!(ssts.len(), 2);
         assert_eq!(ssts[0].id, id2);
         assert_eq!(ssts[1].id, id3);
 
-        let ssts = ts.list_compacted_ssts(..id3).await.unwrap();
+        let ssts = ts
+            .list_compacted_ssts(..id3.unwrap_compacted_id())
+            .await
+            .unwrap();
         assert_eq!(ssts.len(), 2);
         assert_eq!(ssts[0].id, id1);
         assert_eq!(ssts[1].id, id2);
@@ -815,13 +827,13 @@ mod tests {
         let format = SsTableFormat::new(32, 1, None);
         let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
 
-        let id1 = 1;
-        let id2 = 2;
-        let id3 = 3;
+        let id1 = SsTableId::Wal(1);
+        let id2 = SsTableId::Wal(2);
+        let id3 = SsTableId::Wal(3);
 
-        let path1 = ts.path(&SsTableId::Wal(id1));
-        let path2 = ts.path(&SsTableId::Wal(id2));
-        let path3 = ts.path(&SsTableId::Wal(id3));
+        let path1 = ts.path(&id1);
+        let path2 = ts.path(&id2);
+        let path3 = ts.path(&id3);
 
         os.put(&path1, Bytes::new().into()).await.unwrap();
         os.put(&path2, Bytes::new().into()).await.unwrap();
@@ -833,16 +845,19 @@ mod tests {
         assert_eq!(ssts[1].id, id2);
         assert_eq!(ssts[2].id, id3);
 
-        let ssts = ts.list_wal_ssts(id2..id3).await.unwrap();
+        let ssts = ts
+            .list_wal_ssts(id2.unwrap_wal_id()..id3.unwrap_wal_id())
+            .await
+            .unwrap();
         assert_eq!(ssts.len(), 1);
         assert_eq!(ssts[0].id, id2);
 
-        let ssts = ts.list_wal_ssts(id2..).await.unwrap();
+        let ssts = ts.list_wal_ssts(id2.unwrap_wal_id()..).await.unwrap();
         assert_eq!(ssts.len(), 2);
         assert_eq!(ssts[0].id, id2);
         assert_eq!(ssts[1].id, id3);
 
-        let ssts = ts.list_wal_ssts(..id3).await.unwrap();
+        let ssts = ts.list_wal_ssts(..id3.unwrap_wal_id()).await.unwrap();
         assert_eq!(ssts.len(), 2);
         assert_eq!(ssts[0].id, id1);
         assert_eq!(ssts[1].id, id2);
@@ -868,6 +883,6 @@ mod tests {
 
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 1);
-        assert_eq!(ssts[0].id, id2.unwrap_compacted_id());
+        assert_eq!(ssts[0].id, id2);
     }
 }

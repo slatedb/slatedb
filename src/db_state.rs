@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tracing::info;
 use ulid::Ulid;
-use SsTableId::Compacted;
+use SsTableId::{Compacted, Wal};
 
 use crate::flatbuffer_types::SsTableInfoOwned;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
@@ -44,9 +44,17 @@ pub enum SsTableId {
 
 impl SsTableId {
     #[allow(clippy::panic)]
+    pub(crate) fn unwrap_wal_id(&self) -> u64 {
+        match self {
+            Wal(wal_id) => *wal_id,
+            Compacted(_) => panic!("found compacted id when unwrapping WAL ID"),
+        }
+    }
+
+    #[allow(clippy::panic)]
     pub(crate) fn unwrap_compacted_id(&self) -> Ulid {
         match self {
-            SsTableId::Wal(_) => panic!("found WAL id when unwrapping compacted ID"),
+            Wal(_) => panic!("found WAL id when unwrapping compacted ID"),
             Compacted(ulid) => *ulid,
         }
     }

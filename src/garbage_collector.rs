@@ -142,7 +142,7 @@ impl GarbageCollectorOrchestrator {
                 let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
                 Utc::now().signed_duration_since(wal_sst.last_modified) > min_age
             })
-            .map(|wal_sst| SsTableId::Wal(wal_sst.id))
+            .map(|wal_sst| wal_sst.id)
             .collect::<Vec<_>>();
 
         for id in sst_ids_to_delete {
@@ -197,7 +197,7 @@ impl GarbageCollectorOrchestrator {
                 let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
                 Utc::now().signed_duration_since(sst.last_modified) > min_age
             })
-            .map(|sst| SsTableId::Compacted(sst.id))
+            .map(|sst| sst.id)
             // Filter out the ones that are active in the manifest
             .filter(|id| !active_ssts.contains(id))
             .collect::<Vec<_>>();

@@ -112,7 +112,7 @@ impl DbInner {
             .list_wal_ssts((wal_id_last_compacted + 1)..)
             .await?
             .into_iter()
-            .map(|wal_sst| wal_sst.id)
+            .map(|wal_sst| wal_sst.id.unwrap_wal_id())
             .max()
             .unwrap_or(0);
         let mut empty_wal_id = max_wal_id + 1;
@@ -269,7 +269,7 @@ impl DbInner {
             .list_wal_ssts((wal_id_last_compacted + 1)..)
             .await?
             .into_iter()
-            .map(|wal_sst| wal_sst.id)
+            .map(|wal_sst| wal_sst.id.unwrap_wal_id())
             .collect::<Vec<_>>();
         let mut last_sst_id = wal_id_last_compacted;
         for sst_id in wal_sst_list {
