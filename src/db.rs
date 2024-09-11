@@ -438,25 +438,40 @@ impl Db {
     }
 
     pub async fn close(&self) -> Result<(), SlateDBError> {
-        if let Some(compactor) = self.compactor.lock().take() {
+        if let Some(compactor) = {
+            let mut maybe_compactor = self.compactor.lock();
+            maybe_compactor.take()
+        } {
             compactor.close().await;
         }
 
-        if let Some(gc) = self.garbage_collector.lock().take() {
+        if let Some(gc) = {
+            let mut maybe_gc = self.garbage_collector.lock();
+            maybe_gc.take()
+        } {
             gc.close().await;
         }
 
         // Tell the notifier thread to shut down.
         self.flush_notifier.send(()).ok();
 
-        if let Some(flush_task) = self.flush_task.lock().take() {
+        if let Some(flush_task) = {
+            // Scope the flush_thread lock so its lock isn't held while awaiting the join
+            // and the final flush below.
+            // Wait for the flush thread to finish.
+            let mut flush_task = self.flush_task.lock();
+            flush_task.take()
+        } {
             flush_task.await.expect("Failed to join flush thread");
         }
 
         // Tell the memtable flush thread to shut down.
         self.inner.memtable_flush_notifier.send(Shutdown).ok();
 
-        if let Some(memtable_flush_task) = self.memtable_flush_task.lock().take() {
+        if let Some(memtable_flush_task) = {
+            let mut memtable_flush_task = self.memtable_flush_task.lock();
+            memtable_flush_task.take()
+        } {
             memtable_flush_task
                 .await
                 .expect("Failed to join memtable flush thread");
