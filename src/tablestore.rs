@@ -847,4 +847,27 @@ mod tests {
         assert_eq!(ssts[0].id, id1);
         assert_eq!(ssts[1].id, id2);
     }
+
+    #[tokio::test]
+    async fn test_delete_sst() {
+        let os = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(32, 1, None);
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+
+        let id1 = SsTableId::Compacted(Ulid::new());
+        let id2 = SsTableId::Compacted(Ulid::new());
+        let path1 = ts.path(&id1);
+        let path2 = ts.path(&id2);
+        os.put(&path1, Bytes::new().into()).await.unwrap();
+        os.put(&path2, Bytes::new().into()).await.unwrap();
+
+        let ssts = ts.list_compacted_ssts(..).await.unwrap();
+        assert_eq!(ssts.len(), 2);
+
+        ts.delete_sst(&id1).await.unwrap();
+
+        let ssts = ts.list_compacted_ssts(..).await.unwrap();
+        assert_eq!(ssts.len(), 1);
+        assert_eq!(ssts[0].id, id2.unwrap_compacted_id());
+    }
 }
