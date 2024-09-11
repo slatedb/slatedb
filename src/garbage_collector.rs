@@ -3,7 +3,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use tokio::runtime::Handle;
 
-use crate::config::GarbageCollectorOptions;
+use crate::config::{GarbageCollecterDirectoryOptions, GarbageCollectorOptions};
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollectorMessage::*;
 use crate::manifest_store::{ManifestStore, StoredManifest};
@@ -103,24 +103,9 @@ impl GarbageCollectorOrchestrator {
     }
 
     pub fn run(&mut self) {
-        let manifest_ticker = self
-            .options
-            .manifest_options
-            .map_or(crossbeam_channel::never(), |o| {
-                crossbeam_channel::tick(o.poll_interval)
-            });
-        let wal_ticker = self
-            .options
-            .wal_options
-            .map_or(crossbeam_channel::never(), |o| {
-                crossbeam_channel::tick(o.poll_interval)
-            });
-        let compacted_ticker = self
-            .options
-            .compacted_options
-            .map_or(crossbeam_channel::never(), |o| {
-                crossbeam_channel::tick(o.poll_interval)
-            });
+        let manifest_ticker = Self::options_to_ticker(self.options.manifest_options.as_ref());
+        let wal_ticker = Self::options_to_ticker(self.options.wal_options.as_ref());
+        let compacted_ticker = Self::options_to_ticker(self.options.compacted_options.as_ref());
 
         loop {
             crossbeam_channel::select! {
@@ -204,5 +189,13 @@ impl GarbageCollectorOrchestrator {
                 }
             }
         }
+    }
+
+    fn options_to_ticker(
+        options: Option<&GarbageCollecterDirectoryOptions>,
+    ) -> crossbeam_channel::Receiver<std::time::Instant> {
+        options.map_or(crossbeam_channel::never(), |opts| {
+            crossbeam_channel::tick(opts.poll_interval)
+        })
     }
 }
