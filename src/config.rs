@@ -293,7 +293,7 @@ pub struct GarbageCollectorOptions {
 impl Default for GarbageCollecterDirectoryOptions {
     fn default() -> Self {
         Self {
-            poll_interval: Duration::from_secs(60),
+            poll_interval: Duration::from_secs(300),
             min_age: Duration::from_secs(86_400),
         }
     }

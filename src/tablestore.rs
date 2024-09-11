@@ -568,8 +568,8 @@ mod tests {
 
     const ROOT: &str = "/root";
 
-    #[tokio::test]
-    async fn test_parse_id() {
+    #[test]
+    fn test_parse_id() {
         let root = Path::from(ROOT);
         let path = Path::from("/root/wal/00000000000000000003.sst");
         let id = TableStore::parse_id(&root, &path).unwrap();
