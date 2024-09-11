@@ -238,7 +238,8 @@ impl TableStore {
     }
 
     /// List all SSTables in the compacted directory.
-    /// The SSTables are returned in ascending order of their IDs.
+    /// The SSTables are returned in ascending order of their IDs. Ulids within
+    /// the same millisecond are sorted based on their random suffix.
     /// # Arguments
     /// * `id_range` - The range of IDs to list
     /// # Returns
@@ -764,5 +765,86 @@ mod tests {
 
         assert!(block_iter.next().is_none());
         assert!(expected_iter.next().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_compacted_ssts() {
+        let os = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(32, 1, None);
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+
+        // Create id1, id2, and i3 as three random UUIDs that have been sorted ascending.
+        // Need to do this because the Ulids are sometimes generated in the same millisecond
+        // and the random suffix is used to break the tie, which might be out of order.
+        let mut ulids = (0..3).map(|_| Ulid::new()).collect::<Vec<Ulid>>();
+        ulids.sort();
+        let (id1, id2, id3) = (ulids[0], ulids[1], ulids[2]);
+
+        let path1 = ts.path(&SsTableId::Compacted(id1));
+        let path2 = ts.path(&SsTableId::Compacted(id2));
+        let path3 = ts.path(&SsTableId::Compacted(id3));
+
+        os.put(&path1, Bytes::new().into()).await.unwrap();
+        os.put(&path2, Bytes::new().into()).await.unwrap();
+        os.put(&path3, Bytes::new().into()).await.unwrap();
+
+        let ssts = ts.list_compacted_ssts(..).await.unwrap();
+        assert_eq!(ssts.len(), 3);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
+        assert_eq!(ssts[2].id, id3);
+
+        let ssts = ts.list_compacted_ssts(id2..id3).await.unwrap();
+        assert_eq!(ssts.len(), 1);
+        assert_eq!(ssts[0].id, id2);
+
+        let ssts = ts.list_compacted_ssts(id2..).await.unwrap();
+        assert_eq!(ssts.len(), 2);
+        assert_eq!(ssts[0].id, id2);
+        assert_eq!(ssts[1].id, id3);
+
+        let ssts = ts.list_compacted_ssts(..id3).await.unwrap();
+        assert_eq!(ssts.len(), 2);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
+    }
+
+    #[tokio::test]
+    async fn test_list_wal_ssts() {
+        let os = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(32, 1, None);
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+
+        let id1 = 1;
+        let id2 = 2;
+        let id3 = 3;
+
+        let path1 = ts.path(&SsTableId::Wal(id1));
+        let path2 = ts.path(&SsTableId::Wal(id2));
+        let path3 = ts.path(&SsTableId::Wal(id3));
+
+        os.put(&path1, Bytes::new().into()).await.unwrap();
+        os.put(&path2, Bytes::new().into()).await.unwrap();
+        os.put(&path3, Bytes::new().into()).await.unwrap();
+
+        let ssts = ts.list_wal_ssts(..).await.unwrap();
+        assert_eq!(ssts.len(), 3);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
+        assert_eq!(ssts[2].id, id3);
+
+        let ssts = ts.list_wal_ssts(id2..id3).await.unwrap();
+        assert_eq!(ssts.len(), 1);
+        assert_eq!(ssts[0].id, id2);
+
+        let ssts = ts.list_wal_ssts(id2..).await.unwrap();
+        assert_eq!(ssts.len(), 2);
+        assert_eq!(ssts[0].id, id2);
+        assert_eq!(ssts[1].id, id3);
+
+        let ssts = ts.list_wal_ssts(..id3).await.unwrap();
+        assert_eq!(ssts.len(), 2);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
     }
 }
