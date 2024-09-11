@@ -14,6 +14,8 @@ use crate::manifest_store::ManifestStore;
 use crate::metrics::DbStats;
 use crate::tablestore::TableStore;
 
+const DEFAULT_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(86400);
+
 enum GarbageCollectorMessage {
     Shutdown,
 }
@@ -87,7 +89,7 @@ impl GarbageCollectorOrchestrator {
         let min_age = self
             .options
             .manifest_options
-            .map_or(std::time::Duration::from_secs(86400), |opts| opts.min_age);
+            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
         let mut manifest_metadata_list = self.manifest_store.list_manifests(..).await?;
 
         // Remove the last element so we never delete the latest manifest
@@ -132,7 +134,7 @@ impl GarbageCollectorOrchestrator {
         let min_age = self
             .options
             .wal_options
-            .map_or(std::time::Duration::from_secs(86400), |opts| opts.min_age);
+            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
         let sst_ids_to_delete = self
             .table_store
             .list_wal_ssts(..last_compacted_wal_sst_id)
@@ -185,7 +187,7 @@ impl GarbageCollectorOrchestrator {
         let min_age = self
             .options
             .compacted_options
-            .map_or(std::time::Duration::from_secs(86400), |opts| opts.min_age);
+            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
         let sst_ids_to_delete = self
             .table_store
             // List all SSTs in the table store
