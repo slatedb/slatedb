@@ -76,6 +76,7 @@ impl ReadOnlyBlob for ReadOnlyObject {
     }
 }
 
+/// Represents the metadata of an SST file in the compacted directory.
 pub(crate) struct SstFileMetadata {
     pub(crate) id: Ulid,
     #[allow(dead_code)]
@@ -227,6 +228,7 @@ impl TableStore {
         }
     }
 
+    /// Delete an SSTable from the object store.
     pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
         let path = self.path(id);
         self.object_store
@@ -235,6 +237,12 @@ impl TableStore {
             .map_err(SlateDBError::ObjectStoreError)
     }
 
+    /// List all SSTables in the compacted directory.
+    /// The SSTables are returned in ascending order of their IDs.
+    /// # Arguments
+    /// * `id_range` - The range of IDs to list
+    /// # Returns
+    /// A list of SSTables in the compacted directory
     pub(crate) async fn list_compacted_ssts<R: RangeBounds<Ulid>>(
         &self,
         id_range: R,

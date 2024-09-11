@@ -408,7 +408,7 @@ impl Db {
                     Handle::current(),
                     inner.db_stats.clone(),
                 )
-                .await?,
+                .await,
             )
         };
         Ok(Self {

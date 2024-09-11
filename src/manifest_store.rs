@@ -165,6 +165,7 @@ impl StoredManifest {
     }
 }
 
+/// Represents the metadata of a manifest file stored in the object store.
 pub(crate) struct ManifestFileMetadata {
     pub(crate) id: u64,
     pub(crate) location: Path,
@@ -221,6 +222,9 @@ impl ManifestStore {
         Ok(())
     }
 
+    /// Read a manifest from the object store.
+    /// # Arguments
+    /// * `id_range` - The range of IDs to list
     pub(crate) async fn list_manifests<R: RangeBounds<u64>>(
         &self,
         id_range: R,

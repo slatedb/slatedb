@@ -23,14 +23,26 @@ pub(crate) struct GarbageCollector {
     main_thread: Option<JoinHandle<()>>,
 }
 
+/// Garbage collector for the database. This will periodically check for old
+/// manifests and SSTables and delete them. The collector will not delete any
+/// SSTables or manifests that are still in use by the database.
 impl GarbageCollector {
+    /// Create a new garbage collector
+    /// # Arguments
+    /// * `manifest_store` - The manifest store to use
+    /// * `table_store` - The table store to use
+    /// * `options` - The options for the garbage collector
+    /// * `tokio_handle` - The tokio runtime handle to use if no custom runtime is provided
+    /// * `db_stats` - The database stats to use
+    /// # Returns
+    /// A new garbage collector
     pub(crate) async fn new(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         options: GarbageCollectorOptions,
         tokio_handle: Handle,
         db_stats: Arc<DbStats>,
-    ) -> Result<Self, SlateDBError> {
+    ) -> Self {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let tokio_handle = options.gc_runtime.clone().unwrap_or(tokio_handle);
         let main_thread = thread::spawn(move || {
@@ -43,10 +55,10 @@ impl GarbageCollector {
             };
             tokio_handle.block_on(orchestrator.run());
         });
-        Ok(Self {
+        Self {
             main_thread: Some(main_thread),
             main_tx: external_tx,
-        })
+        }
     }
 
     /// Close the garbage collector
@@ -69,6 +81,8 @@ struct GarbageCollectorOrchestrator {
 }
 
 impl GarbageCollectorOrchestrator {
+    /// Collect garbage from the manifest store. This will delete any manifests
+    /// that are older than the minimum age specified in the options.
     async fn collect_garbage_manifests(&self) -> Result<(), SlateDBError> {
         let min_age = self
             .options
@@ -78,6 +92,8 @@ impl GarbageCollectorOrchestrator {
 
         // Remove the last element so we never delete the latest manifest
         manifest_metadata_list.pop();
+
+        // TODO Should exclude snapshotted manifests when we implement snapshots
 
         // Delete manifests older than min_age
         for manifest_metadata in manifest_metadata_list {
@@ -99,6 +115,9 @@ impl GarbageCollectorOrchestrator {
         Ok(())
     }
 
+    /// Collect garbage from the WAL SSTs. This will delete any WAL SSTs that are
+    /// older than the minimum age specified in the options and are also older than
+    /// the last compacted WAL SST.
     async fn collect_garbage_wal_ssts(&self) -> Result<(), SlateDBError> {
         let last_compacted_wal_sst_id = self
             .manifest_store
@@ -137,6 +156,8 @@ impl GarbageCollectorOrchestrator {
         Ok(())
     }
 
+    /// Collect garbage from the compacted SSTs. This will delete any compacted SSTs that are
+    /// older than the minimum age specified in the options and are not active in the manifest.
     async fn collect_garbage_compacted_ssts(&self) -> Result<(), SlateDBError> {
         let manifest = self
             .manifest_store
@@ -192,6 +213,7 @@ impl GarbageCollectorOrchestrator {
         Ok(())
     }
 
+    /// Run the garbage collector
     pub async fn run(&self) {
         let manifest_ticker = Self::options_to_ticker(self.options.manifest_options.as_ref());
         let wal_ticker = Self::options_to_ticker(self.options.wal_options.as_ref());
