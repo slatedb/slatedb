@@ -235,8 +235,7 @@ impl TableStore {
         for wal_id in wal_list {
             let path = self.path(&SsTableId::Wal(wal_id));
             let metadata = self.object_store.head(&path).await?;
-            if Utc::now().signed_duration_since(metadata.last_modified) > min_age
-            {
+            if Utc::now().signed_duration_since(metadata.last_modified) > min_age {
                 self.object_store.delete(&path).await?;
             }
         }
