@@ -106,20 +106,20 @@ impl GarbageCollectorOrchestrator {
         let manifest_ticker = self
             .options
             .manifest_options
-            .map_or(crossbeam_channel::never(), |opts| {
-                crossbeam_channel::tick(opts.poll_interval)
+            .map_or(crossbeam_channel::never(), |o| {
+                crossbeam_channel::tick(o.poll_interval)
             });
         let wal_ticker = self
             .options
             .wal_options
-            .map_or(crossbeam_channel::never(), |opts| {
-                crossbeam_channel::tick(opts.poll_interval)
+            .map_or(crossbeam_channel::never(), |o| {
+                crossbeam_channel::tick(o.poll_interval)
             });
         let compacted_ticker = self
             .options
             .compacted_options
-            .map_or(crossbeam_channel::never(), |opts| {
-                crossbeam_channel::tick(opts.poll_interval)
+            .map_or(crossbeam_channel::never(), |o| {
+                crossbeam_channel::tick(o.poll_interval)
             });
 
         loop {
