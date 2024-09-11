@@ -109,9 +109,10 @@ impl DbInner {
         let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
         let max_wal_id = self
             .table_store
-            .get_wal_sst_list((wal_id_last_compacted + 1)..)
+            .list_wal_ssts((wal_id_last_compacted + 1)..)
             .await?
             .into_iter()
+            .map(|wal_sst| wal_sst.id)
             .max()
             .unwrap_or(0);
         let mut empty_wal_id = max_wal_id + 1;
@@ -265,8 +266,11 @@ impl DbInner {
         let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
         let wal_sst_list = self
             .table_store
-            .get_wal_sst_list((wal_id_last_compacted + 1)..)
-            .await?;
+            .list_wal_ssts((wal_id_last_compacted + 1)..)
+            .await?
+            .into_iter()
+            .map(|wal_sst| wal_sst.id)
+            .collect::<Vec<_>>();
         let mut last_sst_id = wal_id_last_compacted;
         for sst_id in wal_sst_list {
             last_sst_id = sst_id;

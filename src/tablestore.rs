@@ -1,12 +1,12 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::{BufMut, Bytes};
 use chrono::Utc;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::join_all, StreamExt};
+use log::warn;
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -14,10 +14,11 @@ use parking_lot::RwLock;
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
-use crate::db_state::{CoreDbState, SSTableHandle, SsTableId};
+use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
+use crate::manifest_store::ManifestFileMetadata;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
@@ -75,6 +76,15 @@ impl ReadOnlyBlob for ReadOnlyObject {
     }
 }
 
+pub(crate) struct SstFileMetadata {
+    pub(crate) id: Ulid,
+    #[allow(dead_code)]
+    pub(crate) location: Path,
+    pub(crate) last_modified: chrono::DateTime<Utc>,
+    #[allow(dead_code)]
+    pub(crate) size: usize,
+}
+
 impl TableStore {
     #[allow(dead_code)]
     pub fn new(
@@ -115,26 +125,30 @@ impl TableStore {
         }
     }
 
-    pub(crate) async fn get_wal_sst_list<R: RangeBounds<u64>>(
+    pub(crate) async fn list_wal_ssts<R: RangeBounds<u64>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<u64>, SlateDBError> {
-        let mut wal_list: Vec<u64> = Vec::new();
+    ) -> Result<Vec<ManifestFileMetadata>, SlateDBError> {
+        let mut wal_list: Vec<ManifestFileMetadata> = Vec::new();
         let wal_path = &Path::from(format!("{}/{}/", &self.root_path, self.wal_path));
         let mut files_stream = self.object_store.list(Some(wal_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
             match Self::parse_id(&self.root_path, &file.location) {
-                Ok(Some(SsTableId::Wal(wal_id))) => {
-                    if id_range.contains(&wal_id) {
-                        wal_list.push(wal_id);
+                Ok(Some(SsTableId::Wal(id))) => {
+                    if id_range.contains(&id) {
+                        wal_list.push(ManifestFileMetadata {
+                            id,
+                            location: file.location,
+                            last_modified: file.last_modified,
+                            size: file.size,
+                        });
                     }
                 }
                 _ => continue,
             }
         }
-
-        wal_list.sort();
+        wal_list.sort_by_key(|m| m.id);
         Ok(wal_list)
     }
 
@@ -213,7 +227,6 @@ impl TableStore {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
         let path = self.path(id);
         self.object_store
@@ -222,65 +235,40 @@ impl TableStore {
             .map_err(SlateDBError::ObjectStoreError)
     }
 
-    pub(crate) async fn collect_garbage_wal(
+    pub(crate) async fn list_compacted_ssts<R: RangeBounds<Ulid>>(
         &self,
-        min_age: Duration,
-        state: &CoreDbState,
-    ) -> Result<(), SlateDBError> {
-        let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
-        let wal_list = self
-            // Delete all SSTs up to (but not including) the last compacted WAL SST
-            .get_wal_sst_list(..state.last_compacted_wal_sst_id)
-            .await?;
-        for wal_id in wal_list {
-            let path = self.path(&SsTableId::Wal(wal_id));
-            let metadata = self.object_store.head(&path).await?;
-            if Utc::now().signed_duration_since(metadata.last_modified) > min_age {
-                self.object_store.delete(&path).await?;
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn collect_garbage_ssts(
-        &self,
-        min_age: Duration,
-        state: &CoreDbState,
-    ) -> Result<(), SlateDBError> {
-        let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
-
-        // TODO Exclude snapshot SSTs from GC once snapshots are implemented
-        // Get all active SSTs
-        let l0_sst_ids: Vec<SsTableId> = state.l0.iter().map(|h| h.id).collect();
-        let compacted_sst_ids: Vec<SsTableId> = state
-            .compacted
-            .iter()
-            .flat_map(|h| h.ssts.iter().map(|h| h.id))
-            .collect();
-        let mut active_sst_id_set: HashSet<SsTableId> = HashSet::new();
-        active_sst_id_set.extend(l0_sst_ids);
-        active_sst_id_set.extend(compacted_sst_ids);
-
-        // List all SSTs in the object store
+        id_range: R,
+    ) -> Result<Vec<SstFileMetadata>, SlateDBError> {
+        let mut sst_list: Vec<SstFileMetadata> = Vec::new();
         let sst_path = &Path::from(format!("{}/{}/", &self.root_path, self.compacted_path));
         let mut files_stream = self.object_store.list(Some(sst_path));
 
-        // Delete all SSTs that are not in the active set and are older than min_age
         while let Some(file) = files_stream.next().await.transpose()? {
             match Self::parse_id(&self.root_path, &file.location) {
-                Ok(Some(sst_id)) => {
-                    if !active_sst_id_set.contains(&sst_id)
-                        && Utc::now().signed_duration_since(file.last_modified) > min_age
-                    {
-                        let path = self.path(&sst_id);
-                        self.object_store.delete(&path).await?;
+                Ok(Some(SsTableId::Compacted(id))) => {
+                    if id_range.contains(&id) {
+                        sst_list.push(SstFileMetadata {
+                            id,
+                            location: file.location,
+                            last_modified: file.last_modified,
+                            size: file.size,
+                        });
                     }
                 }
-                _ => continue,
+                Err(e) => {
+                    warn!("Error while parsing file id: {}", e);
+                }
+                _ => {
+                    warn!(
+                        "Unexpected file found in compacted directory: {:?}",
+                        file.location
+                    );
+                }
             }
         }
 
-        Ok(())
+        sst_list.sort_by_key(|m| m.id);
+        Ok(sst_list)
     }
 
     // todo: clean up the warning suppression when we start using open_sst outside tests

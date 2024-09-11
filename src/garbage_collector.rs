@@ -1,12 +1,16 @@
+use chrono::Utc;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 use tokio::runtime::Handle;
+use tracing::error;
 
 use crate::config::{GarbageCollecterDirectoryOptions, GarbageCollectorOptions};
+use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollectorMessage::*;
-use crate::manifest_store::{ManifestStore, StoredManifest};
+use crate::manifest_store::ManifestStore;
 use crate::metrics::DbStats;
 use crate::tablestore::TableStore;
 
@@ -28,28 +32,17 @@ impl GarbageCollector {
         db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
-        let (err_tx, err_rx) = tokio::sync::oneshot::channel();
         let tokio_handle = options.gc_runtime.clone().unwrap_or(tokio_handle);
         let main_thread = thread::spawn(move || {
-            let load_result = GarbageCollectorOrchestrator::new(
+            let orchestrator = GarbageCollectorOrchestrator {
                 manifest_store,
                 table_store,
                 options,
-                tokio_handle,
                 external_rx,
                 db_stats,
-            );
-            let mut orchestrator = match load_result {
-                Ok(orchestrator) => orchestrator,
-                Err(err) => {
-                    err_tx.send(Err(err)).expect("err channel failure");
-                    return;
-                }
             };
-            err_tx.send(Ok(())).expect("err channel failure");
-            orchestrator.run();
+            tokio_handle.block_on(orchestrator.run());
         });
-        err_rx.await.expect("err channel failure")?;
         Ok(Self {
             main_thread: Some(main_thread),
             main_tx: external_tx,
@@ -71,38 +64,135 @@ struct GarbageCollectorOrchestrator {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
     options: GarbageCollectorOptions,
-    stored_manifest: StoredManifest,
-    tokio_handle: Handle,
     external_rx: crossbeam_channel::Receiver<GarbageCollectorMessage>,
     db_stats: Arc<DbStats>,
 }
 
 impl GarbageCollectorOrchestrator {
-    fn new(
-        manifest_store: Arc<ManifestStore>,
-        table_store: Arc<TableStore>,
-        options: GarbageCollectorOptions,
-        tokio_handle: Handle,
-        external_rx: crossbeam_channel::Receiver<GarbageCollectorMessage>,
-        db_stats: Arc<DbStats>,
-    ) -> Result<Self, SlateDBError> {
-        let stored_manifest =
-            tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;
-        let Some(stored_manifest) = stored_manifest else {
-            return Err(SlateDBError::InvalidDBState);
-        };
-        Ok(Self {
-            manifest_store,
-            table_store,
-            options,
-            stored_manifest,
-            tokio_handle,
-            external_rx,
-            db_stats,
-        })
+    async fn collect_garbage_manifests(&self) -> Result<(), SlateDBError> {
+        let min_age = self
+            .options
+            .manifest_options
+            .map_or(std::time::Duration::from_secs(86400), |opts| opts.min_age);
+        let mut manifest_metadata_list = self.manifest_store.list_manifests(..).await?;
+
+        // Remove the last element so we never delete the latest manifest
+        manifest_metadata_list.pop();
+
+        // Delete manifests older than min_age
+        for manifest_metadata in manifest_metadata_list {
+            let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
+
+            if Utc::now().signed_duration_since(manifest_metadata.last_modified) > min_age {
+                if let Err(e) = self
+                    .manifest_store
+                    .delete_manifest(manifest_metadata.id)
+                    .await
+                {
+                    error!("Error deleting manifest: {}", e);
+                } else {
+                    self.db_stats.gc_manifest_count.inc();
+                }
+            }
+        }
+
+        Ok(())
     }
 
-    pub fn run(&mut self) {
+    async fn collect_garbage_wal_ssts(&self) -> Result<(), SlateDBError> {
+        let last_compacted_wal_sst_id = self
+            .manifest_store
+            // Get the latest manifest so we can get the last compacted id
+            .read_latest_manifest()
+            .await?
+            .ok_or_else(|| SlateDBError::ManifestMissing)?
+            // read_latest_manifest returns (id, manifest) but we only care about the manifest
+            .1
+            .core
+            .last_compacted_wal_sst_id;
+        let min_age = self
+            .options
+            .wal_options
+            .map_or(std::time::Duration::from_secs(86400), |opts| opts.min_age);
+        let sst_ids_to_delete = self
+            .table_store
+            .list_wal_ssts(..last_compacted_wal_sst_id)
+            .await?
+            .into_iter()
+            .filter(|wal_sst| {
+                let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
+                Utc::now().signed_duration_since(wal_sst.last_modified) > min_age
+            })
+            .map(|wal_sst| SsTableId::Wal(wal_sst.id))
+            .collect::<Vec<_>>();
+
+        for id in sst_ids_to_delete {
+            if let Err(e) = self.table_store.delete_sst(&id).await {
+                error!("Error deleting WAL SST: {}", e);
+            } else {
+                self.db_stats.gc_wal_count.inc();
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn collect_garbage_compacted_ssts(&self) -> Result<(), SlateDBError> {
+        let manifest = self
+            .manifest_store
+            // Get the latest manifest so we can get the last compacted id
+            .read_latest_manifest()
+            .await?
+            .ok_or_else(|| SlateDBError::ManifestMissing)?
+            // read_latest_manifest returns (id, manifest) but we only care about the manifest
+            .1;
+        let active_l0_ssts = manifest
+            .core
+            .l0
+            .iter()
+            .map(|sst| sst.id)
+            .collect::<HashSet<_>>();
+        let active_compacted_ssts = manifest
+            .core
+            .compacted
+            .iter()
+            .flat_map(|sr| sr.ssts.iter().map(|sst| sst.id))
+            .collect::<HashSet<SsTableId>>();
+        let active_ssts = active_l0_ssts
+            .union(&active_compacted_ssts)
+            .collect::<HashSet<_>>();
+        let min_age = self
+            .options
+            .compacted_options
+            .map_or(std::time::Duration::from_secs(86400), |opts| opts.min_age);
+        let sst_ids_to_delete = self
+            .table_store
+            // List all SSTs in the table store
+            .list_compacted_ssts(..)
+            .await?
+            .into_iter()
+            // Filter out the ones that are too young to be collected
+            .filter(|sst| {
+                let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
+                Utc::now().signed_duration_since(sst.last_modified) > min_age
+            })
+            .map(|sst| SsTableId::Compacted(sst.id))
+            // Filter out the ones that are active in the manifest
+            .filter(|id| !active_ssts.contains(id))
+            .collect::<Vec<_>>();
+
+        for id in sst_ids_to_delete {
+            if let Err(e) = self.table_store.delete_sst(&id).await {
+                error!("Error deleting SST: {}", e);
+            } else {
+                self.db_stats.gc_compacted_count.inc();
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn run(&self) {
         let manifest_ticker = Self::options_to_ticker(self.options.manifest_options.as_ref());
         let wal_ticker = Self::options_to_ticker(self.options.wal_options.as_ref());
         let compacted_ticker = Self::options_to_ticker(self.options.compacted_options.as_ref());
@@ -110,83 +200,21 @@ impl GarbageCollectorOrchestrator {
         loop {
             crossbeam_channel::select! {
                 recv(manifest_ticker) -> _ => {
-                    let min_age = self.options.manifest_options.map_or(
-                        std::time::Duration::from_secs(86400),
-                        |opts| opts.min_age
-                    );
-                    match self.tokio_handle.block_on(self.manifest_store.collect_garbage(min_age)) {
-                        Ok(_) => {
-                            self.db_stats.gc_manifest_count.inc();
-                        }
-                        Err(err) => {
-                            log::error!("Error collecting garbage manifests: {}", err);
-                        }
+                    if let Err(e) = self.collect_garbage_manifests().await {
+                        error!("Error collecting manifest garbage: {}", e);
                     }
                 }
                 recv(wal_ticker) -> _ => {
-                    let min_age = self.options.wal_options.map_or(
-                        std::time::Duration::from_secs(86400),
-                        |opts| opts.min_age
-                    );
-
-                    // Refresh the manifest so we have the latest last compacted id
-                    match self.tokio_handle.block_on(self.stored_manifest.refresh()) {
-                        Ok(_) => {}
-                        Err(err) => {
-                            log::error!("Error refreshing manifest: {}", err);
-                            continue;
-                        }
-                    }
-
-                    // Collect garbage WALs
-                    match self.tokio_handle.block_on(
-                        self.table_store.collect_garbage_wal(
-                            min_age,
-                            self.stored_manifest.db_state(),
-                        )
-                    ) {
-                        Ok(_) => {
-                            self.db_stats.gc_wal_count.inc();
-                        }
-                        Err(err) => {
-                            log::error!("Error collecting garbage WALs: {}", err);
-                        }
+                    if let Err(e) = self.collect_garbage_wal_ssts().await {
+                        error!("Error collecting WAL garbage: {}", e);
                     }
                 }
                 recv(compacted_ticker) -> _ => {
-                    let min_age = self.options.compacted_options.map_or(
-                        std::time::Duration::from_secs(86400),
-                        |opts| opts.min_age
-                    );
-
-                    // Refresh the manifest so we have the latest SSTs
-                    match self.tokio_handle.block_on(self.stored_manifest.refresh()) {
-                        Ok(_) => {}
-                        Err(err) => {
-                            log::error!("Error refreshing manifest: {}", err);
-                            continue;
-                        }
-                    }
-
-                    // Collect garbage SSTs
-                    match self.tokio_handle.block_on(
-                        self.table_store.collect_garbage_ssts(
-                            min_age,
-                            self.stored_manifest.db_state(),
-                        )
-                    ) {
-                        Ok(_) => {
-                            self.db_stats.gc_compacted_count.inc();
-                        }
-                        Err(err) => {
-                            log::error!("Error collecting garbage compacted tables: {}", err);
-                        }
+                    if let Err(e) = self.collect_garbage_compacted_ssts().await {
+                        error!("Error collecting compacted garbage: {}", e);
                     }
                 }
-                recv(self.external_rx) -> _ => {
-                    // Shutdown
-                    break;
-                }
+                recv(self.external_rx) -> _ => break, // Shutdown
             }
         }
     }

@@ -1,11 +1,12 @@
+use std::ops::RangeBounds;
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::Utc;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
 use object_store::ObjectStore;
+use tracing::warn;
 
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
@@ -164,6 +165,14 @@ impl StoredManifest {
     }
 }
 
+pub(crate) struct ManifestFileMetadata {
+    pub(crate) id: u64,
+    pub(crate) location: Path,
+    pub(crate) last_modified: chrono::DateTime<Utc>,
+    #[allow(dead_code)]
+    pub(crate) size: usize,
+}
+
 pub(crate) struct ManifestStore {
     object_store: Box<dyn TransactionalObjectStore>,
     codec: Box<dyn ManifestCodec>,
@@ -212,61 +221,56 @@ impl ManifestStore {
         Ok(())
     }
 
-    pub(crate) async fn collect_garbage(&self, min_age: Duration) -> Result<(), SlateDBError> {
-        let manifest_path = &Path::from("/");
-        let mut files_stream = self.object_store.list(Some(manifest_path));
-        let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
-
-        // TODO Exclude snapshot manifests from GC when they are referenced by the current manifest
-        while let Some(file) = match files_stream.next().await.transpose() {
-            Ok(file) => file,
-            Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
-        } {
-            if Utc::now().signed_duration_since(file.last_modified) > min_age {
-                let id = self.parse_id(&file.location, "manifest")?;
-                self.delete_manifest(id).await?;
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn read_latest_manifest(
+    pub(crate) async fn list_manifests<R: RangeBounds<u64>>(
         &self,
-    ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
+        id_range: R,
+    ) -> Result<Vec<ManifestFileMetadata>, SlateDBError> {
         let manifest_path = &Path::from("/");
         let mut files_stream = self.object_store.list(Some(manifest_path));
-        let mut id_and_manifest_file_path: Option<(u64, Path)> = None;
+        let mut manifests = Vec::new();
+
         while let Some(file) = match files_stream.next().await.transpose() {
             Ok(file) => file,
             Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
         } {
             match self.parse_id(&file.location, "manifest") {
-                Ok(found_id) => {
-                    id_and_manifest_file_path = match id_and_manifest_file_path {
-                        Some((current_id, current_path)) => Some(if current_id < found_id {
-                            (found_id, file.location)
-                        } else {
-                            (current_id, current_path)
-                        }),
-                        None => Some((found_id, file.location.clone())),
-                    }
+                Ok(id) if id_range.contains(&id) => {
+                    manifests.push(ManifestFileMetadata {
+                        id,
+                        location: file.location,
+                        last_modified: file.last_modified,
+                        size: file.size,
+                    });
                 }
-                Err(_) => continue,
+                Err(_) => warn!("Unknwon file in manifest directory: {:?}", file.location),
+                _ => {}
             }
         }
 
-        if let Some((id, resolved_manifest_file_path)) = id_and_manifest_file_path {
-            let manifest_bytes = match self.object_store.get(&resolved_manifest_file_path).await {
-                Ok(manifest) => match manifest.bytes().await {
-                    Ok(bytes) => bytes,
-                    Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
-                },
-                Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
-            };
+        manifests.sort_by_key(|m| m.id);
+        Ok(manifests)
+    }
 
-            self.codec.decode(&manifest_bytes).map(|m| Some((id, m)))
-        } else {
-            Ok(None)
+    pub(crate) async fn read_latest_manifest(
+        &self,
+    ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
+        let manifest_metadatas_list = self.list_manifests(..).await?;
+
+        match manifest_metadatas_list.last() {
+            Some(metadata) => {
+                let manifest_bytes = match self.object_store.get(&metadata.location).await {
+                    Ok(manifest) => match manifest.bytes().await {
+                        Ok(bytes) => bytes,
+                        Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
+                    },
+                    Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
+                };
+
+                self.codec
+                    .decode(&manifest_bytes)
+                    .map(|m| Some((metadata.id, m)))
+            }
+            None => Ok(None),
         }
     }
 
@@ -442,5 +446,37 @@ mod tests {
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
         let refreshed = compactor2.refresh().await.unwrap();
         assert_eq!(refreshed.next_wal_sst_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_list_manifests_unbounded() {
+        let os = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+        sm.update_db_state(state.clone()).await.unwrap();
+
+        // Check unbounded
+        let manifests = ms.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 2);
+        assert_eq!(manifests[0].id, 1);
+        assert_eq!(manifests[1].id, 2);
+
+        // Check bounded
+        let manifests = ms.list_manifests(1..2).await.unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].id, 1);
+
+        // Check left bounded
+        let manifests = ms.list_manifests(2..).await.unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].id, 2);
+
+        // Check right bounded
+        let manifests = ms.list_manifests(..2).await.unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].id, 1);
     }
 }
