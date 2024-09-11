@@ -287,7 +287,7 @@ pub struct GarbageCollectorOptions {
 
     /// An optional tokio runtime handle to use for scheduling garbage collection. You can use
     /// this to isolate garbage collection to a dedicated thread pool.
-    pub compaction_runtime: Option<Handle>,
+    pub gc_runtime: Option<Handle>,
 }
 
 impl Default for GarbageCollecterDirectoryOptions {
@@ -322,7 +322,7 @@ impl Default for GarbageCollectorOptions {
                 min_age: Duration::from_secs(60),
             }),
             compacted_options: Some(Default::default()),
-            compaction_runtime: None,
+            gc_runtime: None,
         }
     }
 }
