@@ -143,7 +143,7 @@ pub struct DbOptions {
     /// Block cache options.
     pub block_cache_options: Option<InMemoryCacheOptions>,
 
-    /// Configuration optiosn for the garbage collector.
+    /// Configuration options for the garbage collector.
     pub garbage_collector_options: Option<GarbageCollectorOptions>,
 }
 
