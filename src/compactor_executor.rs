@@ -19,6 +19,8 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 
+use tracing::{error, info};
+
 pub(crate) struct CompactionJob {
     pub(crate) destination: u32,
     pub(crate) ssts: Vec<SSTableHandle>,
@@ -174,9 +176,9 @@ impl TokioCompactionExecutorInner {
             let results = join_all(tasks.drain().map(|(_, task)| task.task)).await;
             for result in results {
                 match result {
-                    // Err(e) if !e.is_cancelled() => {
-                        // eprintln!("Shutdown error in compaction task: {:?}", e);
-                    // }
+                    Err(e) if !e.is_cancelled() => {
+                         error!("Shutdown error in compaction task: {:?}", e);
+                    }
                     _ => {}
                 }
             }

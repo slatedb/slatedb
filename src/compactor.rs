@@ -204,6 +204,15 @@ impl CompactorOrchestrator {
     fn maybe_schedule_compactions(&mut self) -> Result<(), SlateDBError> {
         let compactions = self.scheduler.maybe_schedule_compaction(&self.state);
         for compaction in compactions.iter() {
+            if self.state.num_compactions() >= self.options.max_concurrent_compactions {
+                info!(
+                    "already running {} compactions, which is at the max {}. Won't run compaction {:?}",
+                    self.state.num_compactions(),
+                    self.options.max_concurrent_compactions,
+                    compaction
+                );
+                break;
+            }
             self.submit_compaction(compaction.clone())?;
         }
         Ok(())

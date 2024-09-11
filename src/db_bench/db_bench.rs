@@ -294,11 +294,12 @@ async fn dump_stats(stats: Arc<StatsRecorder>) {
             } else {
                 (0f32, Duration::from_secs(0))
             };
-        // println!("Stats Dump:");
-        // println!("---------------------------------------");
-        // println!("records written: {}", records_written);
-        // println!("write rate: {}/second over {:?}", write_rate, interval);
-        // println!();
+
+        info!("Stats Dump:");
+        info!("---------------------------------------");
+        info!("records written: {}", records_written);
+        info!("write rate: {}/second over {:?}", write_rate, interval);
+
         tokio::time::sleep(STAT_DUMP_INTERVAL).await;
     }
 }
