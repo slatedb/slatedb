@@ -11,7 +11,7 @@ use object_store::ObjectStore;
 use parking_lot::RwLock;
 use tokio::io::AsyncWriteExt;
 
-use crate::db_state::{SSTableHandle, SsTableId};
+use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
@@ -154,7 +154,7 @@ impl TableStore {
         &self,
         id: &SsTableId,
         encoded_sst: EncodedSsTable,
-    ) -> Result<SSTableHandle, SlateDBError> {
+    ) -> Result<SsTableHandle, SlateDBError> {
         fail_point!(
             self.fp_registry.clone(),
             "write-wal-sst-io-error",
@@ -197,7 +197,7 @@ impl TableStore {
             })?;
 
         self.cache_filter(*id, encoded_sst.filter);
-        Ok(SSTableHandle {
+        Ok(SsTableHandle {
             id: *id,
             info: encoded_sst.info,
         })
@@ -212,19 +212,19 @@ impl TableStore {
 
     // todo: clean up the warning suppression when we start using open_sst outside tests
     #[allow(dead_code)]
-    pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SSTableHandle, SlateDBError> {
+    pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
         let path = self.path(id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
         };
         let info = self.sst_format.read_info(&obj).await?;
-        Ok(SSTableHandle { id: *id, info })
+        Ok(SsTableHandle { id: *id, info })
     }
 
     pub(crate) async fn read_filter(
         &self,
-        handle: &SSTableHandle,
+        handle: &SsTableHandle,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         {
             let rguard = self.filter_cache.read();
@@ -245,7 +245,7 @@ impl TableStore {
 
     pub(crate) async fn read_index(
         &self,
-        handle: &SSTableHandle,
+        handle: &SsTableHandle,
     ) -> Result<SsTableIndexOwned, SlateDBError> {
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
@@ -258,7 +258,7 @@ impl TableStore {
     #[allow(dead_code)]
     pub(crate) async fn read_blocks(
         &self,
-        handle: &SSTableHandle,
+        handle: &SsTableHandle,
         blocks: Range<usize>,
     ) -> Result<VecDeque<Block>, SlateDBError> {
         let path = self.path(&handle.id);
@@ -281,7 +281,7 @@ impl TableStore {
     /// TODO: we probably won't need this once we're caching the index
     pub(crate) async fn read_blocks_using_index(
         &self,
-        handle: &SSTableHandle,
+        handle: &SsTableHandle,
         index: Arc<SsTableIndexOwned>,
         blocks: Range<usize>,
         cache_blocks: bool,
@@ -374,7 +374,7 @@ impl TableStore {
     #[allow(dead_code)]
     pub(crate) async fn read_block(
         &self,
-        handle: &SSTableHandle,
+        handle: &SsTableHandle,
         block: usize,
     ) -> Result<Block, SlateDBError> {
         let path = self.path(&handle.id);
@@ -432,14 +432,14 @@ impl<'a> EncodedSsTableWriter<'a> {
         self.drain_blocks().await
     }
 
-    pub async fn close(mut self) -> Result<SSTableHandle, SlateDBError> {
+    pub async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
         let mut encoded_sst = self.builder.build()?;
         while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
             self.writer.write_all(block.as_ref()).await?;
         }
         self.writer.shutdown().await?;
         self.table_store.cache_filter(self.id, encoded_sst.filter);
-        Ok(SSTableHandle {
+        Ok(SsTableHandle {
             id: self.id,
             info: encoded_sst.info,
         })

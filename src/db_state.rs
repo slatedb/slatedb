@@ -9,14 +9,14 @@ use crate::flatbuffer_types::SsTableInfoOwned;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
 
 #[derive(Clone, PartialEq)]
-pub struct SSTableHandle {
+pub struct SsTableHandle {
     pub id: SsTableId,
     pub info: SsTableInfoOwned,
 }
 
-impl SSTableHandle {
+impl SsTableHandle {
     pub(crate) fn new(id: SsTableId, info: SsTableInfoOwned) -> Self {
-        SSTableHandle { id, info }
+        SsTableHandle { id, info }
     }
 
     pub(crate) fn range_covers_key(&self, key: &[u8]) -> bool {
@@ -55,7 +55,7 @@ impl SsTableId {
 #[derive(Clone, PartialEq)]
 pub struct SortedRun {
     pub(crate) id: u32,
-    pub(crate) ssts: Vec<SSTableHandle>,
+    pub(crate) ssts: Vec<SsTableHandle>,
 }
 
 impl SortedRun {
@@ -80,7 +80,7 @@ impl SortedRun {
         None
     }
 
-    pub(crate) fn find_sst_with_range_covering_key(&self, key: &[u8]) -> Option<&SSTableHandle> {
+    pub(crate) fn find_sst_with_range_covering_key(&self, key: &[u8]) -> Option<&SsTableHandle> {
         self.find_sst_with_range_covering_key_idx(key)
             .map(|idx| &self.ssts[idx])
     }
@@ -103,7 +103,7 @@ pub(crate) struct COWDbState {
 #[derive(Clone, PartialEq)]
 pub struct CoreDbState {
     pub(crate) l0_last_compacted: Option<Ulid>,
-    pub(crate) l0: VecDeque<SSTableHandle>,
+    pub(crate) l0: VecDeque<SsTableHandle>,
     pub(crate) compacted: Vec<SortedRun>,
     pub(crate) next_wal_sst_id: u64,
     pub(crate) last_compacted_wal_sst_id: u64,
@@ -223,7 +223,7 @@ impl DbState {
     pub fn move_imm_memtable_to_l0(
         &mut self,
         imm_memtable: Arc<ImmutableMemtable>,
-        sst_handle: SSTableHandle,
+        sst_handle: SsTableHandle,
     ) {
         let mut state = self.state_copy();
         let popped = state
@@ -268,7 +268,7 @@ mod tests {
     use bytes::Bytes;
     use ulid::Ulid;
 
-    use crate::db_state::{CoreDbState, DbState, SSTableHandle, SsTableId};
+    use crate::db_state::{CoreDbState, DbState, SsTableHandle, SsTableId};
     use crate::flatbuffer_types::{SsTableInfo, SsTableInfoArgs, SsTableInfoOwned};
 
     #[test]
@@ -311,7 +311,7 @@ mod tests {
         for i in 0..n {
             db_state.freeze_memtable(i as u64);
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
-            let handle = SSTableHandle::new(SsTableId::Compacted(Ulid::new()), dummy_info.clone());
+            let handle = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), dummy_info.clone());
             db_state.move_imm_memtable_to_l0(imm, handle);
         }
     }
