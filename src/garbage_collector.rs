@@ -271,8 +271,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_garbage_manifest() {
-        let (garbage_collector, manifest_store, _, local_object_store, db_stats) =
-            build_objects().await;
+        let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
 
         // Create a manifest
         let state = CoreDbState::new();
@@ -301,6 +300,14 @@ mod tests {
         assert_eq!(manifests[1].id, 2);
         assert_eq!(manifests[0].last_modified, now_minus_24h);
 
+        // Start the garbage collector
+        let garbage_collector = build_garbage_collector(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
+
         // Wait for the garbage collector to run
         wait_for_gc(db_stats.gc_manifest_count.clone());
 
@@ -312,12 +319,11 @@ mod tests {
         assert_eq!(manifests[0].id, 2);
     }
 
-    /// Build a garbage collector for testing. The garbage collector is started
-    /// as it's returned.
+    /// Builds the objects needed to construct the garbage collector.
     /// # Returns
-    /// The started garbage collector
-    async fn build_objects() -> (
-        GarbageCollector,
+    /// A tuple containing the manifest store, table store, local object store,
+    /// and database stats
+    fn build_objects() -> (
         Arc<ManifestStore>,
         Arc<TableStore>,
         Arc<LocalFileSystem>,
@@ -339,7 +345,23 @@ mod tests {
             None,
         ));
         let db_stats = Arc::new(DbStats::new());
-        let garbage_collector = GarbageCollector::new(
+
+        (manifest_store, table_store, local_object_store, db_stats)
+    }
+
+    /// Build a garbage collector for testing. The garbage collector is started
+    /// as it's returned. The garbage collector is constructed separately from
+    /// the other objects so that it can be started later (since the GC has no
+    /// start method--it always starts on `new()`). This allows us to seed the
+    /// object store with data before the GC starts.
+    /// # Returns
+    /// The started garbage collector
+    async fn build_garbage_collector(
+        manifest_store: Arc<ManifestStore>,
+        table_store: Arc<TableStore>,
+        db_stats: Arc<DbStats>,
+    ) -> GarbageCollector {
+        GarbageCollector::new(
             manifest_store.clone(),
             table_store.clone(),
             crate::config::GarbageCollectorOptions {
@@ -354,15 +376,7 @@ mod tests {
             tokio::runtime::Handle::current(),
             db_stats.clone(),
         )
-        .await;
-
-        (
-            garbage_collector,
-            manifest_store,
-            table_store,
-            local_object_store,
-            db_stats,
-        )
+        .await
     }
 
     /// Set the modified time of a file to be a certain number of seconds ago.
