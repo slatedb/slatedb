@@ -264,29 +264,15 @@ mod tests {
         db_state::CoreDbState,
         garbage_collector::GarbageCollector,
         manifest_store::{ManifestStore, StoredManifest},
-        metrics::DbStats,
+        metrics::{Counter, DbStats},
         sst::SsTableFormat,
         tablestore::TableStore,
     };
 
     #[tokio::test]
-    async fn collect_garbage_manifests() {
-        let tempdir = tempfile::tempdir().unwrap().into_path();
-        let local_object_store = Arc::new(
-            LocalFileSystem::new_with_prefix(tempdir)
-                .unwrap()
-                .with_automatic_cleanup(true),
-        );
-        let path = Path::from("/");
-        let manifest_store = Arc::new(ManifestStore::new(&path, local_object_store.clone()));
-        let sst_format = SsTableFormat::new(4096, 10, None);
-        let table_store = Arc::new(TableStore::new(
-            local_object_store.clone(),
-            sst_format,
-            path.clone(),
-            None,
-        ));
-        let db_stats = Arc::new(DbStats::new());
+    async fn test_collect_garbage_manifest() {
+        let (garbage_collector, manifest_store, _, local_object_store, db_stats) =
+            build_objects().await;
 
         // Create a manifest
         let state = CoreDbState::new();
@@ -313,12 +299,46 @@ mod tests {
         assert_eq!(manifests.len(), 2);
         assert_eq!(manifests[0].id, 1);
         assert_eq!(manifests[1].id, 2);
-        assert_eq!(
-            manifests[0].last_modified,
-            // 24 hours ago DateTime
-            DateTime::<Utc>::from(now_minus_24h)
-        );
+        assert_eq!(manifests[0].last_modified, now_minus_24h);
 
+        // Wait for the garbage collector to run
+        wait_for_gc(db_stats.gc_manifest_count.clone());
+
+        garbage_collector.close().await;
+
+        // Verify that the first manifest was deleted
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].id, 2);
+    }
+
+    /// Build a garbage collector for testing. The garbage collector is started
+    /// as it's returned.
+    /// # Returns
+    /// The started garbage collector
+    async fn build_objects() -> (
+        GarbageCollector,
+        Arc<ManifestStore>,
+        Arc<TableStore>,
+        Arc<LocalFileSystem>,
+        Arc<DbStats>,
+    ) {
+        let tempdir = tempfile::tempdir().unwrap().into_path();
+        let local_object_store = Arc::new(
+            LocalFileSystem::new_with_prefix(tempdir)
+                .unwrap()
+                .with_automatic_cleanup(true),
+        );
+        let path = Path::from("/");
+        let manifest_store = Arc::new(ManifestStore::new(&path, local_object_store.clone()));
+        let sst_format = SsTableFormat::new(4096, 10, None);
+        let table_store = Arc::new(TableStore::new(
+            local_object_store.clone(),
+            sst_format,
+            path.clone(),
+            None,
+        ));
+        let db_stats = Arc::new(DbStats::new());
         let garbage_collector = GarbageCollector::new(
             manifest_store.clone(),
             table_store.clone(),
@@ -336,17 +356,13 @@ mod tests {
         )
         .await;
 
-        while db_stats.gc_manifest_count.get() == 0 {
-            info!("Waiting for garbage collector to run");
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-
-        garbage_collector.close().await;
-
-        // Verify that the first manifest was deleted
-        let manifests = manifest_store.list_manifests(..).await.unwrap();
-        assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].id, 2);
+        (
+            garbage_collector,
+            manifest_store,
+            table_store,
+            local_object_store,
+            db_stats,
+        )
     }
 
     /// Set the modified time of a file to be a certain number of seconds ago.
@@ -368,5 +384,17 @@ mod tests {
             .unwrap();
         file.set_modified(now_minus_24h).unwrap();
         DateTime::<Utc>::from(now_minus_24h)
+    }
+
+    /// Wait for the garbage collector to run at least once.
+    /// # Arguments
+    /// * `counter` - The counter to wait for. Could be the manifest, WAL, or
+    ///   compacted counter.
+    fn wait_for_gc(counter: Counter) {
+        let current = counter.get();
+        while counter.get() == current {
+            info!("Waiting for garbage collector to run");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 }
