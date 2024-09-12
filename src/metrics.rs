@@ -56,6 +56,7 @@ pub struct DbStats {
     pub gc_manifest_count: Counter,
     pub gc_wal_count: Counter,
     pub gc_compacted_count: Counter,
+    pub gc_count: Counter,
     pub object_store_cache_part_hits: Counter,
     pub object_store_cache_part_access: Counter,
 }
@@ -68,6 +69,7 @@ impl DbStats {
             gc_manifest_count: Counter::default(),
             gc_wal_count: Counter::default(),
             gc_compacted_count: Counter::default(),
+            gc_count: Counter::default(),
             object_store_cache_part_hits: Counter::default(),
             object_store_cache_part_access: Counter::default(),
         }

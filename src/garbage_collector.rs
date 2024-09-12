@@ -240,6 +240,7 @@ impl GarbageCollectorOrchestrator {
                 }
                 recv(self.external_rx) -> _ => break, // Shutdown
             }
+            self.db_stats.gc_count.inc();
         }
     }
 
@@ -314,6 +315,106 @@ mod tests {
         garbage_collector.close().await;
 
         // Verify that the first manifest was deleted
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_collect_garbage_only_recent_manifests() {
+        let (manifest_store, table_store, _, db_stats) = build_objects();
+
+        // Create a manifest
+        let state = CoreDbState::new();
+        let mut stored_manifest =
+            StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+                .await
+                .unwrap();
+
+        // Add a second manifest
+        stored_manifest
+            .update_db_state(state.clone())
+            .await
+            .unwrap();
+
+        // Verify that the manifests are there as expected
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 2);
+        assert_eq!(manifests[0].id, 1);
+        assert_eq!(manifests[1].id, 2);
+
+        // Start the garbage collector
+        let garbage_collector = build_garbage_collector(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
+
+        // Wait for the garbage collector to run
+        // Use `gc_count` since the manifest counter won't increment
+        wait_for_gc(db_stats.gc_count.clone());
+
+        garbage_collector.close().await;
+
+        // Verify that no manifests were deleted
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 2);
+        assert_eq!(manifests[0].id, 1);
+        assert_eq!(manifests[1].id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_collect_garbage_old_active_manifest() {
+        let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+
+        // Create a manifest
+        let state = CoreDbState::new();
+        let mut stored_manifest =
+            StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+                .await
+                .unwrap();
+
+        // Add a second manifest
+        stored_manifest
+            .update_db_state(state.clone())
+            .await
+            .unwrap();
+
+        // Set both manifests to be a day old
+        let now_minus_24h_1 = set_modified(
+            local_object_store.clone(),
+            &Path::from(format!("manifest/{:020}.{}", 1, "manifest")),
+            86400,
+        );
+        let now_minus_24h_2 = set_modified(
+            local_object_store.clone(),
+            &Path::from(format!("manifest/{:020}.{}", 2, "manifest")),
+            86400,
+        );
+
+        // Verify that the manifests are there as expected
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 2);
+        assert_eq!(manifests[0].id, 1);
+        assert_eq!(manifests[1].id, 2);
+        assert_eq!(manifests[0].last_modified, now_minus_24h_1);
+        assert_eq!(manifests[1].last_modified, now_minus_24h_2);
+
+        // Start the garbage collector
+        let garbage_collector = build_garbage_collector(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
+
+        // Wait for the garbage collector to run
+        wait_for_gc(db_stats.gc_manifest_count.clone());
+
+        garbage_collector.close().await;
+
+        // Verify that the first manifest was deleted, but the second is still safe
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
         assert_eq!(manifests[0].id, 2);
