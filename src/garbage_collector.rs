@@ -302,15 +302,11 @@ mod tests {
             .unwrap();
 
         // Set the first manifest file to be a day old
-        let now_minus_24h = SystemTime::now()
-            .checked_sub(std::time::Duration::from_secs(86400))
-            .unwrap();
-        let manifest_1_path = local_object_store
-            .path_to_filesystem(&Path::from(format!("manifest/{:020}.{}", 1, "manifest")))
-            .unwrap();
-        println!("{:?}", manifest_1_path);
-        let manifest_1_file = File::open(manifest_1_path).unwrap();
-        manifest_1_file.set_modified(now_minus_24h).unwrap();
+        let now_minus_24h = set_modified(
+            local_object_store.clone(),
+            &Path::from(format!("manifest/{:020}.{}", 1, "manifest")),
+            86400,
+        );
 
         // Verify that the manifests are there as expected
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -319,6 +315,7 @@ mod tests {
         assert_eq!(manifests[1].id, 2);
         assert_eq!(
             manifests[0].last_modified,
+            // 24 hours ago DateTime
             DateTime::<Utc>::from(now_minus_24h)
         );
 
@@ -350,5 +347,26 @@ mod tests {
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
         assert_eq!(manifests[0].id, 2);
+    }
+
+    /// Set the modified time of a file to be a certain number of seconds ago.
+    /// # Arguments
+    /// * `local_object_store` - The local object store that is writing files
+    /// * `path` - The path to the file to modify (relative to the object store root)
+    /// * `seconds_ago` - The number of seconds ago to set the modified time to
+    /// # Returns
+    /// The new modified time
+    fn set_modified(
+        local_object_store: Arc<LocalFileSystem>,
+        path: &Path,
+        seconds_ago: u64,
+    ) -> DateTime<Utc> {
+        let file = local_object_store.path_to_filesystem(path).unwrap();
+        let file = File::open(file).unwrap();
+        let now_minus_24h = SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(seconds_ago))
+            .unwrap();
+        file.set_modified(now_minus_24h).unwrap();
+        DateTime::<Utc>::from(now_minus_24h)
     }
 }
