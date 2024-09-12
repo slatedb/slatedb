@@ -33,6 +33,9 @@ pub enum SlateDBError {
     #[error("Detected newer DB client")]
     Fenced,
 
+    #[error("Invalid cache part size bytes, it must be multiple of 1024 and greater than 0")]
+    InvalidCachePartSize,
+
     #[error("Invalid Compression Codec")]
     InvalidCompressionCodec,
 

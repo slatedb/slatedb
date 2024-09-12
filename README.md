@@ -36,7 +36,7 @@ use bytes::Bytes;
 use object_store::{ObjectStore, memory::InMemory, path::Path};
 use slatedb::db::Db;
 use slatedb::inmemory_cache::InMemoryCacheOptions;
-use slatedb::config::{CompactorOptions, DbOptions};
+use slatedb::config::{CompactorOptions, DbOptions, ObjectStoreCacheOptions};
 use std::{sync::Arc, time::Duration};
 
 #[tokio::main]
@@ -54,6 +54,7 @@ async fn main() {
         compactor_options: Some(CompactorOptions::default()),
         compression_codec: None,
         block_cache_options: Some(InMemoryCacheOptions::default()),
+        object_store_cache_options: ObjectStoreCacheOptions::default(),
     };
     let kv_store = Db::open_with_opts(
         Path::from("/tmp/test_kv_store"),
