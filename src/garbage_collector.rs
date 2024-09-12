@@ -86,6 +86,7 @@ impl GarbageCollectorOrchestrator {
     /// Collect garbage from the manifest store. This will delete any manifests
     /// that are older than the minimum age specified in the options.
     async fn collect_garbage_manifests(&self) -> Result<(), SlateDBError> {
+        let utc_now = Utc::now();
         let min_age = self
             .options
             .manifest_options
@@ -101,7 +102,7 @@ impl GarbageCollectorOrchestrator {
         for manifest_metadata in manifest_metadata_list {
             let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
 
-            if Utc::now().signed_duration_since(manifest_metadata.last_modified) > min_age {
+            if utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age {
                 if let Err(e) = self
                     .manifest_store
                     .delete_manifest(manifest_metadata.id)
@@ -121,6 +122,7 @@ impl GarbageCollectorOrchestrator {
     /// older than the minimum age specified in the options and are also older than
     /// the last compacted WAL SST.
     async fn collect_garbage_wal_ssts(&self) -> Result<(), SlateDBError> {
+        let utc_now = Utc::now();
         let last_compacted_wal_sst_id = self
             .manifest_store
             // Get the latest manifest so we can get the last compacted id
@@ -142,7 +144,7 @@ impl GarbageCollectorOrchestrator {
             .into_iter()
             .filter(|wal_sst| {
                 let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
-                Utc::now().signed_duration_since(wal_sst.last_modified) > min_age
+                utc_now.signed_duration_since(wal_sst.last_modified) > min_age
             })
             .map(|wal_sst| wal_sst.id)
             .collect::<Vec<_>>();
@@ -161,6 +163,7 @@ impl GarbageCollectorOrchestrator {
     /// Collect garbage from the compacted SSTs. This will delete any compacted SSTs that are
     /// older than the minimum age specified in the options and are not active in the manifest.
     async fn collect_garbage_compacted_ssts(&self) -> Result<(), SlateDBError> {
+        let utc_now = Utc::now();
         let manifest = self
             .manifest_store
             // Get the latest manifest so we can get the last compacted id
@@ -197,7 +200,7 @@ impl GarbageCollectorOrchestrator {
             // Filter out the ones that are too young to be collected
             .filter(|sst| {
                 let min_age = chrono::Duration::from_std(min_age).expect("invalid duration");
-                Utc::now().signed_duration_since(sst.last_modified) > min_age
+                utc_now.signed_duration_since(sst.last_modified) > min_age
             })
             .map(|sst| sst.id)
             // Filter out the ones that are active in the manifest
