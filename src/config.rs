@@ -140,6 +140,9 @@ pub struct DbOptions {
     /// The compression algorithm to use for SSTables.
     pub compression_codec: Option<CompressionCodec>,
 
+    /// The object store cache options.
+    pub object_store_cache_options: ObjectStoreCacheOptions,
+
     /// Block cache options.
     pub block_cache_options: Option<InMemoryCacheOptions>,
 
@@ -160,6 +163,7 @@ impl Default for DbOptions {
             l0_max_ssts: 8,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
+            object_store_cache_options: ObjectStoreCacheOptions::default(),
             block_cache_options: Some(InMemoryCacheOptions::default()),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
         }
@@ -248,8 +252,8 @@ impl Default for CompactorOptions {
     }
 }
 
-#[derive(Clone)]
 /// Options for the Size-Tiered Compaction Scheduler
+#[derive(Clone)]
 pub struct SizeTieredCompactionSchedulerOptions {
     /// The minimum number of sources to include together in a single compaction step.
     pub min_compaction_sources: usize,
@@ -323,6 +327,32 @@ impl Default for GarbageCollectorOptions {
             }),
             compacted_options: Some(Default::default()),
             gc_runtime: None,
+        }
+    }
+}
+
+/// Options for the object store cache. This cache is not enabled unless an explicit cache
+/// root folder is set. The object store cache will split an object into align-sized parts
+/// in the local, and save them into the local cache storage.
+///
+/// The local cache default uses file system as storage, it can also be extended to use other
+/// like RocksDB, Redis, etc. in the future.
+#[derive(Clone, Debug)]
+pub struct ObjectStoreCacheOptions {
+    /// The root folder where the cache files are stored. If not set, the cache will be
+    /// disabled.
+    pub root_folder: Option<std::path::PathBuf>,
+
+    /// The size of each part file, the part size is expected to be aligned with 1kb,
+    /// its default value is 4mb.
+    pub part_size_bytes: usize,
+}
+
+impl Default for ObjectStoreCacheOptions {
+    fn default() -> Self {
+        Self {
+            root_folder: None,
+            part_size_bytes: 4 * 1024 * 1024,
         }
     }
 }

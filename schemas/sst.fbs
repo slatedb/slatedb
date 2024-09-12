@@ -4,8 +4,8 @@ table CompactedSstId {
 }
 
 table CompactedSsTable {
-    id: CompactedSstId;
-    info: SsTableInfo;
+    id: CompactedSstId (required);
+    info: SsTableInfo (required);
 }
 
 enum CompressionFormat: byte {
