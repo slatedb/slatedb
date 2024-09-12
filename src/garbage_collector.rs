@@ -251,3 +251,104 @@ impl GarbageCollectorOrchestrator {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, sync::Arc, time::SystemTime};
+
+    use chrono::{DateTime, Utc};
+    use log::info;
+    use object_store::{local::LocalFileSystem, path::Path};
+
+    use crate::{
+        db_state::CoreDbState,
+        garbage_collector::GarbageCollector,
+        manifest_store::{ManifestStore, StoredManifest},
+        metrics::DbStats,
+        sst::SsTableFormat,
+        tablestore::TableStore,
+    };
+
+    #[tokio::test]
+    async fn collect_garbage_manifests() {
+        let tempdir = tempfile::tempdir().unwrap().into_path();
+        let local_object_store = Arc::new(
+            LocalFileSystem::new_with_prefix(tempdir)
+                .unwrap()
+                .with_automatic_cleanup(true),
+        );
+        let path = Path::from("/");
+        let manifest_store = Arc::new(ManifestStore::new(&path, local_object_store.clone()));
+        let sst_format = SsTableFormat::new(4096, 10, None);
+        let table_store = Arc::new(TableStore::new(
+            local_object_store.clone(),
+            sst_format,
+            path.clone(),
+            None,
+        ));
+        let db_stats = Arc::new(DbStats::new());
+
+        // Create a manifest
+        let state = CoreDbState::new();
+        let mut stored_manifest =
+            StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+                .await
+                .unwrap();
+
+        // Add a second manifest
+        stored_manifest
+            .update_db_state(state.clone())
+            .await
+            .unwrap();
+
+        // Set the first manifest file to be a day old
+        let now_minus_24h = SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(86400))
+            .unwrap();
+        let manifest_1_path = local_object_store
+            .path_to_filesystem(&Path::from(format!("manifest/{:020}.{}", 1, "manifest")))
+            .unwrap();
+        println!("{:?}", manifest_1_path);
+        let manifest_1_file = File::open(manifest_1_path).unwrap();
+        manifest_1_file.set_modified(now_minus_24h).unwrap();
+
+        // Verify that the manifests are there as expected
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 2);
+        assert_eq!(manifests[0].id, 1);
+        assert_eq!(manifests[1].id, 2);
+        assert_eq!(
+            manifests[0].last_modified,
+            DateTime::<Utc>::from(now_minus_24h)
+        );
+
+        let garbage_collector = GarbageCollector::new(
+            manifest_store.clone(),
+            table_store.clone(),
+            crate::config::GarbageCollectorOptions {
+                manifest_options: Some(crate::config::GarbageCollecterDirectoryOptions {
+                    min_age: std::time::Duration::from_secs(3600),
+                    poll_interval: std::time::Duration::from_secs(0),
+                }),
+                wal_options: None,
+                compacted_options: None,
+                gc_runtime: None,
+            },
+            tokio::runtime::Handle::current(),
+            db_stats.clone(),
+        )
+        .await;
+
+        while db_stats.gc_manifest_count.get() == 0 {
+            info!("Waiting for garbage collector to run");
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        garbage_collector.close().await;
+
+        // Verify that the first manifest was deleted
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].id, 2);
+    }
+}
