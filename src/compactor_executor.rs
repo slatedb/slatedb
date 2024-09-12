@@ -11,7 +11,7 @@ use ulid::Ulid;
 use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor::WorkerToOrchestratorMsg::CompactionFinished;
 use crate::config::CompactorOptions;
-use crate::db_state::{SSTableHandle, SortedRun, SsTableId};
+use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
@@ -21,7 +21,7 @@ use crate::tablestore::TableStore;
 
 pub(crate) struct CompactionJob {
     pub(crate) destination: u32,
-    pub(crate) ssts: Vec<SSTableHandle>,
+    pub(crate) ssts: Vec<SsTableHandle>,
     pub(crate) sorted_runs: Vec<SortedRun>,
 }
 

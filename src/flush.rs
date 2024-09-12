@@ -5,7 +5,7 @@ use tokio::select;
 
 use crate::db::DbInner;
 use crate::db_state;
-use crate::db_state::SSTableHandle;
+use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
@@ -22,7 +22,7 @@ impl DbInner {
         &self,
         id: &db_state::SsTableId,
         imm_table: Arc<KVTable>,
-    ) -> Result<SSTableHandle, SlateDBError> {
+    ) -> Result<SsTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = imm_table.iter();
         while let Some(kv) = iter.next_entry().await? {
@@ -41,7 +41,7 @@ impl DbInner {
         Ok(handle)
     }
 
-    async fn flush_imm_wal(&self, imm: Arc<ImmutableWal>) -> Result<SSTableHandle, SlateDBError> {
+    async fn flush_imm_wal(&self, imm: Arc<ImmutableWal>) -> Result<SsTableHandle, SlateDBError> {
         let wal_id = db_state::SsTableId::Wal(imm.id());
         self.flush_imm_table(&wal_id, imm.table()).await
     }
