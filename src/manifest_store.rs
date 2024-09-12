@@ -105,11 +105,7 @@ impl StoredManifest {
         store: Arc<ManifestStore>,
         core: CoreDbState,
     ) -> Result<Self, SlateDBError> {
-        let manifest = Manifest {
-            core,
-            writer_epoch: 0,
-            compactor_epoch: 0,
-        };
+        let manifest = Manifest::new(core, 0, 0);
         store.write_manifest(1, &manifest).await?;
         Ok(Self {
             id: 1,
@@ -143,11 +139,11 @@ impl StoredManifest {
     }
 
     pub(crate) async fn update_db_state(&mut self, core: CoreDbState) -> Result<(), SlateDBError> {
-        let manifest = Manifest {
+        let manifest = Manifest::new(
             core,
-            writer_epoch: self.manifest.writer_epoch,
-            compactor_epoch: self.manifest.compactor_epoch,
-        };
+            self.manifest.writer_epoch,
+            self.manifest.compactor_epoch,
+        );
         self.update_manifest(manifest).await
     }
 
@@ -237,6 +233,17 @@ impl ManifestStore {
             self.codec.decode(&manifest_bytes).map(|m| Some((id, m)))
         } else {
             Ok(None)
+        }
+    }
+
+    pub async fn read_manifest_with_id(&self, id: u64) -> Result<Option<Manifest>, SlateDBError> {
+        let manifest_path = &Path::from(format!("{:020}.{}", id, self.manifest_suffix));
+        match self.object_store.get(manifest_path).await {
+            Ok(manifest) => match manifest.bytes().await {
+                Ok(bytes) => self.codec.decode(&bytes).map(Some),
+                Err(e) => Err(SlateDBError::ObjectStoreError(e)),
+            },
+            Err(e) => Err(SlateDBError::ObjectStoreError(e)),
         }
     }
 

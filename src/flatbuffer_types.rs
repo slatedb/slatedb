@@ -119,11 +119,7 @@ impl FlatBufferManifestCodec {
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
             last_compacted_wal_sst_id: manifest.wal_id_last_compacted(),
         };
-        Manifest {
-            core,
-            writer_epoch: manifest.writer_epoch(),
-            compactor_epoch: manifest.compactor_epoch(),
-        }
+        Manifest::new(core, manifest.writer_epoch(), manifest.compactor_epoch())
     }
 
     pub fn create_from_manifest(&self, manifest: &Manifest) -> Bytes {

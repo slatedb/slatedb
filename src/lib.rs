@@ -30,6 +30,7 @@ mod mem_table_flush;
 mod merge_iterator;
 mod metrics;
 pub mod size_tiered_compaction;
+mod snapshot_manager;
 mod sorted_run_iterator;
 mod sst;
 mod sst_iter;

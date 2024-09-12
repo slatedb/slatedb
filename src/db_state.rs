@@ -93,14 +93,14 @@ pub(crate) struct DbState {
 }
 
 // represents the state that is mutated by creating a new copy with the mutations
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct COWDbState {
     pub(crate) imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
     pub(crate) imm_wal: VecDeque<Arc<ImmutableWal>>,
     pub(crate) core: CoreDbState,
 }
 // represents the core db state that we persist in the manifest
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Default)]
 pub struct CoreDbState {
     pub(crate) l0_last_compacted: Option<Ulid>,
     pub(crate) l0: VecDeque<SSTableHandle>,
@@ -132,6 +132,17 @@ impl CoreDbState {
         info!("{:?}", l0s);
         info!("{:?}", compacted);
         info!("-----------------");
+    }
+
+    pub(crate) fn snapshot(&self) -> DbStateSnapshot {
+        DbStateSnapshot {
+            memtable: Arc::new(KVTable::new()),
+            wal: Arc::new(KVTable::new()),
+            state: Arc::new(COWDbState {
+                core: self.clone(),
+                ..Default::default()
+            }),
+        }
     }
 }
 

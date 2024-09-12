@@ -3,10 +3,10 @@ use std::{str::FromStr, time::Duration};
 
 use tokio::runtime::Handle;
 
-use crate::compactor::CompactionScheduler;
 use crate::error::SlateDBError;
 use crate::inmemory_cache::InMemoryCacheOptions;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
+use crate::{compactor::CompactionScheduler, snapshot_manager::Snapshot};
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
 pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
@@ -29,6 +29,8 @@ pub enum ReadLevel {
 pub struct ReadOptions {
     /// The read commit level for read operations.
     pub read_level: ReadLevel,
+    /// optional snapshot
+    pub snapshot: Option<Snapshot>,
 }
 
 impl ReadOptions {
@@ -36,6 +38,7 @@ impl ReadOptions {
     const fn default() -> Self {
         Self {
             read_level: ReadLevel::Commited,
+            snapshot: None,
         }
     }
 }

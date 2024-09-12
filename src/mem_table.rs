@@ -135,7 +135,7 @@ impl WritableKVTable {
 }
 
 impl KVTable {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             map: SkipMap::new(),
             durable_notify: Arc::new(Notify::new()),
