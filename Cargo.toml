@@ -41,7 +41,7 @@ zstd = { version = "0.13.2", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 moka = { version = "0.12.8", features = ["future"] }
-foyer = { git = "https://github.com/foyer-rs/foyer", rev = "ff588d4" }
+foyer = "0.11.2"
 
 [dev-dependencies]
 tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
