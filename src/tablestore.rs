@@ -640,7 +640,7 @@ mod tests {
         sst2.add(b"key", Some(b"value")).unwrap();
         let table2 = sst2.build().unwrap();
 
-        // write another walsst with the same id.
+        // write another wal sst with the same id.
         let result = ts.write_sst(&wal_id, table2).await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
     }

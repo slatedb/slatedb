@@ -262,7 +262,7 @@ mod tests {
     use object_store::{local::LocalFileSystem, path::Path};
 
     use crate::{
-        db_state::CoreDbState,
+        db_state::{CoreDbState, SsTableId},
         garbage_collector::GarbageCollector,
         manifest_store::{ManifestStore, StoredManifest},
         metrics::{Counter, DbStats},
@@ -420,6 +420,134 @@ mod tests {
         assert_eq!(manifests[0].id, 2);
     }
 
+    #[tokio::test]
+    async fn test_collect_garbage_wal_ssts() {
+        let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+
+        // write a wal sst
+        let id1 = SsTableId::Wal(1);
+        let mut sst1 = table_store.table_builder();
+        sst1.add(b"key", Some(b"value")).unwrap();
+        let table1 = sst1.build().unwrap();
+        table_store.write_sst(&id1, table1).await.unwrap();
+
+        let id2 = SsTableId::Wal(2);
+        let mut sst2 = table_store.table_builder();
+        sst2.add(b"key", Some(b"value")).unwrap();
+        let table2 = sst2.build().unwrap();
+        table_store.write_sst(&id2, table2).await.unwrap();
+
+        // Set the first WAL SST file to be a day old
+        let now_minus_24h = set_modified(
+            local_object_store.clone(),
+            &Path::from(format!("wal/{:020}.{}", 1, "sst")),
+            86400,
+        );
+
+        // Create a manifest
+        let mut state = CoreDbState::new();
+        state.last_compacted_wal_sst_id = id2.unwrap_wal_id();
+        StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+            .await
+            .unwrap();
+
+        // Verify that the WAL SST is there as expected
+        let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
+        assert_eq!(wal_ssts.len(), 2);
+        assert_eq!(wal_ssts[0].id, id1);
+        assert_eq!(wal_ssts[1].id, id2);
+        assert_eq!(wal_ssts[0].last_modified, now_minus_24h);
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 1);
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().unwrap().1;
+        assert_eq!(current_manifest.core.last_compacted_wal_sst_id, id2.unwrap_wal_id());
+
+        // Start the garbage collector
+        let garbage_collector = build_garbage_collector(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
+
+        // Wait for the garbage collector to run
+        wait_for_gc(db_stats.gc_wal_count.clone());
+
+        garbage_collector.close().await;
+
+        // Verify that the first WAL was deleted and the second is kept
+        let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
+        assert_eq!(wal_ssts.len(), 1);
+        assert_eq!(wal_ssts[0].id, id2);
+    }
+
+    #[tokio::test]
+    async fn test_collect_garbage_wal_ssts_and_keep_expired_last_compacted() {
+        let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+
+        // write a wal sst
+        let id1 = SsTableId::Wal(1);
+        let mut sst1 = table_store.table_builder();
+        sst1.add(b"key", Some(b"value")).unwrap();
+        let table1 = sst1.build().unwrap();
+        table_store.write_sst(&id1, table1).await.unwrap();
+
+        let id2 = SsTableId::Wal(2);
+        let mut sst2 = table_store.table_builder();
+        sst2.add(b"key", Some(b"value")).unwrap();
+        let table2 = sst2.build().unwrap();
+        table_store.write_sst(&id2, table2).await.unwrap();
+
+        // Set the both WAL SST file to be a day old
+        let now_minus_24h_1 = set_modified(
+            local_object_store.clone(),
+            &Path::from(format!("wal/{:020}.{}", 1, "sst")),
+            86400,
+        );
+        let now_minus_24h_2 = set_modified(
+            local_object_store.clone(),
+            &Path::from(format!("wal/{:020}.{}", 2, "sst")),
+            86400,
+        );
+
+        // Create a manifest
+        let mut state = CoreDbState::new();
+        state.last_compacted_wal_sst_id = id2.unwrap_wal_id();
+        StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+            .await
+            .unwrap();
+
+        // Verify that the WAL SST is there as expected
+        let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
+        assert_eq!(wal_ssts.len(), 2);
+        assert_eq!(wal_ssts[0].id, id1);
+        assert_eq!(wal_ssts[1].id, id2);
+        assert_eq!(wal_ssts[0].last_modified, now_minus_24h_1);
+        assert_eq!(wal_ssts[1].last_modified, now_minus_24h_2);
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 1);
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().unwrap().1;
+        assert_eq!(current_manifest.core.last_compacted_wal_sst_id, id2.unwrap_wal_id());
+
+        // Start the garbage collector
+        let garbage_collector = build_garbage_collector(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
+
+        // Wait for the garbage collector to run
+        wait_for_gc(db_stats.gc_wal_count.clone());
+
+        garbage_collector.close().await;
+
+        // Verify that the first WAL was deleted and the second is kept even though it's expired
+        let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
+        assert_eq!(wal_ssts.len(), 1);
+        assert_eq!(wal_ssts[0].id, id2);
+    }
+
     /// Builds the objects needed to construct the garbage collector.
     /// # Returns
     /// A tuple containing the manifest store, table store, local object store,
@@ -470,8 +598,14 @@ mod tests {
                     min_age: std::time::Duration::from_secs(3600),
                     poll_interval: std::time::Duration::from_secs(0),
                 }),
-                wal_options: None,
-                compacted_options: None,
+                wal_options: Some(crate::config::GarbageCollecterDirectoryOptions {
+                    min_age: std::time::Duration::from_secs(3600),
+                    poll_interval: std::time::Duration::from_secs(0),
+                }),
+                compacted_options: Some(crate::config::GarbageCollecterDirectoryOptions {
+                    min_age: std::time::Duration::from_secs(3600),
+                    poll_interval: std::time::Duration::from_secs(0),
+                }),
                 gc_runtime: None,
             },
             tokio::runtime::Handle::current(),
