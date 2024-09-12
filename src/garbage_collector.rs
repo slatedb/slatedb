@@ -260,9 +260,10 @@ mod tests {
     use chrono::{DateTime, Utc};
     use log::info;
     use object_store::{local::LocalFileSystem, path::Path};
+    use ulid::Ulid;
 
     use crate::{
-        db_state::{CoreDbState, SsTableId},
+        db_state::{CoreDbState, SSTableHandle, SortedRun, SsTableId},
         garbage_collector::GarbageCollector,
         manifest_store::{ManifestStore, StoredManifest},
         metrics::{Counter, DbStats},
@@ -459,8 +460,16 @@ mod tests {
         assert_eq!(wal_ssts[0].last_modified, now_minus_24h);
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().unwrap().1;
-        assert_eq!(current_manifest.core.last_compacted_wal_sst_id, id2.unwrap_wal_id());
+        let current_manifest = manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .unwrap()
+            .1;
+        assert_eq!(
+            current_manifest.core.last_compacted_wal_sst_id,
+            id2.unwrap_wal_id()
+        );
 
         // Start the garbage collector
         let garbage_collector = build_garbage_collector(
@@ -526,8 +535,16 @@ mod tests {
         assert_eq!(wal_ssts[1].last_modified, now_minus_24h_2);
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().unwrap().1;
-        assert_eq!(current_manifest.core.last_compacted_wal_sst_id, id2.unwrap_wal_id());
+        let current_manifest = manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .unwrap()
+            .1;
+        assert_eq!(
+            current_manifest.core.last_compacted_wal_sst_id,
+            id2.unwrap_wal_id()
+        );
 
         // Start the garbage collector
         let garbage_collector = build_garbage_collector(
@@ -546,6 +563,153 @@ mod tests {
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
         assert_eq!(wal_ssts.len(), 1);
         assert_eq!(wal_ssts[0].id, id2);
+    }
+
+    /// This test creates eight compacted SSTs:
+    /// - One L0 SST
+    /// - One active L0 SST that's a day old
+    /// - One inactive expired L0 SST
+    /// - One inactive unexpired L0 SST
+    /// - One active SST
+    /// - One active SST that's a day old
+    /// - One inactive expired SST
+    /// - One inactive unexpired SST
+    /// The test then runs the compactor to verify that only the inactive expired SSTs
+    /// are deleted.
+    #[tokio::test]
+    async fn test_collect_garbage_compacted_ssts() {
+        let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+        let l0_sst_handle = create_sst(table_store.clone()).await;
+        let active_expired_l0_sst_handle = create_sst(table_store.clone()).await;
+        let inactive_expired_l0_sst_handle = create_sst(table_store.clone()).await;
+        let inactive_unexpired_l0_sst_handle = create_sst(table_store.clone()).await;
+        let active_sst_handle = create_sst(table_store.clone()).await;
+        let active_expired_sst_handle = create_sst(table_store.clone()).await;
+        let inactive_expired_sst_handle = create_sst(table_store.clone()).await;
+        let inactive_unexpired_sst_handle = create_sst(table_store.clone()).await;
+
+        // Set expiration for the old SSTs
+        let now_minus_24h_expired_l0_sst = set_modified(
+            local_object_store.clone(),
+            &Path::from(format!(
+                "compacted/{:020}.{}",
+                active_expired_l0_sst_handle.id.unwrap_compacted_id(),
+                "sst"
+            )),
+            86400,
+        );
+        let now_minus_24h_inactive_expired_l0_sst = set_modified(
+            local_object_store.clone(),
+            &Path::from(format!(
+                "compacted/{:020}.{}",
+                inactive_expired_l0_sst_handle.id.unwrap_compacted_id(),
+                "sst"
+            )),
+            86400,
+        );
+        let now_minus_24h_active_expired_sst = set_modified(
+            local_object_store.clone(),
+            &Path::from(format!(
+                "compacted/{:020}.{}",
+                active_expired_sst_handle.id.unwrap_compacted_id(),
+                "sst"
+            )),
+            86400,
+        );
+        let now_minus_24h_inactive_expired_sst_id = set_modified(
+            local_object_store.clone(),
+            &Path::from(format!(
+                "compacted/{:020}.{}",
+                inactive_expired_sst_handle.id.unwrap_compacted_id(),
+                "sst"
+            )),
+            86400,
+        );
+
+        // Create a manifest
+        let mut state = CoreDbState::new();
+        state.l0.push_back(l0_sst_handle.clone());
+        state.l0.push_back(active_expired_l0_sst_handle.clone());
+        // Dont' push inactive_expired_l0_sst_handle
+        state.compacted.push(SortedRun {
+            id: 1,
+            // Don't add inactive_expired_sst_handle
+            ssts: vec![active_sst_handle.clone(), active_expired_sst_handle.clone()],
+        });
+        StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+            .await
+            .unwrap();
+
+        // Verify that the WAL SST is there as expected
+        let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
+        assert_eq!(compacted_ssts.len(), 8);
+        assert_eq!(compacted_ssts[0].id, l0_sst_handle.id);
+        assert_eq!(compacted_ssts[1].id, active_expired_l0_sst_handle.id);
+        assert_eq!(compacted_ssts[2].id, inactive_expired_l0_sst_handle.id);
+        assert_eq!(compacted_ssts[3].id, inactive_unexpired_l0_sst_handle.id);
+        assert_eq!(compacted_ssts[4].id, active_sst_handle.id);
+        assert_eq!(compacted_ssts[5].id, active_expired_sst_handle.id);
+        assert_eq!(compacted_ssts[6].id, inactive_expired_sst_handle.id);
+        assert_eq!(compacted_ssts[7].id, inactive_unexpired_sst_handle.id);
+        assert_eq!(
+            compacted_ssts[1].last_modified,
+            now_minus_24h_expired_l0_sst
+        );
+        assert_eq!(
+            compacted_ssts[2].last_modified,
+            now_minus_24h_inactive_expired_l0_sst
+        );
+        assert_eq!(
+            compacted_ssts[5].last_modified,
+            now_minus_24h_active_expired_sst
+        );
+        assert_eq!(
+            compacted_ssts[6].last_modified,
+            now_minus_24h_inactive_expired_sst_id
+        );
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 1);
+        let current_manifest = manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .unwrap()
+            .1;
+        assert_eq!(current_manifest.core.l0.len(), 2);
+        assert_eq!(current_manifest.core.compacted.len(), 1);
+        assert_eq!(current_manifest.core.compacted[0].ssts.len(), 2);
+
+        // Start the garbage collector
+        let garbage_collector = build_garbage_collector(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
+
+        // Wait for the garbage collector to run
+        wait_for_gc(db_stats.gc_compacted_count.clone());
+
+        garbage_collector.close().await;
+
+        // Verify that the first WAL was deleted and the second is kept
+        let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
+        assert_eq!(compacted_ssts.len(), 6);
+        assert_eq!(compacted_ssts[0].id, l0_sst_handle.id);
+        assert_eq!(compacted_ssts[1].id, active_expired_l0_sst_handle.id);
+        assert_eq!(compacted_ssts[2].id, inactive_unexpired_l0_sst_handle.id);
+        assert_eq!(compacted_ssts[3].id, active_sst_handle.id);
+        assert_eq!(compacted_ssts[4].id, active_expired_sst_handle.id);
+        assert_eq!(compacted_ssts[5].id, inactive_unexpired_sst_handle.id);
+        let current_manifest = manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .unwrap()
+            .1;
+        assert_eq!(current_manifest.core.l0.len(), 2);
+        assert_eq!(current_manifest.core.compacted.len(), 1);
+        assert_eq!(current_manifest.core.compacted[0].ssts.len(), 2);
     }
 
     /// Builds the objects needed to construct the garbage collector.
@@ -612,6 +776,24 @@ mod tests {
             db_stats.clone(),
         )
         .await
+    }
+
+    /// Create an SSTable and write it to the table store.
+    /// # Arguments
+    /// * `table_store` - The table store to write the SSTable to
+    /// # Returns
+    /// The handle to the SSTable that was created
+    async fn create_sst(table_store: Arc<TableStore>) -> SSTableHandle {
+        // Always sleep 1ms to make sure we get ULIDs that are sortable.
+        // Without this, the ULIDs could have the same millisecond timestamp
+        // and then ULID sorting is based on the random part.
+        std::thread::sleep(std::time::Duration::from_millis(1));
+
+        let sst_id = SsTableId::Compacted(Ulid::new());
+        let mut sst = table_store.table_builder();
+        sst.add(b"key", Some(b"value")).unwrap();
+        let table = sst.build().unwrap();
+        table_store.write_sst(&sst_id, table).await.unwrap()
     }
 
     /// Set the modified time of a file to be a certain number of seconds ago.
