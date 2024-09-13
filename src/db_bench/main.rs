@@ -90,4 +90,5 @@ async fn main() {
     };
 
     bench.run().await;
+    db.close().await.expect("failed to close db");
 }
