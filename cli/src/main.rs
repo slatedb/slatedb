@@ -54,15 +54,17 @@ impl DbAdapter {
 trait CliCommand {
     fn usage(&self) -> &str;
     fn validate(&self, args: &Vec<String>) -> bool;
-    async fn execute(&self, args: &Vec<String>) -> Result<(), Box<dyn Error>>;
+    async fn execute(
+        &self,
+        db_adapter: &DbAdapter,
+        args: &Vec<String>,
+    ) -> Result<(), Box<dyn Error>>;
 }
 
-struct GetCommand<'a> {
-    db_adapter: &'a DbAdapter,
-}
+struct GetCommand {}
 
 #[async_trait]
-impl<'a> CliCommand for GetCommand<'a> {
+impl CliCommand for GetCommand {
     fn usage(&self) -> &str {
         "get <key>"
     }
@@ -71,8 +73,12 @@ impl<'a> CliCommand for GetCommand<'a> {
         args.len() == 2
     }
 
-    async fn execute(&self, args: &Vec<String>) -> Result<(), Box<dyn Error>> {
-        match self.db_adapter.db.get(args[1].as_bytes()).await? {
+    async fn execute(
+        &self,
+        db_adapter: &DbAdapter,
+        args: &Vec<String>,
+    ) -> Result<(), Box<dyn Error>> {
+        match db_adapter.db.get(args[1].as_bytes()).await? {
             None => {
                 println!("Key not found")
             }
@@ -85,12 +91,10 @@ impl<'a> CliCommand for GetCommand<'a> {
     }
 }
 
-struct PutCommand<'a> {
-    db_adapter: &'a DbAdapter,
-}
+struct PutCommand {}
 
 #[async_trait]
-impl<'a> CliCommand for PutCommand<'a> {
+impl CliCommand for PutCommand {
     fn usage(&self) -> &str {
         "put <key> <value>"
     }
@@ -99,8 +103,12 @@ impl<'a> CliCommand for PutCommand<'a> {
         args.len() == 3
     }
 
-    async fn execute(&self, args: &Vec<String>) -> Result<(), Box<dyn Error>> {
-        self.db_adapter
+    async fn execute(
+        &self,
+        db_adapter: &DbAdapter,
+        args: &Vec<String>,
+    ) -> Result<(), Box<dyn Error>> {
+        db_adapter
             .db
             .put(args[1].as_bytes(), args[2].as_bytes())
             .await;
@@ -109,12 +117,10 @@ impl<'a> CliCommand for PutCommand<'a> {
     }
 }
 
-struct DeleteCommand<'a> {
-    db_adapter: &'a DbAdapter,
-}
+struct DeleteCommand {}
 
 #[async_trait]
-impl<'a> CliCommand for DeleteCommand<'a> {
+impl CliCommand for DeleteCommand {
     fn usage(&self) -> &str {
         "delete <key>"
     }
@@ -123,8 +129,12 @@ impl<'a> CliCommand for DeleteCommand<'a> {
         args.len() == 2
     }
 
-    async fn execute(&self, args: &Vec<String>) -> Result<(), Box<dyn Error>> {
-        self.db_adapter.db.delete(args[1].as_bytes()).await;
+    async fn execute(
+        &self,
+        db_adapter: &DbAdapter,
+        args: &Vec<String>,
+    ) -> Result<(), Box<dyn Error>> {
+        db_adapter.db.delete(args[1].as_bytes()).await;
         println!("Successfully removed key.");
         Ok(())
     }
@@ -133,7 +143,7 @@ impl<'a> CliCommand for DeleteCommand<'a> {
 struct HelpCommand {}
 
 #[async_trait]
-impl<'a> CliCommand for HelpCommand {
+impl CliCommand for HelpCommand {
     fn usage(&self) -> &str {
         r#"Available commands:
     put <key> <value>           - Insert a key-value pair into SlateDB
@@ -148,7 +158,7 @@ impl<'a> CliCommand for HelpCommand {
         true
     }
 
-    async fn execute(&self, _: &Vec<String>) -> Result<(), Box<dyn Error>> {
+    async fn execute(&self, _: &DbAdapter, _: &Vec<String>) -> Result<(), Box<dyn Error>> {
         println!("{}", self.usage());
         Ok(())
     }
@@ -157,7 +167,7 @@ impl<'a> CliCommand for HelpCommand {
 struct UnknownCommand {}
 
 #[async_trait]
-impl<'a> CliCommand for UnknownCommand {
+impl CliCommand for UnknownCommand {
     fn usage(&self) -> &str {
         ""
     }
@@ -166,7 +176,7 @@ impl<'a> CliCommand for UnknownCommand {
         true
     }
 
-    async fn execute(&self, args: &Vec<String>) -> Result<(), Box<dyn Error>> {
+    async fn execute(&self, _: &DbAdapter, args: &Vec<String>) -> Result<(), Box<dyn Error>> {
         println!(
             "Unknown command '{}'. Type 'help' to see available commands.",
             args[0]
@@ -227,15 +237,9 @@ async fn main() -> Result<(), ReadlineError> {
 
                 let command = parts[0].to_lowercase();
                 let cli_cmd: Box<dyn CliCommand> = match command.as_str() {
-                    "put" => Box::new(PutCommand {
-                        db_adapter: &db_adapter,
-                    }),
-                    "get" => Box::new(GetCommand {
-                        db_adapter: &db_adapter,
-                    }),
-                    "delete" => Box::new(DeleteCommand {
-                        db_adapter: &db_adapter,
-                    }),
+                    "put" => Box::new(PutCommand {}),
+                    "get" => Box::new(GetCommand {}),
+                    "delete" => Box::new(DeleteCommand {}),
                     "help" => Box::new(HelpCommand {}),
                     "exit" | "quit" => {
                         break;
@@ -246,7 +250,7 @@ async fn main() -> Result<(), ReadlineError> {
                 if !cli_cmd.validate(&parts) {
                     println!("{}", cli_cmd.usage());
                 } else {
-                    if let Err(e) = cli_cmd.execute(&parts).await {
+                    if let Err(e) = cli_cmd.execute(&db_adapter, &parts).await {
                         eprintln!("Failed to execute command {}: {}", trimmed, e)
                     };
                 }
