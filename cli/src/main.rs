@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use clap::Parser;
 use object_store::{memory::InMemory, path::Path, ObjectStore};
 use rustyline::error::ReadlineError;
@@ -6,12 +7,13 @@ use shell_words::split;
 use slatedb::config::{CompactorOptions, DbOptions, ObjectStoreCacheOptions};
 use slatedb::db::Db;
 use slatedb::inmemory_cache::InMemoryCacheOptions;
+use std::error::Error;
 use std::{sync::Arc, time::Duration};
 use tokio;
 
 #[derive(Parser, Debug)]
-#[command(name = "SlateDB REPL CLI")]
-#[command(version = "1.0")]
+#[command(name = "SlateDB REPL and CLI")]
+#[command(version = "0.1.0")]
 #[command(about = "A command-line interface for SlateDB", long_about = None)]
 struct Args {
     /// Path to the database storage directory
@@ -19,14 +21,12 @@ struct Args {
     storage_path: String,
 }
 
-// this is the REPL
-struct SlateDbREPL {
+struct DbAdapter {
     db: Db,
 }
 
-impl SlateDbREPL {
-    /// Initialize the DatabaseCLI with a connected database
-    async fn new(storage_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+impl DbAdapter {
+    async fn new(storage_path: &str) -> Result<Self, Box<dyn Error>> {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let options = DbOptions {
             flush_interval: Duration::from_millis(100),
@@ -41,40 +41,137 @@ impl SlateDbREPL {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
         };
         let db = Db::open_with_opts(Path::from(storage_path), options, object_store).await?;
-        Ok(SlateDbREPL { db })
+        Ok(Self { db })
     }
 
-    async fn put(&self, key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
-        self.db.put(key.as_bytes(), value.as_bytes()).await;
-        Ok(())
-    }
-
-    async fn get(&self, key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
-        if let Some(bytes) = self.db.get(key.as_bytes()).await? {
-            let value = String::from_utf8(bytes.to_vec())?;
-            Ok(Some(value))
-        } else {
-            Ok(None)
-        }
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), Box<dyn std::error::Error>> {
-        self.db.delete(key.as_bytes()).await;
-        Ok(())
-    }
-
-    async fn close(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn close(&self) -> Result<(), Box<dyn Error>> {
         self.db.close().await?;
         Ok(())
     }
+}
 
-    fn help() {
-        println!("Available commands:");
-        println!("  put <key> <value>    - Insert a key-value pair into SlateDB");
-        println!("  get <key>            - Retrieve the value associated with a key");
-        println!("  delete <key>         - Delete a key-value pair from SlateDB");
-        println!("  help                 - Show this help message");
-        println!("  exit | quit          - Exit");
+#[async_trait]
+trait CliCommand {
+    fn usage(&self) -> &str;
+    fn validate(&self, args: &Vec<String>) -> bool;
+    async fn execute(&self, args: &Vec<String>) -> Result<(), Box<dyn Error>>;
+}
+
+struct GetCommand<'a> {
+    db_adapter: &'a DbAdapter,
+}
+
+#[async_trait]
+impl<'a> CliCommand for GetCommand<'a> {
+    fn usage(&self) -> &str {
+        "get <key>"
+    }
+
+    fn validate(&self, args: &Vec<String>) -> bool {
+        args.len() == 2
+    }
+
+    async fn execute(&self, args: &Vec<String>) -> Result<(), Box<dyn Error>> {
+        match self.db_adapter.db.get(args[1].as_bytes()).await? {
+            None => {
+                println!("Key not found")
+            }
+            Some(bytes) => {
+                let value = String::from_utf8(bytes.to_vec())?;
+                println!("{}", value);
+            }
+        }
+        Ok(())
+    }
+}
+
+struct PutCommand<'a> {
+    db_adapter: &'a DbAdapter,
+}
+
+#[async_trait]
+impl<'a> CliCommand for PutCommand<'a> {
+    fn usage(&self) -> &str {
+        "put <key> <value>"
+    }
+
+    fn validate(&self, args: &Vec<String>) -> bool {
+        args.len() == 3
+    }
+
+    async fn execute(&self, args: &Vec<String>) -> Result<(), Box<dyn Error>> {
+        self.db_adapter
+            .db
+            .put(args[1].as_bytes(), args[2].as_bytes())
+            .await;
+        println!("Successfully inserted key-value pair.");
+        Ok(())
+    }
+}
+
+struct DeleteCommand<'a> {
+    db_adapter: &'a DbAdapter,
+}
+
+#[async_trait]
+impl<'a> CliCommand for DeleteCommand<'a> {
+    fn usage(&self) -> &str {
+        "delete <key>"
+    }
+
+    fn validate(&self, args: &Vec<String>) -> bool {
+        args.len() == 2
+    }
+
+    async fn execute(&self, args: &Vec<String>) -> Result<(), Box<dyn Error>> {
+        self.db_adapter.db.delete(args[1].as_bytes()).await;
+        println!("Successfully removed key.");
+        Ok(())
+    }
+}
+
+struct HelpCommand {}
+
+#[async_trait]
+impl<'a> CliCommand for HelpCommand {
+    fn usage(&self) -> &str {
+        r#"Available commands:
+    put <key> <value>           - Insert a key-value pair into SlateDB
+    get <key>                   - Retrieve the value associated with <key>
+    delete <key>                - Delete <key> for SlateDB
+    help                        - Display this help message
+    exit | quit                 - Exit
+"#
+    }
+
+    fn validate(&self, _: &Vec<String>) -> bool {
+        true
+    }
+
+    async fn execute(&self, _: &Vec<String>) -> Result<(), Box<dyn Error>> {
+        println!("{}", self.usage());
+        Ok(())
+    }
+}
+
+struct UnknownCommand {}
+
+#[async_trait]
+impl<'a> CliCommand for UnknownCommand {
+    fn usage(&self) -> &str {
+        ""
+    }
+
+    fn validate(&self, _: &Vec<String>) -> bool {
+        true
+    }
+
+    async fn execute(&self, args: &Vec<String>) -> Result<(), Box<dyn Error>> {
+        println!(
+            "Unknown command '{}'. Type 'help' to see available commands.",
+            args[0]
+        );
+        Ok(())
     }
 }
 
@@ -82,7 +179,7 @@ impl SlateDbREPL {
 async fn main() -> Result<(), ReadlineError> {
     let args = Args::parse();
 
-    let db_cli = match SlateDbREPL::new(&args.storage_path).await {
+    let db_adapter = match DbAdapter::new(&args.storage_path).await {
         Ok(cli) => cli,
         Err(e) => {
             eprintln!("Failed to initialize the database: {}", e);
@@ -111,20 +208,12 @@ async fn main() -> Result<(), ReadlineError> {
         let readline = rl.readline(">> ");
         match readline {
             Ok(line) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                match rl.add_history_entry(trimmed) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        eprintln!("Could not save line to history: {}", e)
-                    }
+                if let Err(e) = rl.add_history_entry(&line) {
+                    eprintln!("Could not save line to history: {}", e)
                 }
 
-                // Parse the input using shell-words to handle quotes
-                let parts_result = split(trimmed);
-                let parts = match parts_result {
+                let trimmed = line.trim();
+                let parts = match split(trimmed) {
                     Ok(p) => p,
                     Err(e) => {
                         eprintln!("Error parsing input: {}", e);
@@ -137,77 +226,38 @@ async fn main() -> Result<(), ReadlineError> {
                 }
 
                 let command = parts[0].to_lowercase();
-
-                match command.as_str() {
-                    "put" => {
-                        if parts.len() < 3 {
-                            println!("Usage: put <key> <value>");
-                            continue;
-                        }
-                        let key = &parts[1];
-                        let value = parts[2..].join(" "); // Support spaces in value
-                        match db_cli.put(key, &value).await {
-                            Ok(_) => println!("Successfully inserted key-value pair."),
-                            Err(e) => eprintln!("Error executing put: {}", e),
-                        }
-                    }
-                    "get" => {
-                        if parts.len() != 2 {
-                            println!("Usage: get <key>");
-                            continue;
-                        }
-                        let key = &parts[1];
-                        match db_cli.get(key).await {
-                            Ok(Some(value)) => println!("{}", value),
-                            Ok(None) => println!("Key not found."),
-                            Err(e) => eprintln!("Error executing get: {}", e),
-                        }
-                    }
-                    "delete" => {
-                        if parts.len() != 2 {
-                            println!("Usage: delete <key>");
-                            continue;
-                        }
-                        let key = &parts[1];
-                        match db_cli.delete(key).await {
-                            Ok(_) => println!("Successfully deleted key."),
-                            Err(e) => eprintln!("Error executing delete: {}", e),
-                        }
-                    }
-                    "help" => {
-                        SlateDbREPL::help();
-                    }
+                let cli_cmd: Box<dyn CliCommand> = match command.as_str() {
+                    "put" => Box::new(PutCommand {
+                        db_adapter: &db_adapter,
+                    }),
+                    "get" => Box::new(GetCommand {
+                        db_adapter: &db_adapter,
+                    }),
+                    "delete" => Box::new(DeleteCommand {
+                        db_adapter: &db_adapter,
+                    }),
+                    "help" => Box::new(HelpCommand {}),
                     "exit" | "quit" => {
-                        println!("Exiting REPL. Goodbye!");
-                        // Close the database before exiting
-                        if let Err(e) = db_cli.close().await {
-                            eprintln!("Error closing the database: {}", e);
-                        }
                         break;
                     }
-                    _ => {
-                        println!(
-                            "Unknown command: '{}'. Type 'help' \
-                        to see available commands.",
-                            command
-                        );
-                    }
+                    _ => Box::new(UnknownCommand {}),
+                };
+
+                if !cli_cmd.validate(&parts) {
+                    println!("{}", cli_cmd.usage());
+                } else {
+                    if let Err(e) = cli_cmd.execute(&parts).await {
+                        eprintln!("Failed to execute command {}: {}", trimmed, e)
+                    };
                 }
             }
+
             Err(ReadlineError::Interrupted) => {
                 println!("CTRL-C");
-                println!("Exiting REPL. Goodbye!");
-                if let Err(e) = db_cli.close().await {
-                    eprintln!("Error closing the database: {}", e);
-                }
                 break;
             }
             Err(ReadlineError::Eof) => {
                 println!("CTRL-D");
-                println!("Exiting REPL. Goodbye!");
-                if let Err(e) = db_cli.close().await {
-                    eprintln!("Error closing the database: {}", e);
-                }
                 break;
             }
             Err(err) => {
@@ -217,5 +267,10 @@ async fn main() -> Result<(), ReadlineError> {
         }
     }
 
+    println!("Exiting REPL. Goodbye!");
+    // Close the database before exiting
+    if let Err(e) = db_adapter.close().await {
+        eprintln!("Error closing the database: {}", e);
+    }
     Ok(())
 }

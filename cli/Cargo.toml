@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+async-trait = "0.1.82"
 slatedb = { path = "../"}
 clap = { version = "4.1", features = ["derive"] }
 tokio = { version = "1.28", features = ["full"] }
