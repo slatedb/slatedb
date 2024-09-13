@@ -68,3 +68,8 @@ required-features = ["db_bench"]
 name = "db-bench"
 path = "src/db_bench/main.rs"
 required-features = ["db_bench"]
+
+[workspace]
+members = [
+    "cli"
+]
