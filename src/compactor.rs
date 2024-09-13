@@ -13,7 +13,7 @@ use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::CompactorOptions;
-use crate::db_state::{SSTableHandle, SortedRun};
+use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::metrics::DbStats;
@@ -222,7 +222,7 @@ impl CompactorOrchestrator {
         self.log_compaction_state();
         let db_state = self.state.db_state();
         let compacted_sst_iter = db_state.compacted.iter().flat_map(|sr| sr.ssts.iter());
-        let ssts_by_id: HashMap<Ulid, &SSTableHandle> = db_state
+        let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
             .l0
             .iter()
             .chain(compacted_sst_iter)
@@ -230,7 +230,7 @@ impl CompactorOrchestrator {
             .collect();
         let srs_by_id: HashMap<u32, &SortedRun> =
             db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
-        let ssts: Vec<SSTableHandle> = compaction
+        let ssts: Vec<SsTableHandle> = compaction
             .sources
             .iter()
             .filter_map(|s| s.maybe_unwrap_sst())

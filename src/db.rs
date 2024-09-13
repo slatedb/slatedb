@@ -13,7 +13,7 @@ use crate::compactor::Compactor;
 use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
-use crate::db_state::{CoreDbState, DbState, SSTableHandle, SortedRun, SsTableId};
+use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
@@ -142,7 +142,7 @@ impl DbInner {
 
     async fn sst_may_include_key(
         &self,
-        sst: &SSTableHandle,
+        sst: &SsTableHandle,
         key: &[u8],
     ) -> Result<bool, SlateDBError> {
         if !sst.range_covers_key(key) {
