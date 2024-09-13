@@ -40,12 +40,7 @@ impl SlateDbREPL {
             block_cache_options: Some(InMemoryCacheOptions::default()),
             object_store_cache_options: ObjectStoreCacheOptions::default(),
         };
-        let db = Db::open_with_opts(
-            Path::from(storage_path),
-            options,
-            object_store,
-        )
-            .await?;
+        let db = Db::open_with_opts(Path::from(storage_path), options, object_store).await?;
         Ok(SlateDbREPL { db })
     }
 
@@ -100,13 +95,15 @@ async fn main() -> Result<(), ReadlineError> {
 
     println!("Welcome to the SlateDB REPL!");
     println!("WARNING: This is currently intended for development use.");
-    println!(r#"
+    println!(
+        r#"
   ____  _       _       ____  ____
  / ___|| | __ _| |_ ___|  _ \| __ )
  \___ \| |/ _` | __/ _ \ | | |  _ \
   ___) | | (_| | ||  __/ |_| | |_) |
  |____/|_|\__,_|\__\___|____/|____/
-"#);
+"#
+    );
     println!("Type 'help' to see available commands.\n");
 
     loop {
@@ -120,7 +117,9 @@ async fn main() -> Result<(), ReadlineError> {
                 }
                 match rl.add_history_entry(trimmed) {
                     Ok(_) => {}
-                    Err(e) => {eprintln!("Could not save line to history: {}", e)}
+                    Err(e) => {
+                        eprintln!("Could not save line to history: {}", e)
+                    }
                 }
 
                 // Parse the input using shell-words to handle quotes
@@ -187,8 +186,11 @@ async fn main() -> Result<(), ReadlineError> {
                         break;
                     }
                     _ => {
-                        println!("Unknown command: '{}'. Type 'help' \
-                        to see available commands.", command);
+                        println!(
+                            "Unknown command: '{}'. Type 'help' \
+                        to see available commands.",
+                            command
+                        );
                     }
                 }
             }
