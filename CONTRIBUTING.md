@@ -4,6 +4,11 @@ SlateDB is an open source project and we welcome contributions. Please open Gith
 
 Join our [Discord server](https://discord.gg/mHYmGy5MgA) to chat with the developers.
 
+Please follow the instructions below before making a PR:
+- Run `cargo clippy --all-targets --all-features` and `cargo fmt` on your patch to fix lints and formatting issues
+- Run `cargo test --all-features` to check that your patch doesn't break any tests
+
+
 ## Contributor License Agreement
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a
