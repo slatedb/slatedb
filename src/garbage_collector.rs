@@ -266,7 +266,7 @@ mod tests {
     use ulid::Ulid;
 
     use crate::{
-        db_state::{CoreDbState, SSTableHandle, SortedRun, SsTableId},
+        db_state::{CoreDbState, SsTableHandle, SortedRun, SsTableId},
         garbage_collector::GarbageCollector,
         manifest_store::{ManifestStore, StoredManifest},
         metrics::{Counter, DbStats},
@@ -786,7 +786,7 @@ mod tests {
     /// * `table_store` - The table store to write the SSTable to
     /// # Returns
     /// The handle to the SSTable that was created
-    async fn create_sst(table_store: Arc<TableStore>) -> SSTableHandle {
+    async fn create_sst(table_store: Arc<TableStore>) -> SsTableHandle {
         // Always sleep 1ms to make sure we get ULIDs that are sortable.
         // Without this, the ULIDs could have the same millisecond timestamp
         // and then ULID sorting is based on the random part.
