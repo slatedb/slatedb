@@ -15,6 +15,7 @@ use crate::config::{
 };
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
+use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::WritableKVTable;
@@ -110,9 +111,10 @@ impl DbInner {
         let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
         let max_wal_id = self
             .table_store
-            .get_wal_sst_list(wal_id_last_compacted)
+            .list_wal_ssts((wal_id_last_compacted + 1)..)
             .await?
             .into_iter()
+            .map(|wal_sst| wal_sst.id.unwrap_wal_id())
             .max()
             .unwrap_or(0);
         let mut empty_wal_id = max_wal_id + 1;
@@ -266,8 +268,11 @@ impl DbInner {
         let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
         let wal_sst_list = self
             .table_store
-            .get_wal_sst_list(wal_id_last_compacted)
-            .await?;
+            .list_wal_ssts((wal_id_last_compacted + 1)..)
+            .await?
+            .into_iter()
+            .map(|wal_sst| wal_sst.id.unwrap_wal_id())
+            .collect::<Vec<_>>();
         let mut last_sst_id = wal_id_last_compacted;
         for sst_id in wal_sst_list {
             last_sst_id = sst_id;
@@ -317,6 +322,7 @@ pub struct Db {
     flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     compactor: Mutex<Option<Compactor>>,
+    garbage_collector: Mutex<Option<GarbageCollector>>,
 }
 
 impl Db {
@@ -419,12 +425,26 @@ impl Db {
                 .await?,
             )
         }
+        let mut garbage_collector = None;
+        if let Some(gc_options) = &inner.options.garbage_collector_options {
+            garbage_collector = Some(
+                GarbageCollector::new(
+                    manifest_store.clone(),
+                    table_store.clone(),
+                    gc_options.clone(),
+                    Handle::current(),
+                    inner.db_stats.clone(),
+                )
+                .await,
+            )
+        };
         Ok(Self {
             inner,
             flush_notifier: tx,
             flush_task: Mutex::new(flush_thread),
             memtable_flush_task: Mutex::new(memtable_flush_task),
             compactor: Mutex::new(compactor),
+            garbage_collector: Mutex::new(garbage_collector),
         })
     }
 
@@ -450,6 +470,13 @@ impl Db {
             maybe_compactor.take()
         } {
             compactor.close().await;
+        }
+
+        if let Some(gc) = {
+            let mut maybe_gc = self.garbage_collector.lock();
+            maybe_gc.take()
+        } {
+            gc.close().await;
         }
 
         // Tell the notifier thread to shut down.
@@ -1401,6 +1428,7 @@ mod tests {
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             block_cache_options: None,
+            garbage_collector_options: None,
         }
     }
 }

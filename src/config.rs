@@ -145,6 +145,9 @@ pub struct DbOptions {
 
     /// Block cache options.
     pub block_cache_options: Option<InMemoryCacheOptions>,
+
+    /// Configuration options for the garbage collector.
+    pub garbage_collector_options: Option<GarbageCollectorOptions>,
 }
 
 impl Default for DbOptions {
@@ -162,6 +165,7 @@ impl Default for DbOptions {
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             block_cache_options: Some(InMemoryCacheOptions::default()),
+            garbage_collector_options: Some(GarbageCollectorOptions::default()),
         }
     }
 }
@@ -253,8 +257,10 @@ impl Default for CompactorOptions {
 pub struct SizeTieredCompactionSchedulerOptions {
     /// The minimum number of sources to include together in a single compaction step.
     pub min_compaction_sources: usize,
+
     /// The maximum number of sources to include together in a single compaction step.
     pub max_compaction_sources: usize,
+
     /// The size threshold that the scheduler will use to determine if a sorted run should
     /// be included in a given compaction. A sorted run S will be added to a compaction C if S's
     /// size is less than this value times the min size of the runs currently included in C.
@@ -267,6 +273,60 @@ impl SizeTieredCompactionSchedulerOptions {
             min_compaction_sources: 4,
             max_compaction_sources: 8,
             include_size_threshold: 4.0,
+        }
+    }
+}
+
+/// Garbage collector options.
+#[derive(Clone)]
+pub struct GarbageCollectorOptions {
+    /// Garbage collection options for the manifest directory.
+    pub manifest_options: Option<GarbageCollecterDirectoryOptions>,
+
+    /// Garbage collection options for the WAL directory.
+    pub wal_options: Option<GarbageCollecterDirectoryOptions>,
+
+    /// Garbage collection options for the compacted directory.
+    pub compacted_options: Option<GarbageCollecterDirectoryOptions>,
+
+    /// An optional tokio runtime handle to use for scheduling garbage collection. You can use
+    /// this to isolate garbage collection to a dedicated thread pool.
+    pub gc_runtime: Option<Handle>,
+}
+
+impl Default for GarbageCollecterDirectoryOptions {
+    fn default() -> Self {
+        Self {
+            poll_interval: Duration::from_secs(300),
+            min_age: Duration::from_secs(86_400),
+        }
+    }
+}
+
+/// Garbage collector options for a directory.
+#[derive(Clone, Copy)]
+pub struct GarbageCollecterDirectoryOptions {
+    /// The interval at which the garbage collector checks for files to garbage collect.
+    pub poll_interval: Duration,
+
+    /// The minimum age of a file before it can be garbage collected.
+    pub min_age: Duration,
+}
+
+/// Default options for the garbage collector. The default options are:
+/// * Manifest options: interval of 60 seconds, min age of 1 day
+/// * WAL options: interval of 60 seconds, min age of 1 minute
+/// * Compacted options: interval of 60 seconds, min age of 1 day
+impl Default for GarbageCollectorOptions {
+    fn default() -> Self {
+        Self {
+            manifest_options: Some(Default::default()),
+            wal_options: Some(GarbageCollecterDirectoryOptions {
+                poll_interval: Duration::from_secs(60),
+                min_age: Duration::from_secs(60),
+            }),
+            compacted_options: Some(Default::default()),
+            gc_runtime: None,
         }
     }
 }

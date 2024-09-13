@@ -493,6 +493,7 @@ mod tests {
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             block_cache_options: None,
+            garbage_collector_options: None,
         }
     }
 
