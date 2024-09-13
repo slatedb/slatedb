@@ -266,7 +266,7 @@ mod tests {
     use ulid::Ulid;
 
     use crate::{
-        db_state::{CoreDbState, SsTableHandle, SortedRun, SsTableId},
+        db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
         garbage_collector::GarbageCollector,
         manifest_store::{ManifestStore, StoredManifest},
         metrics::{Counter, DbStats},
