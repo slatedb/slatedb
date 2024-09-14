@@ -658,7 +658,7 @@ impl LocalCacheEntry for FsCacheEntry {
 
         let file = File::open(&part_path).await.map_err(wrap_io_err)?;
         let mut reader = tokio::io::BufReader::new(file);
-        let mut buffer = vec![0; range_in_part.end - range_in_part.start];
+        let mut buffer = vec![0; range_in_part.len()];
         reader
             .seek(SeekFrom::Start(range_in_part.start as u64))
             .await
