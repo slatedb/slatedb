@@ -25,7 +25,7 @@ mod garbage_collector;
 pub mod inmemory_cache;
 mod iter;
 mod manifest;
-mod manifest_store;
+pub mod manifest_store;
 mod mem_table;
 mod mem_table_flush;
 mod merge_iterator;
