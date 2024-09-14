@@ -257,7 +257,7 @@ impl CachedObjectStore {
             let bytes = get_result.bytes().await?;
             entry.save_head((&meta, &attrs)).await.ok();
             entry.save_part(part_id, bytes.clone()).await.ok();
-            Ok(bytes.slice(range_in_part).clone())
+            Ok(Bytes::copy_from_slice(&bytes.slice(range_in_part)))
         })
     }
 
