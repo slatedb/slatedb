@@ -172,7 +172,7 @@ async fn do_load_sst(
         let key = key_gen.next();
         sst_writer.add(key.as_ref(), Some(val.as_ref())).await?;
     }
-    let encoded = sst_writer.close().await?;
+    let encoded = sst_writer.close(true).await?;
     info!("wrote sst with id: {:?} {:?}", &encoded.id, start.elapsed());
     Ok(())
 }
@@ -237,6 +237,7 @@ fn load_compaction_job(
         destination: 0,
         ssts,
         sorted_runs: vec![],
+        write_bloom_filters: true,
     })
 }
 
@@ -262,6 +263,7 @@ fn load_compaction_as_job(manifest: StoredManifest, compaction: &Compaction) -> 
         destination: 0,
         ssts: vec![],
         sorted_runs: srs,
+        write_bloom_filters: true,
     }
 }
 
