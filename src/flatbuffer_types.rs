@@ -5,7 +5,7 @@ use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector,
 use ulid::Ulid;
 
 use crate::db_state;
-use crate::db_state::{CoreDbState, SSTableHandle};
+use crate::db_state::{CoreDbState, SsTableHandle};
 
 #[path = "./generated/manifest_generated.rs"]
 #[allow(warnings)]
@@ -93,23 +93,19 @@ impl FlatBufferManifestCodec {
             .map(|id| Ulid::from((id.high(), id.low())));
         let mut l0 = VecDeque::new();
         for man_sst in manifest.l0().iter() {
-            let man_sst_id = man_sst.id().expect("SSTs in manifest must have IDs");
+            let man_sst_id = man_sst.id();
             let sst_id = Compacted(Ulid::from((man_sst_id.high(), man_sst_id.low())));
-            let sst_info = SsTableInfoOwned::create_copy(
-                &man_sst.info().expect("SSTs in manifest must have info"),
-            );
-            let l0_sst = SSTableHandle::new(sst_id, sst_info);
+            let sst_info = SsTableInfoOwned::create_copy(&man_sst.info());
+            let l0_sst = SsTableHandle::new(sst_id, sst_info);
             l0.push_back(l0_sst);
         }
         let mut compacted = Vec::new();
         for manifest_sr in manifest.compacted().iter() {
             let mut ssts = Vec::new();
             for manifest_sst in manifest_sr.ssts().iter() {
-                let id = Compacted(manifest_sst.id().expect("sst must have id").ulid());
-                let info = SsTableInfoOwned::create_copy(
-                    &manifest_sst.info().expect("sst must have info"),
-                );
-                ssts.push(SSTableHandle::new(id, info));
+                let id = Compacted(manifest_sst.id().ulid());
+                let info = SsTableInfoOwned::create_copy(&manifest_sst.info());
+                ssts.push(SsTableHandle::new(id, info));
             }
             compacted.push(db_state::SortedRun {
                 id: manifest_sr.id(),
@@ -205,7 +201,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         ssts: I,
     ) -> WIPOffset<Vector<'b, ForwardsUOffset<CompactedSsTable<'b>>>>
     where
-        I: Iterator<Item = &'a SSTableHandle>,
+        I: Iterator<Item = &'a SsTableHandle>,
     {
         let compacted_ssts: Vec<WIPOffset<CompactedSsTable>> = ssts
             .map(|sst| self.add_compacted_sst(&sst.id, &sst.info))

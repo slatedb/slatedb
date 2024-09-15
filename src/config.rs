@@ -140,8 +140,14 @@ pub struct DbOptions {
     /// The compression algorithm to use for SSTables.
     pub compression_codec: Option<CompressionCodec>,
 
+    /// The object store cache options.
+    pub object_store_cache_options: ObjectStoreCacheOptions,
+
     /// Block cache options.
     pub block_cache_options: Option<InMemoryCacheOptions>,
+
+    /// Configuration options for the garbage collector.
+    pub garbage_collector_options: Option<GarbageCollectorOptions>,
 }
 
 impl Default for DbOptions {
@@ -157,7 +163,9 @@ impl Default for DbOptions {
             l0_max_ssts: 8,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
+            object_store_cache_options: ObjectStoreCacheOptions::default(),
             block_cache_options: Some(InMemoryCacheOptions::default()),
+            garbage_collector_options: Some(GarbageCollectorOptions::default()),
         }
     }
 }
@@ -249,13 +257,15 @@ impl Default for CompactorOptions {
     }
 }
 
-#[derive(Clone)]
 /// Options for the Size-Tiered Compaction Scheduler
+#[derive(Clone)]
 pub struct SizeTieredCompactionSchedulerOptions {
     /// The minimum number of sources to include together in a single compaction step.
     pub min_compaction_sources: usize,
+
     /// The maximum number of sources to include together in a single compaction step.
     pub max_compaction_sources: usize,
+
     /// The size threshold that the scheduler will use to determine if a sorted run should
     /// be included in a given compaction. A sorted run S will be added to a compaction C if S's
     /// size is less than this value times the min size of the runs currently included in C.
@@ -268,6 +278,86 @@ impl SizeTieredCompactionSchedulerOptions {
             min_compaction_sources: 4,
             max_compaction_sources: 8,
             include_size_threshold: 4.0,
+        }
+    }
+}
+
+/// Garbage collector options.
+#[derive(Clone)]
+pub struct GarbageCollectorOptions {
+    /// Garbage collection options for the manifest directory.
+    pub manifest_options: Option<GarbageCollecterDirectoryOptions>,
+
+    /// Garbage collection options for the WAL directory.
+    pub wal_options: Option<GarbageCollecterDirectoryOptions>,
+
+    /// Garbage collection options for the compacted directory.
+    pub compacted_options: Option<GarbageCollecterDirectoryOptions>,
+
+    /// An optional tokio runtime handle to use for scheduling garbage collection. You can use
+    /// this to isolate garbage collection to a dedicated thread pool.
+    pub gc_runtime: Option<Handle>,
+}
+
+impl Default for GarbageCollecterDirectoryOptions {
+    fn default() -> Self {
+        Self {
+            poll_interval: Duration::from_secs(300),
+            min_age: Duration::from_secs(86_400),
+        }
+    }
+}
+
+/// Garbage collector options for a directory.
+#[derive(Clone, Copy)]
+pub struct GarbageCollecterDirectoryOptions {
+    /// The interval at which the garbage collector checks for files to garbage collect.
+    pub poll_interval: Duration,
+
+    /// The minimum age of a file before it can be garbage collected.
+    pub min_age: Duration,
+}
+
+/// Default options for the garbage collector. The default options are:
+/// * Manifest options: interval of 60 seconds, min age of 1 day
+/// * WAL options: interval of 60 seconds, min age of 1 minute
+/// * Compacted options: interval of 60 seconds, min age of 1 day
+impl Default for GarbageCollectorOptions {
+    fn default() -> Self {
+        Self {
+            manifest_options: Some(Default::default()),
+            wal_options: Some(GarbageCollecterDirectoryOptions {
+                poll_interval: Duration::from_secs(60),
+                min_age: Duration::from_secs(60),
+            }),
+            compacted_options: Some(Default::default()),
+            gc_runtime: None,
+        }
+    }
+}
+
+/// Options for the object store cache. This cache is not enabled unless an explicit cache
+/// root folder is set. The object store cache will split an object into align-sized parts
+/// in the local, and save them into the local cache storage.
+///
+/// The local cache default uses file system as storage, it can also be extended to use other
+/// like RocksDB, Redis, etc. in the future.
+#[derive(Clone, Debug)]
+pub struct ObjectStoreCacheOptions {
+    /// The root folder where the cache files are stored. If not set, the cache will be
+    /// disabled.
+    pub root_folder: Option<std::path::PathBuf>,
+
+    /// The size of each part file, the part size is expected to be aligned with 1kb,
+    /// its default value is 4mb.
+    pub part_size_bytes: usize,
+}
+
+impl Default for ObjectStoreCacheOptions {
+    fn default() -> Self {
+        Self {
+            root_folder: None,
+            part_size_bytes: 4 * 1024 * 1024,
         }
     }
 }

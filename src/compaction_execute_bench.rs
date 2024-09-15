@@ -17,7 +17,7 @@ use ulid::Ulid;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, SourceId};
 use crate::config::CompactorOptions;
-use crate::db_state::{SSTableHandle, SsTableId};
+use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::manifest_store::{ManifestStore, StoredManifest};
 use crate::sst::SsTableFormat;
@@ -204,7 +204,7 @@ fn load_compaction_job(
 ) -> Result<CompactionJob, SlateDBError> {
     let sst_ids: Vec<SsTableId> = (0u32..options.num_ssts as u32).map(sst_id).collect();
     let mut futures =
-        FuturesUnordered::<JoinHandle<Result<(SsTableId, SSTableHandle), SlateDBError>>>::new();
+        FuturesUnordered::<JoinHandle<Result<(SsTableId, SsTableHandle), SlateDBError>>>::new();
     let mut ssts_by_id = HashMap::new();
     info!("load sst");
     for id in sst_ids.clone().into_iter() {
@@ -229,7 +229,7 @@ fn load_compaction_job(
         ssts_by_id.insert(id, handle);
     }
     info!("finished loading");
-    let ssts: Vec<SSTableHandle> = sst_ids
+    let ssts: Vec<SsTableHandle> = sst_ids
         .into_iter()
         .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
         .collect();

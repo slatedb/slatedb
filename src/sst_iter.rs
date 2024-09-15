@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 
-use crate::db_state::SSTableHandle;
+use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::{
@@ -18,7 +18,7 @@ enum FetchTask {
 }
 
 pub(crate) struct SstIterator<'a> {
-    table: &'a SSTableHandle,
+    table: &'a SsTableHandle,
     index: Arc<SsTableIndexOwned>,
     current_iter: Option<BlockIterator<Arc<Block>>>,
     from_key: Option<&'a [u8]>,
@@ -60,7 +60,7 @@ impl<'a> SstIterator<'a> {
     }
 
     pub(crate) async fn new_from_key(
-        table: &'a SSTableHandle,
+        table: &'a SsTableHandle,
         table_store: Arc<TableStore>,
         from_key: &'a [u8],
         max_fetch_tasks: usize,
@@ -80,7 +80,7 @@ impl<'a> SstIterator<'a> {
     }
 
     pub(crate) async fn new_spawn(
-        table: &'a SSTableHandle,
+        table: &'a SsTableHandle,
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
@@ -99,7 +99,7 @@ impl<'a> SstIterator<'a> {
     }
 
     pub(crate) async fn new(
-        table: &'a SSTableHandle,
+        table: &'a SsTableHandle,
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
@@ -118,7 +118,7 @@ impl<'a> SstIterator<'a> {
     }
 
     pub(crate) async fn new_opts(
-        table: &'a SSTableHandle,
+        table: &'a SsTableHandle,
         from_key: Option<&'a [u8]>,
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
@@ -450,7 +450,7 @@ mod tests {
         ts: Arc<TableStore>,
         mut key_gen: OrderedBytesGenerator,
         mut val_gen: OrderedBytesGenerator,
-    ) -> (SSTableHandle, usize) {
+    ) -> (SsTableHandle, usize) {
         let mut writer = ts.table_writer(SsTableId::Wal(0));
         let mut nkeys = 0usize;
         while writer.blocks_written() < n {

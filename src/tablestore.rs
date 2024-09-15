@@ -1,17 +1,20 @@
 use std::collections::{HashMap, VecDeque};
-use std::ops::Range;
+use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
 use bytes::{BufMut, Bytes};
+use chrono::Utc;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::join_all, StreamExt};
+use log::warn;
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::RwLock;
 use tokio::io::AsyncWriteExt;
+use ulid::Ulid;
 
-use crate::db_state::{SSTableHandle, SsTableId};
+use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
@@ -72,6 +75,16 @@ impl ReadOnlyBlob for ReadOnlyObject {
     }
 }
 
+/// Represents the metadata of an SST file in the compacted directory.
+pub(crate) struct SstFileMetadata {
+    pub(crate) id: SsTableId,
+    #[allow(dead_code)]
+    pub(crate) location: Path,
+    pub(crate) last_modified: chrono::DateTime<Utc>,
+    #[allow(dead_code)]
+    pub(crate) size: usize,
+}
+
 impl TableStore {
     #[allow(dead_code)]
     pub fn new(
@@ -112,26 +125,30 @@ impl TableStore {
         }
     }
 
-    pub(crate) async fn get_wal_sst_list(
+    pub(crate) async fn list_wal_ssts<R: RangeBounds<u64>>(
         &self,
-        wal_id_last_compacted: u64,
-    ) -> Result<Vec<u64>, SlateDBError> {
-        let mut wal_list: Vec<u64> = Vec::new();
+        id_range: R,
+    ) -> Result<Vec<SstFileMetadata>, SlateDBError> {
+        let mut wal_list: Vec<SstFileMetadata> = Vec::new();
         let wal_path = &Path::from(format!("{}/{}/", &self.root_path, self.wal_path));
         let mut files_stream = self.object_store.list(Some(wal_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
-            match self.parse_id(&file.location, "sst") {
-                Ok(wal_id) => {
-                    if wal_id > wal_id_last_compacted {
-                        wal_list.push(wal_id);
+            match Self::parse_id(&self.root_path, &file.location) {
+                Ok(Some(SsTableId::Wal(id))) => {
+                    if id_range.contains(&id) {
+                        wal_list.push(SstFileMetadata {
+                            id: SsTableId::Wal(id),
+                            location: file.location,
+                            last_modified: file.last_modified,
+                            size: file.size,
+                        });
                     }
                 }
-                Err(_) => continue,
+                _ => continue,
             }
         }
-
-        wal_list.sort();
+        wal_list.sort_by_key(|m| m.id.unwrap_wal_id());
         Ok(wal_list)
     }
 
@@ -154,7 +171,7 @@ impl TableStore {
         &self,
         id: &SsTableId,
         encoded_sst: EncodedSsTable,
-    ) -> Result<SSTableHandle, SlateDBError> {
+    ) -> Result<SsTableHandle, SlateDBError> {
         fail_point!(
             self.fp_registry.clone(),
             "write-wal-sst-io-error",
@@ -197,7 +214,7 @@ impl TableStore {
             })?;
 
         self.cache_filter(*id, encoded_sst.filter);
-        Ok(SSTableHandle {
+        Ok(SsTableHandle {
             id: *id,
             info: encoded_sst.info,
         })
@@ -210,21 +227,73 @@ impl TableStore {
         }
     }
 
+    /// Delete an SSTable from the object store.
+    pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
+        let path = self.path(id);
+        self.object_store
+            .delete(&path)
+            .await
+            .map_err(SlateDBError::ObjectStoreError)
+    }
+
+    /// List all SSTables in the compacted directory.
+    /// The SSTables are returned in ascending order of their IDs. Ulids within
+    /// the same millisecond are sorted based on their random suffix.
+    /// # Arguments
+    /// * `id_range` - The range of IDs to list
+    /// # Returns
+    /// A list of SSTables in the compacted directory
+    pub(crate) async fn list_compacted_ssts<R: RangeBounds<Ulid>>(
+        &self,
+        id_range: R,
+    ) -> Result<Vec<SstFileMetadata>, SlateDBError> {
+        let mut sst_list: Vec<SstFileMetadata> = Vec::new();
+        let sst_path = &Path::from(format!("{}/{}/", &self.root_path, self.compacted_path));
+        let mut files_stream = self.object_store.list(Some(sst_path));
+
+        while let Some(file) = files_stream.next().await.transpose()? {
+            match Self::parse_id(&self.root_path, &file.location) {
+                Ok(Some(SsTableId::Compacted(id))) => {
+                    if id_range.contains(&id) {
+                        sst_list.push(SstFileMetadata {
+                            id: SsTableId::Compacted(id),
+                            location: file.location,
+                            last_modified: file.last_modified,
+                            size: file.size,
+                        });
+                    }
+                }
+                Err(e) => {
+                    warn!("Error while parsing file id: {}", e);
+                }
+                _ => {
+                    warn!(
+                        "Unexpected file found in compacted directory: {:?}",
+                        file.location
+                    );
+                }
+            }
+        }
+
+        sst_list.sort_by_key(|m| m.id.unwrap_compacted_id());
+        Ok(sst_list)
+    }
+
     // todo: clean up the warning suppression when we start using open_sst outside tests
     #[allow(dead_code)]
-    pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SSTableHandle, SlateDBError> {
+    pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
         let path = self.path(id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
         };
         let info = self.sst_format.read_info(&obj).await?;
-        Ok(SSTableHandle { id: *id, info })
+        Ok(SsTableHandle { id: *id, info })
     }
 
     pub(crate) async fn read_filter(
         &self,
-        handle: &SSTableHandle,
+        handle: &SsTableHandle,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         {
             let rguard = self.filter_cache.read();
@@ -245,7 +314,7 @@ impl TableStore {
 
     pub(crate) async fn read_index(
         &self,
-        handle: &SSTableHandle,
+        handle: &SsTableHandle,
     ) -> Result<SsTableIndexOwned, SlateDBError> {
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
@@ -258,7 +327,7 @@ impl TableStore {
     #[allow(dead_code)]
     pub(crate) async fn read_blocks(
         &self,
-        handle: &SSTableHandle,
+        handle: &SsTableHandle,
         blocks: Range<usize>,
     ) -> Result<VecDeque<Block>, SlateDBError> {
         let path = self.path(&handle.id);
@@ -281,7 +350,7 @@ impl TableStore {
     /// TODO: we probably won't need this once we're caching the index
     pub(crate) async fn read_blocks_using_index(
         &self,
-        handle: &SSTableHandle,
+        handle: &SsTableHandle,
         index: Arc<SsTableIndexOwned>,
         blocks: Range<usize>,
         cache_blocks: bool,
@@ -374,7 +443,7 @@ impl TableStore {
     #[allow(dead_code)]
     pub(crate) async fn read_block(
         &self,
-        handle: &SSTableHandle,
+        handle: &SsTableHandle,
         block: usize,
     ) -> Result<Block, SlateDBError> {
         let path = self.path(&handle.id);
@@ -403,17 +472,26 @@ impl TableStore {
         }
     }
 
-    fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {
-        match path.extension() {
-            Some(ext) if ext == expected_extension => path
-                .filename()
-                .expect("invalid wal file")
-                .split('.')
-                .next()
-                .ok_or_else(|| SlateDBError::InvalidDBState)?
-                .parse()
-                .map_err(|_| SlateDBError::InvalidDBState),
-            _ => Err(SlateDBError::InvalidDBState),
+    /// Parses the SsTableId from a given path
+    fn parse_id(root_path: &Path, path: &Path) -> Result<Option<SsTableId>, SlateDBError> {
+        if let Some(mut suffix_iter) = path.prefix_match(root_path) {
+            match suffix_iter.next() {
+                Some(a) if a.as_ref() == "wal" => suffix_iter
+                    .next()
+                    .and_then(|s| s.as_ref().split('.').next().map(|s| s.parse::<u64>()))
+                    .transpose()
+                    .map(|r| r.map(SsTableId::Wal))
+                    .map_err(|_| SlateDBError::InvalidDBState),
+                Some(a) if a.as_ref() == "compacted" => suffix_iter
+                    .next()
+                    .and_then(|s| s.as_ref().split('.').next().map(Ulid::from_string))
+                    .transpose()
+                    .map(|r| r.map(SsTableId::Compacted))
+                    .map_err(|_| SlateDBError::InvalidDBState),
+                _ => Ok(None),
+            }
+        } else {
+            Ok(None)
         }
     }
 }
@@ -432,14 +510,14 @@ impl<'a> EncodedSsTableWriter<'a> {
         self.drain_blocks().await
     }
 
-    pub async fn close(mut self, use_bloom_filter: bool) -> Result<SSTableHandle, SlateDBError> {
+    pub async fn close(mut self, use_bloom_filter: bool) -> Result<SsTableHandle, SlateDBError> {
         let mut encoded_sst = self.builder.build(use_bloom_filter)?;
         while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
             self.writer.write_all(block.as_ref()).await?;
         }
         self.writer.shutdown().await?;
         self.table_store.cache_filter(self.id, encoded_sst.filter);
-        Ok(SSTableHandle {
+        Ok(SsTableHandle {
             id: self.id,
             info: encoded_sst.info,
         })
@@ -482,6 +560,27 @@ mod tests {
     };
 
     const ROOT: &str = "/root";
+
+    #[test]
+    fn test_parse_id() {
+        let root = Path::from(ROOT);
+        let path = Path::from("/root/wal/00000000000000000003.sst");
+        let id = TableStore::parse_id(&root, &path).unwrap();
+        assert_eq!(id, Some(SsTableId::Wal(3)));
+
+        let path = Path::from("/root/compacted/01J79C21YKR31J2BS1EFXJZ7MR.sst");
+        let id = TableStore::parse_id(&root, &path).unwrap();
+        assert_eq!(
+            id,
+            Some(SsTableId::Compacted(
+                Ulid::from_string("01J79C21YKR31J2BS1EFXJZ7MR").unwrap()
+            ))
+        );
+
+        let path = Path::from("/root/invalid/00000000000000000001.sst");
+        let id = TableStore::parse_id(&root, &path).unwrap();
+        assert_eq!(id, None);
+    }
 
     #[tokio::test]
     async fn test_sst_writer_should_write_sst() {
@@ -541,7 +640,7 @@ mod tests {
         sst2.add(b"key", Some(b"value")).unwrap();
         let table2 = sst2.build(true).unwrap();
 
-        // write another walsst with the same id.
+        // write another wal sst with the same id.
         let result = ts.write_sst(&wal_id, table2).await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
     }
@@ -665,5 +764,125 @@ mod tests {
 
         assert!(block_iter.next().is_none());
         assert!(expected_iter.next().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_compacted_ssts() {
+        let os = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(32, 1, None);
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+
+        // Create id1, id2, and i3 as three random UUIDs that have been sorted ascending.
+        // Need to do this because the Ulids are sometimes generated in the same millisecond
+        // and the random suffix is used to break the tie, which might be out of order.
+        let mut ulids = (0..3).map(|_| Ulid::new()).collect::<Vec<Ulid>>();
+        ulids.sort();
+        let (id1, id2, id3) = (
+            SsTableId::Compacted(ulids[0]),
+            SsTableId::Compacted(ulids[1]),
+            SsTableId::Compacted(ulids[2]),
+        );
+
+        let path1 = ts.path(&id1);
+        let path2 = ts.path(&id2);
+        let path3 = ts.path(&id3);
+
+        os.put(&path1, Bytes::new().into()).await.unwrap();
+        os.put(&path2, Bytes::new().into()).await.unwrap();
+        os.put(&path3, Bytes::new().into()).await.unwrap();
+
+        let ssts = ts.list_compacted_ssts(..).await.unwrap();
+        assert_eq!(ssts.len(), 3);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
+        assert_eq!(ssts[2].id, id3);
+
+        let ssts = ts
+            .list_compacted_ssts(id2.unwrap_compacted_id()..id3.unwrap_compacted_id())
+            .await
+            .unwrap();
+        assert_eq!(ssts.len(), 1);
+        assert_eq!(ssts[0].id, id2);
+
+        let ssts = ts
+            .list_compacted_ssts(id2.unwrap_compacted_id()..)
+            .await
+            .unwrap();
+        assert_eq!(ssts.len(), 2);
+        assert_eq!(ssts[0].id, id2);
+        assert_eq!(ssts[1].id, id3);
+
+        let ssts = ts
+            .list_compacted_ssts(..id3.unwrap_compacted_id())
+            .await
+            .unwrap();
+        assert_eq!(ssts.len(), 2);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
+    }
+
+    #[tokio::test]
+    async fn test_list_wal_ssts() {
+        let os = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(32, 1, None);
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+
+        let id1 = SsTableId::Wal(1);
+        let id2 = SsTableId::Wal(2);
+        let id3 = SsTableId::Wal(3);
+
+        let path1 = ts.path(&id1);
+        let path2 = ts.path(&id2);
+        let path3 = ts.path(&id3);
+
+        os.put(&path1, Bytes::new().into()).await.unwrap();
+        os.put(&path2, Bytes::new().into()).await.unwrap();
+        os.put(&path3, Bytes::new().into()).await.unwrap();
+
+        let ssts = ts.list_wal_ssts(..).await.unwrap();
+        assert_eq!(ssts.len(), 3);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
+        assert_eq!(ssts[2].id, id3);
+
+        let ssts = ts
+            .list_wal_ssts(id2.unwrap_wal_id()..id3.unwrap_wal_id())
+            .await
+            .unwrap();
+        assert_eq!(ssts.len(), 1);
+        assert_eq!(ssts[0].id, id2);
+
+        let ssts = ts.list_wal_ssts(id2.unwrap_wal_id()..).await.unwrap();
+        assert_eq!(ssts.len(), 2);
+        assert_eq!(ssts[0].id, id2);
+        assert_eq!(ssts[1].id, id3);
+
+        let ssts = ts.list_wal_ssts(..id3.unwrap_wal_id()).await.unwrap();
+        assert_eq!(ssts.len(), 2);
+        assert_eq!(ssts[0].id, id1);
+        assert_eq!(ssts[1].id, id2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_sst() {
+        let os = Arc::new(InMemory::new());
+        let format = SsTableFormat::new(32, 1, None);
+        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+
+        let id1 = SsTableId::Compacted(Ulid::new());
+        let id2 = SsTableId::Compacted(Ulid::new());
+        let path1 = ts.path(&id1);
+        let path2 = ts.path(&id2);
+        os.put(&path1, Bytes::new().into()).await.unwrap();
+        os.put(&path2, Bytes::new().into()).await.unwrap();
+
+        let ssts = ts.list_compacted_ssts(..).await.unwrap();
+        assert_eq!(ssts.len(), 2);
+
+        ts.delete_sst(&id1).await.unwrap();
+
+        let ssts = ts.list_compacted_ssts(..).await.unwrap();
+        assert_eq!(ssts.len(), 1);
+        assert_eq!(ssts[0].id, id2);
     }
 }

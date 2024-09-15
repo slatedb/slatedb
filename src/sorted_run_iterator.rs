@@ -1,7 +1,7 @@
 use std::slice::Iter;
 use std::sync::Arc;
 
-use crate::db_state::{SSTableHandle, SortedRun};
+use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::sst_iter::SstIterator;
@@ -10,7 +10,7 @@ use crate::types::KeyValueDeletable;
 
 pub(crate) struct SortedRunIterator<'a> {
     current_iter: Option<SstIterator<'a>>,
-    sorted_run_iter: Iter<'a, SSTableHandle>,
+    sorted_run_iter: Iter<'a, SsTableHandle>,
     table_store: Arc<TableStore>,
     blocks_to_fetch: usize,
     blocks_to_buffer: usize,
@@ -118,7 +118,7 @@ impl<'a> SortedRunIterator<'a> {
     pub(crate) fn find_iter_from_key(
         key: &[u8],
         sorted_run: &'a SortedRun,
-    ) -> Iter<'a, SSTableHandle> {
+    ) -> Iter<'a, SsTableHandle> {
         match sorted_run.find_sst_with_range_covering_key_idx(key) {
             None => sorted_run.ssts.iter(),
             Some(idx) => sorted_run.ssts[idx..].iter(),
@@ -355,7 +355,7 @@ mod tests {
         mut key_gen: OrderedBytesGenerator,
         mut val_gen: OrderedBytesGenerator,
     ) -> SortedRun {
-        let mut ssts = Vec::<SSTableHandle>::new();
+        let mut ssts = Vec::<SsTableHandle>::new();
         for _ in 0..n {
             let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
             for _ in 0..keys_per_sst {
