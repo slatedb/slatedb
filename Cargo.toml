@@ -1,6 +1,6 @@
 [package]
 name = "slatedb"
-version = "0.1.5"
+version = "0.2.0"
 edition = "2021"
 description = "A cloud native embedded storage engine built on object storage."
 repository = "https://github.com/slatedb/slatedb"
