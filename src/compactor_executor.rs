@@ -23,7 +23,7 @@ pub(crate) struct CompactionJob {
     pub(crate) destination: u32,
     pub(crate) ssts: Vec<SSTableHandle>,
     pub(crate) sorted_runs: Vec<SortedRun>,
-    pub(crate) is_last_sorted_run: bool,
+    pub(crate) write_bloom_filters: bool,
 }
 
 pub(crate) trait CompactionExecutor {
@@ -118,8 +118,6 @@ impl TokioCompactionExecutorInner {
             .table_store
             .table_writer(SsTableId::Compacted(Ulid::new()));
         let mut current_size = 0usize;
-        let use_bloom_filter = !self.options.disable_bloom_filter_for_oldest_sorted_run
-            || !compaction.is_last_sorted_run;
         while let Some(kv) = all_iter.next_entry().await? {
             // Complete this SST if we exceed the max size
             if current_size > self.options.max_sst_size {
@@ -129,7 +127,11 @@ impl TokioCompactionExecutorInner {
                     self.table_store
                         .table_writer(SsTableId::Compacted(Ulid::new())),
                 );
-                output_ssts.push(finished_writer.close(use_bloom_filter).await?);
+                output_ssts.push(
+                    finished_writer
+                        .close(compaction.write_bloom_filters)
+                        .await?,
+                );
             }
             // Add to SST
             let value = kv.value.into_option();
@@ -139,7 +141,7 @@ impl TokioCompactionExecutorInner {
             current_size += kv.key.len() + value.map_or(0, |b| b.len());
         }
         if current_size > 0 {
-            output_ssts.push(current_writer.close(use_bloom_filter).await?);
+            output_ssts.push(current_writer.close(compaction.write_bloom_filters).await?);
         }
         Ok(SortedRun {
             id: compaction.destination,

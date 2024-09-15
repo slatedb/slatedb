@@ -242,11 +242,17 @@ impl CompactorOrchestrator {
             .filter_map(|s| s.maybe_unwrap_sorted_run())
             .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
             .collect();
+        let is_last_sorted_run = match db_state.compacted.last() {
+            Some(last_run) => last_run.id == compaction.destination,
+            None => false,
+        };
         self.executor.start_compaction(CompactionJob {
             destination: compaction.destination,
             ssts,
             sorted_runs,
-            is_last_sorted_run: compaction.is_last_sorted_run,
+            // FIXME: Check if it's the last run
+            write_bloom_filters: !is_last_sorted_run
+                || !self.options.disable_bloom_filter_for_oldest_sorted_run,
         });
     }
 
@@ -405,7 +411,7 @@ mod tests {
         rt.block_on(db.put(&[b'j'; 32], &[b'k'; 96]));
         rt.block_on(db.close()).unwrap();
         orchestrator
-            .submit_compaction(Compaction::new(l0_ids_to_compact.clone(), 0, false))
+            .submit_compaction(Compaction::new(l0_ids_to_compact.clone(), 0))
             .unwrap();
         let msg = orchestrator.worker_rx.recv().unwrap();
         let WorkerToOrchestratorMsg::CompactionFinished(Ok(sr)) = msg else {

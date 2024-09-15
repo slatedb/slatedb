@@ -171,7 +171,7 @@ The writer is responsible for compacting the WAL to the first level of the datab
 Let’s look at the write and recovery protocols in more detail:
 
 write:
-1. `put` adds the key-value to the current memtable and updates the WAL using the protocol described in [the manifest design](https://github.com/slatedb/slatedb/blob/main/rfcs/0001-manifest.md). 
+1. `put` adds the key-value to the current memtable and updates the WAL using the protocol described in [the manifest design](https://github.com/slatedb/slatedb/blob/main/rfcs/0001-manifest.md).
 2. If the current memtable is larger than `l0_sst_size`, freeze the memtable by converting it to an immutable memtable, and write the memtable to a new ULID-named SST S in `compacted`.
 3. When S and all earlier SSTs S’, S’’, … for unflushed immutable tables are written:
     1. update L0 in-memory by prepending S, S’, S’’, … to the list of SSTs in L0.
@@ -321,7 +321,7 @@ The Compaction Executor executes the compaction by reading the SSTs and SRs in `
 
 The Compaction Executor needs to coalesce updates. If the same key appears in multiple sources, then it takes the value from the logically latest (i.e. most recent) source. The Compaction Executor handles destination SR 0 specially. If the destination SR is 0, and the value for a key is resolved to a tombstone, then the Compaction Executor will not include include the key in the resulting SR.
 
-The new SR is made up of ULID-named SSTs in the `compacted` directory (just like L0). 
+The new SR is made up of ULID-named SSTs in the `compacted` directory (just like L0).
 
 We should implement the sort-merge so that we can make good use of the available network. One good option here is to use `async` Object Store APIs to concurrently read the various sources, and then to write the resulting SSTs while we move on to the next key ranges. I think the details are something we can work out in the implementation, and it doesn’t have to be optimal in this iteration of work.
 
@@ -392,7 +392,7 @@ Compactions targeting lower levels can take a long time. If the compactor restar
 
 Its not enough to know what compactions were ongoing - a new compactor also needs to be able to reconstruct compaction progress. We can leave breadcrumbs to allow it to piece this information together:
 
-To do this we can allow including uncompleted SRs in the list of SRs in the manifest. We can do this by including a `completed` flag in the SR definition. For a given SR ID there should only be one with `completed` set to `true`, which is what the reader would use to serve reads. Then, the new compactor can inspect the SSTs in the new SR, and see what key ranges have already completed compaction, and finish compacting the uncompacted key ranges. 
+To do this we can allow including uncompleted SRs in the list of SRs in the manifest. We can do this by including a `completed` flag in the SR definition. For a given SR ID there should only be one with `completed` set to `true`, which is what the reader would use to serve reads. Then, the new compactor can inspect the SSTs in the new SR, and see what key ranges have already completed compaction, and finish compacting the uncompacted key ranges.
 
 #### Lazy-Leveling/Tiered+Leveled
 
@@ -410,7 +410,7 @@ We can implement such a Scheduler fairly easily. The main challenge is that we n
 
 One of the main advantages of running in cloud is that applications can dynamically provision resources for a short time to burst capacity, since compute is easily provisioned and billed only for the time its provisioned. This means that for really expensive compactions, we should be able to quickly spin up a short-lived but beefy compactor node to execute the compaction. There's nothing in the design above that precludes us doing this. The compactor could in the future with some (probably pluggable depending on whether a compactor runs on k8s, or directly on a compute service like ec2) API for provisioning, provision a short-lived node, notify it about compaction work, and then commit the manifest when the compaction work is complete.
 
-Its worth calling out that we already get some of this benefit as most instances have burstable network (e.g. an instance with a 5Gbps baseline network can burst up to 25Gbps for a short duration). 
+Its worth calling out that we already get some of this benefit as most instances have burstable network (e.g. an instance with a 5Gbps baseline network can burst up to 25Gbps for a short duration).
 
 ## Appendix
 
@@ -424,4 +424,3 @@ Its worth calling out that we already get some of this benefit as most instances
 | i3en.metal | 12800/12800 | 7812/6250 | 2375/2375 |
 | c5d.xlarge | 160/1280 | 156/70 | 143.75/593.75 |
 | c5d.metal | 12800/12800 | 5468/2656 | 2375/2375 |
-
