@@ -14,7 +14,7 @@ pub(crate) struct CliArgs {
     #[arg(
         short,
         long,
-        help = "The path in the object store to the root directory"
+        help = "The path in the object store to the root directory, starting from within the object store bucket (specified when configuring the object store provider)"
     )]
     pub(crate) path: String,
 

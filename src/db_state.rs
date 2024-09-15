@@ -1,7 +1,5 @@
-use derive_more::Display;
+use serde::Serialize;
 use std::collections::VecDeque;
-use std::fmt;
-use std::fmt::Formatter;
 use std::sync::Arc;
 use tracing::info;
 use ulid::Ulid;
@@ -10,8 +8,7 @@ use SsTableId::{Compacted, Wal};
 use crate::flatbuffer_types::SsTableInfoOwned;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
 
-#[derive(Clone, PartialEq, Display)]
-#[display("{}", id)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct SsTableHandle {
     pub id: SsTableId,
     pub info: SsTableInfoOwned,
@@ -39,8 +36,7 @@ impl SsTableHandle {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Hash, Eq, Copy, Display)]
-#[display("SST(id: {_variant})")]
+#[derive(Clone, PartialEq, Debug, Hash, Eq, Copy, Serialize)]
 pub enum SsTableId {
     Wal(u64),
     Compacted(Ulid),
@@ -64,8 +60,7 @@ impl SsTableId {
     }
 }
 
-#[derive(Clone, PartialEq, Display)]
-#[display("SR(id: {})", id)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct SortedRun {
     pub(crate) id: u32,
     pub(crate) ssts: Vec<SsTableHandle>,
@@ -112,34 +107,15 @@ pub(crate) struct COWDbState {
     pub(crate) imm_wal: VecDeque<Arc<ImmutableWal>>,
     pub(crate) core: CoreDbState,
 }
+
 // represents the core db state that we persist in the manifest
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct CoreDbState {
     pub(crate) l0_last_compacted: Option<Ulid>,
     pub(crate) l0: VecDeque<SsTableHandle>,
     pub(crate) compacted: Vec<SortedRun>,
     pub(crate) next_wal_sst_id: u64,
     pub(crate) last_compacted_wal_sst_id: u64,
-}
-
-impl fmt::Display for CoreDbState {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let l0_ids = self
-            .l0
-            .iter()
-            .map(|sst| sst.id.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let compacted_ids = self
-            .compacted
-            .iter()
-            .map(|sr| format!("{}", sr))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        write!(f, "{{\n\tLast Compacted L0: {:?},\n\tL0: {},\n\tCompacted: {},\n\tNext WAL SST: {},\n\tLast Compacted WAL SST: {}\n}}", self.l0_last_compacted, l0_ids, compacted_ids, self.next_wal_sst_id, self.last_compacted_wal_sst_id)
-    }
 }
 
 impl CoreDbState {

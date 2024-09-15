@@ -17,18 +17,6 @@ use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
 
-/// read-only access to the latest manifest file
-pub async fn read_manifest(
-    path: &Path,
-    object_store: Arc<dyn ObjectStore>,
-) -> Result<Option<String>, SlateDBError> {
-    let manifest_store = ManifestStore::new(path, object_store);
-    match manifest_store.read_latest_manifest().await? {
-        None => Ok(None),
-        Some((_, manifest)) => Ok(Some(manifest.to_string())),
-    }
-}
-
 pub(crate) struct FenceableManifest {
     stored_manifest: StoredManifest,
     local_epoch: u64,

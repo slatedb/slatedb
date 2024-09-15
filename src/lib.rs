@@ -4,6 +4,7 @@
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
 
+pub mod admin;
 mod blob;
 mod block;
 mod block_iterator;
@@ -25,7 +26,7 @@ mod garbage_collector;
 pub mod inmemory_cache;
 mod iter;
 mod manifest;
-pub mod manifest_store;
+mod manifest_store;
 mod mem_table;
 mod mem_table_flush;
 mod merge_iterator;
