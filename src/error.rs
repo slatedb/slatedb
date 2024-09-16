@@ -21,6 +21,12 @@ pub enum SlateDBError {
     #[error("Manifest file already exists")]
     ManifestVersionExists,
 
+    #[error("Manifest missing")]
+    ManifestMissing,
+
+    #[error("Invalid deletion")]
+    InvalidDeletion,
+
     #[error("Invalid sst error")]
     InvalidFlatbuffer(#[from] flatbuffers::InvalidFlatbuffer),
 

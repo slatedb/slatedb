@@ -1,3 +1,5 @@
+use std::io::SeekFrom;
+use std::vec;
 use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
@@ -7,6 +9,7 @@ use object_store::{Attribute, Attributes, GetRange, GetResultPayload, PutResult}
 use object_store::{ListResult, MultipartUpload, PutMultipartOpts, PutOptions, PutPayload};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncSeekExt;
 use tokio::{
     fs,
     fs::{File, OpenOptions},
@@ -225,9 +228,9 @@ impl CachedObjectStore {
         Box::pin(async move {
             db_stats.object_store_cache_part_access.inc();
 
-            if let Ok(Some(bytes)) = entry.read_part(part_id).await {
+            if let Ok(Some(bytes)) = entry.read_part(part_id, range_in_part.clone()).await {
                 db_stats.object_store_cache_part_hits.inc();
-                return Ok(bytes.slice(range_in_part));
+                return Ok(bytes);
             }
 
             // if the part is not cached, fallback to the object store to get the missing part.
@@ -254,7 +257,7 @@ impl CachedObjectStore {
             let bytes = get_result.bytes().await?;
             entry.save_head((&meta, &attrs)).await.ok();
             entry.save_part(part_id, bytes.clone()).await.ok();
-            Ok(bytes.slice(range_in_part))
+            Ok(Bytes::copy_from_slice(&bytes.slice(range_in_part)))
         })
     }
 
@@ -512,7 +515,11 @@ pub trait LocalCacheStorage: Send + Sync + std::fmt::Debug + Display + 'static {
 pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
     async fn save_part(&self, part_number: PartID, buf: Bytes) -> object_store::Result<()>;
 
-    async fn read_part(&self, part_number: PartID) -> object_store::Result<Option<Bytes>>;
+    async fn read_part(
+        &self,
+        part_number: PartID,
+        range_in_part: Range<usize>,
+    ) -> object_store::Result<Option<Bytes>>;
 
     /// might be useful on rewriting GET request on the prefetch phase. the cached files are
     /// expected to be in the same folder, so it'd be expected to be fast without expensive
@@ -574,6 +581,7 @@ impl FsCacheEntry {
             .await
             .map_err(wrap_io_err)?;
         file.write_all(&buf).await.map_err(wrap_io_err)?;
+        file.sync_all().await.map_err(wrap_io_err)?;
         fs::rename(tmp_path, path).await.map_err(wrap_io_err)
     }
 
@@ -630,7 +638,11 @@ impl LocalCacheEntry for FsCacheEntry {
         self.atomic_write(&part_path, buf).await
     }
 
-    async fn read_part(&self, part_number: usize) -> object_store::Result<Option<Bytes>> {
+    async fn read_part(
+        &self,
+        part_number: usize,
+        range_in_part: Range<usize>,
+    ) -> object_store::Result<Option<Bytes>> {
         let part_path = Self::make_part_path(
             self.root_folder.clone(),
             &self.location,
@@ -646,8 +658,12 @@ impl LocalCacheEntry for FsCacheEntry {
 
         let file = File::open(&part_path).await.map_err(wrap_io_err)?;
         let mut reader = tokio::io::BufReader::new(file);
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer).await.map_err(wrap_io_err)?;
+        let mut buffer = vec![0; range_in_part.len()];
+        reader
+            .seek(SeekFrom::Start(range_in_part.start as u64))
+            .await
+            .map_err(wrap_io_err)?;
+        reader.read_exact(&mut buffer).await.map_err(wrap_io_err)?;
         Ok(Some(Bytes::from(buffer)))
     }
 
@@ -800,10 +816,11 @@ mod tests {
         let location = Path::from("/data/testfile1");
         let get_result = object_store.get(&location).await?;
 
+        let part_size = 1024;
         let cached_store = CachedObjectStore::new(
             object_store.clone(),
             test_cache_folder.clone(),
-            1024,
+            part_size,
             db_stats,
         )
         .unwrap();
@@ -819,16 +836,24 @@ mod tests {
         // assert the parts
         let cached_parts = entry.cached_parts().await?;
         assert_eq!(cached_parts.len(), 4);
-        assert_eq!(entry.read_part(0).await?, Some(payload.slice(0..1024)));
-        assert_eq!(entry.read_part(1).await?, Some(payload.slice(1024..2048)));
-        assert_eq!(entry.read_part(2).await?, Some(payload.slice(2048..3072)));
-        assert_eq!(entry.read_part(3).await?, Some(payload.slice(3072..)));
+        assert_eq!(
+            entry.read_part(0, 0..part_size).await?,
+            Some(payload.slice(0..1024))
+        );
+        assert_eq!(
+            entry.read_part(1, 0..part_size).await?,
+            Some(payload.slice(1024..2048))
+        );
+        assert_eq!(
+            entry.read_part(2, 0..part_size).await?,
+            Some(payload.slice(2048..3072))
+        );
 
         // delete part 2, known_cache_size is still known
         let evict_part_path =
             FsCacheEntry::make_part_path(test_cache_folder.clone(), &location, 2, 1024);
         std::fs::remove_file(evict_part_path).unwrap();
-        assert_eq!(entry.read_part(2).await?, None);
+        assert_eq!(entry.read_part(2, 0..part_size).await?, None);
         let cached_parts = entry.cached_parts().await?;
         assert_eq!(cached_parts, vec![0, 1, 3]);
 
@@ -836,7 +861,7 @@ mod tests {
         let evict_part_path =
             FsCacheEntry::make_part_path(test_cache_folder.clone(), &location, 3, 1024);
         std::fs::remove_file(evict_part_path).unwrap();
-        assert_eq!(entry.read_part(3).await?, None);
+        assert_eq!(entry.read_part(3, 0..part_size).await?, None);
         let cached_parts = entry.cached_parts().await?;
         assert_eq!(cached_parts, vec![0, 1]);
         Ok(())
@@ -866,14 +891,23 @@ mod tests {
         assert_eq!(object_size_hint, 1024 * 3);
         let cached_parts = entry.cached_parts().await?;
         assert_eq!(cached_parts.len(), 3);
-        assert_eq!(entry.read_part(0).await?, Some(payload.slice(0..1024)));
-        assert_eq!(entry.read_part(1).await?, Some(payload.slice(1024..2048)));
-        assert_eq!(entry.read_part(2).await?, Some(payload.slice(2048..3072)));
+        assert_eq!(
+            entry.read_part(0, 0..part_size).await?,
+            Some(payload.slice(0..1024))
+        );
+        assert_eq!(
+            entry.read_part(1, 0..part_size).await?,
+            Some(payload.slice(1024..2048))
+        );
+        assert_eq!(
+            entry.read_part(2, 0..part_size).await?,
+            Some(payload.slice(2048..3072))
+        );
 
         let evict_part_path =
             FsCacheEntry::make_part_path(test_cache_folder.clone(), &location, 2, part_size);
         std::fs::remove_file(evict_part_path).unwrap();
-        assert_eq!(entry.read_part(2).await?, None);
+        assert_eq!(entry.read_part(2, 0..part_size).await?, None);
 
         let cached_parts = entry.cached_parts().await?;
         assert_eq!(cached_parts.len(), 2);
