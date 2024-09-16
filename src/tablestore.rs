@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
@@ -10,7 +10,6 @@ use log::warn;
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use parking_lot::RwLock;
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
@@ -36,12 +35,6 @@ pub struct TableStore {
     compacted_path: &'static str,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
-    // TODO: we cache the filters here for now, so the db doesn't need to reload them
-    //       for each read. This means that all the filters need to fit in memory.
-    //       Once we've put in a proper cache, we should instead cache the filter block in
-    //       the cache and get rid of this.
-    //       https://github.com/slatedb/slatedb/issues/89
-    filter_cache: RwLock<HashMap<SsTableId, Option<Arc<BloomFilter>>>>,
     transactional_wal_store: Arc<dyn TransactionalObjectStore>,
     /// In-memory cache for blocks
     block_cache: Option<Arc<dyn InMemoryCache>>,
@@ -116,7 +109,6 @@ impl TableStore {
             wal_path: "wal",
             compacted_path: "compacted",
             fp_registry,
-            filter_cache: RwLock::new(HashMap::new()),
             transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
                 Path::from("/"),
                 object_store.clone(),
@@ -213,17 +205,25 @@ impl TableStore {
                 _ => SlateDBError::ObjectStoreError(e),
             })?;
 
-        self.cache_filter(*id, encoded_sst.filter);
+        self.cache_filter(
+            *id,
+            encoded_sst.info.borrow().filter_offset(),
+            encoded_sst.filter,
+        )
+        .await;
         Ok(SsTableHandle {
             id: *id,
             info: encoded_sst.info,
         })
     }
 
-    fn cache_filter(&self, sst: SsTableId, filter: Option<Arc<BloomFilter>>) {
-        {
-            let mut wguard = self.filter_cache.write();
-            wguard.insert(sst, filter);
+    async fn cache_filter(&self, sst: SsTableId, id: u64, filter: Option<Arc<BloomFilter>>) {
+        if let Some(cache) = &self.block_cache {
+            if let Some(filter) = filter {
+                cache
+                    .insert((sst, id as usize), CachedBlock::Filter(filter))
+                    .await;
+            }
         }
     }
 
@@ -295,10 +295,13 @@ impl TableStore {
         &self,
         handle: &SsTableHandle,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
-        {
-            let rguard = self.filter_cache.read();
-            if let Some(filter) = rguard.get(&handle.id) {
-                return Ok(filter.clone());
+        if let Some(cache) = &self.block_cache {
+            if let Some(filter) = cache
+                .get((handle.id, handle.info.borrow().filter_offset() as usize))
+                .await
+                .bloom_filter()
+            {
+                return Ok(Some(filter));
             }
         }
         let path = self.path(&handle.id);
@@ -307,8 +310,16 @@ impl TableStore {
             path,
         };
         let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
-        let mut wguard = self.filter_cache.write();
-        wguard.insert(handle.id, filter.clone());
+        if let Some(cache) = &self.block_cache {
+            if let Some(filter) = filter.as_ref() {
+                cache
+                    .insert(
+                        (handle.id, handle.info.borrow().filter_offset() as usize),
+                        CachedBlock::Filter(filter.clone()),
+                    )
+                    .await;
+            }
+        }
         Ok(filter)
     }
 
@@ -534,7 +545,13 @@ impl<'a> EncodedSsTableWriter<'a> {
             self.writer.write_all(block.as_ref()).await?;
         }
         self.writer.shutdown().await?;
-        self.table_store.cache_filter(self.id, encoded_sst.filter);
+        self.table_store
+            .cache_filter(
+                self.id,
+                encoded_sst.info.borrow().filter_offset(),
+                encoded_sst.filter,
+            )
+            .await;
         Ok(SsTableHandle {
             id: self.id,
             info: encoded_sst.info,

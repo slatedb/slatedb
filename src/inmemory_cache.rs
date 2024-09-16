@@ -9,9 +9,7 @@ use crate::{
 #[derive(Clone)]
 pub(crate) enum CachedBlock {
     Block(Arc<Block>),
-    #[allow(dead_code)]
     Index(Arc<SsTableIndexOwned>),
-    #[allow(dead_code)]
     Filter(Arc<BloomFilter>),
 }
 
@@ -169,7 +167,6 @@ impl CachedBlockOption {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn sst_index(&self) -> Option<Arc<SsTableIndexOwned>> {
         match self {
             CachedBlockOption::Moka(Some(CachedBlock::Index(index))) => Some(index.clone()),
@@ -181,7 +178,6 @@ impl CachedBlockOption {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
         match self {
             CachedBlockOption::Moka(Some(CachedBlock::Filter(filter))) => Some(filter.clone()),
