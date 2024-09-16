@@ -35,9 +35,8 @@ Then you can use SlateDB in your Rust code:
 use bytes::Bytes;
 use object_store::{ObjectStore, memory::InMemory, path::Path};
 use slatedb::db::Db;
-use slatedb::inmemory_cache::InMemoryCacheOptions;
-use slatedb::config::{CompactorOptions, DbOptions, ObjectStoreCacheOptions};
-use std::{sync::Arc, time::Duration};
+use slatedb::config::DbOptions;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
