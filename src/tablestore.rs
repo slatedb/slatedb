@@ -315,13 +315,31 @@ impl TableStore {
     pub(crate) async fn read_index(
         &self,
         handle: &SsTableHandle,
-    ) -> Result<SsTableIndexOwned, SlateDBError> {
+    ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
+        if let Some(cache) = &self.block_cache {
+            if let Some(index) = cache
+                .get((handle.id, handle.info.borrow().index_offset() as usize))
+                .await
+                .sst_index()
+            {
+                return Ok(index);
+            }
+        }
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
         };
-        self.sst_format.read_index(&handle.info, &obj).await
+        let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
+        if let Some(cache) = &self.block_cache {
+            cache
+                .insert(
+                    (handle.id, handle.info.borrow().index_offset() as usize),
+                    CachedBlock::Index(index.clone()),
+                )
+                .await;
+        }
+        Ok(index)
     }
 
     #[allow(dead_code)]
@@ -674,7 +692,7 @@ mod tests {
         let handle = writer.close().await.unwrap();
 
         // Read the index
-        let index = Arc::new(ts.read_index(&handle).await.unwrap());
+        let index = ts.read_index(&handle).await.unwrap();
 
         // Test 1: SST hit
         let blocks = ts
