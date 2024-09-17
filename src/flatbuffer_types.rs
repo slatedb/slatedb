@@ -2,6 +2,8 @@ use std::collections::VecDeque;
 
 use bytes::Bytes;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 use ulid::Ulid;
 
 use crate::db_state;
@@ -29,6 +31,17 @@ use crate::manifest::{Manifest, ManifestCodec};
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct SsTableInfoOwned {
     data: Bytes,
+}
+
+impl Serialize for SsTableInfoOwned {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut s = serializer.serialize_struct("SsTableInfoOwned", 2)?;
+        s.serialize_field("data_length", &self.data.len())?;
+        s.end()
+    }
 }
 
 impl SsTableInfoOwned {

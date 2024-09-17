@@ -1,6 +1,6 @@
+use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
-
 use tracing::info;
 use ulid::Ulid;
 use SsTableId::{Compacted, Wal};
@@ -8,7 +8,7 @@ use SsTableId::{Compacted, Wal};
 use crate::flatbuffer_types::SsTableInfoOwned;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct SsTableHandle {
     pub id: SsTableId,
     pub info: SsTableInfoOwned,
@@ -36,7 +36,7 @@ impl SsTableHandle {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Hash, Eq, Copy)]
+#[derive(Clone, PartialEq, Debug, Hash, Eq, Copy, Serialize)]
 pub enum SsTableId {
     Wal(u64),
     Compacted(Ulid),
@@ -60,7 +60,7 @@ impl SsTableId {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct SortedRun {
     pub(crate) id: u32,
     pub(crate) ssts: Vec<SsTableHandle>,
@@ -107,8 +107,9 @@ pub(crate) struct COWDbState {
     pub(crate) imm_wal: VecDeque<Arc<ImmutableWal>>,
     pub(crate) core: CoreDbState,
 }
+
 // represents the core db state that we persist in the manifest
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct CoreDbState {
     pub(crate) l0_last_compacted: Option<Ulid>,
     pub(crate) l0: VecDeque<SsTableHandle>,
