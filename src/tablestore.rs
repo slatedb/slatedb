@@ -390,19 +390,22 @@ impl TableStore {
             object_store: self.object_store.clone(),
             path,
         };
-
         // Initialize the result vector and a vector to track uncached ranges
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
+        // currently blocks are written from index 0.
+        let block_offset = 0;
 
         // If block cache is available, try to retrieve cached blocks
         if let Some(cache) = &self.block_cache {
             // Attempt to get all requested blocks from cache concurrently
-            let cached_blocks =
-                join_all(blocks.clone().map(|block_num| async move {
-                    cache.get((handle.id, block_num)).await.block()
-                }))
-                .await;
+            let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
+                cache
+                    .get((handle.id, block_num + block_offset))
+                    .await
+                    .block()
+            }))
+            .await;
 
             let mut last_uncached_start = None;
 
@@ -460,7 +463,7 @@ impl TableStore {
         if let Some(cache) = &self.block_cache {
             if !blocks_to_cache.is_empty() {
                 join_all(blocks_to_cache.into_iter().map(|(id, block_num, block)| {
-                    cache.insert((id, block_num), CachedBlock::Block(block))
+                    cache.insert((id, block_num + block_offset), CachedBlock::Block(block))
                 }))
                 .await;
             }
@@ -719,10 +722,15 @@ mod tests {
 
         assert_blocks(&blocks, &expected_data).await;
 
+        let block_offset = 0;
         // Check that all blocks are now in cache
         for i in 0..20 {
             assert!(
-                block_cache.get((handle.id, i)).await.block().is_some(),
+                block_cache
+                    .get((handle.id, i + block_offset))
+                    .await
+                    .block()
+                    .is_some(),
                 "Block {} should be in cache",
                 i
             );
@@ -730,10 +738,10 @@ mod tests {
 
         // Partially clear the cache (remove blocks 5..10 and 15..20)
         for i in 5..10 {
-            block_cache.remove((handle.id, i)).await;
+            block_cache.remove((handle.id, i + block_offset)).await;
         }
         for i in 15..20 {
-            block_cache.remove((handle.id, i)).await;
+            block_cache.remove((handle.id, i + block_offset)).await;
         }
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
@@ -746,7 +754,11 @@ mod tests {
         // Check that all blocks are again in cache
         for i in 0..20 {
             assert!(
-                block_cache.get((handle.id, i)).await.block().is_some(),
+                block_cache
+                    .get((handle.id, i + block_offset))
+                    .await
+                    .block()
+                    .is_some(),
                 "Block {} should be in cache after partial hit",
                 i
             );
@@ -766,7 +778,11 @@ mod tests {
         // Check that all blocks are still in cache
         for i in 0..20 {
             assert!(
-                block_cache.get((handle.id, i)).await.block().is_some(),
+                block_cache
+                    .get((handle.id, i + block_offset))
+                    .await
+                    .block()
+                    .is_some(),
                 "Block {} should be in cache after SST emptying",
                 i
             );
