@@ -1,10 +1,10 @@
+use futures::future::join_all;
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::mem;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
-
-use futures::future::join_all;
-use parking_lot::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::task::JoinHandle;
 use ulid::Ulid;
 
@@ -115,6 +115,15 @@ impl TokioCompactionExecutorInner {
         &self,
         compaction: CompactionJob,
     ) -> Result<SortedRun, SlateDBError> {
+        // Calculate metrics in batches. Every COMPACTION_METRICS_BATCH_SIZE bytes compacted
+        // metrics are recalculated.
+        const COMPACTION_METRICS_BATCH_SIZE: i32 = 100 * 1024 * 1024;
+        let mut metrics_bytes_counter = COMPACTION_METRICS_BATCH_SIZE;
+        let mut total_size = 0usize;
+        let compaction_start_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+
         let mut all_iter = self.load_iterators(&compaction).await?;
         let mut output_ssts = Vec::new();
         let mut current_writer = self
@@ -125,11 +134,27 @@ impl TokioCompactionExecutorInner {
             // Add to SST
             let value = kv.value.into_option();
             let size = kv.key.len() + value.as_ref().map_or(0, |b| b.len());
-            self.db_stats.bytes_compacted.add(size as i64);
             current_writer
                 .add(kv.key.as_ref(), value.as_ref().map(|b| b.as_ref()))
                 .await?;
             current_size += size;
+
+            metrics_bytes_counter -= size as i32;
+            if metrics_bytes_counter <= 0 {
+                let bytes_compacted = COMPACTION_METRICS_BATCH_SIZE - metrics_bytes_counter;
+                total_size += bytes_compacted as usize;
+                self.db_stats
+                    .running_compaction_bytes
+                    .add(bytes_compacted as i64);
+                let t2 = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default();
+                self.db_stats
+                    .compaction_throughput
+                    .set(calculate_throughput(compaction_start_time, t2, total_size));
+                metrics_bytes_counter = COMPACTION_METRICS_BATCH_SIZE;
+            }
+
             if current_size > self.options.max_sst_size {
                 current_size = 0;
                 let finished_writer = mem::replace(
@@ -139,11 +164,25 @@ impl TokioCompactionExecutorInner {
                 );
                 output_ssts.push(finished_writer.close().await?);
             }
-            self.db_stats.bytes_compacted.sub(size as i64);
         }
         if current_size > 0 {
             output_ssts.push(current_writer.close().await?);
+            total_size += metrics_bytes_counter as usize;
+            self.db_stats
+                .running_compaction_bytes
+                .add(metrics_bytes_counter as i64);
+            let compaction_batch_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            self.db_stats
+                .compaction_throughput
+                .set(calculate_throughput(compaction_start_time, compaction_batch_time, total_size));
         }
+
+        self.db_stats
+            .running_compaction_bytes
+            .sub(total_size as i64);
+
         Ok(SortedRun {
             id: compaction.destination,
             ssts: output_ssts,
@@ -160,7 +199,7 @@ impl TokioCompactionExecutorInner {
         let this = self.clone();
         let task = self.handle.spawn(async move {
             let dst = compaction.destination;
-            this.db_stats.clone().running_compactions.inc();
+            this.db_stats.running_compactions.inc();
             let result = this.execute_compaction(compaction).await;
             this.worker_tx
                 .send(CompactionFinished(result))
@@ -197,4 +236,9 @@ impl TokioCompactionExecutorInner {
     fn is_stopped(&self) -> bool {
         self.is_stopped.load(atomic::Ordering::SeqCst)
     }
+}
+
+fn calculate_throughput(start: Duration, end: Duration, bytes: usize) -> f64 {
+    let total_duration = end - start;
+    (bytes as f64 / total_duration.as_nanos() as f64) * 1_000_000_000f64
 }

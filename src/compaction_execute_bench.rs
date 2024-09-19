@@ -17,7 +17,6 @@ use ulid::Ulid;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, SourceId};
 use crate::config::CompactorOptions;
-use crate::db::Db;
 use crate::db_state::{SSTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::manifest_store::{ManifestStore, StoredManifest};
@@ -301,9 +300,10 @@ fn run_bench(
     let log_thread_handler = handle.spawn(async move {
         loop {
             info!(
-                "metrics: {}, {}",
+                "running compactions: {}, compaction bytes: {}, throughput: {}",
                 db_stats_log.running_compactions.get(),
-                db_stats_log.bytes_compacted.get()
+                db_stats_log.running_compaction_bytes.get(),
+                db_stats_log.compaction_throughput.get()
             );
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -313,7 +313,11 @@ fn run_bench(
     let WorkerToOrchestratorMsg::CompactionFinished(result) = rx.recv().expect("recv failed");
     match result {
         Ok(_) => {
-            info!("compaction finished in {:?} millis", start.elapsed());
+            info!(
+                "compaction finished in {:?} millis",
+                start.elapsed().as_millis()
+            );
+            std::thread::sleep(Duration::from_secs(10));
             log_thread_handler.abort();
         }
         Err(err) => return Err(err),

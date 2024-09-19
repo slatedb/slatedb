@@ -1,4 +1,3 @@
-use std::fmt::{write, Display, Formatter};
 use std::sync::Arc;
 
 use atomic::{Atomic, Ordering};
@@ -75,7 +74,8 @@ pub struct DbStats {
     pub object_store_cache_part_hits: Counter,
     pub object_store_cache_part_access: Counter,
     pub running_compactions: Gauge<i64>,
-    pub bytes_compacted: Gauge<i64>,
+    pub running_compaction_bytes: Gauge<i64>,
+    pub compaction_throughput: Gauge<f64>,
 }
 
 impl DbStats {
@@ -86,16 +86,11 @@ impl DbStats {
             object_store_cache_part_hits: Counter::default(),
             object_store_cache_part_access: Counter::default(),
             running_compactions: Gauge::default(),
-            bytes_compacted: Gauge::default(),
+            running_compaction_bytes: Gauge::default(),
+            compaction_throughput: Gauge::default(),
         }
     }
 }
-
-// impl Display for DbStats {
-//     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-//         write!(f, )
-//     }
-// }
 
 #[cfg(test)]
 mod tests {
