@@ -3,10 +3,11 @@ deadlock_detection: false
 options:
     max_actions: 100
     crash_on_yield: false
-    max_concurrent_actions: 2
 action_options:
     SlateDb.Put:
         max_actions: 2
+    SlateDb.FlushWal:
+        max_concurrent_actions: 1
     SlateDb.FlushMemtable:
         max_concurrent_actions: 1
 
@@ -37,7 +38,8 @@ role SlateDb:
   atomic action Put:
     require (self.MODE == 'RW')
     kv = any [ (k,v) for k in KEYS for v in VALUES ]
-    writer.put(kv[0], kv[1])
+    self.put(kv[0], kv[1])
+    _last_puts[kv[0]] = kv[1]
 
   # atomic action Get:
   #   k = any KEYS
@@ -59,7 +61,7 @@ role SlateDb:
     self.write_l0()
     self.immutable_memtable.clear()
     
-  func put(k, v):
+  atomic func put(k, v):
     self.wal.append( (k, v) )
 
   atomic func get(k, read_level):
@@ -68,16 +70,16 @@ role SlateDb:
             if kv[0] == k:
                 return kv[1]
 
-    if self.immutable_memtable.get(k):
-        return self.immutable_memtable.get(k)
     if self.memtable.get(k):
         return self.memtable.get(k)
+    if self.immutable_memtable.get(k):
+        return self.immutable_memtable.get(k)
 
     for l0 in reversed(self.l0):
         content = store.Read(l0)
         if content and content.get(k):
             return content.get(k)
- 
+
     return NOT_FOUND
 
   atomic func freeze_wal():
@@ -110,6 +112,7 @@ role SlateDb:
     name = "compacted/ulid-" + str(next_ulid) + ".sst"
     next_ulid += 1
     store.Write(name, dict(self.immutable_memtable))
+    self.l0.append(name)
     
 
   atomic func clear_immutable_memtable():
@@ -133,13 +136,34 @@ action Init:
   # Slatedb uses ULID, that is a sortable unique id. We can model it with just a counter
   next_ulid = 1
 
+  # As a convention, variables starting with _ are not part of the system modelled, but
+  # useful for assertions
+  _last_puts = {}
+
 
 always assertion NoEmptyL0s:
     for l0 in writer.l0:
         if store.objects.get(l0) != None and len(store.objects.get(l0)) == 0:
             return False
     return True
-        
+
+always assertion UncommittedRead:
+    for k in KEYS:
+        v0 = writer.get(k, ReadLevel.Uncommitted)
+        v1 = _last_puts.get(k, NOT_FOUND)
+        if v0 != v1:
+            return False
+    return True
+
+always eventually assertion CommittedRead:
+    for k in KEYS:
+        v0 = writer.get(k, ReadLevel.Uncommitted)
+        v1 = writer.get(k, ReadLevel.Committed)
+        v2 = _last_puts.get(k, NOT_FOUND)
+        if v0 != v1 or v0 != v2:
+            return False
+    return True
+
 always eventually assertion ConsistentRead:
     reader = SlateDb(mode="RO")
     reader.l0 = writer.l0
