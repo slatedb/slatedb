@@ -26,7 +26,23 @@ pub(crate) struct CliArgs {
 pub(crate) enum CliCommands {
     /// Reads the latest manifest file and outputs a readable
     /// String representation
-    ReadManifest,
+    ReadManifest {
+        /// Specify a specific manifest ULID to read, if this is
+        /// not specified the latest manifest will be returned
+        #[arg(short, long)]
+        id: Option<u64>,
+    },
+
+    /// Lists all available manifests
+    ListManifests {
+        /// Optionally specify a start id for the range of manifests to lookup
+        #[arg(short, long)]
+        start: Option<u64>,
+
+        /// Optionally specify an end id for the range of manifests to lookup
+        #[arg(short, long)]
+        end: Option<u64>,
+    },
 }
 
 pub(crate) fn parse_args() -> CliArgs {
