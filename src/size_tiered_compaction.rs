@@ -332,13 +332,10 @@ impl CompactionSchedulerSupplier for SizeTieredCompactionSchedulerSupplier {
 mod tests {
     use std::collections::VecDeque;
 
-    use bytes::Bytes;
-
     use crate::compactor::CompactionScheduler;
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
     use crate::config::SizeTieredCompactionSchedulerOptions;
-    use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId};
-    use crate::flatbuffer_types::{SsTableInfo, SsTableInfoArgs, SsTableInfoOwned};
+    use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
 
     #[test]
@@ -626,20 +623,14 @@ mod tests {
     }
 
     fn create_sst(size: u64) -> SsTableHandle {
-        let mut builder = flatbuffers::FlatBufferBuilder::new();
-        let wip = SsTableInfo::create(
-            &mut builder,
-            &SsTableInfoArgs {
-                first_key: None,
-                index_offset: size,
-                index_len: 0,
-                filter_offset: 0,
-                filter_len: 0,
-                compression_format: None.into(),
-            },
-        );
-        builder.finish(wip, None);
-        let info = SsTableInfoOwned::new(Bytes::copy_from_slice(builder.finished_data())).unwrap();
+        let info = SsTableInfo {
+            first_key: None,
+            index_offset: size,
+            index_len: 0,
+            filter_offset: 0,
+            filter_len: 0,
+            compression_codec: None,
+        };
         SsTableHandle {
             id: SsTableId::Compacted(ulid::Ulid::new()),
             info,

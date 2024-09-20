@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
 
+use serde::Serialize;
 use tokio::runtime::Handle;
 
 use crate::compactor::CompactionScheduler;
@@ -171,7 +172,7 @@ impl Default for DbOptions {
 }
 
 /// The compression algorithm to use for SSTables.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize)]
 pub enum CompressionCodec {
     #[cfg(feature = "snappy")]
     /// Snappy compression algorithm.
