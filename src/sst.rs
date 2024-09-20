@@ -271,9 +271,9 @@ impl SsTableFormat {
 
 impl SsTableInfo {
     pub(crate) fn encode(info: &SsTableInfo, buf: &mut Vec<u8>, sst_codec: &dyn SsTableInfoCodec) {
-        let data = sst_codec.encode(info);
-        buf.extend_from_slice(data.as_ref());
-        buf.put_u32(crc32fast::hash(data.as_ref()));
+        let data = &sst_codec.encode(info);
+        buf.extend_from_slice(data);
+        buf.put_u32(crc32fast::hash(data));
     }
 
     pub(crate) fn decode(
