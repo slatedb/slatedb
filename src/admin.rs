@@ -3,18 +3,35 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use std::env;
 use std::error::Error;
+use std::ops::RangeBounds;
 use std::sync::Arc;
 
 /// read-only access to the latest manifest file
 pub async fn read_manifest(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
+    maybe_id: Option<u64>,
 ) -> Result<Option<String>, Box<dyn Error>> {
     let manifest_store = ManifestStore::new(path, object_store);
-    match manifest_store.read_latest_manifest().await? {
+    let id_manifest = match maybe_id {
+        None => manifest_store.read_latest_manifest().await?,
+        Some(id) => manifest_store.read_manifest(id).await?,
+    };
+
+    match id_manifest {
         None => Ok(None),
-        Some(id_manifest) => Ok(Some(serde_json::to_string(&id_manifest)?)),
+        Some(result) => Ok(Some(serde_json::to_string(&result)?)),
     }
+}
+
+pub async fn list_manifests<R: RangeBounds<u64>>(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    range: R,
+) -> Result<String, Box<dyn Error>> {
+    let manifest_store = ManifestStore::new(path, object_store);
+    let manifests = manifest_store.list_manifests(range).await?;
+    Ok(serde_json::to_string(&manifests)?)
 }
 
 /// Loads an object store from configured environment variables.
