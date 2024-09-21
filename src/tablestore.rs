@@ -205,12 +205,8 @@ impl TableStore {
                 _ => SlateDBError::ObjectStoreError(e),
             })?;
 
-        self.cache_filter(
-            *id,
-            encoded_sst.info.borrow().filter_offset(),
-            encoded_sst.filter,
-        )
-        .await;
+        self.cache_filter(*id, encoded_sst.info.filter_offset, encoded_sst.filter)
+            .await;
         Ok(SsTableHandle {
             id: *id,
             info: encoded_sst.info,
@@ -297,7 +293,7 @@ impl TableStore {
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(filter) = cache
-                .get((handle.id, handle.info.borrow().filter_offset() as usize))
+                .get((handle.id, handle.info.filter_offset as usize))
                 .await
                 .bloom_filter()
             {
@@ -314,7 +310,7 @@ impl TableStore {
             if let Some(filter) = filter.as_ref() {
                 cache
                     .insert(
-                        (handle.id, handle.info.borrow().filter_offset() as usize),
+                        (handle.id, handle.info.filter_offset as usize),
                         CachedBlock::Filter(filter.clone()),
                     )
                     .await;
@@ -329,7 +325,7 @@ impl TableStore {
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(index) = cache
-                .get((handle.id, handle.info.borrow().index_offset() as usize))
+                .get((handle.id, handle.info.index_offset as usize))
                 .await
                 .sst_index()
             {
@@ -345,7 +341,7 @@ impl TableStore {
         if let Some(cache) = &self.block_cache {
             cache
                 .insert(
-                    (handle.id, handle.info.borrow().index_offset() as usize),
+                    (handle.id, handle.info.index_offset as usize),
                     CachedBlock::Index(index.clone()),
                 )
                 .await;
@@ -543,11 +539,7 @@ impl<'a> EncodedSsTableWriter<'a> {
         }
         self.writer.shutdown().await?;
         self.table_store
-            .cache_filter(
-                self.id,
-                encoded_sst.info.borrow().filter_offset(),
-                encoded_sst.filter,
-            )
+            .cache_filter(self.id, encoded_sst.info.filter_offset, encoded_sst.filter)
             .await;
         Ok(SsTableHandle {
             id: self.id,
