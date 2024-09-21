@@ -72,8 +72,8 @@ impl BloomFilter {
         (self.buffer.len() * 8) as u32
     }
 
-    pub(crate) fn has_key(&self, key: &[u8]) -> bool {
-        for p in probes_for_key(filter_hash(key), self.num_probes, self.filter_bits()) {
+    pub(crate) fn has_key(&self, key_hash: u64) -> bool {
+        for p in probes_for_key(key_hash, self.num_probes, self.filter_bits()) {
             if !check_bit(p as usize, &self.buffer) {
                 return false;
             }
@@ -82,7 +82,7 @@ impl BloomFilter {
     }
 }
 
-fn filter_hash(key: &[u8]) -> u64 {
+pub fn filter_hash(key: &[u8]) -> u64 {
     // sip hash is the default rust hash function, however its only
     // accessible by creating DefaultHasher. Direct use of SipHasher13 in
     // std is deprecated. We don't want to use DefaultHasher because the
@@ -230,7 +230,8 @@ mod tests {
             let mut bytes = BytesMut::with_capacity(key_sz);
             bytes.reserve(key_sz);
             bytes.put_u32(i);
-            assert!(filter.has_key(bytes.freeze().as_ref()));
+            let hash = filter_hash(bytes.freeze().as_ref());
+            assert!(filter.has_key(hash));
         }
 
         // check false positives
@@ -239,7 +240,8 @@ mod tests {
             let mut bytes = BytesMut::with_capacity(key_sz);
             bytes.reserve(key_sz);
             bytes.put_u32(i);
-            if filter.has_key(bytes.freeze().as_ref()) {
+            let hash = filter_hash(bytes.freeze().as_ref());
+            if filter.has_key(hash) {
                 fp += 1;
             }
         }

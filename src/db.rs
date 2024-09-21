@@ -15,6 +15,7 @@ use crate::config::{
 };
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
+use crate::filter;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -80,8 +81,10 @@ impl DbInner {
             return Ok(val.into_option());
         }
 
+        let key_hash = filter::filter_hash(key);
+
         for sst in &snapshot.state.core.l0 {
-            if self.sst_may_include_key(sst, key).await? {
+            if self.sst_may_include_key(sst, key, key_hash).await? {
                 let mut iter =
                     SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1, true)
                         .await?; // cache blocks that are being read
@@ -93,7 +96,7 @@ impl DbInner {
             }
         }
         for sr in &snapshot.state.core.compacted {
-            if self.sr_may_include_key(sr, key).await? {
+            if self.sr_may_include_key(sr, key, key_hash).await? {
                 let mut iter =
                     SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1, true) // cache blocks
                         .await?;
@@ -144,20 +147,26 @@ impl DbInner {
         &self,
         sst: &SsTableHandle,
         key: &[u8],
+        key_hash: u64,
     ) -> Result<bool, SlateDBError> {
         if !sst.range_covers_key(key) {
             return Ok(false);
         }
         if let Some(filter) = self.table_store.read_filter(sst).await? {
-            return Ok(filter.has_key(key));
+            return Ok(filter.has_key(key_hash));
         }
         Ok(true)
     }
 
-    async fn sr_may_include_key(&self, sr: &SortedRun, key: &[u8]) -> Result<bool, SlateDBError> {
+    async fn sr_may_include_key(
+        &self,
+        sr: &SortedRun,
+        key: &[u8],
+        key_hash: u64,
+    ) -> Result<bool, SlateDBError> {
         if let Some(sst) = sr.find_sst_with_range_covering_key(key) {
             if let Some(filter) = self.table_store.read_filter(sst).await? {
-                return Ok(filter.has_key(key));
+                return Ok(filter.has_key(key_hash));
             }
             return Ok(true);
         }
