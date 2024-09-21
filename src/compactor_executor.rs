@@ -8,8 +8,8 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 use ulid::Ulid;
 
-use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor::WorkerToOrchestratorMsg::CompactionFinished;
+use crate::compactor::{FilterResult, WorkerToOrchestratorMsg};
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -18,6 +18,8 @@ use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
+use crate::types::KeyValueDeletable;
+use crate::types::ValueDeletable::Tombstone;
 
 pub(crate) struct CompactionJob {
     pub(crate) destination: u32,
@@ -117,7 +119,21 @@ impl TokioCompactionExecutorInner {
             .table_store
             .table_writer(SsTableId::Compacted(Ulid::new()));
         let mut current_size = 0usize;
-        while let Some(kv) = all_iter.next_entry().await? {
+
+        let filter = &self.options.compaction_filter;
+        while let Some(raw_kv) = all_iter.next_entry().await? {
+            let kv = match filter.filter(&raw_kv) {
+                FilterResult::Keep => raw_kv,
+                FilterResult::Delete => KeyValueDeletable {
+                    key: raw_kv.key,
+                    value: Tombstone,
+                },
+                FilterResult::Modify { new_value } => KeyValueDeletable {
+                    key: raw_kv.key,
+                    value: new_value,
+                },
+            };
+
             // Add to SST
             let value = kv.value.into_option();
             current_writer

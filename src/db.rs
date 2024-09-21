@@ -562,6 +562,7 @@ mod tests {
     use tracing::info;
 
     use super::*;
+    use crate::compactor::NoopCompactionFilter;
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
     };
@@ -1294,6 +1295,7 @@ mod tests {
                 )),
                 max_concurrent_compactions: 1,
                 compaction_runtime: None,
+                compaction_filter: Arc::new(Box::new(NoopCompactionFilter {})),
             }),
         ))
         .await;
@@ -1312,6 +1314,7 @@ mod tests {
                 )),
                 max_concurrent_compactions: 1,
                 compaction_runtime: None,
+                compaction_filter: Arc::new(Box::new(NoopCompactionFilter {})),
             }),
         ))
         .await

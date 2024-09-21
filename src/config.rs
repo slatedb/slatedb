@@ -3,7 +3,7 @@ use std::{str::FromStr, time::Duration};
 
 use tokio::runtime::Handle;
 
-use crate::compactor::CompactionScheduler;
+use crate::compactor::{CompactionFilter, CompactionScheduler, NoopCompactionFilter};
 use crate::error::SlateDBError;
 use crate::inmemory_cache::InMemoryCacheOptions;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
@@ -232,6 +232,10 @@ pub struct CompactorOptions {
     /// An optional tokio runtime handle to use for scheduling compaction work. You can use
     /// this to isolate compactions to a dedicated thread pool.
     pub compaction_runtime: Option<Handle>,
+
+    /// An optional filter that can perform filtering and modification on rows
+    /// during the compaction operation.
+    pub compaction_filter: Arc<Box<dyn CompactionFilter>>,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -248,6 +252,7 @@ impl Default for CompactorOptions {
             )),
             max_concurrent_compactions: 4,
             compaction_runtime: None,
+            compaction_filter: Arc::new(Box::new(NoopCompactionFilter {})),
         }
     }
 }

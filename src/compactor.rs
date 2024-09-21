@@ -18,9 +18,28 @@ use crate::error::SlateDBError;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::metrics::DbStats;
 use crate::tablestore::TableStore;
+use crate::types::{KeyValueDeletable, ValueDeletable};
 
 pub trait CompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
+}
+
+pub trait CompactionFilter: Send + Sync {
+    fn filter(&self, kv: &KeyValueDeletable) -> FilterResult;
+}
+
+pub enum FilterResult {
+    Keep,
+    Delete,
+    Modify { new_value: ValueDeletable },
+}
+
+pub struct NoopCompactionFilter {}
+
+impl CompactionFilter for NoopCompactionFilter {
+    fn filter(&self, _: &KeyValueDeletable) -> FilterResult {
+        FilterResult::Keep
+    }
 }
 
 enum CompactorMainMsg {
@@ -294,6 +313,7 @@ impl CompactorOrchestrator {
 mod tests {
     use std::future::Future;
     use std::sync::Arc;
+
     use std::time::{Duration, SystemTime};
 
     use object_store::memory::InMemory;
@@ -302,16 +322,22 @@ mod tests {
     use tokio::runtime::Runtime;
     use ulid::Ulid;
 
-    use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestratorMsg};
+    use crate::compactor::{
+        CompactionFilter, CompactorOptions, CompactorOrchestrator, FilterResult,
+        WorkerToOrchestratorMsg,
+    };
     use crate::compactor_state::{Compaction, SourceId};
     use crate::config::{DbOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions};
     use crate::db::Db;
+    use crate::db_state::CoreDbState;
     use crate::iter::KeyValueIterator;
     use crate::manifest_store::{ManifestStore, StoredManifest};
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
+    use crate::types::{KeyValueDeletable, ValueDeletable};
+    use bytes::Bytes;
 
     const PATH: &str = "/test/db";
 
@@ -326,18 +352,7 @@ mod tests {
         }
 
         // when:
-        let db_state = run_for(Duration::from_secs(10), || async {
-            let stored_manifest = StoredManifest::load(manifest_store.clone())
-                .await
-                .unwrap()
-                .unwrap();
-            let db_state = stored_manifest.db_state();
-            if db_state.l0_last_compacted.is_some() {
-                return Some(db_state.clone());
-            }
-            None
-        })
-        .await;
+        let db_state = await_compaction(manifest_store).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -361,6 +376,67 @@ mod tests {
         }
         assert!(iter.next().await.unwrap().is_none());
         // todo: test that the db can read the k/vs (once we implement reading from compacted)
+    }
+
+    #[tokio::test]
+    async fn test_should_apply_compaction_filter() {
+        // given:
+        let options = db_options(Some(compactor_options()));
+        let (_, manifest_store, table_store, db) = build_test_db(options).await;
+        for i in 0..8 {
+            db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48]).await;
+        }
+
+        // when:
+        let db_state = await_compaction(manifest_store).await;
+
+        // then:
+        let db_state = db_state.expect("db was not compacted");
+        assert!(db_state.l0_last_compacted.is_some());
+        assert_eq!(db_state.compacted.len(), 1);
+        let compacted = &db_state.compacted.first().unwrap().ssts;
+        assert_eq!(compacted.len(), 1);
+        let handle = compacted.first().unwrap();
+        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1, false)
+            .await
+            .unwrap();
+
+        for i in 0..6 {
+            if i == 4 {
+                // this is the result of the DELETE filter result
+                continue;
+            }
+            let maybe_kv = iter.next().await.unwrap();
+            if let Some(kv) = maybe_kv {
+                assert_eq!(
+                    kv.key.as_ref(),
+                    &[b'a' + i as u8; 16],
+                    "Failed to match at index: {}",
+                    i
+                );
+                if kv.key.as_ref().eq(&[b'a' + 5u8; 16]) {
+                    // this is the result of the MODIFY filter result
+                    assert_eq!(kv.value.as_ref(), &[b'z'; 48]);
+                } else {
+                    assert_eq!(kv.value.as_ref(), &[b'b' + i as u8; 48]);
+                }
+            }
+        }
+    }
+
+    async fn await_compaction(manifest_store: Arc<ManifestStore>) -> Option<CoreDbState> {
+        run_for(Duration::from_secs(10), || async {
+            let stored_manifest = StoredManifest::load(manifest_store.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            let db_state = stored_manifest.db_state();
+            if db_state.l0_last_compacted.is_some() {
+                return Some(db_state.clone());
+            }
+            None
+        })
+        .await
     }
 
     #[test]
@@ -506,6 +582,23 @@ mod tests {
             )),
             max_concurrent_compactions: 1,
             compaction_runtime: None,
+            compaction_filter: Arc::new(Box::new(TestCompactionFilter {})),
+        }
+    }
+
+    struct TestCompactionFilter {}
+
+    impl CompactionFilter for TestCompactionFilter {
+        fn filter(&self, kv: &KeyValueDeletable) -> FilterResult {
+            if kv.key.as_ref().eq(&[b'a' + 4u8; 16]) {
+                return FilterResult::Delete;
+            } else if kv.key.as_ref().eq(&[b'a' + 5u8; 16]) {
+                return FilterResult::Modify {
+                    new_value: ValueDeletable::Value(Bytes::copy_from_slice(&[b'z'; 48])),
+                };
+            }
+
+            FilterResult::Keep
         }
     }
 }
