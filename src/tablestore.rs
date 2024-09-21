@@ -216,9 +216,7 @@ impl TableStore {
     async fn cache_filter(&self, sst: SsTableId, id: u64, filter: Option<Arc<BloomFilter>>) {
         if let Some(cache) = &self.block_cache {
             if let Some(filter) = filter {
-                cache
-                    .insert((sst, id as usize), CachedBlock::Filter(filter))
-                    .await;
+                cache.insert((sst, id), CachedBlock::Filter(filter)).await;
             }
         }
     }
@@ -293,7 +291,7 @@ impl TableStore {
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(filter) = cache
-                .get((handle.id, handle.info.filter_offset as usize))
+                .get((handle.id, handle.info.filter_offset))
                 .await
                 .bloom_filter()
             {
@@ -310,7 +308,7 @@ impl TableStore {
             if let Some(filter) = filter.as_ref() {
                 cache
                     .insert(
-                        (handle.id, handle.info.filter_offset as usize),
+                        (handle.id, handle.info.filter_offset),
                         CachedBlock::Filter(filter.clone()),
                     )
                     .await;
@@ -325,7 +323,7 @@ impl TableStore {
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(index) = cache
-                .get((handle.id, handle.info.index_offset as usize))
+                .get((handle.id, handle.info.index_offset))
                 .await
                 .sst_index()
             {
@@ -341,7 +339,7 @@ impl TableStore {
         if let Some(cache) = &self.block_cache {
             cache
                 .insert(
-                    (handle.id, handle.info.index_offset as usize),
+                    (handle.id, handle.info.index_offset),
                     CachedBlock::Index(index.clone()),
                 )
                 .await;
@@ -395,7 +393,7 @@ impl TableStore {
             // Attempt to get all requested blocks from cache concurrently
             let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
                 let block_meta = index_borrow.block_meta().get(block_num);
-                let offset = block_meta.offset() as usize;
+                let offset = block_meta.offset();
                 cache.get((handle.id, offset)).await.block()
             }))
             .await;
@@ -413,6 +411,7 @@ impl TableStore {
                         blocks_read.push_back(cached_block);
                     }
                     None => {
+                        // If a block is not in cache, mark the start of an uncached range
                         last_uncached_start.get_or_insert(index);
                     }
                 }
@@ -422,6 +421,7 @@ impl TableStore {
                 uncached_ranges.push((blocks.start + start)..blocks.end);
             }
         } else {
+            // If no cache is available, treat all blocks as uncached
             uncached_ranges.push(blocks.clone());
         }
         // Read uncached blocks concurrently
@@ -436,6 +436,7 @@ impl TableStore {
         }))
         .await;
 
+        // Merge uncached blocks with blocks_read and prepare blocks for caching
         let mut blocks_to_cache = vec![];
         for (range, range_blocks) in uncached_ranges.into_iter().zip(uncached_blocks) {
             let index_borrow = index.borrow();
@@ -443,13 +444,14 @@ impl TableStore {
                 let block = Arc::new(block_read);
                 if cache_blocks {
                     let block_meta = index_borrow.block_meta().get(block_num);
-                    let offset = block_meta.offset() as usize;
+                    let offset = block_meta.offset();
                     blocks_to_cache.push((handle.id, offset, block.clone()));
                 }
                 blocks_read.insert(block_num - blocks.start, block);
             }
         }
 
+        // Cache the newly read blocks if caching is enabled
         if let Some(cache) = &self.block_cache {
             if !blocks_to_cache.is_empty() {
                 join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
@@ -710,7 +712,7 @@ mod tests {
 
         // Check that all blocks are now in cache
         for i in 0..20 {
-            let offset = index.borrow().block_meta().get(i).offset() as usize;
+            let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache.get((handle.id, offset)).await.block().is_some(),
                 "Block with offset {} should be in cache",
@@ -720,11 +722,11 @@ mod tests {
 
         // Partially clear the cache (remove blocks 5..10 and 15..20)
         for i in 5..10 {
-            let offset = index.borrow().block_meta().get(i).offset() as usize;
+            let offset = index.borrow().block_meta().get(i).offset();
             block_cache.remove((handle.id, offset)).await;
         }
         for i in 15..20 {
-            let offset = index.borrow().block_meta().get(i).offset() as usize;
+            let offset = index.borrow().block_meta().get(i).offset();
             block_cache.remove((handle.id, offset)).await;
         }
 
@@ -737,7 +739,7 @@ mod tests {
 
         // Check that all blocks are again in cache
         for i in 0..20 {
-            let offset = index.borrow().block_meta().get(i).offset() as usize;
+            let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache.get((handle.id, offset)).await.block().is_some(),
                 "Block with offset {} should be in cache after partial hit",
@@ -758,7 +760,7 @@ mod tests {
 
         // Check that all blocks are still in cache
         for i in 0..20 {
-            let offset = index.borrow().block_meta().get(i).offset() as usize;
+            let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache.get((handle.id, offset)).await.block().is_some(),
                 "Block with offset {} should be in cache after SST emptying",

@@ -42,16 +42,16 @@ impl Default for InMemoryCacheOptions {
 
 #[async_trait]
 pub(crate) trait InMemoryCache: Send + Sync + 'static {
-    async fn get(&self, key: (SsTableId, usize)) -> CachedBlockOption;
-    async fn insert(&self, key: (SsTableId, usize), value: CachedBlock);
+    async fn get(&self, key: (SsTableId, u64)) -> CachedBlockOption;
+    async fn insert(&self, key: (SsTableId, u64), value: CachedBlock);
     #[allow(dead_code)]
-    async fn remove(&self, key: (SsTableId, usize));
+    async fn remove(&self, key: (SsTableId, u64));
     #[allow(dead_code)]
     fn entry_count(&self) -> u64;
 }
 
 pub(crate) struct MokaCache {
-    inner: moka::future::Cache<(SsTableId, usize), CachedBlock>,
+    inner: moka::future::Cache<(SsTableId, u64), CachedBlock>,
 }
 
 impl MokaCache {
@@ -76,15 +76,15 @@ impl MokaCache {
 
 #[async_trait]
 impl InMemoryCache for MokaCache {
-    async fn get(&self, key: (SsTableId, usize)) -> CachedBlockOption {
+    async fn get(&self, key: (SsTableId, u64)) -> CachedBlockOption {
         CachedBlockOption::Moka(self.inner.get(&key).await)
     }
 
-    async fn insert(&self, key: (SsTableId, usize), value: CachedBlock) {
+    async fn insert(&self, key: (SsTableId, u64), value: CachedBlock) {
         self.inner.insert(key, value).await;
     }
 
-    async fn remove(&self, key: (SsTableId, usize)) {
+    async fn remove(&self, key: (SsTableId, u64)) {
         self.inner.remove(&key).await;
     }
 
@@ -94,7 +94,7 @@ impl InMemoryCache for MokaCache {
 }
 
 pub(crate) struct FoyerCache {
-    inner: foyer::Cache<(SsTableId, usize), CachedBlock>,
+    inner: foyer::Cache<(SsTableId, u64), CachedBlock>,
 }
 
 impl FoyerCache {
@@ -118,15 +118,15 @@ impl FoyerCache {
 
 #[async_trait]
 impl InMemoryCache for FoyerCache {
-    async fn get(&self, key: (SsTableId, usize)) -> CachedBlockOption {
+    async fn get(&self, key: (SsTableId, u64)) -> CachedBlockOption {
         CachedBlockOption::Foyer(self.inner.get(&key))
     }
 
-    async fn insert(&self, key: (SsTableId, usize), value: CachedBlock) {
+    async fn insert(&self, key: (SsTableId, u64), value: CachedBlock) {
         self.inner.insert(key, value);
     }
 
-    async fn remove(&self, key: (SsTableId, usize)) {
+    async fn remove(&self, key: (SsTableId, u64)) {
         self.inner.remove(&key);
     }
 
@@ -152,7 +152,7 @@ pub(crate) fn create_block_cache(
 /// wrapper around Option<CachedBlock> to provide helper functions
 pub(crate) enum CachedBlockOption {
     Moka(Option<CachedBlock>),
-    Foyer(Option<foyer::CacheEntry<(SsTableId, usize), CachedBlock>>),
+    Foyer(Option<foyer::CacheEntry<(SsTableId, u64), CachedBlock>>),
 }
 
 impl CachedBlockOption {
