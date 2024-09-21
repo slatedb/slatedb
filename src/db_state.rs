@@ -1,42 +1,43 @@
+use bytes::Bytes;
+use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
-
 use tracing::info;
 use ulid::Ulid;
 use SsTableId::{Compacted, Wal};
 
-use crate::flatbuffer_types::SsTableInfoOwned;
+use crate::config::CompressionCodec;
+use crate::error::SlateDBError;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct SsTableHandle {
     pub id: SsTableId,
-    pub info: SsTableInfoOwned,
+    pub info: SsTableInfo,
 }
 
 impl SsTableHandle {
-    pub(crate) fn new(id: SsTableId, info: SsTableInfoOwned) -> Self {
+    pub(crate) fn new(id: SsTableId, info: SsTableInfo) -> Self {
         SsTableHandle { id, info }
     }
 
     pub(crate) fn range_covers_key(&self, key: &[u8]) -> bool {
-        if let Some(first_key) = self.info.borrow().first_key() {
-            return key >= first_key.bytes();
+        if let Some(first_key) = self.info.first_key.as_ref() {
+            return key >= first_key;
         }
         false
     }
 
     pub(crate) fn estimate_size(&self) -> u64 {
-        let info = self.info.borrow();
         // this is a hacky estimate of the sst size since we don't have it stored anywhere
         // right now. Just use the index's offset and add the index length. Since the index
         // is the last thing we put in the SST before the info footer, this should be a good
         // estimate for now.
-        info.index_offset() + info.index_len()
+        self.info.index_offset + self.info.index_len
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Hash, Eq, Copy)]
+#[derive(Clone, PartialEq, Debug, Hash, Eq, Copy, Serialize)]
 pub enum SsTableId {
     Wal(u64),
     Compacted(Ulid),
@@ -60,7 +61,34 @@ impl SsTableId {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct SsTableInfo {
+    pub(crate) first_key: Option<Bytes>,
+    pub(crate) index_offset: u64,
+    pub(crate) index_len: u64,
+    pub(crate) filter_offset: u64,
+    pub(crate) filter_len: u64,
+    pub(crate) compression_codec: Option<CompressionCodec>,
+}
+
+pub(crate) trait SsTableInfoCodec: Send + Sync {
+    fn encode(&self, manifest: &SsTableInfo) -> Bytes;
+
+    fn decode(&self, bytes: &Bytes) -> Result<SsTableInfo, SlateDBError>;
+
+    fn clone_box(&self) -> Box<dyn SsTableInfoCodec>;
+}
+
+/// Implement Clone for Box<dyn SsTableInfoCodec> by delegating to the clone_box method.
+/// This is the idiomatic way to clone trait objects in Rust. It is also the only way to
+/// clone trait objects without knowing the concrete type.
+impl Clone for Box<dyn SsTableInfoCodec> {
+    fn clone(&self) -> Self {
+        self.as_ref().clone_box()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize)]
 pub struct SortedRun {
     pub(crate) id: u32,
     pub(crate) ssts: Vec<SsTableHandle>,
@@ -75,10 +103,9 @@ impl SortedRun {
         // returns the sst after the one whose range includes the key
         let first_sst = self.ssts.partition_point(|sst| {
             sst.info
-                .borrow()
-                .first_key()
+                .first_key
+                .as_ref()
                 .expect("sst must have first key")
-                .bytes()
                 <= key
         });
         if first_sst > 0 {
@@ -107,8 +134,9 @@ pub(crate) struct COWDbState {
     pub(crate) imm_wal: VecDeque<Arc<ImmutableWal>>,
     pub(crate) core: CoreDbState,
 }
+
 // represents the core db state that we persist in the manifest
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct CoreDbState {
     pub(crate) l0_last_compacted: Option<Ulid>,
     pub(crate) l0: VecDeque<SsTableHandle>,
@@ -273,11 +301,9 @@ impl DbState {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
     use ulid::Ulid;
 
-    use crate::db_state::{CoreDbState, DbState, SsTableHandle, SsTableId};
-    use crate::flatbuffer_types::{SsTableInfo, SsTableInfoArgs, SsTableInfoOwned};
+    use crate::db_state::{CoreDbState, DbState, SsTableHandle, SsTableId, SsTableInfo};
 
     #[test]
     fn test_should_refresh_db_state_with_l0s_up_to_last_compacted() {
@@ -324,20 +350,14 @@ mod tests {
         }
     }
 
-    fn create_sst_info() -> SsTableInfoOwned {
-        let mut builder = flatbuffers::FlatBufferBuilder::new();
-        let wip = SsTableInfo::create(
-            &mut builder,
-            &SsTableInfoArgs {
-                first_key: None,
-                index_offset: 0,
-                index_len: 0,
-                filter_offset: 0,
-                filter_len: 0,
-                compression_format: None.into(),
-            },
-        );
-        builder.finish(wip, None);
-        SsTableInfoOwned::new(Bytes::copy_from_slice(builder.finished_data())).unwrap()
+    fn create_sst_info() -> SsTableInfo {
+        SsTableInfo {
+            first_key: None,
+            index_offset: 0,
+            index_len: 0,
+            filter_offset: 0,
+            filter_len: 0,
+            compression_codec: None,
+        }
     }
 }

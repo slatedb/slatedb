@@ -293,6 +293,9 @@ name = "bytes"
 version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8318a53db07bb3f8dca91a600466bdb3f2eaadeedfdbcf02e1accbad9271ba50"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "cc"
@@ -545,6 +548,12 @@ dependencies = [
  "block-buffer",
  "crypto-common",
 ]
+
+[[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "downcast-rs"
@@ -2123,6 +2132,7 @@ dependencies = [
  "crc32fast",
  "crossbeam-channel",
  "crossbeam-skiplist",
+ "dotenvy",
  "env_logger",
  "fail-parallel",
  "flatbuffers",
@@ -2529,6 +2539,7 @@ checksum = "04f903f293d11f31c0c29e4148f6dc0d033a7f80cebc0282bea147611667d289"
 dependencies = [
  "getrandom",
  "rand",
+ "serde",
  "web-time",
 ]
 

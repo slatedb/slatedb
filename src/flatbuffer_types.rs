@@ -4,7 +4,7 @@ use bytes::Bytes;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
 use ulid::Ulid;
 
-use crate::db_state;
+use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SsTableHandle};
 
 #[path = "./generated/manifest_generated.rs"]
@@ -13,7 +13,7 @@ use crate::db_state::{CoreDbState, SsTableHandle};
 mod manifest_generated;
 pub use manifest_generated::{
     BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
-    SsTableInfo, SsTableInfoArgs,
+    SsTableInfo as FbSsTableInfo, SsTableInfoArgs,
 };
 
 use crate::config::CompressionCodec;
@@ -25,37 +25,6 @@ use crate::flatbuffer_types::manifest_generated::{
     SortedRun, SortedRunArgs,
 };
 use crate::manifest::{Manifest, ManifestCodec};
-
-#[derive(Clone, PartialEq, Debug)]
-pub(crate) struct SsTableInfoOwned {
-    data: Bytes,
-}
-
-impl SsTableInfoOwned {
-    pub fn new(data: Bytes) -> Result<Self, InvalidFlatbuffer> {
-        flatbuffers::root::<SsTableInfo>(&data)?;
-        Ok(Self { data })
-    }
-
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    pub fn borrow(&self) -> SsTableInfo<'_> {
-        let raw = &self.data;
-        // This is safe, because we validated the flatbuffer on construction and the
-        // memory is immutable once we construct the handle.
-        unsafe { flatbuffers::root_unchecked::<SsTableInfo>(raw) }
-    }
-
-    pub fn create_copy(sst_info: &SsTableInfo) -> Self {
-        let builder = flatbuffers::FlatBufferBuilder::new();
-        let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
-        Self {
-            data: db_fb_builder.create_sst_info_copy(sst_info),
-        }
-    }
-}
 
 pub(crate) struct SsTableIndexOwned {
     data: Bytes,
@@ -73,21 +42,61 @@ impl SsTableIndexOwned {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct FlatBufferSsTableInfoCodec {}
+
+impl SsTableInfoCodec for FlatBufferSsTableInfoCodec {
+    fn encode(&self, info: &SsTableInfo) -> Bytes {
+        Self::create_from_sst_info(info)
+    }
+
+    fn decode(&self, bytes: &Bytes) -> Result<SsTableInfo, SlateDBError> {
+        let info = flatbuffers::root::<FbSsTableInfo>(bytes)?;
+        Ok(Self::sst_info(&info))
+    }
+
+    fn clone_box(&self) -> Box<dyn SsTableInfoCodec> {
+        Box::new(Self {})
+    }
+}
+
+impl FlatBufferSsTableInfoCodec {
+    pub fn sst_info(info: &FbSsTableInfo) -> SsTableInfo {
+        let first_key: Option<Bytes> = info
+            .first_key()
+            .map(|key| Bytes::copy_from_slice(key.bytes()));
+        SsTableInfo {
+            first_key,
+            index_offset: info.index_offset(),
+            index_len: info.index_len(),
+            filter_offset: info.filter_offset(),
+            filter_len: info.filter_len(),
+            compression_codec: info.compression_format().into(),
+        }
+    }
+
+    pub fn create_from_sst_info(info: &SsTableInfo) -> Bytes {
+        let builder = FlatBufferBuilder::new();
+        let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
+        db_fb_builder.create_sst_info(info)
+    }
+}
+
 pub(crate) struct FlatBufferManifestCodec {}
 
 impl ManifestCodec for FlatBufferManifestCodec {
     fn encode(&self, manifest: &Manifest) -> Bytes {
-        self.create_from_manifest(manifest)
+        Self::create_from_manifest(manifest)
     }
 
     fn decode(&self, bytes: &Bytes) -> Result<Manifest, SlateDBError> {
         let manifest = flatbuffers::root::<ManifestV1>(bytes)?;
-        Ok(self.manifest(&manifest))
+        Ok(Self::manifest(&manifest))
     }
 }
 
 impl FlatBufferManifestCodec {
-    pub fn manifest(&self, manifest: &ManifestV1) -> Manifest {
+    pub fn manifest(manifest: &ManifestV1) -> Manifest {
         let l0_last_compacted = manifest
             .l0_last_compacted()
             .map(|id| Ulid::from((id.high(), id.low())));
@@ -95,7 +104,8 @@ impl FlatBufferManifestCodec {
         for man_sst in manifest.l0().iter() {
             let man_sst_id = man_sst.id();
             let sst_id = Compacted(Ulid::from((man_sst_id.high(), man_sst_id.low())));
-            let sst_info = SsTableInfoOwned::create_copy(&man_sst.info());
+
+            let sst_info = FlatBufferSsTableInfoCodec::sst_info(&man_sst.info());
             let l0_sst = SsTableHandle::new(sst_id, sst_info);
             l0.push_back(l0_sst);
         }
@@ -104,7 +114,7 @@ impl FlatBufferManifestCodec {
             let mut ssts = Vec::new();
             for manifest_sst in manifest_sr.ssts().iter() {
                 let id = Compacted(manifest_sst.id().ulid());
-                let info = SsTableInfoOwned::create_copy(&manifest_sst.info());
+                let info = FlatBufferSsTableInfoCodec::sst_info(&manifest_sst.info());
                 ssts.push(SsTableHandle::new(id, info));
             }
             compacted.push(db_state::SortedRun {
@@ -126,7 +136,7 @@ impl FlatBufferManifestCodec {
         }
     }
 
-    pub fn create_from_manifest(&self, manifest: &Manifest) -> Bytes {
+    pub fn create_from_manifest(manifest: &Manifest) -> Bytes {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
         db_fb_builder.create_manifest(manifest)
@@ -148,20 +158,20 @@ impl<'b> DbFlatBufferBuilder<'b> {
         Self { builder }
     }
 
-    fn add_sst_info_copy(&mut self, info: &SsTableInfo) -> WIPOffset<SsTableInfo<'b>> {
-        let first_key = match info.first_key() {
+    fn add_sst_info(&mut self, info: &SsTableInfo) -> WIPOffset<FbSsTableInfo<'b>> {
+        let first_key = match info.first_key.as_ref() {
             None => None,
-            Some(first_key_vector) => Some(self.builder.create_vector(first_key_vector.bytes())),
+            Some(first_key_vector) => Some(self.builder.create_vector(first_key_vector)),
         };
-        SsTableInfo::create(
+        FbSsTableInfo::create(
             &mut self.builder,
             &SsTableInfoArgs {
                 first_key,
-                index_offset: info.index_offset(),
-                index_len: info.index_len(),
-                filter_offset: info.filter_offset(),
-                filter_len: info.filter_len(),
-                compression_format: info.compression_format(),
+                index_offset: info.index_offset,
+                index_len: info.index_len,
+                filter_offset: info.filter_offset,
+                filter_len: info.filter_len,
+                compression_format: info.compression_codec.into(),
             },
         )
     }
@@ -177,7 +187,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
     fn add_compacted_sst(
         &mut self,
         id: &SsTableId,
-        info: &SsTableInfoOwned,
+        info: &SsTableInfo,
     ) -> WIPOffset<CompactedSsTable<'b>> {
         let ulid = match id {
             SsTableId::Wal(_) => {
@@ -186,7 +196,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
             SsTableId::Compacted(ulid) => *ulid,
         };
         let compacted_sst_id = self.add_compacted_sst_id(&ulid);
-        let compacted_sst_info = self.add_sst_info_copy(&info.borrow());
+        let compacted_sst_info = self.add_sst_info(info);
         CompactedSsTable::create(
             &mut self.builder,
             &CompactedSsTableArgs {
@@ -257,8 +267,8 @@ impl<'b> DbFlatBufferBuilder<'b> {
         Bytes::copy_from_slice(self.builder.finished_data())
     }
 
-    fn create_sst_info_copy(&mut self, sst_info: &SsTableInfo) -> Bytes {
-        let copy = self.add_sst_info_copy(sst_info);
+    fn create_sst_info(&mut self, info: &SsTableInfo) -> Bytes {
+        let copy = self.add_sst_info(info);
         self.builder.finish(copy, None);
         Bytes::copy_from_slice(self.builder.finished_data())
     }

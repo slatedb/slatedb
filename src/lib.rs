@@ -4,6 +4,7 @@
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
 
+pub mod admin;
 mod blob;
 mod block;
 mod block_iterator;

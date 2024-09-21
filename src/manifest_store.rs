@@ -5,7 +5,8 @@ use chrono::Utc;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
-use object_store::ObjectStore;
+use object_store::{Error, ObjectStore};
+use serde::Serialize;
 use tracing::warn;
 
 use crate::db_state::CoreDbState;
@@ -166,12 +167,21 @@ impl StoredManifest {
 }
 
 /// Represents the metadata of a manifest file stored in the object store.
+#[derive(Serialize)]
 pub(crate) struct ManifestFileMetadata {
     pub(crate) id: u64,
+    #[serde(serialize_with = "serialize_path")]
     pub(crate) location: Path,
     pub(crate) last_modified: chrono::DateTime<Utc>,
     #[allow(dead_code)]
     pub(crate) size: usize,
+}
+
+fn serialize_path<S>(path: &Path, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(path.as_ref())
 }
 
 pub(crate) struct ManifestStore {
@@ -253,7 +263,7 @@ impl ManifestStore {
                         size: file.size,
                     });
                 }
-                Err(_) => warn!("Unknwon file in manifest directory: {:?}", file.location),
+                Err(_) => warn!("Unknown file in manifest directory: {:?}", file.location),
                 _ => {}
             }
         }
@@ -266,23 +276,31 @@ impl ManifestStore {
         &self,
     ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
         let manifest_metadatas_list = self.list_manifests(..).await?;
-
         match manifest_metadatas_list.last() {
-            Some(metadata) => {
-                let manifest_bytes = match self.object_store.get(&metadata.location).await {
-                    Ok(manifest) => match manifest.bytes().await {
-                        Ok(bytes) => bytes,
-                        Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
-                    },
-                    Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
-                };
-
-                self.codec
-                    .decode(&manifest_bytes)
-                    .map(|m| Some((metadata.id, m)))
-            }
             None => Ok(None),
+            Some(metadata) => Ok(self.read_manifest(metadata.id).await?),
         }
+    }
+
+    pub(crate) async fn read_manifest(
+        &self,
+        id: u64,
+    ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
+        let manifest_path = &self.get_manifest_path(id);
+        let manifest_bytes = match self.object_store.get(manifest_path).await {
+            Ok(manifest) => match manifest.bytes().await {
+                Ok(bytes) => bytes,
+                Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
+            },
+            Err(e) => {
+                return match e {
+                    Error::NotFound { .. } => Ok(None),
+                    _ => Err(SlateDBError::ObjectStoreError(e)),
+                }
+            }
+        };
+
+        self.codec.decode(&manifest_bytes).map(|m| Some((id, m)))
     }
 
     fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {
@@ -457,6 +475,24 @@ mod tests {
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
         let refreshed = compactor2.refresh().await.unwrap();
         assert_eq!(refreshed.next_wal_sst_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_should_read_specific_manifest() {
+        // Given
+        let os = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+        sm.update_db_state(state.clone()).await.unwrap();
+
+        // When
+        let (id, _) = ms.read_manifest(2).await.unwrap().unwrap();
+
+        // Then:
+        assert_eq!(id, 2);
     }
 
     #[tokio::test]
