@@ -383,16 +383,20 @@ impl TableStore {
         blocks: Range<usize>,
         cache_blocks: bool,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
+        // Create a ReadOnlyObject for accessing the SSTable file
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
         };
+        // Initialize the result vector and a vector to track uncached ranges
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
 
+        // If block cache is available, try to retrieve cached blocks
         if let Some(cache) = &self.block_cache {
             let index_borrow = index.borrow();
+            // Attempt to get all requested blocks from cache concurrently
             let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
                 let block_meta = index_borrow.block_meta().get(block_num);
                 let offset = block_meta.offset() as usize;
@@ -402,9 +406,11 @@ impl TableStore {
 
             let mut last_uncached_start = None;
 
+            // Process cached block results
             for (index, block_result) in cached_blocks.into_iter().enumerate() {
                 match block_result {
                     Some(cached_block) => {
+                        // If a cached block is found, add it to blocks_read
                         if let Some(start) = last_uncached_start.take() {
                             uncached_ranges.push((blocks.start + start)..(blocks.start + index));
                         }
@@ -415,14 +421,14 @@ impl TableStore {
                     }
                 }
             }
-
+            // Add the last uncached range if it exists
             if let Some(start) = last_uncached_start {
                 uncached_ranges.push((blocks.start + start)..blocks.end);
             }
         } else {
             uncached_ranges.push(blocks.clone());
         }
-
+        // Read uncached blocks concurrently
         let uncached_blocks = join_all(uncached_ranges.iter().map(|range| {
             let obj_ref = &obj;
             let index_ref = &index;
