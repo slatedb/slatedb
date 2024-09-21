@@ -81,6 +81,8 @@ impl DbInner {
             return Ok(val.into_option());
         }
 
+        // Since the key remains unchanged during the point query, we only need to compute the hash value once
+        // and pass it to the filter to avoid unnecessary hash computation
         let key_hash = filter::filter_hash(key);
 
         for sst in &snapshot.state.core.l0 {
@@ -143,6 +145,8 @@ impl DbInner {
         }
     }
 
+    // key: used for fence pointer to probe whether the given key is in sst range
+    // key_hash: used for filter to reuse the hash result
     async fn sst_may_include_key(
         &self,
         sst: &SsTableHandle,
@@ -153,11 +157,13 @@ impl DbInner {
             return Ok(false);
         }
         if let Some(filter) = self.table_store.read_filter(sst).await? {
-            return Ok(filter.has_key(key_hash));
+            return Ok(filter.may_contains(key_hash));
         }
         Ok(true)
     }
 
+    // key: used for fence pointer to probe whether the given key is in sst range
+    // key_hash: used for filter to reuse the hash result
     async fn sr_may_include_key(
         &self,
         sr: &SortedRun,
@@ -166,7 +172,7 @@ impl DbInner {
     ) -> Result<bool, SlateDBError> {
         if let Some(sst) = sr.find_sst_with_range_covering_key(key) {
             if let Some(filter) = self.table_store.read_filter(sst).await? {
-                return Ok(filter.has_key(key_hash));
+                return Ok(filter.may_contains(key_hash));
             }
             return Ok(true);
         }
