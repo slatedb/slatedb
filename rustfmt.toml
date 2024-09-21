@@ -1,2 +1,3 @@
 edition = "2021"
 reorder_imports = true
+required_version = "1.8.1"
