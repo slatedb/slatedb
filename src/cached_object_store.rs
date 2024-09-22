@@ -928,14 +928,8 @@ impl FsCacheEvictorInner {
         let mut total_bytes = 0;
         let iter = WalkDir::new(root_folder).into_iter();
         for entry in iter {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(err) => return Err(Box::new(err)),
-            };
-            let metadata = match tokio::fs::metadata(entry.path()).await {
-                Ok(metadata) => metadata,
-                Err(err) => return Err(Box::new(err)),
-            };
+            let entry = entry?;
+            let metadata = tokio::fs::metadata(entry.path()).await?;
             total_bytes += metadata.len();
         }
         Ok(total_bytes as usize)
