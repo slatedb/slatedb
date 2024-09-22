@@ -820,7 +820,12 @@ impl FsCacheEvictor {
     }
 
     async fn start(&self) {
-        let rx = self.rx.lock().await.take().unwrap();
+        let rx = self
+            .rx
+            .lock()
+            .await
+            .take()
+            .expect("evictor already started");
         tokio::spawn(Self::background(
             self.root_folder.clone(),
             self.limit_bytes,
