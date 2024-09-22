@@ -352,6 +352,9 @@ pub struct ObjectStoreCacheOptions {
     /// disabled.
     pub root_folder: Option<std::path::PathBuf>,
 
+    /// The limit of the cache size in bytes, the default value is 16gb.
+    pub limit_bytes: usize,
+
     /// The size of each part file, the part size is expected to be aligned with 1kb,
     /// its default value is 4mb.
     pub part_size_bytes: usize,
@@ -361,6 +364,7 @@ impl Default for ObjectStoreCacheOptions {
     fn default() -> Self {
         Self {
             root_folder: None,
+            limit_bytes: 16 * 1024 * 1024 * 1024,
             part_size_bytes: 4 * 1024 * 1024,
         }
     }
