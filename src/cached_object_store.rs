@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::io::SeekFrom;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::vec;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
@@ -45,15 +44,20 @@ impl CachedObjectStore {
             return Err(SlateDBError::InvalidCachePartSize);
         }
 
-        let cache_storage = Arc::new(FsCacheStorage {
-            root_folder: root_folder.clone(),
-        });
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            root_folder.clone(),
+            1024 * 1024 * 1024, // 1GB
+        ));
         Ok(Arc::new(Self {
             object_store,
             part_size,
             cache_storage,
             db_stats,
         }))
+    }
+
+    pub async fn start_evictor(&self) {
+        self.cache_storage.start_evictor().await;
     }
 
     pub async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
@@ -510,12 +514,15 @@ pub(crate) enum InvalidGetRange {
     Inconsistent { start: usize, end: usize },
 }
 
+#[async_trait::async_trait]
 pub trait LocalCacheStorage: Send + Sync + std::fmt::Debug + Display + 'static {
     fn entry(
         &self,
         location: &object_store::path::Path,
         part_size: usize,
     ) -> Box<dyn LocalCacheEntry>;
+
+    async fn start_evictor(&self);
 }
 
 #[async_trait::async_trait]
@@ -542,8 +549,20 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
 #[derive(Debug)]
 struct FsCacheStorage {
     root_folder: std::path::PathBuf,
+    evictor: Arc<FsCacheEvictor>,
 }
 
+impl FsCacheStorage {
+    pub fn new(root_folder: std::path::PathBuf, limit_bytes: usize) -> Self {
+        let evictor = Arc::new(FsCacheEvictor::new(root_folder.clone(), limit_bytes as u64));
+        Self {
+            root_folder,
+            evictor,
+        }
+    }
+}
+
+#[async_trait::async_trait]
 impl LocalCacheStorage for FsCacheStorage {
     fn entry(
         &self,
@@ -555,6 +574,10 @@ impl LocalCacheStorage for FsCacheStorage {
             location: location.clone(),
             part_size,
         })
+    }
+
+    async fn start_evictor(&self) {
+        self.evictor.start().await;
     }
 }
 
@@ -769,15 +792,34 @@ impl LocalCacheEntry for FsCacheEntry {
     }
 }
 
+#[derive(Debug)]
 struct FsCacheEvictor {
+    root_folder: std::path::PathBuf,
+    limit_bytes: u64,
     tx: tokio::sync::mpsc::Sender<u64>,
+    rx: Mutex<Option<tokio::sync::mpsc::Receiver<u64>>>,
 }
 
 impl FsCacheEvictor {
-    pub async fn new(root_folder: std::path::PathBuf, limit_bytes: u64) -> Self {
+    pub fn new(root_folder: std::path::PathBuf, limit_bytes: u64) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
-        tokio::spawn(Self::background(root_folder, limit_bytes, rx));
-        Self { tx }
+        Self {
+            root_folder,
+            limit_bytes,
+            tx,
+            rx: Mutex::new(Some(rx)),
+        }
+    }
+
+    async fn start(&self) {
+        let rx = self.rx.lock().await.take().unwrap();
+        tokio::spawn(Self::background(
+            self.root_folder.clone(),
+            self.limit_bytes,
+            rx,
+        ))
+        .await
+        .ok();
     }
 
     async fn background(
