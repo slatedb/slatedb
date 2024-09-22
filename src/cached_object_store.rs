@@ -786,7 +786,7 @@ impl FsCacheEvictor {
 
     // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, randomized pick
     // two of files, compare their last access time, and evict the older one.
-    async fn pick_evict_target(&self) -> Option<std::path::PathBuf> {
+    async fn pick_evict_target(&self) -> Option<(std::path::PathBuf, u64)> {
         // extend the evict_buffer if it's empty. it will randomized iterate the cache folder,
         // and randomly pick 1000 files into the evict_buffer.
         if self.evict_buffer.lock().await.len() < 2 {
@@ -820,12 +820,12 @@ impl FsCacheEvictor {
             }
         };
 
-        // read the accessed time of the two files
-        let (accessed0, accessed1) = match (
-            tokio::fs::metadata(&path0).await.and_then(|m| m.accessed()),
-            tokio::fs::metadata(&path1).await.and_then(|m| m.accessed()),
+        // read the accessed time & length of the two files
+        let (metadata0, metadata1) = match (
+            tokio::fs::metadata(&path0).await,
+            tokio::fs::metadata(&path1).await,
         ) {
-            (Ok(accessed0), Ok(accessed1)) => (accessed0, accessed1),
+            (Ok(metadata0), Ok(metadata1)) => (metadata0, metadata1),
             (Err(err), _) | (_, Err(err)) => {
                 warn!(
                     "evictor: failed to read metadata of the cache files: {}",
@@ -834,12 +834,22 @@ impl FsCacheEvictor {
                 return None;
             }
         };
+        let (accessed0, accessed1) = match (metadata0.accessed(), metadata1.accessed()) {
+            (Ok(accessed0), Ok(accessed1)) => (accessed0, accessed1),
+            (Err(err), _) | (_, Err(err)) => {
+                warn!(
+                    "evictor: failed to read accessed time of the cache files: {}",
+                    err
+                );
+                return None;
+            }
+        };
 
         // choose the older one to evict
         if accessed0 < accessed1 {
-            Some(path0)
+            Some((path0, metadata0.len()))
         } else {
-            Some(path1)
+            Some((path1, metadata1.len()))
         }
     }
 }
