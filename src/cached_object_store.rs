@@ -13,7 +13,7 @@ use rand::SeedableRng;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncSeekExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 use tokio::{
     fs,
     fs::{File, OpenOptions},
@@ -550,6 +550,7 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
 struct FsCacheStorage {
     root_folder: std::path::PathBuf,
     evictor: Arc<FsCacheEvictor>,
+    evictor_init: OnceCell<()>,
 }
 
 impl FsCacheStorage {
@@ -558,6 +559,7 @@ impl FsCacheStorage {
         Self {
             root_folder,
             evictor,
+            evictor_init: OnceCell::new(),
         }
     }
 }
@@ -577,7 +579,8 @@ impl LocalCacheStorage for FsCacheStorage {
     }
 
     async fn start_evictor(&self) {
-        self.evictor.start().await;
+        let evictor = self.evictor.clone();
+        self.evictor_init.get_or_init(|| evictor.start()).await;
     }
 }
 
