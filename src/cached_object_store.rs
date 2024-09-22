@@ -574,6 +574,7 @@ impl LocalCacheStorage for FsCacheStorage {
         Box::new(FsCacheEntry {
             root_folder: self.root_folder.clone(),
             location: location.clone(),
+            evictor: self.evictor.clone(),
             part_size,
         })
     }
@@ -595,6 +596,7 @@ struct FsCacheEntry {
     root_folder: std::path::PathBuf,
     location: Path,
     part_size: usize,
+    evictor: Arc<FsCacheEvictor>,
 }
 
 impl FsCacheEntry {
@@ -605,6 +607,9 @@ impl FsCacheEntry {
         if let Some(folder_path) = tmp_path.parent() {
             fs::create_dir_all(folder_path).await.map_err(wrap_io_err)?;
         }
+
+        // try triggering evict before writing
+        self.evictor.maybe_evict(buf.len() as u64).await;
 
         let mut file = OpenOptions::new()
             .write(true)
