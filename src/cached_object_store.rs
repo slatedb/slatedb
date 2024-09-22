@@ -885,12 +885,12 @@ struct FsCacheEvictorInner {
 impl FsCacheEvictorInner {
     pub async fn maybe_evict(&self, bytes: u64) {
         self.tracked_bytes.fetch_add(bytes, Ordering::SeqCst);
+        if self.tracked_bytes.load(Ordering::Relaxed) <= self.limit_bytes {
+            return;
+        }
 
-        let max_iterations = 10;
-        for _ in 0..max_iterations {
-            if self.tracked_bytes.load(Ordering::Relaxed) <= self.limit_bytes {
-                return;
-            }
+        let evict_factor = 10;
+        for _ in 0..evict_factor {
             let evicted_bytes = self.evict_once().await;
             if evicted_bytes == 0 {
                 return;
