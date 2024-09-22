@@ -19,7 +19,7 @@ use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncWriteExt},
 };
-use tracing::warn;
+use tracing::{debug, warn};
 use walkdir::WalkDir;
 
 use crate::error::SlateDBError;
@@ -777,11 +777,42 @@ struct FsCacheEvictor {
 
 impl FsCacheEvictor {
     pub async fn maybe_evict(&self, bytes: u64) {
-        self.tracked_bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.tracked_bytes.fetch_add(bytes, Ordering::SeqCst);
+
+        let max_iterations = 10;
+        for _ in 0..max_iterations {
+            if self.tracked_bytes.load(Ordering::Relaxed) <= self.limit_bytes {
+                return;
+            }
+            let evicted_bytes = self.evict_once().await;
+            if evicted_bytes == 0 {
+                return;
+            }
+            self.tracked_bytes
+                .fetch_sub(evicted_bytes, Ordering::SeqCst);
+        }
     }
 
+    // evict once, return the bytes evicted
     async fn evict_once(&self) -> u64 {
-        return 0;
+        let (target, target_bytes) = match self.pick_evict_target().await {
+            Some(target) => target,
+            None => return 0,
+        };
+
+        match tokio::fs::remove_file(&target).await {
+            Err(err) => {
+                warn!("evictor: failed to remove the cache file: {}", err);
+                0
+            }
+            Ok(()) => {
+                debug!(
+                    "evictor: evicted cache file: {:?}, bytes: {}",
+                    target, target_bytes
+                );
+                target_bytes
+            }
+        }
     }
 
     // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, randomized pick
