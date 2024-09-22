@@ -815,6 +815,29 @@ impl FsCacheEvictor {
         }
     }
 
+    async fn scan_cache_folder_bytes(&self) -> u64 {
+        let mut total_bytes = 0;
+        let iter = WalkDir::new(&self.root_folder).into_iter();
+        for entry in iter {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    warn!("evictor: failed to walk the cache folder: {}", err);
+                    break;
+                }
+            };
+            let metadata = match tokio::fs::metadata(entry.path()).await {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    warn!("evictor: failed to read metadata of the cache files: {}", err);
+                    continue;
+                }
+            };
+            total_bytes += metadata.len();
+        }
+        total_bytes
+    }
+
     // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, randomized pick
     // two of files, compare their last access time, and evict the older one.
     async fn pick_evict_target(&self) -> Option<(std::path::PathBuf, u64)> {
