@@ -1,4 +1,6 @@
+use std::collections::VecDeque;
 use std::io::SeekFrom;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::vec;
 use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
 
@@ -10,6 +12,7 @@ use object_store::{ListResult, MultipartUpload, PutMultipartOpts, PutOptions, Pu
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncSeekExt;
+use tokio::sync::Mutex;
 use tokio::{
     fs,
     fs::{File, OpenOptions},
@@ -759,6 +762,20 @@ impl LocalCacheEntry for FsCacheEntry {
 
         let head: LocalCacheHead = serde_json::from_str(&content).map_err(wrap_io_err)?;
         Ok(Some((head.meta(), head.attributes())))
+    }
+}
+
+struct FsCacheEvictor {
+    root_folder: std::path::PathBuf,
+    tracked_bytes: AtomicI64,
+    limit_bytes: u64,
+    evict_buffer: Mutex<std::path::PathBuf>,
+}
+
+impl FsCacheEvictor {
+    pub fn maybe_evict(&self, bytes: u64) {
+        self.tracked_bytes
+            .fetch_add(bytes as i64, Ordering::Relaxed);
     }
 }
 
