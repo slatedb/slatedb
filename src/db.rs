@@ -367,6 +367,7 @@ impl Db {
                 let cached_object_store = CachedObjectStore::new(
                     object_store.clone(),
                     cache_root_folder.clone(),
+                    0,
                     part_size_bytes,
                     db_stats.clone(),
                 )?;
@@ -645,6 +646,7 @@ mod tests {
         let cached_object_store = CachedObjectStore::new(
             object_store.clone(),
             temp_dir.path().to_path_buf(),
+            0,
             part_size,
             db_stats.clone(),
         )

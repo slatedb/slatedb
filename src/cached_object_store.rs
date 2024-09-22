@@ -37,20 +37,18 @@ impl CachedObjectStore {
     pub fn new(
         object_store: Arc<dyn ObjectStore>,
         root_folder: std::path::PathBuf,
-        part_size: usize,
+        limit_bytes: usize,
+        part_bytes: usize,
         db_stats: Arc<DbStats>,
     ) -> Result<Arc<Self>, SlateDBError> {
-        if part_size == 0 || part_size % 1024 != 0 {
+        if part_bytes == 0 || part_bytes % 1024 != 0 {
             return Err(SlateDBError::InvalidCachePartSize);
         }
 
-        let cache_storage = Arc::new(FsCacheStorage::new(
-            root_folder.clone(),
-            1024 * 1024 * 1024, // 1GB
-        ));
+        let cache_storage = Arc::new(FsCacheStorage::new(root_folder.clone(), limit_bytes));
         Ok(Arc::new(Self {
             object_store,
-            part_size,
+            part_size: part_bytes,
             cache_storage,
             db_stats,
         }))
@@ -820,6 +818,11 @@ impl FsCacheEvictor {
     }
 
     async fn start(&self) {
+        // if the limit_bytes is 0, do nothing
+        if self.limit_bytes == 0 {
+            return;
+        }
+
         let rx = self
             .rx
             .lock()
@@ -864,6 +867,10 @@ impl FsCacheEvictor {
     }
 
     pub async fn maybe_evict(&self, bytes: u64) {
+        if self.limit_bytes == 0 {
+            return;
+        }
+
         self.tx.send(bytes).await.ok();
     }
 }
@@ -1063,6 +1070,7 @@ mod tests {
         let cached_store = CachedObjectStore::new(
             object_store.clone(),
             test_cache_folder.clone(),
+            0,
             part_size,
             db_stats,
         )
@@ -1126,9 +1134,14 @@ mod tests {
         let get_result = object_store.get(&location).await?;
         let part_size = 1024;
 
-        let cached_store =
-            CachedObjectStore::new(object_store, test_cache_folder.clone(), part_size, db_stats)
-                .unwrap();
+        let cached_store = CachedObjectStore::new(
+            object_store,
+            test_cache_folder.clone(),
+            0,
+            part_size,
+            db_stats,
+        )
+        .unwrap();
         let entry = cached_store.cache_storage.entry(&location, part_size);
         let object_size_hint = cached_store.save_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3);
@@ -1163,7 +1176,7 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CachedObjectStore::new(object_store, test_cache_folder, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, test_cache_folder, 0, 1024, db_stats).unwrap();
 
         struct Test {
             input: (Option<GetRange>, usize),
@@ -1243,7 +1256,7 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CachedObjectStore::new(object_store, test_cache_folder, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, test_cache_folder, 0, 1024, db_stats).unwrap();
 
         let aligned = cached_store.align_range(&(9..1025), 1024);
         assert_eq!(aligned, 0..2048);
@@ -1257,7 +1270,7 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CachedObjectStore::new(object_store, test_cache_folder, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, test_cache_folder, 0, 1024, db_stats).unwrap();
 
         let aligned = cached_store.align_get_range(&GetRange::Bounded(9..1025));
         assert_eq!(aligned, GetRange::Bounded(0..2048));
@@ -1280,6 +1293,7 @@ mod tests {
         let cached_store = CachedObjectStore::new(
             object_store.clone(),
             test_cache_folder,
+            0,
             1024,
             Arc::new(DbStats::new()),
         )
