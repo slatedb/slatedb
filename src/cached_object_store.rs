@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::io::SeekFrom;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::vec;
 use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
 
@@ -9,6 +9,7 @@ use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 use object_store::{Attribute, Attributes, GetRange, GetResultPayload, PutResult};
 use object_store::{ListResult, MultipartUpload, PutMultipartOpts, PutOptions, PutPayload};
+use rand::seq::IteratorRandom;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncSeekExt;
@@ -18,6 +19,8 @@ use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncWriteExt},
 };
+use tracing::warn;
+use walkdir::WalkDir;
 
 use crate::error::SlateDBError;
 use crate::metrics::DbStats;
@@ -767,15 +770,77 @@ impl LocalCacheEntry for FsCacheEntry {
 
 struct FsCacheEvictor {
     root_folder: std::path::PathBuf,
-    tracked_bytes: AtomicI64,
+    tracked_bytes: AtomicU64,
     limit_bytes: u64,
-    evict_buffer: Mutex<std::path::PathBuf>,
+    evict_buffer: Mutex<VecDeque<std::path::PathBuf>>,
 }
 
 impl FsCacheEvictor {
-    pub fn maybe_evict(&self, bytes: u64) {
-        self.tracked_bytes
-            .fetch_add(bytes as i64, Ordering::Relaxed);
+    pub async fn maybe_evict(&self, bytes: u64) {
+        self.tracked_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    async fn evict_once(&self) -> u64 {
+        return 0;
+    }
+
+    // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, randomized pick
+    // two of files, compare their last access time, and evict the older one.
+    async fn pick_evict_target(&self) -> Option<std::path::PathBuf> {
+        // extend the evict_buffer if it's empty. it will randomized iterate the cache folder,
+        // and randomly pick 1000 files into the evict_buffer.
+        if self.evict_buffer.lock().await.len() < 2 {
+            let iter = WalkDir::new(&self.root_folder).into_iter();
+            for entry in iter.choose_multiple(&mut rand::thread_rng(), 1000) {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(err) => {
+                        warn!("evictor: failed to walk the cache folder: {}", err);
+                        break;
+                    }
+                };
+                self.evict_buffer
+                    .lock()
+                    .await
+                    .push_back(entry.path().to_path_buf());
+            }
+        }
+
+        // if the evict_buffer length still below 2, return None
+        if self.evict_buffer.lock().await.len() < 2 {
+            return None;
+        }
+
+        // pop two files from the evict_buffer
+        let (path0, path1) = {
+            let mut guard = self.evict_buffer.lock().await;
+            match (guard.pop_front(), guard.pop_front()) {
+                (Some(path0), Some(path1)) => (path0, path1),
+                _ => return None,
+            }
+        };
+
+        // read the accessed time of the two files
+        let (accessed0, accessed1) = match (
+            tokio::fs::metadata(&path0).await.and_then(|m| m.accessed()),
+            tokio::fs::metadata(&path1).await.and_then(|m| m.accessed()),
+        ) {
+            (Ok(accessed0), Ok(accessed1)) => (accessed0, accessed1),
+            (Err(err), _) | (_, Err(err)) => {
+                warn!(
+                    "evictor: failed to read metadata of the cache files: {}",
+                    err
+                );
+                return None;
+            }
+        };
+
+        // choose the older one to evict
+        if accessed0 < accessed1 {
+            Some(path0)
+        } else {
+            Some(path1)
+        }
     }
 }
 
