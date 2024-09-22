@@ -785,11 +785,13 @@ impl FsCacheEvictor {
         limit_bytes: u64,
         mut rx: tokio::sync::mpsc::Receiver<u64>,
     ) {
+        let start_time = std::time::Instant::now();
         let scanned_bytes = match FsCacheEvictorInner::scan_cache_folder_bytes(&root_folder).await {
             Ok(scanned_bytes) => scanned_bytes,
             Err(err) => {
                 warn!(
-                    "evictor: unexpected error on scaning the cache folder, stop the evictor: {}",
+                    "evictor: unexpected error on scaning the cache folder after {}s, stop the evictor: {}",
+                    start_time.elapsed().as_secs(),
                     err
                 );
                 return;
