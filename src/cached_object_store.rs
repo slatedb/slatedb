@@ -785,7 +785,16 @@ impl FsCacheEvictor {
         limit_bytes: u64,
         mut rx: tokio::sync::mpsc::Receiver<u64>,
     ) {
-        let scanned_bytes = FsCacheEvictorInner::scan_cache_folder_bytes(&root_folder).await;
+        let scanned_bytes = match FsCacheEvictorInner::scan_cache_folder_bytes(&root_folder).await {
+            Ok(scanned_bytes) => scanned_bytes,
+            Err(err) => {
+                warn!(
+                    "evictor: unexpected error on scaning the cache folder, stop the evictor: {}",
+                    err
+                );
+                return;
+            }
+        };
         let inner = FsCacheEvictorInner {
             root_folder,
             tracked_bytes: AtomicU64::new(scanned_bytes as u64),
@@ -849,30 +858,23 @@ impl FsCacheEvictorInner {
         }
     }
 
-    pub async fn scan_cache_folder_bytes(root_folder: &std::path::PathBuf) -> usize {
+    pub async fn scan_cache_folder_bytes(
+        root_folder: &std::path::PathBuf,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
         let mut total_bytes = 0;
         let iter = WalkDir::new(root_folder).into_iter();
         for entry in iter {
             let entry = match entry {
                 Ok(entry) => entry,
-                Err(err) => {
-                    warn!("evictor: failed to walk the cache folder on scan: {}", err);
-                    break;
-                }
+                Err(err) => return Err(Box::new(err)),
             };
             let metadata = match tokio::fs::metadata(entry.path()).await {
                 Ok(metadata) => metadata,
-                Err(err) => {
-                    warn!(
-                        "evictor: failed to read metadata of the cache file on scan: {}",
-                        err
-                    );
-                    continue;
-                }
+                Err(err) => return Err(Box::new(err)),
             };
             total_bytes += metadata.len();
         }
-        total_bytes as usize
+        Ok(total_bytes as usize)
     }
 
     // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, randomized pick
