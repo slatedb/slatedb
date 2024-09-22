@@ -10,6 +10,7 @@ use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 use object_store::{Attribute, Attributes, GetRange, GetResultPayload, PutResult};
 use object_store::{ListResult, MultipartUpload, PutMultipartOpts, PutOptions, PutPayload};
 use rand::seq::IteratorRandom;
+use rand::SeedableRng;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncSeekExt;
@@ -769,13 +770,46 @@ impl LocalCacheEntry for FsCacheEntry {
 }
 
 struct FsCacheEvictor {
+    tx: tokio::sync::mpsc::Sender<u64>,
+}
+
+impl FsCacheEvictor {
+    pub async fn new(root_folder: std::path::PathBuf, limit_bytes: u64) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        tokio::spawn(Self::background(root_folder, limit_bytes, rx));
+        Self { tx }
+    }
+
+    async fn background(
+        root_folder: std::path::PathBuf,
+        limit_bytes: u64,
+        mut rx: tokio::sync::mpsc::Receiver<u64>,
+    ) {
+        let scanned_bytes = FsCacheEvictorInner::scan_cache_folder_bytes(&root_folder).await;
+        let inner = FsCacheEvictorInner {
+            root_folder,
+            tracked_bytes: AtomicU64::new(scanned_bytes as u64),
+            limit_bytes,
+            evict_buffer: Mutex::new(VecDeque::new()),
+        };
+        while let Some(bytes) = rx.recv().await {
+            inner.maybe_evict(bytes).await;
+        }
+    }
+
+    pub async fn maybe_evict(&self, bytes: u64) {
+        self.tx.send(bytes).await.ok();
+    }
+}
+
+struct FsCacheEvictorInner {
     root_folder: std::path::PathBuf,
     tracked_bytes: AtomicU64,
     limit_bytes: u64,
     evict_buffer: Mutex<VecDeque<std::path::PathBuf>>,
 }
 
-impl FsCacheEvictor {
+impl FsCacheEvictorInner {
     pub async fn maybe_evict(&self, bytes: u64) {
         self.tracked_bytes.fetch_add(bytes, Ordering::SeqCst);
 
@@ -815,27 +849,30 @@ impl FsCacheEvictor {
         }
     }
 
-    async fn scan_cache_folder_bytes(&self) -> u64 {
+    pub async fn scan_cache_folder_bytes(root_folder: &std::path::PathBuf) -> usize {
         let mut total_bytes = 0;
-        let iter = WalkDir::new(&self.root_folder).into_iter();
+        let iter = WalkDir::new(root_folder).into_iter();
         for entry in iter {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
-                    warn!("evictor: failed to walk the cache folder: {}", err);
+                    warn!("evictor: failed to walk the cache folder on scan: {}", err);
                     break;
                 }
             };
             let metadata = match tokio::fs::metadata(entry.path()).await {
                 Ok(metadata) => metadata,
                 Err(err) => {
-                    warn!("evictor: failed to read metadata of the cache files: {}", err);
+                    warn!(
+                        "evictor: failed to read metadata of the cache file on scan: {}",
+                        err
+                    );
                     continue;
                 }
             };
             total_bytes += metadata.len();
         }
-        total_bytes
+        total_bytes as usize
     }
 
     // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, randomized pick
@@ -843,9 +880,10 @@ impl FsCacheEvictor {
     async fn pick_evict_target(&self) -> Option<(std::path::PathBuf, u64)> {
         // extend the evict_buffer if it's empty. it will randomized iterate the cache folder,
         // and randomly pick 1000 files into the evict_buffer.
+        let mut rng = rand::rngs::StdRng::from_entropy();
         if self.evict_buffer.lock().await.len() < 2 {
             let iter = WalkDir::new(&self.root_folder).into_iter();
-            for entry in iter.choose_multiple(&mut rand::thread_rng(), 1000) {
+            for entry in iter.choose_multiple(&mut rng, 1000) {
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(err) => {
