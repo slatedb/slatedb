@@ -13,7 +13,6 @@ use crate::args::{parse_args, DbBenchArgs, DbBenchCommand, Provider};
 use crate::db_bench::DbBench;
 
 use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
 
 mod args;
 mod db_bench;
@@ -56,19 +55,8 @@ fn load_object_store(args: &DbBenchArgs) -> Result<Arc<dyn ObjectStore>, SlateDB
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
 
-    // Initialize the tracing subscriber
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::TRACE)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set tracing subscriber");
-
-    // Your application code
-    info!("db_bench started");
-
-    env_logger::init();
     let args: DbBenchArgs = parse_args();
     let mut db_options = DbOptions::default();
     db_options.wal_enabled = !args.disable_wal.unwrap_or(false);

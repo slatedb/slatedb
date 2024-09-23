@@ -9,6 +9,7 @@ use rand_xorshift::XorShiftRng;
 use slatedb::config::WriteOptions;
 use slatedb::db::Db;
 use tokio::time::Instant;
+use tracing::info;
 
 pub trait KeyGenerator: Send {
     fn next_key(&mut self) -> Bytes;
