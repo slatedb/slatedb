@@ -12,7 +12,7 @@ use slatedb::error::SlateDBError;
 use crate::args::{parse_args, DbBenchArgs, DbBenchCommand, Provider};
 use crate::db_bench::DbBench;
 
-use tracing::{info, Level};
+use tracing::info;
 
 mod args;
 mod db_bench;
