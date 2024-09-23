@@ -128,7 +128,7 @@ impl<'a> SstIterator<'a> {
     ) -> Result<Self, SlateDBError> {
         assert!(max_fetch_tasks > 0);
         assert!(blocks_to_fetch > 0);
-        let index = Arc::new(table_store.read_index(table).await?);
+        let index = table_store.read_index(table).await?;
         let next_block_idx_to_fetch = from_key
             .map(|k| Self::first_block_with_data_including_or_after_key(&index.borrow(), k))
             .unwrap_or(0);

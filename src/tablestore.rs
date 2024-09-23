@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
@@ -10,7 +10,6 @@ use log::warn;
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use parking_lot::RwLock;
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
@@ -36,12 +35,6 @@ pub struct TableStore {
     compacted_path: &'static str,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
-    // TODO: we cache the filters here for now, so the db doesn't need to reload them
-    //       for each read. This means that all the filters need to fit in memory.
-    //       Once we've put in a proper cache, we should instead cache the filter block in
-    //       the cache and get rid of this.
-    //       https://github.com/slatedb/slatedb/issues/89
-    filter_cache: RwLock<HashMap<SsTableId, Option<Arc<BloomFilter>>>>,
     transactional_wal_store: Arc<dyn TransactionalObjectStore>,
     /// In-memory cache for blocks
     block_cache: Option<Arc<dyn InMemoryCache>>,
@@ -116,7 +109,6 @@ impl TableStore {
             wal_path: "wal",
             compacted_path: "compacted",
             fp_registry,
-            filter_cache: RwLock::new(HashMap::new()),
             transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
                 Path::from("/"),
                 object_store.clone(),
@@ -213,17 +205,19 @@ impl TableStore {
                 _ => SlateDBError::ObjectStoreError(e),
             })?;
 
-        self.cache_filter(*id, encoded_sst.filter);
+        self.cache_filter(*id, encoded_sst.info.filter_offset, encoded_sst.filter)
+            .await;
         Ok(SsTableHandle {
             id: *id,
             info: encoded_sst.info,
         })
     }
 
-    fn cache_filter(&self, sst: SsTableId, filter: Option<Arc<BloomFilter>>) {
-        {
-            let mut wguard = self.filter_cache.write();
-            wguard.insert(sst, filter);
+    async fn cache_filter(&self, sst: SsTableId, id: u64, filter: Option<Arc<BloomFilter>>) {
+        if let Some(cache) = &self.block_cache {
+            if let Some(filter) = filter {
+                cache.insert((sst, id), CachedBlock::Filter(filter)).await;
+            }
         }
     }
 
@@ -295,10 +289,13 @@ impl TableStore {
         &self,
         handle: &SsTableHandle,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
-        {
-            let rguard = self.filter_cache.read();
-            if let Some(filter) = rguard.get(&handle.id) {
-                return Ok(filter.clone());
+        if let Some(cache) = &self.block_cache {
+            if let Some(filter) = cache
+                .get((handle.id, handle.info.filter_offset))
+                .await
+                .bloom_filter()
+            {
+                return Ok(Some(filter));
             }
         }
         let path = self.path(&handle.id);
@@ -307,21 +304,47 @@ impl TableStore {
             path,
         };
         let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
-        let mut wguard = self.filter_cache.write();
-        wguard.insert(handle.id, filter.clone());
+        if let Some(cache) = &self.block_cache {
+            if let Some(filter) = filter.as_ref() {
+                cache
+                    .insert(
+                        (handle.id, handle.info.filter_offset),
+                        CachedBlock::Filter(filter.clone()),
+                    )
+                    .await;
+            }
+        }
         Ok(filter)
     }
 
     pub(crate) async fn read_index(
         &self,
         handle: &SsTableHandle,
-    ) -> Result<SsTableIndexOwned, SlateDBError> {
+    ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
+        if let Some(cache) = &self.block_cache {
+            if let Some(index) = cache
+                .get((handle.id, handle.info.index_offset))
+                .await
+                .sst_index()
+            {
+                return Ok(index);
+            }
+        }
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
         };
-        self.sst_format.read_index(&handle.info, &obj).await
+        let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
+        if let Some(cache) = &self.block_cache {
+            cache
+                .insert(
+                    (handle.id, handle.info.index_offset),
+                    CachedBlock::Index(index.clone()),
+                )
+                .await;
+        }
+        Ok(index)
     }
 
     #[allow(dead_code)]
@@ -347,7 +370,6 @@ impl TableStore {
     /// and falls back to reading from storage for uncached blocks
     /// using an async fetch for each contiguous range that blocks are not cached.
     /// It can optionally cache newly read blocks.
-    /// TODO: we probably won't need this once we're caching the index
     pub(crate) async fn read_blocks_using_index(
         &self,
         handle: &SsTableHandle,
@@ -361,19 +383,20 @@ impl TableStore {
             object_store: self.object_store.clone(),
             path,
         };
-
         // Initialize the result vector and a vector to track uncached ranges
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
 
         // If block cache is available, try to retrieve cached blocks
         if let Some(cache) = &self.block_cache {
+            let index_borrow = index.borrow();
             // Attempt to get all requested blocks from cache concurrently
-            let cached_blocks =
-                join_all(blocks.clone().map(|block_num| async move {
-                    cache.get((handle.id, block_num)).await.block()
-                }))
-                .await;
+            let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
+                let block_meta = index_borrow.block_meta().get(block_num);
+                let offset = block_meta.offset();
+                cache.get((handle.id, offset)).await.block()
+            }))
+            .await;
 
             let mut last_uncached_start = None;
 
@@ -393,7 +416,6 @@ impl TableStore {
                     }
                 }
             }
-
             // Add the last uncached range if it exists
             if let Some(start) = last_uncached_start {
                 uncached_ranges.push((blocks.start + start)..blocks.end);
@@ -402,7 +424,6 @@ impl TableStore {
             // If no cache is available, treat all blocks as uncached
             uncached_ranges.push(blocks.clone());
         }
-
         // Read uncached blocks concurrently
         let uncached_blocks = join_all(uncached_ranges.iter().map(|range| {
             let obj_ref = &obj;
@@ -418,10 +439,13 @@ impl TableStore {
         // Merge uncached blocks with blocks_read and prepare blocks for caching
         let mut blocks_to_cache = vec![];
         for (range, range_blocks) in uncached_ranges.into_iter().zip(uncached_blocks) {
+            let index_borrow = index.borrow();
             for (block_num, block_read) in range.zip(range_blocks?) {
                 let block = Arc::new(block_read);
                 if cache_blocks {
-                    blocks_to_cache.push((handle.id, block_num, block.clone()));
+                    let block_meta = index_borrow.block_meta().get(block_num);
+                    let offset = block_meta.offset();
+                    blocks_to_cache.push((handle.id, offset, block.clone()));
                 }
                 blocks_read.insert(block_num - blocks.start, block);
             }
@@ -430,8 +454,8 @@ impl TableStore {
         // Cache the newly read blocks if caching is enabled
         if let Some(cache) = &self.block_cache {
             if !blocks_to_cache.is_empty() {
-                join_all(blocks_to_cache.into_iter().map(|(id, block_num, block)| {
-                    cache.insert((id, block_num), CachedBlock::Block(block))
+                join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
+                    cache.insert((id, offset), CachedBlock::Block(block))
                 }))
                 .await;
             }
@@ -516,7 +540,9 @@ impl<'a> EncodedSsTableWriter<'a> {
             self.writer.write_all(block.as_ref()).await?;
         }
         self.writer.shutdown().await?;
-        self.table_store.cache_filter(self.id, encoded_sst.filter);
+        self.table_store
+            .cache_filter(self.id, encoded_sst.info.filter_offset, encoded_sst.filter)
+            .await;
         Ok(SsTableHandle {
             id: self.id,
             info: encoded_sst.info,
@@ -683,7 +709,7 @@ mod tests {
         let handle = writer.close().await.unwrap();
 
         // Read the index
-        let index = Arc::new(ts.read_index(&handle).await.unwrap());
+        let index = ts.read_index(&handle).await.unwrap();
 
         // Test 1: SST hit
         let blocks = ts
@@ -695,19 +721,22 @@ mod tests {
 
         // Check that all blocks are now in cache
         for i in 0..20 {
+            let offset = index.borrow().block_meta().get(i).offset();
             assert!(
-                block_cache.get((handle.id, i)).await.block().is_some(),
-                "Block {} should be in cache",
-                i
+                block_cache.get((handle.id, offset)).await.block().is_some(),
+                "Block with offset {} should be in cache",
+                offset
             );
         }
 
         // Partially clear the cache (remove blocks 5..10 and 15..20)
         for i in 5..10 {
-            block_cache.remove((handle.id, i)).await;
+            let offset = index.borrow().block_meta().get(i).offset();
+            block_cache.remove((handle.id, offset)).await;
         }
         for i in 15..20 {
-            block_cache.remove((handle.id, i)).await;
+            let offset = index.borrow().block_meta().get(i).offset();
+            block_cache.remove((handle.id, offset)).await;
         }
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
@@ -719,10 +748,11 @@ mod tests {
 
         // Check that all blocks are again in cache
         for i in 0..20 {
+            let offset = index.borrow().block_meta().get(i).offset();
             assert!(
-                block_cache.get((handle.id, i)).await.block().is_some(),
-                "Block {} should be in cache after partial hit",
-                i
+                block_cache.get((handle.id, offset)).await.block().is_some(),
+                "Block with offset {} should be in cache after partial hit",
+                offset
             );
         }
 
@@ -739,10 +769,11 @@ mod tests {
 
         // Check that all blocks are still in cache
         for i in 0..20 {
+            let offset = index.borrow().block_meta().get(i).offset();
             assert!(
-                block_cache.get((handle.id, i)).await.block().is_some(),
-                "Block {} should be in cache after SST emptying",
-                i
+                block_cache.get((handle.id, offset)).await.block().is_some(),
+                "Block with offset {} should be in cache after SST emptying",
+                offset
             );
         }
 
