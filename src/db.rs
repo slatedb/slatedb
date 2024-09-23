@@ -81,12 +81,12 @@ impl DbInner {
             return Ok(val.into_option());
         }
 
-        // Since the key remains unchanged during the point query, we only need to compute the hash value once
-        // and pass it to the filter to avoid unnecessary hash computation
+        // Since the key remains unchanged during the point query, we only need to compute
+        // the hash value once and pass it to the filter to avoid unnecessary hash computation
         let key_hash = filter::filter_hash(key);
 
         for sst in &snapshot.state.core.l0 {
-            if self.sst_may_include_key(sst, key, key_hash).await? {
+            if self.sst_might_include_key(sst, key, key_hash).await? {
                 let mut iter =
                     SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1, true)
                         .await?; // cache blocks that are being read
@@ -98,7 +98,7 @@ impl DbInner {
             }
         }
         for sr in &snapshot.state.core.compacted {
-            if self.sr_may_include_key(sr, key, key_hash).await? {
+            if self.sr_might_include_key(sr, key, key_hash).await? {
                 let mut iter =
                     SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1, true) // cache blocks
                         .await?;
@@ -145,9 +145,15 @@ impl DbInner {
         }
     }
 
-    // key: used for fence pointer to probe whether the given key is in sst range
-    // key_hash: used for filter to reuse the hash result
-    async fn sst_may_include_key(
+    /// Check if the given key might be in the range of the SST. Checks if the key is
+    /// in the range of the sst and if the filter might contain the key.
+    /// ## Arguments
+    /// - `sst`: the sst to check
+    /// - `key`: the key to check
+    /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
+    /// ## Returns
+    /// - `true` if the key is in the range of the sst.
+    async fn sst_might_include_key(
         &self,
         sst: &SsTableHandle,
         key: &[u8],
@@ -157,14 +163,20 @@ impl DbInner {
             return Ok(false);
         }
         if let Some(filter) = self.table_store.read_filter(sst).await? {
-            return Ok(filter.may_contains(key_hash));
+            return Ok(filter.might_contain(key_hash));
         }
         Ok(true)
     }
 
-    // key: used for fence pointer to probe whether the given key is in sst range
-    // key_hash: used for filter to reuse the hash result
-    async fn sr_may_include_key(
+    /// Check if the given key might be in the range of the sorted run (SR). Checks if the key
+    /// is in the range of the SSTs in the run and if the SST's filter might contain the key.
+    /// ## Arguments
+    /// - `sr`: the sorted run to check
+    /// - `key`: the key to check
+    /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
+    /// ## Returns
+    /// - `true` if the key is in the range of the sst.
+    async fn sr_might_include_key(
         &self,
         sr: &SortedRun,
         key: &[u8],
@@ -172,7 +184,7 @@ impl DbInner {
     ) -> Result<bool, SlateDBError> {
         if let Some(sst) = sr.find_sst_with_range_covering_key(key) {
             if let Some(filter) = self.table_store.read_filter(sst).await? {
-                return Ok(filter.may_contains(key_hash));
+                return Ok(filter.might_contain(key_hash));
             }
             return Ok(true);
         }

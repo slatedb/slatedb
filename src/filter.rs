@@ -72,7 +72,7 @@ impl BloomFilter {
         (self.buffer.len() * 8) as u32
     }
 
-    pub(crate) fn may_contains(&self, hash: u64) -> bool {
+    pub(crate) fn might_contain(&self, hash: u64) -> bool {
         for p in probes_for_key(hash, self.num_probes, self.filter_bits()) {
             if !check_bit(p as usize, &self.buffer) {
                 return false;
@@ -231,7 +231,7 @@ mod tests {
             bytes.reserve(key_sz);
             bytes.put_u32(i);
             let hash = filter_hash(bytes.freeze().as_ref());
-            assert!(filter.may_contains(hash));
+            assert!(filter.might_contain(hash));
         }
 
         // check false positives
@@ -241,7 +241,7 @@ mod tests {
             bytes.reserve(key_sz);
             bytes.put_u32(i);
             let hash = filter_hash(bytes.freeze().as_ref());
-            if filter.may_contains(hash) {
+            if filter.might_contain(hash) {
                 fp += 1;
             }
         }
