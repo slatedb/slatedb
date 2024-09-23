@@ -332,13 +332,10 @@ impl CompactionSchedulerSupplier for SizeTieredCompactionSchedulerSupplier {
 mod tests {
     use std::collections::VecDeque;
 
-    use bytes::Bytes;
-
     use crate::compactor::CompactionScheduler;
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
     use crate::config::SizeTieredCompactionSchedulerOptions;
-    use crate::db_state::{CoreDbState, SSTableHandle, SortedRun, SsTableId};
-    use crate::flatbuffer_types::{SsTableInfo, SsTableInfoArgs, SsTableInfoOwned};
+    use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
 
     #[test]
@@ -625,22 +622,16 @@ mod tests {
         assert_eq!(compaction, &create_sr_compaction(vec![3, 2, 1, 0]));
     }
 
-    fn create_sst(size: u64) -> SSTableHandle {
-        let mut builder = flatbuffers::FlatBufferBuilder::new();
-        let wip = SsTableInfo::create(
-            &mut builder,
-            &SsTableInfoArgs {
-                first_key: None,
-                index_offset: size,
-                index_len: 0,
-                filter_offset: 0,
-                filter_len: 0,
-                compression_format: None.into(),
-            },
-        );
-        builder.finish(wip, None);
-        let info = SsTableInfoOwned::new(Bytes::copy_from_slice(builder.finished_data())).unwrap();
-        SSTableHandle {
+    fn create_sst(size: u64) -> SsTableHandle {
+        let info = SsTableInfo {
+            first_key: None,
+            index_offset: size,
+            index_len: 0,
+            filter_offset: 0,
+            filter_len: 0,
+            compression_codec: None,
+        };
+        SsTableHandle {
             id: SsTableId::Compacted(ulid::Ulid::new()),
             info,
         }
@@ -655,11 +646,11 @@ mod tests {
     }
 
     fn create_sr(id: u32, sst_size: u64, num_ssts: usize) -> SortedRun {
-        let ssts: Vec<SSTableHandle> = (0..num_ssts).map(|_| create_sst(sst_size)).collect();
+        let ssts: Vec<SsTableHandle> = (0..num_ssts).map(|_| create_sst(sst_size)).collect();
         SortedRun { id, ssts }
     }
 
-    fn create_db_state(l0: VecDeque<SSTableHandle>, srs: Vec<SortedRun>) -> CoreDbState {
+    fn create_db_state(l0: VecDeque<SsTableHandle>, srs: Vec<SortedRun>) -> CoreDbState {
         CoreDbState {
             l0_last_compacted: None,
             l0,
@@ -673,7 +664,7 @@ mod tests {
         CompactorState::new(db_state)
     }
 
-    fn create_l0_compaction(l0: &[SSTableHandle], dst: u32) -> Compaction {
+    fn create_l0_compaction(l0: &[SsTableHandle], dst: u32) -> Compaction {
         Compaction::new(
             l0.iter()
                 .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))

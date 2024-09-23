@@ -9,15 +9,14 @@ use crate::{
 #[derive(Clone)]
 pub(crate) enum CachedBlock {
     Block(Arc<Block>),
-    #[allow(dead_code)]
     Index(Arc<SsTableIndexOwned>),
-    #[allow(dead_code)]
     Filter(Arc<BloomFilter>),
 }
 
 #[derive(Clone, Copy)]
 pub enum CacheType {
     Moka,
+    Foyer,
 }
 
 #[derive(Clone, Copy)]
@@ -43,16 +42,16 @@ impl Default for InMemoryCacheOptions {
 
 #[async_trait]
 pub(crate) trait InMemoryCache: Send + Sync + 'static {
-    async fn get(&self, key: (SsTableId, usize)) -> CachedBlockOption;
-    async fn insert(&self, key: (SsTableId, usize), value: CachedBlock);
+    async fn get(&self, key: (SsTableId, u64)) -> CachedBlockOption;
+    async fn insert(&self, key: (SsTableId, u64), value: CachedBlock);
     #[allow(dead_code)]
-    async fn remove(&self, key: (SsTableId, usize));
+    async fn remove(&self, key: (SsTableId, u64));
     #[allow(dead_code)]
     fn entry_count(&self) -> u64;
 }
 
 pub(crate) struct MokaCache {
-    inner: moka::future::Cache<(SsTableId, usize), CachedBlock>,
+    inner: moka::future::Cache<(SsTableId, u64), CachedBlock>,
 }
 
 impl MokaCache {
@@ -77,20 +76,62 @@ impl MokaCache {
 
 #[async_trait]
 impl InMemoryCache for MokaCache {
-    async fn get(&self, key: (SsTableId, usize)) -> CachedBlockOption {
-        CachedBlockOption(self.inner.get(&key).await)
+    async fn get(&self, key: (SsTableId, u64)) -> CachedBlockOption {
+        CachedBlockOption::Moka(self.inner.get(&key).await)
     }
 
-    async fn insert(&self, key: (SsTableId, usize), value: CachedBlock) {
+    async fn insert(&self, key: (SsTableId, u64), value: CachedBlock) {
         self.inner.insert(key, value).await;
     }
 
-    async fn remove(&self, key: (SsTableId, usize)) {
+    async fn remove(&self, key: (SsTableId, u64)) {
         self.inner.remove(&key).await;
     }
 
     fn entry_count(&self) -> u64 {
         self.inner.entry_count()
+    }
+}
+
+pub(crate) struct FoyerCache {
+    inner: foyer::Cache<(SsTableId, u64), CachedBlock>,
+}
+
+impl FoyerCache {
+    pub fn new(options: InMemoryCacheOptions) -> Self {
+        let builder = foyer::CacheBuilder::new(options.max_capacity as _)
+            .with_weighter(move |_, _| options.cached_block_size as _);
+
+        if options.time_to_live.is_some() {
+            unimplemented!("ttl is not supported by foyer yet");
+        }
+
+        if options.time_to_idle.is_some() {
+            unimplemented!("tti is not supported by foyer yet");
+        }
+
+        let cache = builder.build();
+
+        Self { inner: cache }
+    }
+}
+
+#[async_trait]
+impl InMemoryCache for FoyerCache {
+    async fn get(&self, key: (SsTableId, u64)) -> CachedBlockOption {
+        CachedBlockOption::Foyer(self.inner.get(&key))
+    }
+
+    async fn insert(&self, key: (SsTableId, u64), value: CachedBlock) {
+        self.inner.insert(key, value);
+    }
+
+    async fn remove(&self, key: (SsTableId, u64)) {
+        self.inner.remove(&key);
+    }
+
+    fn entry_count(&self) -> u64 {
+        self.inner.usage() as _
     }
 }
 
@@ -101,6 +142,7 @@ pub(crate) fn create_block_cache(
     if let Some(options) = options {
         match options.cache_type {
             CacheType::Moka => Some(Arc::new(MokaCache::new(options))),
+            CacheType::Foyer => Some(Arc::new(FoyerCache::new(options))),
         }
     } else {
         None
@@ -108,28 +150,41 @@ pub(crate) fn create_block_cache(
 }
 
 /// wrapper around Option<CachedBlock> to provide helper functions
-pub(crate) struct CachedBlockOption(Option<CachedBlock>);
+pub(crate) enum CachedBlockOption {
+    Moka(Option<CachedBlock>),
+    Foyer(Option<foyer::CacheEntry<(SsTableId, u64), CachedBlock>>),
+}
 
 impl CachedBlockOption {
     pub(crate) fn block(&self) -> Option<Arc<Block>> {
         match self {
-            CachedBlockOption(Some(CachedBlock::Block(block))) => Some(block.clone()),
+            CachedBlockOption::Moka(Some(CachedBlock::Block(block))) => Some(block.clone()),
+            CachedBlockOption::Foyer(Some(entry)) => match entry.value() {
+                CachedBlock::Block(block) => Some(block.clone()),
+                _ => None,
+            },
             _ => None,
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn sst_index(&self) -> Option<Arc<SsTableIndexOwned>> {
         match self {
-            CachedBlockOption(Some(CachedBlock::Index(index))) => Some(index.clone()),
+            CachedBlockOption::Moka(Some(CachedBlock::Index(index))) => Some(index.clone()),
+            CachedBlockOption::Foyer(Some(entry)) => match entry.value() {
+                CachedBlock::Index(index) => Some(index.clone()),
+                _ => None,
+            },
             _ => None,
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
         match self {
-            CachedBlockOption(Some(CachedBlock::Filter(filter))) => Some(filter.clone()),
+            CachedBlockOption::Moka(Some(CachedBlock::Filter(filter))) => Some(filter.clone()),
+            CachedBlockOption::Foyer(Some(entry)) => match entry.value() {
+                CachedBlock::Filter(filter) => Some(filter.clone()),
+                _ => None,
+            },
             _ => None,
         }
     }

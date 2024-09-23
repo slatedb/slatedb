@@ -107,4 +107,5 @@ async fn main() {
     bench.run().await;
 
     info!("db_bench shutting down ...");
+    db.close().await.expect("failed to close db");
 }
