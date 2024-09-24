@@ -12,6 +12,8 @@ use slatedb::error::SlateDBError;
 use crate::args::{parse_args, DbBenchArgs, DbBenchCommand, Provider};
 use crate::db_bench::DbBench;
 
+use tracing::info;
+
 mod args;
 mod db_bench;
 #[cfg(feature = "aws")]
@@ -53,7 +55,8 @@ fn load_object_store(args: &DbBenchArgs) -> Result<Arc<dyn ObjectStore>, SlateDB
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
+    tracing_subscriber::fmt::init();
+
     let args: DbBenchArgs = parse_args();
     let mut db_options = DbOptions::default();
     db_options.wal_enabled = !args.disable_wal.unwrap_or(false);
@@ -90,5 +93,7 @@ async fn main() {
     };
 
     bench.run().await;
+
+    info!("db_bench shutting down ...");
     db.close().await.expect("failed to close db");
 }
