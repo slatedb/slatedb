@@ -50,7 +50,22 @@ pub(crate) trait DbCache: Send + Sync + 'static {
     fn entry_count(&self) -> u64;
 }
 
-pub(crate) struct MokaCache {
+/// A cache implementation using the Moka library.
+///
+/// This struct wraps a Moka cache, providing an in-memory caching solution
+/// for storing and retrieving cached blocks associated with SSTable IDs.
+///
+/// # Fields
+///
+/// * `inner` - The underlying Moka cache instance, which maps `(SsTableId, u64)`
+///   keys to `CachedBlock` values.
+///
+/// # Notes
+///
+/// The cache is configured based on the provided `InMemoryCacheOptions`,
+/// including settings for capacity, time-to-live (TTL), and time-to-idle (TTI).
+/// It uses a custom weigher to account for the size of cached blocks.
+pub struct MokaCache {
     inner: moka::future::Cache<(SsTableId, u64), CachedBlock>,
 }
 
@@ -93,7 +108,22 @@ impl DbCache for MokaCache {
     }
 }
 
-pub(crate) struct FoyerCache {
+/// A cache implementation using the Foyer library.
+///
+/// This struct wraps a Foyer cache, providing an in-memory caching solution
+/// for storing and retrieving cached blocks associated with SSTable IDs.
+///
+/// # Fields
+///
+/// * `inner` - The underlying Foyer cache instance, which maps `(SsTableId, u64)`
+///   keys to `CachedBlock` values.
+///
+/// # Notes
+///
+/// The cache is configured based on the provided `InMemoryCacheOptions`,
+/// including settings for capacity, time-to-live (TTL), and time-to-idle (TTI).
+/// It uses a custom weigher to account for the size of cached blocks.
+pub struct FoyerCache {
     inner: foyer::Cache<(SsTableId, u64), CachedBlock>,
 }
 
