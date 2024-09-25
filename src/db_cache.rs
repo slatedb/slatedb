@@ -6,6 +6,7 @@ use crate::{
     block::Block, db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned,
 };
 
+/// The cached block types.
 #[derive(Clone)]
 pub enum CachedBlock {
     Block(Arc<Block>),
@@ -13,12 +14,14 @@ pub enum CachedBlock {
     Filter(Arc<BloomFilter>),
 }
 
+/// The type of the in-memory cache.
 #[derive(Clone, Copy)]
 pub enum CacheType {
     Moka,
     Foyer,
 }
 
+/// The options for the in-memory cache.
 #[derive(Clone, Copy)]
 pub struct DbCacheOptions {
     pub max_capacity: u64,
@@ -40,6 +43,10 @@ impl Default for DbCacheOptions {
     }
 }
 
+/// A trait for in-memory caches.
+///
+/// This trait defines the interface for an in-memory cache,
+/// which is used to store and retrieve cached blocks associated with SSTable IDs.
 #[async_trait]
 pub(crate) trait DbCache: Send + Sync + 'static {
     async fn get(&self, key: (SsTableId, u64)) -> CachedBlockOption;

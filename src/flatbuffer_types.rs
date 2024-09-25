@@ -26,6 +26,7 @@ use crate::flatbuffer_types::manifest_generated::{
 };
 use crate::manifest::{Manifest, ManifestCodec};
 
+/// A wrapper around a `Bytes` buffer containing a FlatBuffer-encoded `SsTableIndex`.
 pub struct SsTableIndexOwned {
     data: Bytes,
 }
