@@ -400,12 +400,17 @@ impl Db {
             }
         };
 
+        let block_cache = options
+            .block_cache_instance
+            .clone()
+            .or_else(|| create_block_cache(options.block_cache_options));
+
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             maybe_cached_object_store.clone(),
             sst_format.clone(),
             path.clone(),
             fp_registry.clone(),
-            create_block_cache(options.block_cache_options),
+            block_cache,
         ));
 
         let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
@@ -1462,6 +1467,7 @@ mod tests {
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             block_cache_options: None,
+            block_cache_instance: None,
             garbage_collector_options: None,
         }
     }

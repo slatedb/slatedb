@@ -7,7 +7,7 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub(crate) enum CachedBlock {
+pub enum CachedBlock {
     Block(Arc<Block>),
     Index(Arc<SsTableIndexOwned>),
     Filter(Arc<BloomFilter>),
@@ -148,7 +148,7 @@ pub(crate) fn create_block_cache(options: Option<DbCacheOptions>) -> Option<Arc<
 }
 
 /// wrapper around Option<CachedBlock> to provide helper functions
-pub(crate) enum CachedBlockOption {
+pub enum CachedBlockOption {
     Moka(Option<CachedBlock>),
     Foyer(Option<foyer::CacheEntry<(SsTableId, u64), CachedBlock>>),
 }

@@ -7,6 +7,10 @@ use tokio::runtime::Handle;
 use crate::compactor::CompactionScheduler;
 use crate::db_cache::DbCacheOptions;
 use crate::error::SlateDBError;
+<<<<<<< HEAD
+=======
+use crate::inmemory_cache::{InMemoryCache, InMemoryCacheOptions};
+>>>>>>> feat(cache): Add option to provide a cache instance.
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
@@ -154,6 +158,9 @@ pub struct DbOptions {
     /// Block cache options.
     pub block_cache_options: Option<DbCacheOptions>,
 
+    /// Block cache instance.
+    pub block_cache_instance: Option<Arc<dyn InMemoryCache>>,
+
     /// Configuration options for the garbage collector.
     pub garbage_collector_options: Option<GarbageCollectorOptions>,
 }
@@ -172,7 +179,8 @@ impl Default for DbOptions {
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
-            block_cache_options: Some(DbCacheOptions::default()),
+            block_cache_options: Some(InMemoryCacheOptions::default()),
+            block_cache_instance: None,
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
         }

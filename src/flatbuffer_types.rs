@@ -26,7 +26,7 @@ use crate::flatbuffer_types::manifest_generated::{
 };
 use crate::manifest::{Manifest, ManifestCodec};
 
-pub(crate) struct SsTableIndexOwned {
+pub struct SsTableIndexOwned {
     data: Bytes,
 }
 
