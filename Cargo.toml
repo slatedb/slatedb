@@ -46,9 +46,10 @@ chrono = "0.4.38"
 foyer = "0.11.2"
 
 [dev-dependencies]
-tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
+criterion = { version = "0.5.1", features = ["async_tokio"] }
 fail-parallel = { version = "0.5.1", features = ["failpoints"] }
 tempfile = "3.3"
+tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
 
 [features]
 default = ["aws"]
@@ -77,3 +78,6 @@ name = "slatedb"
 path = "src/cli/main.rs"
 required-features = ["cli"]
 
+[[bench]]
+name = "bench"
+harness = false
