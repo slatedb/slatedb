@@ -96,6 +96,7 @@ async fn main() {
             let mut puts = 0u64;
             let mut gets = 0u64;
 
+            #[allow(clippy::needless_range_loop)]
             for i in 0..params.concurrency {
                 let v = state.counters[i].puts.load(Ordering::Relaxed);
                 puts += v - snapshots[i].puts;
@@ -326,17 +327,21 @@ The following environment variables must be configured externally:
         plot: *args.get_one::<bool>("plot").unwrap(),
     };
 
-    let mut options = DbOptions::default();
-    options.wal_enabled = !args.get_one::<bool>("no-wal").unwrap();
+    let mut options = DbOptions {
+        wal_enabled: !args.get_one::<bool>("no-wal").unwrap(),
+        ..Default::default()
+    };
 
     if let Some(values) = args.get_many::<u64>("block-cache") {
         let values: Vec<u64> = values.copied().collect();
-        let mut block_cache_options = InMemoryCacheOptions::default();
-        block_cache_options.max_capacity = values[0];
-        block_cache_options.cached_block_size = *(values
-            .get(1)
-            .unwrap_or(&(InMemoryCacheOptions::default().cached_block_size as u64)))
-            as u32;
+        let block_cache_options = InMemoryCacheOptions {
+            max_capacity: values[0],
+            cached_block_size: *(values
+                .get(1)
+                .unwrap_or(&(InMemoryCacheOptions::default().cached_block_size as u64)))
+                as u32,
+            ..Default::default()
+        };
         options.block_cache_options = Some(block_cache_options);
     } else {
         options.block_cache_options = None;
@@ -344,14 +349,13 @@ The following environment variables must be configured externally:
 
     if let Some(values) = args.get_many::<String>("object-cache") {
         let values: Vec<String> = values.cloned().collect();
-
-        let mut object_cache_options = ObjectStoreCacheOptions::default();
-        object_cache_options.part_size_bytes = values[0].parse().unwrap();
-
         let default_location = default_object_cache_location.to_string();
         let location = values.get(1).unwrap_or(&default_location);
-        object_cache_options.root_folder = Some(PathBuf::from(location));
 
+        let object_cache_options = ObjectStoreCacheOptions {
+            part_size_bytes: values[0].parse().unwrap(),
+            root_folder: Some(PathBuf::from(location)),
+        };
         options.object_store_cache_options = object_cache_options;
     } else {
         options.object_store_cache_options.root_folder = None;
