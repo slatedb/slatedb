@@ -62,6 +62,19 @@ async fn main() {
             }
         }
 
+        // sync all the previous writes if WAL is enabled
+        if options.wal_enabled {
+            let key: u32 = rand::thread_rng().gen_range(0..params.key_count);
+            db.put_with_options(
+                &key.to_be_bytes(),
+                value.as_slice(),
+                &WriteOptions {
+                    await_durable: true,
+                },
+            )
+            .await;
+        }
+
         if !params.plot {
             println!("Database prepopulated with {} key(s)", inserted);
         }
