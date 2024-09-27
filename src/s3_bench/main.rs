@@ -27,9 +27,13 @@ async fn main() {
     if !params.plot {
         println!("Creating database: {}", s3_db_path);
     }
-    let db = Db::open_with_opts(s3_db_path.clone(), options, Arc::clone(&object_store))
-        .await
-        .expect("failed to create database");
+    let db = Db::open_with_opts(
+        s3_db_path.clone(),
+        options.clone(),
+        Arc::clone(&object_store),
+    )
+    .await
+    .expect("failed to create database");
 
     if params.prepopulate_percentage != 0 {
         if !params.plot {
@@ -131,8 +135,13 @@ async fn main() {
 
     state.db.close().await.expect("failed to close database");
 
-    let cache_path = format!("target/s3-bench/cache/s3-bench/{}", db_name);
-    let _ = remove_dir_all(std::path::Path::new(&cache_path)).await;
+    if let Some(object_cache_root) = options.object_store_cache_options.root_folder {
+        let db_cache_path = format!("{}/{}", object_cache_root.display(), s3_db_path);
+        let result = remove_dir_all(std::path::Path::new(&db_cache_path)).await;
+        if let Err(e) = result {
+            println!("Failed to delete object cache at {}: {}", db_cache_path, e);
+        }
+    }
 }
 
 async fn run(id: usize, params: Params, state: Arc<State>) {
