@@ -28,7 +28,7 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
-use crate::{config::ReadLevel::Uncommitted, inmemory_cache::create_block_cache};
+use crate::{config::ReadLevel::Uncommitted, db_cache::create_block_cache};
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,

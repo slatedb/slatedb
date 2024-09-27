@@ -5,8 +5,8 @@ use serde::Serialize;
 use tokio::runtime::Handle;
 
 use crate::compactor::CompactionScheduler;
+use crate::db_cache::DbCacheOptions;
 use crate::error::SlateDBError;
-use crate::inmemory_cache::InMemoryCacheOptions;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
@@ -152,7 +152,7 @@ pub struct DbOptions {
     pub object_store_cache_options: ObjectStoreCacheOptions,
 
     /// Block cache options.
-    pub block_cache_options: Option<InMemoryCacheOptions>,
+    pub block_cache_options: Option<DbCacheOptions>,
 
     /// Configuration options for the garbage collector.
     pub garbage_collector_options: Option<GarbageCollectorOptions>,
@@ -172,7 +172,7 @@ impl Default for DbOptions {
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
-            block_cache_options: Some(InMemoryCacheOptions::default()),
+            block_cache_options: Some(DbCacheOptions::default()),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
         }
