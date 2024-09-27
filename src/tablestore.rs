@@ -572,7 +572,7 @@ mod tests {
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use ulid::Ulid;
 
-    use crate::db_cache::{DbCacheOptions, MokaCache};
+    use crate::db_cache::{MokaCache, MokaCacheOptions};
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
@@ -685,7 +685,8 @@ mod tests {
             block_size: 32,
             ..SsTableFormat::default()
         };
-        let block_cache = Arc::new(MokaCache::new(DbCacheOptions::default()));
+
+        let block_cache = Arc::new(MokaCache::new(MokaCacheOptions::default()));
         let ts = Arc::new(TableStore::new(
             os.clone(),
             format,
