@@ -19,7 +19,6 @@ crc32fast = "1.4.2"
 crossbeam-channel = "0.5.13"
 crossbeam-skiplist = "0.1.3"
 dotenvy = { version = "0.15.7" }
-env_logger = { version = "0.11", optional = true }
 fail-parallel = "0.5.1"
 flatbuffers = "24.3.25"
 futures = "0.3.30"
@@ -35,6 +34,7 @@ rand_xorshift = "0.3.0"
 log = {  version = "0.4.22", features = ["std"] }
 once_cell = "1.19.0"
 tracing = {version = "0.1.40", features = ["log"]}
+tracing-subscriber = {version = "0.3"}
 snap = { version = "1.1.1", optional = true }
 flate2 = { version = "1.0.33", optional = true }
 lz4_flex = { version = "0.11.3", optional = true }
@@ -55,7 +55,8 @@ tempfile = "3.3"
 default = ["aws"]
 aws = ["object_store/aws"]
 cli = ["clap", "clap/derive"]
-db_bench = ["aws", "env_logger", "leaky-bucket", "clap", "clap/derive", "wal_disable"]
+db_bench = ["aws", "leaky-bucket", "clap", "clap/derive", "wal_disable"]
+s3_bench = ["aws", "wal_disable", "clap", "clap/cargo"]
 compression = ["snappy"]
 snappy = ["dep:snap"]
 zlib = ["dep:flate2"]
@@ -72,6 +73,11 @@ required-features = ["db_bench"]
 name = "db-bench"
 path = "src/db_bench/main.rs"
 required-features = ["db_bench"]
+
+[[bin]]
+name = "s3-bench"
+path = "src/s3_bench/main.rs"
+required-features = ["s3_bench"]
 
 [[bin]]
 name = "slatedb"

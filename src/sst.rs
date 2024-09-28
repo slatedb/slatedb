@@ -515,6 +515,7 @@ mod tests {
     use super::*;
     use crate::block_iterator::BlockIterator;
     use crate::db_state::SsTableId;
+    use crate::filter::filter_hash;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
@@ -757,8 +758,8 @@ mod tests {
             let index = table_store.read_index(&sst_handle).await.unwrap();
             let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
 
-            assert!(filter.has_key(b"key1"));
-            assert!(filter.has_key(b"key2"));
+            assert!(filter.might_contain(filter_hash(b"key1")));
+            assert!(filter.might_contain(filter_hash(b"key2")));
             assert_eq!(encoded_info, sst_handle.info);
             assert_eq!(1, index.borrow().block_meta().len());
             assert_eq!(
@@ -801,8 +802,8 @@ mod tests {
             let index = table_store.read_index(&sst_handle).await.unwrap();
             let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
 
-            assert!(filter.has_key(b"key1"));
-            assert!(filter.has_key(b"key2"));
+            assert!(filter.might_contain(filter_hash(b"key1")));
+            assert!(filter.might_contain(filter_hash(b"key2")));
             assert_eq!(encoded_info, sst_handle.info);
             assert_eq!(1, index.borrow().block_meta().len());
             assert_eq!(
