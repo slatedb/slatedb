@@ -575,7 +575,6 @@ mod tests {
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use ulid::Ulid;
 
-    use crate::db_cache::moka::{MokaCache, MokaCacheOptions};
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
@@ -681,7 +680,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "moka")]
     async fn test_tablestore_sst_and_partial_cache_hits() {
+        use crate::db_cache::moka::{MokaCache, MokaCacheOptions};
+
         // Setup
         let os = Arc::new(InMemory::new());
         let format = SsTableFormat {

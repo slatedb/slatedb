@@ -11,7 +11,9 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 /// The default cached block size for the cache. (32 bytes)
 pub const DEFAULT_CACHED_BLOCK_SIZE: u32 = 32;
 
+#[cfg(feature = "foyer")]
 pub mod foyer;
+#[cfg(feature = "moka")]
 pub mod moka;
 
 /// The cached block types.
