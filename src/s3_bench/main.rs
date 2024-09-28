@@ -7,7 +7,7 @@ use rand::{Rng, RngCore, SeedableRng};
 use slatedb::config::ReadLevel::Uncommitted;
 use slatedb::config::{DbOptions, ObjectStoreCacheOptions, ReadOptions, WriteOptions};
 use slatedb::db::Db;
-use slatedb::inmemory_cache::InMemoryCacheOptions;
+use slatedb::db_cache::DbCacheOptions;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -377,6 +377,7 @@ The following environment variables must be configured externally:
         let object_cache_options = ObjectStoreCacheOptions {
             part_size_bytes: values[0].parse().unwrap(),
             root_folder: Some(PathBuf::from(location)),
+            limit_bytes: None,
         };
         options.object_store_cache_options = object_cache_options;
     } else {

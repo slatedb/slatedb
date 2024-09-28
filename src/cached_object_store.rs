@@ -37,7 +37,7 @@ impl CachedObjectStore {
     pub fn new(
         object_store: Arc<dyn ObjectStore>,
         root_folder: std::path::PathBuf,
-        limit_bytes: usize,
+        limit_bytes: Option<usize>,
         part_bytes: usize,
         db_stats: Arc<DbStats>,
     ) -> Result<Arc<Self>, SlateDBError> {
@@ -551,8 +551,8 @@ struct FsCacheStorage {
 }
 
 impl FsCacheStorage {
-    pub fn new(root_folder: std::path::PathBuf, limit_bytes: usize) -> Self {
-        let evictor = Arc::new(FsCacheEvictor::new(root_folder.clone(), limit_bytes as u64));
+    pub fn new(root_folder: std::path::PathBuf, limit_bytes: Option<usize>) -> Self {
+        let evictor = Arc::new(FsCacheEvictor::new(root_folder.clone(), limit_bytes));
         Self {
             root_folder,
             evictor,
@@ -798,14 +798,14 @@ impl LocalCacheEntry for FsCacheEntry {
 #[derive(Debug)]
 struct FsCacheEvictor {
     root_folder: std::path::PathBuf,
-    limit_bytes: u64,
+    limit_bytes: Option<usize>,
     tx: tokio::sync::mpsc::Sender<u64>,
     rx: Mutex<Option<tokio::sync::mpsc::Receiver<u64>>>,
     task_handle: OnceCell<tokio::task::JoinHandle<()>>,
 }
 
 impl FsCacheEvictor {
-    pub fn new(root_folder: std::path::PathBuf, limit_bytes: u64) -> Self {
+    pub fn new(root_folder: std::path::PathBuf, limit_bytes: Option<usize>) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         Self {
             root_folder,
@@ -817,10 +817,11 @@ impl FsCacheEvictor {
     }
 
     async fn start(&self) {
-        // if the limit_bytes is 0, do nothing
-        if self.limit_bytes == 0 || self.started().await {
-            return;
-        }
+        // if the limit_bytes is not set, do nothing
+        let cache_size_bytes = match &self.limit_bytes {
+            None => return,
+            Some(limit_bytes) => *limit_bytes,
+        };
 
         let rx = self
             .rx
@@ -830,7 +831,7 @@ impl FsCacheEvictor {
             .expect("evictor already started");
         let handle = tokio::spawn(Self::background(
             self.root_folder.clone(),
-            self.limit_bytes,
+            cache_size_bytes as u64,
             rx,
         ));
         self.task_handle.set(handle).ok();
@@ -869,7 +870,7 @@ impl FsCacheEvictor {
     }
 
     pub async fn maybe_evict(&self, bytes: u64) {
-        if self.limit_bytes == 0 || !self.started().await {
+        if self.limit_bytes.is_none() || !self.started().await {
             return;
         }
 
@@ -1066,7 +1067,7 @@ mod tests {
         let cached_store = CachedObjectStore::new(
             object_store.clone(),
             test_cache_folder.clone(),
-            0,
+            None,
             part_size,
             db_stats,
         )
@@ -1133,7 +1134,7 @@ mod tests {
         let cached_store = CachedObjectStore::new(
             object_store,
             test_cache_folder.clone(),
-            0,
+            None,
             part_size,
             db_stats,
         )
@@ -1172,7 +1173,7 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CachedObjectStore::new(object_store, test_cache_folder, 0, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, test_cache_folder, None, 1024, db_stats).unwrap();
 
         struct Test {
             input: (Option<GetRange>, usize),
@@ -1252,7 +1253,7 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CachedObjectStore::new(object_store, test_cache_folder, 0, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, test_cache_folder, None, 1024, db_stats).unwrap();
 
         let aligned = cached_store.align_range(&(9..1025), 1024);
         assert_eq!(aligned, 0..2048);
@@ -1266,7 +1267,7 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CachedObjectStore::new(object_store, test_cache_folder, 0, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, test_cache_folder, None, 1024, db_stats).unwrap();
 
         let aligned = cached_store.align_get_range(&GetRange::Bounded(9..1025));
         assert_eq!(aligned, GetRange::Bounded(0..2048));
@@ -1289,7 +1290,7 @@ mod tests {
         let cached_store = CachedObjectStore::new(
             object_store.clone(),
             test_cache_folder,
-            0,
+            None,
             1024,
             Arc::new(DbStats::new()),
         )

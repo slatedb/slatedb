@@ -673,7 +673,7 @@ mod tests {
         let cached_object_store = CachedObjectStore::new(
             object_store.clone(),
             temp_dir.path().to_path_buf(),
-            0,
+            None,
             part_size,
             db_stats.clone(),
         )
