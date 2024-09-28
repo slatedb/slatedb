@@ -16,14 +16,6 @@ pub mod foyer;
 #[cfg(feature = "moka")]
 pub mod moka;
 
-/// The cached block types.
-#[derive(Clone)]
-pub enum CachedBlock {
-    Block(Arc<Block>),
-    Index(Arc<SsTableIndexOwned>),
-    Filter(Arc<BloomFilter>),
-}
-
 /// A trait for in-memory caches.
 ///
 /// This trait defines the interface for an in-memory cache,
@@ -31,7 +23,7 @@ pub enum CachedBlock {
 #[async_trait]
 pub trait DbCache: Send + Sync {
     async fn get(&self, key: (SsTableId, u64)) -> Option<CachedEntry>;
-    async fn insert(&self, key: (SsTableId, u64), value: CachedBlock);
+    async fn insert(&self, key: (SsTableId, u64), value: CachedEntry);
     #[allow(dead_code)]
     async fn remove(&self, key: (SsTableId, u64));
     #[allow(dead_code)]
@@ -47,15 +39,39 @@ pub struct CachedEntry {
 }
 
 impl CachedEntry {
-    pub fn block(&self) -> Option<Arc<Block>> {
+    /// Create a new `CachedEntry` with the given block.
+    pub(crate) fn with_block(self, block: Arc<Block>) -> Self {
+        Self {
+            block: Some(block),
+            ..self
+        }
+    }
+
+    /// Create a new `CachedEntry` with the given SSTable index.
+    pub(crate) fn with_sst_index(self, sst_index: Arc<SsTableIndexOwned>) -> Self {
+        Self {
+            sst_index: Some(sst_index),
+            ..self
+        }
+    }
+
+    /// Create a new `CachedEntry` with the given bloom filter.
+    pub(crate) fn with_bloom_filter(self, bloom_filter: Arc<BloomFilter>) -> Self {
+        Self {
+            bloom_filter: Some(bloom_filter),
+            ..self
+        }
+    }
+
+    pub(crate) fn block(&self) -> Option<Arc<Block>> {
         self.block.clone()
     }
 
-    pub fn sst_index(&self) -> Option<Arc<SsTableIndexOwned>> {
+    pub(crate) fn sst_index(&self) -> Option<Arc<SsTableIndexOwned>> {
         self.sst_index.clone()
     }
 
-    pub fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
+    pub(crate) fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
         self.bloom_filter.clone()
     }
 }

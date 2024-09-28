@@ -16,16 +16,18 @@
 //! use slatedb::db::Db;
 //! use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
 //! use object_store::local::LocalFileSystem;
-//! use std::path::Path;
 //! use std::sync::Arc;
 //!
-//! let object_store = Arc::new(LocalFileSystem::new());
-//! let cache = Arc::new(MokaCache::new());
-//! let db = Db::open_with_cache(Path::from("path/to/db"), object_store, cache).await;
+//! #[::tokio::main]
+//! async fn main() {
+//!     let object_store = Arc::new(LocalFileSystem::new());
+//!     let cache = Arc::new(MokaCache::new());
+//!     let db = Db::open_with_cache("path/to/db".into(), object_store, cache).await;
+//! }
 //! ```
 //!
 use crate::db_cache::{
-    CachedBlock, CachedEntry, DbCache, SsTableId, DEFAULT_CACHED_BLOCK_SIZE, DEFAULT_MAX_CAPACITY,
+    CachedEntry, DbCache, SsTableId, DEFAULT_CACHED_BLOCK_SIZE, DEFAULT_MAX_CAPACITY,
 };
 use async_trait::async_trait;
 use std::time::Duration;
@@ -66,7 +68,7 @@ impl Default for MokaCacheOptions {
 /// including settings for capacity, time-to-live (TTL), and time-to-idle (TTI).
 /// It uses a custom weigher to account for the size of cached blocks.
 pub struct MokaCache {
-    inner: moka::future::Cache<(SsTableId, u64), CachedBlock>,
+    inner: moka::future::Cache<(SsTableId, u64), CachedEntry>,
 }
 
 impl MokaCache {
@@ -102,13 +104,10 @@ impl Default for MokaCache {
 #[async_trait]
 impl DbCache for MokaCache {
     async fn get(&self, key: (SsTableId, u64)) -> Option<CachedEntry> {
-        self.inner
-            .get(&key)
-            .await
-            .map(convert_moka_cache_to_cached_entry)
+        self.inner.get(&key).await
     }
 
-    async fn insert(&self, key: (SsTableId, u64), value: CachedBlock) {
+    async fn insert(&self, key: (SsTableId, u64), value: CachedEntry) {
         self.inner.insert(key, value).await;
     }
 
@@ -119,16 +118,4 @@ impl DbCache for MokaCache {
     fn entry_count(&self) -> u64 {
         self.inner.entry_count()
     }
-}
-
-fn convert_moka_cache_to_cached_entry(entry: CachedBlock) -> CachedEntry {
-    let mut cached_entry = CachedEntry::default();
-
-    match entry {
-        CachedBlock::Block(block) => cached_entry.block = Some(block),
-        CachedBlock::Index(index) => cached_entry.sst_index = Some(index),
-        CachedBlock::Filter(filter) => cached_entry.bloom_filter = Some(filter),
-    }
-
-    cached_entry
 }

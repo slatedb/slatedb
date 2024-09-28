@@ -9,7 +9,7 @@ pub(crate) struct BloomFilterBuilder {
 }
 
 #[derive(PartialEq, Eq)]
-pub struct BloomFilter {
+pub(crate) struct BloomFilter {
     num_probes: u16,
     buffer: Bytes,
 }

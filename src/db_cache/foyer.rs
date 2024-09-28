@@ -16,16 +16,18 @@
 //! use slatedb::db::Db;
 //! use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 //! use object_store::local::LocalFileSystem;
-//! use std::path::Path;
 //! use std::sync::Arc;
 //!
-//! let object_store = Arc::new(LocalFileSystem::new());
-//! let cache = Arc::new(FoyerCache::new());
-//! let db = Db::open_with_cache(Path::from("path/to/db"), object_store, cache).await;
+//! #[::tokio::main]
+//! async fn main() {
+//!     let object_store = Arc::new(LocalFileSystem::new());
+//!     let cache = Arc::new(FoyerCache::new());
+//! let db = Db::open_with_cache("path/to/db".into(), object_store, cache).await;
+//! }
 //! ```
 //!
 use crate::db_cache::{
-    CachedBlock, CachedEntry, DbCache, SsTableId, DEFAULT_CACHED_BLOCK_SIZE, DEFAULT_MAX_CAPACITY,
+    CachedEntry, DbCache, SsTableId, DEFAULT_CACHED_BLOCK_SIZE, DEFAULT_MAX_CAPACITY,
 };
 use async_trait::async_trait;
 
@@ -61,7 +63,7 @@ impl Default for FoyerCacheOptions {
 /// including settings for capacity, time-to-live (TTL), and time-to-idle (TTI).
 /// It uses a custom weigher to account for the size of cached blocks.
 pub struct FoyerCache {
-    inner: foyer::Cache<(SsTableId, u64), CachedBlock>,
+    inner: foyer::Cache<(SsTableId, u64), CachedEntry>,
 }
 
 impl FoyerCache {
@@ -88,12 +90,10 @@ impl Default for FoyerCache {
 #[async_trait]
 impl DbCache for FoyerCache {
     async fn get(&self, key: (SsTableId, u64)) -> Option<CachedEntry> {
-        self.inner
-            .get(&key)
-            .map(convert_foyer_cache_to_cached_entry)
+        self.inner.get(&key).map(|entry| entry.value().clone())
     }
 
-    async fn insert(&self, key: (SsTableId, u64), value: CachedBlock) {
+    async fn insert(&self, key: (SsTableId, u64), value: CachedEntry) {
         self.inner.insert(key, value);
     }
 
@@ -104,18 +104,4 @@ impl DbCache for FoyerCache {
     fn entry_count(&self) -> u64 {
         self.inner.usage() as _
     }
-}
-
-fn convert_foyer_cache_to_cached_entry(
-    entry: foyer::CacheEntry<(SsTableId, u64), CachedBlock>,
-) -> CachedEntry {
-    let mut cached_entry = CachedEntry::default();
-
-    match entry.value() {
-        CachedBlock::Block(block) => cached_entry.block = Some(block.clone()),
-        CachedBlock::Index(index) => cached_entry.sst_index = Some(index.clone()),
-        CachedBlock::Filter(filter) => cached_entry.bloom_filter = Some(filter.clone()),
-    }
-
-    cached_entry
 }

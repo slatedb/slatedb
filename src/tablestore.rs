@@ -13,6 +13,7 @@ use object_store::ObjectStore;
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
+use crate::db_cache::CachedEntry;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
@@ -21,11 +22,7 @@ use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
-use crate::{
-    blob::ReadOnlyBlob,
-    block::Block,
-    db_cache::{CachedBlock, DbCache},
-};
+use crate::{blob::ReadOnlyBlob, block::Block, db_cache::DbCache};
 
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
@@ -214,10 +211,13 @@ impl TableStore {
     }
 
     async fn cache_filter(&self, sst: SsTableId, id: u64, filter: Option<Arc<BloomFilter>>) {
-        if let Some(cache) = &self.block_cache {
-            if let Some(filter) = filter {
-                cache.insert((sst, id), CachedBlock::Filter(filter)).await;
-            }
+        let Some(cache) = &self.block_cache else {
+            return;
+        };
+        if let Some(filter) = filter {
+            cache
+                .insert((sst, id), CachedEntry::default().with_bloom_filter(filter))
+                .await;
         }
     }
 
@@ -309,7 +309,7 @@ impl TableStore {
                 cache
                     .insert(
                         (handle.id, handle.info.filter_offset),
-                        CachedBlock::Filter(filter.clone()),
+                        CachedEntry::default().with_bloom_filter(filter.clone()),
                     )
                     .await;
             }
@@ -340,7 +340,7 @@ impl TableStore {
             cache
                 .insert(
                     (handle.id, handle.info.index_offset),
-                    CachedBlock::Index(index.clone()),
+                    CachedEntry::default().with_sst_index(index.clone()),
                 )
                 .await;
         }
@@ -458,7 +458,7 @@ impl TableStore {
         if let Some(cache) = &self.block_cache {
             if !blocks_to_cache.is_empty() {
                 join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
-                    cache.insert((id, offset), CachedBlock::Block(block))
+                    cache.insert((id, offset), CachedEntry::default().with_block(block))
                 }))
                 .await;
             }
