@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 
 use crate::{
     block::{Block, TOMBSTONE},
@@ -47,6 +47,9 @@ impl BlockLike for Arc<Block> {
 pub struct BlockIterator<B: BlockLike> {
     block: B,
     off_off: usize,
+    // first key in the block, because slateDB does not support multi version of keys
+    // so we use `Bytes` temporarily
+    first_key: Bytes,
 }
 
 impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
@@ -61,22 +64,32 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
 
 impl<B: BlockLike> BlockIterator<B> {
     pub fn from_first_key(block: B) -> BlockIterator<B> {
-        BlockIterator { block, off_off: 0 }
+        BlockIterator {
+            first_key: BlockIterator::decode_first_key(&block),
+            block,
+            off_off: 0,
+        }
     }
 
     /// Construct a BlockIterator that starts at the given key, or at the first
     /// key greater than the given key if the exact key given is not in the block.
     pub fn from_key(block: B, key: &[u8]) -> BlockIterator<B> {
+        let first_key = BlockIterator::decode_first_key(&block);
+
         let idx = block.offsets().partition_point(|offset| {
             let mut cursor = &block.data()[*offset as usize..];
-            let key_len = cursor.get_u16() as usize;
-            let cursor_key = &cursor[..key_len];
+            let overlap_len = cursor.get_u16() as usize;
+            let rest_len = cursor.get_u16() as usize;
+            let rest_key = &cursor[..rest_len];
+            let mut cursor_key = BytesMut::from(&first_key[..overlap_len]);
+            cursor_key.extend_from_slice(rest_key);
             cursor_key < key
         });
 
         BlockIterator {
             block,
             off_off: idx,
+            first_key,
         }
     }
 
@@ -92,9 +105,10 @@ impl<B: BlockLike> BlockIterator<B> {
         let off_usz = off as usize;
         // TODO: bounds checks to avoid panics? (paulgb)
         let mut cursor = self.block.data().slice(off_usz..);
-        let key_len = cursor.get_u16() as usize;
-        let key = cursor.slice(..key_len);
-        cursor.advance(key_len);
+        let overlap_len = cursor.get_u16() as usize;
+        let rest_len = cursor.get_u16() as usize;
+        let rest_key = cursor.slice(..rest_len);
+        cursor.advance(rest_len);
         let value_len = cursor.get_u32();
 
         let v = if value_len == TOMBSTONE {
@@ -104,7 +118,22 @@ impl<B: BlockLike> BlockIterator<B> {
             ValueDeletable::Value(value)
         };
 
-        Some(KeyValueDeletable { key, value: v })
+        let mut key = BytesMut::from(&self.first_key[..overlap_len]);
+        key.extend_from_slice(&rest_key);
+
+        Some(KeyValueDeletable {
+            key: key.into(),
+            value: v,
+        })
+    }
+
+    pub fn decode_first_key(block: &B) -> Bytes {
+        let mut buf = block.data().slice(..);
+        let overlap_len = buf.get_u16() as usize;
+        assert_eq!(overlap_len, 0, "first key overlap should be 0");
+        let key_len = buf.get_u16() as usize;
+        let first_key = &buf[..key_len];
+        Bytes::copy_from_slice(first_key)
     }
 }
 
