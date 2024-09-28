@@ -7,7 +7,7 @@ use rand::{Rng, RngCore, SeedableRng};
 use slatedb::config::ReadLevel::Uncommitted;
 use slatedb::config::{DbOptions, ObjectStoreCacheOptions, ReadOptions, WriteOptions};
 use slatedb::db::Db;
-use slatedb::inmemory_cache::InMemoryCacheOptions;
+use slatedb::db_cache::DbCacheOptions;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -232,11 +232,9 @@ struct Params {
 }
 
 fn configure() -> (Params, DbOptions, Arc<dyn ObjectStore>) {
-    let default_block_cache_capacity: &'static str = InMemoryCacheOptions::default()
-        .max_capacity
-        .to_string()
-        .leak();
-    let default_block_cache_block_size: &'static str = InMemoryCacheOptions::default()
+    let default_block_cache_capacity: &'static str =
+        DbCacheOptions::default().max_capacity.to_string().leak();
+    let default_block_cache_block_size: &'static str = DbCacheOptions::default()
         .cached_block_size
         .to_string()
         .leak();
@@ -356,11 +354,11 @@ The following environment variables must be configured externally:
 
     if let Some(values) = args.get_many::<u64>("block-cache") {
         let values: Vec<u64> = values.copied().collect();
-        let block_cache_options = InMemoryCacheOptions {
+        let block_cache_options = DbCacheOptions {
             max_capacity: values[0],
             cached_block_size: *(values
                 .get(1)
-                .unwrap_or(&(InMemoryCacheOptions::default().cached_block_size as u64)))
+                .unwrap_or(&(DbCacheOptions::default().cached_block_size as u64)))
                 as u32,
             ..Default::default()
         };
