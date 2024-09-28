@@ -12,18 +12,16 @@
 //!
 //! ## Examples
 //!
-//! ```rust
-//! use crate::db_cache::{CachedBlock, FoyerCache, FoyerCacheOptions, SsTableId};
-//! use crate::block::Block;
+//! ```rust,no_run
+//! use slatedb::db::Db;
+//! use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
+//! use object_store::local::LocalFileSystem;
+//! use std::path::Path;
+//! use std::sync::Arc;
 //!
-//! let cache = FoyerCache::new(FoyerCacheOptions::default());
-//!
-//! let block = Block::new(vec![1, 2, 3, 4, 5]);
-//! let cached_block = CachedBlock::Block(block);
-//!
-//! cache.insert((SsTableId::new(1), 1), cached_block);
-//!
-//! let cached_entry = cache.get((SsTableId::new(1), 1)).await;
+//! let object_store = Arc::new(LocalFileSystem::new());
+//! let cache = Arc::new(FoyerCache::new());
+//! let db = Db::open_with_cache(Path::from("path/to/db"), object_store, cache).await;
 //! ```
 //!
 use crate::db_cache::{
@@ -67,13 +65,23 @@ pub struct FoyerCache {
 }
 
 impl FoyerCache {
-    pub fn new(options: FoyerCacheOptions) -> Self {
+    pub fn new() -> Self {
+        Self::new_with_opts(FoyerCacheOptions::default())
+    }
+
+    pub fn new_with_opts(options: FoyerCacheOptions) -> Self {
         let builder = foyer::CacheBuilder::new(options.max_capacity as _)
             .with_weighter(move |_, _| options.cached_block_size as _);
 
         let cache = builder.build();
 
         Self { inner: cache }
+    }
+}
+
+impl Default for FoyerCache {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

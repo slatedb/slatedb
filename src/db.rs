@@ -14,6 +14,7 @@ use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
+use crate::db_cache::DbCache;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter;
@@ -358,6 +359,18 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self, SlateDBError> {
         Self::open_with_opts(path, DbOptions::default(), object_store).await
+    }
+
+    pub async fn open_with_cache(
+        path: Path,
+        object_store: Arc<dyn ObjectStore>,
+        cache: Arc<dyn DbCache>,
+    ) -> Result<Self, SlateDBError> {
+        let options = DbOptions {
+            block_cache_instance: Some(cache),
+            ..Default::default()
+        };
+        Self::open_with_opts(path, options, object_store).await
     }
 
     pub async fn open_with_opts(

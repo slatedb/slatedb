@@ -682,7 +682,7 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "moka")]
     async fn test_tablestore_sst_and_partial_cache_hits() {
-        use crate::db_cache::moka::{MokaCache, MokaCacheOptions};
+        use crate::db_cache::moka::MokaCache;
 
         // Setup
         let os = Arc::new(InMemory::new());
@@ -691,7 +691,7 @@ mod tests {
             ..SsTableFormat::default()
         };
 
-        let block_cache = Arc::new(MokaCache::new(MokaCacheOptions::default()));
+        let block_cache = Arc::new(MokaCache::new());
         let ts = Arc::new(TableStore::new(
             os.clone(),
             format,

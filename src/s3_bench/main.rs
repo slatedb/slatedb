@@ -359,7 +359,7 @@ The following environment variables must be configured externally:
                 as u32,
             ..Default::default()
         };
-        options.block_cache_instance = Some(Arc::new(MokaCache::new(cache_options)));
+        options.block_cache_instance = Some(Arc::new(MokaCache::new_with_opts(cache_options)));
     } else {
         options.block_cache_instance = None;
     }

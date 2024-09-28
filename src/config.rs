@@ -5,7 +5,7 @@ use serde::Serialize;
 use tokio::runtime::Handle;
 
 use crate::compactor::CompactionScheduler;
-use crate::db_cache::moka::{MokaCache, MokaCacheOptions};
+use crate::db_cache::moka::MokaCache;
 use crate::error::SlateDBError;
 
 use crate::db_cache::DbCache;
@@ -174,7 +174,7 @@ impl Default for DbOptions {
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
-            block_cache_instance: Some(Arc::new(MokaCache::new(MokaCacheOptions::default()))),
+            block_cache_instance: Some(Arc::new(MokaCache::new())),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
         }

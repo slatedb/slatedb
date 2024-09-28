@@ -29,7 +29,7 @@ pub enum CachedBlock {
 /// This trait defines the interface for an in-memory cache,
 /// which is used to store and retrieve cached blocks associated with SSTable IDs.
 #[async_trait]
-pub trait DbCache: Send + Sync + 'static {
+pub trait DbCache: Send + Sync {
     async fn get(&self, key: (SsTableId, u64)) -> Option<CachedEntry>;
     async fn insert(&self, key: (SsTableId, u64), value: CachedBlock);
     #[allow(dead_code)]
