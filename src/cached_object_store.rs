@@ -853,7 +853,7 @@ impl FsCacheEvictor {
             Ok(scanned_bytes) => scanned_bytes,
             Err(err) => {
                 warn!(
-                    "evictor: unexpected error on scaning the cache folder after {}s, stop the evictor: {}",
+                    "evictor: unexpected error on scanning the cache folder after {}s, stop the evictor: {}",
                     start_time.elapsed().as_secs(),
                     err
                 );
