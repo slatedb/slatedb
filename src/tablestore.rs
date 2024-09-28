@@ -575,7 +575,7 @@ mod tests {
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use ulid::Ulid;
 
-    use crate::db_cache::{MokaCache, MokaCacheOptions};
+    use crate::db_cache::moka::{MokaCache, MokaCacheOptions};
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
