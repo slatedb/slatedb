@@ -216,7 +216,7 @@ impl TableStore {
         };
         if let Some(filter) = filter {
             cache
-                .insert((sst, id), CachedEntry::default().with_bloom_filter(filter))
+                .insert((sst, id), CachedEntry::with_bloom_filter(filter))
                 .await;
         }
     }
@@ -309,7 +309,7 @@ impl TableStore {
                 cache
                     .insert(
                         (handle.id, handle.info.filter_offset),
-                        CachedEntry::default().with_bloom_filter(filter.clone()),
+                        CachedEntry::with_bloom_filter(filter.clone()),
                     )
                     .await;
             }
@@ -340,7 +340,7 @@ impl TableStore {
             cache
                 .insert(
                     (handle.id, handle.info.index_offset),
-                    CachedEntry::default().with_sst_index(index.clone()),
+                    CachedEntry::with_sst_index(index.clone()),
                 )
                 .await;
         }
@@ -458,7 +458,7 @@ impl TableStore {
         if let Some(cache) = &self.block_cache {
             if !blocks_to_cache.is_empty() {
                 join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
-                    cache.insert((id, offset), CachedEntry::default().with_block(block))
+                    cache.insert((id, offset), CachedEntry::with_block(block))
                 }))
                 .await;
             }

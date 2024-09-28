@@ -30,48 +30,59 @@ pub trait DbCache: Send + Sync {
     fn entry_count(&self) -> u64;
 }
 
+#[derive(Clone)]
+enum CachedItem {
+    Block(Arc<Block>),
+    SsTableIndex(Arc<SsTableIndexOwned>),
+    BloomFilter(Arc<BloomFilter>),
+}
+
 /// A cached entry stored in the cache.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CachedEntry {
-    block: Option<Arc<Block>>,
-    sst_index: Option<Arc<SsTableIndexOwned>>,
-    bloom_filter: Option<Arc<BloomFilter>>,
+    item: CachedItem,
 }
 
 impl CachedEntry {
     /// Create a new `CachedEntry` with the given block.
-    pub(crate) fn with_block(self, block: Arc<Block>) -> Self {
+    pub(crate) fn with_block(block: Arc<Block>) -> Self {
         Self {
-            block: Some(block),
-            ..self
+            item: CachedItem::Block(block),
         }
     }
 
     /// Create a new `CachedEntry` with the given SSTable index.
-    pub(crate) fn with_sst_index(self, sst_index: Arc<SsTableIndexOwned>) -> Self {
+    pub(crate) fn with_sst_index(sst_index: Arc<SsTableIndexOwned>) -> Self {
         Self {
-            sst_index: Some(sst_index),
-            ..self
+            item: CachedItem::SsTableIndex(sst_index),
         }
     }
 
     /// Create a new `CachedEntry` with the given bloom filter.
-    pub(crate) fn with_bloom_filter(self, bloom_filter: Arc<BloomFilter>) -> Self {
+    pub(crate) fn with_bloom_filter(bloom_filter: Arc<BloomFilter>) -> Self {
         Self {
-            bloom_filter: Some(bloom_filter),
-            ..self
+            item: CachedItem::BloomFilter(bloom_filter),
         }
     }
 
     pub(crate) fn block(&self) -> Option<Arc<Block>> {
-        self.block.clone()
+        match &self.item {
+            CachedItem::Block(block) => Some(block.clone()),
+            _ => None,
+        }
     }
 
     pub(crate) fn sst_index(&self) -> Option<Arc<SsTableIndexOwned>> {
-        self.sst_index.clone()
+        match &self.item {
+            CachedItem::SsTableIndex(sst_index) => Some(sst_index.clone()),
+            _ => None,
+        }
     }
 
     pub(crate) fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
-        self.bloom_filter.clone()
+        match &self.item {
+            CachedItem::BloomFilter(bloom_filter) => Some(bloom_filter.clone()),
+            _ => None,
+        }
     }
 }
