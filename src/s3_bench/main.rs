@@ -359,9 +359,9 @@ The following environment variables must be configured externally:
                 as u32,
             ..Default::default()
         };
-        options.block_cache_instance = Some(Arc::new(MokaCache::new_with_opts(cache_options)));
+        options.block_cache = Some(Arc::new(MokaCache::new_with_opts(cache_options)));
     } else {
-        options.block_cache_instance = None;
+        options.block_cache = None;
     }
 
     if let Some(values) = args.get_many::<String>("object-cache") {

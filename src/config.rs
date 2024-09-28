@@ -153,8 +153,8 @@ pub struct DbOptions {
     /// The object store cache options.
     pub object_store_cache_options: ObjectStoreCacheOptions,
 
-    /// Block cache instance.
-    pub block_cache_instance: Option<Arc<dyn DbCache>>,
+    /// The block cache instance used to cache SSTable blocks, indexes and bloom filters.
+    pub block_cache: Option<Arc<dyn DbCache>>,
 
     /// Configuration options for the garbage collector.
     pub garbage_collector_options: Option<GarbageCollectorOptions>,
@@ -174,7 +174,7 @@ impl Default for DbOptions {
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
-            block_cache_instance: Some(Arc::new(MokaCache::new())),
+            block_cache: Some(Arc::new(MokaCache::new())),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
         }

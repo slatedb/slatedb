@@ -15,14 +15,18 @@
 //! ```rust,no_run
 //! use slatedb::db::Db;
 //! use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
+//! use slatedb::config::DbOptions;
 //! use object_store::local::LocalFileSystem;
 //! use std::sync::Arc;
 //!
 //! #[::tokio::main]
 //! async fn main() {
 //!     let object_store = Arc::new(LocalFileSystem::new());
-//!     let cache = Arc::new(MokaCache::new());
-//!     let db = Db::open_with_cache("path/to/db".into(), object_store, cache).await;
+//!     let options = DbOptions {
+//!         block_cache: Some(Arc::new(MokaCache::new())),
+//!         ..Default::default()
+//!     };
+//!     let db = Db::open_with_opts("path/to/db".into(), options, object_store).await;
 //! }
 //! ```
 //!
