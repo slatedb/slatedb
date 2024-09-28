@@ -548,7 +548,6 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
 struct FsCacheStorage {
     root_folder: std::path::PathBuf,
     evictor: Arc<FsCacheEvictor>,
-    evictor_init: OnceCell<()>,
 }
 
 impl FsCacheStorage {
@@ -557,7 +556,6 @@ impl FsCacheStorage {
         Self {
             root_folder,
             evictor,
-            evictor_init: OnceCell::new(),
         }
     }
 }
@@ -578,8 +576,7 @@ impl LocalCacheStorage for FsCacheStorage {
     }
 
     async fn start_evictor(&self) {
-        let evictor = self.evictor.clone();
-        self.evictor_init.get_or_init(|| evictor.start()).await;
+        self.evictor.start().await
     }
 }
 
@@ -804,6 +801,7 @@ struct FsCacheEvictor {
     limit_bytes: u64,
     tx: tokio::sync::mpsc::Sender<u64>,
     rx: Mutex<Option<tokio::sync::mpsc::Receiver<u64>>>,
+    task_handle: OnceCell<tokio::task::JoinHandle<()>>,
 }
 
 impl FsCacheEvictor {
@@ -814,12 +812,13 @@ impl FsCacheEvictor {
             limit_bytes,
             tx,
             rx: Mutex::new(Some(rx)),
+            task_handle: OnceCell::new(),
         }
     }
 
     async fn start(&self) {
         // if the limit_bytes is 0, do nothing
-        if self.limit_bytes == 0 {
+        if self.limit_bytes == 0 || self.started().await {
             return;
         }
 
@@ -829,13 +828,16 @@ impl FsCacheEvictor {
             .await
             .take()
             .expect("evictor already started");
-        tokio::spawn(Self::background(
+        let handle = tokio::spawn(Self::background(
             self.root_folder.clone(),
             self.limit_bytes,
             rx,
-        ))
-        .await
-        .ok();
+        ));
+        self.task_handle.set(handle).ok();
+    }
+
+    async fn started(&self) -> bool {
+        self.rx.lock().await.is_none()
     }
 
     async fn background(
@@ -867,7 +869,7 @@ impl FsCacheEvictor {
     }
 
     pub async fn maybe_evict(&self, bytes: u64) {
-        if self.limit_bytes == 0 {
+        if self.limit_bytes == 0 || !self.started().await {
             return;
         }
 
