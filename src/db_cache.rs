@@ -39,17 +39,13 @@ impl Default for MokaCacheOptions {
 pub struct FoyerCacheOptions {
     pub max_capacity: u64,
     pub cached_block_size: u32,
-    pub time_to_live: Option<Duration>,
-    pub time_to_idle: Option<Duration>,
 }
 
 impl Default for FoyerCacheOptions {
     fn default() -> Self {
         Self {
             max_capacity: 64 * 1024 * 1024, // 64MB default max capacity,
-            cached_block_size: 32,          // 32 bytes default
-            time_to_live: None,
-            time_to_idle: None,
+            cached_block_size: 32,
         }
     }
 }
@@ -151,14 +147,6 @@ impl FoyerCache {
     pub fn new(options: FoyerCacheOptions) -> Self {
         let builder = foyer::CacheBuilder::new(options.max_capacity as _)
             .with_weighter(move |_, _| options.cached_block_size as _);
-
-        if options.time_to_live.is_some() {
-            unimplemented!("ttl is not supported by foyer yet");
-        }
-
-        if options.time_to_idle.is_some() {
-            unimplemented!("tti is not supported by foyer yet");
-        }
 
         let cache = builder.build();
 
