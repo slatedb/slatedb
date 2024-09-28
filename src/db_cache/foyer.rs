@@ -58,13 +58,13 @@ impl Default for FoyerCacheOptions {
 ///
 /// # Fields
 ///
-/// * `inner` - The underlying Foyer cache instance, which maps `(SsTableId, u64)`
-///   keys to `CachedBlock` values.
+/// * `inner` - The underlying Foyer cache instance, which maps `CachedKey`
+///   keys to `CachedEntry` values.
 ///
 /// # Notes
 ///
-/// The cache is configured based on the provided `InMemoryCacheOptions`,
-/// including settings for capacity, time-to-live (TTL), and time-to-idle (TTI).
+/// The cache is configured based on the provided `FoyerCacheOptions`,
+/// including settings for capacity and block size.
 /// It uses a custom weigher to account for the size of cached blocks.
 pub struct FoyerCache {
     inner: foyer::Cache<CachedKey, CachedEntry>,

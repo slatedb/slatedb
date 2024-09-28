@@ -63,13 +63,13 @@ impl Default for MokaCacheOptions {
 ///
 /// # Fields
 ///
-/// * `inner` - The underlying Moka cache instance, which maps `(SsTableId, u64)`
-///   keys to `CachedBlock` values.
+/// * `inner` - The underlying Moka cache instance, which maps `CachedKey`
+///   keys to `CachedEntry` values.
 ///
 /// # Notes
 ///
-/// The cache is configured based on the provided `InMemoryCacheOptions`,
-/// including settings for capacity, time-to-live (TTL), and time-to-idle (TTI).
+/// The cache is configured based on the provided `MokaCacheOptions`,
+/// including settings for capacity, block size, time-to-live (TTL), and time-to-idle (TTI).
 /// It uses a custom weigher to account for the size of cached blocks.
 pub struct MokaCache {
     inner: moka::future::Cache<CachedKey, CachedEntry>,
