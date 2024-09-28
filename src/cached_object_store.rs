@@ -903,8 +903,9 @@ impl FsCacheEvictorInner {
             }
             self.tracked_bytes
                 .fetch_sub(evicted_bytes, Ordering::SeqCst);
-            total_bytes += total_bytes;
+            total_bytes += evicted_bytes;
         }
+
         total_bytes
     }
 
@@ -1021,7 +1022,7 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{io::Write, sync::Arc};
 
     use bytes::Bytes;
     use object_store::{path::Path, GetOptions, GetRange, ObjectStore, PutPayload};
@@ -1029,7 +1030,7 @@ mod tests {
 
     use super::CachedObjectStore;
     use crate::{
-        cached_object_store::{FsCacheEntry, PartID},
+        cached_object_store::{FsCacheEntry, FsCacheEvictorInner, PartID},
         metrics::DbStats,
     };
 
@@ -1037,6 +1038,18 @@ mod tests {
         let mut rng = thread_rng();
         let random_bytes: Vec<u8> = (0..n).map(|_| rng.gen()).collect();
         Bytes::from(random_bytes)
+    }
+
+    fn gen_rand_file(
+        folder_path: &std::path::Path,
+        file_name: &str,
+        n: usize,
+    ) -> std::path::PathBuf {
+        let file_path = folder_path.join(file_name);
+        let bytes = gen_rand_bytes(n);
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        file.write_all(&bytes).unwrap();
+        file_path
     }
 
     fn new_test_cache_folder() -> std::path::PathBuf {
@@ -1362,5 +1375,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_evictor() {}
+    async fn test_evictor() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_cache_test_evictor_")
+            .tempdir()
+            .unwrap();
+
+        let mut evictor = FsCacheEvictorInner {
+            root_folder: temp_dir.path().to_path_buf(),
+            tracked_bytes: Default::default(),
+            cache_size_bytes: 1024 * 2,
+            batch_factor: 2,
+            evict_buffer: Default::default(),
+        };
+
+        gen_rand_file(temp_dir.path(), "file0", 1024);
+        let evicted = evictor.maybe_evict(1024).await;
+        assert_eq!(evicted, 0);
+
+        gen_rand_file(temp_dir.path(), "file1", 1024);
+        let evicted = evictor.maybe_evict(1024).await;
+        assert_eq!(evicted, 0);
+
+        gen_rand_file(temp_dir.path(), "file2", 1024);
+        let evicted = evictor.maybe_evict(1024).await;
+        assert_eq!(evicted, 2048);
+
+        let file_paths = walkdir::WalkDir::new(temp_dir.path())
+            .into_iter()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(file_paths.len(), 2); // the folder file "." is also counted
+    }
 }
