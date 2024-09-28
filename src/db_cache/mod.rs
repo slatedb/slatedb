@@ -38,7 +38,7 @@ pub trait DbCache: Send + Sync + 'static {
     fn entry_count(&self) -> u64;
 }
 
-/// A cached entry from the cache.
+/// A cached entry stored in the cache.
 #[derive(Clone, Default)]
 pub struct CachedEntry {
     block: Option<Arc<Block>>,

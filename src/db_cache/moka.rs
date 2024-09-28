@@ -1,3 +1,31 @@
+//! # Moka Cache
+//!
+//! This module provides an implementation of an in-memory cache using the Moka library.
+//! The cache is designed to store and retrieve cached blocks associated with SSTable IDs.
+//! It supports configurable capacity, block size, time-to-live (TTL), and time-to-idle (TTI) settings.
+//!
+//! ## Features
+//!
+//! - **Asynchronous Operations**: Utilizes Moka's `future::Cache` to perform cache operations asynchronously.
+//! - **Custom Weigher**: Implements a custom weigher to account for the size of cached blocks.
+//! - **Flexible Configuration**: Allows customization of cache parameters such as maximum capacity, TTL, and TTI.
+//!
+//! ## Examples
+//!
+//! ```rust
+//! use crate::db_cache::{CachedBlock, MokaCache, MokaCacheOptions, SsTableId};
+//! use crate::block::Block;
+//!
+//! let cache = MokaCache::new(MokaCacheOptions::default());
+//!
+//! let block = Block::new(vec![1, 2, 3, 4, 5]);
+//! let cached_block = CachedBlock::Block(block);
+//!
+//! cache.insert((SsTableId::new(1), 1), cached_block).await;
+//!
+//! let cached_entry = cache.get((SsTableId::new(1), 1)).await;
+//! ```
+//!
 use crate::db_cache::{
     CachedBlock, CachedEntry, DbCache, SsTableId, DEFAULT_CACHED_BLOCK_SIZE, DEFAULT_MAX_CAPACITY,
 };
