@@ -41,13 +41,12 @@ pub mod moka;
 /// use object_store::local::LocalFileSystem;
 /// use slatedb::db::Db;
 /// use slatedb::config::DbOptions;
-/// use slatedb::db_cache::{DbCache, CachedEntry};
-/// use slatedb::db_state::SsTableId;
+/// use slatedb::db_cache::{DbCache, CachedEntry, CachedKey};
 /// use ssc::HashMap;
 /// use std::sync::Arc;
 ///
 /// struct MyCache {
-///     inner: HashMap<(SsTableId, u64), CachedEntry>,
+///     inner: HashMap<CachedKey, CachedEntry>,
 /// }
 ///
 /// impl MyCache {
@@ -60,15 +59,15 @@ pub mod moka;
 ///
 /// #[async_trait]
 /// impl DbCache for MyCache {
-///     async fn get(&self, key: (SsTableId, u64)) -> Option<CachedEntry> {
+///     async fn get(&self, key: CachedKey) -> Option<CachedEntry> {
 ///         self.inner.get_async(&key).await.cloned()
 ///     }
 ///
-///     async fn insert(&self, key: (SsTableId, u64), value: CachedEntry) {
+///     async fn insert(&self, key: CachedKey, value: CachedEntry) {
 ///         self.inner.insert_async(key, value).await;
 ///     }
 ///
-///     async fn remove(&self, key: (SsTableId, u64)) {
+///     async fn remove(&self, key: CachedKey) {
 ///         self.inner.remove_async(&key).await;
 ///     }
 ///
@@ -89,12 +88,22 @@ pub mod moka;
 /// ```
 #[async_trait]
 pub trait DbCache: Send + Sync {
-    async fn get(&self, key: (SsTableId, u64)) -> Option<CachedEntry>;
-    async fn insert(&self, key: (SsTableId, u64), value: CachedEntry);
+    async fn get(&self, key: CachedKey) -> Option<CachedEntry>;
+    async fn insert(&self, key: CachedKey, value: CachedEntry);
     #[allow(dead_code)]
-    async fn remove(&self, key: (SsTableId, u64));
+    async fn remove(&self, key: CachedKey);
     #[allow(dead_code)]
     fn entry_count(&self) -> u64;
+}
+
+/// A key used to identify a cached entry.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct CachedKey(SsTableId, u64);
+
+impl From<(SsTableId, u64)> for CachedKey {
+    fn from((sst_id, block_id): (SsTableId, u64)) -> Self {
+        Self(sst_id, block_id)
+    }
 }
 
 #[derive(Clone)]

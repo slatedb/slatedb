@@ -216,7 +216,7 @@ impl TableStore {
         };
         if let Some(filter) = filter {
             cache
-                .insert((sst, id), CachedEntry::with_bloom_filter(filter))
+                .insert((sst, id).into(), CachedEntry::with_bloom_filter(filter))
                 .await;
         }
     }
@@ -291,7 +291,7 @@ impl TableStore {
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(filter) = cache
-                .get((handle.id, handle.info.filter_offset))
+                .get((handle.id, handle.info.filter_offset).into())
                 .await
                 .and_then(|entry| entry.bloom_filter())
             {
@@ -308,7 +308,7 @@ impl TableStore {
             if let Some(filter) = filter.as_ref() {
                 cache
                     .insert(
-                        (handle.id, handle.info.filter_offset),
+                        (handle.id, handle.info.filter_offset).into(),
                         CachedEntry::with_bloom_filter(filter.clone()),
                     )
                     .await;
@@ -323,7 +323,7 @@ impl TableStore {
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(index) = cache
-                .get((handle.id, handle.info.index_offset))
+                .get((handle.id, handle.info.index_offset).into())
                 .await
                 .and_then(|entry| entry.sst_index())
             {
@@ -339,7 +339,7 @@ impl TableStore {
         if let Some(cache) = &self.block_cache {
             cache
                 .insert(
-                    (handle.id, handle.info.index_offset),
+                    (handle.id, handle.info.index_offset).into(),
                     CachedEntry::with_sst_index(index.clone()),
                 )
                 .await;
@@ -395,7 +395,7 @@ impl TableStore {
                 let block_meta = index_borrow.block_meta().get(block_num);
                 let offset = block_meta.offset();
                 cache
-                    .get((handle.id, offset))
+                    .get((handle.id, offset).into())
                     .await
                     .and_then(|entry| entry.block())
             }))
@@ -458,7 +458,7 @@ impl TableStore {
         if let Some(cache) = &self.block_cache {
             if !blocks_to_cache.is_empty() {
                 join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
-                    cache.insert((id, offset), CachedEntry::with_block(block))
+                    cache.insert((id, offset).into(), CachedEntry::with_block(block))
                 }))
                 .await;
             }
@@ -730,7 +730,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset))
+                    .get((handle.id, offset).into())
                     .await
                     .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache",
@@ -741,11 +741,11 @@ mod tests {
         // Partially clear the cache (remove blocks 5..10 and 15..20)
         for i in 5..10 {
             let offset = index.borrow().block_meta().get(i).offset();
-            block_cache.remove((handle.id, offset)).await;
+            block_cache.remove((handle.id, offset).into()).await;
         }
         for i in 15..20 {
             let offset = index.borrow().block_meta().get(i).offset();
-            block_cache.remove((handle.id, offset)).await;
+            block_cache.remove((handle.id, offset).into()).await;
         }
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
@@ -760,7 +760,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset))
+                    .get((handle.id, offset).into())
                     .await
                     .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache after partial hit",
@@ -784,7 +784,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset))
+                    .get((handle.id, offset).into())
                     .await
                     .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache after SST emptying",

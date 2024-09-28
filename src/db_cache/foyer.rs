@@ -31,7 +31,7 @@
 //! ```
 //!
 use crate::db_cache::{
-    CachedEntry, DbCache, SsTableId, DEFAULT_CACHED_BLOCK_SIZE, DEFAULT_MAX_CAPACITY,
+    CachedEntry, CachedKey, DbCache, DEFAULT_CACHED_BLOCK_SIZE, DEFAULT_MAX_CAPACITY,
 };
 use async_trait::async_trait;
 
@@ -67,7 +67,7 @@ impl Default for FoyerCacheOptions {
 /// including settings for capacity, time-to-live (TTL), and time-to-idle (TTI).
 /// It uses a custom weigher to account for the size of cached blocks.
 pub struct FoyerCache {
-    inner: foyer::Cache<(SsTableId, u64), CachedEntry>,
+    inner: foyer::Cache<CachedKey, CachedEntry>,
 }
 
 impl FoyerCache {
@@ -93,15 +93,15 @@ impl Default for FoyerCache {
 
 #[async_trait]
 impl DbCache for FoyerCache {
-    async fn get(&self, key: (SsTableId, u64)) -> Option<CachedEntry> {
+    async fn get(&self, key: CachedKey) -> Option<CachedEntry> {
         self.inner.get(&key).map(|entry| entry.value().clone())
     }
 
-    async fn insert(&self, key: (SsTableId, u64), value: CachedEntry) {
+    async fn insert(&self, key: CachedKey, value: CachedEntry) {
         self.inner.insert(key, value);
     }
 
-    async fn remove(&self, key: (SsTableId, u64)) {
+    async fn remove(&self, key: CachedKey) {
         self.inner.remove(&key);
     }
 
