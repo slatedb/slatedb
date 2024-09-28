@@ -825,12 +825,8 @@ impl FsCacheEvictor {
             Some(cache_size_bytes) => *cache_size_bytes,
         };
 
-        let rx = self
-            .rx
-            .lock()
-            .await
-            .take()
-            .expect("evictor already started");
+        let guard = self.rx.lock();
+        let rx = guard.await.take().expect("evictor already started");
         let handle = tokio::spawn(Self::background(
             self.root_folder.clone(),
             cache_size_bytes as u64,
@@ -1357,4 +1353,7 @@ mod tests {
         }
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_evictor() {}
 }
