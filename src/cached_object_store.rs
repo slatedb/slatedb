@@ -28,7 +28,7 @@ use crate::metrics::DbStats;
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
-    pub(crate) part_size: usize, // expected to be aligned with mb or kb
+    pub(crate) part_size_bytes: usize, // expected to be aligned with mb or kb
     pub(crate) cache_storage: Arc<dyn LocalCacheStorage>,
     db_stats: Arc<DbStats>,
 }
@@ -38,17 +38,17 @@ impl CachedObjectStore {
         object_store: Arc<dyn ObjectStore>,
         root_folder: std::path::PathBuf,
         cache_size_bytes: Option<usize>,
-        part_bytes: usize,
+        part_size_bytes: usize,
         db_stats: Arc<DbStats>,
     ) -> Result<Arc<Self>, SlateDBError> {
-        if part_bytes == 0 || part_bytes % 1024 != 0 {
+        if part_size_bytes == 0 || part_size_bytes % 1024 != 0 {
             return Err(SlateDBError::InvalidCachePartSize);
         }
 
         let cache_storage = Arc::new(FsCacheStorage::new(root_folder.clone(), cache_size_bytes));
         Ok(Arc::new(Self {
             object_store,
-            part_size: part_bytes,
+            part_size_bytes,
             cache_storage,
             db_stats,
         }))
@@ -59,7 +59,7 @@ impl CachedObjectStore {
     }
 
     pub async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        let entry = self.cache_storage.entry(location, self.part_size);
+        let entry = self.cache_storage.entry(location, self.part_size_bytes);
         match entry.read_head().await {
             Ok(Some((meta, _))) => Ok(meta),
             _ => {
@@ -129,7 +129,7 @@ impl CachedObjectStore {
         location: &Path,
         mut opts: GetOptions,
     ) -> object_store::Result<(ObjectMeta, Attributes)> {
-        let entry = self.cache_storage.entry(location, self.part_size);
+        let entry = self.cache_storage.entry(location, self.part_size_bytes);
         match entry.read_head().await {
             Ok(Some((meta, attrs))) => return Ok((meta, attrs)),
             Ok(None) => {}
@@ -157,16 +157,18 @@ impl CachedObjectStore {
     /// files and a meta file. please note that the `range` in the GetResult is expected to be
     /// aligned with the part size.
     async fn save_result(&self, result: GetResult) -> object_store::Result<usize> {
-        assert!(result.range.start % self.part_size == 0);
-        assert!(result.range.end % self.part_size == 0 || result.range.end == result.meta.size);
+        assert!(result.range.start % self.part_size_bytes == 0);
+        assert!(
+            result.range.end % self.part_size_bytes == 0 || result.range.end == result.meta.size
+        );
 
         let entry = self
             .cache_storage
-            .entry(&result.meta.location, self.part_size);
+            .entry(&result.meta.location, self.part_size_bytes);
         entry.save_head((&result.meta, &result.attributes)).await?;
 
         let mut buffer = BytesMut::new();
-        let mut part_number = result.range.start / self.part_size;
+        let mut part_number = result.range.start / self.part_size_bytes;
         let object_size = result.meta.size;
 
         let mut stream = result.into_stream();
@@ -174,8 +176,8 @@ impl CachedObjectStore {
             let chunk = chunk?;
             buffer.extend_from_slice(&chunk);
 
-            while buffer.len() >= self.part_size {
-                let to_write = buffer.split_to(self.part_size);
+            while buffer.len() >= self.part_size_bytes {
+                let to_write = buffer.split_to(self.part_size_bytes);
                 entry.save_part(part_number, to_write.into()).await?;
                 part_number += 1;
             }
@@ -192,16 +194,16 @@ impl CachedObjectStore {
 
     // split the range into parts, and return the part id and the range inside the part.
     fn split_range_into_parts(&self, range: Range<usize>) -> Vec<(PartID, Range<usize>)> {
-        let range_aligned = self.align_range(&range, self.part_size);
-        let start_part = range_aligned.start / self.part_size;
-        let end_part = range_aligned.end / self.part_size;
+        let range_aligned = self.align_range(&range, self.part_size_bytes);
+        let start_part = range_aligned.start / self.part_size_bytes;
+        let end_part = range_aligned.end / self.part_size_bytes;
         let mut parts: Vec<_> = (start_part..end_part)
             .map(|part_id| {
                 (
                     part_id,
                     Range {
                         start: 0,
-                        end: self.part_size,
+                        end: self.part_size_bytes,
                     },
                 )
             })
@@ -210,11 +212,11 @@ impl CachedObjectStore {
             return vec![];
         }
         if let Some(first_part) = parts.first_mut() {
-            first_part.1.start = range.start % self.part_size;
+            first_part.1.start = range.start % self.part_size_bytes;
         }
         if let Some(last_part) = parts.last_mut() {
-            if range.end % self.part_size != 0 {
-                last_part.1.end = range.end % self.part_size;
+            if range.end % self.part_size_bytes != 0 {
+                last_part.1.end = range.end % self.part_size_bytes;
             }
         }
         parts
@@ -229,10 +231,10 @@ impl CachedObjectStore {
         part_id: PartID,
         range_in_part: Range<usize>,
     ) -> BoxFuture<'static, object_store::Result<Bytes>> {
-        let part_size = self.part_size;
+        let part_size = self.part_size_bytes;
         let object_store = self.object_store.clone();
         let location = location.clone();
-        let entry = self.cache_storage.entry(&location, self.part_size);
+        let entry = self.cache_storage.entry(&location, self.part_size_bytes);
         let db_stats = self.db_stats.clone();
         Box::pin(async move {
             db_stats.object_store_cache_part_access.inc();
@@ -325,15 +327,15 @@ impl CachedObjectStore {
     fn align_get_range(&self, range: &GetRange) -> GetRange {
         match range {
             GetRange::Bounded(bounded) => {
-                let aligned = self.align_range(bounded, self.part_size);
+                let aligned = self.align_range(bounded, self.part_size_bytes);
                 GetRange::Bounded(aligned)
             }
             GetRange::Suffix(suffix) => {
-                let suffix_aligned = self.align_range(&(0..*suffix), self.part_size).end;
+                let suffix_aligned = self.align_range(&(0..*suffix), self.part_size_bytes).end;
                 GetRange::Suffix(suffix_aligned)
             }
             GetRange::Offset(offset) => {
-                let offset_aligned = *offset - *offset % self.part_size;
+                let offset_aligned = *offset - *offset % self.part_size_bytes;
                 GetRange::Offset(offset_aligned)
             }
         }
