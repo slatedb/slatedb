@@ -13,10 +13,10 @@
 //! ## Examples
 //!
 //! ```rust,no_run
+//! use object_store::local::LocalFileSystem;
 //! use slatedb::db::Db;
 //! use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
 //! use slatedb::config::DbOptions;
-//! use object_store::local::LocalFileSystem;
 //! use std::sync::Arc;
 //!
 //! #[::tokio::main]
