@@ -860,6 +860,7 @@ impl FsCacheEvictor {
             root_folder,
             tracked_bytes: AtomicU64::new(scanned_bytes as u64),
             cache_size_bytes,
+            batch_factor: 10,
             evict_buffer: VecDeque::new(),
         };
         while let Some(bytes) = rx.recv().await {
@@ -880,6 +881,7 @@ struct FsCacheEvictorInner {
     root_folder: std::path::PathBuf,
     tracked_bytes: AtomicU64,
     cache_size_bytes: u64,
+    batch_factor: usize,
     evict_buffer: VecDeque<std::path::PathBuf>,
 }
 
@@ -890,8 +892,10 @@ impl FsCacheEvictorInner {
             return;
         }
 
-        let evict_factor = 10;
-        for _ in 0..evict_factor {
+        // if the cache size exceeds the limit, evict the cache files in batch with the batch_factor,
+        // this may help to avoid the cases like triggering the evictor too frequently when the cache
+        // size is just slightly above the limit.
+        for _ in 0..self.batch_factor {
             let evicted_bytes = self.evict_once().await;
             if evicted_bytes == 0 {
                 return;
