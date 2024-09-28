@@ -860,11 +860,11 @@ impl FsCacheEvictor {
                 return;
             }
         };
-        let inner = FsCacheEvictorInner {
+        let mut inner = FsCacheEvictorInner {
             root_folder,
             tracked_bytes: AtomicU64::new(scanned_bytes as u64),
             cache_size_bytes,
-            evict_buffer: Mutex::new(VecDeque::new()),
+            evict_buffer: VecDeque::new(),
         };
         while let Some(bytes) = rx.recv().await {
             inner.maybe_evict(bytes).await;
@@ -884,11 +884,11 @@ struct FsCacheEvictorInner {
     root_folder: std::path::PathBuf,
     tracked_bytes: AtomicU64,
     cache_size_bytes: u64,
-    evict_buffer: Mutex<VecDeque<std::path::PathBuf>>,
+    evict_buffer: VecDeque<std::path::PathBuf>,
 }
 
 impl FsCacheEvictorInner {
-    pub async fn maybe_evict(&self, bytes: u64) {
+    pub async fn maybe_evict(&mut self, bytes: u64) {
         self.tracked_bytes.fetch_add(bytes, Ordering::SeqCst);
         if self.tracked_bytes.load(Ordering::Relaxed) <= self.cache_size_bytes {
             return;
@@ -906,7 +906,7 @@ impl FsCacheEvictorInner {
     }
 
     // evict once, return the bytes evicted
-    async fn evict_once(&self) -> u64 {
+    async fn evict_once(&mut self) -> u64 {
         let (target, target_bytes) = match self.pick_evict_target().await {
             Some(target) => target,
             None => return 0,
@@ -942,11 +942,11 @@ impl FsCacheEvictorInner {
 
     // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, randomized pick
     // two of files, compare their last access time, and evict the older one.
-    async fn pick_evict_target(&self) -> Option<(std::path::PathBuf, u64)> {
+    async fn pick_evict_target(&mut self) -> Option<(std::path::PathBuf, u64)> {
         // extend the evict_buffer if it's empty. it will randomized iterate the cache folder,
         // and randomly pick 1000 files into the evict_buffer.
         let mut rng = rand::rngs::StdRng::from_entropy();
-        if self.evict_buffer.lock().await.len() < 2 {
+        if self.evict_buffer.len() < 2 {
             let iter = WalkDir::new(&self.root_folder).into_iter();
             for entry in iter.choose_multiple(&mut rng, 1000) {
                 let entry = match entry {
@@ -956,22 +956,18 @@ impl FsCacheEvictorInner {
                         break;
                     }
                 };
-                self.evict_buffer
-                    .lock()
-                    .await
-                    .push_back(entry.path().to_path_buf());
+                self.evict_buffer.push_back(entry.path().to_path_buf());
             }
         }
 
         // if the evict_buffer length still below 2, return None
-        if self.evict_buffer.lock().await.len() < 2 {
+        if self.evict_buffer.len() < 2 {
             return None;
         }
 
         // pop two files from the evict_buffer
         let (path0, path1) = {
-            let mut guard = self.evict_buffer.lock().await;
-            match (guard.pop_front(), guard.pop_front()) {
+            match (self.evict_buffer.pop_front(), self.evict_buffer.pop_front()) {
                 (Some(path0), Some(path1)) => (path0, path1),
                 _ => return None,
             }
