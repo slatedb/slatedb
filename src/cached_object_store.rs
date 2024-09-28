@@ -37,7 +37,7 @@ impl CachedObjectStore {
     pub fn new(
         object_store: Arc<dyn ObjectStore>,
         root_folder: std::path::PathBuf,
-        limit_bytes: Option<usize>,
+        cache_size_bytes: Option<usize>,
         part_bytes: usize,
         db_stats: Arc<DbStats>,
     ) -> Result<Arc<Self>, SlateDBError> {
@@ -45,7 +45,7 @@ impl CachedObjectStore {
             return Err(SlateDBError::InvalidCachePartSize);
         }
 
-        let cache_storage = Arc::new(FsCacheStorage::new(root_folder.clone(), limit_bytes));
+        let cache_storage = Arc::new(FsCacheStorage::new(root_folder.clone(), cache_size_bytes));
         Ok(Arc::new(Self {
             object_store,
             part_size: part_bytes,
@@ -551,8 +551,8 @@ struct FsCacheStorage {
 }
 
 impl FsCacheStorage {
-    pub fn new(root_folder: std::path::PathBuf, limit_bytes: Option<usize>) -> Self {
-        let evictor = Arc::new(FsCacheEvictor::new(root_folder.clone(), limit_bytes));
+    pub fn new(root_folder: std::path::PathBuf, cache_size_bytes: Option<usize>) -> Self {
+        let evictor = Arc::new(FsCacheEvictor::new(root_folder.clone(), cache_size_bytes));
         Self {
             root_folder,
             evictor,
@@ -798,18 +798,18 @@ impl LocalCacheEntry for FsCacheEntry {
 #[derive(Debug)]
 struct FsCacheEvictor {
     root_folder: std::path::PathBuf,
-    limit_bytes: Option<usize>,
+    cache_size_bytes: Option<usize>,
     tx: tokio::sync::mpsc::Sender<u64>,
     rx: Mutex<Option<tokio::sync::mpsc::Receiver<u64>>>,
     task_handle: OnceCell<tokio::task::JoinHandle<()>>,
 }
 
 impl FsCacheEvictor {
-    pub fn new(root_folder: std::path::PathBuf, limit_bytes: Option<usize>) -> Self {
+    pub fn new(root_folder: std::path::PathBuf, cache_size_bytes: Option<usize>) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         Self {
             root_folder,
-            limit_bytes,
+            cache_size_bytes,
             tx,
             rx: Mutex::new(Some(rx)),
             task_handle: OnceCell::new(),
@@ -817,10 +817,10 @@ impl FsCacheEvictor {
     }
 
     async fn start(&self) {
-        // if the limit_bytes is not set, do nothing
-        let cache_size_bytes = match &self.limit_bytes {
+        // if the cache_size_bytes is not set, do nothing
+        let cache_size_bytes = match &self.cache_size_bytes {
             None => return,
-            Some(limit_bytes) => *limit_bytes,
+            Some(cache_size_bytes) => *cache_size_bytes,
         };
 
         let rx = self
@@ -843,7 +843,7 @@ impl FsCacheEvictor {
 
     async fn background(
         root_folder: std::path::PathBuf,
-        limit_bytes: u64,
+        cache_size_bytes: u64,
         mut rx: tokio::sync::mpsc::Receiver<u64>,
     ) {
         let start_time = std::time::Instant::now();
@@ -861,7 +861,7 @@ impl FsCacheEvictor {
         let inner = FsCacheEvictorInner {
             root_folder,
             tracked_bytes: AtomicU64::new(scanned_bytes as u64),
-            limit_bytes,
+            cache_size_bytes,
             evict_buffer: Mutex::new(VecDeque::new()),
         };
         while let Some(bytes) = rx.recv().await {
@@ -870,7 +870,7 @@ impl FsCacheEvictor {
     }
 
     pub async fn maybe_evict(&self, bytes: u64) {
-        if self.limit_bytes.is_none() || !self.started().await {
+        if self.cache_size_bytes.is_none() || !self.started().await {
             return;
         }
 
@@ -881,14 +881,14 @@ impl FsCacheEvictor {
 struct FsCacheEvictorInner {
     root_folder: std::path::PathBuf,
     tracked_bytes: AtomicU64,
-    limit_bytes: u64,
+    cache_size_bytes: u64,
     evict_buffer: Mutex<VecDeque<std::path::PathBuf>>,
 }
 
 impl FsCacheEvictorInner {
     pub async fn maybe_evict(&self, bytes: u64) {
         self.tracked_bytes.fetch_add(bytes, Ordering::SeqCst);
-        if self.tracked_bytes.load(Ordering::Relaxed) <= self.limit_bytes {
+        if self.tracked_bytes.load(Ordering::Relaxed) <= self.cache_size_bytes {
             return;
         }
 

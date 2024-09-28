@@ -394,7 +394,7 @@ impl Db {
                 let cached_object_store = CachedObjectStore::new(
                     object_store.clone(),
                     cache_root_folder.clone(),
-                    options.object_store_cache_options.limit_bytes,
+                    options.object_store_cache_options.cache_size_bytes,
                     part_size_bytes,
                     db_stats.clone(),
                 )?;
