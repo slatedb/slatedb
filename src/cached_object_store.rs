@@ -886,23 +886,26 @@ struct FsCacheEvictorInner {
 }
 
 impl FsCacheEvictorInner {
-    pub async fn maybe_evict(&mut self, bytes: u64) {
+    pub async fn maybe_evict(&mut self, bytes: u64) -> u64 {
         self.tracked_bytes.fetch_add(bytes, Ordering::SeqCst);
         if self.tracked_bytes.load(Ordering::Relaxed) <= self.cache_size_bytes {
-            return;
+            return 0;
         }
 
         // if the cache size exceeds the limit, evict the cache files in batch with the batch_factor,
         // this may help to avoid the cases like triggering the evictor too frequently when the cache
         // size is just slightly above the limit.
+        let mut total_bytes: u64 = 0;
         for _ in 0..self.batch_factor {
             let evicted_bytes = self.evict_once().await;
             if evicted_bytes == 0 {
-                return;
+                return total_bytes;
             }
             self.tracked_bytes
                 .fetch_sub(evicted_bytes, Ordering::SeqCst);
+            total_bytes += total_bytes;
         }
+        total_bytes
     }
 
     // evict once, return the bytes evicted
