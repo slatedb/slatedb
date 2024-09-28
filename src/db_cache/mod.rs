@@ -6,6 +6,11 @@ use crate::{
     block::Block, db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned,
 };
 
+/// The default max capacity for the cache. (64MB)
+pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
+/// The default cached block size for the cache. (32 bytes)
+pub const DEFAULT_CACHED_BLOCK_SIZE: u32 = 32;
+
 pub mod foyer;
 pub mod moka;
 

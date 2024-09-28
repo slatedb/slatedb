@@ -1,4 +1,6 @@
-use crate::db_cache::{CachedBlock, CachedEntry, DbCache, SsTableId};
+use crate::db_cache::{
+    CachedBlock, CachedEntry, DbCache, SsTableId, DEFAULT_CACHED_BLOCK_SIZE, DEFAULT_MAX_CAPACITY,
+};
 use async_trait::async_trait;
 
 /// The options for the Foyer cache.
@@ -11,8 +13,8 @@ pub struct FoyerCacheOptions {
 impl Default for FoyerCacheOptions {
     fn default() -> Self {
         Self {
-            max_capacity: 64 * 1024 * 1024, // 64MB default max capacity,
-            cached_block_size: 32,
+            max_capacity: DEFAULT_MAX_CAPACITY,
+            cached_block_size: DEFAULT_CACHED_BLOCK_SIZE,
         }
     }
 }

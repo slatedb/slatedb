@@ -7,7 +7,10 @@ use rand::{Rng, RngCore, SeedableRng};
 use slatedb::config::ReadLevel::Uncommitted;
 use slatedb::config::{DbOptions, ObjectStoreCacheOptions, ReadOptions, WriteOptions};
 use slatedb::db::Db;
-use slatedb::db_cache::DbCacheOptions;
+
+use slatedb::db_cache::{
+    moka::MokaCache, moka::MokaCacheOptions, DEFAULT_CACHED_BLOCK_SIZE, DEFAULT_MAX_CAPACITY,
+};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -232,12 +235,8 @@ struct Params {
 }
 
 fn configure() -> (Params, DbOptions, Arc<dyn ObjectStore>) {
-    let default_block_cache_capacity: &'static str =
-        DbCacheOptions::default().max_capacity.to_string().leak();
-    let default_block_cache_block_size: &'static str = DbCacheOptions::default()
-        .cached_block_size
-        .to_string()
-        .leak();
+    let default_block_cache_capacity: &'static str = DEFAULT_MAX_CAPACITY.to_string().leak();
+    let default_block_cache_block_size: &'static str = DEFAULT_CACHED_BLOCK_SIZE.to_string().leak();
     let default_object_cache_part_size: &'static str = ObjectStoreCacheOptions::default()
         .part_size_bytes
         .to_string()
@@ -354,17 +353,15 @@ The following environment variables must be configured externally:
 
     if let Some(values) = args.get_many::<u64>("block-cache") {
         let values: Vec<u64> = values.copied().collect();
-        let block_cache_options = DbCacheOptions {
+        let cache_options = MokaCacheOptions {
             max_capacity: values[0],
-            cached_block_size: *(values
-                .get(1)
-                .unwrap_or(&(DbCacheOptions::default().cached_block_size as u64)))
+            cached_block_size: *(values.get(1).unwrap_or(&(DEFAULT_CACHED_BLOCK_SIZE as u64)))
                 as u32,
             ..Default::default()
         };
-        options.block_cache_options = Some(block_cache_options);
+        options.block_cache_instance = Some(Arc::new(MokaCache::new(cache_options)));
     } else {
-        options.block_cache_options = None;
+        options.block_cache_instance = None;
     }
 
     if let Some(values) = args.get_many::<String>("object-cache") {

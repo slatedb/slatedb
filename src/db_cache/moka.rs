@@ -1,4 +1,6 @@
-use crate::db_cache::{CachedBlock, CachedEntry, DbCache, SsTableId};
+use crate::db_cache::{
+    CachedBlock, CachedEntry, DbCache, SsTableId, DEFAULT_CACHED_BLOCK_SIZE, DEFAULT_MAX_CAPACITY,
+};
 use async_trait::async_trait;
 use std::time::Duration;
 
@@ -14,8 +16,8 @@ pub struct MokaCacheOptions {
 impl Default for MokaCacheOptions {
     fn default() -> Self {
         Self {
-            max_capacity: 64 * 1024 * 1024, // 64MB default max capacity,
-            cached_block_size: 32,          // 32 bytes default
+            max_capacity: DEFAULT_MAX_CAPACITY,
+            cached_block_size: DEFAULT_CACHED_BLOCK_SIZE,
             time_to_live: None,
             time_to_idle: None,
         }
