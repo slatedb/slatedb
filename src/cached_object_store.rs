@@ -960,6 +960,10 @@ impl FsCacheEvictorInner {
                         break;
                     }
                 };
+
+                if entry.file_type().is_dir() {
+                    continue;
+                }
                 self.evict_buffer.push_back(entry.path().to_path_buf());
             }
         }
@@ -1022,9 +1026,10 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Write, sync::Arc};
+    use std::{io::Write, sync::Arc, time::SystemTime};
 
     use bytes::Bytes;
+    use filetime::FileTime;
     use object_store::{path::Path, GetOptions, GetRange, ObjectStore, PutPayload};
     use rand::{thread_rng, Rng};
 
@@ -1406,5 +1411,31 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
             .collect::<Vec<_>>();
         assert_eq!(file_paths.len(), 2); // the folder file "." is also counted
+    }
+
+    #[tokio::test]
+    async fn test_evictor_pick() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_cache_test_evictor_")
+            .tempdir()
+            .unwrap();
+
+        let mut evictor = FsCacheEvictorInner {
+            root_folder: temp_dir.path().to_path_buf(),
+            tracked_bytes: Default::default(),
+            cache_size_bytes: 1024 * 2,
+            batch_factor: 2,
+            evict_buffer: Default::default(),
+        };
+
+        let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
+        gen_rand_file(temp_dir.path(), "file1", 1025);
+
+        filetime::set_file_atime(&path0, FileTime::from_system_time(SystemTime::UNIX_EPOCH))
+            .unwrap();
+
+        let (target_path, size) = evictor.pick_evict_target().await.unwrap();
+        assert_eq!(target_path, path0);
+        assert_eq!(size, 1024);
     }
 }
