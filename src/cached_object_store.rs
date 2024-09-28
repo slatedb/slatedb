@@ -952,7 +952,7 @@ impl FsCacheEvictorInner {
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(err) => {
-                        warn!("evictor: failed to walk the cache folder: {}", err);
+                        warn!("evictor: unexpected error on reading dir entry to pick the evict target, skip the entry: {}", err);
                         break;
                     }
                 };
