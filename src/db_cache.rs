@@ -56,7 +56,7 @@ impl Default for FoyerCacheOptions {
 /// which is used to store and retrieve cached blocks associated with SSTable IDs.
 #[async_trait]
 pub trait DbCache: Send + Sync + 'static {
-    async fn get(&self, key: (SsTableId, u64)) -> Box<dyn CachedEntry>;
+    async fn get(&self, key: (SsTableId, u64)) -> Option<CachedEntry>;
     async fn insert(&self, key: (SsTableId, u64), value: CachedBlock);
     #[allow(dead_code)]
     async fn remove(&self, key: (SsTableId, u64));
@@ -105,10 +105,11 @@ impl MokaCache {
 
 #[async_trait]
 impl DbCache for MokaCache {
-    async fn get(&self, key: (SsTableId, u64)) -> Box<dyn CachedEntry> {
-        Box::new(MokaCachedEntry {
-            entry: self.inner.get(&key).await,
-        })
+    async fn get(&self, key: (SsTableId, u64)) -> Option<CachedEntry> {
+        self.inner
+            .get(&key)
+            .await
+            .map(convert_moka_cache_to_cached_entry)
     }
 
     async fn insert(&self, key: (SsTableId, u64), value: CachedBlock) {
@@ -122,6 +123,18 @@ impl DbCache for MokaCache {
     fn entry_count(&self) -> u64 {
         self.inner.entry_count()
     }
+}
+
+fn convert_moka_cache_to_cached_entry(entry: CachedBlock) -> CachedEntry {
+    let mut cached_entry = CachedEntry::default();
+
+    match entry {
+        CachedBlock::Block(block) => cached_entry.block = Some(block),
+        CachedBlock::Index(index) => cached_entry.sst_index = Some(index),
+        CachedBlock::Filter(filter) => cached_entry.bloom_filter = Some(filter),
+    }
+
+    cached_entry
 }
 
 /// A cache implementation using the Foyer library.
@@ -156,10 +169,10 @@ impl FoyerCache {
 
 #[async_trait]
 impl DbCache for FoyerCache {
-    async fn get(&self, key: (SsTableId, u64)) -> Box<dyn CachedEntry> {
-        Box::new(FoyerCachedEntry {
-            entry: self.inner.get(&key),
-        })
+    async fn get(&self, key: (SsTableId, u64)) -> Option<CachedEntry> {
+        self.inner
+            .get(&key)
+            .map(convert_foyer_cache_to_cached_entry)
     }
 
     async fn insert(&self, key: (SsTableId, u64), value: CachedBlock) {
@@ -175,65 +188,38 @@ impl DbCache for FoyerCache {
     }
 }
 
-/// A trait for the cached entries.
-pub trait CachedEntry {
-    fn block(&self) -> Option<Arc<Block>>;
-    fn sst_index(&self) -> Option<Arc<SsTableIndexOwned>>;
-    fn bloom_filter(&self) -> Option<Arc<BloomFilter>>;
+fn convert_foyer_cache_to_cached_entry(
+    entry: foyer::CacheEntry<(SsTableId, u64), CachedBlock>,
+) -> CachedEntry {
+    let mut cached_entry = CachedEntry::default();
+
+    match entry.value() {
+        CachedBlock::Block(block) => cached_entry.block = Some(block.clone()),
+        CachedBlock::Index(index) => cached_entry.sst_index = Some(index.clone()),
+        CachedBlock::Filter(filter) => cached_entry.bloom_filter = Some(filter.clone()),
+    }
+
+    cached_entry
 }
 
-/// A cached entry for the Moka cache.
-struct MokaCachedEntry {
-    entry: Option<CachedBlock>,
+/// A cached entry from the cache.
+#[derive(Clone, Default)]
+pub struct CachedEntry {
+    block: Option<Arc<Block>>,
+    sst_index: Option<Arc<SsTableIndexOwned>>,
+    bloom_filter: Option<Arc<BloomFilter>>,
 }
 
-impl CachedEntry for MokaCachedEntry {
-    fn block(&self) -> Option<Arc<Block>> {
-        match &self.entry {
-            Some(CachedBlock::Block(block)) => Some(block.clone()),
-            _ => None,
-        }
+impl CachedEntry {
+    pub fn block(&self) -> Option<Arc<Block>> {
+        self.block.clone()
     }
 
-    fn sst_index(&self) -> Option<Arc<SsTableIndexOwned>> {
-        match &self.entry {
-            Some(CachedBlock::Index(index)) => Some(index.clone()),
-            _ => None,
-        }
+    pub fn sst_index(&self) -> Option<Arc<SsTableIndexOwned>> {
+        self.sst_index.clone()
     }
 
-    fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
-        match &self.entry {
-            Some(CachedBlock::Filter(filter)) => Some(filter.clone()),
-            _ => None,
-        }
-    }
-}
-
-/// A cached entry for the Foyer cache.
-struct FoyerCachedEntry {
-    entry: Option<foyer::CacheEntry<(SsTableId, u64), CachedBlock>>,
-}
-
-impl CachedEntry for FoyerCachedEntry {
-    fn block(&self) -> Option<Arc<Block>> {
-        self.entry.as_ref().and_then(|entry| match entry.value() {
-            CachedBlock::Block(block) => Some(block.clone()),
-            _ => None,
-        })
-    }
-
-    fn sst_index(&self) -> Option<Arc<SsTableIndexOwned>> {
-        self.entry.as_ref().and_then(|entry| match entry.value() {
-            CachedBlock::Index(index) => Some(index.clone()),
-            _ => None,
-        })
-    }
-
-    fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
-        self.entry.as_ref().and_then(|entry| match entry.value() {
-            CachedBlock::Filter(filter) => Some(filter.clone()),
-            _ => None,
-        })
+    pub fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
+        self.bloom_filter.clone()
     }
 }

@@ -293,7 +293,7 @@ impl TableStore {
             if let Some(filter) = cache
                 .get((handle.id, handle.info.filter_offset))
                 .await
-                .bloom_filter()
+                .and_then(|entry| entry.bloom_filter())
             {
                 return Ok(Some(filter));
             }
@@ -325,7 +325,7 @@ impl TableStore {
             if let Some(index) = cache
                 .get((handle.id, handle.info.index_offset))
                 .await
-                .sst_index()
+                .and_then(|entry| entry.sst_index())
             {
                 return Ok(index);
             }
@@ -394,7 +394,10 @@ impl TableStore {
             let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
                 let block_meta = index_borrow.block_meta().get(block_num);
                 let offset = block_meta.offset();
-                cache.get((handle.id, offset)).await.block()
+                cache
+                    .get((handle.id, offset))
+                    .await
+                    .and_then(|entry| entry.block())
             }))
             .await;
 
@@ -724,7 +727,10 @@ mod tests {
         for i in 0..20 {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
-                block_cache.get((handle.id, offset)).await.block().is_some(),
+                block_cache
+                    .get((handle.id, offset))
+                    .await
+                    .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache",
                 offset
             );
@@ -751,7 +757,10 @@ mod tests {
         for i in 0..20 {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
-                block_cache.get((handle.id, offset)).await.block().is_some(),
+                block_cache
+                    .get((handle.id, offset))
+                    .await
+                    .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache after partial hit",
                 offset
             );
@@ -772,7 +781,10 @@ mod tests {
         for i in 0..20 {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
-                block_cache.get((handle.id, offset)).await.block().is_some(),
+                block_cache
+                    .get((handle.id, offset))
+                    .await
+                    .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache after SST emptying",
                 offset
             );
