@@ -80,6 +80,11 @@ impl BloomFilter {
         }
         true
     }
+
+    /// Returns the size of the bloom filter in bytes.
+    pub(crate) fn size(&self) -> usize {
+        self.buffer.len()
+    }
 }
 
 pub fn filter_hash(key: &[u8]) -> u64 {

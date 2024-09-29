@@ -21,8 +21,6 @@ use crate::{
 
 /// The default max capacity for the cache. (64MB)
 pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
-/// The default cached block size for the cache. (32 bytes)
-pub const DEFAULT_CACHED_BLOCK_SIZE: u32 = 32;
 
 #[cfg(feature = "foyer")]
 pub mod foyer;
@@ -167,6 +165,18 @@ impl CachedEntry {
         match &self.item {
             CachedItem::BloomFilter(bloom_filter) => Some(bloom_filter.clone()),
             _ => None,
+        }
+    }
+
+    /// Returns the size of the cached entry in bytes.
+    ///
+    /// This method is public to allow external cache implementations
+    /// to use it to implement custom weighers.
+    pub fn size(&self) -> usize {
+        match &self.item {
+            CachedItem::Block(block) => block.size(),
+            CachedItem::SsTableIndex(sst_index) => sst_index.size(),
+            CachedItem::BloomFilter(bloom_filter) => bloom_filter.size(),
         }
     }
 }

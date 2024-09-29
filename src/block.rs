@@ -16,11 +16,7 @@ pub(crate) struct Block {
 impl Block {
     #[rustfmt::skip]
     pub fn encode(&self) -> Bytes {
-        let mut buf = BytesMut::with_capacity(
-            self.data.len()                   // data byte length
-            + self.offsets.len() * SIZEOF_U16 // offsets as u16's
-            + SIZEOF_U16, // number of offsets in the block
-        );
+        let mut buf = BytesMut::with_capacity(self.size());
         buf.put_slice(&self.data);
         for offset in &self.offsets {
             buf.put_u16(*offset);
@@ -47,6 +43,14 @@ impl Block {
             data: bytes,
             offsets,
         }
+    }
+
+    /// Returns the size of the block in bytes.
+    #[rustfmt::skip]
+    pub(crate) fn size(&self) -> usize {
+        self.data.len()                   // data byte length
+        + self.offsets.len() * SIZEOF_U16 // offsets as u16's
+        + SIZEOF_U16 // number of offsets in the block
     }
 }
 

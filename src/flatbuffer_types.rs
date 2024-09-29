@@ -41,6 +41,11 @@ impl SsTableIndexOwned {
         let raw = &self.data;
         unsafe { flatbuffers::root_unchecked::<SsTableIndex>(raw) }
     }
+
+    /// Returns the size of the SSTable index in bytes.
+    pub(crate) fn size(&self) -> usize {
+        self.data.len()
+    }
 }
 
 #[derive(Clone)]
