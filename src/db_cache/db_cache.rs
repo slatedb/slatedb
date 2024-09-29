@@ -97,6 +97,10 @@ pub trait DbCache: Send + Sync {
 }
 
 /// A key used to identify a cached entry.
+///
+/// The key is a tuple of an SSTable ID and a block ID.
+/// The tuple is private to this module, so the implementation details
+/// of the cache are not exposed publicly.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CachedKey(SsTableId, u64);
 
@@ -114,6 +118,10 @@ enum CachedItem {
 }
 
 /// A cached entry stored in the cache.
+///
+/// The entry stores data in an internal enum that represents the type of cached item.
+/// The enum is private to this module, so the implementation details
+/// of the cache are not exposed publicly.
 #[derive(Clone)]
 pub struct CachedEntry {
     item: CachedItem,

@@ -1,8 +1,8 @@
 //! # Moka Cache
 //!
 //! This module provides an implementation of an in-memory cache using the Moka library.
-//! The cache is designed to store and retrieve cached blocks associated with SSTable IDs.
-//! It supports configurable capacity, block size, time-to-live (TTL), and time-to-idle (TTI) settings.
+//! The cache is designed to store and retrieve cached blocks, indexes, and bloom filters
+//! associated with SSTable IDs.
 //!
 //! ## Features
 //!
@@ -69,7 +69,7 @@ impl Default for MokaCacheOptions {
 /// # Notes
 ///
 /// The cache is configured based on the provided `MokaCacheOptions`,
-/// including settings for capacity, block size, time-to-live (TTL), and time-to-idle (TTI).
+/// including settings for capacity, time-to-live (TTL), and time-to-idle (TTI).
 /// It uses a custom weigher to account for the size of cached blocks.
 pub struct MokaCache {
     inner: moka::future::Cache<CachedKey, CachedEntry>,

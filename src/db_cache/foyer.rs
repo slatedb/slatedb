@@ -1,14 +1,14 @@
 //! # Foyer Cache
 //!
 //! This module provides an implementation of an in-memory cache using the Foyer library.
-//! The cache is designed to store and retrieve cached blocks associated with SSTable IDs.
-//! It supports configurable capacity and block size.
+//! The cache is designed to store and retrieve cached blocks, indexes, and bloom filters
+//! associated with SSTable IDs.
 //!
 //! ## Features
 //!
 //! - **Asynchronous Operations**: Utilizes Foyer's `Cache` to perform cache operations asynchronously.
 //! - **Custom Weigher**: Implements a custom weigher to account for the size of cached blocks.
-//! - **Flexible Configuration**: Allows customization of cache parameters such as maximum capacity and block size.
+//! - **Flexible Configuration**: Allows customization of cache parameters such as maximum capacity.
 //!
 //! ## Examples
 //!
@@ -64,7 +64,7 @@ impl Default for FoyerCacheOptions {
 /// # Notes
 ///
 /// The cache is configured based on the provided `FoyerCacheOptions`,
-/// including settings for capacity and block size.
+/// including settings for the maximum capacity of the cache.
 /// It uses a custom weigher to account for the size of cached blocks.
 pub struct FoyerCache {
     inner: foyer::Cache<CachedKey, CachedEntry>,
