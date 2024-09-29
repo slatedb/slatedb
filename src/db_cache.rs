@@ -120,8 +120,8 @@ enum CachedItem {
 /// A cached entry stored in the cache.
 ///
 /// The entry stores data in an internal enum that represents the type of cached item.
-/// The enum is private to this module, so the implementation details
-/// of the cache are not exposed publicly.
+/// The internal types of the entries that are stored in the cache are private,
+/// so the implementation details of the cache are not exposed publicly.
 #[derive(Clone)]
 pub struct CachedEntry {
     item: CachedItem,
