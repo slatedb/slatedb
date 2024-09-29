@@ -10,6 +10,7 @@ use tokio::runtime::Handle;
 
 use crate::cached_object_store::CachedObjectStore;
 use crate::compactor::Compactor;
+use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
@@ -28,7 +29,6 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
-use crate::{config::ReadLevel::Uncommitted, db_cache::create_block_cache};
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -405,7 +405,7 @@ impl Db {
             sst_format.clone(),
             path.clone(),
             fp_registry.clone(),
-            create_block_cache(options.block_cache_options),
+            options.block_cache.clone(),
         ));
 
         let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
@@ -1461,7 +1461,7 @@ mod tests {
             compactor_options,
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
-            block_cache_options: None,
+            block_cache: None,
             garbage_collector_options: None,
         }
     }

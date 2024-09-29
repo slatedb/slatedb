@@ -1,4 +1,17 @@
-use std::{sync::Arc, time::Duration};
+//! # DB Cache
+//!
+//! This module provides an in-memory caching solution for storing and retrieving
+//! cached blocks, index and bloom filters associated with SSTable IDs.
+//!
+//! There are currently two built-in cache implementations:
+//! - [Foyer](crate::db_cache::foyer::FoyerCache): Requires the `foyer` feature flag.
+//! - [Moka](crate::db_cache::moka::MokaCache): Requires the `moka` feature flag. (Enabled by default)
+//!
+//! ## Usage
+//!
+//! To use the cache, you need to configure the [DbOptions](crate::config::DbOptions) with the desired cache implementation.
+//!
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -6,183 +19,153 @@ use crate::{
     block::Block, db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned,
 };
 
-#[derive(Clone)]
-pub(crate) enum CachedBlock {
-    Block(Arc<Block>),
-    Index(Arc<SsTableIndexOwned>),
-    Filter(Arc<BloomFilter>),
-}
+/// The default max capacity for the cache. (64MB)
+pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
+/// The default cached block size for the cache. (32 bytes)
+pub const DEFAULT_CACHED_BLOCK_SIZE: u32 = 32;
 
-#[derive(Clone, Copy)]
-pub enum CacheType {
-    Moka,
-    Foyer,
-}
+#[cfg(feature = "foyer")]
+pub mod foyer;
+#[cfg(feature = "moka")]
+pub mod moka;
 
-#[derive(Clone, Copy)]
-pub struct DbCacheOptions {
-    pub max_capacity: u64,
-    pub cached_block_size: u32,
-    pub time_to_live: Option<Duration>,
-    pub time_to_idle: Option<Duration>,
-    pub cache_type: CacheType,
-}
-
-impl Default for DbCacheOptions {
-    fn default() -> Self {
-        Self {
-            max_capacity: 64 * 1024 * 1024, // 64MB default max capacity
-            cached_block_size: 32,          // 32 bytes default
-            time_to_live: None,
-            time_to_idle: None,
-            cache_type: CacheType::Moka, // Default to Moka cache
-        }
-    }
-}
-
+/// A trait for in-memory caches.
+///
+/// This trait defines the interface for an in-memory cache,
+/// which is used to store and retrieve cached blocks associated with SSTable IDs.
+///
+/// Example:
+///
+/// ```rust,no_run,compile_fail
+/// use async_trait::async_trait;
+/// use object_store::local::LocalFileSystem;
+/// use slatedb::db::Db;
+/// use slatedb::config::DbOptions;
+/// use slatedb::db_cache::{DbCache, CachedEntry, CachedKey};
+/// use ssc::HashMap;
+/// use std::sync::Arc;
+///
+/// struct MyCache {
+///     inner: HashMap<CachedKey, CachedEntry>,
+/// }
+///
+/// impl MyCache {
+///     pub fn new() -> Self {
+///         Self {
+///             inner: HashMap::new(),
+///         }
+///     }
+/// }
+///
+/// #[async_trait]
+/// impl DbCache for MyCache {
+///     async fn get(&self, key: CachedKey) -> Option<CachedEntry> {
+///         self.inner.get_async(&key).await.cloned()
+///     }
+///
+///     async fn insert(&self, key: CachedKey, value: CachedEntry) {
+///         self.inner.insert_async(key, value).await;
+///     }
+///
+///     async fn remove(&self, key: CachedKey) {
+///         self.inner.remove_async(&key).await;
+///     }
+///
+///     fn entry_count(&self) -> u64 {
+///         self.inner.len() as u64
+///     }
+/// }
+///
+/// #[::tokio::main]
+/// async fn main() {
+///     let object_store = Arc::new(LocalFileSystem::new());
+///     let options = DbOptions {
+///         block_cache: Some(Arc::new(MyCache::new())),
+///         ..Default::default()
+///     };
+///     let db = Db::open_with_opts("path/to/db".into(), options, object_store).await;
+/// }
+/// ```
 #[async_trait]
-pub(crate) trait DbCache: Send + Sync + 'static {
-    async fn get(&self, key: (SsTableId, u64)) -> CachedBlockOption;
-    async fn insert(&self, key: (SsTableId, u64), value: CachedBlock);
+pub trait DbCache: Send + Sync {
+    async fn get(&self, key: CachedKey) -> Option<CachedEntry>;
+    async fn insert(&self, key: CachedKey, value: CachedEntry);
     #[allow(dead_code)]
-    async fn remove(&self, key: (SsTableId, u64));
+    async fn remove(&self, key: CachedKey);
     #[allow(dead_code)]
     fn entry_count(&self) -> u64;
 }
 
-pub(crate) struct MokaCache {
-    inner: moka::future::Cache<(SsTableId, u64), CachedBlock>,
+/// A key used to identify a cached entry.
+///
+/// The key is a tuple of an SSTable ID and a block ID.
+/// The tuple is private to this module, so the implementation details
+/// of the cache are not exposed publicly.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct CachedKey(SsTableId, u64);
+
+impl From<(SsTableId, u64)> for CachedKey {
+    fn from((sst_id, block_id): (SsTableId, u64)) -> Self {
+        Self(sst_id, block_id)
+    }
 }
 
-impl MokaCache {
-    pub fn new(options: DbCacheOptions) -> Self {
-        let mut builder = moka::future::Cache::builder()
-            .weigher(move |_, _| options.cached_block_size)
-            .max_capacity(options.max_capacity);
+#[derive(Clone)]
+enum CachedItem {
+    Block(Arc<Block>),
+    SsTableIndex(Arc<SsTableIndexOwned>),
+    BloomFilter(Arc<BloomFilter>),
+}
 
-        if let Some(ttl) = options.time_to_live {
-            builder = builder.time_to_live(ttl);
+/// A cached entry stored in the cache.
+///
+/// The entry stores data in an internal enum that represents the type of cached item.
+/// The internal types of the entries that are stored in the cache are private,
+/// so the implementation details of the cache are not exposed publicly.
+#[derive(Clone)]
+pub struct CachedEntry {
+    item: CachedItem,
+}
+
+impl CachedEntry {
+    /// Create a new `CachedEntry` with the given block.
+    pub(crate) fn with_block(block: Arc<Block>) -> Self {
+        Self {
+            item: CachedItem::Block(block),
         }
+    }
 
-        if let Some(tti) = options.time_to_idle {
-            builder = builder.time_to_idle(tti);
+    /// Create a new `CachedEntry` with the given SSTable index.
+    pub(crate) fn with_sst_index(sst_index: Arc<SsTableIndexOwned>) -> Self {
+        Self {
+            item: CachedItem::SsTableIndex(sst_index),
         }
-
-        let cache = builder.build();
-
-        Self { inner: cache }
-    }
-}
-
-#[async_trait]
-impl DbCache for MokaCache {
-    async fn get(&self, key: (SsTableId, u64)) -> CachedBlockOption {
-        CachedBlockOption::Moka(self.inner.get(&key).await)
     }
 
-    async fn insert(&self, key: (SsTableId, u64), value: CachedBlock) {
-        self.inner.insert(key, value).await;
-    }
-
-    async fn remove(&self, key: (SsTableId, u64)) {
-        self.inner.remove(&key).await;
-    }
-
-    fn entry_count(&self) -> u64 {
-        self.inner.entry_count()
-    }
-}
-
-pub(crate) struct FoyerCache {
-    inner: foyer::Cache<(SsTableId, u64), CachedBlock>,
-}
-
-impl FoyerCache {
-    pub fn new(options: DbCacheOptions) -> Self {
-        let builder = foyer::CacheBuilder::new(options.max_capacity as _)
-            .with_weighter(move |_, _| options.cached_block_size as _);
-
-        if options.time_to_live.is_some() {
-            unimplemented!("ttl is not supported by foyer yet");
+    /// Create a new `CachedEntry` with the given bloom filter.
+    pub(crate) fn with_bloom_filter(bloom_filter: Arc<BloomFilter>) -> Self {
+        Self {
+            item: CachedItem::BloomFilter(bloom_filter),
         }
-
-        if options.time_to_idle.is_some() {
-            unimplemented!("tti is not supported by foyer yet");
-        }
-
-        let cache = builder.build();
-
-        Self { inner: cache }
-    }
-}
-
-#[async_trait]
-impl DbCache for FoyerCache {
-    async fn get(&self, key: (SsTableId, u64)) -> CachedBlockOption {
-        CachedBlockOption::Foyer(self.inner.get(&key))
     }
 
-    async fn insert(&self, key: (SsTableId, u64), value: CachedBlock) {
-        self.inner.insert(key, value);
-    }
-
-    async fn remove(&self, key: (SsTableId, u64)) {
-        self.inner.remove(&key);
-    }
-
-    fn entry_count(&self) -> u64 {
-        self.inner.usage() as _
-    }
-}
-
-/// Factory function to create the appropriate cache based on DbCacheOptions
-pub(crate) fn create_block_cache(options: Option<DbCacheOptions>) -> Option<Arc<dyn DbCache>> {
-    if let Some(options) = options {
-        match options.cache_type {
-            CacheType::Moka => Some(Arc::new(MokaCache::new(options))),
-            CacheType::Foyer => Some(Arc::new(FoyerCache::new(options))),
-        }
-    } else {
-        None
-    }
-}
-
-/// wrapper around Option<CachedBlock> to provide helper functions
-pub(crate) enum CachedBlockOption {
-    Moka(Option<CachedBlock>),
-    Foyer(Option<foyer::CacheEntry<(SsTableId, u64), CachedBlock>>),
-}
-
-impl CachedBlockOption {
     pub(crate) fn block(&self) -> Option<Arc<Block>> {
-        match self {
-            CachedBlockOption::Moka(Some(CachedBlock::Block(block))) => Some(block.clone()),
-            CachedBlockOption::Foyer(Some(entry)) => match entry.value() {
-                CachedBlock::Block(block) => Some(block.clone()),
-                _ => None,
-            },
+        match &self.item {
+            CachedItem::Block(block) => Some(block.clone()),
             _ => None,
         }
     }
 
     pub(crate) fn sst_index(&self) -> Option<Arc<SsTableIndexOwned>> {
-        match self {
-            CachedBlockOption::Moka(Some(CachedBlock::Index(index))) => Some(index.clone()),
-            CachedBlockOption::Foyer(Some(entry)) => match entry.value() {
-                CachedBlock::Index(index) => Some(index.clone()),
-                _ => None,
-            },
+        match &self.item {
+            CachedItem::SsTableIndex(sst_index) => Some(sst_index.clone()),
             _ => None,
         }
     }
 
     pub(crate) fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
-        match self {
-            CachedBlockOption::Moka(Some(CachedBlock::Filter(filter))) => Some(filter.clone()),
-            CachedBlockOption::Foyer(Some(entry)) => match entry.value() {
-                CachedBlock::Filter(filter) => Some(filter.clone()),
-                _ => None,
-            },
+        match &self.item {
+            CachedItem::BloomFilter(bloom_filter) => Some(bloom_filter.clone()),
             _ => None,
         }
     }

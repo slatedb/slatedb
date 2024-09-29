@@ -13,6 +13,7 @@ use object_store::ObjectStore;
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
+use crate::db_cache::CachedEntry;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
@@ -21,11 +22,7 @@ use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
-use crate::{
-    blob::ReadOnlyBlob,
-    block::Block,
-    db_cache::{CachedBlock, DbCache},
-};
+use crate::{blob::ReadOnlyBlob, block::Block, db_cache::DbCache};
 
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
@@ -214,10 +211,13 @@ impl TableStore {
     }
 
     async fn cache_filter(&self, sst: SsTableId, id: u64, filter: Option<Arc<BloomFilter>>) {
-        if let Some(cache) = &self.block_cache {
-            if let Some(filter) = filter {
-                cache.insert((sst, id), CachedBlock::Filter(filter)).await;
-            }
+        let Some(cache) = &self.block_cache else {
+            return;
+        };
+        if let Some(filter) = filter {
+            cache
+                .insert((sst, id).into(), CachedEntry::with_bloom_filter(filter))
+                .await;
         }
     }
 
@@ -291,9 +291,9 @@ impl TableStore {
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(filter) = cache
-                .get((handle.id, handle.info.filter_offset))
+                .get((handle.id, handle.info.filter_offset).into())
                 .await
-                .bloom_filter()
+                .and_then(|entry| entry.bloom_filter())
             {
                 return Ok(Some(filter));
             }
@@ -308,8 +308,8 @@ impl TableStore {
             if let Some(filter) = filter.as_ref() {
                 cache
                     .insert(
-                        (handle.id, handle.info.filter_offset),
-                        CachedBlock::Filter(filter.clone()),
+                        (handle.id, handle.info.filter_offset).into(),
+                        CachedEntry::with_bloom_filter(filter.clone()),
                     )
                     .await;
             }
@@ -323,9 +323,9 @@ impl TableStore {
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(index) = cache
-                .get((handle.id, handle.info.index_offset))
+                .get((handle.id, handle.info.index_offset).into())
                 .await
-                .sst_index()
+                .and_then(|entry| entry.sst_index())
             {
                 return Ok(index);
             }
@@ -339,8 +339,8 @@ impl TableStore {
         if let Some(cache) = &self.block_cache {
             cache
                 .insert(
-                    (handle.id, handle.info.index_offset),
-                    CachedBlock::Index(index.clone()),
+                    (handle.id, handle.info.index_offset).into(),
+                    CachedEntry::with_sst_index(index.clone()),
                 )
                 .await;
         }
@@ -394,7 +394,10 @@ impl TableStore {
             let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
                 let block_meta = index_borrow.block_meta().get(block_num);
                 let offset = block_meta.offset();
-                cache.get((handle.id, offset)).await.block()
+                cache
+                    .get((handle.id, offset).into())
+                    .await
+                    .and_then(|entry| entry.block())
             }))
             .await;
 
@@ -455,7 +458,7 @@ impl TableStore {
         if let Some(cache) = &self.block_cache {
             if !blocks_to_cache.is_empty() {
                 join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
-                    cache.insert((id, offset), CachedBlock::Block(block))
+                    cache.insert((id, offset).into(), CachedEntry::with_block(block))
                 }))
                 .await;
             }
@@ -572,7 +575,6 @@ mod tests {
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use ulid::Ulid;
 
-    use crate::db_cache::{DbCacheOptions, MokaCache};
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
@@ -678,14 +680,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "moka")]
     async fn test_tablestore_sst_and_partial_cache_hits() {
+        use crate::db_cache::moka::MokaCache;
+
         // Setup
         let os = Arc::new(InMemory::new());
         let format = SsTableFormat {
             block_size: 32,
             ..SsTableFormat::default()
         };
-        let block_cache = Arc::new(MokaCache::new(DbCacheOptions::default()));
+
+        let block_cache = Arc::new(MokaCache::new());
         let ts = Arc::new(TableStore::new(
             os.clone(),
             format,
@@ -723,7 +729,10 @@ mod tests {
         for i in 0..20 {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
-                block_cache.get((handle.id, offset)).await.block().is_some(),
+                block_cache
+                    .get((handle.id, offset).into())
+                    .await
+                    .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache",
                 offset
             );
@@ -732,11 +741,11 @@ mod tests {
         // Partially clear the cache (remove blocks 5..10 and 15..20)
         for i in 5..10 {
             let offset = index.borrow().block_meta().get(i).offset();
-            block_cache.remove((handle.id, offset)).await;
+            block_cache.remove((handle.id, offset).into()).await;
         }
         for i in 15..20 {
             let offset = index.borrow().block_meta().get(i).offset();
-            block_cache.remove((handle.id, offset)).await;
+            block_cache.remove((handle.id, offset).into()).await;
         }
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
@@ -750,7 +759,10 @@ mod tests {
         for i in 0..20 {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
-                block_cache.get((handle.id, offset)).await.block().is_some(),
+                block_cache
+                    .get((handle.id, offset).into())
+                    .await
+                    .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache after partial hit",
                 offset
             );
@@ -771,7 +783,10 @@ mod tests {
         for i in 0..20 {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
-                block_cache.get((handle.id, offset)).await.block().is_some(),
+                block_cache
+                    .get((handle.id, offset).into())
+                    .await
+                    .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache after SST emptying",
                 offset
             );
