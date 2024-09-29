@@ -22,11 +22,14 @@ Checkout [slatedb.io](https://slatedb.io) to learn more.
 
 ## Get Started
 
-Add the following to your `Cargo.toml` to use SlateDB:
+Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 slatedb = "*"
+bytes = "*"
+object_store = "*"
+tokio = "*"
 ```
 
 Then you can use SlateDB in your Rust code:
