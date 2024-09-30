@@ -180,16 +180,17 @@ impl Default for DbOptions {
     }
 }
 
+#[allow(unreachable_code)]
 fn default_block_cache() -> Option<Arc<dyn DbCache>> {
-    if cfg!(all(feature = "moka", feature = "foyer")) {
-        Some(Arc::new(crate::db_cache::moka::MokaCache::new()))
-    } else if cfg!(feature = "foyer") {
-        Some(Arc::new(crate::db_cache::foyer::FoyerCache::new()))
-    } else if cfg!(feature = "moka") {
-        Some(Arc::new(crate::db_cache::moka::MokaCache::new()))
-    } else {
-        None
+    #[cfg(feature = "moka")]
+    {
+        return Some(Arc::new(crate::db_cache::moka::MokaCache::new()));
     }
+    #[cfg(feature = "foyer")]
+    {
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new()));
+    }
+    None
 }
 
 /// The compression algorithm to use for SSTables.
