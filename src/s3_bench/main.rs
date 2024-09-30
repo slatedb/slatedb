@@ -393,12 +393,10 @@ Optionally, you may set an alternative endpoint (allow_http will be enabled auto
         )));
 
     let object_store_builder = match std::env::var("AWS_ENDPOINT_URL") {
-        Ok(endpoint_url) => {
-            object_store_builder
-                .with_allow_http(true)
-                .with_endpoint(endpoint_url)
-        }
-        _ => object_store_builder
+        Ok(endpoint_url) => object_store_builder
+            .with_allow_http(true)
+            .with_endpoint(endpoint_url),
+        _ => object_store_builder,
     };
 
     let object_store: Arc<dyn ObjectStore> = Arc::new(
