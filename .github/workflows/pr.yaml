@@ -16,7 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run Clippy
+      - name: Run Clippy (no features)
+        run: cargo clippy --no-default-features
+      - name: Run Clippy (all features)
         run: cargo clippy --all-targets --all-features
 
   style_check:

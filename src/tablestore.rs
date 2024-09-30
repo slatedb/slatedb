@@ -575,15 +575,17 @@ mod tests {
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use ulid::Ulid;
 
+    use crate::error;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
+    #[cfg(feature = "moka")]
+    use crate::tablestore::DbCache;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
     use crate::{
         block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
     };
-    use crate::{error, tablestore::DbCache};
 
     const ROOT: &str = "/root";
 
@@ -806,6 +808,7 @@ mod tests {
         assert_blocks(&blocks, &expected_data[15..20]).await;
     }
 
+    #[allow(dead_code)]
     async fn assert_blocks(blocks: &VecDeque<Arc<Block>>, expected: &[(Vec<u8>, ValueDeletable)]) {
         let mut block_iter = blocks.iter();
         let mut expected_iter = expected.iter();
