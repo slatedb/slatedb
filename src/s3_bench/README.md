@@ -15,6 +15,7 @@ Make sure to set up the following environment variables before benchmarking:
 - `AWS_DYNAMODB_TABLE`, see
   [DynamoCommit](https://docs.rs/object_store/latest/object_store/aws/struct.DynamoCommit.html)
   for more details.
+- `AWS_ENDPOINT` (optional), if you are using a custom S3 endpoint.
 
 There is also a shell script which runs a series of benchmarks and then draws
 the plots using `gnuplot`. Think of it as a template to start with to create

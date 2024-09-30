@@ -252,7 +252,12 @@ The following environment variables must be configured externally:
   - AWS_SECRET_ACCESS_KEY
   - AWS_REGION
   - AWS_S3_BUCKET
-  - AWS_DYNAMODB_TABLE",
+  - AWS_DYNAMODB_TABLE
+
+Optionally, you may set an alternative endpoint (allow_http will be enabled automatically):
+
+  - AWS_ENDPOINT_URL
+  ",
         )
         .arg(
             Arg::new("duration")
@@ -376,19 +381,28 @@ The following environment variables must be configured externally:
         options.object_store_cache_options.root_folder = None;
     }
 
+    let object_store_builder = object_store::aws::AmazonS3Builder::new()
+        .with_access_key_id(std::env::var("AWS_ACCESS_KEY_ID").expect("missing AWS_ACCESS_KEY_ID"))
+        .with_secret_access_key(
+            std::env::var("AWS_SECRET_ACCESS_KEY").expect("missing AWS_SECRET_ACCESS_KEY"),
+        )
+        .with_region(std::env::var("AWS_REGION").expect("missing AWS_REGION"))
+        .with_bucket_name(std::env::var("AWS_S3_BUCKET").expect("missing AWS_S3_BUCKET"))
+        .with_conditional_put(S3ConditionalPut::Dynamo(DynamoCommit::new(
+            std::env::var("AWS_DYNAMODB_TABLE").expect("missing AWS_DYNAMODB_TABLE"),
+        )));
+
+    let object_store_builder = match std::env::var("AWS_ENDPOINT_URL") {
+        Ok(endpoint_url) => {
+            object_store_builder
+                .with_allow_http(true)
+                .with_endpoint(endpoint_url)
+        }
+        _ => object_store_builder
+    };
+
     let object_store: Arc<dyn ObjectStore> = Arc::new(
-        object_store::aws::AmazonS3Builder::new()
-            .with_access_key_id(
-                std::env::var("AWS_ACCESS_KEY_ID").expect("missing AWS_ACCESS_KEY_ID"),
-            )
-            .with_secret_access_key(
-                std::env::var("AWS_SECRET_ACCESS_KEY").expect("missing AWS_SECRET_ACCESS_KEY"),
-            )
-            .with_region(std::env::var("AWS_REGION").expect("missing AWS_REGION"))
-            .with_bucket_name(std::env::var("AWS_S3_BUCKET").expect("missing AWS_S3_BUCKET"))
-            .with_conditional_put(S3ConditionalPut::Dynamo(DynamoCommit::new(
-                std::env::var("AWS_DYNAMODB_TABLE").expect("missing AWS_DYNAMODB_TABLE"),
-            )))
+        object_store_builder
             .build()
             .expect("failed to build S3 config"),
     );
