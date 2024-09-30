@@ -53,7 +53,7 @@ pub fn load_object_store_from_env(
     match provider {
         #[cfg(feature = "aws")]
         "aws" => load_aws(),
-        _ => Err(format!("Unknown OS_PROVIDER: '{}'", provider).into()),
+        _ => Err(format!("Unknown CLOUD_PROVIDER: '{}'", provider).into()),
     }
 }
 
