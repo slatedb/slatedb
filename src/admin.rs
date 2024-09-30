@@ -67,9 +67,6 @@ pub fn load_object_store_from_env(
 /// | AWS_REGION | The AWS region to use | Yes |
 #[cfg(feature = "aws")]
 pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
-    #[cfg(not(feature = "aws"))]
-    panic!("feature 'aws' must be enabled to use OS_PROVIDER=aws");
-
     let key = env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID must be set");
     let secret =
         env::var("AWS_SECRET_ACCESS_KEY").expect("Expected AWS_SECRET_ACCESS_KEY must be set");
