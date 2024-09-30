@@ -5,8 +5,9 @@ use serde::Serialize;
 use tokio::runtime::Handle;
 
 use crate::compactor::CompactionScheduler;
-use crate::db_cache::DbCacheOptions;
 use crate::error::SlateDBError;
+
+use crate::db_cache::DbCache;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
@@ -151,8 +152,8 @@ pub struct DbOptions {
     /// The object store cache options.
     pub object_store_cache_options: ObjectStoreCacheOptions,
 
-    /// Block cache options.
-    pub block_cache_options: Option<DbCacheOptions>,
+    /// The block cache instance used to cache SSTable blocks, indexes and bloom filters.
+    pub block_cache: Option<Arc<dyn DbCache>>,
 
     /// Configuration options for the garbage collector.
     pub garbage_collector_options: Option<GarbageCollectorOptions>,
@@ -172,10 +173,22 @@ impl Default for DbOptions {
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
-            block_cache_options: Some(DbCacheOptions::default()),
+            block_cache: default_block_cache(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
         }
+    }
+}
+
+fn default_block_cache() -> Option<Arc<dyn DbCache>> {
+    if cfg!(all(feature = "moka", feature = "foyer")) {
+        Some(Arc::new(crate::db_cache::moka::MokaCache::new()))
+    } else if cfg!(feature = "foyer") {
+        Some(Arc::new(crate::db_cache::foyer::FoyerCache::new()))
+    } else if cfg!(feature = "moka") {
+        Some(Arc::new(crate::db_cache::moka::MokaCache::new()))
+    } else {
+        None
     }
 }
 

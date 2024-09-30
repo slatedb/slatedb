@@ -8,7 +8,7 @@ pub(crate) const SIZEOF_U32: usize = std::mem::size_of::<u32>();
 /// "None" values are encoded by using the maximum u32 value as the value length.
 pub(crate) const TOMBSTONE: u32 = u32::MAX;
 
-pub struct Block {
+pub(crate) struct Block {
     pub(crate) data: Bytes,
     pub(crate) offsets: Vec<u16>,
 }
@@ -16,11 +16,7 @@ pub struct Block {
 impl Block {
     #[rustfmt::skip]
     pub fn encode(&self) -> Bytes {
-        let mut buf = BytesMut::with_capacity(
-            self.data.len()                   // data byte length
-            + self.offsets.len() * SIZEOF_U16 // offsets as u16's
-            + SIZEOF_U16, // number of offsets in the block
-        );
+        let mut buf = BytesMut::with_capacity(self.size());
         buf.put_slice(&self.data);
         for offset in &self.offsets {
             buf.put_u16(*offset);
@@ -47,6 +43,14 @@ impl Block {
             data: bytes,
             offsets,
         }
+    }
+
+    /// Returns the size of the block in bytes.
+    #[rustfmt::skip]
+    pub(crate) fn size(&self) -> usize {
+        self.data.len()                   // data byte length
+        + self.offsets.len() * SIZEOF_U16 // offsets as u16's
+        + SIZEOF_U16 // number of offsets in the block
     }
 }
 
@@ -167,5 +171,14 @@ mod tests {
         let block = builder.build().unwrap();
         let encoded = block.encode();
         let _decoded = Block::decode(encoded);
+    }
+
+    #[test]
+    fn test_block_size() {
+        let mut builder = BlockBuilder::new(4096);
+        assert!(builder.add(b"key1", Some(b"value1")));
+        assert!(builder.add(b"key2", Some(b"value2")));
+        let block = builder.build().unwrap();
+        assert_eq!(38, block.size());
     }
 }

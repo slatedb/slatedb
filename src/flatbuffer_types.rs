@@ -26,6 +26,7 @@ use crate::flatbuffer_types::manifest_generated::{
 };
 use crate::manifest::{Manifest, ManifestCodec};
 
+/// A wrapper around a `Bytes` buffer containing a FlatBuffer-encoded `SsTableIndex`.
 pub(crate) struct SsTableIndexOwned {
     data: Bytes,
 }
@@ -39,6 +40,11 @@ impl SsTableIndexOwned {
     pub fn borrow(&self) -> SsTableIndex<'_> {
         let raw = &self.data;
         unsafe { flatbuffers::root_unchecked::<SsTableIndex>(raw) }
+    }
+
+    /// Returns the size of the SSTable index in bytes.
+    pub(crate) fn size(&self) -> usize {
+        self.data.len()
     }
 }
 
