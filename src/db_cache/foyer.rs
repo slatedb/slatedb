@@ -30,23 +30,19 @@
 //! }
 //! ```
 //!
-use crate::db_cache::{
-    CachedEntry, CachedKey, DbCache, DEFAULT_CACHED_BLOCK_SIZE, DEFAULT_MAX_CAPACITY,
-};
+use crate::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
 use async_trait::async_trait;
 
 /// The options for the Foyer cache.
 #[derive(Clone, Copy, Debug)]
 pub struct FoyerCacheOptions {
     pub max_capacity: u64,
-    pub cached_block_size: u32,
 }
 
 impl Default for FoyerCacheOptions {
     fn default() -> Self {
         Self {
             max_capacity: DEFAULT_MAX_CAPACITY,
-            cached_block_size: DEFAULT_CACHED_BLOCK_SIZE,
         }
     }
 }
@@ -77,7 +73,7 @@ impl FoyerCache {
 
     pub fn new_with_opts(options: FoyerCacheOptions) -> Self {
         let builder = foyer::CacheBuilder::new(options.max_capacity as _)
-            .with_weighter(move |_, _| options.cached_block_size as _);
+            .with_weighter(|_, v: &CachedEntry| v.size());
 
         let cache = builder.build();
 

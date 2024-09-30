@@ -30,9 +30,7 @@
 //! }
 //! ```
 //!
-use crate::db_cache::{
-    CachedEntry, CachedKey, DbCache, DEFAULT_CACHED_BLOCK_SIZE, DEFAULT_MAX_CAPACITY,
-};
+use crate::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
 use async_trait::async_trait;
 use std::time::Duration;
 
@@ -40,7 +38,6 @@ use std::time::Duration;
 #[derive(Clone, Copy, Debug)]
 pub struct MokaCacheOptions {
     pub max_capacity: u64,
-    pub cached_block_size: u32,
     pub time_to_live: Option<Duration>,
     pub time_to_idle: Option<Duration>,
 }
@@ -49,7 +46,6 @@ impl Default for MokaCacheOptions {
     fn default() -> Self {
         Self {
             max_capacity: DEFAULT_MAX_CAPACITY,
-            cached_block_size: DEFAULT_CACHED_BLOCK_SIZE,
             time_to_live: None,
             time_to_idle: None,
         }
@@ -82,7 +78,7 @@ impl MokaCache {
 
     pub fn new_with_opts(options: MokaCacheOptions) -> Self {
         let mut builder = moka::future::Cache::builder()
-            .weigher(move |_, _| options.cached_block_size)
+            .weigher(|_, v: &CachedEntry| v.size() as u32)
             .max_capacity(options.max_capacity);
 
         if let Some(ttl) = options.time_to_live {

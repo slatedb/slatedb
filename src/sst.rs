@@ -966,6 +966,46 @@ mod tests {
         assert!(blocks.is_empty())
     }
 
+    #[tokio::test]
+    async fn test_sstable_index_size() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
+
+        let table_store = TableStore::new(object_store, format, root_path, None);
+        let mut builder = table_store.table_builder();
+        builder.add(b"key1", Some(b"value1")).unwrap();
+        builder.add(b"key2", Some(b"value2")).unwrap();
+        let encoded = builder.build().unwrap();
+        let encoded_info = encoded.info.clone();
+
+        // write sst and validate that the handle returned has the correct content.
+        let sst_handle = table_store
+            .write_sst(&SsTableId::Wal(0), encoded)
+            .await
+            .unwrap();
+        assert_eq!(encoded_info, sst_handle.info);
+        let sst_info = sst_handle.info;
+        assert_eq!(
+            b"key1",
+            sst_info.first_key.unwrap().as_ref(),
+            "first key in sst info should be correct"
+        );
+
+        // construct sst info from the raw bytes and validate that it matches the original info.
+        let sst_handle_from_store = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
+        assert_eq!(encoded_info, sst_handle_from_store.info);
+        let index = table_store
+            .read_index(&sst_handle_from_store)
+            .await
+            .unwrap();
+
+        assert_eq!(88, index.size());
+    }
+
     struct BytesBlob {
         bytes: Bytes,
     }
