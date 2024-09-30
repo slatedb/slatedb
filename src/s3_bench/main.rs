@@ -347,7 +347,7 @@ The following environment variables must be configured externally:
 
     let mut options = DbOptions {
         #[cfg(feature = "wal_disable")]
-        wal_enabled: !args.get_one::<bool>("no-wal").unwrap_or(false),
+        wal_enabled: !args.get_one::<bool>("no-wal").unwrap_or(&false),
         ..Default::default()
     };
 
