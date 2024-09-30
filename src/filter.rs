@@ -254,4 +254,24 @@ mod tests {
         // observed fp is .0087
         assert!((fp as f32 / keys_to_test as f32) < 0.01);
     }
+
+    #[test]
+    fn test_bloom_filter_size() {
+        let mut builder = BloomFilterBuilder::new(10);
+        builder.add_key(b"test_key");
+        let filter = builder.build();
+
+        // The exact size may vary, so we'll check if it's greater than zero
+        assert!(
+            filter.size() > 0,
+            "Bloom filter size should be greater than zero"
+        );
+
+        // We can also check if the size matches the buffer length
+        assert_eq!(
+            filter.size(),
+            filter.buffer.len(),
+            "Size should match buffer length"
+        );
+    }
 }

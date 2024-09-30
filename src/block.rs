@@ -147,4 +147,13 @@ mod tests {
         let encoded = block.encode();
         let _decoded = Block::decode(encoded);
     }
+
+    #[test]
+    fn test_block_size() {
+        let mut builder = BlockBuilder::new(4096);
+        assert!(builder.add(b"key1", Some(b"value1")));
+        assert!(builder.add(b"key2", Some(b"value2")));
+        let block = builder.build().unwrap();
+        assert_eq!(38, block.size());
+    }
 }
