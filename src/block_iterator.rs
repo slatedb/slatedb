@@ -81,7 +81,8 @@ impl<B: BlockLike> BlockIterator<B> {
             let overlap_len = cursor.get_u16() as usize;
             let rest_len = cursor.get_u16() as usize;
             let rest_key = &cursor[..rest_len];
-            let mut cursor_key = BytesMut::from(&first_key[..overlap_len]);
+            let mut cursor_key = BytesMut::with_capacity(overlap_len + rest_len);
+            cursor_key.extend_from_slice(&first_key[..overlap_len]);
             cursor_key.extend_from_slice(rest_key);
             cursor_key < key
         });
@@ -118,7 +119,8 @@ impl<B: BlockLike> BlockIterator<B> {
             ValueDeletable::Value(value)
         };
 
-        let mut key = BytesMut::from(&self.first_key[..overlap_len]);
+        let mut key = BytesMut::with_capacity(overlap_len + rest_len);
+        key.extend_from_slice(&self.first_key[..overlap_len]);
         key.extend_from_slice(&rest_key);
 
         Some(KeyValueDeletable {

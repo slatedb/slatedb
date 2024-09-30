@@ -90,7 +90,7 @@ impl BlockBuilder {
     #[inline]
     fn estimated_size(&self) -> usize {
         SIZEOF_U16           // number of key-value pairs in the block
-        + self.offsets.len() // offsets
+        + self.offsets.len() * SIZEOF_U16 // offsets
         + self.data.len()    // key-value pairs
     }
 
@@ -180,5 +180,12 @@ mod tests {
         assert!(builder.add(b"key2", Some(b"value2")));
         let block = builder.build().unwrap();
         assert_eq!(38, block.size());
+    }
+
+    #[test]
+    fn test_prefix_computing() {
+        assert_eq!(compute_prefix(b"1", b"11"), 1);
+        assert_eq!(compute_prefix(b"222", b"111"), 0);
+        assert_eq!(compute_prefix(b"1234567", b"123456789"), 7);
     }
 }
