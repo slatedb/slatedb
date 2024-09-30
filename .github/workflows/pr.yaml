@@ -12,20 +12,17 @@ env:
   RUSTFLAGS: "-Dwarnings"
 
 jobs:
-  clippy_check:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run Clippy (no features)
-        run: cargo clippy --no-default-features
-      - name: Run Clippy (all features)
-        run: cargo clippy --all-targets --all-features
-
-  style_check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run rustfmt
+      - name: cargo install cargo-hack
+        run: cargo +stable install cargo-hack --locked
+      - name: cargo check
+        run: cargo hack check --each-feature --no-dev-deps
+      - name: cargo clippy
+        run: cargo hack clippy --each-feature --no-dev-deps
+      - name: cargo fmt
         run: cargo fmt -- --check
 
   flatbuffers_check:
@@ -53,7 +50,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run Tests (no features)
-        run: cargo test --no-default-features
-      - name: Run Tests (all features)
+      - name: Run Tests
         run: cargo test --all-features --verbose

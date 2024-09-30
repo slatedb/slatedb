@@ -340,7 +340,13 @@ The following environment variables must be configured externally:
         plot: *args.get_one::<bool>("plot").unwrap(),
     };
 
+    #[cfg(not(feature = "wal_disable"))]
+    if args.get_one::<bool>("no-wal").is_some() {
+        panic!("`no-wal` requires `wal_disabled` feature, but didn't find it in this build");
+    }
+
     let mut options = DbOptions {
+        #[cfg(feature = "wal_disable")]
         wal_enabled: !args.get_one::<bool>("no-wal").unwrap(),
         ..Default::default()
     };
