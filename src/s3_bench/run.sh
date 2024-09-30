@@ -1,4 +1,4 @@
-#!
+#!/usr/bin/env bash
 
 set -eu # stop on errors and undefined variables
 
