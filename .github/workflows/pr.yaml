@@ -51,5 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run Tests
+      - name: Run Tests (no features)
+        run: cargo test --no-default-features
+      - name: Run Tests (all features)
         run: cargo test --all-features --verbose
