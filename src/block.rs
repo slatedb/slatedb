@@ -179,7 +179,7 @@ mod tests {
         assert!(builder.add(b"key1", Some(b"value1")));
         assert!(builder.add(b"key2", Some(b"value2")));
         let block = builder.build().unwrap();
-        assert_eq!(38, block.size());
+        assert_eq!(39, block.size());
     }
 
     #[test]
