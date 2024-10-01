@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 use tokio::runtime::Handle;
 use tracing::error;
 
-use crate::config::{GarbageCollecterDirectoryOptions, GarbageCollectorOptions};
+use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollectorMessage::*;
@@ -248,7 +248,7 @@ impl GarbageCollectorOrchestrator {
     }
 
     fn options_to_ticker(
-        options: Option<&GarbageCollecterDirectoryOptions>,
+        options: Option<&GarbageCollectorDirectoryOptions>,
     ) -> crossbeam_channel::Receiver<std::time::Instant> {
         options.map_or(crossbeam_channel::never(), |opts| {
             crossbeam_channel::tick(opts.poll_interval)
@@ -761,15 +761,15 @@ mod tests {
             manifest_store.clone(),
             table_store.clone(),
             crate::config::GarbageCollectorOptions {
-                manifest_options: Some(crate::config::GarbageCollecterDirectoryOptions {
+                manifest_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                     min_age: std::time::Duration::from_secs(3600),
                     poll_interval: std::time::Duration::from_secs(0),
                 }),
-                wal_options: Some(crate::config::GarbageCollecterDirectoryOptions {
+                wal_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                     min_age: std::time::Duration::from_secs(3600),
                     poll_interval: std::time::Duration::from_secs(0),
                 }),
-                compacted_options: Some(crate::config::GarbageCollecterDirectoryOptions {
+                compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                     min_age: std::time::Duration::from_secs(3600),
                     poll_interval: std::time::Duration::from_secs(0),
                 }),

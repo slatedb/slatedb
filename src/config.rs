@@ -304,20 +304,20 @@ impl SizeTieredCompactionSchedulerOptions {
 #[derive(Clone)]
 pub struct GarbageCollectorOptions {
     /// Garbage collection options for the manifest directory.
-    pub manifest_options: Option<GarbageCollecterDirectoryOptions>,
+    pub manifest_options: Option<GarbageCollectorDirectoryOptions>,
 
     /// Garbage collection options for the WAL directory.
-    pub wal_options: Option<GarbageCollecterDirectoryOptions>,
+    pub wal_options: Option<GarbageCollectorDirectoryOptions>,
 
     /// Garbage collection options for the compacted directory.
-    pub compacted_options: Option<GarbageCollecterDirectoryOptions>,
+    pub compacted_options: Option<GarbageCollectorDirectoryOptions>,
 
     /// An optional tokio runtime handle to use for scheduling garbage collection. You can use
     /// this to isolate garbage collection to a dedicated thread pool.
     pub gc_runtime: Option<Handle>,
 }
 
-impl Default for GarbageCollecterDirectoryOptions {
+impl Default for GarbageCollectorDirectoryOptions {
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(300),
@@ -328,7 +328,7 @@ impl Default for GarbageCollecterDirectoryOptions {
 
 /// Garbage collector options for a directory.
 #[derive(Clone, Copy)]
-pub struct GarbageCollecterDirectoryOptions {
+pub struct GarbageCollectorDirectoryOptions {
     /// The interval at which the garbage collector checks for files to garbage collect.
     pub poll_interval: Duration,
 
@@ -344,7 +344,7 @@ impl Default for GarbageCollectorOptions {
     fn default() -> Self {
         Self {
             manifest_options: Some(Default::default()),
-            wal_options: Some(GarbageCollecterDirectoryOptions {
+            wal_options: Some(GarbageCollectorDirectoryOptions {
                 poll_interval: Duration::from_secs(60),
                 min_age: Duration::from_secs(60),
             }),
