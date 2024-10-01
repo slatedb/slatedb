@@ -51,8 +51,9 @@ pub fn load_object_store_from_env(
         .expect("CLOUD_PROVIDER must be set")
         .to_lowercase();
     match provider {
+        #[cfg(feature = "aws")]
         "aws" => load_aws(),
-        _ => Err(format!("Unknown OS_PROVIDER: '{}'", provider).into()),
+        _ => Err(format!("Unknown CLOUD_PROVIDER: '{}'", provider).into()),
     }
 }
 
@@ -64,10 +65,8 @@ pub fn load_object_store_from_env(
 /// | AWS_SECRET_ACCESS_KEY | The access key secret for the above ID | Yes |
 /// | AWS_BUCKET | The bucket to use within S3 | Yes |
 /// | AWS_REGION | The AWS region to use | Yes |
+#[cfg(feature = "aws")]
 pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
-    #[cfg(not(feature = "aws"))]
-    panic!("feature 'aws' must be enabled to use OS_PROVIDER=aws");
-
     let key = env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID must be set");
     let secret =
         env::var("AWS_SECRET_ACCESS_KEY").expect("Expected AWS_SECRET_ACCESS_KEY must be set");

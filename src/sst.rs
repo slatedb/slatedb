@@ -1,8 +1,6 @@
 use std::collections::VecDeque;
-#[cfg(feature = "snappy")]
-use std::io::Read;
-#[cfg(feature = "lz4")]
-use std::io::Write;
+#[cfg(feature = "zlib")]
+use std::io::{Read, Write};
 use std::ops::Range;
 use std::sync::Arc;
 
