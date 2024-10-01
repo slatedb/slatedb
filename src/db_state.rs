@@ -37,6 +37,12 @@ impl SsTableHandle {
     }
 }
 
+impl AsRef<SsTableHandle> for SsTableHandle {
+    fn as_ref(&self) -> &SsTableHandle {
+        self
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Hash, Eq, Copy, Serialize)]
 pub(crate) enum SsTableId {
     Wal(u64),
