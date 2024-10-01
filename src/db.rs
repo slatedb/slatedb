@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -29,6 +30,7 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
+use std::rc::Rc;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -292,8 +294,28 @@ impl DbInner {
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
+        async fn load_sst_iters(
+            db_inner: &DbInner,
+            sst_id: u64,
+        ) -> Result<(SstIterator<'_, Rc<SsTableHandle>>, u64), SlateDBError> {
+            let sst = Rc::new(
+                db_inner
+                    .table_store
+                    .open_sst(&SsTableId::Wal(sst_id))
+                    .await?,
+            );
+            let id = match &sst.id {
+                SsTableId::Wal(id) => *id,
+                SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
+            };
+            let iter =
+                SstIterator::new_spawn(Rc::clone(&sst), db_inner.table_store.clone(), 1, 256, true)
+                    .await?;
+            Ok((iter, id))
+        }
+
         let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
-        let wal_sst_list = self
+        let mut wal_sst_list = self
             .table_store
             .list_wal_ssts((wal_id_last_compacted + 1)..)
             .await?
@@ -301,20 +323,29 @@ impl DbInner {
             .map(|wal_sst| wal_sst.id.unwrap_wal_id())
             .collect::<Vec<_>>();
         let mut last_sst_id = wal_id_last_compacted;
+        let sst_batch_size = 4;
+
+        let mut remaining_sst_list = Vec::new();
+        if wal_sst_list.len() > sst_batch_size {
+            remaining_sst_list = wal_sst_list.split_off(sst_batch_size);
+        }
+        let mut remaining_sst_iter = remaining_sst_list.iter();
+
+        // Load the first N ssts and instantiate their iterators
+        let mut sst_iterators = VecDeque::new();
         for sst_id in wal_sst_list {
+            sst_iterators.push_back(load_sst_iters(self, sst_id).await?);
+        }
+
+        while let Some((mut sst_iter, sst_id)) = sst_iterators.pop_front() {
             last_sst_id = sst_id;
-            let sst = self.table_store.open_sst(&SsTableId::Wal(sst_id)).await?;
-            let sst_id = match &sst.id {
-                SsTableId::Wal(id) => *id,
-                SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
-            };
-            let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1, true).await?;
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
             // buffer the WAL entries to bulk replay them into the memtable.
             let mut wal_replay_buf = Vec::new();
-            while let Some(kv) = iter.next_entry().await? {
+            while let Some(kv) = sst_iter.next_entry().await? {
                 wal_replay_buf.push(kv);
             }
+            // Build the memtable
             {
                 let mut guard = self.state.write();
                 for kv in wal_replay_buf.iter() {
@@ -330,7 +361,13 @@ impl DbInner {
                     guard.increment_next_wal_id();
                 }
             }
+
+            // feed the remaining SstIterators into the vecdeque
+            if let Some(sst_id) = remaining_sst_iter.next() {
+                sst_iterators.push_back(load_sst_iters(self, *sst_id).await?);
+            }
         }
+
         // assert that we didn't have any gaps in the wal
         assert_eq!(
             last_sst_id + 1,
