@@ -7,8 +7,8 @@
 - [Out of Scope](#out-of-scope)
 - [Public API](#public-api)
 - [Implementation](#implementation)
-  * [Data Format](#data-format)
-  * [Compaction](#compaction)
+    * [Data Format](#data-format)
+    * [Compaction](#compaction)
 - [Rejected Alternatives](#rejected-alternatives--follow-ups)
 - [Updates](#updates)
 
@@ -17,9 +17,11 @@
 Status: In Discussion
 
 Authors:
+
 * [Almog Gavra](https://github.com/agavra)
 
 References:
+
 * https://github.com/slatedb/slatedb/issues/218
 * https://github.com/slatedb/slatedb/issues/225
 * https://github.com/facebook/rocksdb/wiki/User-defined-Timestamp
@@ -38,17 +40,18 @@ insertion/modification time of rows. The most common usages of timestamps are:
 
 1. **Time-To-Live**: many applications, either for compliance or space-saving purposes
    require purging data a certain amount of time after its insertion. Use cases with time
-   series data and privacy requirements such as GDPR come to mind here, though ensuring that 
+   series data and privacy requirements such as GDPR come to mind here, though ensuring that
    deleted data is collected within a time bound is left for a future exercise.
-2. **Resolving Out-of-Order Operations**: some applications may process incoming requests
-   in a manner that results in out-of-order insertions to SlateDB (stream processing applications
-   are frequently subject to this type of pattern). Using insertion timestamps to resolve which
-   version of a key is more recent may be preferable to using the clock at the time of insertion.
-3. **Historical Reads / MVCC**: while SlateDB provides snapshot capabilities to ensure reads are
-   consistent and repeatable, it requires a snapshot to have been taken at the desired time. 
-   increasing the number of snapshots adds significant storage overhead. Instead, it is possible
-   to trade read-latency for space amplification by maintaining multiple versions of keys at
-   different timestamps to allow for similar "historical" read operations.
+2. **Resolving Out-of-Order Operations (out of scope)**: some applications may process incoming
+   requests in a manner that results in out-of-order insertions to SlateDB (stream processing
+   applications are frequently subject to this type of pattern). Using insertion timestamps to
+   resolve which version of a key is more recent may be preferable to using the clock at the time of
+   insertion.
+3. **Historical Reads (out of scope)**: while SlateDB provides snapshot capabilities to
+   ensure reads are consistent and repeatable, it requires a snapshot to have been taken at the
+   desired time. Increasing the number of snapshots adds significant storage overhead. Instead, it
+   is possible to trade read-latency for space amplification by maintaining multiple versions of
+   keys at different timestamps to allow for similar "historical" read operations.
 
 ## Goals
 
@@ -79,8 +82,9 @@ not preclude:
 ## Public API
 
 We will make the following changes to `DbOptions`:
+
 - introduce a configuration for a custom clock, and will default to using the system clock
-- introduce a configuration for a default TTL, which defaults to -1
+- introduce a configuration for a default TTL, which defaults to `None`
 
 Note that the clock is expected to return monotonically increasing (greater than or equal to
 previous) values. This will be enforced by wrapping the supplied `Clock` implementation that
@@ -89,10 +93,14 @@ tracks the previous values returned.
 ```rust
 /// defines the clock that SlateDB will use during this session
 pub trait Clock {
-    
-    /// returns a timestamp in milliseconds since the unix epoch,
+    /// Returns a timestamp in milliseconds since the unix epoch,
     /// must return monotonically increasing numbers (this is enforced
     /// at runtime and will panic if the invariant is broken)
+    ///
+    /// Note that this clock does not need to return a number that
+    /// represents the unix timestamp; the only requirement is that
+    /// it represents a sequence that can attribute a logical ordering
+    /// to actions on the database
     fn now(&self) -> i64;
 }
 
@@ -104,22 +112,23 @@ pub struct SystemClock;
 pub struct DbOptions {
     // ...
 
-    /// the Clock to use for insertion timestamps
+    /// The Clock to use for insertion timestamps
     ///
-    /// default: the default clock uses the local system time on the machine
+    /// Default: the default clock uses the local system time on the machine
     clock: Option<Arc<dyn Clock>>,
 
-    /// the default time-to-live (TTL) for insertions (note that re-inserting a key
+    /// The default time-to-live (TTL) for insertions (note that re-inserting a key
     /// with any value will update the TTL to use the default_ttl)
     ///
-    /// default: no TTL (insertions will remain until deleted)
+    /// Default: no TTL (insertions will remain until deleted)
     default_ttl: Option<Duration>
 }
 ```
 
 To enforce that the clock remains monotonically increasing across instantiations of the
-database, the manifest will be updated to include the time it was written and this will
-seed the previously returned tick in the clock to the value in the latest manifest:
+database, we will add the maximum timestamp written in both the manifest and each SST (
+see the change to `SsTableInfo` below). When seeding the database minimum timestamp, SlateDB
+will use the maximum value seen in all persisted WAL SSTs and the latest manifest.
 
 ```fbs
 table ManifestV1 {
@@ -128,15 +137,15 @@ table ManifestV1 {
 }
 ```
 
-`Db#put_put_with_options` can optionally specify a row-level TTL at insertion time 
+`Db#put_put_with_options` can optionally specify a row-level TTL at insertion time
 by leveraging newly added field in `WriteOptions`:
 
 ```rust
 pub struct WriteOptions {
-    /// the time-to-live (ttl) for this insertion. If this insert overwrites an existing
+    /// The time-to-live (ttl) for this insertion. If this insert overwrites an existing
     /// database entry, the TTL for the most recent entry will be canonical.
     ///
-    /// default: the TTL configured in DbOptions when opening a SlateDB session
+    /// Default: the TTL configured in DbOptions when opening a SlateDB session
     pub ttl: Option<Duration>,
 }
 ```
@@ -145,7 +154,7 @@ For this RFC we will not introduce the ability to disable filtering out TTL-expi
 retrieval. The default implementation will read the metadata for every retrieved row and filter out
 records where `ts + tll < now`. We can, as a future optimization, enable lazy deserialization of the
 metadata so that this doesn't need to happen on each row retrieved if the user requests the ability
-to retrieve TTL'd rows that have not yet been compacted. This can be part of the API design for 
+to retrieve TTL'd rows that have not yet been compacted. This can be part of the API design for
 compaction filters (see https://github.com/slatedb/slatedb/issues/225)
 
 ## Implementation
@@ -154,13 +163,15 @@ compaction filters (see https://github.com/slatedb/slatedb/issues/225)
 
 Currently, SlateDB does not have a mechanism for backwards-compatibility of the SST data format.
 
-We will first introduce the following fields to the flatbuffer definitions: 
+We will first introduce the following fields to the flatbuffer definitions:
+
 - `format_version`: field that specifies the codec version that encoded this SST
 - `meta_features`: an enumeration of metadata fields that are available with each encoded row. This
   makes it possible in the future to save space per row by disabling metadata features, but that is
   out of scope for this RFC
 - `creation_timestamp`: the time at which this SST file was written. For this RFC this timestamp is
   used to schedule follow-up compactions (see [periodic compaction](#periodic-compaction)).
+- `min_ts`/`max_ts`:  metadata that indicates the earliest and latest timestamp values in the SST
 
 ```fbs
 /// the metadata encoded with each row, note that the ordering of this enum is 
@@ -168,20 +179,27 @@ We will first introduce the following fields to the flatbuffer definitions:
 enum MetaFeatures: byte {
     Timestamp,
     TimeToLive,
-    RowType,
+    RowFlags,
 }
 
 table SsTableInfo {
     // ...
     
-    // the current encoding version of the data block
+    // The current encoding version of the data block
     format_version: uint;
     
-    // the metadata features that are encoded with each row, in declaration order in MetaFeatures
+    // The metadata features that are encoded with each row. These features will be encoded
+    // in order that they are declared in the MetaFeatures enum
     meta_features: [MetaFeatures];
     
-    // the time at which this SST was created
+    // The time at which this SST was created
     creation_timestamp: long;
+   
+    // The minimum timestamp of any row in the SST
+    min_ts: long;
+    
+    // The maximum timestamp of any row in the SST
+    max_ts: long;
 }
 ```
 
@@ -205,14 +223,15 @@ The `format_version` will be bumped to 1 and will be modified to have the follow
 ```
 
 The newly introduced `meta` field will be decoded using the `meta_features` array specified for
-this SST. Which values meta features are included depend on the data that is being written. If 
+this SST. Which values meta features are included depend on the data that is being written. If
 any row in the SST has a `ttl`, the `TimeToLive` feature will be enabled.
 
 As part of this proposal, we will no longer represent tombstones as `INT_MAX` value_len and instead
-have an indicator `byte` in the meta array which specifies the `RowType`. A `RowType` of `0` 
-indicates a normal row and a value of `1` is a tombstone. Later we can add other types of metadata
-rows as necessary (since flatbuffers does not support single-bit values, a byte is the smallest
-amount of data we can store here):
+have an indicator `byte` in the meta array which specifies the `RowFlags`. `RowFlags` is a bitmask
+of descriptors on the row. The first bit in `RowFlags` is set to `1` if the row is a tombstone.
+Other bits are reserved for future flags. Later we can add other types of metadata rows as
+necessary (since flatbuffers does not support single-bit values, a byte is the smallest amount of
+data we can store here):
 
 ```
                 |-- meta --|
@@ -225,14 +244,14 @@ amount of data we can store here):
 In cases where both `Timestamp` and `TimeToLive` are enabled, the row will look like:
 
 ```
-                |-------- meta -------|
-|  u16    | var |    byte   i64   i64 |    u32    |  var  |
-|---------|-----|---------------------|-----------|-------|
-| key_len | key | row_type | ts | ttl | value_len | value |
-|---------|-----|---------------------|-----------|-------|
+                |-------- meta --------------|
+|  u16    | var |    byte  | i64 |    i64    |    u32    |  var  |
+|---------|-----|----------------------------|-----------|-------|
+| key_len | key | row_type | ts  | expire_ts | value_len | value |
+|---------|-----|----------|-----|-----------|-----------|-------|
 ```
 
-Both `ts` and `ttl` are encoded as `i64` in milliseconds. The expiry time is `ts + ttl`.
+Both `ts` and `expire_ts` are encoded as `i64` in milliseconds.
 
 The metadata will be returned in the decoded `KeyValueDeletable` which will be modified:
 
@@ -245,7 +264,7 @@ pub struct KeyValueDeletable {
 
 pub struct KeyValueMeta {
     pub ts: Option<i64>,
-    pub ttl: Option<i64>,
+    pub expire_ts: Option<i64>,
 }
 ```
 
@@ -258,8 +277,10 @@ participation in the compaction process. Specifically, the filter (if configured
 key during the compaction process and optionally remove or modify the value.
 
 For the scope of this RFC, we will be introducing a builtin TS/TTL compaction filter. This filter
-will add a tombstone to any value where `db.clock.now() > kv.meta.ts + kv.meta.ttl`. Note that
-tombstones will still contain a timestamp see [out of order insertions](#insertion-timestamps).
+will add a tombstone to any value where `db.clock.now() > kv.meta.expire_ts`. Note that
+tombstones will still contain a timestamp see [out of order insertions](#insertion-timestamps). If
+a tombstone is added, the TTL (`expire_ts`) for the row will be cleared, indicating that a future
+run of this filter should not remove the tombstone.
 
 Since this RFC does not cover the public API for compaction filters, this filter will simply run
 on any SST that specifies `meta_features: [Timestamp | TimeToLive]`.
@@ -276,10 +297,13 @@ use std::time::Duration;
 pub struct CompactorOptions {
     // ...
 
-    // when there are SSTs in L0 (or Sorted Runs with SSTs in other levels) older than 
-    // `periodic_compaction_seconds`, SlateDB will include them in the next scheduled
-    // compaction
-    periodic_compaction_seconds: Duration
+    // When there are SSTs in L0 (or Sorted Runs with SSTs in other levels) older than 
+    // `periodic_compaction_interval`, SlateDB will include them in the next scheduled
+    // compaction -- this is a best effort interval and slateDB does not guarantee that
+    // compaction will happen within this interval (implementations of the compaction scheduler
+    // are free to implement jitters or other mechanisms to ensure that SSTs are not 
+    // all compacted simultaneously)
+    periodic_compaction_interval: Duration
 }
 ```
 
@@ -293,7 +317,7 @@ for the lower levels of the LSM tree.
 
 A previous version of this proposal introduced the concept of row level timestamps -- the ability
 to set a timestamp at each insertion instead of only specifying a custom clock. This introduced
-the ability to have out-of-order insertions, which in turn caused significant downstream 
+the ability to have out-of-order insertions, which in turn caused significant downstream
 complications.
 
 In order to leave the door open for timestamps on insertion, we encode the clock time with each
@@ -327,3 +351,13 @@ the original `seq0` insert as it logically happened "after" `seq1`.
 - Added a creation_timestamp field to `SsTableInfo` and `periodic_compaction_seconds` to the
   `CompactorOptions`
 - Added a `RowType` metadata feature and used it to replace the current encoding of tombstones
+
+### October 1, 2024
+
+- Changed `RowType` to `RowFlags` and indicated that the first bit is used to identify tombstones
+- Added `min_ts`/`max_ts` into `SsTableInfo`
+- Updated the seeding of the clock min timestamp to look at the WAL SSTs as well as the manifest
+- Modified the stored value in the SST from `ttl` to `expire_ts`
+- Marked `periodic_compaction_interval` as "best effort" to allow for implementations to optimize
+  performance characteristics such as adding a jitter or max number of SSTs to compact in one go
+- Many misc. improvements to readability and clarifications
