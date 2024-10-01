@@ -347,12 +347,12 @@ Optionally, you may set an alternative endpoint (allow_http will be enabled auto
 
     #[cfg(not(feature = "wal_disable"))]
     if args.get_one::<bool>("no-wal").is_some() {
-        panic!("no-wal option requires `wal_disabled` feature in this build");
+        panic!("`no-wal` requires `wal_disable` feature, but didn't find it in this build");
     }
 
     let mut options = DbOptions {
         #[cfg(feature = "wal_disable")]
-        wal_enabled: !args.get_one::<bool>("no-wal").unwrap(),
+        wal_enabled: !args.get_one::<bool>("no-wal").unwrap_or(&false),
         ..Default::default()
     };
 
