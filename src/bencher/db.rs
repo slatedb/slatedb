@@ -1,14 +1,24 @@
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use rand::{RngCore, SeedableRng};
+use rand::{Rng, RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use slatedb::config::WriteOptions;
 use slatedb::db::Db;
 use tokio::time::Instant;
 use tracing::info;
+
+/// How frequently to dump stats to the console.
+const STAT_DUMP_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How frequently to update stats between puts and gets.
+const REPORT_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The granularity of the stats window.
+const WINDOW_SIZE: Duration = Duration::from_secs(10);
 
 pub trait KeyGenerator: Send {
     fn next_key(&mut self) -> Bytes;
@@ -85,6 +95,7 @@ impl DbBench {
                 self.write_options.clone(),
                 self.num_rows,
                 self.duration,
+                self.put_percentage,
                 stats_recorder.clone(),
                 self.db.clone(),
             );
@@ -103,6 +114,7 @@ struct Task {
     write_options: WriteOptions,
     num_keys: Option<u64>,
     duration: Option<Duration>,
+    put_percentage: u32,
     stats_recorder: Arc<StatsRecorder>,
     db: Arc<Db>,
 }
@@ -115,6 +127,7 @@ impl Task {
         write_options: WriteOptions,
         num_keys: Option<u64>,
         duration: Option<Duration>,
+        put_percentage: u32,
         stats_recorder: Arc<StatsRecorder>,
         db: Arc<Db>,
     ) -> Self {
@@ -124,107 +137,129 @@ impl Task {
             write_options,
             num_keys,
             duration,
+            put_percentage,
             stats_recorder,
             db,
         }
     }
 
     async fn run(&mut self) {
-        let start = std::time::Instant::now();
-        let mut keys_written = 0u64;
-        let write_batch = 4;
-        let mut val_rng = rand_xorshift::XorShiftRng::from_entropy();
-        loop {
-            if start.elapsed() >= self.duration.unwrap_or(Duration::MAX) {
-                break;
-            }
-            if keys_written >= self.num_keys.unwrap_or(u64::MAX) {
-                break;
-            }
-            for _ in 0..write_batch {
-                let key = self.key_generator.next_key();
+        let mut random = rand_xorshift::XorShiftRng::from_entropy();
+        let mut puts = 0u64;
+        let mut gets = 0u64;
+        let duration = self.duration.unwrap_or(Duration::MAX);
+        let num_keys = self.num_keys.unwrap_or(u64::MAX);
+        let start = Instant::now();
+        let mut last_report = start;
+        while self.stats_recorder.puts() < num_keys && start.elapsed() < duration {
+            let key = &self.key_generator.next_key();
+            if random.gen_range(0..100) < self.put_percentage {
                 let mut value = vec![0; self.val_len];
-                val_rng.fill_bytes(value.as_mut_slice());
+                random.fill_bytes(value.as_mut_slice());
                 self.db
-                    .put_with_options(key.as_ref(), value.as_ref(), &self.write_options)
+                    .put_with_options(key, value.as_ref(), &self.write_options)
                     .await;
+                puts += 1;
+            } else {
+                self.db.get(key).await.unwrap();
+                gets += 1;
             }
-            self.stats_recorder
-                .record_records_written(write_batch as u64);
-            keys_written += write_batch as u64;
+            if last_report.elapsed() >= REPORT_INTERVAL {
+                last_report = Instant::now();
+                self.stats_recorder.record_puts(last_report, puts);
+                self.stats_recorder.record_gets(last_report, gets);
+                puts = 0;
+                gets = 0;
+            }
         }
     }
 }
 
-const WINDOW_SIZE: Duration = Duration::from_secs(10);
-
+#[derive(Debug)]
 struct Window {
-    start: Instant,
-    last: Instant,
-    value: f32,
+    range: Range<Instant>,
+    puts: f32,
+    gets: f32,
 }
 
 struct StatsRecorderInner {
-    records_written: u64,
-    records_written_windows: VecDeque<Window>,
+    puts: u64,
+    gets: u64,
+    windows: VecDeque<Window>,
 }
 
 impl StatsRecorderInner {
     fn maybe_roll_window(now: Instant, windows: &mut VecDeque<Window>) {
-        let Some(front) = windows.front() else {
+        let Some(mut front) = windows.front() else {
             windows.push_front(Window {
-                start: now,
-                value: 0f32,
-                last: now,
+                range: now..now + WINDOW_SIZE,
+                puts: 0f32,
+                gets: 0f32,
             });
             return;
         };
-        let mut front_start = front.start;
-        while now.duration_since(front_start) > WINDOW_SIZE {
+        while now >= front.range.end {
             windows.push_front(Window {
-                start: front_start + WINDOW_SIZE,
-                value: 0f32,
-                last: now,
+                range: front.range.end..front.range.end + WINDOW_SIZE,
+                puts: 0f32,
+                gets: 0f32,
             });
-            front_start = windows.front().unwrap().start;
             while windows.len() > 180 {
                 windows.pop_back();
             }
+            front = windows.front().unwrap();
         }
     }
 
-    fn record_records_written(&mut self, now: Instant, records: u64) {
-        Self::maybe_roll_window(now, &mut self.records_written_windows);
-        if let Some(front) = self.records_written_windows.front_mut() {
-            front.value += records as f32;
-            front.last = now;
+    fn record_puts(&mut self, now: Instant, puts: u64) {
+        Self::maybe_roll_window(now, &mut self.windows);
+        if let Some(front) = self.windows.front_mut() {
+            front.puts += puts as f32;
         }
-        self.records_written += records;
+        self.puts += puts;
     }
 
-    fn records_written(&self) -> u64 {
-        self.records_written
-    }
-
-    fn sum_windows(windows: &VecDeque<Window>, since: Instant) -> Option<(Instant, Instant, f32)> {
-        let sum: f32 = windows
-            .iter()
-            .filter(|w| w.start > since)
-            .map(|w| w.value)
-            .sum();
-        let start = windows
-            .iter()
-            .filter(|w| w.start > since)
-            .map(|w| w.start)
-            .min();
-        if let Some(start) = start {
-            return windows.front().map(|w| (w.start, start, sum));
+    fn record_gets(&mut self, now: Instant, gets: u64) {
+        Self::maybe_roll_window(now, &mut self.windows);
+        if let Some(front) = self.windows.front_mut() {
+            front.gets += gets as f32;
         }
-        None
+        self.gets += gets;
     }
 
-    fn records_written_since(&self, since: Instant) -> Option<(Instant, Instant, u64)> {
-        Self::sum_windows(&self.records_written_windows, since).map(|r| (r.0, r.1, r.2 as u64))
+    fn puts(&self) -> u64 {
+        self.puts
+    }
+
+    fn gets(&self) -> u64 {
+        self.gets
+    }
+
+    fn sum_windows(
+        windows: &VecDeque<Window>,
+        lookback: Duration,
+    ) -> Option<(Range<Instant>, f32, f32)> {
+        let mut puts = 0f32;
+        let mut gets = 0f32;
+        let mut windows_iter = windows.iter();
+        // Don't count the active window, but use its start point as the end of the range.
+        let active_window = windows_iter.next();
+        let mut range = if let Some(window) = active_window {
+            (window.range.start)..window.range.start
+        } else {
+            return None;
+        };
+        for window in windows_iter.filter(|w| w.range.start >= range.end - lookback)
+        {
+            puts += window.puts;
+            gets += window.gets;
+            range.start = window.range.start;
+        }
+        return Some((range, puts, gets));
+    }
+
+    fn operations_since(&self, lookback: Duration) -> Option<(Range<Instant>, u64, u64)> {
+        Self::sum_windows(&self.windows, lookback).map(|r| (r.0, r.1 as u64, r.2 as u64))
     }
 }
 
@@ -236,49 +271,64 @@ impl StatsRecorder {
     fn new() -> Self {
         Self {
             inner: Mutex::new(StatsRecorderInner {
-                records_written: 0,
-                records_written_windows: VecDeque::new(),
+                puts: 0,
+                gets: 0,
+                windows: VecDeque::new(),
             }),
         }
     }
 
-    fn record_records_written(&self, records: u64) {
-        let now = Instant::now();
+    fn record_puts(&self, now: Instant, records: u64) {
         let mut guard = self.inner.lock().expect("lock failed");
-        guard.record_records_written(now, records);
+        guard.record_puts(now, records);
     }
 
-    fn records_written(&self) -> u64 {
-        let guard = self.inner.lock().expect("lock failed");
-        guard.records_written()
+    fn record_gets(&self, now: Instant, records: u64) {
+        let mut guard = self.inner.lock().expect("lock failed");
+        guard.record_gets(now, records);
     }
 
-    fn records_written_since(&self, since: Instant) -> Option<(Instant, Instant, u64)> {
+    fn puts(&self) -> u64 {
         let guard = self.inner.lock().expect("lock failed");
-        guard.records_written_since(since)
+        guard.puts()
+    }
+
+    fn gets(&self) -> u64 {
+        let guard = self.inner.lock().expect("lock failed");
+        guard.gets()
+    }
+
+    fn operations_since(&self, lookback: Duration) -> Option<(Range<Instant>, u64, u64)> {
+        let guard = self.inner.lock().expect("lock failed");
+        guard.operations_since(lookback)
     }
 }
 
-const STAT_DUMP_INTERVAL: Duration = Duration::from_secs(10);
-
 async fn dump_stats(stats: Arc<StatsRecorder>) {
+    let mut last_stats_dump: Option<Instant> = None;
     loop {
-        let records_written = stats.records_written();
-        let records_written_since =
-            stats.records_written_since(Instant::now() - Duration::from_secs(60));
-        let (write_rate, interval) =
-            if let Some((last, start, records_written)) = records_written_since {
-                let interval = last - start;
-                (records_written as f32 / interval.as_secs() as f32, interval)
-            } else {
-                (0f32, Duration::from_secs(0))
+        tokio::time::sleep(REPORT_INTERVAL).await;
+
+        let operations_since = stats.operations_since(Duration::from_secs(60));
+        if let Some((range, puts_since, gets_since)) = operations_since {
+            let interval = range.end - range.start;
+            let puts = stats.puts();
+            let gets = stats.gets();
+            let should_print = match last_stats_dump {
+                Some(last_stats_dump) => (range.end - last_stats_dump) >= STAT_DUMP_INTERVAL,
+                None => (range.end - range.start) >= STAT_DUMP_INTERVAL,
             };
-
-        info!("Stats Dump:");
-        info!("---------------------------------------");
-        info!("records written: {}", records_written);
-        info!("write rate: {}/second over {:?}", write_rate, interval);
-
-        tokio::time::sleep(STAT_DUMP_INTERVAL).await;
+            if should_print {
+                let put_rate = puts_since as f32 / interval.as_secs() as f32;
+                let get_rate = gets_since as f32 / interval.as_secs() as f32;
+                info!("Stats Dump:");
+                info!("---------------------------------------");
+                info!("puts: {}", puts);
+                info!("gets: {}", gets);
+                info!("put rate: {:.3}/second over {:?}", put_rate, interval);
+                info!("get rate: {:.3}/second over {:?}", get_rate, interval);
+                last_stats_dump = Some(range.end);
+            }
+        }
     }
 }
