@@ -87,6 +87,7 @@ impl DbBench {
 
     pub async fn run(&self) {
         let stats_recorder = Arc::new(StatsRecorder::new());
+        let plot = self.plot;
         let mut write_tasks = Vec::new();
         for _ in 0..self.concurrency {
             let mut write_task = Task::new(
@@ -101,7 +102,7 @@ impl DbBench {
             );
             write_tasks.push(tokio::spawn(async move { write_task.run().await }));
         }
-        tokio::spawn(async move { dump_stats(stats_recorder).await });
+        tokio::spawn(async move { dump_stats(stats_recorder, plot).await });
         for write_task in write_tasks {
             write_task.await.unwrap();
         }
@@ -303,8 +304,9 @@ impl StatsRecorder {
     }
 }
 
-async fn dump_stats(stats: Arc<StatsRecorder>) {
+async fn dump_stats(stats: Arc<StatsRecorder>, plot: bool) {
     let mut last_stats_dump: Option<Instant> = None;
+    let mut first_dump_start: Option<Instant> = None;
     loop {
         tokio::time::sleep(REPORT_INTERVAL).await;
 
@@ -317,9 +319,17 @@ async fn dump_stats(stats: Arc<StatsRecorder>) {
                 Some(last_stats_dump) => (range.end - last_stats_dump) >= STAT_DUMP_INTERVAL,
                 None => (range.end - range.start) >= STAT_DUMP_INTERVAL,
             };
+            first_dump_start = first_dump_start.or(Some(range.start));
             if should_print {
                 let put_rate = puts_since as f32 / interval.as_secs() as f32;
                 let get_rate = gets_since as f32 / interval.as_secs() as f32;
+                if plot {
+                    println!(
+                        "{:.3} {:.3}",
+                        range.end.duration_since(first_dump_start.unwrap()).as_secs_f64(),
+                        (put_rate + get_rate) as f64,
+                    );
+                }
                 info!(
                     "stats dump [put/s: {:.3}, get/s: {:.3}, window: {:?}, cumulative puts: {}, cumulative gets: {}]",
                     put_rate,
