@@ -159,33 +159,14 @@ impl CompactorState {
             .chain(compacted.iter().map(|sr| SourceId::SortedRun(sr.id)))
             .collect();
 
-        let sources_set: HashSet<_> = sources.iter().collect();
-
-        if !sources
-            .iter()
-            .all(|src| sources_logical_order.contains(src))
-        {
-            return Err(SlateDBError::InvalidCompaction);
+        let mut start_idx = 0;
+        while start_idx < sources_logical_order.len() && sources_logical_order[start_idx] != sources[0] {
+            start_idx += 1;
         }
 
-        let start = sources
-            .iter()
-            .filter_map(|src| sources_logical_order.iter().position(|id| id == src))
-            .min();
-        let end = sources
-            .iter()
-            .filter_map(|src| sources_logical_order.iter().rposition(|id| id == src))
-            .max();
-
-        if let (Some(start_idx), Some(end_idx)) = (start, end) {
-            if !sources_logical_order[start_idx..=end_idx]
-                .iter()
-                .filter(|id| sources_set.contains(id))
-                .eq(sources.iter())
-            {
-                return Err(SlateDBError::InvalidCompaction);
-            }
-        } else {
+        if start_idx + sources.len() > sources_logical_order.len() ||
+            !sources.iter().eq(&sources_logical_order[start_idx..start_idx + sources.len()])
+        {
             return Err(SlateDBError::InvalidCompaction);
         }
 
