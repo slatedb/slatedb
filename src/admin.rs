@@ -50,6 +50,7 @@ pub fn load_object_store_from_env(
     let provider = &*env::var("CLOUD_PROVIDER")
         .expect("CLOUD_PROVIDER must be set")
         .to_lowercase();
+
     match provider {
         #[cfg(feature = "aws")]
         "aws" => load_aws(),
@@ -66,14 +67,18 @@ pub fn load_object_store_from_env(
 /// | AWS_BUCKET | The bucket to use within S3 | Yes |
 /// | AWS_REGION | The AWS region to use | Yes |
 /// | AWS_ENDPOINT | The endpoint to use for S3 (disables https) | No |
+/// | AWS_DYNAMODB_TABLE | The DynamoDB table to use for locking | No |
 #[cfg(feature = "aws")]
 pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+    use object_store::aws::{DynamoCommit, S3ConditionalPut};
+
     let key = env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID must be set");
     let secret =
         env::var("AWS_SECRET_ACCESS_KEY").expect("Expected AWS_SECRET_ACCESS_KEY must be set");
     let bucket = env::var("AWS_BUCKET").expect("AWS_BUCKET must be set");
     let region = env::var("AWS_REGION").expect("AWS_REGION must be set");
     let endpoint = env::var("AWS_ENDPOINT").ok();
+    let dynamodb_table = env::var("AWS_DYNAMODB_TABLE").ok();
     let builder = object_store::aws::AmazonS3Builder::new()
         .with_access_key_id(key)
         .with_secret_access_key(secret)
@@ -81,6 +86,11 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
         .with_region(region);
     let builder = if let Some(endpoint) = endpoint {
         builder.with_allow_http(true).with_endpoint(endpoint)
+    } else {
+        builder
+    };
+    let builder = if let Some(dynamodb_table) = dynamodb_table {
+        builder.with_conditional_put(S3ConditionalPut::Dynamo(DynamoCommit::new(dynamodb_table)))
     } else {
         builder
     };

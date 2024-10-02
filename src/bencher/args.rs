@@ -1,9 +1,20 @@
 use std::{
-    fmt::{Display, Formatter}, path::PathBuf, sync::Arc, time::Duration
+    fmt::{Display, Formatter},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
 };
 
 use clap::{builder::PossibleValue, Args, Parser, Subcommand, ValueEnum};
-use slatedb::{config::{DbOptions, ObjectStoreCacheOptions}, db_cache::{moka::{MokaCache, MokaCacheOptions}, DbCache}};
+use slatedb::{
+    config::{DbOptions, ObjectStoreCacheOptions},
+    db_cache::{
+        moka::{MokaCache, MokaCacheOptions},
+        DbCache,
+    },
+};
+
+use crate::db::{KeyGenerator, RandomKeyGenerator};
 
 #[derive(Parser, Clone)]
 #[command(name = "bencher")]
@@ -46,28 +57,19 @@ pub(crate) struct DbArgs {
     )]
     pub(crate) flush_ms: Option<u32>,
 
-    #[arg(
-        long,
-        help = "The size in bytes of the L0 SSTables.",
-    )]
+    #[arg(long, help = "The size in bytes of the L0 SSTables.")]
     pub(crate) l0_sst_size_bytes: Option<usize>,
 
-    #[arg(
-        long,
-        help = "The size in bytes of the block cache.",
-    )]
+    #[arg(long, help = "The size in bytes of the block cache.")]
     pub(crate) block_cache_size: Option<usize>,
 
     #[arg(
         long,
-        help = "The path where object store cache part files are stored.",
+        help = "The path where object store cache part files are stored."
     )]
     pub(crate) object_cache_path: Option<String>,
 
-    #[arg(
-        long,
-        help = "The size in bytes of the object store cache part files.",
-    )]
+    #[arg(long, help = "The size in bytes of the object store cache part files.")]
     pub(crate) object_cache_part_size: Option<usize>,
 }
 
@@ -84,21 +86,22 @@ impl DbArgs {
         db_options.l0_sst_size_bytes = self
             .l0_sst_size_bytes
             .unwrap_or(db_options.l0_sst_size_bytes);
-        db_options.block_cache = self.block_cache_size
-            .map(|size| Arc::new(MokaCache::new_with_opts(
-                MokaCacheOptions {
-                    max_capacity: size as u64,
-                    ..MokaCacheOptions::default()
-                }
-            )) as Arc<dyn DbCache>);
-        db_options.object_store_cache_options = self.object_cache_path.clone()
-            .map(|path| {
-                ObjectStoreCacheOptions {
-                    root_folder: Some(PathBuf::from(path)),
-                    ..ObjectStoreCacheOptions::default()
-                }
-            }).unwrap_or(db_options.object_store_cache_options);
-        db_options.object_store_cache_options.part_size_bytes = self.object_cache_part_size
+        db_options.block_cache = self.block_cache_size.map(|size| {
+            Arc::new(MokaCache::new_with_opts(MokaCacheOptions {
+                max_capacity: size as u64,
+                ..Default::default()
+            })) as Arc<dyn DbCache>
+        });
+        db_options.object_store_cache_options = self
+            .object_cache_path
+            .clone()
+            .map(|path| ObjectStoreCacheOptions {
+                root_folder: Some(PathBuf::from(path)),
+                ..Default::default()
+            })
+            .unwrap_or(db_options.object_store_cache_options);
+        db_options.object_store_cache_options.part_size_bytes = self
+            .object_cache_part_size
             .unwrap_or(db_options.object_store_cache_options.part_size_bytes);
         db_options
     }
@@ -109,39 +112,31 @@ pub(crate) struct BenchmarkDbArgs {
     #[clap(flatten)]
     pub(crate) db_args: DbArgs,
 
-    #[arg(
-        long,
-        help = "The duration in seconds to run the benchmark for.",
-        default_value_t = 60
-    )]
-    pub(crate) duration: u32,
+    #[arg(long, help = "The duration in seconds to run the benchmark for.")]
+    pub(crate) duration: Option<u32>,
 
     #[arg(
         long,
         help = "The key distribution to use.",
         default_value_t = KeyDistribution::Random
     )]
-    key_distribution: KeyDistribution,
+    pub(crate) key_distribution: KeyDistribution,
 
     #[arg(
         long,
         help = "The length of the keys to generate.",
         default_value_t = 16
     )]
-    key_len: usize,
+    pub(crate) key_len: usize,
 
     #[arg(
         long,
         help = "Whether to await durable writes.",
         default_value_t = false
     )]
-    await_durable: bool,
+    pub(crate) await_durable: bool,
 
-    #[arg(
-        long,
-        help = "The number of read/write to spawn.",
-        default_value_t = 4
-    )]
+    #[arg(long, help = "The number of read/write to spawn.", default_value_t = 4)]
     pub(crate) concurrency: u32,
 
     #[arg(long, help = "The number of rows to write.")]
@@ -164,9 +159,21 @@ pub(crate) struct BenchmarkDbArgs {
     #[arg(
         long,
         help = "Whether to print gnuplot-compatible CSVs to stdout (and disable logging).",
-        default_value_t = false,
+        default_value_t = false
     )]
     pub(crate) plot: bool,
+}
+
+impl BenchmarkDbArgs {
+    pub(crate) fn key_gen_supplier(&self) -> Box<dyn Fn() -> Box<dyn KeyGenerator>> {
+        let supplier = match self.key_distribution {
+            KeyDistribution::Random => {
+                let key_len = self.key_len;
+                move || Box::new(RandomKeyGenerator::new(key_len)) as Box<dyn KeyGenerator>
+            }
+        };
+        Box::new(supplier)
+    }
 }
 
 #[derive(Clone)]
