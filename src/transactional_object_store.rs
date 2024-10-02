@@ -16,6 +16,8 @@ pub(crate) trait TransactionalObjectStore: Send + Sync {
 
     async fn get(&self, path: &Path) -> Result<GetResult, Error>;
 
+    async fn delete(&self, path: &Path) -> Result<(), Error>;
+
     fn list(&self, path: Option<&Path>) -> BoxStream<'_, Result<ObjectMeta, Error>>;
 }
 
@@ -75,6 +77,11 @@ impl TransactionalObjectStore for DelegatingTransactionalObjectStore {
     async fn get(&self, path: &Path) -> Result<GetResult, Error> {
         let path = self.path(path);
         self.object_store.get(&path).await
+    }
+
+    async fn delete(&self, path: &Path) -> Result<(), Error> {
+        let path = self.path(path);
+        self.object_store.delete(&path).await
     }
 
     fn list(&self, path: Option<&Path>) -> BoxStream<'_, Result<ObjectMeta, Error>> {
@@ -222,5 +229,39 @@ mod tests {
             result.bytes().await.unwrap(),
             Bytes::copy_from_slice("data1".as_bytes())
         );
+    }
+
+    #[tokio::test]
+    async fn test_delegating_object_store_delete() {
+        // given:
+        let os = Arc::new(InMemory::new());
+        let txnl_os = DelegatingTransactionalObjectStore::new(Path::from(ROOT_PATH), os.clone());
+        txnl_os
+            .put_if_not_exists(
+                &Path::from("obj"),
+                Bytes::copy_from_slice("data1".as_bytes()),
+            )
+            .await
+            .unwrap();
+
+        // when:
+        let result = os.get(&Path::from("root/path/obj")).await.unwrap();
+
+        // then:
+        assert_eq!(
+            result.bytes().await.unwrap(),
+            Bytes::copy_from_slice("data1".as_bytes())
+        );
+
+        // when:
+        txnl_os.delete(&Path::from("obj")).await.unwrap();
+
+        // then:
+        let result = os.get(&Path::from("root/path/obj")).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.err().unwrap(),
+            object_store::Error::NotFound { path: _, source: _ }
+        ));
     }
 }

@@ -1,8 +1,6 @@
 use std::collections::VecDeque;
-#[cfg(feature = "snappy")]
-use std::io::Read;
-#[cfg(feature = "lz4")]
-use std::io::Write;
+#[cfg(feature = "zlib")]
+use std::io::{Read, Write};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -10,38 +8,41 @@ use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
 
 use crate::block::Block;
+use crate::db_state::{SsTableInfo, SsTableInfoCodec};
 use crate::filter::{BloomFilter, BloomFilterBuilder};
 use crate::flatbuffer_types::{
-    BlockMeta, BlockMetaArgs, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned, SsTableInfo,
-    SsTableInfoArgs, SsTableInfoOwned,
+    BlockMeta, BlockMetaArgs, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs,
+    SsTableIndexOwned,
 };
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
 
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
-    block_size: usize,
-    min_filter_keys: u32,
-    compression_codec: Option<CompressionCodec>,
+    pub(crate) block_size: usize,
+    pub(crate) min_filter_keys: u32,
+    pub(crate) sst_codec: Box<dyn SsTableInfoCodec>,
+    pub(crate) filter_bits_per_key: u32,
+    pub(crate) compression_codec: Option<CompressionCodec>,
+}
+
+impl Default for SsTableFormat {
+    fn default() -> Self {
+        Self {
+            block_size: 4096,
+            min_filter_keys: 0,
+            sst_codec: Box::new(FlatBufferSsTableInfoCodec {}),
+            filter_bits_per_key: 10,
+            compression_codec: None,
+        }
+    }
 }
 
 impl SsTableFormat {
-    pub fn new(
-        block_size: usize,
-        min_filter_keys: u32,
-        compression_codec: Option<CompressionCodec>,
-    ) -> Self {
-        Self {
-            block_size,
-            min_filter_keys,
-            compression_codec,
-        }
-    }
-
     pub(crate) async fn read_info(
         &self,
         obj: &impl ReadOnlyBlob,
-    ) -> Result<SsTableInfoOwned, SlateDBError> {
+    ) -> Result<SsTableInfo, SlateDBError> {
         let len = obj.len().await?;
         if len <= 4 {
             return Err(SlateDBError::EmptySSTable);
@@ -53,23 +54,22 @@ impl SsTableFormat {
         // Get the metadata. Last 4 bytes are the offset of SsTableInfo
         let sst_metadata_range = sst_metadata_offset..len - 4;
         let sst_metadata_bytes = obj.read_range(sst_metadata_range).await?;
-        SsTableInfoOwned::decode(sst_metadata_bytes)
+        SsTableInfo::decode(sst_metadata_bytes, &*self.sst_codec)
     }
 
     pub(crate) async fn read_filter(
         &self,
-        info: &SsTableInfoOwned,
+        info: &SsTableInfo,
         obj: &impl ReadOnlyBlob,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         let mut filter = None;
-        let handle = info.borrow();
-        if handle.filter_len() > 0 {
-            let filter_end = handle.filter_offset() + handle.filter_len();
-            let filter_offset_range = handle.filter_offset() as usize..filter_end as usize;
+        if info.filter_len > 0 {
+            let filter_end = info.filter_offset + info.filter_len;
+            let filter_offset_range = info.filter_offset as usize..filter_end as usize;
             let filter_bytes = obj.read_range(filter_offset_range).await?;
-            let compression_codec = handle.compression_format();
+            let compression_codec = info.compression_codec;
             filter = Some(Arc::new(
-                self.decode_filter(filter_bytes, compression_codec.into())?,
+                self.decode_filter(filter_bytes, compression_codec)?,
             ));
         }
         Ok(filter)
@@ -89,29 +89,27 @@ impl SsTableFormat {
 
     pub(crate) async fn read_index(
         &self,
-        info_owned: &SsTableInfoOwned,
+        info: &SsTableInfo,
         obj: &impl ReadOnlyBlob,
     ) -> Result<SsTableIndexOwned, SlateDBError> {
-        let info = info_owned.borrow();
-        let index_off = info.index_offset() as usize;
-        let index_end = index_off + info.index_len() as usize;
+        let index_off = info.index_offset as usize;
+        let index_end = index_off + info.index_len as usize;
         let index_bytes = obj.read_range(index_off..index_end).await?;
-        let compression_codec = info.compression_format();
-        self.decode_index(index_bytes, compression_codec.into())
+        let compression_codec = info.compression_codec;
+        self.decode_index(index_bytes, compression_codec)
     }
 
     #[allow(dead_code)]
     pub(crate) fn read_index_raw(
         &self,
-        info_owned: &SsTableInfoOwned,
+        info: &SsTableInfo,
         sst_bytes: &Bytes,
     ) -> Result<SsTableIndexOwned, SlateDBError> {
-        let info = info_owned.borrow();
-        let index_off = info.index_offset() as usize;
-        let index_end = index_off + info.index_len() as usize;
+        let index_off = info.index_offset as usize;
+        let index_end = index_off + info.index_len as usize;
         let index_bytes: Bytes = sst_bytes.slice(index_off..index_end);
-        let compression_codec = info.compression_format();
-        self.decode_index(index_bytes, compression_codec.into())
+        let compression_codec = info.compression_codec;
+        self.decode_index(index_bytes, compression_codec)
     }
 
     fn decode_index(
@@ -165,10 +163,10 @@ impl SsTableFormat {
     fn block_range(
         &self,
         blocks: Range<usize>,
-        handle: &SsTableInfo,
+        info: &SsTableInfo,
         index: &SsTableIndex,
     ) -> Range<usize> {
-        let mut end_offset = handle.filter_offset() as usize;
+        let mut end_offset = info.filter_offset as usize;
         if blocks.end < index.block_meta().len() {
             let next_block_meta = index.block_meta().get(blocks.end);
             end_offset = next_block_meta.offset() as usize;
@@ -179,23 +177,22 @@ impl SsTableFormat {
 
     pub(crate) async fn read_blocks(
         &self,
-        info: &SsTableInfoOwned,
+        info: &SsTableInfo,
         index_owned: &SsTableIndexOwned,
         blocks: Range<usize>,
         obj: &impl ReadOnlyBlob,
     ) -> Result<VecDeque<Block>, SlateDBError> {
-        let handle = &info.borrow();
         let index = index_owned.borrow();
         assert!(blocks.start <= blocks.end);
         assert!(blocks.end <= index.block_meta().len());
         if blocks.start == blocks.end {
             return Ok(VecDeque::new());
         }
-        let range = self.block_range(blocks.clone(), handle, &index);
+        let range = self.block_range(blocks.clone(), info, &index);
         let start_offset = range.start;
         let bytes: Bytes = obj.read_range(range).await?;
         let mut decoded_blocks = VecDeque::new();
-        let compression_codec = handle.compression_format();
+        let compression_codec = info.compression_codec;
         for block in blocks {
             let block_meta = index.block_meta().get(block);
             let block_bytes_start = block_meta.offset() as usize - start_offset;
@@ -206,7 +203,7 @@ impl SsTableFormat {
                 let block_bytes_end = next_block_meta.offset() as usize - start_offset;
                 bytes.slice(block_bytes_start..block_bytes_end)
             };
-            decoded_blocks.push_back(self.decode_block(block_bytes, compression_codec.into())?);
+            decoded_blocks.push_back(self.decode_block(block_bytes, compression_codec)?);
         }
         Ok(decoded_blocks)
     }
@@ -237,7 +234,7 @@ impl SsTableFormat {
 
     pub(crate) async fn read_block(
         &self,
-        info: &SsTableInfoOwned,
+        info: &SsTableInfo,
         index: &SsTableIndexOwned,
         block: usize,
         obj: &impl ReadOnlyBlob,
@@ -249,34 +246,39 @@ impl SsTableFormat {
     #[allow(dead_code)]
     pub(crate) fn read_block_raw(
         &self,
-        info: &SsTableInfoOwned,
+        info: &SsTableInfo,
         index_owned: &SsTableIndexOwned,
         block: usize,
         sst_bytes: &Bytes,
     ) -> Result<Block, SlateDBError> {
-        let handle = &info.borrow();
         let index = index_owned.borrow();
-        let bytes: Bytes = sst_bytes.slice(self.block_range(block..block + 1, handle, &index));
-        let compression_codec = handle.compression_format();
-        self.decode_block(bytes, compression_codec.into())
+        let bytes: Bytes = sst_bytes.slice(self.block_range(block..block + 1, info, &index));
+        let compression_codec = info.compression_codec;
+        self.decode_block(bytes, compression_codec)
     }
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
         EncodedSsTableBuilder::new(
             self.block_size,
             self.min_filter_keys,
+            self.sst_codec.clone(),
+            self.filter_bits_per_key,
             self.compression_codec,
         )
     }
 }
 
-impl SsTableInfoOwned {
-    fn encode(info: &SsTableInfoOwned, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(info.data());
-        buf.put_u32(crc32fast::hash(info.data()));
+impl SsTableInfo {
+    pub(crate) fn encode(info: &SsTableInfo, buf: &mut Vec<u8>, sst_codec: &dyn SsTableInfoCodec) {
+        let data = &sst_codec.encode(info);
+        buf.extend_from_slice(data);
+        buf.put_u32(crc32fast::hash(data));
     }
 
-    pub(crate) fn decode(raw_info: Bytes) -> Result<SsTableInfoOwned, SlateDBError> {
+    pub(crate) fn decode(
+        raw_info: Bytes,
+        sst_codec: &dyn SsTableInfoCodec,
+    ) -> Result<SsTableInfo, SlateDBError> {
         if raw_info.len() <= 4 {
             return Err(SlateDBError::EmptyBlockMeta);
         }
@@ -286,13 +288,13 @@ impl SsTableInfoOwned {
             return Err(SlateDBError::ChecksumMismatch);
         }
 
-        let info = SsTableInfoOwned::new(data)?;
+        let info = sst_codec.decode(&data)?;
         Ok(info)
     }
 }
 
 pub(crate) struct EncodedSsTable {
-    pub(crate) info: SsTableInfoOwned,
+    pub(crate) info: SsTableInfo,
     pub(crate) filter: Option<Arc<BloomFilter>>,
     pub(crate) unconsumed_blocks: VecDeque<Bytes>,
 }
@@ -310,6 +312,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     min_filter_keys: u32,
     num_keys: u32,
     filter_builder: BloomFilterBuilder,
+    sst_codec: Box<dyn SsTableInfoCodec>,
     compression_codec: Option<CompressionCodec>,
 }
 
@@ -318,6 +321,8 @@ impl<'a> EncodedSsTableBuilder<'a> {
     fn new(
         block_size: usize,
         min_filter_keys: u32,
+        sst_codec: Box<dyn SsTableInfoCodec>,
+        filter_bits_per_key: u32,
         compression_codec: Option<CompressionCodec>,
     ) -> Self {
         Self {
@@ -330,8 +335,9 @@ impl<'a> EncodedSsTableBuilder<'a> {
             builder: BlockBuilder::new(block_size),
             min_filter_keys,
             num_keys: 0,
-            filter_builder: BloomFilterBuilder::new(10),
+            filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
+            sst_codec,
             compression_codec,
         }
     }
@@ -472,29 +478,19 @@ impl<'a> EncodedSsTableBuilder<'a> {
         let index_len = index_block.len();
         buf.put(index_block);
 
-        let mut sst_info_builder = flatbuffers::FlatBufferBuilder::new();
-        let first_key = self
-            .sst_first_key
-            .map(|k| sst_info_builder.create_vector(k.as_ref()));
         let meta_offset = self.current_len + buf.len();
-        let info_wip_offset = SsTableInfo::create(
-            &mut sst_info_builder,
-            &SsTableInfoArgs {
-                first_key,
-                index_offset: index_offset as u64,
-                index_len: index_len as u64,
-                filter_offset: filter_offset as u64,
-                filter_len: filter_len as u64,
-                compression_format: self.compression_codec.into(),
-            },
-        );
+        let info = SsTableInfo {
+            first_key: self.sst_first_key,
+            index_offset: index_offset as u64,
+            index_len: index_len as u64,
+            filter_offset: filter_offset as u64,
+            filter_len: filter_len as u64,
+            compression_codec: self.compression_codec,
+        };
+        SsTableInfo::encode(&info, &mut buf, &*self.sst_codec);
 
-        sst_info_builder.finish(info_wip_offset, None);
-        let info = SsTableInfoOwned::new(Bytes::from(sst_info_builder.finished_data().to_vec()))?;
-
-        SsTableInfoOwned::encode(&info, &mut buf);
-
-        // write the metadata offset at the end of the file. FlatBuffer internal representation is not intended to be used directly.
+        // write the metadata offset at the end of the file. FlatBuffer internal
+        // representation is not intended to be used directly.
         buf.put_u32(meta_offset as u32);
         self.blocks.push_back(Bytes::from(buf));
         Ok(EncodedSsTable {
@@ -517,6 +513,7 @@ mod tests {
     use super::*;
     use crate::block_iterator::BlockIterator;
     use crate::db_state::SsTableId;
+    use crate::filter::filter_hash;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
@@ -533,7 +530,10 @@ mod tests {
     async fn test_builder_should_make_blocks_available() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 0, None);
+        let format = SsTableFormat {
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
         let table_store = TableStore::new(object_store, format, root_path, None);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 8], Some(&[b'1'; 8])).unwrap();
@@ -577,7 +577,10 @@ mod tests {
     async fn test_builder_should_return_unconsumed_blocks() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 0, None);
+        let format = SsTableFormat {
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
         let table_store = TableStore::new(object_store, format.clone(), root_path, None);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 8], Some(&[b'1'; 8])).unwrap();
@@ -637,7 +640,7 @@ mod tests {
     async fn test_sstable() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 0, None);
+        let format = SsTableFormat::default();
         let table_store = TableStore::new(object_store, format, root_path, None);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
@@ -651,10 +654,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
-        let sst_info = sst_handle.info.borrow();
+        let sst_info = sst_handle.info;
         assert_eq!(
             b"key1",
-            sst_info.first_key().unwrap().bytes(),
+            sst_info.first_key.unwrap().as_ref(),
             "first key in sst info should be correct"
         );
 
@@ -665,11 +668,11 @@ mod tests {
             .read_index(&sst_handle_from_store)
             .await
             .unwrap();
-        let sst_info_from_store = sst_handle_from_store.info.borrow();
+        let sst_info_from_store = sst_handle_from_store.info;
         assert_eq!(1, index.borrow().block_meta().len());
         assert_eq!(
             b"key1",
-            sst_info_from_store.first_key().unwrap().bytes(),
+            sst_info_from_store.first_key.unwrap().as_ref(),
             "first key in sst info should be correct after reading from store"
         );
         assert_eq!(
@@ -683,7 +686,10 @@ mod tests {
     async fn test_sstable_no_filter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 3, None);
+        let format = SsTableFormat {
+            min_filter_keys: 3,
+            ..SsTableFormat::default()
+        };
         let table_store = TableStore::new(object_store, format, root_path, None);
         let mut builder = table_store.table_builder();
         builder.add(b"key1", Some(b"value1")).unwrap();
@@ -696,8 +702,34 @@ mod tests {
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         assert_eq!(encoded_info, sst_handle.info);
-        let handle = sst_handle.info.borrow();
-        assert_eq!(handle.filter_len(), 0);
+        assert_eq!(sst_handle.info.filter_len, 0);
+    }
+
+    #[tokio::test]
+    async fn test_sstable_builds_filter_with_correct_bits_per_key() {
+        async fn test_inner(filter_bits_per_key: u32) {
+            let root_path = Path::from("");
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let format = SsTableFormat {
+                filter_bits_per_key,
+                ..SsTableFormat::default()
+            };
+            let table_store = TableStore::new(object_store, format, root_path, None);
+            let mut builder = table_store.table_builder();
+            for k in 0..8 {
+                builder
+                    .add(format!("{}", k).as_bytes(), Some(b"value"))
+                    .unwrap();
+            }
+            let encoded = builder.build().unwrap();
+            let filter = encoded.filter.unwrap();
+            let bytes = filter.encode();
+            // filters are encoded as a 16-bit number of probes followed by the filter
+            assert_eq!(bytes.len() as u32, 2 + filter_bits_per_key);
+        }
+
+        test_inner(10).await;
+        test_inner(20).await;
     }
 
     #[tokio::test]
@@ -706,7 +738,10 @@ mod tests {
         async fn test_compression_inner(compression: CompressionCodec) {
             let root_path = Path::from("");
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let format = SsTableFormat::new(4096, 0, Some(compression));
+            let format = SsTableFormat {
+                compression_codec: Some(compression),
+                ..SsTableFormat::default()
+            };
             let table_store = TableStore::new(object_store, format, root_path, None);
             let mut builder = table_store.table_builder();
             builder.add(b"key1", Some(b"value1")).unwrap();
@@ -721,14 +756,13 @@ mod tests {
             let index = table_store.read_index(&sst_handle).await.unwrap();
             let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
 
-            assert!(filter.has_key(b"key1"));
-            assert!(filter.has_key(b"key2"));
+            assert!(filter.might_contain(filter_hash(b"key1")));
+            assert!(filter.might_contain(filter_hash(b"key2")));
             assert_eq!(encoded_info, sst_handle.info);
-            let sst_info = sst_handle.info.borrow();
             assert_eq!(1, index.borrow().block_meta().len());
             assert_eq!(
                 b"key1",
-                sst_info.first_key().unwrap().bytes(),
+                sst_handle.info.first_key.unwrap().as_ref(),
                 "first key in sst info should be correct"
             );
         }
@@ -740,7 +774,10 @@ mod tests {
         ) {
             let root_path = Path::from("");
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let format = SsTableFormat::new(4096, 0, Some(compression));
+            let format = SsTableFormat {
+                compression_codec: Some(compression),
+                ..SsTableFormat::default()
+            };
             let table_store =
                 TableStore::new(object_store.clone(), format, root_path.clone(), None);
             let mut builder = table_store.table_builder();
@@ -754,20 +791,22 @@ mod tests {
                 .unwrap();
 
             // Decompression is independent of TableFormat. It uses the CompressionFormat from SSTable Info to decompress sst.
-            let format = SsTableFormat::new(4096, 0, Some(dummy_codec));
+            let format = SsTableFormat {
+                compression_codec: Some(dummy_codec),
+                ..SsTableFormat::default()
+            };
             let table_store = TableStore::new(object_store, format, root_path, None);
             let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
             let index = table_store.read_index(&sst_handle).await.unwrap();
             let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
 
-            assert!(filter.has_key(b"key1"));
-            assert!(filter.has_key(b"key2"));
+            assert!(filter.might_contain(filter_hash(b"key1")));
+            assert!(filter.might_contain(filter_hash(b"key2")));
             assert_eq!(encoded_info, sst_handle.info);
-            let sst_info = sst_handle.info.borrow();
             assert_eq!(1, index.borrow().block_meta().len());
             assert_eq!(
                 b"key1",
-                sst_info.first_key().unwrap().bytes(),
+                sst_handle.info.first_key.unwrap().as_ref(),
                 "first key in sst info should be correct"
             );
         }
@@ -799,7 +838,11 @@ mod tests {
         // given:
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 1, None);
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
         let table_store = TableStore::new(object_store, format.clone(), root_path, None);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 2], Some(&[1u8; 2])).unwrap();
@@ -856,7 +899,11 @@ mod tests {
         // given:
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(32, 1, None);
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
         let table_store = TableStore::new(object_store, format.clone(), root_path, None);
         let mut builder = table_store.table_builder();
         builder.add(&[b'a'; 2], Some(&[1u8; 2])).unwrap();
@@ -915,6 +962,46 @@ mod tests {
         )
         .await;
         assert!(blocks.is_empty())
+    }
+
+    #[tokio::test]
+    async fn test_sstable_index_size() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
+
+        let table_store = TableStore::new(object_store, format, root_path, None);
+        let mut builder = table_store.table_builder();
+        builder.add(b"key1", Some(b"value1")).unwrap();
+        builder.add(b"key2", Some(b"value2")).unwrap();
+        let encoded = builder.build().unwrap();
+        let encoded_info = encoded.info.clone();
+
+        // write sst and validate that the handle returned has the correct content.
+        let sst_handle = table_store
+            .write_sst(&SsTableId::Wal(0), encoded)
+            .await
+            .unwrap();
+        assert_eq!(encoded_info, sst_handle.info);
+        let sst_info = sst_handle.info;
+        assert_eq!(
+            b"key1",
+            sst_info.first_key.unwrap().as_ref(),
+            "first key in sst info should be correct"
+        );
+
+        // construct sst info from the raw bytes and validate that it matches the original info.
+        let sst_handle_from_store = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
+        assert_eq!(encoded_info, sst_handle_from_store.info);
+        let index = table_store
+            .read_index(&sst_handle_from_store)
+            .await
+            .unwrap();
+
+        assert_eq!(88, index.size());
     }
 
     struct BytesBlob {

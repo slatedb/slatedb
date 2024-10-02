@@ -1,0 +1,193 @@
+---
+deadlock_detection: false
+options:
+    max_actions: 100
+    crash_on_yield: false
+action_options:
+    SlateDb.Put:
+        max_actions: 2
+    SlateDb.FlushWal:
+        max_concurrent_actions: 1
+    SlateDb.FlushMemtable:
+        max_concurrent_actions: 1
+
+---
+
+# Acts as tombstone for deletes and return of Get when key is not found
+NOT_FOUND = "notfound"
+
+KEYS = ["k0", "k1"]
+VALUES = ["v0", "v1", NOT_FOUND]
+
+ReadLevel = enum('Committed', 'Uncommitted')
+
+
+role SlateDb:
+  action Init:
+    self.wal = []
+    self.immutable_wal = []
+
+    self.memtable = {}
+    self.immutable_memtable = {}
+
+    self.l0 = []
+
+    # For now, modeling only a single writer that maintains its own count
+    self.wal_index = 0
+
+  atomic action Put:
+    require (self.MODE == 'RW')
+    kv = any [ (k,v) for k in KEYS for v in VALUES ]
+    self.put(kv[0], kv[1])
+    _last_puts[kv[0]] = kv[1]
+
+  # atomic action Get:
+  #   k = any KEYS
+  #   read_level = any dir(ReadLevel)
+  #   v = writer.get(k, read_level)
+  #   return v
+
+  fair action FlushWal:
+    require len(self.wal) > 0 or len(self.immutable_wal) > 0
+    self.freeze_wal()
+    self.write_wal()
+    self.update_memtable()
+    self.immutable_wal.clear()
+    
+
+  fair action FlushMemtable:
+    require len(self.memtable) > 0 or len(self.immutable_memtable) > 0
+    self.freeze_memtable()
+    self.write_l0()
+    self.immutable_memtable.clear()
+    
+  atomic func put(k, v):
+    self.wal.append( (k, v) )
+
+  atomic func get(k, read_level):
+    if read_level == ReadLevel.Uncommitted:
+        for kv in reversed(self.immutable_wal + self.wal):
+            if kv[0] == k:
+                return kv[1]
+
+    if self.memtable.get(k):
+        return self.memtable.get(k)
+    if self.immutable_memtable.get(k):
+        return self.immutable_memtable.get(k)
+
+    for l0 in reversed(self.l0):
+        content = store.Read(l0)
+        if content and content.get(k):
+            return content.get(k)
+
+    return NOT_FOUND
+
+  atomic func freeze_wal():
+    if len(self.immutable_wal) > 0 or len(self.wal) == 0:
+        return
+    self.immutable_wal = list(self.wal)
+    self.wal.clear()
+    self.wal_index += 1
+
+  atomic func write_wal():
+    if len(self.immutable_wal) > 0:
+        store.Write("wal/" + format_with_leading_zeros(self.wal_index) + ".sst", list(self.immutable_wal))
+
+
+  atomic func update_memtable():
+    for kv in self.immutable_wal:
+        self.memtable[kv[0]] = kv[1]
+    
+
+  atomic func freeze_memtable():
+    if len(self.immutable_memtable) > 0 or len(self.memtable) == 0:
+        return
+
+    self.immutable_memtable = dict(self.memtable)
+    self.memtable.clear()
+
+  atomic func write_l0():
+    if len(self.immutable_memtable) == 0:
+        return
+    name = "compacted/ulid-" + str(next_ulid) + ".sst"
+    next_ulid += 1
+    store.Write(name, dict(self.immutable_memtable))
+    self.l0.append(name)
+    
+
+  atomic func clear_immutable_memtable():
+    self.immutable_memtable.clear()
+
+
+role ObjectStore:
+  action Init:
+    self.objects = {}
+
+  atomic func Write(name, content):
+    self.objects[name] = content
+
+  atomic func Read(name):
+    return self.objects.get(name)
+
+
+action Init:
+  writer = SlateDb(MODE="RW")
+  store = ObjectStore()  
+  # Slatedb uses ULID, that is a sortable unique id. We can model it with just a counter
+  next_ulid = 1
+
+  # As a convention, variables starting with _ are not part of the system modelled, but
+  # useful for assertions
+  _last_puts = {}
+
+
+always assertion NoEmptyL0s:
+    for l0 in writer.l0:
+        if store.objects.get(l0) != None and len(store.objects.get(l0)) == 0:
+            return False
+    return True
+
+always assertion UncommittedRead:
+    for k in KEYS:
+        v0 = writer.get(k, ReadLevel.Uncommitted)
+        v1 = _last_puts.get(k, NOT_FOUND)
+        if v0 != v1:
+            return False
+    return True
+
+always eventually assertion CommittedRead:
+    for k in KEYS:
+        v0 = writer.get(k, ReadLevel.Uncommitted)
+        v1 = writer.get(k, ReadLevel.Committed)
+        v2 = _last_puts.get(k, NOT_FOUND)
+        if v0 != v1 or v0 != v2:
+            return False
+    return True
+
+always eventually assertion ConsistentRead:
+    reader = SlateDb(mode="RO")
+    reader.l0 = writer.l0
+    for k in KEYS:
+        v0 = writer.get(k, ReadLevel.Committed)
+        v1 = reader.get(k, ReadLevel.Committed)
+        if v0 != v1:
+            return False
+    return True
+        
+always assertion MaxObjects:
+    return len(store.objects) <= 6
+
+always eventually assertion WalFlushed:
+    return len(writer.wal) == 0 and len(writer.immutable_wal) == 0
+
+always eventually assertion MemtableFlushed:
+    return len(writer.memtable) == 0 and len(writer.immutable_memtable) == 0
+
+def format_with_leading_zeros(n, width=4):
+    """
+    Helper function to format integer with leading zeros. 
+    Starlark doesn't support python's format strings yet.
+    """
+    s = str(n)
+    return "0" * (width - len(s)) + s
+

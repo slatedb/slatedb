@@ -41,7 +41,7 @@ impl MemtableFlusher {
             match self.write_manifest().await {
                 Ok(_) => return Ok(()),
                 Err(SlateDBError::ManifestVersionExists) => {
-                    print!("conflicting manifest version. retry write");
+                    error!("conflicting manifest version. retry write");
                 }
                 Err(err) => return Err(err),
             }
@@ -139,7 +139,7 @@ impl DbInner {
             }
 
             if let Err(err) = flusher.write_manifest_safely().await {
-                print!("error writing manifest on shutdown: {}", err);
+                error!("error writing manifest on shutdown: {}", err);
             }
         }))
     }

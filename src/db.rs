@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -8,12 +9,16 @@ use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Handle;
 
+use crate::cached_object_store::CachedObjectStore;
 use crate::compactor::Compactor;
+use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
     DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
-use crate::db_state::{CoreDbState, DbState, SSTableHandle, SortedRun, SsTableId};
+use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
+use crate::filter;
+use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::WritableKVTable;
@@ -25,7 +30,7 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
-use crate::{config::ReadLevel::Uncommitted, inmemory_cache::create_block_cache};
+use std::rc::Rc;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -41,6 +46,7 @@ impl DbInner {
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
         memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
+        db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let state = DbState::new(core_db_state);
         let db_inner = Self {
@@ -48,7 +54,7 @@ impl DbInner {
             options,
             table_store,
             memtable_flush_notifier,
-            db_stats: Arc::new(DbStats::new()),
+            db_stats,
         };
         Ok(db_inner)
     }
@@ -77,8 +83,12 @@ impl DbInner {
             return Ok(val.into_option());
         }
 
+        // Since the key remains unchanged during the point query, we only need to compute
+        // the hash value once and pass it to the filter to avoid unnecessary hash computation
+        let key_hash = filter::filter_hash(key);
+
         for sst in &snapshot.state.core.l0 {
-            if self.sst_may_include_key(sst, key).await? {
+            if self.sst_might_include_key(sst, key, key_hash).await? {
                 let mut iter =
                     SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1, true)
                         .await?; // cache blocks that are being read
@@ -90,7 +100,7 @@ impl DbInner {
             }
         }
         for sr in &snapshot.state.core.compacted {
-            if self.sr_may_include_key(sr, key).await? {
+            if self.sr_might_include_key(sr, key, key_hash).await? {
                 let mut iter =
                     SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1, true) // cache blocks
                         .await?;
@@ -108,9 +118,10 @@ impl DbInner {
         let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
         let max_wal_id = self
             .table_store
-            .get_wal_sst_list(wal_id_last_compacted)
+            .list_wal_ssts((wal_id_last_compacted + 1)..)
             .await?
             .into_iter()
+            .map(|wal_sst| wal_sst.id.unwrap_wal_id())
             .max()
             .unwrap_or(0);
         let mut empty_wal_id = max_wal_id + 1;
@@ -136,24 +147,46 @@ impl DbInner {
         }
     }
 
-    async fn sst_may_include_key(
+    /// Check if the given key might be in the range of the SST. Checks if the key is
+    /// in the range of the sst and if the filter might contain the key.
+    /// ## Arguments
+    /// - `sst`: the sst to check
+    /// - `key`: the key to check
+    /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
+    /// ## Returns
+    /// - `true` if the key is in the range of the sst.
+    async fn sst_might_include_key(
         &self,
-        sst: &SSTableHandle,
+        sst: &SsTableHandle,
         key: &[u8],
+        key_hash: u64,
     ) -> Result<bool, SlateDBError> {
         if !sst.range_covers_key(key) {
             return Ok(false);
         }
         if let Some(filter) = self.table_store.read_filter(sst).await? {
-            return Ok(filter.has_key(key));
+            return Ok(filter.might_contain(key_hash));
         }
         Ok(true)
     }
 
-    async fn sr_may_include_key(&self, sr: &SortedRun, key: &[u8]) -> Result<bool, SlateDBError> {
+    /// Check if the given key might be in the range of the sorted run (SR). Checks if the key
+    /// is in the range of the SSTs in the run and if the SST's filter might contain the key.
+    /// ## Arguments
+    /// - `sr`: the sorted run to check
+    /// - `key`: the key to check
+    /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
+    /// ## Returns
+    /// - `true` if the key is in the range of the sst.
+    async fn sr_might_include_key(
+        &self,
+        sr: &SortedRun,
+        key: &[u8],
+        key_hash: u64,
+    ) -> Result<bool, SlateDBError> {
         if let Some(sst) = sr.find_sst_with_range_covering_key(key) {
             if let Some(filter) = self.table_store.read_filter(sst).await? {
-                return Ok(filter.has_key(key));
+                return Ok(filter.might_contain(key_hash));
             }
             return Ok(true);
         }
@@ -261,26 +294,58 @@ impl DbInner {
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
-        let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
-        let wal_sst_list = self
-            .table_store
-            .get_wal_sst_list(wal_id_last_compacted)
-            .await?;
-        let mut last_sst_id = wal_id_last_compacted;
-        for sst_id in wal_sst_list {
-            last_sst_id = sst_id;
-            let sst = self.table_store.open_sst(&SsTableId::Wal(sst_id)).await?;
-            let sst_id = match &sst.id {
+        async fn load_sst_iters(
+            db_inner: &DbInner,
+            sst_id: u64,
+        ) -> Result<(SstIterator<'_, Rc<SsTableHandle>>, u64), SlateDBError> {
+            let sst = Rc::new(
+                db_inner
+                    .table_store
+                    .open_sst(&SsTableId::Wal(sst_id))
+                    .await?,
+            );
+            let id = match &sst.id {
                 SsTableId::Wal(id) => *id,
                 SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
             };
-            let mut iter = SstIterator::new(&sst, self.table_store.clone(), 1, 1, true).await?;
+            let iter =
+                SstIterator::new_spawn(Rc::clone(&sst), db_inner.table_store.clone(), 1, 256, true)
+                    .await?;
+            Ok((iter, id))
+        }
+
+        let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
+        let mut wal_sst_list = self
+            .table_store
+            .list_wal_ssts((wal_id_last_compacted + 1)..)
+            .await?
+            .into_iter()
+            .map(|wal_sst| wal_sst.id.unwrap_wal_id())
+            .collect::<Vec<_>>();
+        let mut last_sst_id = wal_id_last_compacted;
+        let sst_batch_size = 4;
+
+        let mut remaining_sst_list = Vec::new();
+        if wal_sst_list.len() > sst_batch_size {
+            remaining_sst_list = wal_sst_list.split_off(sst_batch_size);
+        }
+        let mut remaining_sst_iter = remaining_sst_list.iter();
+
+        // Load the first N ssts and instantiate their iterators
+        let mut sst_iterators = VecDeque::new();
+        for sst_id in wal_sst_list {
+            sst_iterators.push_back(load_sst_iters(self, sst_id).await?);
+        }
+
+        while let Some((mut sst_iter, sst_id)) = sst_iterators.pop_front() {
+            last_sst_id = sst_id;
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
             // buffer the WAL entries to bulk replay them into the memtable.
             let mut wal_replay_buf = Vec::new();
-            while let Some(kv) = iter.next_entry().await? {
+            while let Some(kv) = sst_iter.next_entry().await? {
                 wal_replay_buf.push(kv);
             }
+            // Build the memtable
             {
                 let mut guard = self.state.write();
                 for kv in wal_replay_buf.iter() {
@@ -296,7 +361,13 @@ impl DbInner {
                     guard.increment_next_wal_id();
                 }
             }
+
+            // feed the remaining SstIterators into the vecdeque
+            if let Some(sst_id) = remaining_sst_iter.next() {
+                sst_iterators.push_back(load_sst_iters(self, *sst_id).await?);
+            }
         }
+
         // assert that we didn't have any gaps in the wal
         assert_eq!(
             last_sst_id + 1,
@@ -315,6 +386,7 @@ pub struct Db {
     flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     compactor: Mutex<Option<Compactor>>,
+    garbage_collector: Mutex<Option<GarbageCollector>>,
 }
 
 impl Db {
@@ -345,16 +417,35 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
-        let sst_format =
-            SsTableFormat::new(4096, options.min_filter_keys, options.compression_codec);
+        let db_stats = Arc::new(DbStats::new());
+        let sst_format = SsTableFormat {
+            min_filter_keys: options.min_filter_keys,
+            filter_bits_per_key: options.filter_bits_per_key,
+            compression_codec: options.compression_codec,
+            ..SsTableFormat::default()
+        };
+        let maybe_cached_object_store = match &options.object_store_cache_options.root_folder {
+            None => object_store.clone(),
+            Some(cache_root_folder) => {
+                let part_size_bytes = options.object_store_cache_options.part_size_bytes;
+                CachedObjectStore::new(
+                    object_store.clone(),
+                    cache_root_folder.clone(),
+                    part_size_bytes,
+                    db_stats.clone(),
+                )?
+            }
+        };
+
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            object_store.clone(),
-            sst_format,
+            maybe_cached_object_store.clone(),
+            sst_format.clone(),
             path.clone(),
             fp_registry.clone(),
-            create_block_cache(options.block_cache_options),
+            options.block_cache.clone(),
         ));
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+
+        let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
         let mut manifest = Self::init_db(&manifest_store).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
@@ -363,6 +454,7 @@ impl Db {
                 table_store.clone(),
                 manifest.db_state()?.clone(),
                 memtable_flush_tx,
+                db_stats,
             )
             .await?,
         );
@@ -381,10 +473,18 @@ impl Db {
             inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
         let mut compactor = None;
         if let Some(compactor_options) = &inner.options.compactor_options {
+            // not to pollute the cache during compaction
+            let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
+                object_store.clone(),
+                sst_format,
+                path.clone(),
+                fp_registry.clone(),
+                None,
+            ));
             compactor = Some(
                 Compactor::new(
                     manifest_store.clone(),
-                    table_store.clone(),
+                    uncached_table_store.clone(),
                     compactor_options.clone(),
                     Handle::current(),
                     inner.db_stats.clone(),
@@ -392,12 +492,26 @@ impl Db {
                 .await?,
             )
         }
+        let mut garbage_collector = None;
+        if let Some(gc_options) = &inner.options.garbage_collector_options {
+            garbage_collector = Some(
+                GarbageCollector::new(
+                    manifest_store.clone(),
+                    table_store.clone(),
+                    gc_options.clone(),
+                    Handle::current(),
+                    inner.db_stats.clone(),
+                )
+                .await,
+            )
+        };
         Ok(Self {
             inner,
             flush_notifier: tx,
             flush_task: Mutex::new(flush_thread),
             memtable_flush_task: Mutex::new(memtable_flush_task),
             compactor: Mutex::new(compactor),
+            garbage_collector: Mutex::new(garbage_collector),
         })
     }
 
@@ -423,6 +537,13 @@ impl Db {
             maybe_compactor.take()
         } {
             compactor.close().await;
+        }
+
+        if let Some(gc) = {
+            let mut maybe_gc = self.garbage_collector.lock();
+            maybe_gc.take()
+        } {
+            gc.close().await;
         }
 
         // Tell the notifier thread to shut down.
@@ -502,12 +623,15 @@ impl Db {
 mod tests {
     use std::time::Duration;
 
+    use futures::StreamExt;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use tracing::info;
 
     use super::*;
-    use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
+    use crate::config::{
+        CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
+    };
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
     #[cfg(feature = "wal_disable")]
@@ -535,6 +659,123 @@ mod tests {
         kv_store.delete(key).await;
         assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_with_object_store_cache_metrics() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut opts = test_db_options(0, 1024, None);
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_cache_test_")
+            .tempdir()
+            .unwrap();
+
+        opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
+        opts.object_store_cache_options.part_size_bytes = 1024;
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store_with_cache_metrics"),
+            opts,
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        let access_count0 = kv_store.metrics().object_store_cache_part_access.get();
+        let key = b"test_key";
+        let value = b"test_value";
+        kv_store.put(key, value).await;
+        kv_store.flush().await.unwrap();
+
+        let got = kv_store.get(key).await.unwrap();
+        let access_count1 = kv_store.metrics().object_store_cache_part_access.get();
+        assert_eq!(got, Some(Bytes::from_static(value)));
+        assert!(access_count1 > 0);
+        assert!(access_count1 >= access_count0);
+        assert!(kv_store.metrics().object_store_cache_part_hits.get() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_with_object_store_cache_stored_files() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut opts = test_db_options(0, 1024, None);
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_cache_test_")
+            .tempdir()
+            .unwrap();
+        let db_stats = Arc::new(DbStats::new());
+        let part_size = 1024;
+        let cached_object_store = CachedObjectStore::new(
+            object_store.clone(),
+            temp_dir.path().to_path_buf(),
+            part_size,
+            db_stats.clone(),
+        )
+        .unwrap();
+
+        opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store_with_cache_stored_files"),
+            opts,
+            cached_object_store.clone(),
+        )
+        .await
+        .unwrap();
+        let key = b"test_key";
+        let value = b"test_value";
+        kv_store.put(key, value).await;
+        kv_store.flush().await.unwrap();
+
+        assert_eq!(
+            cached_object_store
+                .list(None)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .filter_map(Result::ok)
+                .map(|meta| meta.location.to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest"
+                    .to_string(),
+                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest"
+                    .to_string(),
+                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst"
+                    .to_string(),
+                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst"
+                    .to_string(),
+            ],
+        );
+
+        // check the files are cached as expected
+        let tests = vec![
+            (
+                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest",
+                0,
+            ),
+            (
+                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest",
+                2,
+            ),
+            (
+                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst",
+                2,
+            ),
+            (
+                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst",
+                0,
+            ),
+        ];
+        for (path, expected) in tests {
+            let entry = cached_object_store
+                .cache_storage
+                .entry(&object_store::path::Path::from(path), part_size);
+            assert_eq!(
+                entry.cached_parts().await.unwrap().len(),
+                expected,
+                "{}",
+                path
+            );
+        }
     }
 
     #[tokio::test]
@@ -584,7 +825,7 @@ mod tests {
         options.wal_enabled = false;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let sst_format = SsTableFormat::new(4096, 10, None);
+        let sst_format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
             sst_format,
@@ -658,7 +899,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let sst_format = SsTableFormat::new(4096, 10, None);
+        let sst_format = SsTableFormat {
+            min_filter_keys: 10,
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
             sst_format,
@@ -1249,10 +1493,13 @@ mod tests {
             max_unflushed_memtable: 2,
             l0_max_ssts: 8,
             min_filter_keys,
+            filter_bits_per_key: 10,
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
-            block_cache_options: None,
+            object_store_cache_options: ObjectStoreCacheOptions::default(),
+            block_cache: None,
+            garbage_collector_options: None,
         }
     }
 }

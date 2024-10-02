@@ -4,9 +4,11 @@
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
 
+pub mod admin;
 mod blob;
 mod block;
 mod block_iterator;
+mod cached_object_store;
 #[cfg(feature = "db_bench")]
 pub mod compaction_execute_bench;
 mod compactor;
@@ -14,13 +16,14 @@ mod compactor_executor;
 mod compactor_state;
 pub mod config;
 pub mod db;
+pub mod db_cache;
 mod db_common;
 mod db_state;
 pub mod error;
 mod filter;
 mod flatbuffer_types;
 mod flush;
-pub mod inmemory_cache;
+mod garbage_collector;
 mod iter;
 mod manifest;
 mod manifest_store;

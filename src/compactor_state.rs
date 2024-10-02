@@ -4,7 +4,7 @@ use tracing::info;
 use ulid::Ulid;
 
 use crate::compactor_state::CompactionStatus::Submitted;
-use crate::db_state::{CoreDbState, SSTableHandle, SortedRun};
+use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -239,7 +239,7 @@ impl CompactorState {
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
             let mut db_state = self.db_state.clone();
-            let new_l0: VecDeque<SSTableHandle> = db_state
+            let new_l0: VecDeque<SsTableHandle> = db_state
                 .l0
                 .iter()
                 .filter_map(|l0| {
@@ -647,7 +647,7 @@ mod tests {
         .expect("no manifest found with l0 len")
     }
 
-    fn build_l0_compaction(ssts: &VecDeque<SSTableHandle>, dst: u32) -> Compaction {
+    fn build_l0_compaction(ssts: &VecDeque<SsTableHandle>, dst: u32) -> Compaction {
         let sources = ssts
             .iter()
             .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))

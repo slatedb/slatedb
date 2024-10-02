@@ -2,8 +2,8 @@ name: PR Checks
 
 on:
   push:
-      branches:
-        - main
+    branches:
+      - main
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -12,21 +12,32 @@ env:
   RUSTFLAGS: "-Dwarnings"
 
 jobs:
-  clippy_check:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run Clippy
-        run: cargo clippy --all-targets --all-features
+      - name: cargo install cargo-hack
+        run: cargo +stable install cargo-hack --locked
+      - name: cargo check
+        run: cargo hack check --each-feature --no-dev-deps
 
-  style_check:
+  clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run rustfmt
+      - name: cargo install cargo-hack
+        run: cargo +stable install cargo-hack --locked
+      - name: cargo clippy
+        run: cargo hack clippy --each-feature --no-dev-deps
+
+  style:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo fmt
         run: cargo fmt -- --check
 
-  flatbuffers_check:
+  flatbuffers:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

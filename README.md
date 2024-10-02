@@ -22,11 +22,14 @@ Checkout [slatedb.io](https://slatedb.io) to learn more.
 
 ## Get Started
 
-Add the following to your `Cargo.toml` to use SlateDB:
+Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 slatedb = "*"
+bytes = "*"
+object_store = "*"
+tokio = "*"
 ```
 
 Then you can use SlateDB in your Rust code:
@@ -35,26 +38,14 @@ Then you can use SlateDB in your Rust code:
 use bytes::Bytes;
 use object_store::{ObjectStore, memory::InMemory, path::Path};
 use slatedb::db::Db;
-use slatedb::inmemory_cache::InMemoryCacheOptions;
-use slatedb::config::{CompactorOptions, DbOptions};
-use std::{sync::Arc, time::Duration};
+use slatedb::config::DbOptions;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
     // Setup
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let options = DbOptions {
-        flush_interval: Duration::from_millis(100),
-        manifest_poll_interval: Duration::from_millis(100),
-        #[cfg(feature = "wal_disable")] wal_enabled: true,
-        min_filter_keys: 10,
-        l0_sst_size_bytes: 128,
-        l0_max_ssts: 8,
-        max_unflushed_memtable: 2,
-        compactor_options: Some(CompactorOptions::default()),
-        compression_codec: None,
-        block_cache_options: Some(InMemoryCacheOptions::default()),
-    };
+    let options = DbOptions::default();
     let kv_store = Db::open_with_opts(
         Path::from("/tmp/test_kv_store"),
         options,
@@ -96,8 +87,8 @@ SlateDB is currently in the early stages of development. It is not yet ready for
 - [x] Basic API (get, put, delete)
 - [x] SSTs on object storage
 - [ ] Range queries ([#8](https://github.com/slatedb/slatedb/issues/8))
-- [ ] Block cache ([#15](https://github.com/slatedb/slatedb/issues/15))
-- [ ] Disk cache ([#9](https://github.com/slatedb/slatedb/issues/9))
+- [x] Block cache ([#15](https://github.com/slatedb/slatedb/issues/15))
+- [x] Disk cache ([#9](https://github.com/slatedb/slatedb/issues/9))
 - [x] Compression ([#10](https://github.com/slatedb/slatedb/issues/10))
 - [x] Bloom filters ([#11](https://github.com/slatedb/slatedb/issues/11))
 - [x] Manifest persistence ([#14](https://github.com/slatedb/slatedb/issues/14))

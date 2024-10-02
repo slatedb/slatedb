@@ -72,17 +72,22 @@ impl BloomFilter {
         (self.buffer.len() * 8) as u32
     }
 
-    pub(crate) fn has_key(&self, key: &[u8]) -> bool {
-        for p in probes_for_key(filter_hash(key), self.num_probes, self.filter_bits()) {
+    pub(crate) fn might_contain(&self, hash: u64) -> bool {
+        for p in probes_for_key(hash, self.num_probes, self.filter_bits()) {
             if !check_bit(p as usize, &self.buffer) {
                 return false;
             }
         }
         true
     }
+
+    /// Returns the size of the bloom filter in bytes.
+    pub(crate) fn size(&self) -> usize {
+        self.buffer.len()
+    }
 }
 
-fn filter_hash(key: &[u8]) -> u64 {
+pub fn filter_hash(key: &[u8]) -> u64 {
     // sip hash is the default rust hash function, however its only
     // accessible by creating DefaultHasher. Direct use of SipHasher13 in
     // std is deprecated. We don't want to use DefaultHasher because the
@@ -230,7 +235,8 @@ mod tests {
             let mut bytes = BytesMut::with_capacity(key_sz);
             bytes.reserve(key_sz);
             bytes.put_u32(i);
-            assert!(filter.has_key(bytes.freeze().as_ref()));
+            let hash = filter_hash(bytes.freeze().as_ref());
+            assert!(filter.might_contain(hash));
         }
 
         // check false positives
@@ -239,12 +245,33 @@ mod tests {
             let mut bytes = BytesMut::with_capacity(key_sz);
             bytes.reserve(key_sz);
             bytes.put_u32(i);
-            if filter.has_key(bytes.freeze().as_ref()) {
+            let hash = filter_hash(bytes.freeze().as_ref());
+            if filter.might_contain(hash) {
                 fp += 1;
             }
         }
 
         // observed fp is .0087
         assert!((fp as f32 / keys_to_test as f32) < 0.01);
+    }
+
+    #[test]
+    fn test_bloom_filter_size() {
+        let mut builder = BloomFilterBuilder::new(10);
+        builder.add_key(b"test_key");
+        let filter = builder.build();
+
+        // The exact size may vary, so we'll check if it's greater than zero
+        assert!(
+            filter.size() > 0,
+            "Bloom filter size should be greater than zero"
+        );
+
+        // We can also check if the size matches the buffer length
+        assert_eq!(
+            filter.size(),
+            filter.buffer.len(),
+            "Size should match buffer length"
+        );
     }
 }

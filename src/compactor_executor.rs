@@ -11,7 +11,7 @@ use ulid::Ulid;
 use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor::WorkerToOrchestratorMsg::CompactionFinished;
 use crate::config::CompactorOptions;
-use crate::db_state::{SSTableHandle, SortedRun, SsTableId};
+use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
@@ -19,9 +19,11 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 
+use tracing::error;
+
 pub(crate) struct CompactionJob {
     pub(crate) destination: u32,
-    pub(crate) ssts: Vec<SSTableHandle>,
+    pub(crate) ssts: Vec<SsTableHandle>,
     pub(crate) sorted_runs: Vec<SortedRun>,
 }
 
@@ -175,7 +177,7 @@ impl TokioCompactionExecutorInner {
             for result in results {
                 match result {
                     Err(e) if !e.is_cancelled() => {
-                        eprintln!("Shutdown error in compaction task: {:?}", e);
+                        error!("Shutdown error in compaction task: {:?}", e);
                     }
                     _ => {}
                 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 
-use crate::db_state::SSTableHandle;
+use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::{
@@ -17,8 +17,12 @@ enum FetchTask {
     Finished(VecDeque<Arc<Block>>),
 }
 
-pub(crate) struct SstIterator<'a> {
-    table: &'a SSTableHandle,
+pub(crate) struct SstIterator<'a, H: AsRef<SsTableHandle> = &'a SsTableHandle> {
+    // We use a trait bound `H` here instead of the concrete type `SstTableHandle` to
+    // make it easier for the users of this API to pass table handles wrapped in
+    // smart pointers thereby making it easier to workaround some lifetime constraints.
+    // An example of this can be found in `DbInner::replay_wal`.
+    table: H,
     index: Arc<SsTableIndexOwned>,
     current_iter: Option<BlockIterator<Arc<Block>>>,
     from_key: Option<&'a [u8]>,
@@ -30,7 +34,7 @@ pub(crate) struct SstIterator<'a> {
     cache_blocks: bool,
 }
 
-impl<'a> SstIterator<'a> {
+impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
     fn first_block_with_data_including_or_after_key(index: &SsTableIndex, key: &[u8]) -> usize {
         // search for the block that could contain the key.
         let mut low = 0;
@@ -60,7 +64,7 @@ impl<'a> SstIterator<'a> {
     }
 
     pub(crate) async fn new_from_key(
-        table: &'a SSTableHandle,
+        table: H,
         table_store: Arc<TableStore>,
         from_key: &'a [u8],
         max_fetch_tasks: usize,
@@ -80,7 +84,7 @@ impl<'a> SstIterator<'a> {
     }
 
     pub(crate) async fn new_spawn(
-        table: &'a SSTableHandle,
+        table: H,
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
@@ -99,7 +103,7 @@ impl<'a> SstIterator<'a> {
     }
 
     pub(crate) async fn new(
-        table: &'a SSTableHandle,
+        table: H,
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
@@ -118,7 +122,7 @@ impl<'a> SstIterator<'a> {
     }
 
     pub(crate) async fn new_opts(
-        table: &'a SSTableHandle,
+        table: H,
         from_key: Option<&'a [u8]>,
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
@@ -128,7 +132,7 @@ impl<'a> SstIterator<'a> {
     ) -> Result<Self, SlateDBError> {
         assert!(max_fetch_tasks > 0);
         assert!(blocks_to_fetch > 0);
-        let index = Arc::new(table_store.read_index(table).await?);
+        let index = table_store.read_index(table.as_ref()).await?;
         let next_block_idx_to_fetch = from_key
             .map(|k| Self::first_block_with_data_including_or_after_key(&index.borrow(), k))
             .unwrap_or(0);
@@ -159,7 +163,7 @@ impl<'a> SstIterator<'a> {
                 self.blocks_to_fetch,
                 num_blocks - self.next_block_idx_to_fetch,
             );
-            let table = self.table.clone();
+            let table = self.table.as_ref().clone();
             let table_store = self.table_store.clone();
             let blocks_start = self.next_block_idx_to_fetch;
             let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
@@ -213,7 +217,7 @@ impl<'a> SstIterator<'a> {
     }
 }
 
-impl<'a> KeyValueIterator for SstIterator<'a> {
+impl<'a, H: AsRef<SsTableHandle>> KeyValueIterator for SstIterator<'a, H> {
     async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
         loop {
             let current_iter = if let Some(current_iter) = self.current_iter.as_mut() {
@@ -254,7 +258,10 @@ mod tests {
     async fn test_one_block_sst_iter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 3, None);
+        let format = SsTableFormat {
+            min_filter_keys: 3,
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
             object_store,
             format,
@@ -298,7 +305,10 @@ mod tests {
     async fn test_many_block_sst_iter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(4096, 3, None);
+        let format = SsTableFormat {
+            min_filter_keys: 3,
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
             object_store,
             format,
@@ -323,7 +333,7 @@ mod tests {
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle).await.unwrap();
-        assert_eq!(index.borrow().block_meta().len(), 6);
+        assert_eq!(index.borrow().block_meta().len(), 5);
 
         let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 3, 3, true)
             .await
@@ -342,7 +352,11 @@ mod tests {
     async fn test_iter_from_key() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(128, 1, None);
+        let format = SsTableFormat {
+            block_size: 128,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
             object_store,
             format,
@@ -389,7 +403,11 @@ mod tests {
     async fn test_iter_from_key_smaller_than_first() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(128, 1, None);
+        let format = SsTableFormat {
+            block_size: 128,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
             object_store,
             format,
@@ -424,7 +442,11 @@ mod tests {
     async fn test_iter_from_key_larger_than_last() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::new(128, 1, None);
+        let format = SsTableFormat {
+            block_size: 128,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
             object_store,
             format,
@@ -450,7 +472,7 @@ mod tests {
         ts: Arc<TableStore>,
         mut key_gen: OrderedBytesGenerator,
         mut val_gen: OrderedBytesGenerator,
-    ) -> (SSTableHandle, usize) {
+    ) -> (SsTableHandle, usize) {
         let mut writer = ts.table_writer(SsTableId::Wal(0));
         let mut nkeys = 0usize;
         while writer.blocks_written() < n {

@@ -13,7 +13,7 @@ use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::CompactorOptions;
-use crate::db_state::{SSTableHandle, SortedRun};
+use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::metrics::DbStats;
@@ -205,7 +205,7 @@ impl CompactorOrchestrator {
         let compactions = self.scheduler.maybe_schedule_compaction(&self.state);
         for compaction in compactions.iter() {
             if self.state.num_compactions() >= self.options.max_concurrent_compactions {
-                println!(
+                info!(
                     "already running {} compactions, which is at the max {}. Won't run compaction {:?}",
                     self.state.num_compactions(),
                     self.options.max_concurrent_compactions,
@@ -222,7 +222,7 @@ impl CompactorOrchestrator {
         self.log_compaction_state();
         let db_state = self.state.db_state();
         let compacted_sst_iter = db_state.compacted.iter().flat_map(|sr| sr.ssts.iter());
-        let ssts_by_id: HashMap<Ulid, &SSTableHandle> = db_state
+        let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
             .l0
             .iter()
             .chain(compacted_sst_iter)
@@ -230,7 +230,7 @@ impl CompactorOrchestrator {
             .collect();
         let srs_by_id: HashMap<u32, &SortedRun> =
             db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
-        let ssts: Vec<SSTableHandle> = compaction
+        let ssts: Vec<SsTableHandle> = compaction
             .sources
             .iter()
             .filter_map(|s| s.maybe_unwrap_sst())
@@ -304,7 +304,7 @@ mod tests {
 
     use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestratorMsg};
     use crate::compactor_state::{Compaction, SourceId};
-    use crate::config::{DbOptions, SizeTieredCompactionSchedulerOptions};
+    use crate::config::{DbOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions};
     use crate::db::Db;
     use crate::iter::KeyValueIterator;
     use crate::manifest_store::{ManifestStore, StoredManifest};
@@ -468,7 +468,12 @@ mod tests {
         let db = Db::open_with_opts(Path::from(PATH), options.clone(), os.clone())
             .await
             .unwrap();
-        let sst_format = SsTableFormat::new(32, 10, options.compression_codec);
+        let sst_format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 10,
+            compression_codec: options.compression_codec,
+            ..SsTableFormat::default()
+        };
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let table_store = Arc::new(TableStore::new(
             os.clone(),
@@ -486,12 +491,15 @@ mod tests {
             wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),
             min_filter_keys: 0,
+            filter_bits_per_key: 10,
             l0_sst_size_bytes: 128,
             max_unflushed_memtable: 2,
             l0_max_ssts: 8,
             compactor_options,
             compression_codec: None,
-            block_cache_options: None,
+            object_store_cache_options: ObjectStoreCacheOptions::default(),
+            block_cache: None,
+            garbage_collector_options: None,
         }
     }
 
