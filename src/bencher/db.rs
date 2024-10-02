@@ -249,8 +249,7 @@ impl StatsRecorderInner {
         } else {
             return None;
         };
-        for window in windows_iter.filter(|w| w.range.start >= range.end - lookback)
-        {
+        for window in windows_iter.filter(|w| w.range.start >= range.end - lookback) {
             puts += window.puts;
             gets += window.gets;
             range.start = window.range.start;
@@ -321,12 +320,14 @@ async fn dump_stats(stats: Arc<StatsRecorder>) {
             if should_print {
                 let put_rate = puts_since as f32 / interval.as_secs() as f32;
                 let get_rate = gets_since as f32 / interval.as_secs() as f32;
-                info!("Stats Dump:");
-                info!("---------------------------------------");
-                info!("puts: {}", puts);
-                info!("gets: {}", gets);
-                info!("put rate: {:.3}/second over {:?}", put_rate, interval);
-                info!("get rate: {:.3}/second over {:?}", get_rate, interval);
+                info!(
+                    "stats dump [put/s: {:.3}, get/s: {:.3}, window: {:?}, cumulative puts: {}, cumulative gets: {}]",
+                    put_rate,
+                    get_rate,
+                    range.end - range.start,
+                    puts,
+                    gets,
+                );
                 last_stats_dump = Some(range.end);
             }
         }
