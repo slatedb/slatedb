@@ -370,6 +370,7 @@ The following environment variables must be configured externally:
         let object_cache_options = ObjectStoreCacheOptions {
             part_size_bytes: values[0].parse().unwrap(),
             root_folder: Some(PathBuf::from(location)),
+            max_cache_size_bytes: None,
         };
         options.object_store_cache_options = object_cache_options;
     } else {
