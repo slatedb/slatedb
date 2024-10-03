@@ -22,19 +22,25 @@ dotenvy = { version = "0.15.7" }
 fail-parallel = "0.5.1"
 flatbuffers = "24.3.25"
 futures = "0.3.30"
-leaky-bucket = {  version = "1.1", optional = true }
+leaky-bucket = { version = "1.1", optional = true }
 object_store = "0.11.0"
 parking_lot = "0.12.3"
 siphasher = "1"
 thiserror = "1.0.63"
-tokio = { version = "1.40.0", features = ["fs", "macros", "sync", "rt", "rt-multi-thread"] }
+tokio = { version = "1.40.0", features = [
+    "fs",
+    "macros",
+    "sync",
+    "rt",
+    "rt-multi-thread",
+] }
 ulid = { version = "1.1.3", features = ["serde"] }
 rand = "0.8.5"
 rand_xorshift = "0.3.0"
-log = {  version = "0.4.22", features = ["std"] }
+log = { version = "0.4.22", features = ["std"] }
 once_cell = "1.19.0"
-tracing = {version = "0.1.40", features = ["log"]}
-tracing-subscriber = {version = "0.3"}
+tracing = { version = "0.1.40", features = ["log"] }
+tracing-subscriber = { version = "0.3" }
 snap = { version = "1.1.1", optional = true }
 flate2 = { version = "1.0.33", optional = true }
 lz4_flex = { version = "0.11.3", optional = true }
@@ -46,6 +52,7 @@ chrono = { version = "0.4.38", features = ["serde"] }
 foyer = { version = "0.11.2", optional = true }
 
 [dev-dependencies]
+criterion = { version = "0.5.1", features = ["async_tokio"] }
 tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
 fail-parallel = { version = "0.5.1", features = ["failpoints"] }
 tempfile = "3.3"
@@ -64,6 +71,10 @@ zstd = ["dep:zstd"]
 wal_disable = []
 moka = ["dep:moka"]
 foyer = ["dep:foyer"]
+
+[profile.bench]
+debug = true
+
 [[bin]]
 name = "compaction-execute-bench"
 path = "src/compaction_execute_bench/compaction_execute_bench.rs"
@@ -84,3 +95,6 @@ name = "slatedb"
 path = "src/cli/main.rs"
 required-features = ["cli"]
 
+[[bench]]
+name = "bloom_bench"
+harness = false
