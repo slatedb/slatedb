@@ -1438,14 +1438,18 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        let mut evictor = FsCacheEvictorInner::new(temp_dir.path().to_path_buf(), 1024 * 2);
-        evictor.batch_factor = 2;
+        let evictor = Arc::new(FsCacheEvictorInner::new(
+            temp_dir.path().to_path_buf(),
+            1024 * 2,
+        ));
 
         let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
         gen_rand_file(temp_dir.path(), "file1", 1025);
 
         filetime::set_file_atime(&path0, FileTime::from_system_time(SystemTime::UNIX_EPOCH))
             .unwrap();
+
+        evictor.clone().scan_entries().await;
 
         let (target_path, size) = evictor.pick_evict_target().await.unwrap();
         assert_eq!(target_path, path0);
