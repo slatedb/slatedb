@@ -228,8 +228,8 @@ impl Task {
 #[derive(Debug)]
 struct Window {
     range: Range<Instant>,
-    puts: f32,
-    gets: f32,
+    puts: u64,
+    gets: u64,
 }
 
 struct StatsRecorderInner {
@@ -246,16 +246,16 @@ impl StatsRecorderInner {
         let Some(mut front) = windows.front() else {
             windows.push_front(Window {
                 range: now..now + WINDOW_SIZE,
-                puts: 0f32,
-                gets: 0f32,
+                puts: 0,
+                gets: 0,
             });
             return;
         };
         while now >= front.range.end {
             windows.push_front(Window {
                 range: front.range.end..front.range.end + WINDOW_SIZE,
-                puts: 0f32,
-                gets: 0f32,
+                puts: 0,
+                gets: 0,
             });
             while windows.len() > 180 {
                 windows.pop_back();
@@ -267,7 +267,7 @@ impl StatsRecorderInner {
     fn record_puts(&mut self, now: Instant, puts: u64) {
         Self::maybe_roll_window(now, &mut self.windows);
         if let Some(front) = self.windows.front_mut() {
-            front.puts += puts as f32;
+            front.puts += puts;
         }
         self.puts += puts;
     }
@@ -275,7 +275,7 @@ impl StatsRecorderInner {
     fn record_gets(&mut self, now: Instant, gets: u64) {
         Self::maybe_roll_window(now, &mut self.windows);
         if let Some(front) = self.windows.front_mut() {
-            front.gets += gets as f32;
+            front.gets += gets;
         }
         self.gets += gets;
     }
@@ -294,9 +294,9 @@ impl StatsRecorderInner {
     fn sum_windows(
         windows: &VecDeque<Window>,
         lookback: Duration,
-    ) -> Option<(Range<Instant>, f32, f32)> {
-        let mut puts = 0f32;
-        let mut gets = 0f32;
+    ) -> Option<(Range<Instant>, u64, u64)> {
+        let mut puts = 0;
+        let mut gets = 0;
         let mut windows_iter = windows.iter();
         // Don't count the active window, but use its start point as the end of the range.
         let active_window = windows_iter.next();

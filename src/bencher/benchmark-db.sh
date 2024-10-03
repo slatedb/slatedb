@@ -2,7 +2,7 @@
 
 set -eu # stop on errors and undefined variables
 
-WARMUP=3 # ignore the first N samples, equal to 30 seconds with default settings
+WARMUP=0 # ignore the first N samples, equal to 30 seconds with default settings
 OUT="target/bencher/results"
 
 mkdir -p $OUT/plots
@@ -11,7 +11,7 @@ mkdir -p $OUT/logs
 gnuplot -V # just to make sure gnuplot is present
 
 BENCH="cargo run -r --bin bencher --features=bencher -- --path /slatedb-bencher db \
-  --duration 600 \
+  --duration 60 \
   --val-len 8192 \
   --disable-wal \
   --block-cache-size 134217728 \
