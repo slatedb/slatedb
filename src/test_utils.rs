@@ -64,7 +64,7 @@ impl OrderedBytesGenerator {
         Self::new(suffix, bytes, u8::MIN, u8::MAX)
     }
 
-    // this complains because we include these in the db_bench feature but they are only
+    // this complains because we include these in the bencher feature but they are only
     // used for cfg(test)
     #[allow(dead_code)]
     pub(crate) fn new_with_byte_range(bytes: &[u8], min: u8, max: u8) -> Self {
