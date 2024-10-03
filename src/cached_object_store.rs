@@ -892,6 +892,9 @@ impl FsCacheEvictorInner {
         }
     }
 
+    // scan the cache folder, and load the cache entries into the in memory trie cache_entries.
+    // this function is only called on start up, and it's expected to runned interleavely with
+    // maybe_evict is being called.
     pub async fn scan_entries(self: Arc<Self>) {
         // walk the cache folder, record the files and their last access time into the cache_entries
         let iter = WalkDir::new(&self.root_folder).into_iter();
@@ -930,22 +933,26 @@ impl FsCacheEvictorInner {
     }
 
     pub async fn maybe_evict(&self, path: std::path::PathBuf, bytes: usize) -> usize {
+        // record the new cache entry into the cache_entries, and increase the cache_size_bytes
         self.cache_size_bytes
             .fetch_add(bytes as u64, Ordering::SeqCst);
         self.cache_entries
             .lock()
             .await
             .insert(path.clone(), (SystemTime::now(), bytes));
+
+        // if the cache size is still below the limit, do nothing
         if self.cache_size_bytes.load(Ordering::Relaxed) <= self.max_cache_size_bytes as u64 {
             return 0;
         }
+        // TODO: check the disk space ratio here, if the disk space is low, also triggers evict.
 
         // if the cache size exceeds the limit, evict the cache files in batch with the batch_factor,
         // this may help to avoid the cases like triggering the evictor too frequently when the cache
         // size is just slightly above the limit.
         let mut total_bytes: usize = 0;
         for _ in 0..self.batch_factor {
-            let evicted_bytes = self.evict_once().await;
+            let evicted_bytes = self.maybe_evict_once().await;
             if evicted_bytes == 0 {
                 return total_bytes;
             }
@@ -957,7 +964,7 @@ impl FsCacheEvictorInner {
 
     // find a file, and evict it from disk. return the bytes of the evicted file. if no file is evicted or
     // any error occurs, return 0.
-    async fn evict_once(&self) -> usize {
+    async fn maybe_evict_once(&self) -> usize {
         let (target, target_bytes) = match self.pick_evict_target().await {
             Some(target) => target,
             None => return 0,
