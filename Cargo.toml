@@ -51,7 +51,7 @@ fail-parallel = { version = "0.5.1", features = ["failpoints"] }
 tempfile = "3.3"
 
 [features]
-default = ["aws", "moka", "bencher"] # TODO remove bencher
+default = ["aws", "moka"]
 aws = ["object_store/aws"]
 cli = ["clap", "clap/derive"]
 bencher = ["aws", "wal_disable", "clap", "clap/derive", "moka"]
@@ -64,7 +64,6 @@ wal_disable = []
 moka = ["dep:moka"]
 foyer = ["dep:foyer"]
 
-# TODO Merge this into `bencher`, too.
 [[bin]]
 name = "compaction-execute-bench"
 path = "src/compaction_execute_bench/compaction_execute_bench.rs"
