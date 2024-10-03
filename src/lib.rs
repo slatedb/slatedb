@@ -20,7 +20,7 @@ pub mod db_cache;
 mod db_common;
 mod db_state;
 pub mod error;
-mod filter;
+pub mod filter;
 mod flatbuffer_types;
 mod flush;
 mod garbage_collector;
