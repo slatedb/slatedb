@@ -45,7 +45,7 @@ moka = { version = "0.12.8", features = ["future"], optional = true }
 chrono = { version = "0.4.38", features = ["serde"] }
 foyer = { version = "0.11.2", optional = true }
 walkdir = "2.3.3"
-indextreemap = "0.1.25"
+radix_trie = "0.2.1"
 
 [dev-dependencies]
 tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
