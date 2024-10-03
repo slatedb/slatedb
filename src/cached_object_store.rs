@@ -1,6 +1,4 @@
-use std::collections::VecDeque;
 use std::io::SeekFrom;
-use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
@@ -897,7 +895,7 @@ impl FsCacheEvictorInner {
             batch_factor: 10,
             max_cache_size_bytes,
             cache_entries: Arc::new(Mutex::new(Trie::new())),
-            cache_size_bytes: Arc::new(AtomicU64::new(0 as u64)),
+            cache_size_bytes: Arc::new(AtomicU64::new(0_u64)),
         }
     }
 
@@ -979,12 +977,9 @@ impl FsCacheEvictorInner {
             None => return 0,
         };
 
-        match tokio::fs::remove_file(&target).await {
-            Err(err) => {
-                warn!("evictor: failed to remove the cache file: {}", err);
-                return 0;
-            }
-            _ => (),
+        if let Err(err) = tokio::fs::remove_file(&target).await {
+            warn!("evictor: failed to remove the cache file: {}", err);
+            return 0;
         }
 
         debug!(
