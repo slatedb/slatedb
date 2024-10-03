@@ -7,6 +7,7 @@ use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
+use indextreemap::IndexTreeMap;
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 use object_store::{Attribute, Attributes, GetRange, GetResultPayload, PutResult};
 use object_store::{ListResult, MultipartUpload, PutMultipartOpts, PutOptions, PutPayload};
@@ -876,7 +877,7 @@ struct FsCacheEvictorInner {
     batch_factor: usize,
     max_cache_size_bytes: usize,
     // TODO: can use a trie to save memory on common prefixes
-    cache_entries: Arc<Mutex<HashMap<std::path::PathBuf, SystemTime>>>,
+    cache_entries: Arc<Mutex<IndexTreeMap<std::path::PathBuf, u64>>>,
     cache_size_bytes: Arc<AtomicU64>,
 }
 
@@ -886,7 +887,7 @@ impl FsCacheEvictorInner {
             root_folder,
             batch_factor: 10,
             max_cache_size_bytes,
-            cache_entries: Arc::new(Mutex::new(HashMap::new())),
+            cache_entries: Arc::new(Mutex::new(IndexTreeMap::new())),
             cache_size_bytes: Arc::new(AtomicU64::new(0 as u64)),
         }
     }
@@ -916,11 +917,19 @@ impl FsCacheEvictorInner {
                     continue;
                 }
             };
-            let atime = metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
+            let accessed_timestamp = metadata
+                .accessed()
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             let path = entry.path().to_path_buf();
             let bytes = metadata.len();
 
-            self.cache_entries.lock().await.insert(path, atime);
+            self.cache_entries
+                .lock()
+                .await
+                .insert(path, accessed_timestamp);
             self.cache_size_bytes.fetch_add(bytes, Ordering::SeqCst);
         }
     }
@@ -928,10 +937,13 @@ impl FsCacheEvictorInner {
     pub async fn maybe_evict(&self, path: std::path::PathBuf, bytes: usize) -> usize {
         self.cache_size_bytes
             .fetch_add(bytes as u64, Ordering::SeqCst);
-        self.cache_entries
-            .lock()
-            .await
-            .insert(path.clone(), SystemTime::now());
+        self.cache_entries.lock().await.insert(
+            path.clone(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        );
         if self.cache_size_bytes.load(Ordering::Relaxed) <= self.max_cache_size_bytes as u64 {
             return 0;
         }
