@@ -802,6 +802,9 @@ impl LocalCacheEntry for FsCacheEntry {
     }
 }
 
+/// FsCacheEvictor evicts the cache entries when the cache size exceeds the limit. it is expected to
+/// run in the background to avoid blocking the caller, and it'll be triggered whenever a new cache entry
+/// is added.
 #[derive(Debug)]
 struct FsCacheEvictor {
     root_folder: std::path::PathBuf,
@@ -871,12 +874,18 @@ impl FsCacheEvictor {
     }
 }
 
+/// FsCacheEvictorInner manages the cache entries in an in-memory trie, and evict the cache entries
+/// when the cache size exceeds the limit. it uses a pick-of-2 strategy to approximate LRU, and evict
+/// the older file when the cache size exceeds the limit.
+///
+/// On start up, FsCacheEvictorInner will scan the cache folder to load the cache files into the in-memory
+/// trie cache_entries. This loading process is interleaved with the maybe_evict is being called, so the
+/// cache entries should be wrapped with Arc<Mutex<_>>.
 #[derive(Debug, Clone)]
 struct FsCacheEvictorInner {
     root_folder: std::path::PathBuf,
     batch_factor: usize,
     max_cache_size_bytes: usize,
-    // use IndexTreeMap to allow the O(1) time complexity on random pick an element from it.
     cache_entries: Arc<Mutex<Trie<std::path::PathBuf, (SystemTime, usize)>>>,
     cache_size_bytes: Arc<AtomicU64>,
 }
