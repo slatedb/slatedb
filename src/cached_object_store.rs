@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::io::SeekFrom;
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
@@ -607,7 +608,9 @@ impl FsCacheEntry {
         }
 
         // try triggering evict before writing
-        self.evictor.maybe_evict(buf.len() as u64).await;
+        self.evictor
+            .maybe_evict(path.to_path_buf(), buf.len())
+            .await;
 
         let mut file = OpenOptions::new()
             .write(true)
@@ -802,8 +805,8 @@ impl LocalCacheEntry for FsCacheEntry {
 struct FsCacheEvictor {
     root_folder: std::path::PathBuf,
     cache_size_bytes: Option<usize>,
-    tx: tokio::sync::mpsc::Sender<u64>,
-    rx: Mutex<Option<tokio::sync::mpsc::Receiver<u64>>>,
+    tx: tokio::sync::mpsc::Sender<(std::path::PathBuf, usize)>,
+    rx: Mutex<Option<tokio::sync::mpsc::Receiver<(std::path::PathBuf, usize)>>>,
     task_handle: OnceCell<tokio::task::JoinHandle<()>>,
 }
 
@@ -843,80 +846,105 @@ impl FsCacheEvictor {
     async fn background(
         root_folder: std::path::PathBuf,
         cache_size_bytes: u64,
-        mut rx: tokio::sync::mpsc::Receiver<u64>,
+        mut rx: tokio::sync::mpsc::Receiver<(std::path::PathBuf, usize)>,
     ) {
-        let start_time = std::time::Instant::now();
-        let scanned_bytes = match FsCacheEvictorInner::scan_cache_folder_bytes(&root_folder).await {
-            Ok(scanned_bytes) => scanned_bytes,
-            Err(err) => {
-                warn!(
-                    "evictor: unexpected error on scanning the cache folder after {}s, stop the evictor: {}",
-                    start_time.elapsed().as_secs(),
-                    err
-                );
-                return;
-            }
-        };
         let mut inner = FsCacheEvictorInner::new(root_folder, cache_size_bytes);
-        while let Some(bytes) = rx.recv().await {
-            inner.maybe_evict(bytes).await;
+        while let Some((path, bytes)) = rx.recv().await {
+            inner.maybe_evict(path, bytes).await;
         }
     }
 
-    pub async fn maybe_evict(&self, bytes: u64) {
+    pub async fn maybe_evict(&self, path: std::path::PathBuf, bytes: usize) {
         if self.cache_size_bytes.is_none() || !self.started().await {
             return;
         }
 
-        self.tx.send(bytes).await.ok();
+        self.tx.send((path, bytes)).await.ok();
     }
 }
 
 struct FsCacheEvictorInner {
     root_folder: std::path::PathBuf,
-    tracked_bytes: AtomicU64,
-    cache_size_bytes: u64,
     batch_factor: usize,
+    max_cache_size_bytes: u64,
     // TODO: can use a trie to save memory on common prefixes
-    cache_entries: Mutex<HashMap<std::path::PathBuf, SystemTime>>,
+    cache_entries: Arc<Mutex<HashMap<std::path::PathBuf, SystemTime>>>,
+    cache_size_bytes: Arc<AtomicU64>,
 }
 
 impl FsCacheEvictorInner {
-    pub fn new(root_folder: std::path::PathBuf, cache_size_bytes: u64) -> Self {
+    pub fn new(root_folder: std::path::PathBuf, max_cache_size_bytes: u64) -> Self {
         Self {
             root_folder,
-            tracked_bytes: AtomicU64::new(0 as u64),
-            cache_size_bytes,
             batch_factor: 10,
-            cache_entries: Mutex::new(HashMap::new()),
+            max_cache_size_bytes: max_cache_size_bytes,
+            cache_entries: Arc::new(Mutex::new(HashMap::new())),
+            cache_size_bytes: Arc::new(AtomicU64::new(0 as u64)),
         }
     }
 
-    pub async fn maybe_evict(&mut self, bytes: u64) -> u64 {
-        self.tracked_bytes.fetch_add(bytes, Ordering::SeqCst);
-        if self.tracked_bytes.load(Ordering::Relaxed) <= self.cache_size_bytes {
+    pub async fn scan_entries(&self) {
+        // walk the cache folder, record the files and their last access time into the cache_entries
+        let iter = WalkDir::new(&self.root_folder).into_iter();
+        for entry in iter {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    warn!("evictor: failed to walk the cache folder: {}", err);
+                    continue;
+                }
+            };
+            if entry.file_type().is_dir() {
+                continue;
+            }
+
+            let metadata = match tokio::fs::metadata(entry.path()).await {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    warn!(
+                        "evictor: failed to get the metadata of the cache file: {}",
+                        err
+                    );
+                    continue;
+                }
+            };
+            let atime = metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
+            let path = entry.path().to_path_buf();
+            let bytes = metadata.len();
+
+            self.cache_entries.lock().await.insert(path, atime);
+            self.cache_size_bytes.fetch_add(bytes, Ordering::SeqCst);
+        }
+    }
+
+    pub async fn maybe_evict(&mut self, path: std::path::PathBuf, bytes: usize) -> usize {
+        self.cache_size_bytes
+            .fetch_add(bytes as u64, Ordering::SeqCst);
+        self.cache_entries
+            .lock()
+            .await
+            .insert(path.clone(), SystemTime::now());
+        if self.cache_size_bytes.load(Ordering::Relaxed) <= self.max_cache_size_bytes {
             return 0;
         }
 
         // if the cache size exceeds the limit, evict the cache files in batch with the batch_factor,
         // this may help to avoid the cases like triggering the evictor too frequently when the cache
         // size is just slightly above the limit.
-        let mut total_bytes: u64 = 0;
+        let mut total_bytes: usize = 0;
         for _ in 0..self.batch_factor {
             let evicted_bytes = self.evict_once().await;
             if evicted_bytes == 0 {
                 return total_bytes;
             }
-            self.tracked_bytes
-                .fetch_sub(evicted_bytes, Ordering::SeqCst);
-            total_bytes += evicted_bytes;
+            total_bytes += evicted_bytes as usize;
         }
 
         total_bytes
     }
 
     // evict once, return the bytes evicted
-    async fn evict_once(&mut self) -> u64 {
+    async fn evict_once(&mut self) -> usize {
         let (target, target_bytes) = match self.pick_evict_target().await {
             Some(target) => target,
             None => return 0,
@@ -932,6 +960,9 @@ impl FsCacheEvictorInner {
                     "evictor: evicted cache file: {:?}, bytes: {}",
                     target, target_bytes
                 );
+                self.cache_entries.lock().await.remove(&target);
+                self.cache_size_bytes
+                    .fetch_sub(target_bytes as u64, Ordering::SeqCst);
                 target_bytes
             }
         }
@@ -952,7 +983,7 @@ impl FsCacheEvictorInner {
 
     // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, randomized pick
     // two of files, compare their last access time, and evict the older one.
-    async fn pick_evict_target(&mut self) -> Option<(std::path::PathBuf, u64)> {
+    async fn pick_evict_target(&mut self) -> Option<(std::path::PathBuf, usize)> {
         todo!()
     }
 }
@@ -1328,24 +1359,19 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        let mut evictor = FsCacheEvictorInner {
-            root_folder: temp_dir.path().to_path_buf(),
-            tracked_bytes: Default::default(),
-            cache_size_bytes: 1024 * 2,
-            batch_factor: 2,
-            evict_buffer: Default::default(),
-        };
+        let mut evictor = FsCacheEvictorInner::new(temp_dir.path().to_path_buf(), 1024 * 2);
+        evictor.batch_factor = 2;
 
-        gen_rand_file(temp_dir.path(), "file0", 1024);
-        let evicted = evictor.maybe_evict(1024).await;
+        let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
+        let evicted = evictor.maybe_evict(path0, 1024).await;
         assert_eq!(evicted, 0);
 
-        gen_rand_file(temp_dir.path(), "file1", 1024);
-        let evicted = evictor.maybe_evict(1024).await;
+        let path1 = gen_rand_file(temp_dir.path(), "file1", 1024);
+        let evicted = evictor.maybe_evict(path1, 1024).await;
         assert_eq!(evicted, 0);
 
-        gen_rand_file(temp_dir.path(), "file2", 1024);
-        let evicted = evictor.maybe_evict(1024).await;
+        let path2 = gen_rand_file(temp_dir.path(), "file2", 1024);
+        let evicted = evictor.maybe_evict(path2, 1024).await;
         assert_eq!(evicted, 2048);
 
         let file_paths = walkdir::WalkDir::new(temp_dir.path())
@@ -1362,13 +1388,8 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        let mut evictor = FsCacheEvictorInner {
-            root_folder: temp_dir.path().to_path_buf(),
-            tracked_bytes: Default::default(),
-            cache_size_bytes: 1024 * 2,
-            batch_factor: 2,
-            evict_buffer: Default::default(),
-        };
+        let mut evictor = FsCacheEvictorInner::new(temp_dir.path().to_path_buf(), 1024 * 2);
+        evictor.batch_factor = 2;
 
         let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
         gen_rand_file(temp_dir.path(), "file1", 1025);
