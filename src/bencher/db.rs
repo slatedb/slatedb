@@ -101,6 +101,8 @@ pub struct DbBench {
 }
 
 impl DbBench {
+    // Ignore too many args
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         key_gen_supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>>,
         val_len: usize,
@@ -308,7 +310,7 @@ impl StatsRecorderInner {
             gets += window.gets;
             range.start = window.range.start;
         }
-        return Some((range, puts, gets));
+        Some((range, puts, gets))
     }
 
     fn operations_since(&self, lookback: Duration) -> Option<(Range<Instant>, u64, u64)> {
