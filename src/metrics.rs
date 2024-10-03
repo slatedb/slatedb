@@ -59,6 +59,10 @@ pub struct DbStats {
     pub gc_count: Counter,
     pub object_store_cache_part_hits: Counter,
     pub object_store_cache_part_access: Counter,
+    pub object_store_cache_keys: Gauge<u64>,
+    pub object_store_cache_bytes: Gauge<u64>,
+    pub object_store_cache_evicted_keys: Counter,
+    pub object_store_cache_evicted_bytes: Counter,
 }
 
 impl DbStats {
@@ -72,6 +76,10 @@ impl DbStats {
             gc_count: Counter::default(),
             object_store_cache_part_hits: Counter::default(),
             object_store_cache_part_access: Counter::default(),
+            object_store_cache_bytes: Gauge::default(),
+            object_store_cache_keys: Gauge::default(),
+            object_store_cache_evicted_bytes: Counter::default(),
+            object_store_cache_evicted_keys: Counter::default(),
         }
     }
 }
