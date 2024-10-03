@@ -155,13 +155,6 @@ pub(crate) struct BenchmarkDbArgs {
         default_value_t = 20
     )]
     pub(crate) put_percentage: u32,
-
-    #[arg(
-        long,
-        help = "Whether to print gnuplot-compatible CSVs to stdout (and disable logging).",
-        default_value_t = false
-    )]
-    pub(crate) plot: bool,
 }
 
 impl BenchmarkDbArgs {

@@ -48,7 +48,6 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
         args.num_rows,
         args.duration.map(|d| Duration::from_secs(d as u64)),
         args.put_percentage,
-        args.plot,
         db,
     );
     bencher.run().await;

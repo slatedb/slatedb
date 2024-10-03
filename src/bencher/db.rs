@@ -56,7 +56,6 @@ pub struct DbBench {
     num_rows: Option<u64>,
     duration: Option<Duration>,
     put_percentage: u32,
-    plot: bool,
     db: Arc<Db>,
 }
 
@@ -69,7 +68,6 @@ impl DbBench {
         num_rows: Option<u64>,
         duration: Option<Duration>,
         put_percentage: u32,
-        plot: bool,
         db: Arc<Db>,
     ) -> Self {
         Self {
@@ -80,14 +78,12 @@ impl DbBench {
             num_rows,
             duration,
             put_percentage,
-            plot,
             db,
         }
     }
 
     pub async fn run(&self) {
         let stats_recorder = Arc::new(StatsRecorder::new());
-        let plot = self.plot;
         let mut write_tasks = Vec::new();
         for _ in 0..self.concurrency {
             let mut write_task = Task::new(
@@ -102,7 +98,7 @@ impl DbBench {
             );
             write_tasks.push(tokio::spawn(async move { write_task.run().await }));
         }
-        tokio::spawn(async move { dump_stats(stats_recorder, plot).await });
+        tokio::spawn(async move { dump_stats(stats_recorder).await });
         for write_task in write_tasks {
             write_task.await.unwrap();
         }
@@ -304,7 +300,7 @@ impl StatsRecorder {
     }
 }
 
-async fn dump_stats(stats: Arc<StatsRecorder>, plot: bool) {
+async fn dump_stats(stats: Arc<StatsRecorder>) {
     let mut last_stats_dump: Option<Instant> = None;
     let mut first_dump_start: Option<Instant> = None;
     loop {
@@ -323,15 +319,9 @@ async fn dump_stats(stats: Arc<StatsRecorder>, plot: bool) {
             if should_print {
                 let put_rate = puts_since as f32 / interval.as_secs() as f32;
                 let get_rate = gets_since as f32 / interval.as_secs() as f32;
-                if plot {
-                    println!(
-                        "{:.3} {:.3}",
-                        range.end.duration_since(first_dump_start.unwrap()).as_secs_f64(),
-                        (put_rate + get_rate) as f64,
-                    );
-                }
                 info!(
-                    "stats dump [put/s: {:.3}, get/s: {:.3}, window: {:?}, cumulative puts: {}, cumulative gets: {}]",
+                    "stats dump [elapsed {:?}, put/s: {:.3}, get/s: {:.3}, window: {:?}, total puts: {}, total gets: {}]",
+                    range.end.duration_since(first_dump_start.unwrap()).as_secs_f64(),
                     put_rate,
                     get_rate,
                     range.end - range.start,
