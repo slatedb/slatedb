@@ -996,6 +996,12 @@ impl FsCacheEvictorInner {
             if evicted_bytes == 0 {
                 return total_bytes;
             }
+
+            self.db_stats
+                .object_store_cache_evicted_bytes
+                .add(evicted_bytes as u64);
+            self.db_stats.object_store_cache_evicted_keys.inc();
+
             total_bytes += evicted_bytes as usize;
         }
 

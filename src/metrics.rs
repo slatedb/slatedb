@@ -16,6 +16,10 @@ impl Counter {
     pub fn inc(&self) -> u64 {
         self.value.fetch_add(1, Ordering::Relaxed)
     }
+
+    pub fn add(&self, value: u64) -> u64 {
+        self.value.fetch_add(value, Ordering::Relaxed)
+    }
 }
 
 impl Default for Counter {
