@@ -11,7 +11,7 @@ use crate::error::SlateDBError;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
 
 #[derive(Clone, PartialEq, Serialize)]
-pub struct SsTableHandle {
+pub(crate) struct SsTableHandle {
     pub id: SsTableId,
     pub info: SsTableInfo,
 }
@@ -37,8 +37,14 @@ impl SsTableHandle {
     }
 }
 
+impl AsRef<SsTableHandle> for SsTableHandle {
+    fn as_ref(&self) -> &SsTableHandle {
+        self
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Hash, Eq, Copy, Serialize)]
-pub enum SsTableId {
+pub(crate) enum SsTableId {
     Wal(u64),
     Compacted(Ulid),
 }
@@ -89,7 +95,7 @@ impl Clone for Box<dyn SsTableInfoCodec> {
 }
 
 #[derive(Clone, PartialEq, Serialize)]
-pub struct SortedRun {
+pub(crate) struct SortedRun {
     pub(crate) id: u32,
     pub(crate) ssts: Vec<SsTableHandle>,
 }
@@ -137,7 +143,7 @@ pub(crate) struct COWDbState {
 
 // represents the core db state that we persist in the manifest
 #[derive(Clone, PartialEq, Serialize)]
-pub struct CoreDbState {
+pub(crate) struct CoreDbState {
     pub(crate) l0_last_compacted: Option<Ulid>,
     pub(crate) l0: VecDeque<SsTableHandle>,
     pub(crate) compacted: Vec<SortedRun>,

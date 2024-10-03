@@ -5,8 +5,9 @@ use serde::Serialize;
 use tokio::runtime::Handle;
 
 use crate::compactor::CompactionScheduler;
-use crate::db_cache::DbCacheOptions;
 use crate::error::SlateDBError;
+
+use crate::db_cache::DbCache;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
@@ -151,8 +152,8 @@ pub struct DbOptions {
     /// The object store cache options.
     pub object_store_cache_options: ObjectStoreCacheOptions,
 
-    /// Block cache options.
-    pub block_cache_options: Option<DbCacheOptions>,
+    /// The block cache instance used to cache SSTable blocks, indexes and bloom filters.
+    pub block_cache: Option<Arc<dyn DbCache>>,
 
     /// Configuration options for the garbage collector.
     pub garbage_collector_options: Option<GarbageCollectorOptions>,
@@ -172,11 +173,24 @@ impl Default for DbOptions {
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
-            block_cache_options: Some(DbCacheOptions::default()),
+            block_cache: default_block_cache(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
         }
     }
+}
+
+#[allow(unreachable_code)]
+fn default_block_cache() -> Option<Arc<dyn DbCache>> {
+    #[cfg(feature = "moka")]
+    {
+        return Some(Arc::new(crate::db_cache::moka::MokaCache::new()));
+    }
+    #[cfg(feature = "foyer")]
+    {
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new()));
+    }
+    None
 }
 
 /// The compression algorithm to use for SSTables.
@@ -290,20 +304,20 @@ impl SizeTieredCompactionSchedulerOptions {
 #[derive(Clone)]
 pub struct GarbageCollectorOptions {
     /// Garbage collection options for the manifest directory.
-    pub manifest_options: Option<GarbageCollecterDirectoryOptions>,
+    pub manifest_options: Option<GarbageCollectorDirectoryOptions>,
 
     /// Garbage collection options for the WAL directory.
-    pub wal_options: Option<GarbageCollecterDirectoryOptions>,
+    pub wal_options: Option<GarbageCollectorDirectoryOptions>,
 
     /// Garbage collection options for the compacted directory.
-    pub compacted_options: Option<GarbageCollecterDirectoryOptions>,
+    pub compacted_options: Option<GarbageCollectorDirectoryOptions>,
 
     /// An optional tokio runtime handle to use for scheduling garbage collection. You can use
     /// this to isolate garbage collection to a dedicated thread pool.
     pub gc_runtime: Option<Handle>,
 }
 
-impl Default for GarbageCollecterDirectoryOptions {
+impl Default for GarbageCollectorDirectoryOptions {
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(300),
@@ -314,7 +328,7 @@ impl Default for GarbageCollecterDirectoryOptions {
 
 /// Garbage collector options for a directory.
 #[derive(Clone, Copy)]
-pub struct GarbageCollecterDirectoryOptions {
+pub struct GarbageCollectorDirectoryOptions {
     /// The interval at which the garbage collector checks for files to garbage collect.
     pub poll_interval: Duration,
 
@@ -330,7 +344,7 @@ impl Default for GarbageCollectorOptions {
     fn default() -> Self {
         Self {
             manifest_options: Some(Default::default()),
-            wal_options: Some(GarbageCollecterDirectoryOptions {
+            wal_options: Some(GarbageCollectorDirectoryOptions {
                 poll_interval: Duration::from_secs(60),
                 min_age: Duration::from_secs(60),
             }),
