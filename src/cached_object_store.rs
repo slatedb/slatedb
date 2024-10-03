@@ -804,58 +804,65 @@ impl LocalCacheEntry for FsCacheEntry {
 #[derive(Debug)]
 struct FsCacheEvictor {
     root_folder: std::path::PathBuf,
-    cache_size_bytes: Option<usize>,
+    max_cache_size_bytes: Option<usize>,
     tx: tokio::sync::mpsc::Sender<(std::path::PathBuf, usize)>,
     rx: Mutex<Option<tokio::sync::mpsc::Receiver<(std::path::PathBuf, usize)>>>,
-    task_handle: OnceCell<tokio::task::JoinHandle<()>>,
+    evict_task_handle: OnceCell<tokio::task::JoinHandle<()>>,
+    scan_task_handle: OnceCell<tokio::task::JoinHandle<()>>,
 }
 
 impl FsCacheEvictor {
-    pub fn new(root_folder: std::path::PathBuf, cache_size_bytes: Option<usize>) -> Self {
+    pub fn new(root_folder: std::path::PathBuf, max_cache_size_bytes: Option<usize>) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         Self {
             root_folder,
-            cache_size_bytes,
+            max_cache_size_bytes,
             tx,
             rx: Mutex::new(Some(rx)),
-            task_handle: OnceCell::new(),
+            evict_task_handle: OnceCell::new(),
+            scan_task_handle: OnceCell::new(),
         }
     }
 
     async fn start(&self) {
         // if the cache_size_bytes is not set, do nothing
-        let cache_size_bytes = match &self.cache_size_bytes {
+        let max_cache_size_bytes = match &self.max_cache_size_bytes {
             None => return,
-            Some(cache_size_bytes) => *cache_size_bytes,
+            Some(max_cache_size_bytes) => *max_cache_size_bytes,
         };
+
+        let inner = Arc::new(FsCacheEvictorInner::new(
+            self.root_folder.clone(),
+            max_cache_size_bytes,
+        ));
 
         let guard = self.rx.lock();
         let rx = guard.await.take().expect("evictor already started");
-        let handle = tokio::spawn(Self::background(
-            self.root_folder.clone(),
-            cache_size_bytes as u64,
-            rx,
-        ));
-        self.task_handle.set(handle).ok();
+
+        // scan the cache folder to load the cache entries on disk
+        let scan_task_handle = tokio::spawn(inner.clone().scan_entries());
+        self.scan_task_handle.set(scan_task_handle).ok();
+
+        // start the background evictor task, it'll be triggered whenever a new cache entry is added
+        let evict_task_handle = tokio::spawn(Self::background_evict(rx, inner));
+        self.evict_task_handle.set(evict_task_handle).ok();
     }
 
     async fn started(&self) -> bool {
         self.rx.lock().await.is_none()
     }
 
-    async fn background(
-        root_folder: std::path::PathBuf,
-        cache_size_bytes: u64,
+    async fn background_evict(
         mut rx: tokio::sync::mpsc::Receiver<(std::path::PathBuf, usize)>,
+        inner: Arc<FsCacheEvictorInner>,
     ) {
-        let mut inner = FsCacheEvictorInner::new(root_folder, cache_size_bytes);
         while let Some((path, bytes)) = rx.recv().await {
             inner.maybe_evict(path, bytes).await;
         }
     }
 
     pub async fn maybe_evict(&self, path: std::path::PathBuf, bytes: usize) {
-        if self.cache_size_bytes.is_none() || !self.started().await {
+        if self.max_cache_size_bytes.is_none() || !self.started().await {
             return;
         }
 
@@ -863,27 +870,28 @@ impl FsCacheEvictor {
     }
 }
 
+#[derive(Debug, Clone)]
 struct FsCacheEvictorInner {
     root_folder: std::path::PathBuf,
     batch_factor: usize,
-    max_cache_size_bytes: u64,
+    max_cache_size_bytes: usize,
     // TODO: can use a trie to save memory on common prefixes
     cache_entries: Arc<Mutex<HashMap<std::path::PathBuf, SystemTime>>>,
     cache_size_bytes: Arc<AtomicU64>,
 }
 
 impl FsCacheEvictorInner {
-    pub fn new(root_folder: std::path::PathBuf, max_cache_size_bytes: u64) -> Self {
+    pub fn new(root_folder: std::path::PathBuf, max_cache_size_bytes: usize) -> Self {
         Self {
             root_folder,
             batch_factor: 10,
-            max_cache_size_bytes: max_cache_size_bytes,
+            max_cache_size_bytes,
             cache_entries: Arc::new(Mutex::new(HashMap::new())),
             cache_size_bytes: Arc::new(AtomicU64::new(0 as u64)),
         }
     }
 
-    pub async fn scan_entries(&self) {
+    pub async fn scan_entries(self: Arc<Self>) {
         // walk the cache folder, record the files and their last access time into the cache_entries
         let iter = WalkDir::new(&self.root_folder).into_iter();
         for entry in iter {
@@ -917,14 +925,14 @@ impl FsCacheEvictorInner {
         }
     }
 
-    pub async fn maybe_evict(&mut self, path: std::path::PathBuf, bytes: usize) -> usize {
+    pub async fn maybe_evict(&self, path: std::path::PathBuf, bytes: usize) -> usize {
         self.cache_size_bytes
             .fetch_add(bytes as u64, Ordering::SeqCst);
         self.cache_entries
             .lock()
             .await
             .insert(path.clone(), SystemTime::now());
-        if self.cache_size_bytes.load(Ordering::Relaxed) <= self.max_cache_size_bytes {
+        if self.cache_size_bytes.load(Ordering::Relaxed) <= self.max_cache_size_bytes as u64 {
             return 0;
         }
 
@@ -944,7 +952,7 @@ impl FsCacheEvictorInner {
     }
 
     // evict once, return the bytes evicted
-    async fn evict_once(&mut self) -> usize {
+    async fn evict_once(&self) -> usize {
         let (target, target_bytes) = match self.pick_evict_target().await {
             Some(target) => target,
             None => return 0,
@@ -968,22 +976,9 @@ impl FsCacheEvictorInner {
         }
     }
 
-    pub async fn scan_cache_folder_bytes(
-        root_folder: &std::path::PathBuf,
-    ) -> Result<usize, Box<dyn std::error::Error>> {
-        let mut total_bytes = 0;
-        let iter = WalkDir::new(root_folder).into_iter();
-        for entry in iter {
-            let entry = entry?;
-            let metadata = tokio::fs::metadata(entry.path()).await?;
-            total_bytes += metadata.len();
-        }
-        Ok(total_bytes as usize)
-    }
-
     // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, randomized pick
     // two of files, compare their last access time, and evict the older one.
-    async fn pick_evict_target(&mut self) -> Option<(std::path::PathBuf, usize)> {
+    async fn pick_evict_target(&self) -> Option<(std::path::PathBuf, usize)> {
         todo!()
     }
 }
