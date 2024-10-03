@@ -314,7 +314,7 @@ impl StatsRecorderInner {
     }
 
     fn operations_since(&self, lookback: Duration) -> Option<(Range<Instant>, u64, u64)> {
-        Self::sum_windows(&self.windows, lookback).map(|r| (r.0, r.1 as u64, r.2 as u64))
+        Self::sum_windows(&self.windows, lookback).map(|r| (r.0, r.1, r.2))
     }
 }
 
