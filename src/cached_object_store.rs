@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::io::SeekFrom;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
@@ -856,13 +857,7 @@ impl FsCacheEvictor {
                 return;
             }
         };
-        let mut inner = FsCacheEvictorInner {
-            root_folder,
-            tracked_bytes: AtomicU64::new(scanned_bytes as u64),
-            cache_size_bytes,
-            batch_factor: 10,
-            evict_buffer: VecDeque::new(),
-        };
+        let mut inner = FsCacheEvictorInner::new(root_folder, cache_size_bytes);
         while let Some(bytes) = rx.recv().await {
             inner.maybe_evict(bytes).await;
         }
@@ -882,10 +877,21 @@ struct FsCacheEvictorInner {
     tracked_bytes: AtomicU64,
     cache_size_bytes: u64,
     batch_factor: usize,
-    evict_buffer: VecDeque<std::path::PathBuf>,
+    // TODO: can use a trie to save memory on common prefixes
+    cache_entries: Mutex<HashMap<std::path::PathBuf, SystemTime>>,
 }
 
 impl FsCacheEvictorInner {
+    pub fn new(root_folder: std::path::PathBuf, cache_size_bytes: u64) -> Self {
+        Self {
+            root_folder,
+            tracked_bytes: AtomicU64::new(0 as u64),
+            cache_size_bytes,
+            batch_factor: 10,
+            cache_entries: Mutex::new(HashMap::new()),
+        }
+    }
+
     pub async fn maybe_evict(&mut self, bytes: u64) -> u64 {
         self.tracked_bytes.fetch_add(bytes, Ordering::SeqCst);
         if self.tracked_bytes.load(Ordering::Relaxed) <= self.cache_size_bytes {
@@ -947,71 +953,7 @@ impl FsCacheEvictorInner {
     // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, randomized pick
     // two of files, compare their last access time, and evict the older one.
     async fn pick_evict_target(&mut self) -> Option<(std::path::PathBuf, u64)> {
-        // extend the evict_buffer if it's empty. it will randomized iterate the cache folder,
-        // and randomly pick 1000 files into the evict_buffer.
-        let mut rng = rand::rngs::StdRng::from_entropy();
-        if self.evict_buffer.len() < 2 {
-            let iter = WalkDir::new(&self.root_folder).into_iter();
-            for entry in iter.choose_multiple(&mut rng, 1000) {
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(err) => {
-                        warn!("evictor: unexpected error on reading dir entry to pick the evict target, skip the entry: {}", err);
-                        break;
-                    }
-                };
-
-                if entry.file_type().is_dir() {
-                    continue;
-                }
-                self.evict_buffer.push_back(entry.path().to_path_buf());
-            }
-        }
-
-        // if the evict_buffer length still below 2, return None
-        if self.evict_buffer.len() < 2 {
-            return None;
-        }
-
-        // pop two files from the evict_buffer
-        let (path0, path1) = {
-            match (self.evict_buffer.pop_front(), self.evict_buffer.pop_front()) {
-                (Some(path0), Some(path1)) => (path0, path1),
-                _ => return None,
-            }
-        };
-
-        // read the accessed time & length of the two files
-        let (metadata0, metadata1) = match (
-            tokio::fs::metadata(&path0).await,
-            tokio::fs::metadata(&path1).await,
-        ) {
-            (Ok(metadata0), Ok(metadata1)) => (metadata0, metadata1),
-            (Err(err), _) | (_, Err(err)) => {
-                warn!(
-                    "evictor: failed to read metadata of the cache files: {}",
-                    err
-                );
-                return None;
-            }
-        };
-        let (accessed0, accessed1) = match (metadata0.accessed(), metadata1.accessed()) {
-            (Ok(accessed0), Ok(accessed1)) => (accessed0, accessed1),
-            (Err(err), _) | (_, Err(err)) => {
-                warn!(
-                    "evictor: failed to read accessed time of the cache files: {}",
-                    err
-                );
-                return None;
-            }
-        };
-
-        // choose the older one to evict
-        if accessed0 < accessed1 {
-            Some((path0, metadata0.len()))
-        } else {
-            Some((path1, metadata1.len()))
-        }
+        todo!()
     }
 }
 
