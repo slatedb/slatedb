@@ -896,14 +896,14 @@ impl FsCacheEvictor {
 ///
 /// On start up, FsCacheEvictorInner will scan the cache folder to load the cache files into the in-memory
 /// trie cache_entries. This loading process is interleaved with the maybe_evict is being called, so the
-/// cache entries should be wrapped with Arc<Mutex<_>>.
-#[derive(Debug, Clone)]
+/// cache entries should be wrapped with Mutex<_>.
+#[derive(Debug)]
 struct FsCacheEvictorInner {
     root_folder: std::path::PathBuf,
     batch_factor: usize,
     max_cache_size_bytes: usize,
-    cache_entries: Arc<Mutex<Trie<std::path::PathBuf, (SystemTime, usize)>>>,
-    cache_size_bytes: Arc<AtomicU64>,
+    cache_entries: Mutex<Trie<std::path::PathBuf, (SystemTime, usize)>>,
+    cache_size_bytes: AtomicU64,
     db_stats: Arc<DbStats>,
 }
 
@@ -917,8 +917,8 @@ impl FsCacheEvictorInner {
             root_folder,
             batch_factor: 10,
             max_cache_size_bytes,
-            cache_entries: Arc::new(Mutex::new(Trie::new())),
-            cache_size_bytes: Arc::new(AtomicU64::new(0_u64)),
+            cache_entries: Mutex::new(Trie::new()),
+            cache_size_bytes: AtomicU64::new(0_u64),
             db_stats,
         }
     }
