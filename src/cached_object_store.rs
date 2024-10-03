@@ -38,7 +38,7 @@ impl CachedObjectStore {
     pub fn new(
         object_store: Arc<dyn ObjectStore>,
         root_folder: std::path::PathBuf,
-        cache_size_bytes: Option<usize>,
+        max_cache_size_bytes: Option<usize>,
         part_size_bytes: usize,
         db_stats: Arc<DbStats>,
     ) -> Result<Arc<Self>, SlateDBError> {
@@ -46,7 +46,10 @@ impl CachedObjectStore {
             return Err(SlateDBError::InvalidCachePartSize);
         }
 
-        let cache_storage = Arc::new(FsCacheStorage::new(root_folder.clone(), cache_size_bytes));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            root_folder.clone(),
+            max_cache_size_bytes,
+        ));
         Ok(Arc::new(Self {
             object_store,
             part_size_bytes,
@@ -550,12 +553,19 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
 #[derive(Debug)]
 struct FsCacheStorage {
     root_folder: std::path::PathBuf,
-    evictor: Arc<FsCacheEvictor>,
+    evictor: Option<Arc<FsCacheEvictor>>,
 }
 
 impl FsCacheStorage {
-    pub fn new(root_folder: std::path::PathBuf, cache_size_bytes: Option<usize>) -> Self {
-        let evictor = Arc::new(FsCacheEvictor::new(root_folder.clone(), cache_size_bytes));
+    pub fn new(root_folder: std::path::PathBuf, max_cache_size_bytes: Option<usize>) -> Self {
+        let evictor = match max_cache_size_bytes {
+            None => None,
+            Some(max_cache_size_bytes) => Some(Arc::new(FsCacheEvictor::new(
+                root_folder.clone(),
+                max_cache_size_bytes,
+            ))),
+        };
+
         Self {
             root_folder,
             evictor,
@@ -579,7 +589,9 @@ impl LocalCacheStorage for FsCacheStorage {
     }
 
     async fn start_evictor(&self) {
-        self.evictor.start().await
+        if let Some(evictor) = &self.evictor {
+            evictor.start().await
+        }
     }
 }
 
@@ -594,7 +606,7 @@ struct FsCacheEntry {
     root_folder: std::path::PathBuf,
     location: Path,
     part_size: usize,
-    evictor: Arc<FsCacheEvictor>,
+    evictor: Option<Arc<FsCacheEvictor>>,
 }
 
 impl FsCacheEntry {
@@ -607,9 +619,9 @@ impl FsCacheEntry {
         }
 
         // try triggering evict before writing
-        self.evictor
-            .maybe_evict(path.to_path_buf(), buf.len())
-            .await;
+        if let Some(evictor) = &self.evictor {
+            evictor.maybe_evict(path.to_path_buf(), buf.len()).await;
+        }
 
         let mut file = OpenOptions::new()
             .write(true)
@@ -806,7 +818,7 @@ impl LocalCacheEntry for FsCacheEntry {
 #[derive(Debug)]
 struct FsCacheEvictor {
     root_folder: std::path::PathBuf,
-    max_cache_size_bytes: Option<usize>,
+    max_cache_size_bytes: usize,
     tx: tokio::sync::mpsc::Sender<(std::path::PathBuf, usize)>,
     rx: Mutex<Option<tokio::sync::mpsc::Receiver<(std::path::PathBuf, usize)>>>,
     evict_task_handle: OnceCell<tokio::task::JoinHandle<()>>,
@@ -814,7 +826,7 @@ struct FsCacheEvictor {
 }
 
 impl FsCacheEvictor {
-    pub fn new(root_folder: std::path::PathBuf, max_cache_size_bytes: Option<usize>) -> Self {
+    pub fn new(root_folder: std::path::PathBuf, max_cache_size_bytes: usize) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         Self {
             root_folder,
@@ -827,15 +839,9 @@ impl FsCacheEvictor {
     }
 
     async fn start(&self) {
-        // if the cache_size_bytes is not set, do nothing
-        let max_cache_size_bytes = match &self.max_cache_size_bytes {
-            None => return,
-            Some(max_cache_size_bytes) => *max_cache_size_bytes,
-        };
-
         let inner = Arc::new(FsCacheEvictorInner::new(
             self.root_folder.clone(),
-            max_cache_size_bytes,
+            self.max_cache_size_bytes,
         ));
 
         let guard = self.rx.lock();
@@ -864,7 +870,7 @@ impl FsCacheEvictor {
     }
 
     pub async fn maybe_evict(&self, path: std::path::PathBuf, bytes: usize) {
-        if self.max_cache_size_bytes.is_none() || !self.started().await {
+        if !self.started().await {
             return;
         }
 
