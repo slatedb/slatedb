@@ -48,8 +48,12 @@ pub(crate) enum BencherCommands {
 #[command(about = "Benchmark a SlateDB database.")]
 
 pub(crate) struct DbArgs {
-    #[arg(long, help = "Whether to disable the write-ahead log.")]
-    pub(crate) disable_wal: Option<bool>,
+    #[arg(
+        long,
+        help = "Whether to disable the write-ahead log.",
+        default_value_t = false
+    )]
+    pub(crate) disable_wal: bool,
 
     #[arg(
         long,
@@ -78,7 +82,7 @@ impl DbArgs {
     #[allow(dead_code)]
     pub(crate) fn config(&self) -> DbOptions {
         let mut db_options = DbOptions::default();
-        db_options.wal_enabled = !self.disable_wal.unwrap_or(false);
+        db_options.wal_enabled = !self.disable_wal;
         db_options.flush_interval = self
             .flush_ms
             .map(|i| Duration::from_millis(i as u64))
@@ -112,7 +116,10 @@ pub(crate) struct BenchmarkDbArgs {
     #[clap(flatten)]
     pub(crate) db_args: DbArgs,
 
-    #[arg(long, help = "The duration in seconds to run the benchmark for.")]
+    #[arg(
+        long,
+        help = "The duration in seconds to run the benchmark for.",
+    )]
     pub(crate) duration: Option<u32>,
 
     #[arg(
