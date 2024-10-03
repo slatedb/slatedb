@@ -563,14 +563,13 @@ impl FsCacheStorage {
         max_cache_size_bytes: Option<usize>,
         db_stats: Arc<DbStats>,
     ) -> Self {
-        let evictor = match max_cache_size_bytes {
-            None => None,
-            Some(max_cache_size_bytes) => Some(Arc::new(FsCacheEvictor::new(
+        let evictor = max_cache_size_bytes.map(|max_cache_size_bytes| {
+            Arc::new(FsCacheEvictor::new(
                 root_folder.clone(),
                 max_cache_size_bytes,
                 db_stats,
-            ))),
-        };
+            ))
+        });
 
         Self {
             root_folder,
@@ -1002,7 +1001,7 @@ impl FsCacheEvictorInner {
                 .add(evicted_bytes as u64);
             self.db_stats.object_store_cache_evicted_keys.inc();
 
-            total_bytes += evicted_bytes as usize;
+            total_bytes += evicted_bytes;
         }
 
         total_bytes
