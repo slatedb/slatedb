@@ -973,6 +973,14 @@ impl FsCacheEvictorInner {
             .await
             .insert(path.clone(), (SystemTime::now(), bytes));
 
+        // record the metrics
+        self.db_stats
+            .object_store_cache_keys
+            .set(self.cache_entries.lock().await.len() as u64);
+        self.db_stats
+            .object_store_cache_bytes
+            .set(self.cache_size_bytes.load(Ordering::Relaxed));
+
         // if the cache size is still below the limit, do nothing
         if self.cache_size_bytes.load(Ordering::Relaxed) <= self.max_cache_size_bytes as u64 {
             return 0;
