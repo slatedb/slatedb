@@ -877,7 +877,7 @@ struct FsCacheEvictorInner {
     batch_factor: usize,
     max_cache_size_bytes: usize,
     // use IndexTreeMap to allow the O(1) time complexity on random pick an element from it.
-    cache_entries: Arc<Mutex<Trie<std::path::PathBuf, SystemTime>>>,
+    cache_entries: Arc<Mutex<Trie<std::path::PathBuf, (SystemTime, usize)>>>,
     cache_size_bytes: Arc<AtomicU64>,
 }
 
@@ -917,14 +917,14 @@ impl FsCacheEvictorInner {
                     continue;
                 }
             };
-            let accessed_timestamp = metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
+            let atime = metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
             let path = entry.path().to_path_buf();
             let bytes = metadata.len();
 
             self.cache_entries
                 .lock()
                 .await
-                .insert(path, accessed_timestamp);
+                .insert(path, (atime, bytes as usize));
             self.cache_size_bytes.fetch_add(bytes, Ordering::SeqCst);
         }
     }
@@ -935,7 +935,7 @@ impl FsCacheEvictorInner {
         self.cache_entries
             .lock()
             .await
-            .insert(path.clone(), SystemTime::now());
+            .insert(path.clone(), (SystemTime::now(), bytes));
         if self.cache_size_bytes.load(Ordering::Relaxed) <= self.max_cache_size_bytes as u64 {
             return 0;
         }
@@ -955,7 +955,8 @@ impl FsCacheEvictorInner {
         total_bytes
     }
 
-    // evict once, return the bytes evicted
+    // find a file, and evict it from disk. return the bytes of the evicted file. if no file is evicted or
+    // any error occurs, return 0.
     async fn evict_once(&self) -> usize {
         let (target, target_bytes) = match self.pick_evict_target().await {
             Some(target) => target,
@@ -965,25 +966,28 @@ impl FsCacheEvictorInner {
         match tokio::fs::remove_file(&target).await {
             Err(err) => {
                 warn!("evictor: failed to remove the cache file: {}", err);
-                0
+                return 0;
             }
-            Ok(()) => {
-                debug!(
-                    "evictor: evicted cache file: {:?}, bytes: {}",
-                    target, target_bytes
-                );
-                self.cache_entries.lock().await.remove(&target);
-                self.cache_size_bytes
-                    .fetch_sub(target_bytes as u64, Ordering::SeqCst);
-                target_bytes
-            }
+            _ => (),
         }
+
+        debug!(
+            "evictor: evicted cache file: {:?}, bytes: {}",
+            target, target_bytes
+        );
+
+        // remove the entry from the cache_entries, and decrease the cache_size_bytes
+        self.cache_entries.lock().await.remove(&target);
+        self.cache_size_bytes
+            .fetch_sub(target_bytes as u64, Ordering::SeqCst);
+
+        target_bytes
     }
 
-    // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, randomized pick
-    // two of files, compare their last access time, and evict the older one.
+    // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, which is an approximation
+    // of LRU, it randomized pick two files, compare their last access time, and choose the older one to evict.
     async fn pick_evict_target(&self) -> Option<(std::path::PathBuf, usize)> {
-        let ((path0, atime0), (path1, atime1)) = match (
+        let ((path0, (atime0, bytes0)), (path1, (atime1, bytes1))) = match (
             self.random_pick_entry().await,
             self.random_pick_entry().await,
         ) {
@@ -991,10 +995,14 @@ impl FsCacheEvictorInner {
             _ => return None,
         };
 
-        todo!()
+        if atime0 <= atime1 {
+            Some((path0, bytes0))
+        } else {
+            Some((path1, bytes1))
+        }
     }
 
-    async fn random_pick_entry(&self) -> Option<(std::path::PathBuf, SystemTime)> {
+    async fn random_pick_entry(&self) -> Option<(std::path::PathBuf, (SystemTime, usize))> {
         let cache_entries = self.cache_entries.lock().await;
         let mut rng = rand::rngs::StdRng::from_entropy();
 
