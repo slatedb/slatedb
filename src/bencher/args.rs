@@ -31,7 +31,8 @@ pub(crate) struct BencherArgs {
     #[arg(
         short,
         long,
-        help = "The path in the object store to the root  directory, starting from within the object store bucket."
+        help = "The path in the object store to the root  directory, starting from within the object store bucket.",
+        default_value = "/slatedb-bencher"
     )]
     pub(crate) path: String,
 
@@ -116,10 +117,7 @@ pub(crate) struct BenchmarkDbArgs {
     #[clap(flatten)]
     pub(crate) db_args: DbArgs,
 
-    #[arg(
-        long,
-        help = "The duration in seconds to run the benchmark for.",
-    )]
+    #[arg(long, help = "The duration in seconds to run the benchmark for.")]
     pub(crate) duration: Option<u32>,
 
     #[arg(

@@ -1,3 +1,39 @@
+//! # Database benchmarker
+//!
+//! This module contains the database benchmarker, which is used to benchmark
+//! SlateDB. The benchmarker is a subcommand of the `bencher` CLI tool.
+//!
+//! The DB benchmarker supports:
+//!
+//! - Configurable key/value sizes
+//! - Configurable `WriteOptions`
+//! - A pluggable key generator strategy (defaults to random)
+//! - Configurable `DbOptions`` (for common variables)
+//! - Charts with gnuplots
+//! - Mixed read/write workloads
+//! - Concurrent workloads
+//!
+//! ## Design
+//!
+//! The benchmarker spins up `concurrency` tasks, each of which runs a loop.
+//! The loop generates a key (and value if needed), and then either puts they
+//! key/value pair or gets the key. The ratio of puts to gets is controlled by
+//! the `put_percentage`.
+//!
+//! Every `REPORT_INTERVAL`, the task records the number of puts and gets since
+//! the last report. The stats are kept in a rolling window of fixed duration
+//! (`WINDOW_SIZE`).
+//!
+//! Meanwhile, the main thread loops, sleeping for `REPORT_INTERVAL` and
+//! then checking if it's been more than `STAT_DUMP_INTERVAL` since the last
+//! dump. If so, it sums all puts and gets starting from the most recently
+//! completed window, looking back `STAT_DUMP_LOOKBACK`. It then prints the sum
+//! to the console.
+//!
+//! If `STAT_DUMP_LOOKBACK` is greater than `STAT_DUMP_INTERVAL` and
+//! `WINDOW_SIZE`, the result will be the sum of multiple windows, and thus
+//! some smoothing will occur.
+
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
@@ -14,18 +50,22 @@ use tracing::info;
 /// How frequently to dump stats to the console.
 const STAT_DUMP_INTERVAL: Duration = Duration::from_secs(10);
 
-/// How frequently to update stats between puts and gets.
+/// How far back to look when dumping stats.
+const STAT_DUMP_LOOKBACK: Duration = Duration::from_secs(60);
+
+/// How frequently to update stats between puts and gets and
+/// how frequently to check if we need to dump new stats.
 const REPORT_INTERVAL: Duration = Duration::from_millis(100);
 
-/// The granularity of the stats window.
+/// The size of each window.
 const WINDOW_SIZE: Duration = Duration::from_secs(10);
 
+/// A key generator trait that generates keys for the benchmarker.
 pub trait KeyGenerator: Send {
     fn next_key(&mut self) -> Bytes;
 }
 
-// TODO: implement other distributions
-
+/// A key generator that generates random keys of a fixed length.
 pub struct RandomKeyGenerator {
     key_len_bytes: usize,
     rng: XorShiftRng,
@@ -48,6 +88,7 @@ impl KeyGenerator for RandomKeyGenerator {
     }
 }
 
+/// The database benchmarker.
 pub struct DbBench {
     key_gen_supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>>,
     val_len: usize,
@@ -82,6 +123,11 @@ impl DbBench {
         }
     }
 
+    /// Run the benchmarker.
+    ///
+    /// This method spins up `concurrency` tasks, each of which runs a loop,
+    /// and then waits for all the tasks to complete. It also spawns a task
+    /// to dump stats to the console.
     pub async fn run(&self) {
         let stats_recorder = Arc::new(StatsRecorder::new());
         let mut write_tasks = Vec::new();
@@ -140,6 +186,10 @@ impl Task {
         }
     }
 
+    /// Run the task.
+    ///
+    /// This method runs a loop, generating a key (and value if needed), and
+    /// then either puts the key/value pair or gets the key.
     async fn run(&mut self) {
         let mut random = rand_xorshift::XorShiftRng::from_entropy();
         let mut puts = 0u64;
@@ -172,6 +222,7 @@ impl Task {
     }
 }
 
+/// Represents the number of puts and gets in a window of time.
 #[derive(Debug)]
 struct Window {
     range: Range<Instant>,
@@ -186,6 +237,9 @@ struct StatsRecorderInner {
 }
 
 impl StatsRecorderInner {
+    /// Rolls the window if necessary. Creates a new window if there are no windows.
+    /// Otherwise, checks if the front window is in the past and creates a new
+    /// window if so.
     fn maybe_roll_window(now: Instant, windows: &mut VecDeque<Window>) {
         let Some(mut front) = windows.front() else {
             windows.push_front(Window {
@@ -232,6 +286,9 @@ impl StatsRecorderInner {
         self.gets
     }
 
+    /// Sums the puts and gets in the windows that are contained in the lookback.
+    /// Partially continued windows are excluded. The lookback starts from the start
+    /// of the active window, so the active window is not included in the sum.
     fn sum_windows(
         windows: &VecDeque<Window>,
         lookback: Duration,
@@ -306,7 +363,7 @@ async fn dump_stats(stats: Arc<StatsRecorder>) {
     loop {
         tokio::time::sleep(REPORT_INTERVAL).await;
 
-        let operations_since = stats.operations_since(Duration::from_secs(60));
+        let operations_since = stats.operations_since(STAT_DUMP_LOOKBACK);
         if let Some((range, puts_since, gets_since)) = operations_since {
             let interval = range.end - range.start;
             let puts = stats.puts();
