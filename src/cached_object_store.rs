@@ -10,7 +10,7 @@ use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 use object_store::{Attribute, Attributes, GetRange, GetResultPayload, PutResult};
 use object_store::{ListResult, MultipartUpload, PutMultipartOpts, PutOptions, PutPayload};
-use radix_trie::Trie;
+use radix_trie::{Trie, TrieCommon};
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use rand::{distributions::Alphanumeric, Rng};
@@ -983,7 +983,34 @@ impl FsCacheEvictorInner {
     // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, randomized pick
     // two of files, compare their last access time, and evict the older one.
     async fn pick_evict_target(&self) -> Option<(std::path::PathBuf, usize)> {
+        let ((path0, atime0), (path1, atime1)) = match (
+            self.random_pick_entry().await,
+            self.random_pick_entry().await,
+        ) {
+            (Some(o0), Some(o1)) => (o0, o1),
+            _ => return None,
+        };
+
         todo!()
+    }
+
+    async fn random_pick_entry(&self) -> Option<(std::path::PathBuf, SystemTime)> {
+        let cache_entries = self.cache_entries.lock().await;
+        let mut rng = rand::rngs::StdRng::from_entropy();
+
+        let mut rand_child = match cache_entries.children().choose(&mut rng) {
+            None => return None,
+            Some(child) => child,
+        };
+        loop {
+            if rand_child.is_leaf() {
+                return rand_child.key().cloned().zip(rand_child.value().cloned());
+            }
+            rand_child = match rand_child.children().choose(&mut rng) {
+                None => return None,
+                Some(child) => child,
+            };
+        }
     }
 }
 
