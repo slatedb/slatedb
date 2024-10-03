@@ -49,6 +49,7 @@ impl CachedObjectStore {
         let cache_storage = Arc::new(FsCacheStorage::new(
             root_folder.clone(),
             max_cache_size_bytes,
+            db_stats.clone(),
         ));
         Ok(Arc::new(Self {
             object_store,
@@ -557,12 +558,17 @@ struct FsCacheStorage {
 }
 
 impl FsCacheStorage {
-    pub fn new(root_folder: std::path::PathBuf, max_cache_size_bytes: Option<usize>) -> Self {
+    pub fn new(
+        root_folder: std::path::PathBuf,
+        max_cache_size_bytes: Option<usize>,
+        db_stats: Arc<DbStats>,
+    ) -> Self {
         let evictor = match max_cache_size_bytes {
             None => None,
             Some(max_cache_size_bytes) => Some(Arc::new(FsCacheEvictor::new(
                 root_folder.clone(),
                 max_cache_size_bytes,
+                db_stats,
             ))),
         };
 
@@ -823,10 +829,15 @@ struct FsCacheEvictor {
     rx: Mutex<Option<tokio::sync::mpsc::Receiver<(std::path::PathBuf, usize)>>>,
     evict_task_handle: OnceCell<tokio::task::JoinHandle<()>>,
     scan_task_handle: OnceCell<tokio::task::JoinHandle<()>>,
+    db_stats: Arc<DbStats>,
 }
 
 impl FsCacheEvictor {
-    pub fn new(root_folder: std::path::PathBuf, max_cache_size_bytes: usize) -> Self {
+    pub fn new(
+        root_folder: std::path::PathBuf,
+        max_cache_size_bytes: usize,
+        db_stats: Arc<DbStats>,
+    ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         Self {
             root_folder,
@@ -835,6 +846,7 @@ impl FsCacheEvictor {
             rx: Mutex::new(Some(rx)),
             evict_task_handle: OnceCell::new(),
             scan_task_handle: OnceCell::new(),
+            db_stats,
         }
     }
 
@@ -842,6 +854,7 @@ impl FsCacheEvictor {
         let inner = Arc::new(FsCacheEvictorInner::new(
             self.root_folder.clone(),
             self.max_cache_size_bytes,
+            self.db_stats.clone(),
         ));
 
         let guard = self.rx.lock();
@@ -892,16 +905,22 @@ struct FsCacheEvictorInner {
     max_cache_size_bytes: usize,
     cache_entries: Arc<Mutex<Trie<std::path::PathBuf, (SystemTime, usize)>>>,
     cache_size_bytes: Arc<AtomicU64>,
+    db_stats: Arc<DbStats>,
 }
 
 impl FsCacheEvictorInner {
-    pub fn new(root_folder: std::path::PathBuf, max_cache_size_bytes: usize) -> Self {
+    pub fn new(
+        root_folder: std::path::PathBuf,
+        max_cache_size_bytes: usize,
+        db_stats: Arc<DbStats>,
+    ) -> Self {
         Self {
             root_folder,
             batch_factor: 10,
             max_cache_size_bytes,
             cache_entries: Arc::new(Mutex::new(Trie::new())),
             cache_size_bytes: Arc::new(AtomicU64::new(0_u64)),
+            db_stats,
         }
     }
 
@@ -1410,7 +1429,11 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        let mut evictor = FsCacheEvictorInner::new(temp_dir.path().to_path_buf(), 1024 * 2);
+        let mut evictor = FsCacheEvictorInner::new(
+            temp_dir.path().to_path_buf(),
+            1024 * 2,
+            Arc::new(DbStats::new()),
+        );
         evictor.batch_factor = 2;
 
         let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
@@ -1442,6 +1465,7 @@ mod tests {
         let evictor = Arc::new(FsCacheEvictorInner::new(
             temp_dir.path().to_path_buf(),
             1024 * 2,
+            Arc::new(DbStats::new()),
         ));
 
         let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
