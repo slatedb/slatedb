@@ -27,8 +27,8 @@ Options:
           The size in bytes of the object store cache part files.
       --duration <DURATION>
           The duration in seconds to run the benchmark for.
-      --key-distribution <KEY_DISTRIBUTION>
-          The key distribution to use. [default: Random] [possible values: Random]
+      --key-generator <KEY_GENERATOR>
+          The key generator to use. [default: Random] [possible values: Random]
       --key-len <KEY_LEN>
           The length of the keys to generate. [default: 16]
       --await-durable
