@@ -78,19 +78,15 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     let bucket = env::var("AWS_BUCKET").expect("AWS_BUCKET must be set");
     let region = env::var("AWS_REGION").expect("AWS_REGION must be set");
     let endpoint = env::var("AWS_ENDPOINT").ok();
-    let dynamodb_table = env::var("AWS_DYNAMODB_TABLE").ok();
+    let dynamodb_table = env::var("AWS_DYNAMODB_TABLE").expect("AWS_DYNAMODB_TABLE must be set");
     let builder = object_store::aws::AmazonS3Builder::new()
         .with_access_key_id(key)
         .with_secret_access_key(secret)
         .with_bucket_name(bucket)
-        .with_region(region);
+        .with_region(region)
+        .with_conditional_put(S3ConditionalPut::Dynamo(DynamoCommit::new(dynamodb_table)));
     let builder = if let Some(endpoint) = endpoint {
         builder.with_allow_http(true).with_endpoint(endpoint)
-    } else {
-        builder
-    };
-    let builder = if let Some(dynamodb_table) = dynamodb_table {
-        builder.with_conditional_put(S3ConditionalPut::Dynamo(DynamoCommit::new(dynamodb_table)))
     } else {
         builder
     };
