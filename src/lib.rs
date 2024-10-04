@@ -9,7 +9,7 @@ mod blob;
 mod block;
 mod block_iterator;
 mod cached_object_store;
-#[cfg(feature = "db_bench")]
+#[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;
 mod compactor;
 mod compactor_executor;
@@ -36,7 +36,7 @@ mod sorted_run_iterator;
 mod sst;
 mod sst_iter;
 mod tablestore;
-#[cfg(any(test, feature = "db_bench"))]
+#[cfg(any(test, feature = "bencher"))]
 mod test_utils;
 mod transactional_object_store;
 mod types;
