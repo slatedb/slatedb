@@ -132,9 +132,9 @@ impl DbBench {
     /// to dump stats to the console.
     pub async fn run(&self) {
         let stats_recorder = Arc::new(StatsRecorder::new());
-        let mut write_tasks = Vec::new();
+        let mut tasks = Vec::new();
         for _ in 0..self.concurrency {
-            let mut write_task = Task::new(
+            let mut task = Task::new(
                 (*self.key_gen_supplier)(),
                 self.val_len,
                 self.write_options.clone(),
@@ -144,11 +144,11 @@ impl DbBench {
                 stats_recorder.clone(),
                 self.db.clone(),
             );
-            write_tasks.push(tokio::spawn(async move { write_task.run().await }));
+            tasks.push(tokio::spawn(async move { task.run().await }));
         }
         tokio::spawn(async move { dump_stats(stats_recorder).await });
-        for write_task in write_tasks {
-            write_task.await.unwrap();
+        for task in tasks {
+            task.await.unwrap();
         }
     }
 }
