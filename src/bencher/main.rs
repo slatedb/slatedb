@@ -1,3 +1,5 @@
+#![doc = include_str!("README.md")]
+
 use crate::args::BencherArgs;
 use args::{BencherCommands, BenchmarkDbArgs};
 use clap::Parser;
