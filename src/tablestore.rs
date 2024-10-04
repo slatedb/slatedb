@@ -575,6 +575,7 @@ mod tests {
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use ulid::Ulid;
 
+    use crate::db_state::SsTableHandle;
     use crate::error;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
@@ -631,9 +632,16 @@ mod tests {
         let sst = writer.close().await.unwrap();
 
         // then:
-        let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1, true)
-            .await
-            .unwrap();
+        let mut iter = SstIterator::new(
+            &sst,
+            ts.clone(),
+            1,
+            1,
+            true,
+            sst.info.row_attributes.clone(),
+        )
+        .await
+        .unwrap();
         assert_iterator(
             &mut iter,
             &[
@@ -725,7 +733,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_blocks(&blocks, &expected_data).await;
+        assert_blocks(&blocks, &expected_data, &handle).await;
 
         // Check that all blocks are now in cache
         for i in 0..20 {
@@ -755,7 +763,7 @@ mod tests {
             .read_blocks_using_index(&handle, index.clone(), 0..20, true)
             .await
             .unwrap();
-        assert_blocks(&blocks, &expected_data).await;
+        assert_blocks(&blocks, &expected_data, &handle).await;
 
         // Check that all blocks are again in cache
         for i in 0..20 {
@@ -779,7 +787,7 @@ mod tests {
             .read_blocks_using_index(&handle, index.clone(), 0..20, true)
             .await
             .unwrap();
-        assert_blocks(&blocks, &expected_data).await;
+        assert_blocks(&blocks, &expected_data, &handle).await;
 
         // Check that all blocks are still in cache
         for i in 0..20 {
@@ -799,22 +807,27 @@ mod tests {
             .read_blocks_using_index(&handle, index.clone(), 5..10, true)
             .await
             .unwrap();
-        assert_blocks(&blocks, &expected_data[5..10]).await;
+        assert_blocks(&blocks, &expected_data[5..10], &handle).await;
 
         let blocks = ts
             .read_blocks_using_index(&handle, index.clone(), 15..20, true)
             .await
             .unwrap();
-        assert_blocks(&blocks, &expected_data[15..20]).await;
+        assert_blocks(&blocks, &expected_data[15..20], &handle).await;
     }
 
     #[allow(dead_code)]
-    async fn assert_blocks(blocks: &VecDeque<Arc<Block>>, expected: &[(Vec<u8>, ValueDeletable)]) {
+    async fn assert_blocks(
+        blocks: &VecDeque<Arc<Block>>,
+        expected: &[(Vec<u8>, ValueDeletable)],
+        handle: &SsTableHandle,
+    ) {
         let mut block_iter = blocks.iter();
         let mut expected_iter = expected.iter();
 
         while let (Some(block), Some(expected_item)) = (block_iter.next(), expected_iter.next()) {
-            let mut iter = BlockIterator::from_first_key(block.clone());
+            let mut iter =
+                BlockIterator::from_first_key(block.clone(), handle.info.row_attributes.clone());
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, expected_item.0);
             assert_eq!(ValueDeletable::Value(kv.value), expected_item.1);

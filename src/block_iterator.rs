@@ -2,12 +2,9 @@ use std::sync::Arc;
 
 use bytes::{Buf, Bytes, BytesMut};
 
-use crate::{
-    block::{Block, TOMBSTONE},
-    error::SlateDBError,
-    iter::KeyValueIterator,
-    types::{KeyValueDeletable, ValueDeletable},
-};
+use crate::db_state::RowAttribute;
+use crate::row_codec::decode_row_v0;
+use crate::{block::Block, error::SlateDBError, iter::KeyValueIterator, types::KeyValueDeletable};
 
 pub trait BlockLike {
     fn data(&self) -> &Bytes;
@@ -50,11 +47,12 @@ pub struct BlockIterator<B: BlockLike> {
     // first key in the block, because slateDB does not support multi version of keys
     // so we use `Bytes` temporarily
     first_key: Bytes,
+    row_attributes: Vec<RowAttribute>,
 }
 
 impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
     async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
-        let Some(key_value) = self.load_at_current_off() else {
+        let Ok(Some(key_value)) = self.load_at_current_off() else {
             return Ok(None);
         };
         self.advance();
@@ -63,17 +61,18 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
 }
 
 impl<B: BlockLike> BlockIterator<B> {
-    pub fn from_first_key(block: B) -> BlockIterator<B> {
+    pub fn from_first_key(block: B, row_attributes: Vec<RowAttribute>) -> BlockIterator<B> {
         BlockIterator {
             first_key: BlockIterator::decode_first_key(&block),
             block,
             off_off: 0,
+            row_attributes,
         }
     }
 
     /// Construct a BlockIterator that starts at the given key, or at the first
     /// key greater than the given key if the exact key given is not in the block.
-    pub fn from_key(block: B, key: &[u8]) -> BlockIterator<B> {
+    pub fn from_key(block: B, key: &[u8], row_attributes: Vec<RowAttribute>) -> BlockIterator<B> {
         let first_key = BlockIterator::decode_first_key(&block);
 
         let idx = block.offsets().partition_point(|offset| {
@@ -91,6 +90,7 @@ impl<B: BlockLike> BlockIterator<B> {
             block,
             off_off: idx,
             first_key,
+            row_attributes,
         }
     }
 
@@ -98,35 +98,19 @@ impl<B: BlockLike> BlockIterator<B> {
         self.off_off += 1;
     }
 
-    fn load_at_current_off(&self) -> Option<KeyValueDeletable> {
+    fn load_at_current_off(&self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
         if self.off_off >= self.block.offsets().len() {
-            return None;
+            return Ok(None);
         }
         let off = self.block.offsets()[self.off_off];
         let off_usz = off as usize;
         // TODO: bounds checks to avoid panics? (paulgb)
         let mut cursor = self.block.data().slice(off_usz..);
-        let overlap_len = cursor.get_u16() as usize;
-        let rest_len = cursor.get_u16() as usize;
-        let rest_key = cursor.slice(..rest_len);
-        cursor.advance(rest_len);
-        let value_len = cursor.get_u32();
 
-        let v = if value_len == TOMBSTONE {
-            ValueDeletable::Tombstone
-        } else {
-            let value = cursor.slice(..value_len as usize);
-            ValueDeletable::Value(value)
-        };
-
-        let mut key = BytesMut::with_capacity(overlap_len + rest_len);
-        key.extend_from_slice(&self.first_key[..overlap_len]);
-        key.extend_from_slice(&rest_key);
-
-        Some(KeyValueDeletable {
-            key: key.into(),
-            value: v,
-        })
+        match decode_row_v0(&self.first_key, &self.row_attributes, &mut cursor) {
+            Ok(row) => Ok(Some(row)),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn decode_first_key(block: &B) -> Bytes {
@@ -143,17 +127,22 @@ impl<B: BlockLike> BlockIterator<B> {
 mod tests {
     use crate::block::BlockBuilder;
     use crate::block_iterator::BlockIterator;
+    use crate::db_state::RowAttribute;
     use crate::iter::KeyValueIterator;
     use crate::test_utils;
 
+    fn attributes() -> Vec<RowAttribute> {
+        vec![RowAttribute::Flags]
+    }
+
     #[tokio::test]
     async fn test_iterator() {
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new(1024, attributes());
         assert!(block_builder.add("donkey".as_ref(), Some("kong".as_ref())));
         assert!(block_builder.add("kratos".as_ref(), Some("atreus".as_ref())));
         assert!(block_builder.add("super".as_ref(), Some("mario".as_ref())));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_first_key(&block);
+        let mut iter = BlockIterator::from_first_key(&block, attributes());
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"donkey", b"kong");
         let kv = iter.next().await.unwrap().unwrap();
@@ -165,12 +154,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_iter_from_existing_key() {
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new(1024, attributes());
         assert!(block_builder.add("donkey".as_ref(), Some("kong".as_ref())));
         assert!(block_builder.add("kratos".as_ref(), Some("atreus".as_ref())));
         assert!(block_builder.add("super".as_ref(), Some("mario".as_ref())));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"kratos".as_ref());
+        let mut iter = BlockIterator::from_key(&block, b"kratos".as_ref(), attributes());
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
@@ -180,12 +169,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_iter_from_nonexisting_key() {
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new(1024, attributes());
         assert!(block_builder.add("donkey".as_ref(), Some("kong".as_ref())));
         assert!(block_builder.add("kratos".as_ref(), Some("atreus".as_ref())));
         assert!(block_builder.add("super".as_ref(), Some("mario".as_ref())));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"ka".as_ref());
+        let mut iter = BlockIterator::from_key(&block, b"ka".as_ref(), attributes());
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
@@ -195,12 +184,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_iter_from_end() {
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new(1024, attributes());
         assert!(block_builder.add("donkey".as_ref(), Some("kong".as_ref())));
         assert!(block_builder.add("kratos".as_ref(), Some("atreus".as_ref())));
         assert!(block_builder.add("super".as_ref(), Some("mario".as_ref())));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"zzz".as_ref());
+        let mut iter = BlockIterator::from_key(&block, b"zzz".as_ref(), attributes());
         assert!(iter.next().await.unwrap().is_none());
     }
 }

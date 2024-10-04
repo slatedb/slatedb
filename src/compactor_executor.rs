@@ -95,7 +95,15 @@ impl TokioCompactionExecutorInner {
         let mut l0_iters = VecDeque::new();
         for l0 in compaction.ssts.iter() {
             // block cache is disabled here so that we dont clobber the cache
-            let iter = SstIterator::new_spawn(l0, self.table_store.clone(), 4, 256, false).await?;
+            let iter = SstIterator::new_spawn(
+                l0,
+                self.table_store.clone(),
+                4,
+                256,
+                false,
+                l0.info.row_attributes.clone(),
+            )
+            .await?;
             l0_iters.push_back(iter);
         }
         let l0_merge_iter = MergeIterator::new(l0_iters).await?;
