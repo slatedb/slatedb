@@ -164,7 +164,7 @@ pub(crate) struct BenchmarkDbArgs {
 
 impl BenchmarkDbArgs {
     pub(crate) fn key_gen_supplier(&self) -> Box<dyn Fn() -> Box<dyn KeyGenerator>> {
-        let supplier = match self.key_generator_type {
+        let supplier = match self.key_generator {
             KeyGeneratorType::Random => {
                 let key_len = self.key_len;
                 move || Box::new(RandomKeyGenerator::new(key_len)) as Box<dyn KeyGenerator>
