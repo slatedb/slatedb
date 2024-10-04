@@ -122,10 +122,10 @@ pub(crate) struct BenchmarkDbArgs {
 
     #[arg(
         long,
-        help = "The key distribution to use.",
-        default_value_t = KeyDistribution::Random
+        help = "The key generator to use.",
+        default_value_t = KeyGeneratorType::Random
     )]
-    pub(crate) key_distribution: KeyDistribution,
+    pub(crate) key_generator: KeyGeneratorType,
 
     #[arg(
         long,
@@ -164,8 +164,8 @@ pub(crate) struct BenchmarkDbArgs {
 
 impl BenchmarkDbArgs {
     pub(crate) fn key_gen_supplier(&self) -> Box<dyn Fn() -> Box<dyn KeyGenerator>> {
-        let supplier = match self.key_distribution {
-            KeyDistribution::Random => {
+        let supplier = match self.key_generator_type {
+            KeyGeneratorType::Random => {
                 let key_len = self.key_len;
                 move || Box::new(RandomKeyGenerator::new(key_len)) as Box<dyn KeyGenerator>
             }
@@ -175,31 +175,31 @@ impl BenchmarkDbArgs {
 }
 
 #[derive(Clone)]
-pub(crate) enum KeyDistribution {
+pub(crate) enum KeyGeneratorType {
     Random,
 }
 
-const KEY_DISTRIBUTION_RANDOM: &str = "Random";
+const KEY_GENERATOR_TYPE_RANDOM: &str = "Random";
 
-impl ValueEnum for KeyDistribution {
+impl ValueEnum for KeyGeneratorType {
     fn value_variants<'a>() -> &'a [Self] {
-        &[KeyDistribution::Random]
+        &[KeyGeneratorType::Random]
     }
 
     fn to_possible_value(&self) -> Option<PossibleValue> {
         match self {
-            KeyDistribution::Random => Some(PossibleValue::new(KEY_DISTRIBUTION_RANDOM)),
+            KeyGeneratorType::Random => Some(PossibleValue::new(KEY_GENERATOR_TYPE_RANDOM)),
         }
     }
 }
 
-impl Display for KeyDistribution {
+impl Display for KeyGeneratorType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "{}",
             match self {
-                KeyDistribution::Random => KEY_DISTRIBUTION_RANDOM,
+                KeyGeneratorType::Random => KEY_GENERATOR_TYPE_RANDOM,
             }
         )
     }
