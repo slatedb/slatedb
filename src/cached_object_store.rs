@@ -999,11 +999,6 @@ impl FsCacheEvictorInner {
                 return total_bytes;
             }
 
-            self.db_stats
-                .object_store_cache_evicted_bytes
-                .add(evicted_bytes as u64);
-            self.db_stats.object_store_cache_evicted_keys.inc();
-
             total_bytes += evicted_bytes;
         }
 
@@ -1032,6 +1027,18 @@ impl FsCacheEvictorInner {
         self.cache_entries.lock().await.remove(&target);
         self.cache_size_bytes
             .fetch_sub(target_bytes as u64, Ordering::SeqCst);
+
+        // sync the metrics after eviction
+        self.db_stats
+            .object_store_cache_evicted_bytes
+            .add(target_bytes as u64);
+        self.db_stats.object_store_cache_evicted_keys.inc();
+        self.db_stats
+            .object_store_cache_keys
+            .set(self.cache_entries.lock().await.len() as u64);
+        self.db_stats
+            .object_store_cache_bytes
+            .set(self.cache_size_bytes.load(Ordering::Relaxed));
 
         target_bytes
     }
