@@ -860,7 +860,7 @@ impl FsCacheEvictor {
         let rx = guard.await.take().expect("evictor already started");
 
         // scan the cache folder to load the cache entries on disk
-        let scan_task_handle = tokio::spawn(inner.clone().scan_entries());
+        let scan_task_handle = tokio::spawn(inner.clone().scan_entries(true));
         self.scan_task_handle.set(scan_task_handle).ok();
 
         // start the background evictor task, it'll be triggered whenever a new cache entry is added
@@ -877,7 +877,9 @@ impl FsCacheEvictor {
         inner: Arc<FsCacheEvictorInner>,
     ) {
         while let Some((path, bytes)) = rx.recv().await {
-            inner.maybe_evict(path, bytes, SystemTime::now()).await;
+            inner
+                .track_new_entry(path, bytes, SystemTime::now(), true)
+                .await;
         }
     }
 
@@ -926,7 +928,7 @@ impl FsCacheEvictorInner {
     // scan the cache folder, and load the cache entries into the in memory trie cache_entries.
     // this function is only called on start up, and it's expected to runned interleavely with
     // maybe_evict is being called.
-    pub async fn scan_entries(self: Arc<Self>) {
+    pub async fn scan_entries(self: Arc<Self>, evict: bool) {
         // walk the cache folder, record the files and their last access time into the cache_entries
         let iter = WalkDir::new(&self.root_folder).into_iter();
         for entry in iter {
@@ -955,17 +957,16 @@ impl FsCacheEvictorInner {
             let path = entry.path().to_path_buf();
             let bytes = metadata.len() as usize;
 
-            // track the cache files into the cache_entries & cache_size_bytes, may trigger evict
-            // if the cache size exceeds the limit.
-            self.maybe_evict(path, bytes, atime).await;
+            self.track_new_entry(path, bytes, atime, evict).await;
         }
     }
 
-    pub async fn maybe_evict(
+    async fn track_new_entry(
         &self,
         path: std::path::PathBuf,
         bytes: usize,
         accessed_time: SystemTime,
+        eivct: bool,
     ) -> usize {
         // record the new cache entry into the cache_entries, and increase the cache_size_bytes
         self.cache_size_bytes
@@ -982,6 +983,10 @@ impl FsCacheEvictorInner {
         self.db_stats
             .object_store_cache_bytes
             .set(self.cache_size_bytes.load(Ordering::Relaxed));
+
+        if !eivct {
+            return 0;
+        }
 
         // if the cache size is still below the limit, do nothing
         if self.cache_size_bytes.load(Ordering::Relaxed) <= self.max_cache_size_bytes as u64 {
@@ -1046,18 +1051,29 @@ impl FsCacheEvictorInner {
     // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, which is an approximation
     // of LRU, it randomized pick two files, compare their last access time, and choose the older one to evict.
     async fn pick_evict_target(&self) -> Option<(std::path::PathBuf, usize)> {
-        let ((path0, (atime0, bytes0)), (path1, (atime1, bytes1))) = match (
-            self.random_pick_entry().await,
-            self.random_pick_entry().await,
-        ) {
-            (Some(o0), Some(o1)) => (o0, o1),
-            _ => return None,
-        };
+        if self.cache_entries.lock().await.len() < 2 {
+            return None;
+        }
 
-        if atime0 <= atime1 {
-            Some((path0, bytes0))
-        } else {
-            Some((path1, bytes1))
+        loop {
+            let ((path0, (atime0, bytes0)), (path1, (atime1, bytes1))) = match (
+                self.random_pick_entry().await,
+                self.random_pick_entry().await,
+            ) {
+                (Some(o0), Some(o1)) => (o0, o1),
+                _ => return None,
+            };
+
+            // random_pick_entry might return the same file, skip it.
+            if path0 == path1 {
+                continue;
+            }
+
+            if atime0 <= atime1 {
+                return Some((path0, bytes0));
+            } else {
+                return Some((path1, bytes1));
+            }
         }
     }
 
@@ -1460,15 +1476,21 @@ mod tests {
         evictor.batch_factor = 2;
 
         let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
-        let evicted = evictor.maybe_evict(path0, 1024, SystemTime::now()).await;
+        let evicted = evictor
+            .track_new_entry(path0, 1024, SystemTime::now(), true)
+            .await;
         assert_eq!(evicted, 0);
 
         let path1 = gen_rand_file(temp_dir.path(), "file1", 1024);
-        let evicted = evictor.maybe_evict(path1, 1024, SystemTime::now()).await;
+        let evicted = evictor
+            .track_new_entry(path1, 1024, SystemTime::now(), true)
+            .await;
         assert_eq!(evicted, 0);
 
         let path2 = gen_rand_file(temp_dir.path(), "file2", 1024);
-        let evicted = evictor.maybe_evict(path2, 1024, SystemTime::now()).await;
+        let evicted = evictor
+            .track_new_entry(path2, 1024, SystemTime::now(), true)
+            .await;
         assert_eq!(evicted, 2048);
 
         let file_paths = walkdir::WalkDir::new(temp_dir.path())
@@ -1497,7 +1519,7 @@ mod tests {
         filetime::set_file_atime(&path0, FileTime::from_system_time(SystemTime::UNIX_EPOCH))
             .unwrap();
 
-        evictor.clone().scan_entries().await;
+        evictor.clone().scan_entries(false).await;
 
         let (target_path, size) = evictor.pick_evict_target().await.unwrap();
         assert_eq!(target_path, path0);
