@@ -966,7 +966,7 @@ impl FsCacheEvictorInner {
         path: std::path::PathBuf,
         bytes: usize,
         accessed_time: SystemTime,
-        eivct: bool,
+        evict: bool,
     ) -> usize {
         // record the new cache entry into the cache_entries, and increase the cache_size_bytes
         self.cache_size_bytes
@@ -984,7 +984,7 @@ impl FsCacheEvictorInner {
             .object_store_cache_bytes
             .set(self.cache_size_bytes.load(Ordering::Relaxed));
 
-        if !eivct {
+        if !evict {
             return 0;
         }
 
