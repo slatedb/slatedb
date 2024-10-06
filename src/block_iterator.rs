@@ -52,11 +52,15 @@ pub struct BlockIterator<B: BlockLike> {
 
 impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
     async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
-        let Ok(Some(key_value)) = self.load_at_current_off() else {
-            return Ok(None);
-        };
-        self.advance();
-        Ok(Some(key_value))
+        let result = self.load_at_current_off();
+        match result {
+            Ok(None) => Ok(None),
+            Ok(key_value) => {
+                self.advance();
+                Ok(key_value)
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 

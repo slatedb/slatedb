@@ -632,16 +632,9 @@ mod tests {
         let sst = writer.close().await.unwrap();
 
         // then:
-        let mut iter = SstIterator::new(
-            &sst,
-            ts.clone(),
-            1,
-            1,
-            true,
-            sst.info.row_attributes.clone(),
-        )
-        .await
-        .unwrap();
+        let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1, true)
+            .await
+            .unwrap();
         assert_iterator(
             &mut iter,
             &[

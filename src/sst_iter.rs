@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 
-use crate::db_state::{RowAttribute, SsTableHandle};
+use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::{
@@ -32,7 +32,6 @@ pub(crate) struct SstIterator<'a, H: AsRef<SsTableHandle> = &'a SsTableHandle> {
     blocks_to_fetch: usize,
     table_store: Arc<TableStore>,
     cache_blocks: bool,
-    row_attributes: Vec<RowAttribute>,
 }
 
 impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
@@ -71,7 +70,6 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
         cache_blocks: bool,
-        row_attributes: Vec<RowAttribute>,
     ) -> Result<Self, SlateDBError> {
         Self::new_opts(
             table,
@@ -81,7 +79,6 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
             blocks_to_fetch,
             false,
             cache_blocks,
-            row_attributes,
         )
         .await
     }
@@ -92,7 +89,6 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
         cache_blocks: bool,
-        row_attributes: Vec<RowAttribute>,
     ) -> Result<Self, SlateDBError> {
         Self::new_opts(
             table,
@@ -102,7 +98,6 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
             blocks_to_fetch,
             true,
             cache_blocks,
-            row_attributes,
         )
         .await
     }
@@ -113,7 +108,6 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
         cache_blocks: bool,
-        row_attributes: Vec<RowAttribute>,
     ) -> Result<Self, SlateDBError> {
         Self::new_opts(
             table,
@@ -123,7 +117,6 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
             blocks_to_fetch,
             false,
             cache_blocks,
-            row_attributes,
         )
         .await
     }
@@ -137,7 +130,6 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
         blocks_to_fetch: usize,
         spawn: bool,
         cache_blocks: bool,
-        row_attributes: Vec<RowAttribute>,
     ) -> Result<Self, SlateDBError> {
         assert!(max_fetch_tasks > 0);
         assert!(blocks_to_fetch > 0);
@@ -156,7 +148,6 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
             blocks_to_fetch,
             table_store,
             cache_blocks,
-            row_attributes,
         };
         if spawn {
             iter.spawn_fetches();
@@ -209,12 +200,12 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
                             return match first_key {
                                 None => Ok(Some(BlockIterator::from_first_key(
                                     block,
-                                    self.row_attributes.clone(),
+                                    self.table.as_ref().info.row_attributes.clone(),
                                 ))),
                                 Some(k) => Ok(Some(BlockIterator::from_key(
                                     block,
                                     k,
-                                    self.row_attributes.clone(),
+                                    self.table.as_ref().info.row_attributes.clone(),
                                 ))),
                             };
                         } else {
@@ -299,16 +290,9 @@ mod tests {
         let index = table_store.read_index(&sst_handle).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 1);
 
-        let mut iter = SstIterator::new(
-            &sst_handle,
-            table_store.clone(),
-            1,
-            1,
-            true,
-            vec![RowAttribute::Flags],
-        )
-        .await
-        .unwrap();
+        let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 1, 1, true)
+            .await
+            .unwrap();
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
@@ -359,16 +343,9 @@ mod tests {
         let index = table_store.read_index(&sst_handle).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 6);
 
-        let mut iter = SstIterator::new(
-            &sst_handle,
-            table_store.clone(),
-            3,
-            3,
-            true,
-            vec![RowAttribute::Flags],
-        )
-        .await
-        .unwrap();
+        let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 3, 3, true)
+            .await
+            .unwrap();
         for i in 0..1000 {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, format!("key{}", i));
@@ -415,7 +392,6 @@ mod tests {
                 1,
                 1,
                 false,
-                vec![RowAttribute::Flags],
             )
             .await
             .unwrap();
@@ -454,17 +430,10 @@ mod tests {
         let mut expected_val_gen = val_gen.clone();
         let (sst, nkeys) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
-        let mut iter = SstIterator::new_from_key(
-            &sst,
-            table_store.clone(),
-            &[b'a'; 16],
-            1,
-            1,
-            false,
-            vec![RowAttribute::Flags],
-        )
-        .await
-        .unwrap();
+        let mut iter =
+            SstIterator::new_from_key(&sst, table_store.clone(), &[b'a'; 16], 1, 1, false)
+                .await
+                .unwrap();
 
         for _ in 0..nkeys {
             let e = iter.next().await.unwrap().unwrap();
@@ -498,17 +467,10 @@ mod tests {
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
         let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
-        let mut iter = SstIterator::new_from_key(
-            &sst,
-            table_store.clone(),
-            &[b'z'; 16],
-            1,
-            1,
-            false,
-            vec![RowAttribute::Flags],
-        )
-        .await
-        .unwrap();
+        let mut iter =
+            SstIterator::new_from_key(&sst, table_store.clone(), &[b'z'; 16], 1, 1, false)
+                .await
+                .unwrap();
 
         assert!(iter.next().await.unwrap().is_none());
     }

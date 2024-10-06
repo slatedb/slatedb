@@ -346,16 +346,9 @@ mod tests {
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
-        let mut iter = SstIterator::new(
-            handle,
-            table_store.clone(),
-            1,
-            1,
-            false,
-            handle.info.row_attributes.clone(),
-        )
-        .await
-        .unwrap();
+        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1, false)
+            .await
+            .unwrap();
         for i in 0..4 {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), &[b'a' + i as u8; 16]);

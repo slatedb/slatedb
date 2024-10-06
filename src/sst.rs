@@ -317,6 +317,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     filter_builder: BloomFilterBuilder,
     sst_codec: Box<dyn SsTableInfoCodec>,
     compression_codec: Option<CompressionCodec>,
+    row_attributes: Vec<RowAttribute>,
 }
 
 impl<'a> EncodedSsTableBuilder<'a> {
@@ -336,13 +337,14 @@ impl<'a> EncodedSsTableBuilder<'a> {
             first_key: None,
             sst_first_key: None,
             block_size,
-            builder: BlockBuilder::new(block_size, row_attributes),
+            builder: BlockBuilder::new(block_size, row_attributes.clone()),
             min_filter_keys,
             num_keys: 0,
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
             compression_codec,
+            row_attributes,
         }
     }
 
@@ -491,7 +493,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
             filter_offset: filter_offset as u64,
             filter_len: filter_len as u64,
             compression_codec: self.compression_codec,
-            row_attributes: vec![RowAttribute::Flags],
+            row_attributes: self.row_attributes,
         };
         SsTableInfo::encode(&info, &mut buf, &*self.sst_codec);
 

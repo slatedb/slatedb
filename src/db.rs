@@ -89,16 +89,9 @@ impl DbInner {
 
         for sst in &snapshot.state.core.l0 {
             if self.sst_might_include_key(sst, key, key_hash).await? {
-                let mut iter = SstIterator::new_from_key(
-                    sst,
-                    self.table_store.clone(),
-                    key,
-                    1,
-                    1,
-                    true,
-                    sst.info.row_attributes.clone(),
-                )
-                .await?; // cache blocks that are being read
+                let mut iter =
+                    SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1, true)
+                        .await?; // cache blocks that are being read
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
                         return Ok(entry.value.into_option());
@@ -315,15 +308,9 @@ impl DbInner {
                 SsTableId::Wal(id) => *id,
                 SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
             };
-            let iter = SstIterator::new_spawn(
-                Rc::clone(&sst),
-                db_inner.table_store.clone(),
-                1,
-                256,
-                true,
-                sst.info.row_attributes.clone(),
-            )
-            .await?;
+            let iter =
+                SstIterator::new_spawn(Rc::clone(&sst), db_inner.table_store.clone(), 1, 256, true)
+                    .await?;
             Ok((iter, id))
         }
 
@@ -875,16 +862,9 @@ mod tests {
         assert_eq!(state.l0.len(), 1);
 
         let l0 = state.l0.front().unwrap();
-        let mut iter = SstIterator::new(
-            l0,
-            table_store.clone(),
-            1,
-            1,
-            false,
-            l0.info.row_attributes.clone(),
-        )
-        .await
-        .unwrap();
+        let mut iter = SstIterator::new(l0, table_store.clone(), 1, 1, false)
+            .await
+            .unwrap();
         assert_iterator(
             &mut iter,
             &[
@@ -956,16 +936,9 @@ mod tests {
         assert_eq!(l0.len(), 3);
         for i in 0u8..3u8 {
             let sst1 = l0.get(2 - i as usize).unwrap();
-            let mut iter = SstIterator::new(
-                sst1,
-                table_store.clone(),
-                1,
-                1,
-                true,
-                sst1.info.row_attributes.clone(),
-            )
-            .await
-            .unwrap();
+            let mut iter = SstIterator::new(sst1, table_store.clone(), 1, 1, true)
+                .await
+                .unwrap();
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);

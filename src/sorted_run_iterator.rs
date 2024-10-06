@@ -101,7 +101,6 @@ impl<'a> SortedRunIterator<'a> {
                     blocks_to_fetch,
                     spawn,
                     cache_blocks,
-                    h.info.row_attributes.clone(),
                 )
                 .await?,
             ),
@@ -143,7 +142,6 @@ impl<'a> KeyValueIterator for SortedRunIterator<'a> {
                             self.blocks_to_fetch,
                             self.blocks_to_buffer,
                             self.cache_blocks,
-                            h.info.row_attributes.clone(),
                         )
                         .await?,
                     ),

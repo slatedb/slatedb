@@ -81,6 +81,9 @@ fn encode_row_flags(is_tombstone: bool) -> u8 {
     flags.bits()
 }
 
+/// Decodes a row based on the encoding specified in [`encode_row_v0`]. If the
+/// `data` passed in was not encoded using `encode_row_v0`, or if there are any
+/// unknown row attributes, this method will return an error.
 pub(crate) fn decode_row_v0(
     first_key: &Bytes,
     row_attributes: &Vec<RowAttribute>,
