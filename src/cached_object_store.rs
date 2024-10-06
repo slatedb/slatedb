@@ -877,7 +877,7 @@ impl FsCacheEvictor {
         inner: Arc<FsCacheEvictorInner>,
     ) {
         while let Some((path, bytes)) = rx.recv().await {
-            inner.maybe_evict(path, bytes).await;
+            inner.maybe_evict(path, bytes, SystemTime::now()).await;
         }
     }
 
@@ -953,24 +953,27 @@ impl FsCacheEvictorInner {
             };
             let atime = metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
             let path = entry.path().to_path_buf();
-            let bytes = metadata.len();
+            let bytes = metadata.len() as usize;
 
-            self.cache_entries
-                .lock()
-                .await
-                .insert(path, (atime, bytes as usize));
-            self.cache_size_bytes.fetch_add(bytes, Ordering::SeqCst);
+            // track the cache files into the cache_entries & cache_size_bytes, may trigger evict
+            // if the cache size exceeds the limit.
+            self.maybe_evict(path, bytes, atime).await;
         }
     }
 
-    pub async fn maybe_evict(&self, path: std::path::PathBuf, bytes: usize) -> usize {
+    pub async fn maybe_evict(
+        &self,
+        path: std::path::PathBuf,
+        bytes: usize,
+        accessed_time: SystemTime,
+    ) -> usize {
         // record the new cache entry into the cache_entries, and increase the cache_size_bytes
         self.cache_size_bytes
             .fetch_add(bytes as u64, Ordering::SeqCst);
         self.cache_entries
             .lock()
             .await
-            .insert(path.clone(), (SystemTime::now(), bytes));
+            .insert(path.clone(), (accessed_time, bytes));
 
         // record the metrics
         self.db_stats
@@ -1450,15 +1453,15 @@ mod tests {
         evictor.batch_factor = 2;
 
         let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
-        let evicted = evictor.maybe_evict(path0, 1024).await;
+        let evicted = evictor.maybe_evict(path0, 1024, SystemTime::now()).await;
         assert_eq!(evicted, 0);
 
         let path1 = gen_rand_file(temp_dir.path(), "file1", 1024);
-        let evicted = evictor.maybe_evict(path1, 1024).await;
+        let evicted = evictor.maybe_evict(path1, 1024, SystemTime::now()).await;
         assert_eq!(evicted, 0);
 
         let path2 = gen_rand_file(temp_dir.path(), "file2", 1024);
-        let evicted = evictor.maybe_evict(path2, 1024).await;
+        let evicted = evictor.maybe_evict(path2, 1024, SystemTime::now()).await;
         assert_eq!(evicted, 2048);
 
         let file_paths = walkdir::WalkDir::new(temp_dir.path())
