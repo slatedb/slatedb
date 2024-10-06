@@ -57,8 +57,7 @@ filetime = "0.2"
 default = ["aws", "moka"]
 aws = ["object_store/aws"]
 cli = ["clap", "clap/derive"]
-db_bench = ["aws", "leaky-bucket", "clap", "clap/derive", "wal_disable"]
-s3_bench = ["aws", "wal_disable", "clap", "clap/cargo", "moka"]
+bencher = ["aws", "wal_disable", "clap", "clap/derive", "moka"]
 compression = ["snappy"]
 snappy = ["dep:snap"]
 zlib = ["dep:flate2"]
@@ -67,20 +66,16 @@ zstd = ["dep:zstd"]
 wal_disable = []
 moka = ["dep:moka"]
 foyer = ["dep:foyer"]
+
 [[bin]]
 name = "compaction-execute-bench"
 path = "src/compaction_execute_bench/compaction_execute_bench.rs"
-required-features = ["db_bench"]
+required-features = ["bencher"]
 
 [[bin]]
-name = "db-bench"
-path = "src/db_bench/main.rs"
-required-features = ["db_bench"]
-
-[[bin]]
-name = "s3-bench"
-path = "src/s3_bench/main.rs"
-required-features = ["s3_bench"]
+name = "bencher"
+path = "src/bencher/main.rs"
+required-features = ["bencher"]
 
 [[bin]]
 name = "slatedb"
