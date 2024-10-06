@@ -166,8 +166,8 @@ Currently, SlateDB does not have a mechanism for backwards-compatibility of the 
 We will first introduce the following fields to the flatbuffer definitions:
 
 - `format_version`: field that specifies the codec version that encoded this SST
-- `meta_features`: an enumeration of metadata fields that are available with each encoded row. This
-  makes it possible in the future to save space per row by disabling metadata features, but that is
+- `row_attributes`: an enumeration of metadata fields that are available with each encoded row. This
+  makes it possible in the future to save space per row by disabling row attributes, but that is
   out of scope for this RFC
 - `creation_timestamp`: the time at which this SST file was written. For this RFC this timestamp is
   used to schedule follow-up compactions (see [periodic compaction](#periodic-compaction)).
@@ -176,10 +176,10 @@ We will first introduce the following fields to the flatbuffer definitions:
 ```fbs
 /// the metadata encoded with each row, note that the ordering of this enum is 
 /// sensitive and must be maintained
-enum MetaFeatures: byte {
+enum RowAttributes: byte {
+    RowFlags,
     Timestamp,
     TimeToLive,
-    RowFlags,
 }
 
 table SsTableInfo {
@@ -188,17 +188,20 @@ table SsTableInfo {
     // The current encoding version of the data block
     format_version: uint;
     
-    // The metadata features that are encoded with each row. These features will be encoded
-    // in order that they are declared in the MetaFeatures enum
-    meta_features: [MetaFeatures];
+    // The metadata attributes that are encoded with each row. These attributes will be encoded
+    // in order that they are declared in the RowAttributes enum
+    row_attributes: [RowAttributes];
     
-    // The time at which this SST was created
+    // The time at which this SST was created, based on the configured Clock in
+    // DbOptions
     creation_timestamp: long;
    
-    // The minimum timestamp of any row in the SST
+    // The minimum timestamp of any row in the SST, based on the configured Clock in
+    // DbOptions
     min_ts: long;
     
-    // The maximum timestamp of any row in the SST
+    // The maximum timestamp of any row in the SST, based on the configured Clock in
+    // DbOptions
     max_ts: long;
 }
 ```
@@ -218,36 +221,36 @@ The `format_version` will be bumped to 1 and will be modified to have the follow
 ```
 |  u16    | var | var  |    u32    |  var  |
 |---------|-----|------|-----------|-------|
-| key_len | key | meta | value_len | value |
+| key_len | key | attr | value_len | value |
 |---------|-----|------|-----------|-------|
 ```
 
-The newly introduced `meta` field will be decoded using the `meta_features` array specified for
-this SST. Which values meta features are included depend on the data that is being written. If
+The newly introduced `attr` field will be decoded using the `row_attributes` array specified for
+this SST. Which row attributes are included depend on the data that is being written. If
 any row in the SST has a `ttl`, the `TimeToLive` feature will be enabled.
 
 As part of this proposal, we will no longer represent tombstones as `INT_MAX` value_len and instead
-have an indicator `byte` in the meta array which specifies the `RowFlags`. `RowFlags` is a bitmask
-of descriptors on the row. The first bit in `RowFlags` is set to `1` if the row is a tombstone.
-Other bits are reserved for future flags. Later we can add other types of metadata rows as
-necessary (since flatbuffers does not support single-bit values, a byte is the smallest amount of
+have an indicator `byte` in the attribute array which specifies the `RowFlags`. `RowFlags` is a
+bitmask of descriptors on the row. The first bit in `RowFlags` is set to `1` if the row is a
+tombstone. Other bits are reserved for future flags. Later we can add other types of row attributes
+as necessary (since flatbuffers does not support single-bit values, a byte is the smallest amount of
 data we can store here):
 
 ```
-                |-- meta --|
+                |-- attr --|
 |  u16    | var |   byte   |    u32    |  var  |
 |---------|-----|----------|-----------|-------|
-| key_len | key | row_type | value_len | value |
+| key_len | key | row_flag | value_len | value |
 |---------|-----|----------|-----------|-------|
 ```
 
 In cases where both `Timestamp` and `TimeToLive` are enabled, the row will look like:
 
 ```
-                |-------- meta --------------|
+                |-------- attr --------------|
 |  u16    | var |    byte  | i64 |    i64    |    u32    |  var  |
 |---------|-----|----------------------------|-----------|-------|
-| key_len | key | row_type | ts  | expire_ts | value_len | value |
+| key_len | key | row_flag | ts  | expire_ts | value_len | value |
 |---------|-----|----------|-----|-----------|-----------|-------|
 ```
 
@@ -259,10 +262,10 @@ The metadata will be returned in the decoded `KeyValueDeletable` which will be m
 pub struct KeyValueDeletable {
     pub key: Bytes,
     pub value: ValueDeletable,
-    pub meta: KeyValueMeta,
+    pub attributes: RowAttributes,
 }
 
-pub struct KeyValueMeta {
+pub struct RowAttributes {
     pub ts: Option<i64>,
     pub expire_ts: Option<i64>,
 }
@@ -274,20 +277,21 @@ pub struct KeyValueMeta {
 
 We will introduce the concept of a compaction filter, which serves as a mechanism for pluggable
 participation in the compaction process. Specifically, the filter (if configured) will run on each
-key during the compaction process and optionally remove or modify the value.
+key during the compaction process and optionally remove or modify the value. This is independent
+of the periodic compaction interval specified in the following section.
 
 For the scope of this RFC, we will be introducing a builtin TS/TTL compaction filter. This filter
-will add a tombstone to any value where `db.clock.now() > kv.meta.expire_ts`. Note that
+will add a tombstone to any value where `db.clock.now() > kv.attributes.expire_ts`. Note that
 tombstones will still contain a timestamp see [out of order insertions](#insertion-timestamps). If
 a tombstone is added, the TTL (`expire_ts`) for the row will be cleared, indicating that a future
 run of this filter should not remove the tombstone.
 
 Since this RFC does not cover the public API for compaction filters, this filter will simply run
-on any SST that specifies `meta_features: [Timestamp | TimeToLive]`.
+on any SST that specifies `row_attributes: [Timestamp && TimeToLive]`.
 
 #### Periodic Compaction
 
-If the SST is written with the `TimeToLive` meta feature enabled, the compaction scheduler will
+If the SST is written with the `TimeToLive` row attribute enabled, the compaction scheduler will
 compare the SST's `SsTableInfo#timestamp` with a newly introduced compaction config for periodic
 compaction time limits:
 
@@ -361,3 +365,7 @@ the original `seq0` insert as it logically happened "after" `seq1`.
 - Marked `periodic_compaction_interval` as "best effort" to allow for implementations to optimize
   performance characteristics such as adding a jitter or max number of SSTs to compact in one go
 - Many misc. improvements to readability and clarifications
+
+### October 6, 2024
+
+- Minor changes and feedback. Most notable is renaming "meta features" to "row attributes"
