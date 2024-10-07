@@ -84,4 +84,22 @@ To mitigate this anomaly, we could choose:
 
 This is one of the key design decisions that we need to make in this RFC. Let's evaluate what we need to do for each approach in the later part of this RFC.
 
-### Snapshot
+### Prequsites
+
+As described above, Snapshot and WriteBatch are considered as the prerequisites for the transaction feature.
+
+In vanilla LevelDB, Snapshot gives the "C" part of the ACID, while WriteBatch gives the "A" and "D" parts of the ACID.
+
+As a fork of LevelDB, all the transaction feature in RocksDB needs to do is to provide the Isolation part. In a too simplified view for the optimistic transaction implementation in RocksDB, the transaction feature could be regarded as adding a **conflict check** before writing a WriteBatch. This is also true for the Badger's implementation.
+
+Let's discuss the prerequisites in this section, and evaluate the possible approaches we'd take in SlateDB to smooth the implementation of the transaction feature.
+
+#### Snapshot
+
+LevelDB and its derivatives mostly tags a sequence number to each key, and each Snapshot simply bound with a sequence number. All the read in the Snapshot filters out the values with bigger sequence number, including a new value or a tombstone on the same key.
+
+At the moment of writing, SlateDB still haven't have the equivant of sequence number yet, instead, we could regard a manifest + wal number to represent a consistent view of a table.
+
+There're an in-progress RFC on exploring the design on Snapshot. We can refer to that RFC for the details later. However, we could have an evaluation about using Sequence Number vs Manifest + WAL number approaches to make the implementation about Transactions easier.
+
+#### Write Batch
