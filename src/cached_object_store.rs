@@ -1,3 +1,5 @@
+mod lru;
+
 use std::io::SeekFrom;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
