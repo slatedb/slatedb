@@ -968,13 +968,15 @@ impl FsCacheEvictorInner {
         accessed_time: SystemTime,
         evict: bool,
     ) -> usize {
-        // record the new cache entry into the cache_entries, and increase the cache_size_bytes
-        self.cache_size_bytes
-            .fetch_add(bytes as u64, Ordering::SeqCst);
-        self.cache_entries
-            .lock()
-            .await
-            .insert(path.clone(), (accessed_time, bytes));
+        // record the new cache entry into the cache_entries, and increase the cache_size_bytes.
+        // NOTE: only increase the cache_size_bytes if the entry is not already in the cache_entries.
+        {
+            let mut guard = self.cache_entries.lock().await;
+            if let None = guard.insert(path.clone(), (accessed_time, bytes)) {
+                self.cache_size_bytes
+                    .fetch_add(bytes as u64, Ordering::SeqCst);
+            }
+        }
 
         // record the metrics
         self.db_stats
@@ -1029,9 +1031,14 @@ impl FsCacheEvictorInner {
         );
 
         // remove the entry from the cache_entries, and decrease the cache_size_bytes
-        self.cache_entries.lock().await.remove(&target);
-        self.cache_size_bytes
-            .fetch_sub(target_bytes as u64, Ordering::SeqCst);
+        // NOTE: only decrease the cache_size_bytes if the entry is actually removed from the cache_entries.
+        {
+            let mut guard = self.cache_entries.lock().await;
+            if let Some(_) = guard.remove(&target) {
+                self.cache_size_bytes
+                    .fetch_sub(target_bytes as u64, Ordering::SeqCst);
+            }
+        }
 
         // sync the metrics after eviction
         self.db_stats
