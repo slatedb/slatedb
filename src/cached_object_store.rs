@@ -972,7 +972,7 @@ impl FsCacheEvictorInner {
         // NOTE: only increase the cache_size_bytes if the entry is not already in the cache_entries.
         {
             let mut guard = self.cache_entries.lock().await;
-            if let None = guard.insert(path.clone(), (accessed_time, bytes)) {
+            if guard.insert(path.clone(), (accessed_time, bytes)).is_none() {
                 self.cache_size_bytes
                     .fetch_add(bytes as u64, Ordering::SeqCst);
             }
@@ -1034,7 +1034,7 @@ impl FsCacheEvictorInner {
         // NOTE: only decrease the cache_size_bytes if the entry is actually removed from the cache_entries.
         {
             let mut guard = self.cache_entries.lock().await;
-            if let Some(_) = guard.remove(&target) {
+            if guard.remove(&target).is_some() {
                 self.cache_size_bytes
                     .fetch_sub(target_bytes as u64, Ordering::SeqCst);
             }
