@@ -82,7 +82,9 @@ To mitigate this anomaly, we could choose:
 
 (2) is the approach that RocksDB takes, it does not built in SSI support, but it provides a `GetForUpdate()` method to lock the key before the write operation.
 
-This is one of the key design decisions that we need to make in this RFC. Let's evaluate what we need to do for each approach in the later part of this RFC.
+This is one of the key design decisions that we need to make in this RFC. We can evaluate what we need to do for each approach in the later part of this RFC.
+
+In my understanding, the pros of the RocksDB approach is mostly easy to implement, just regard the read operations as write operations. And in most of the time, users can make the decision by themselves about when to use `GetForUpdate()`. However, it may produce massive writes on read intensive workloads when you hope to keep the read & write operations consistent, and some researches show that manual `GetForUpdate()` often introduces unexpected hard to diagnosis bugs.
 
 ### Prequsites
 
