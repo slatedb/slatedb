@@ -14,7 +14,7 @@
 
 <!-- TOC end -->
 
-Status: In Discussion
+Status: Accepted
 
 Authors:
 
