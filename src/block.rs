@@ -1,12 +1,10 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-
+use crate::db_state::RowAttribute;
 use crate::error::SlateDBError;
+use crate::row_codec::encode_row_v0;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
 pub(crate) const SIZEOF_U32: usize = std::mem::size_of::<u32>();
-
-/// "None" values are encoded by using the maximum u32 value as the value length.
-pub(crate) const TOMBSTONE: u32 = u32::MAX;
 
 pub(crate) struct Block {
     pub(crate) data: Bytes,
@@ -59,6 +57,7 @@ pub struct BlockBuilder {
     data: Vec<u8>,
     block_size: usize,
     first_key: Bytes,
+    row_attributes: Vec<RowAttribute>,
 }
 
 // Details can be found: https://users.rust-lang.org/t/how-to-find-common-prefix-of-two-byte-slices-effectively/25815/4
@@ -77,12 +76,23 @@ fn compute_prefix_chunks<const N: usize>(lhs: &[u8], rhs: &[u8]) -> usize {
 }
 
 impl BlockBuilder {
-    pub fn new(block_size: usize) -> Self {
+    pub fn new(block_size: usize, row_attributes: Vec<RowAttribute>) -> Self {
         Self {
             offsets: Vec::new(),
             data: Vec::new(),
             block_size,
             first_key: Bytes::new(),
+            row_attributes,
+        }
+    }
+
+    pub fn new_with_same_attributes(other: &BlockBuilder, block_size: usize) -> Self {
+        Self {
+            offsets: Vec::new(),
+            data: Vec::new(),
+            block_size,
+            first_key: Bytes::new(),
+            row_attributes: other.row_attributes.clone(),
         }
     }
 
@@ -97,13 +107,13 @@ impl BlockBuilder {
     #[must_use]
     pub fn add(&mut self, key: &[u8], value: Option<&[u8]>) -> bool {
         assert!(!key.is_empty(), "key must not be empty");
-        let overlap_len = compute_prefix(&self.first_key, key);
-        let rest_key = &key[overlap_len..];
+        let key_prefix_len = compute_prefix(&self.first_key, key);
+        let key_suffix = &key[key_prefix_len..];
 
         // If adding the key-value pair would exceed the block size limit, don't add it.
         // (Unless the block is empty, in which case, allow the block to exceed the limit.)
         if self.estimated_size()
-                + rest_key.len()
+                + key_suffix.len()
                 + value.map(|v| v.len()).unwrap_or_default() // None takes no space (besides u32)
                 + SIZEOF_U16 * 3 // overlap key size + rest key size + offset size
                 + SIZEOF_U32 // value size
@@ -114,15 +124,13 @@ impl BlockBuilder {
         }
 
         self.offsets.push(self.data.len() as u16);
-        self.data.put_u16(overlap_len as u16);
-        self.data.put_u16(rest_key.len() as u16);
-        self.data.put(rest_key);
-        if let Some(value) = value {
-            self.data.put_u32(value.len() as u32);
-            self.data.put(value);
-        } else {
-            self.data.put_u32(TOMBSTONE);
-        }
+        encode_row_v0(
+            &mut self.data,
+            key_prefix_len,
+            key_suffix,
+            value,
+            &self.row_attributes,
+        );
 
         if self.first_key.is_empty() {
             self.first_key = Bytes::copy_from_slice(key);
@@ -152,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_block() {
-        let mut builder = BlockBuilder::new(4096);
+        let mut builder = BlockBuilder::new(4096, vec![RowAttribute::Flags]);
         assert!(builder.add(b"key1", Some(b"value1")));
         assert!(builder.add(b"key2", Some(b"value2")));
         let block = builder.build().unwrap();
@@ -164,7 +172,7 @@ mod tests {
 
     #[test]
     fn test_block_with_tombstone() {
-        let mut builder = BlockBuilder::new(4096);
+        let mut builder = BlockBuilder::new(4096, vec![RowAttribute::Flags]);
         assert!(builder.add(b"key1", Some(b"value1")));
         assert!(builder.add(b"key2", None));
         assert!(builder.add(b"key3", Some(b"value3")));
@@ -175,11 +183,11 @@ mod tests {
 
     #[test]
     fn test_block_size() {
-        let mut builder = BlockBuilder::new(4096);
+        let mut builder = BlockBuilder::new(4096, vec![RowAttribute::Flags]);
         assert!(builder.add(b"key1", Some(b"value1")));
         assert!(builder.add(b"key2", Some(b"value2")));
         let block = builder.build().unwrap();
-        assert_eq!(39, block.size());
+        assert_eq!(41, block.size());
     }
 
     #[test]
