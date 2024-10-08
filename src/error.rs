@@ -50,4 +50,7 @@ pub enum SlateDBError {
 
     #[error("Error Compressing Block")]
     BlockCompressionError,
+
+    #[error("Unknown RowFlags -- this may be caused by reading data encoded with a newer codec")]
+    InvalidRowFlags,
 }
