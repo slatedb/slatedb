@@ -625,7 +625,9 @@ impl FsCacheEntry {
 
         // try triggering evict before writing
         if let Some(evictor) = &self.evictor {
-            evictor.maybe_evict(path.to_path_buf(), buf.len()).await;
+            evictor
+                .track_entry_accessed(path.to_path_buf(), buf.len(), true)
+                .await;
         }
 
         let mut file = OpenOptions::new()
@@ -711,6 +713,14 @@ impl LocalCacheEntry for FsCacheEntry {
             return Ok(None);
         }
 
+        // track the part access for evictor
+        if let Some(evictor) = &self.evictor {
+            evictor
+                .track_entry_accessed(part_path.to_path_buf(), self.part_size, false)
+                .await;
+        }
+
+        // read the part file, and return the bytes
         let file = File::open(&part_path).await.map_err(wrap_io_err)?;
         let mut reader = tokio::io::BufReader::new(file);
         let mut buffer = vec![0; range_in_part.len()];
@@ -796,15 +806,27 @@ impl LocalCacheEntry for FsCacheEntry {
     }
 
     async fn read_head(&self) -> object_store::Result<Option<(ObjectMeta, Attributes)>> {
-        let meta_path = Self::make_head_path(self.root_folder.clone(), &self.location);
+        let head_path = Self::make_head_path(self.root_folder.clone(), &self.location);
 
-        let exists = fs::try_exists(&meta_path).await.unwrap_or(false);
-        if !exists {
-            return Ok(None);
+        // if the head file does not exist, return None
+        let head_size_bytes = match fs::metadata(&head_path).await {
+            Ok(metadata) => metadata.len() as usize,
+            Err(err) => {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(None);
+                }
+                return Err(wrap_io_err(err));
+            }
+        };
+
+        // track the head access for evictor
+        if let Some(evictor) = &self.evictor {
+            evictor
+                .track_entry_accessed(head_path.to_path_buf(), head_size_bytes, false)
+                .await;
         }
 
-        // TODO: process not found err here instead of check exists
-        let file = File::open(&meta_path).await.map_err(wrap_io_err)?;
+        let file = File::open(&head_path).await.map_err(wrap_io_err)?;
         let mut reader = tokio::io::BufReader::new(file);
         let mut content = String::new();
         reader
@@ -817,6 +839,8 @@ impl LocalCacheEntry for FsCacheEntry {
     }
 }
 
+type FsCacheEvictorWork = (std::path::PathBuf, usize, bool);
+
 /// FsCacheEvictor evicts the cache entries when the cache size exceeds the limit. it is expected to
 /// run in the background to avoid blocking the caller, and it'll be triggered whenever a new cache entry
 /// is added.
@@ -824,9 +848,9 @@ impl LocalCacheEntry for FsCacheEntry {
 struct FsCacheEvictor {
     root_folder: std::path::PathBuf,
     max_cache_size_bytes: usize,
-    tx: tokio::sync::mpsc::Sender<(std::path::PathBuf, usize)>,
-    rx: Mutex<Option<tokio::sync::mpsc::Receiver<(std::path::PathBuf, usize)>>>,
-    evict_task_handle: OnceCell<tokio::task::JoinHandle<()>>,
+    tx: tokio::sync::mpsc::Sender<FsCacheEvictorWork>,
+    rx: Mutex<Option<tokio::sync::mpsc::Receiver<FsCacheEvictorWork>>>,
+    work_task_handle: OnceCell<tokio::task::JoinHandle<()>>,
     scan_task_handle: OnceCell<tokio::task::JoinHandle<()>>,
     db_stats: Arc<DbStats>,
 }
@@ -843,7 +867,7 @@ impl FsCacheEvictor {
             max_cache_size_bytes,
             tx,
             rx: Mutex::new(Some(rx)),
-            evict_task_handle: OnceCell::new(),
+            work_task_handle: OnceCell::new(),
             scan_task_handle: OnceCell::new(),
             db_stats,
         }
@@ -864,31 +888,36 @@ impl FsCacheEvictor {
         self.scan_task_handle.set(scan_task_handle).ok();
 
         // start the background evictor task, it'll be triggered whenever a new cache entry is added
-        let evict_task_handle = tokio::spawn(Self::background_evict(rx, inner));
-        self.evict_task_handle.set(evict_task_handle).ok();
+        let work_task_handle = tokio::spawn(Self::background_work(rx, inner));
+        self.work_task_handle.set(work_task_handle).ok();
     }
 
     async fn started(&self) -> bool {
         self.rx.lock().await.is_none()
     }
 
-    async fn background_evict(
-        mut rx: tokio::sync::mpsc::Receiver<(std::path::PathBuf, usize)>,
+    async fn background_work(
+        mut rx: tokio::sync::mpsc::Receiver<FsCacheEvictorWork>,
         inner: Arc<FsCacheEvictorInner>,
     ) {
-        while let Some((path, bytes)) = rx.recv().await {
-            inner
-                .track_new_entry(path, bytes, SystemTime::now(), true)
-                .await;
+        loop {
+            match rx.recv().await {
+                Some((path, bytes, evict)) => {
+                    inner
+                        .track_entry_accessed(path, bytes, SystemTime::now(), evict)
+                        .await;
+                }
+                None => return,
+            }
         }
     }
 
-    pub async fn maybe_evict(&self, path: std::path::PathBuf, bytes: usize) {
+    pub async fn track_entry_accessed(&self, path: std::path::PathBuf, bytes: usize, evict: bool) {
         if !self.started().await {
             return;
         }
 
-        self.tx.send((path, bytes)).await.ok();
+        self.tx.send((path, bytes, evict)).await.ok();
     }
 }
 
@@ -957,11 +986,11 @@ impl FsCacheEvictorInner {
             let path = entry.path().to_path_buf();
             let bytes = metadata.len() as usize;
 
-            self.track_new_entry(path, bytes, atime, evict).await;
+            self.track_entry_accessed(path, bytes, atime, evict).await;
         }
     }
 
-    async fn track_new_entry(
+    async fn track_entry_accessed(
         &self,
         path: std::path::PathBuf,
         bytes: usize,
@@ -1484,19 +1513,19 @@ mod tests {
 
         let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
         let evicted = evictor
-            .track_new_entry(path0, 1024, SystemTime::now(), true)
+            .track_entry_accessed(path0, 1024, SystemTime::now(), true)
             .await;
         assert_eq!(evicted, 0);
 
         let path1 = gen_rand_file(temp_dir.path(), "file1", 1024);
         let evicted = evictor
-            .track_new_entry(path1, 1024, SystemTime::now(), true)
+            .track_entry_accessed(path1, 1024, SystemTime::now(), true)
             .await;
         assert_eq!(evicted, 0);
 
         let path2 = gen_rand_file(temp_dir.path(), "file2", 1024);
         let evicted = evictor
-            .track_new_entry(path2, 1024, SystemTime::now(), true)
+            .track_entry_accessed(path2, 1024, SystemTime::now(), true)
             .await;
         assert_eq!(evicted, 2048);
 
