@@ -1,3 +1,4 @@
+use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
 
@@ -327,7 +328,7 @@ impl Default for GarbageCollectorDirectoryOptions {
 }
 
 /// Garbage collector options for a directory.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct GarbageCollectorDirectoryOptions {
     /// The interval at which the garbage collector checks for files to garbage collect.
     pub poll_interval: Duration,
@@ -377,5 +378,123 @@ impl Default for ObjectStoreCacheOptions {
             root_folder: None,
             part_size_bytes: 4 * 1024 * 1024,
         }
+    }
+}
+
+impl Display for DbOptions {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(f, "DbOptions {{")?;
+        writeln!(f, "    flush_interval: {:?},", self.flush_interval)?;
+
+        #[cfg(feature = "wal_disable")]
+        writeln!(f, "    wal_enabled: {},", self.wal_enabled)?;
+
+        writeln!(
+            f,
+            "    manifest_poll_interval: {:?},",
+            self.manifest_poll_interval
+        )?;
+        writeln!(f, "    min_filter_keys: {},", self.min_filter_keys)?;
+        writeln!(f, "    filter_bits_per_key: {},", self.filter_bits_per_key)?;
+        writeln!(f, "    l0_sst_size_bytes: {},", self.l0_sst_size_bytes)?;
+        writeln!(f, "    l0_max_ssts: {},", self.l0_max_ssts)?;
+        writeln!(
+            f,
+            "    max_unflushed_memtable: {},",
+            self.max_unflushed_memtable
+        )?;
+
+        writeln!(
+            f,
+            "    compactor_options: {}",
+            match &self.compactor_options {
+                Some(opts) => format!("{}", CompactorOptionsDisplay(opts)),
+                None => "None".to_string(),
+            }
+        )?;
+
+        writeln!(
+            f,
+            "    compression_codec: {}",
+            match &self.compression_codec {
+                Some(codec) => format!("{:?}", codec),
+                None => "None".to_string(),
+            }
+        )?;
+
+        writeln!(
+            f,
+            "    object_store_cache_options: {}",
+            ObjectStoreCacheOptionsDisplay(&self.object_store_cache_options)
+        )?;
+
+        writeln!(
+            f,
+            "    block_cache: {}",
+            if self.block_cache.is_some() {
+                "Some(Arc<dyn DbCache>)"
+            } else {
+                "None"
+            }
+        )?;
+
+        writeln!(
+            f,
+            "    garbage_collector_options: {}",
+            match &self.garbage_collector_options {
+                Some(opts) => format!("{}", GarbageCollectorOptionsDisplay(opts)),
+                None => "None".to_string(),
+            }
+        )?;
+
+        write!(f, "}}")
+    }
+}
+
+// Helper structs for formatting complex types
+struct CompactorOptionsDisplay<'a>(&'a CompactorOptions);
+struct ObjectStoreCacheOptionsDisplay<'a>(&'a ObjectStoreCacheOptions);
+struct GarbageCollectorOptionsDisplay<'a>(&'a GarbageCollectorOptions);
+
+impl<'a> Display for CompactorOptionsDisplay<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "CompactorOptions {{ poll_interval: {:?}, max_sst_size: {}, max_concurrent_compactions: {}, compaction_runtime: {} }}",
+            self.0.poll_interval,
+            self.0.max_sst_size,
+            self.0.max_concurrent_compactions,
+            if self.0.compaction_runtime.is_some() { "Some(Handle)" } else { "None" }
+        )
+    }
+}
+
+impl<'a> Display for ObjectStoreCacheOptionsDisplay<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ObjectStoreCacheOptions {{ root_folder: {:?}, part_size_bytes: {} }}",
+            self.0.root_folder, self.0.part_size_bytes
+        )
+    }
+}
+
+impl<'a> Display for GarbageCollectorOptionsDisplay<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "GarbageCollectorOptions {{ manifest_options: {:?}, wal_options: {:?}, compacted_options: {:?}, gc_runtime: {} }}",
+            self.0.manifest_options,
+            self.0.wal_options,
+            self.0.compacted_options,
+            if self.0.gc_runtime.is_some() { "Some(Handle)" } else { "None" }
+        )
+    }
+}
+
+// Implement Display for GarbageCollectorDirectoryOptions
+impl Display for GarbageCollectorDirectoryOptions {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GarbageCollectorDirectoryOptions {{ poll_interval: {:?}, min_age: {:?} }}",
+            self.poll_interval, self.min_age
+        )
     }
 }

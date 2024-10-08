@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use futures::StreamExt;
+use log::debug;
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
 use object_store::{Error, ObjectStore};
@@ -246,9 +247,12 @@ impl ManifestStore {
         &self,
         id_range: R,
     ) -> Result<Vec<ManifestFileMetadata>, SlateDBError> {
+        debug!("entered list_manifests");
         let manifest_path = &Path::from("/");
         let mut files_stream = self.object_store.list(Some(manifest_path));
         let mut manifests = Vec::new();
+
+        debug!("about to parse manifest files");
 
         while let Some(file) = match files_stream.next().await.transpose() {
             Ok(file) => file,
@@ -264,9 +268,12 @@ impl ManifestStore {
                     });
                 }
                 Err(_) => warn!("Unknown file in manifest directory: {:?}", file.location),
-                _ => {}
+                _ => {
+                    debug!("hit an unknown state")
+                }
             }
         }
+        debug!("manifests successfully loaded");
 
         manifests.sort_by_key(|m| m.id);
         Ok(manifests)
@@ -275,7 +282,9 @@ impl ManifestStore {
     pub(crate) async fn read_latest_manifest(
         &self,
     ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
+        debug!("entering read_latest_manifest");
         let manifest_metadatas_list = self.list_manifests(..).await?;
+        debug!("successfully read the manifest_metadatas_list");
         match manifest_metadatas_list.last() {
             None => Ok(None),
             Some(metadata) => Ok(self.read_manifest(metadata.id).await?),
