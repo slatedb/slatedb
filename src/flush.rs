@@ -11,6 +11,11 @@ use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
 use crate::types::ValueDeletable;
 
+pub(crate) enum WalFlushThreadMsg {
+    Shutdown,
+    FlushImmutableWals(Option<tokio::sync::oneshot::Sender<Result<(), SlateDBError>>>),
+}
+
 impl DbInner {
     pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
         self.state.write().freeze_wal();
@@ -78,7 +83,7 @@ impl DbInner {
 
     pub(crate) fn spawn_flush_task(
         self: &Arc<Self>,
-        mut rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<WalFlushThreadMsg>,
         tokio_handle: &Handle,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let this = Arc::clone(self);
@@ -90,10 +95,23 @@ impl DbInner {
                   _ = ticker.tick() => {
                     _ = this.flush().await;
                   }
-                  // Stop the thread.
-                  _ = rx.recv() => {
-                        _ = this.flush().await;
-                        return
+                  msg = rx.recv() => {
+                        let msg = msg.expect("channel unexpectedly closed");
+                        match msg {
+                            WalFlushThreadMsg::Shutdown => {
+                                // Stop the thread.
+                                _ = this.flush().await;
+                                return
+                            },
+                            WalFlushThreadMsg::FlushImmutableWals(rsp) => {
+                                let result = this.flush().await;
+                                match rsp {
+                                    None => {}
+                                    Some(rsp) => _ = rsp.send(result)
+                                };
+                            },
+                        }
+
                   }
                 }
             }
