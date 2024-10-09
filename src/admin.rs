@@ -1,4 +1,6 @@
 use crate::manifest_store::ManifestStore;
+#[cfg(feature = "aws")]
+use log::warn;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use std::env;
@@ -92,17 +94,26 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     let bucket = env::var("AWS_BUCKET").expect("AWS_BUCKET must be set");
     let region = env::var("AWS_REGION").expect("AWS_REGION must be set");
     let endpoint = env::var("AWS_ENDPOINT").ok();
-    let dynamodb_table = env::var("AWS_DYNAMODB_TABLE").expect("AWS_DYNAMODB_TABLE must be set");
+    let dynamodb_table = env::var("AWS_DYNAMODB_TABLE").ok();
     let builder = object_store::aws::AmazonS3Builder::new()
         .with_access_key_id(key)
         .with_secret_access_key(secret)
         .with_bucket_name(bucket)
-        .with_region(region)
-        .with_conditional_put(S3ConditionalPut::Dynamo(DynamoCommit::new(dynamodb_table)));
+        .with_region(region);
 
     let builder = if let Some(token) = session_token {
         builder.with_token(token)
     } else {
+        builder
+    };
+
+    let builder = if let Some(dynamodb_table) = dynamodb_table {
+        builder.with_conditional_put(S3ConditionalPut::Dynamo(DynamoCommit::new(dynamodb_table)))
+    } else {
+        warn!(
+            "Running without configuring a DynamoDB Table. This is OK when running an admin, \
+        but any operations that attempt a CAS will fail."
+        );
         builder
     };
 
@@ -111,5 +122,6 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     } else {
         builder
     };
+
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
 }
