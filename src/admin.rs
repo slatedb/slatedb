@@ -52,10 +52,22 @@ pub fn load_object_store_from_env(
         .to_lowercase();
 
     match provider {
+        "local" => load_local(),
         #[cfg(feature = "aws")]
         "aws" => load_aws(),
         _ => Err(format!("Unknown CLOUD_PROVIDER: '{}'", provider).into()),
     }
+}
+
+/// Loads a local object store instance.
+///
+/// | Env Variable | Doc | Required |
+/// |--------------|-----|----------|
+/// | LOCAL_PATH | The path to the local directory where all data will be stored | Yes |
+pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+    let local_path = env::var("LOCAL_PATH").expect("LOCAL_PATH must be set");
+    let lfs = object_store::local::LocalFileSystem::new_with_prefix(local_path)?;
+    Ok(Arc::new(lfs) as Arc<dyn ObjectStore>)
 }
 
 /// Loads an AWS S3 Object store instance.
