@@ -20,7 +20,6 @@ crc32fast = "1.4.2"
 crossbeam-channel = "0.5.13"
 crossbeam-skiplist = "0.1.3"
 dotenvy = { version = "0.15.7" }
-env_logger = { version = "0.11.5", optional = true }
 fail-parallel = "0.5.1"
 flatbuffers = "24.3.25"
 futures = "0.3.30"
@@ -55,7 +54,7 @@ tempfile = "3.3"
 [features]
 default = ["aws", "moka"]
 aws = ["object_store/aws"]
-cli = ["clap", "clap/derive", "env_logger"]
+cli = ["clap", "clap/derive"]
 bencher = ["aws", "wal_disable", "clap", "clap/derive", "moka"]
 compression = ["snappy"]
 snappy = ["dep:snap"]
