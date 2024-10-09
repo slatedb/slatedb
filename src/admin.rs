@@ -1,4 +1,5 @@
 use crate::manifest_store::ManifestStore;
+#[cfg(feature = "aws")]
 use log::warn;
 use object_store::path::Path;
 use object_store::ObjectStore;
