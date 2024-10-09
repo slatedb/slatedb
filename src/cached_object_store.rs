@@ -933,6 +933,7 @@ struct FsCacheEvictorInner {
     root_folder: std::path::PathBuf,
     batch_factor: usize,
     max_cache_size_bytes: usize,
+    track_lock: Mutex<()>,
     cache_entries: Mutex<Trie<std::path::PathBuf, (SystemTime, usize)>>,
     cache_size_bytes: AtomicU64,
     db_stats: Arc<DbStats>,
@@ -948,6 +949,7 @@ impl FsCacheEvictorInner {
             root_folder,
             batch_factor: 10,
             max_cache_size_bytes,
+            track_lock: Mutex::new(()),
             cache_entries: Mutex::new(Trie::new()),
             cache_size_bytes: AtomicU64::new(0_u64),
             db_stats,
@@ -990,13 +992,18 @@ impl FsCacheEvictorInner {
         }
     }
 
-    async fn track_entry_accessed(
+    /// track the cache entry access, and evict the cache files when the cache size exceeds the limit if evict is true,
+    /// return the bytes of the evicted files. please note that track_entry_accessed might be called concurrently from
+    /// the rescanner and evictor tasks, it's expected to be wrapped with a lock to ensure the serial execution.
+    pub async fn track_entry_accessed(
         &self,
         path: std::path::PathBuf,
         bytes: usize,
         accessed_time: SystemTime,
         evict: bool,
     ) -> usize {
+        let _track_guard = self.track_lock.lock().await;
+
         // record the new cache entry into the cache_entries, and increase the cache_size_bytes.
         // NOTE: only increase the cache_size_bytes if the entry is not already in the cache_entries.
         {
@@ -1049,9 +1056,13 @@ impl FsCacheEvictorInner {
             None => return 0,
         };
 
+        // if the file is not found, still try to remove it from the cache_entries, and decrease the cache_size_bytes.
+        // this might happen when the file is removed by other processes, but the cache_entries is not updated yet.
         if let Err(err) = tokio::fs::remove_file(&target).await {
             warn!("evictor: failed to remove the cache file: {}", err);
-            return 0;
+            if err.kind() != std::io::ErrorKind::NotFound {
+                return 0;
+            }
         }
 
         debug!(
