@@ -87,6 +87,7 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     let key = env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID must be set");
     let secret =
         env::var("AWS_SECRET_ACCESS_KEY").expect("Expected AWS_SECRET_ACCESS_KEY must be set");
+    let session_token = env::var("AWS_SESSION_TOKEN").ok();
     let bucket = env::var("AWS_BUCKET").expect("AWS_BUCKET must be set");
     let region = env::var("AWS_REGION").expect("AWS_REGION must be set");
     let endpoint = env::var("AWS_ENDPOINT").ok();
@@ -97,6 +98,13 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
         .with_bucket_name(bucket)
         .with_region(region)
         .with_conditional_put(S3ConditionalPut::Dynamo(DynamoCommit::new(dynamodb_table)));
+
+    let builder = if let Some(token) = session_token {
+        builder.with_token(token)
+    } else {
+        builder
+    };
+
     let builder = if let Some(endpoint) = endpoint {
         builder.with_allow_http(true).with_endpoint(endpoint)
     } else {

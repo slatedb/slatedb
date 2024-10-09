@@ -4,7 +4,7 @@ use bytes::Bytes;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
 use ulid::Ulid;
 
-use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
+use crate::db_state::{self, RowAttribute, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SsTableHandle};
 
 #[path = "./generated/manifest_generated.rs"]
@@ -78,6 +78,7 @@ impl FlatBufferSsTableInfoCodec {
             filter_offset: info.filter_offset(),
             filter_len: info.filter_len(),
             compression_codec: info.compression_format().into(),
+            row_attributes: vec![RowAttribute::Flags],
         }
     }
 

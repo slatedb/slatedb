@@ -2064,6 +2064,7 @@ dependencies = [
  "async-channel",
  "async-trait",
  "atomic",
+ "bitflags 2.6.0",
  "bytemuck",
  "bytes",
  "chrono",
