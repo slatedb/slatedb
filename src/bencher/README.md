@@ -56,11 +56,12 @@ Make sure to set up the following environment variables before benchmarking:
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
 - `AWS_REGION`
-- `AWS_S3_BUCKET`
+- `AWS_BUCKET`
 - `AWS_DYNAMODB_TABLE`, see
   [DynamoCommit](https://docs.rs/object_store/latest/object_store/aws/struct.DynamoCommit.html)
   for more details.
 - `AWS_ENDPOINT` (optional), if you are using a custom S3 endpoint.
+- `AWS_SESSION_TOKEN` (optional), if you are using temporary credentials. 
 
 ### Plotting Results
 
