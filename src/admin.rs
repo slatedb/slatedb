@@ -76,6 +76,7 @@ pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 /// |--------------|-----|----------|
 /// | AWS_ACCESS_KEY_ID | The access key for a role with permissions to access the store | Yes |
 /// | AWS_SECRET_ACCESS_KEY | The access key secret for the above ID | Yes |
+/// | AWS_SESSION_TOKEN | The session token for the above ID | No |
 /// | AWS_BUCKET | The bucket to use within S3 | Yes |
 /// | AWS_REGION | The AWS region to use | Yes |
 /// | AWS_ENDPOINT | The endpoint to use for S3 (disables https) | No |
