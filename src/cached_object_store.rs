@@ -1,6 +1,6 @@
 use std::io::SeekFrom;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
@@ -40,6 +40,7 @@ impl CachedObjectStore {
         root_folder: std::path::PathBuf,
         max_cache_size_bytes: Option<usize>,
         part_size_bytes: usize,
+        scan_interval: Option<Duration>,
         db_stats: Arc<DbStats>,
     ) -> Result<Arc<Self>, SlateDBError> {
         if part_size_bytes == 0 || part_size_bytes % 1024 != 0 {
@@ -49,6 +50,7 @@ impl CachedObjectStore {
         let cache_storage = Arc::new(FsCacheStorage::new(
             root_folder.clone(),
             max_cache_size_bytes,
+            scan_interval,
             db_stats.clone(),
         ));
         Ok(Arc::new(Self {
@@ -561,12 +563,14 @@ impl FsCacheStorage {
     pub fn new(
         root_folder: std::path::PathBuf,
         max_cache_size_bytes: Option<usize>,
+        scan_interval: Option<Duration>,
         db_stats: Arc<DbStats>,
     ) -> Self {
         let evictor = max_cache_size_bytes.map(|max_cache_size_bytes| {
             Arc::new(FsCacheEvictor::new(
                 root_folder.clone(),
                 max_cache_size_bytes,
+                scan_interval,
                 db_stats,
             ))
         });
@@ -848,10 +852,11 @@ type FsCacheEvictorWork = (std::path::PathBuf, usize, bool);
 struct FsCacheEvictor {
     root_folder: std::path::PathBuf,
     max_cache_size_bytes: usize,
+    scan_interval: Option<Duration>,
     tx: tokio::sync::mpsc::Sender<FsCacheEvictorWork>,
     rx: Mutex<Option<tokio::sync::mpsc::Receiver<FsCacheEvictorWork>>>,
-    work_task_handle: OnceCell<tokio::task::JoinHandle<()>>,
-    scan_task_handle: OnceCell<tokio::task::JoinHandle<()>>,
+    background_evict_handle: OnceCell<tokio::task::JoinHandle<()>>,
+    background_scan_handle: OnceCell<tokio::task::JoinHandle<()>>,
     db_stats: Arc<DbStats>,
 }
 
@@ -859,16 +864,18 @@ impl FsCacheEvictor {
     pub fn new(
         root_folder: std::path::PathBuf,
         max_cache_size_bytes: usize,
+        scan_interval: Option<Duration>,
         db_stats: Arc<DbStats>,
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         Self {
             root_folder,
+            scan_interval,
             max_cache_size_bytes,
             tx,
             rx: Mutex::new(Some(rx)),
-            work_task_handle: OnceCell::new(),
-            scan_task_handle: OnceCell::new(),
+            background_evict_handle: OnceCell::new(),
+            background_scan_handle: OnceCell::new(),
             db_stats,
         }
     }
@@ -883,22 +890,28 @@ impl FsCacheEvictor {
         let guard = self.rx.lock();
         let rx = guard.await.take().expect("evictor already started");
 
-        // scan the cache folder to load the cache entries on disk
-        let scan_task_handle = tokio::spawn(inner.clone().scan_entries(true));
-        self.scan_task_handle.set(scan_task_handle).ok();
+        // scan the cache folder (defaults as every 1 hour) to keep the in-memory cache_entries eventually
+        // consistent with the cache folder.
+        self.background_scan_handle
+            .set(tokio::spawn(Self::background_scan(
+                inner.clone(),
+                self.scan_interval,
+            )))
+            .ok();
 
         // start the background evictor task, it'll be triggered whenever a new cache entry is added
-        let work_task_handle = tokio::spawn(Self::background_work(rx, inner));
-        self.work_task_handle.set(work_task_handle).ok();
+        self.background_evict_handle
+            .set(tokio::spawn(Self::background_evict(inner, rx)))
+            .ok();
     }
 
     async fn started(&self) -> bool {
         self.rx.lock().await.is_none()
     }
 
-    async fn background_work(
-        mut rx: tokio::sync::mpsc::Receiver<FsCacheEvictorWork>,
+    async fn background_evict(
         inner: Arc<FsCacheEvictorInner>,
+        mut rx: tokio::sync::mpsc::Receiver<FsCacheEvictorWork>,
     ) {
         loop {
             match rx.recv().await {
@@ -908,6 +921,17 @@ impl FsCacheEvictor {
                         .await;
                 }
                 None => return,
+            }
+        }
+    }
+
+    async fn background_scan(inner: Arc<FsCacheEvictorInner>, scan_interval: Option<Duration>) {
+        inner.clone().scan_entries(true).await;
+
+        if let Some(scan_interval) = scan_interval {
+            loop {
+                tokio::time::sleep(scan_interval).await;
+                inner.clone().scan_entries(true).await;
             }
         }
     }
@@ -1155,7 +1179,11 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Write, sync::Arc, time::SystemTime};
+    use std::{
+        io::Write,
+        sync::{atomic::Ordering, Arc},
+        time::SystemTime,
+    };
 
     use bytes::Bytes;
     use filetime::FileTime;
@@ -1217,6 +1245,7 @@ mod tests {
             test_cache_folder.clone(),
             None,
             part_size,
+            None,
             db_stats,
         )
         .unwrap();
@@ -1284,6 +1313,7 @@ mod tests {
             test_cache_folder.clone(),
             None,
             part_size,
+            None,
             db_stats,
         )
         .unwrap();
@@ -1321,7 +1351,8 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CachedObjectStore::new(object_store, test_cache_folder, None, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, test_cache_folder, None, 1024, None, db_stats)
+                .unwrap();
 
         struct Test {
             input: (Option<GetRange>, usize),
@@ -1401,7 +1432,8 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CachedObjectStore::new(object_store, test_cache_folder, None, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, test_cache_folder, None, 1024, None, db_stats)
+                .unwrap();
 
         let aligned = cached_store.align_range(&(9..1025), 1024);
         assert_eq!(aligned, 0..2048);
@@ -1415,7 +1447,8 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CachedObjectStore::new(object_store, test_cache_folder, None, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, test_cache_folder, None, 1024, None, db_stats)
+                .unwrap();
 
         let aligned = cached_store.align_get_range(&GetRange::Bounded(9..1025));
         assert_eq!(aligned, GetRange::Bounded(0..2048));
@@ -1440,6 +1473,7 @@ mod tests {
             test_cache_folder,
             None,
             1024,
+            None,
             Arc::new(DbStats::new()),
         )
         .unwrap();
@@ -1571,5 +1605,30 @@ mod tests {
         let (target_path, size) = evictor.pick_evict_target().await.unwrap();
         assert_eq!(target_path, path0);
         assert_eq!(size, 1024);
+    }
+
+    #[tokio::test]
+    async fn test_evictor_rescan() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_cache_test_evictor_")
+            .tempdir()
+            .unwrap();
+
+        let evictor = Arc::new(FsCacheEvictorInner::new(
+            temp_dir.path().to_path_buf(),
+            1024 * 2,
+            Arc::new(DbStats::new()),
+        ));
+
+        gen_rand_file(temp_dir.path(), "file0", 1024);
+        gen_rand_file(temp_dir.path(), "file1", 1025);
+
+        // rescan two times, the cache size should be 2049 unchanged
+        evictor.clone().scan_entries(false).await;
+        let cache_size_bytes = evictor.cache_size_bytes.load(Ordering::SeqCst);
+        assert_eq!(cache_size_bytes, 2049);
+        evictor.clone().scan_entries(false).await;
+        let cache_size_bytes = evictor.cache_size_bytes.load(Ordering::SeqCst);
+        assert_eq!(cache_size_bytes, 2049);
     }
 }

@@ -433,6 +433,7 @@ impl Db {
                     cache_root_folder.clone(),
                     options.object_store_cache_options.max_cache_size_bytes,
                     part_size_bytes,
+                    options.object_store_cache_options.scan_interval,
                     db_stats.clone(),
                 )?;
                 cached_object_store.start_evictor().await;
@@ -712,6 +713,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             None,
             part_size,
+            None,
             db_stats.clone(),
         )
         .unwrap();

@@ -372,6 +372,11 @@ pub struct ObjectStoreCacheOptions {
     /// The size of each part file, the part size is expected to be aligned with 1kb,
     /// its default value is 4mb.
     pub part_size_bytes: usize,
+
+    /// Interval to scan the cache directory to rebuild the in-memory map for evictor.
+    /// The default value is 1 hour. If set to None, the cache directory will be only
+    /// scanned once on start up.
+    pub scan_interval: Option<Duration>,
 }
 
 impl Default for ObjectStoreCacheOptions {
@@ -380,6 +385,7 @@ impl Default for ObjectStoreCacheOptions {
             root_folder: None,
             max_cache_size_bytes: Some(16 * 1024 * 1024 * 1024),
             part_size_bytes: 4 * 1024 * 1024,
+            scan_interval: Some(Duration::from_secs(3600)),
         }
     }
 }
