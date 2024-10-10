@@ -438,12 +438,16 @@ impl Db {
             None => object_store.clone(),
             Some(cache_root_folder) => {
                 let part_size_bytes = options.object_store_cache_options.part_size_bytes;
-                CachedObjectStore::new(
+                let cached_object_store = CachedObjectStore::new(
                     object_store.clone(),
                     cache_root_folder.clone(),
+                    options.object_store_cache_options.max_cache_size_bytes,
                     part_size_bytes,
+                    options.object_store_cache_options.scan_interval,
                     db_stats.clone(),
-                )?
+                )?;
+                cached_object_store.start_evictor().await;
+                cached_object_store
             }
         };
 
@@ -723,7 +727,9 @@ mod tests {
         let cached_object_store = CachedObjectStore::new(
             object_store.clone(),
             temp_dir.path().to_path_buf(),
+            None,
             part_size,
+            None,
             db_stats.clone(),
         )
         .unwrap();
