@@ -1504,7 +1504,7 @@ mod tests {
         DbOptions {
             flush_interval: Duration::from_millis(100),
             #[cfg(feature = "wal_disable")]
-            wal_enabled: false,
+            wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),
             max_unflushed_memtable: 2,
             l0_max_ssts: 8,
