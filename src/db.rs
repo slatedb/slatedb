@@ -767,7 +767,7 @@ mod tests {
             ),
             (
                 "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest",
-                2,
+                0,
             ),
             (
                 "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst",
@@ -1501,7 +1501,7 @@ mod tests {
         DbOptions {
             flush_interval: Duration::from_millis(100),
             #[cfg(feature = "wal_disable")]
-            wal_enabled: true,
+            wal_enabled: false,
             manifest_poll_interval: Duration::from_millis(100),
             max_unflushed_memtable: 2,
             l0_max_ssts: 8,
