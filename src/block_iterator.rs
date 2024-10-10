@@ -111,10 +111,11 @@ impl<B: BlockLike> BlockIterator<B> {
         // TODO: bounds checks to avoid panics? (paulgb)
         let mut cursor = self.block.data().slice(off_usz..);
 
-        match decode_row_v0(&self.first_key, &self.row_attributes, &mut cursor) {
-            Ok(row) => Ok(Some(row)),
-            Err(e) => Err(e),
-        }
+        Ok(Some(decode_row_v0(
+            &self.first_key,
+            &self.row_attributes,
+            &mut cursor,
+        )?))
     }
 
     pub fn decode_first_key(block: &B) -> Bytes {

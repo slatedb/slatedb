@@ -22,7 +22,7 @@ use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::manifest_generated::{
     CompactedSsTable, CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat,
-    SortedRun, SortedRunArgs,
+    SortedRun, SortedRunArgs, SstRowAttribute,
 };
 use crate::manifest::{Manifest, ManifestCodec};
 
@@ -71,6 +71,12 @@ impl FlatBufferSsTableInfoCodec {
         let first_key: Option<Bytes> = info
             .first_key()
             .map(|key| Bytes::copy_from_slice(key.bytes()));
+
+        let row_attributes: Vec<RowAttribute> = match info.row_attributes() {
+            Some(vec) => vec.into_iter().map(|attr| attr.into()).collect(),
+            None => Vec::new(),
+        };
+
         SsTableInfo {
             first_key,
             index_offset: info.index_offset(),
@@ -78,7 +84,7 @@ impl FlatBufferSsTableInfoCodec {
             filter_offset: info.filter_offset(),
             filter_len: info.filter_len(),
             compression_codec: info.compression_format().into(),
-            row_attributes: vec![RowAttribute::Flags],
+            row_attributes,
         }
     }
 
@@ -170,6 +176,15 @@ impl<'b> DbFlatBufferBuilder<'b> {
             None => None,
             Some(first_key_vector) => Some(self.builder.create_vector(first_key_vector)),
         };
+
+        let sst_row_attributes: Vec<SstRowAttribute> = info
+            .row_attributes
+            .clone()
+            .into_iter()
+            .map(|attr| attr.into())
+            .collect();
+        let row_attributes = Some(self.builder.create_vector(&sst_row_attributes));
+
         FbSsTableInfo::create(
             &mut self.builder,
             &SsTableInfoArgs {
@@ -179,6 +194,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 filter_offset: info.filter_offset,
                 filter_len: info.filter_len,
                 compression_format: info.compression_codec.into(),
+                row_attributes,
             },
         )
     }
@@ -311,6 +327,27 @@ impl From<CompressionFormat> for Option<CompressionCodec> {
             #[cfg(feature = "zstd")]
             CompressionFormat::Zstd => Some(CompressionCodec::Zstd),
             _ => None,
+        }
+    }
+}
+
+impl From<RowAttribute> for SstRowAttribute {
+    fn from(value: RowAttribute) -> Self {
+        match value {
+            RowAttribute::Flags => SstRowAttribute::Flags,
+        }
+    }
+}
+
+#[allow(clippy::panic)]
+impl From<SstRowAttribute> for RowAttribute {
+    fn from(value: SstRowAttribute) -> Self {
+        match value {
+            SstRowAttribute::Flags => RowAttribute::Flags,
+            _ => panic!(
+                "Attempted to read SST written with unknown SstRowAttribute. Are you \
+            running an older version of SlateDB than was used to write the SST?"
+            ),
         }
     }
 }
