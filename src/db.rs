@@ -18,6 +18,7 @@ use crate::config::{
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter;
+use crate::flush::WalFlushThreadMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -30,7 +31,6 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
-use crate::flush::WalFlushThreadMsg;
 use std::rc::Rc;
 
 pub(crate) struct DbInner {
@@ -557,7 +557,10 @@ impl Db {
         }
 
         // Tell the wal flush thread to shut down.
-        self.inner.wal_flush_notifier.send(WalFlushThreadMsg::Shutdown).ok();
+        self.inner
+            .wal_flush_notifier
+            .send(WalFlushThreadMsg::Shutdown)
+            .ok();
 
         if let Some(flush_task) = {
             // Scope the flush_thread lock so its lock isn't held while awaiting the join
