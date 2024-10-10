@@ -18,6 +18,7 @@ use crate::config::{
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter;
+use crate::flush::WalFlushThreadMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -36,6 +37,7 @@ pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
     pub(crate) table_store: Arc<TableStore>,
+    pub(crate) wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
     pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
     pub(crate) db_stats: Arc<DbStats>,
 }
@@ -45,6 +47,7 @@ impl DbInner {
         options: DbOptions,
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
+        wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
         memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
         db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
@@ -53,6 +56,7 @@ impl DbInner {
             state: Arc::new(RwLock::new(state)),
             options,
             table_store,
+            wal_flush_notifier,
             memtable_flush_notifier,
             db_stats,
         };
@@ -262,6 +266,14 @@ impl DbInner {
         }
     }
 
+    async fn flush_wals(&self) -> Result<(), SlateDBError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.wal_flush_notifier
+            .send(WalFlushThreadMsg::FlushImmutableWals(Some(tx)))
+            .expect("wal flush hung up");
+        rx.await.expect("received error on wal flush")
+    }
+
     // use to manually flush memtables
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -380,10 +392,8 @@ impl DbInner {
 
 pub struct Db {
     inner: Arc<DbInner>,
-    /// Notifies the L0 flush thread to stop working.
-    flush_notifier: tokio::sync::mpsc::UnboundedSender<()>,
     /// The handle for the flush thread.
-    flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    wal_flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     compactor: Mutex<Option<Compactor>>,
     garbage_collector: Mutex<Option<GarbageCollector>>,
@@ -448,11 +458,13 @@ impl Db {
         let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
         let mut manifest = Self::init_db(&manifest_store).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (wal_flush_tx, wal_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
             DbInner::new(
                 options.clone(),
                 table_store.clone(),
                 manifest.db_state()?.clone(),
+                wal_flush_tx,
                 memtable_flush_tx,
                 db_stats,
             )
@@ -462,10 +474,9 @@ impl Db {
             inner.fence_writers(&mut manifest).await?;
         }
         inner.replay_wal().await?;
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let tokio_handle = Handle::current();
         let flush_thread = if inner.wal_enabled() {
-            inner.spawn_flush_task(rx, &tokio_handle)
+            inner.spawn_flush_task(wal_flush_rx, &tokio_handle)
         } else {
             None
         };
@@ -507,8 +518,7 @@ impl Db {
         };
         Ok(Self {
             inner,
-            flush_notifier: tx,
-            flush_task: Mutex::new(flush_thread),
+            wal_flush_task: Mutex::new(flush_thread),
             memtable_flush_task: Mutex::new(memtable_flush_task),
             compactor: Mutex::new(compactor),
             garbage_collector: Mutex::new(garbage_collector),
@@ -546,14 +556,17 @@ impl Db {
             gc.close().await;
         }
 
-        // Tell the notifier thread to shut down.
-        self.flush_notifier.send(()).ok();
+        // Tell the wal flush thread to shut down.
+        self.inner
+            .wal_flush_notifier
+            .send(WalFlushThreadMsg::Shutdown)
+            .ok();
 
         if let Some(flush_task) = {
             // Scope the flush_thread lock so its lock isn't held while awaiting the join
             // and the final flush below.
             // Wait for the flush thread to finish.
-            let mut flush_task = self.flush_task.lock();
+            let mut flush_task = self.wal_flush_task.lock();
             flush_task.take()
         } {
             flush_task.await.expect("Failed to join flush thread");
@@ -610,8 +623,11 @@ impl Db {
     }
 
     pub async fn flush(&self) -> Result<(), SlateDBError> {
-        self.inner.flush().await?;
-        self.inner.flush_memtables().await
+        if self.inner.wal_enabled() {
+            self.inner.flush_wals().await
+        } else {
+            self.inner.flush_memtables().await
+        }
     }
 
     pub fn metrics(&self) -> Arc<DbStats> {
@@ -754,7 +770,7 @@ mod tests {
             ),
             (
                 "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest",
-                2,
+                0,
             ),
             (
                 "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst",
