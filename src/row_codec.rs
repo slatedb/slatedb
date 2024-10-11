@@ -6,7 +6,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 bitflags! {
     pub(crate) struct RowFlags: u8 {
-        const Tombstone = 0x01;
+        const Tombstone = 0b00000001;
     }
 }
 
@@ -94,10 +94,7 @@ pub(crate) fn decode_row_v0(
     let key_suffix = data.slice(..key_suffix_len);
     data.advance(key_suffix_len);
 
-    let meta = match decode_meta(row_attributes, data) {
-        Ok(meta) => meta,
-        Err(e) => return Err(e),
-    };
+    let meta = decode_meta(row_attributes, data)?;
     let value = if !(meta.flags & RowFlags::Tombstone).is_empty() {
         ValueDeletable::Tombstone
     } else {
@@ -141,7 +138,7 @@ fn decode_meta(
 
 fn decode_row_flags(flags: u8) -> Result<RowFlags, SlateDBError> {
     match RowFlags::from_bits(flags) {
-        None => Err(SlateDBError::BlockCompressionError),
+        None => Err(SlateDBError::InvalidRowFlags),
         Some(flags) => Ok(flags),
     }
 }
@@ -235,8 +232,8 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(SlateDBError::BlockCompressionError) => (),
-            _ => panic!("Expected BlockCompressionError"),
+            Err(SlateDBError::InvalidRowFlags) => (),
+            _ => panic!("Expected InvalidRowFlags"),
         }
     }
 
