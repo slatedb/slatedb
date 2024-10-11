@@ -10,6 +10,8 @@ mod args;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt::init();
+
     let args: CliArgs = parse_args();
     let path = Path::from(args.path.as_str());
     let object_store = admin::load_object_store_from_env(args.env_file)?;
