@@ -9,7 +9,9 @@ Transaction allows multiple operations to be executed in a single atomic operati
 
 This RFC proposes the goals & design draft of the transaction feature in SlateDB.
 
-There're still some ongoing RFCs on the prerequisites of the Transaction feature, such as the Snapshot API and WriteBatch API. We'll refer to these RFCs or PRs in this RFC when they're ready. This RFC may also help to clarify the requirements of the Snapshot API and WriteBatch API in the sense of the Transaction feature.
+There're still some ongoing RFCs on the prerequisites of the Transaction feature, such as the Snapshot API and WriteBatch API. We'll refer to these RFCs or PRs in this RFC when they're ready.
+
+Is this RFC considered as too early? Yes, the implementation of the Transaction feature can not be started until the prerequisites got ready. However, this RFC may help us to clarify the requirements of the Snapshot API and WriteBatch API in the sense of the Transaction feature, and organize the roadmap on these developments.
 
 ## Goals
 
@@ -166,6 +168,29 @@ The `WriteBatch` is considered as a prerequisite for the transaction feature, as
 
 We can refer to the WriteBatch RFC or PR for the details later.
 
-## Implementation: Snapshot Isolation
+## Conflict Checking: Snapshot Isolation
 
-## Implementation: Serializable Snapshot Isolation
+The conflict checking in the SI transaction is simple:
+
+1. Track the sequence number when transaction is started in the `Transaction` struct.
+2. Track the modified keys in the `Transaction` struct.
+3. When `commit()` is called, check whether the modified keys are modified by others after the transaction started.
+
+How to verify the modified keys are modified by others after the transaction started?
+
+We could simply check the sequence number of the keys in latest db storage. Given a key `"key1"`, let's say the sequence number of the current transaction is "102", while the sequence number of the key `"key1"` is "103" in the storage, then we could regard the key `"key1"` is modified by others after the transaction started, thus violates the conflict check and should abort the commit.
+
+So the problem now is how to get the latest sequence number of a given key in the storage efficiently. It'd not be very fast to read the keys from the disk storage on conflict checking during every commit.
+
+We could reference RocksDB' approach here: RocksDB assumes each transaction is short-lived, and **only checks the conflicts with the changes in recent**. In LSM, the "recent changes" are buffered in MemTable, so we can leverages MemTable to check the conflicts, making conflict checks could be regarded as a pure in-memory operation without any IO overhead.
+
+But the size of MemTable is limited and might be flushed & rotated at any time, it can not buffer ALL the changes since the earliest running transaction. To deal with this limitation, RocksDB's solution is also very straghtforward:
+
+1. Track the earliest sequence number of keys in the MemTable.
+2. When transaction commits, if the MemTable's earliest sequence number is bigger than the transaction's sequence number, then the transaction is considered as `Expired`.
+
+The good part of this approach is that it's very efficient and simple, and it's free of floating garbage. The bad part is that it may abort the transaction when it's not necessary, and prones to encourage the users to set a bigger MemTable size.
+
+Given the production maturity of RocksDB & the simplicity of the implementation, we could consider to implement the conflict checking in the similar way in SlateDB.
+
+## Conflict Checking: Serializable Snapshot Isolation
