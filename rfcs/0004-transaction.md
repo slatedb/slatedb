@@ -33,8 +33,10 @@ Is this RFC considered as too early? Yes, the implementation of the Transaction 
 
 ## References
 
-- [Concurrent ACID Transactions in Badger](https://dgraph.io/blog/post/badger-txn/)
 - [Transactions - RocksDB](https://github.com/facebook/rocksdb/wiki/Transactions)
+- [Concurrent ACID Transactions in Badger](https://dgraph.io/blog/post/badger-txn/)
+- [Transaction Internals: RocksDB](https://flaneur2020.github.io/posts/2021-08-14-rocksdb-txn/)
+- [Transaction Internals: Badger](https://flaneur2020.github.io/posts/2021-08-01-badger-txn/)
 - [Serializable Snapshot Isolation in PostgreSQL](https://arxiv.org/pdf/1208.4179)
 
 ## Proposal
@@ -191,6 +193,6 @@ But the size of MemTable is limited and might be flushed & rotated at any time, 
 
 The good part of this approach is that it's very efficient and simple, and it's free of floating garbage. The bad part is that it may abort the transaction when it's not necessary, and prones to encourage the users to set a bigger MemTable size.
 
-Given the production maturity of RocksDB & the simplicity of the implementation, we could consider to implement the conflict checking in the similar way in SlateDB.
+Given the wide adaption of RocksDB & the simplicity of the implementation, we could consider to implement the conflict checking in the similar way in SlateDB.
 
 ## Conflict Checking: Serializable Snapshot Isolation
