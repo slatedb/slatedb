@@ -31,7 +31,7 @@ pub(crate) struct BencherArgs {
     #[arg(
         short,
         long,
-        help = "The path in the object store to the root  directory, starting from within the object store bucket.",
+        help = "The path in the object store to the root directory, starting from within the object store bucket.",
         default_value = "/slatedb-bencher"
     )]
     pub(crate) path: String,
@@ -251,10 +251,10 @@ pub(crate) struct CompactionLoadArgs {
 pub(crate) struct CompactionRunArgs {
     #[arg(
         long,
-        help = "Size of each SSTable in bytes.",
-        default_value_t = 1_073_741_824
+        help = "Number of SSTables to use when running a compaction.",
+        default_value_t = 4
     )]
-    pub(crate) sst_bytes: usize,
+    pub(crate) num_ssts: usize,
 
     #[arg(
         long,
@@ -262,7 +262,7 @@ pub(crate) struct CompactionRunArgs {
     )]
     pub(crate) compaction_sources: Option<Vec<u32>>,
 
-    #[arg(long, help = "Destination sorted run ID.")]
+    #[arg(long, help = "Destination sorted run ID.", default_value_t = 0)]
     pub(crate) compaction_destination: u32,
 
     #[arg(long, help = "Compression codec to use.")]

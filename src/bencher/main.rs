@@ -1,17 +1,19 @@
 #![doc = include_str!("README.md")]
 
 use crate::args::BencherArgs;
-use args::{BencherCommands, BenchmarkCompactionArgs, BenchmarkDbArgs};
+use args::{BencherCommands, BenchmarkCompactionArgs, BenchmarkDbArgs, CompactionSubcommands};
 use clap::Parser;
 use db::DbBench;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use slatedb::admin;
+use slatedb::compaction_execute_bench::CompactionExecuteBench;
 use slatedb::config::WriteOptions;
 use slatedb::db::Db;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::runtime::Handle;
 
 mod args;
 mod db;
@@ -63,4 +65,35 @@ async fn exec_benchmark_compaction(
     object_store: Arc<dyn ObjectStore>,
     args: BenchmarkCompactionArgs,
 ) {
+    let compaction_execute_bench = CompactionExecuteBench::new(path, object_store);
+    match args.subcommand {
+        CompactionSubcommands::Load(load_args) => {
+            compaction_execute_bench
+                .run_load(
+                    load_args.num_ssts,
+                    load_args.sst_bytes,
+                    load_args.key_bytes,
+                    load_args.val_bytes,
+                    load_args.compression_codec,
+                )
+                .await
+                .expect("Failed to run load");
+        }
+        CompactionSubcommands::Run(run_args) => {
+            compaction_execute_bench
+                .run_bench(
+                    run_args.num_ssts,
+                    run_args.compaction_sources,
+                    run_args.compaction_destination,
+                    run_args.compression_codec,
+                    Handle::current(),
+                )
+                .expect("Failed to run bench");
+        }
+        CompactionSubcommands::Clear(clear_args) => {
+            compaction_execute_bench
+                .run_clear(clear_args.num_ssts, Handle::current())
+                .expect("Failed to run clear");
+        }
+    }
 }
