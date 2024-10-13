@@ -13,7 +13,6 @@ use slatedb::db::Db;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::runtime::Handle;
 
 mod args;
 mod db;
@@ -92,7 +91,8 @@ async fn exec_benchmark_compaction(
         }
         CompactionSubcommands::Clear(clear_args) => {
             compaction_execute_bench
-                .run_clear(clear_args.num_ssts, Handle::current())
+                .run_clear(clear_args.num_ssts)
+                .await
                 .expect("Failed to run clear");
         }
     }

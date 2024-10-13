@@ -149,23 +149,28 @@ impl CompactionExecuteBench {
         Ok(())
     }
 
-    pub fn run_clear(
+    #[allow(clippy::panic)]
+    pub async fn run_clear(
         &self,
         num_ssts: usize,
-        handle: tokio::runtime::Handle,
     ) -> Result<(), SlateDBError> {
         let mut del_tasks = Vec::new();
         for i in 0u32..num_ssts as u32 {
             let os = self.object_store.clone();
             let path = self.path.clone();
-            del_tasks.push(handle.spawn(async move {
+            del_tasks.push(tokio::spawn(async move {
                 let sst_id = CompactionExecuteBench::sst_id(i);
                 os.delete(&CompactionExecuteBench::sst_path(&sst_id, &path))
                     .await
             }))
         }
-        while let Some(del_task) = del_tasks.pop() {
-            handle.block_on(del_task).expect("join failed")?;
+        let results = futures::future::join_all(del_tasks).await;
+        for result in results {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => return Err(err.into()),
+                Err(err) => panic!("task failed: {:?}", err),
+            }
         }
         Ok(())
     }
