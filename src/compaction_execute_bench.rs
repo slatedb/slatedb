@@ -170,9 +170,8 @@ impl CompactionExecuteBench {
         Ok(())
     }
 
-    fn load_compaction_job(
+    async fn load_compaction_job(
         num_ssts: usize,
-        handle: &Handle,
         table_store: &Arc<TableStore>,
     ) -> Result<CompactionJob, SlateDBError> {
         let sst_ids: Vec<SsTableId> = (0u32..num_ssts as u32)
@@ -184,14 +183,15 @@ impl CompactionExecuteBench {
         info!("load sst");
         for id in sst_ids.clone().into_iter() {
             if futures.len() > 8 {
-                let (id, handle) = handle
-                    .block_on(futures.next())
-                    .expect("expected join handle")
+                let (id, handle) = futures
+                    .next()
+                    .await
+                    .expect("missing join handle")
                     .expect("join failed")?;
                 ssts_by_id.insert(id, handle);
             }
             let table_store_clone = table_store.clone();
-            let jh = handle.spawn(async move {
+            let jh = tokio::spawn(async move {
                 match table_store_clone.open_sst(&id).await {
                     Ok(h) => Ok((id, h)),
                     Err(err) => Err(err),
@@ -199,7 +199,7 @@ impl CompactionExecuteBench {
             });
             futures.push(jh);
         }
-        while let Some(jh) = handle.block_on(futures.next()) {
+        while let Some(jh) = futures.next().await {
             let (id, handle) = jh.expect("join failed")?;
             ssts_by_id.insert(id, handle);
         }
@@ -240,13 +240,12 @@ impl CompactionExecuteBench {
         }
     }
 
-    pub fn run_bench(
+    pub async fn run_bench(
         &self,
         num_ssts: usize,
         source_sr_ids: Option<Vec<u32>>,
         destination_sr_id: u32,
         compression_codec: Option<CompressionCodec>,
-        handle: tokio::runtime::Handle,
     ) -> Result<(), SlateDBError> {
         let sst_format = SsTableFormat {
             compression_codec: compression_codec,
@@ -267,7 +266,7 @@ impl CompactionExecuteBench {
         let (tx, rx) = crossbeam_channel::unbounded();
         let compactor_options = CompactorOptions::default();
         let executor = TokioCompactionExecutor::new(
-            handle.clone(),
+            Handle::current(),
             Arc::new(compactor_options),
             tx,
             table_store.clone(),
@@ -278,20 +277,20 @@ impl CompactionExecuteBench {
             Some(compaction) => {
                 info!("load job from existing compaction");
                 let manifest_store = Arc::new(ManifestStore::new(&self.path, os.clone()));
-                let manifest = handle
-                    .block_on(StoredManifest::load(manifest_store))?
-                    .expect("expected manifest to be present");
+                let manifest = StoredManifest::load(manifest_store)
+                    .await?
+                    .expect("expected manifest");
                 CompactionExecuteBench::load_compaction_as_job(manifest, compaction)
             }
-            None => CompactionExecuteBench::load_compaction_job(num_ssts, &handle, &table_store)?,
+            None => CompactionExecuteBench::load_compaction_job(num_ssts, &table_store).await?,
         };
         let start = std::time::Instant::now();
         info!("start compaction job");
-        executor.start_compaction(job);
+        tokio::task::spawn_blocking(move || executor.start_compaction(job));
         let WorkerToOrchestratorMsg::CompactionFinished(result) = rx.recv().expect("recv failed");
         match result {
             Ok(_) => {
-                info!("compaction finished in {:?} millis", start.elapsed());
+                info!("compaction finished in {:?}", start.elapsed());
             }
             Err(err) => return Err(err),
         }

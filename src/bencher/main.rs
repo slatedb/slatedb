@@ -86,8 +86,8 @@ async fn exec_benchmark_compaction(
                     run_args.compaction_sources,
                     run_args.compaction_destination,
                     run_args.compression_codec,
-                    Handle::current(),
                 )
+                .await
                 .expect("Failed to run bench");
         }
         CompactionSubcommands::Clear(clear_args) => {
