@@ -55,7 +55,7 @@ tempfile = "3.3"
 filetime = "0.2"
 
 [features]
-default = ["aws", "moka"]
+default = ["aws", "moka", "bencher"] # TODO remove bencher
 aws = ["object_store/aws"]
 cli = ["clap", "clap/derive"]
 bencher = ["aws", "wal_disable", "clap", "clap/derive", "moka"]

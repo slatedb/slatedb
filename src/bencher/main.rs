@@ -1,7 +1,7 @@
 #![doc = include_str!("README.md")]
 
 use crate::args::BencherArgs;
-use args::{BencherCommands, BenchmarkDbArgs};
+use args::{BencherCommands, BenchmarkCompactionArgs, BenchmarkDbArgs};
 use clap::Parser;
 use db::DbBench;
 use object_store::path::Path;
@@ -26,6 +26,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match args.command {
         BencherCommands::Db(subcommand_args) => {
             exec_benchmark_db(path, object_store, subcommand_args).await;
+        }
+        BencherCommands::Compaction(subcommand_args) => {
+            exec_benchmark_compaction(path, object_store, subcommand_args).await;
         }
     }
 
@@ -53,4 +56,11 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
         db,
     );
     bencher.run().await;
+}
+
+async fn exec_benchmark_compaction(
+    path: Path,
+    object_store: Arc<dyn ObjectStore>,
+    args: BenchmarkCompactionArgs,
+) {
 }
