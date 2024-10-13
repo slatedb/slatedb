@@ -206,32 +206,4 @@ Given the wide adaption of RocksDB & the simplicity of the implementation, we co
 
 ## Conflict Checking: Serializable Snapshot Isolation
 
-The difference between SSI and SI is simple: not only check the conflicts between Writes and Writes, but also check the conflicts between Reads and Writes.
-
-The key idea is to track the recent committed transactions globally, and let the current transaction checks conflicts with them, belike:
-
-```rust
-struct Oracle {
-    next_seq: AtomicU64,
-    recent_committed_txns: Deque<Arc<TransactionState>>,
-}
-
-struct TransactionState {
-    seq: u64,
-    write_keys: HashSet<String>,
-    read_keys: HashSet<KeyFingerPrint>,
-    committed_seq: Option<u64>
-}
-```
-
-`Oracle` is considered as a global singleton in the storage, and it tracks the recent committed transactions in the `recent_committed_txns` deque. When a transaction commits, it should push itself into the `recent_committed_txns` deque, and the `recent_committed_txns` can be GCed after some of the items are not needed, we'll cover the details on GC later.
-
-Another thing detail to be mentioned is that we do not have to track the full keys in `String` on `read_keys`, which might not be memory efficient. Instead, we could just store the integer hash of each key. There might introduce some unnecessary conflicts when both keys have the same hash value, but the probability is extreme low.
-
-Besides the sequence number of the transaction started, we also need to track the sequence number of the transaction committed. During each transaction execution, some other transactions might commit, and the current transaction should check the conflicts with these committed transactions.
-
-Besides the `TransactionState`, we also need to track the recent committed transactions in a global manner:
-
-When a transaction commits, it should check the conflicts with the recent committed transactions which 
-
-The conflict checking is simple:
+tbd
