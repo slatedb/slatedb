@@ -106,7 +106,7 @@ cargo run -r --bin bencher --features="bencher" -- compaction clear
 See individual subcommands for more details.
 
 The compaction benchmarking tool can also be used to compact specific SSTables
-rather than thhe generated test data. To do this, set the `--compaction-sources`
+rather than the generated test data. To do this, set the `--compaction-sources`
 argument:
 
 ```bash
