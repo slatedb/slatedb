@@ -4,9 +4,10 @@
 //! collection of write operations (puts and/or deletes) that are applied
 //! atomically to the database.
 
-/// A batch of write operations (puts and/or deletes). All operations in the batch
-/// are applied atomically to the database. If multiple operations appear for a
-/// a single key, the last operation will be applied. The others will be dropped.
+/// A batch of write operations (puts and/or deletes). All operations in the
+/// batch are applied atomically to the database. If multiple operations appear
+/// for a a single key, the last operation will be applied. The others will be
+/// dropped.
 ///
 /// # Examples
 /// ```rust,no_run,compile_fail
@@ -22,6 +23,10 @@
 ///
 /// db.write(batch).await;
 /// ```
+///
+/// Note that the `WriteBatch` has an unlimited size. This means that batch
+/// writes can exceed `l0_sst_size_bytes` (when `WAL` is disabled). It also
+/// means that WAL SSTs could get large if there's a large batch write.
 pub struct WriteBatch {
     pub(crate) ops: Vec<WriteOp>,
 }
