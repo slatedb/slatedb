@@ -150,10 +150,7 @@ impl CompactionExecuteBench {
     }
 
     #[allow(clippy::panic)]
-    pub async fn run_clear(
-        &self,
-        num_ssts: usize,
-    ) -> Result<(), SlateDBError> {
+    pub async fn run_clear(&self, num_ssts: usize) -> Result<(), SlateDBError> {
         let mut del_tasks = Vec::new();
         for i in 0u32..num_ssts as u32 {
             let os = self.object_store.clone();
