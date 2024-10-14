@@ -79,14 +79,14 @@ txn.commit().await?;
 
 The Snapshot Isolation have a good reputation in the industry, and is widely used in many databases. It's gives a lightweight Snapshot on each transactions started, and checks whether the writes against the snapshot has modified by others or not during the commit. It is very efficient and is considered as a good default isolation level for most of the use cases.
 
-However, Snapshot Isolation still suffers Write Skew anomaly, for example:
+However, Snapshot Isolation still suffers Write Skew anomaly. For example, let's assume we have two accounts, where account A has $600, and account B has $500. Also, the business rule is that Account A's balance + Account B's balance should always be >= $200.
 
-1. Initially, account A has $600, the account B has $500, and the account C has $0.
-2. Two transactions occur concurrently: Transaction 1 transfer $400 from account A to account C, while transaction 2 Transfer $300 from account A to account B.
-1. Transaction 1 commits: account A has $200, account B has $500, account C has $400.
-2. Transaction 2 commits: account A has $300, account B has $800, account C has $400.
+Two transactions occur concurrently:
 
-In this case, the total amount of money in the system has increased by $100, which is a violation of the integrity constraint that the total amount of money in the system should remain constant.
+1. Transaction 1 first checks the total amount of balance in A and B, and then transfers $550 from account A to account C.
+2. Transaction 2 first checks the total amount of balance in A and B, and then transfers $450 from account B to account D.
+
+In this case, if the two transactions are executed concurrently, the total amount of balance in A and B might be less than $200, which violates the business rule. There's no Write-Write conflict in the two transactions, but the Read-Write conflict is not detected by Snapshot Isolation.
 
 To mitigate this anomaly, we could choose:
 
