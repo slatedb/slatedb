@@ -4,7 +4,9 @@
 //! collection of write operations (puts and/or deletes) that are applied
 //! atomically to the database.
 
-/// A batch of write operations (puts and/or deletes).
+/// A batch of write operations (puts and/or deletes). All operations in the batch
+/// are applied atomically to the database. If multiple operations appear for a
+/// a single key, the last operation will be applied. The others will be dropped.
 ///
 /// # Examples
 /// ```rust,no_run,compile_fail
@@ -47,9 +49,6 @@ impl WriteBatch {
     }
 
     /// Delete a key-value pair into the batch. Keys must not be empty.
-    /// If the same key is put later, both operations will be recorded in
-    /// order. The key will be present in the database if the last operation
-    /// is a put.
     pub fn delete(&mut self, key: &[u8]) {
         assert!(!key.is_empty(), "key cannot be empty");
         self.ops.push(WriteOp::Delete(key.to_vec()));
