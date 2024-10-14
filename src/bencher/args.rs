@@ -77,10 +77,7 @@ pub(crate) struct DbArgs {
     #[arg(long, help = "The size in bytes of the object store cache part files.")]
     pub(crate) object_cache_part_size: Option<usize>,
 
-    #[arg(
-        long,
-        help = "The size in bytes of the object store cache.",
-    )]
+    #[arg(long, help = "The size in bytes of the object store cache.")]
     pub(crate) object_cache_size_bytes: Option<usize>,
 
     #[arg(long, help = "The interval in seconds to scan for expired objects.")]
