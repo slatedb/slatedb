@@ -114,9 +114,9 @@ impl DbArgs {
         db_options.object_store_cache_options.part_size_bytes = self
             .object_cache_part_size
             .unwrap_or(db_options.object_store_cache_options.part_size_bytes);
-        db_options.object_store_cache_options.cache_size_bytes = self
+        db_options.object_store_cache_options.max_cache_size_bytes = self
             .object_cache_size_bytes
-            .unwrap_or(db_options.object_store_cache_options.cache_size_bytes);
+            .or(db_options.object_store_cache_options.max_cache_size_bytes);
         db_options.object_store_cache_options.scan_interval = self
             .scan_interval
             .map(|i| Duration::from_secs(i as u64))
