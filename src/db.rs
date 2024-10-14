@@ -9,6 +9,7 @@ use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Handle;
 
+use crate::batch::{WriteBatch, WriteOp};
 use crate::cached_object_store::CachedObjectStore;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
@@ -255,6 +256,51 @@ impl DbInner {
             let mut guard = self.state.write();
             let current_memtable = guard.memtable();
             current_memtable.delete(key);
+            let table = current_memtable.table().clone();
+            let last_wal_id = guard.last_written_wal_id();
+            self.maybe_freeze_memtable(&mut guard, last_wal_id);
+            table
+        };
+
+        if options.await_durable {
+            current_table.await_durable().await;
+        }
+    }
+
+    #[allow(clippy::panic)]
+    pub async fn write_batch_with_options(&self, batch: &WriteBatch, options: &WriteOptions) {
+        self.maybe_apply_backpressure().await;
+
+        let current_table = if self.wal_enabled() {
+            let mut guard = self.state.write();
+            let current_wal = guard.wal();
+            for op in &batch.ops {
+                match op {
+                    WriteOp::Put(key, value) => {
+                        current_wal.put(key, value);
+                    }
+                    WriteOp::Delete(key) => {
+                        current_wal.delete(key);
+                    }
+                }
+            }
+            current_wal.table().clone()
+        } else {
+            if cfg!(not(feature = "wal_disable")) {
+                panic!("wal_disabled feature must be enabled");
+            }
+            let mut guard = self.state.write();
+            let current_memtable = guard.memtable();
+            for op in &batch.ops {
+                match op {
+                    WriteOp::Put(key, value) => {
+                        current_memtable.put(key, value);
+                    }
+                    WriteOp::Delete(key) => {
+                        current_memtable.delete(key);
+                    }
+                }
+            }
             let table = current_memtable.table().clone();
             let last_wal_id = guard.last_written_wal_id();
             self.maybe_freeze_memtable(&mut guard, last_wal_id);
@@ -626,6 +672,22 @@ impl Db {
         self.inner.delete_with_options(key, options).await;
     }
 
+    /// Write a batch of put/delete operations atomically to the database. All batch
+    /// operations are guaranteed to end up in the same WAL SST (or L0 memtable if
+    /// WAL is disabled).
+    pub async fn write_batch(&self, batch: &WriteBatch) {
+        self.inner
+            .write_batch_with_options(batch, DEFAULT_WRITE_OPTIONS)
+            .await;
+    }
+
+    /// Write a batch of put/delete operations atomically to the database. All batch
+    /// operations are guaranteed to end up in the same WAL SST (or L0 memtable if
+    /// WAL is disabled).
+    pub async fn write_batch_with_options(&self, batch: &WriteBatch, options: &WriteOptions) {
+        self.inner.write_batch_with_options(batch, options).await;
+    }
+
     pub async fn flush(&self) -> Result<(), SlateDBError> {
         if self.inner.wal_enabled() {
             self.inner.flush_wals().await
@@ -798,6 +860,57 @@ mod tests {
                 path
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_write_batch() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options(0, 1024, None),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        // Create a new WriteBatch
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.put(b"key2", b"value2");
+        batch.delete(b"key1");
+
+        // Write the batch
+        kv_store.write_batch(&batch).await;
+
+        // Read back keys
+        assert_eq!(kv_store.get(b"key1").await.unwrap(), None);
+        assert_eq!(
+            kv_store.get(b"key2").await.unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_write_batch_with_empty_key() {
+        let mut batch = WriteBatch::new();
+        let result = std::panic::catch_unwind(move || {
+            batch.put(b"", b"value");
+        });
+        assert!(
+            result.is_err(),
+            "Expected panic when using empty key in put operation"
+        );
+
+        let mut batch = WriteBatch::new();
+        let result = std::panic::catch_unwind(move || {
+            batch.delete(b"");
+        });
+        assert!(
+            result.is_err(),
+            "Expected panic when using empty key in delete operation"
+        );
     }
 
     #[tokio::test]
