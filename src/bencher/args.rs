@@ -242,7 +242,7 @@ pub(crate) struct CompactionLoadArgs {
     #[arg(long, help = "Size of each value.", default_value_t = 224)]
     pub(crate) val_bytes: usize,
 
-    #[arg(long, help = "Compression codec to use.")]
+    #[arg(long, help = "Compression codec to use. If set, must `snappy`, `zlib`, `lz4`, or `zstd` (with the `--features` set).")]
     pub(crate) compression_codec: Option<CompressionCodec>,
 }
 
