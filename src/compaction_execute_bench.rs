@@ -48,7 +48,7 @@ impl CompactionExecuteBench {
         compression_codec: Option<CompressionCodec>,
     ) -> Result<(), SlateDBError> {
         let sst_format = SsTableFormat {
-            compression_codec: compression_codec,
+            compression_codec,
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
@@ -250,7 +250,7 @@ impl CompactionExecuteBench {
         compression_codec: Option<CompressionCodec>,
     ) -> Result<(), SlateDBError> {
         let sst_format = SsTableFormat {
-            compression_codec: compression_codec,
+            compression_codec,
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
