@@ -75,6 +75,12 @@ pub(crate) struct DbArgs {
 
     #[arg(long, help = "The size in bytes of the object store cache part files.")]
     pub(crate) object_cache_part_size: Option<usize>,
+
+    #[arg(long, help = "The size in bytes of the object store cache.")]
+    pub(crate) object_cache_size_bytes: Option<usize>,
+
+    #[arg(long, help = "The interval in seconds to scan for expired objects.")]
+    pub(crate) scan_interval: Option<u32>,
 }
 
 impl DbArgs {
@@ -107,6 +113,13 @@ impl DbArgs {
         db_options.object_store_cache_options.part_size_bytes = self
             .object_cache_part_size
             .unwrap_or(db_options.object_store_cache_options.part_size_bytes);
+        db_options.object_store_cache_options.max_cache_size_bytes = self
+            .object_cache_size_bytes
+            .or(db_options.object_store_cache_options.max_cache_size_bytes);
+        db_options.object_store_cache_options.scan_interval = self
+            .scan_interval
+            .map(|i| Duration::from_secs(i as u64))
+            .or(db_options.object_store_cache_options.scan_interval);
         db_options
     }
 }
