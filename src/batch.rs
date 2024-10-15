@@ -27,35 +27,35 @@
 /// Note that the `WriteBatch` has an unlimited size. This means that batch
 /// writes can exceed `l0_sst_size_bytes` (when `WAL` is disabled). It also
 /// means that WAL SSTs could get large if there's a large batch write.
-pub struct WriteBatch<'a> {
-  pub(crate) ops: Vec<WriteOp<'a>>,
+pub struct WriteBatch {
+    pub(crate) ops: Vec<WriteOp>,
 }
 
-impl<'a> Default for WriteBatch<'a> {
-  fn default() -> Self {
-      Self::new()
-  }
+impl Default for WriteBatch {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-pub enum WriteOp<'a> {
-  Put(&'a [u8], &'a [u8]),
-  Delete(&'a [u8]),
+pub enum WriteOp {
+    Put(Vec<u8>, Vec<u8>),
+    Delete(Vec<u8>),
 }
 
-impl<'a> WriteBatch<'a> {
-  pub fn new() -> Self {
-      WriteBatch { ops: Vec::new() }
-  }
+impl WriteBatch {
+    pub fn new() -> Self {
+        WriteBatch { ops: Vec::new() }
+    }
 
-  /// Put a key-value pair into the batch. Keys must not be empty.
-  pub fn put(&mut self, key: &'a [u8], value: &'a [u8]) {
-      assert!(!key.is_empty(), "key cannot be empty");
-      self.ops.push(WriteOp::Put(key, value));
-  }
+    /// Put a key-value pair into the batch. Keys must not be empty.
+    pub fn put(&mut self, key: &[u8], value: &[u8]) {
+        assert!(!key.is_empty(), "key cannot be empty");
+        self.ops.push(WriteOp::Put(key.to_vec(), value.to_vec()));
+    }
 
-  /// Delete a key-value pair into the batch. Keys must not be empty.
-  pub fn delete(&mut self, key: &'a [u8]) {
-      assert!(!key.is_empty(), "key cannot be empty");
-      self.ops.push(WriteOp::Delete(key));
-  }
+    /// Delete a key-value pair into the batch. Keys must not be empty.
+    pub fn delete(&mut self, key: &[u8]) {
+        assert!(!key.is_empty(), "key cannot be empty");
+        self.ops.push(WriteOp::Delete(key.to_vec()));
+    }
 }
