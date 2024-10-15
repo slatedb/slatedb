@@ -268,7 +268,7 @@ impl DbInner {
     }
 
     #[allow(clippy::panic)]
-    pub async fn write_batch_with_options(&self, batch: &WriteBatch, options: &WriteOptions) {
+    pub async fn write_batch_with_options<'a>(&self, batch: &WriteBatch<'a>, options: &WriteOptions) {
         // If the batch is empty, return early. This prevents the write from hanging if
         // the current WAL/memtable is empty (and thus never gets flushed).
         if batch.ops.is_empty() {
@@ -681,7 +681,7 @@ impl Db {
     /// Write a batch of put/delete operations atomically to the database. All batch
     /// operations are guaranteed to end up in the same WAL SST (or L0 memtable if
     /// WAL is disabled).
-    pub async fn write_batch(&self, batch: &WriteBatch) {
+    pub async fn write_batch<'a>(&self, batch: &WriteBatch<'a>) {
         self.inner
             .write_batch_with_options(batch, DEFAULT_WRITE_OPTIONS)
             .await;
@@ -690,7 +690,7 @@ impl Db {
     /// Write a batch of put/delete operations atomically to the database. All batch
     /// operations are guaranteed to end up in the same WAL SST (or L0 memtable if
     /// WAL is disabled).
-    pub async fn write_batch_with_options(&self, batch: &WriteBatch, options: &WriteOptions) {
+    pub async fn write_batch_with_options<'a>(&self, batch: &WriteBatch<'a>, options: &WriteOptions) {
         self.inner.write_batch_with_options(batch, options).await;
     }
 
