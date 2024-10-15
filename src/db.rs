@@ -268,51 +268,63 @@ impl DbInner {
     }
 
     #[allow(clippy::panic)]
-    pub async fn write_batch_with_options(&self, batch: &WriteBatch, options: &WriteOptions) {
-        // If the batch is empty, return early. This prevents the write from hanging if
-        // the current WAL/memtable is empty (and thus never gets flushed).
+    pub async fn write_batch_with_options(
+        self: Arc<Self>,
+        batch: WriteBatch,
+        options: &WriteOptions,
+    ) {
+        // If the batch is empty, return early.
         if batch.ops.is_empty() {
             return;
         }
 
         self.maybe_apply_backpressure().await;
 
-        let current_table = if self.wal_enabled() {
-            let mut guard = self.state.write();
-            let current_wal = guard.wal();
-            for op in &batch.ops {
-                match op {
-                    WriteOp::Put(key, value) => {
-                        current_wal.put(key, value);
-                    }
-                    WriteOp::Delete(key) => {
-                        current_wal.delete(key);
-                    }
-                }
-            }
-            current_wal.table().clone()
-        } else {
-            if cfg!(not(feature = "wal_disable")) {
-                panic!("wal_disabled feature must be enabled");
-            }
-            let mut guard = self.state.write();
-            let current_memtable = guard.memtable();
-            for op in &batch.ops {
-                match op {
-                    WriteOp::Put(key, value) => {
-                        current_memtable.put(key, value);
-                    }
-                    WriteOp::Delete(key) => {
-                        current_memtable.delete(key);
-                    }
-                }
-            }
-            let table = current_memtable.table().clone();
-            let last_wal_id = guard.last_written_wal_id();
-            self.maybe_freeze_memtable(&mut guard, last_wal_id);
-            table
-        };
+        let wal_enabled = self.wal_enabled();
+        let cloned_self = Arc::clone(&self);
 
+        // Move the batch processing to a blocking task
+        let current_table = tokio::task::spawn_blocking(move || {
+            if wal_enabled {
+                let mut guard = cloned_self.state.write();
+                let current_wal = guard.wal();
+                for op in &batch.ops {
+                    match op {
+                        WriteOp::Put(key, value) => {
+                            current_wal.put(key, value);
+                        }
+                        WriteOp::Delete(key) => {
+                            current_wal.delete(key);
+                        }
+                    }
+                }
+                current_wal.table().clone()
+            } else {
+                if cfg!(not(feature = "wal_disable")) {
+                    panic!("wal_disabled feature must be enabled");
+                }
+                let mut guard = cloned_self.state.write();
+                let current_memtable = guard.memtable();
+                for op in &batch.ops {
+                    match op {
+                        WriteOp::Put(key, value) => {
+                            current_memtable.put(key, value);
+                        }
+                        WriteOp::Delete(key) => {
+                            current_memtable.delete(key);
+                        }
+                    }
+                }
+                let table = current_memtable.table().clone();
+                let last_wal_id = guard.last_written_wal_id();
+                cloned_self.maybe_freeze_memtable(&mut guard, last_wal_id);
+                table
+            }
+        })
+        .await
+        .expect("Blocking task panicked");
+
+        // Await durability if required
         if options.await_durable {
             current_table.await_durable().await;
         }
@@ -681,17 +693,19 @@ impl Db {
     /// Write a batch of put/delete operations atomically to the database. All batch
     /// operations are guaranteed to end up in the same WAL SST (or L0 memtable if
     /// WAL is disabled).
-    pub async fn write_batch(&self, batch: &WriteBatch) {
-        self.inner
-            .write_batch_with_options(batch, DEFAULT_WRITE_OPTIONS)
+    pub async fn write_batch(&self, batch: WriteBatch) {
+        self.write_batch_with_options(batch, DEFAULT_WRITE_OPTIONS)
             .await;
     }
 
     /// Write a batch of put/delete operations atomically to the database. All batch
     /// operations are guaranteed to end up in the same WAL SST (or L0 memtable if
     /// WAL is disabled).
-    pub async fn write_batch_with_options(&self, batch: &WriteBatch, options: &WriteOptions) {
-        self.inner.write_batch_with_options(batch, options).await;
+    pub async fn write_batch_with_options(&self, batch: WriteBatch, options: &WriteOptions) {
+        self.inner
+            .clone()
+            .write_batch_with_options(batch, options)
+            .await;
     }
 
     pub async fn flush(&self) -> Result<(), SlateDBError> {
@@ -886,7 +900,7 @@ mod tests {
         batch.delete(b"key1");
 
         // Write the batch
-        kv_store.write_batch(&batch).await;
+        kv_store.write_batch(batch).await;
 
         // Read back keys
         assert_eq!(kv_store.get(b"key1").await.unwrap(), None);
