@@ -269,6 +269,12 @@ impl DbInner {
 
     #[allow(clippy::panic)]
     pub async fn write_batch_with_options(&self, batch: &WriteBatch, options: &WriteOptions) {
+        // If the batch is empty, return early. This prevents the write from hanging if
+        // the current WAL/memtable is empty (and thus never gets flushed).
+        if batch.ops.is_empty() {
+            return;
+        }
+
         self.maybe_apply_backpressure().await;
 
         let current_table = if self.wal_enabled() {
