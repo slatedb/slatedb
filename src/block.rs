@@ -1,6 +1,7 @@
 use crate::db_state::RowAttribute;
 use crate::error::SlateDBError;
 use crate::row_codec::encode_row_v0;
+use crate::types::RowAttributes;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
@@ -105,7 +106,7 @@ impl BlockBuilder {
     }
 
     #[must_use]
-    pub fn add(&mut self, key: &[u8], value: Option<&[u8]>) -> bool {
+    pub fn add(&mut self, key: &[u8], value: Option<&[u8]>, attrs: RowAttributes) -> bool {
         assert!(!key.is_empty(), "key must not be empty");
         let key_prefix_len = compute_prefix(&self.first_key, key);
         let key_suffix = &key[key_prefix_len..];
@@ -130,6 +131,7 @@ impl BlockBuilder {
             key_suffix,
             value,
             &self.row_attributes,
+            attrs.ts,
         );
 
         if self.first_key.is_empty() {
@@ -157,12 +159,13 @@ impl BlockBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::gen_attrs;
 
     #[test]
     fn test_block() {
         let mut builder = BlockBuilder::new(4096, vec![RowAttribute::Flags]);
-        assert!(builder.add(b"key1", Some(b"value1")));
-        assert!(builder.add(b"key2", Some(b"value2")));
+        assert!(builder.add(b"key1", Some(b"value1"), gen_attrs(0)));
+        assert!(builder.add(b"key2", Some(b"value2"), gen_attrs(1)));
         let block = builder.build().unwrap();
         let encoded = block.encode();
         let decoded = Block::decode(encoded);
@@ -173,9 +176,9 @@ mod tests {
     #[test]
     fn test_block_with_tombstone() {
         let mut builder = BlockBuilder::new(4096, vec![RowAttribute::Flags]);
-        assert!(builder.add(b"key1", Some(b"value1")));
-        assert!(builder.add(b"key2", None));
-        assert!(builder.add(b"key3", Some(b"value3")));
+        assert!(builder.add(b"key1", Some(b"value1"), gen_attrs(0)));
+        assert!(builder.add(b"key2", None, gen_attrs(1)));
+        assert!(builder.add(b"key3", Some(b"value3"), gen_attrs(2)));
         let block = builder.build().unwrap();
         let encoded = block.encode();
         let _decoded = Block::decode(encoded);
@@ -184,8 +187,8 @@ mod tests {
     #[test]
     fn test_block_size() {
         let mut builder = BlockBuilder::new(4096, vec![RowAttribute::Flags]);
-        assert!(builder.add(b"key1", Some(b"value1")));
-        assert!(builder.add(b"key2", Some(b"value2")));
+        assert!(builder.add(b"key1", Some(b"value1"), gen_attrs(1)));
+        assert!(builder.add(b"key2", Some(b"value2"), gen_attrs(2)));
         let block = builder.build().unwrap();
         assert_eq!(41, block.size());
     }

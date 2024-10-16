@@ -335,6 +335,7 @@ impl From<RowAttribute> for SstRowAttribute {
     fn from(value: RowAttribute) -> Self {
         match value {
             RowAttribute::Flags => SstRowAttribute::Flags,
+            RowAttribute::Timestamp => SstRowAttribute::Timestamp,
         }
     }
 }
@@ -344,6 +345,7 @@ impl From<SstRowAttribute> for RowAttribute {
     fn from(value: SstRowAttribute) -> Self {
         match value {
             SstRowAttribute::Flags => RowAttribute::Flags,
+            SstRowAttribute::Timestamp => RowAttribute::Timestamp,
             _ => panic!(
                 "Attempted to read SST written with unknown SstRowAttribute. Are you \
             running an older version of SlateDB than was used to write the SST?"

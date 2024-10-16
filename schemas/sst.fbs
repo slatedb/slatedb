@@ -17,7 +17,8 @@ enum CompressionFormat: byte {
 }
 
 enum SstRowAttribute: byte {
-    Flags
+    Flags,
+    Timestamp
 }
 
 // Has metadata about a SST file.

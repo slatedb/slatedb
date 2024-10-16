@@ -147,31 +147,32 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
 mod tests {
     use std::collections::VecDeque;
 
-    use bytes::Bytes;
-
+    use crate::config::Clock;
     use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
     use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
-    use crate::test_utils::assert_iterator;
+    use crate::test_utils::{assert_iterator, gen_attrs, TestClock};
     use crate::types::{KeyValueDeletable, ValueDeletable};
+    use bytes::Bytes;
 
     #[tokio::test]
     async fn test_merge_iterator_should_include_entries_in_order() {
         let mut iters = VecDeque::new();
+        let clock = TestClock::new();
         iters.push_back(
-            TestIterator::new()
+            TestIterator::new(&clock)
                 .with_entry(b"aaaa", b"1111")
                 .with_entry(b"cccc", b"3333")
                 .with_entry(b"zzzz", b"26262626"),
         );
         iters.push_back(
-            TestIterator::new()
+            TestIterator::new(&clock)
                 .with_entry(b"bbbb", b"2222")
                 .with_entry(b"xxxx", b"24242424")
                 .with_entry(b"yyyy", b"25252525"),
         );
         iters.push_back(
-            TestIterator::new()
+            TestIterator::new(&clock)
                 .with_entry(b"dddd", b"4444")
                 .with_entry(b"eeee", b"5555")
                 .with_entry(b"gggg", b"7777"),
@@ -182,23 +183,50 @@ mod tests {
         assert_iterator(
             &mut merge_iter,
             &[
-                ("aaaa".into(), ValueDeletable::Value(Bytes::from("1111"))),
-                ("bbbb".into(), ValueDeletable::Value(Bytes::from("2222"))),
-                ("cccc".into(), ValueDeletable::Value(Bytes::from("3333"))),
-                ("dddd".into(), ValueDeletable::Value(Bytes::from("4444"))),
-                ("eeee".into(), ValueDeletable::Value(Bytes::from("5555"))),
-                ("gggg".into(), ValueDeletable::Value(Bytes::from("7777"))),
+                (
+                    "aaaa".into(),
+                    ValueDeletable::Value(Bytes::from("1111")),
+                    gen_attrs(0),
+                ),
+                (
+                    "bbbb".into(),
+                    ValueDeletable::Value(Bytes::from("2222")),
+                    gen_attrs(3),
+                ),
+                (
+                    "cccc".into(),
+                    ValueDeletable::Value(Bytes::from("3333")),
+                    gen_attrs(1),
+                ),
+                (
+                    "dddd".into(),
+                    ValueDeletable::Value(Bytes::from("4444")),
+                    gen_attrs(6),
+                ),
+                (
+                    "eeee".into(),
+                    ValueDeletable::Value(Bytes::from("5555")),
+                    gen_attrs(7),
+                ),
+                (
+                    "gggg".into(),
+                    ValueDeletable::Value(Bytes::from("7777")),
+                    gen_attrs(8),
+                ),
                 (
                     "xxxx".into(),
                     ValueDeletable::Value(Bytes::from("24242424")),
+                    gen_attrs(4),
                 ),
                 (
                     "yyyy".into(),
                     ValueDeletable::Value(Bytes::from("25252525")),
+                    gen_attrs(5),
                 ),
                 (
                     "zzzz".into(),
                     ValueDeletable::Value(Bytes::from("26262626")),
+                    gen_attrs(2),
                 ),
             ],
         )
@@ -208,18 +236,19 @@ mod tests {
     #[tokio::test]
     async fn test_merge_iterator_should_write_one_entry_with_given_key() {
         let mut iters = VecDeque::new();
+        let clock = TestClock::new();
         iters.push_back(
-            TestIterator::new()
+            TestIterator::new(&clock)
                 .with_entry(b"aaaa", b"1111")
                 .with_entry(b"cccc", b"use this one c"),
         );
         iters.push_back(
-            TestIterator::new()
+            TestIterator::new(&clock)
                 .with_entry(b"cccc", b"badc1")
                 .with_entry(b"xxxx", b"use this one x"),
         );
         iters.push_back(
-            TestIterator::new()
+            TestIterator::new(&clock)
                 .with_entry(b"bbbb", b"2222")
                 .with_entry(b"cccc", b"badc2")
                 .with_entry(b"xxxx", b"badx1"),
@@ -230,15 +259,25 @@ mod tests {
         assert_iterator(
             &mut merge_iter,
             &[
-                ("aaaa".into(), ValueDeletable::Value(Bytes::from("1111"))),
-                ("bbbb".into(), ValueDeletable::Value(Bytes::from("2222"))),
+                (
+                    "aaaa".into(),
+                    ValueDeletable::Value(Bytes::from("1111")),
+                    gen_attrs(0),
+                ),
+                (
+                    "bbbb".into(),
+                    ValueDeletable::Value(Bytes::from("2222")),
+                    gen_attrs(4),
+                ),
                 (
                     "cccc".into(),
                     ValueDeletable::Value(Bytes::from("use this one c")),
+                    gen_attrs(1),
                 ),
                 (
                     "xxxx".into(),
                     ValueDeletable::Value(Bytes::from("use this one x")),
+                    gen_attrs(3),
                 ),
             ],
         )
@@ -247,11 +286,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_two_iterator_should_include_entries_in_order() {
-        let iter1 = TestIterator::new()
+        let clock = TestClock::new();
+        let iter1 = TestIterator::new(&clock)
             .with_entry(b"aaaa", b"1111")
             .with_entry(b"cccc", b"3333")
             .with_entry(b"zzzz", b"26262626");
-        let iter2 = TestIterator::new()
+        let iter2 = TestIterator::new(&clock)
             .with_entry(b"bbbb", b"2222")
             .with_entry(b"xxxx", b"24242424")
             .with_entry(b"yyyy", b"25252525");
@@ -261,20 +301,35 @@ mod tests {
         assert_iterator(
             &mut merge_iter,
             &[
-                ("aaaa".into(), ValueDeletable::Value(Bytes::from("1111"))),
-                ("bbbb".into(), ValueDeletable::Value(Bytes::from("2222"))),
-                ("cccc".into(), ValueDeletable::Value(Bytes::from("3333"))),
+                (
+                    "aaaa".into(),
+                    ValueDeletable::Value(Bytes::from("1111")),
+                    gen_attrs(0),
+                ),
+                (
+                    "bbbb".into(),
+                    ValueDeletable::Value(Bytes::from("2222")),
+                    gen_attrs(3),
+                ),
+                (
+                    "cccc".into(),
+                    ValueDeletable::Value(Bytes::from("3333")),
+                    gen_attrs(1),
+                ),
                 (
                     "xxxx".into(),
                     ValueDeletable::Value(Bytes::from("24242424")),
+                    gen_attrs(4),
                 ),
                 (
                     "yyyy".into(),
                     ValueDeletable::Value(Bytes::from("25252525")),
+                    gen_attrs(5),
                 ),
                 (
                     "zzzz".into(),
                     ValueDeletable::Value(Bytes::from("26262626")),
+                    gen_attrs(2),
                 ),
             ],
         )
@@ -283,10 +338,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_two_iterator_should_write_one_entry_with_given_key() {
-        let iter1 = TestIterator::new()
+        let clock = TestClock::new();
+        let iter1 = TestIterator::new(&clock)
             .with_entry(b"aaaa", b"1111")
             .with_entry(b"cccc", b"use this one c");
-        let iter2 = TestIterator::new()
+        let iter2 = TestIterator::new(&clock)
             .with_entry(b"cccc", b"badc")
             .with_entry(b"xxxx", b"24242424");
 
@@ -295,28 +351,36 @@ mod tests {
         assert_iterator(
             &mut merge_iter,
             &[
-                ("aaaa".into(), ValueDeletable::Value(Bytes::from("1111"))),
+                (
+                    "aaaa".into(),
+                    ValueDeletable::Value(Bytes::from("1111")),
+                    gen_attrs(0),
+                ),
                 (
                     "cccc".into(),
                     ValueDeletable::Value(Bytes::from("use this one c")),
+                    gen_attrs(1),
                 ),
                 (
                     "xxxx".into(),
                     ValueDeletable::Value(Bytes::from("24242424")),
+                    gen_attrs(3),
                 ),
             ],
         )
         .await;
     }
 
-    struct TestIterator {
+    struct TestIterator<'a> {
         entries: VecDeque<Result<KeyValueDeletable, SlateDBError>>,
+        clock: &'a TestClock,
     }
 
-    impl TestIterator {
-        fn new() -> Self {
+    impl<'a> TestIterator<'a> {
+        fn new(clock: &'a TestClock) -> Self {
             Self {
                 entries: VecDeque::new(),
+                clock,
             }
         }
 
@@ -324,12 +388,13 @@ mod tests {
             self.entries.push_back(Ok(KeyValueDeletable {
                 key: Bytes::from(key),
                 value: ValueDeletable::Value(Bytes::from(val)),
+                attributes: gen_attrs(self.clock.now()),
             }));
             self
         }
     }
 
-    impl KeyValueIterator for TestIterator {
+    impl KeyValueIterator for TestIterator<'_> {
         async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
             self.entries.pop_front().map_or(Ok(None), |e| match e {
                 Ok(kv) => Ok(Some(kv)),

@@ -123,7 +123,11 @@ impl TokioCompactionExecutorInner {
             // Add to SST
             let value = kv.value.into_option();
             current_writer
-                .add(kv.key.as_ref(), value.as_ref().map(|b| b.as_ref()))
+                .add(
+                    kv.key.as_ref(),
+                    value.as_ref().map(|b| b.as_ref()),
+                    kv.attributes,
+                )
                 .await?;
             current_size += kv.key.len() + value.map_or(0, |b| b.len());
             if current_size > self.options.max_sst_size {

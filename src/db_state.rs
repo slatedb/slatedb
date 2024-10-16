@@ -70,6 +70,7 @@ impl SsTableId {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) enum RowAttribute {
     Flags,
+    Timestamp,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

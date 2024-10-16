@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use std::{str::FromStr, time::Duration};
-
 use serde::Serialize;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{str::FromStr, time::Duration};
 use tokio::runtime::Handle;
 
 use crate::compactor::CompactionScheduler;
@@ -56,6 +56,33 @@ impl WriteOptions {
     const fn default() -> Self {
         Self {
             await_durable: true,
+        }
+    }
+}
+
+/// defines the clock that SlateDB will use during this session
+pub trait Clock {
+    /// Returns a timestamp in milliseconds since the unix epoch,
+    /// must return monotonically increasing numbers (this is enforced
+    /// at runtime and will panic if the invariant is broken)
+    ///
+    /// Note that this clock does not need to return a number that
+    /// represents the unix timestamp; the only requirement is that
+    /// it represents a sequence that can attribute a logical ordering
+    /// to actions on the database
+    fn now(&self) -> i64;
+}
+
+/// contains the default implementation of the Clock, and will return the system time
+pub struct SystemClock {
+    pub system_time: SystemTime,
+}
+
+impl Clock for SystemClock {
+    fn now(&self) -> i64 {
+        match self.system_time.duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs() as i64, // Time is after the epoch
+            Err(e) => -(e.duration().as_secs() as i64), // Time is before the epoch, return negative
         }
     }
 }
@@ -157,6 +184,11 @@ pub struct DbOptions {
 
     /// Configuration options for the garbage collector.
     pub garbage_collector_options: Option<GarbageCollectorOptions>,
+
+    /// The Clock to use for insertion timestamps
+    ///
+    /// Default: the default clock uses the local system time on the machine
+    pub clock: Arc<dyn Clock + Send + Sync>,
 }
 
 impl Default for DbOptions {
@@ -176,6 +208,9 @@ impl Default for DbOptions {
             block_cache: default_block_cache(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
+            clock: Arc::new(SystemClock {
+                system_time: SystemTime::now(),
+            }),
         }
     }
 }
