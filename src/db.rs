@@ -705,7 +705,7 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
@@ -715,13 +715,12 @@ mod tests {
     use super::*;
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
-        SystemClock,
     };
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
     #[cfg(feature = "wal_disable")]
     use crate::test_utils::assert_iterator;
-    use crate::test_utils::gen_attrs;
+    use crate::test_utils::{gen_attrs, TestClock};
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -1142,13 +1141,13 @@ mod tests {
                 (
                     vec![b'a'; 32],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
-                    gen_attrs(1),
+                    gen_attrs(0),
                 ),
-                (vec![b'b'; 32], ValueDeletable::Tombstone, gen_attrs(2)),
+                (vec![b'b'; 32], ValueDeletable::Tombstone, gen_attrs(1)),
                 (
                     vec![b'c'; 32],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
-                    gen_attrs(3),
+                    gen_attrs(2),
                 ),
             ],
         )
@@ -1785,9 +1784,7 @@ mod tests {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             block_cache: None,
             garbage_collector_options: None,
-            clock: Arc::new(SystemClock {
-                system_time: SystemTime::now(),
-            }),
+            clock: Arc::new(TestClock::new()),
         }
     }
 }
