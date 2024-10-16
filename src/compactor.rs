@@ -312,6 +312,7 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
+    use crate::test_utils::TestClock;
 
     const PATH: &str = "/test/db";
 
@@ -500,6 +501,7 @@ mod tests {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             block_cache: None,
             garbage_collector_options: None,
+            clock: Arc::new(TestClock::new()),
         }
     }
 

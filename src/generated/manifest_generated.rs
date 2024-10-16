@@ -109,11 +109,12 @@ impl flatbuffers::SimpleToVerifyInSlice for CompressionFormat {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_SST_ROW_ATTRIBUTE: i8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SST_ROW_ATTRIBUTE: i8 = 0;
+pub const ENUM_MAX_SST_ROW_ATTRIBUTE: i8 = 1;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SST_ROW_ATTRIBUTE: [SstRowAttribute; 1] = [
+pub const ENUM_VALUES_SST_ROW_ATTRIBUTE: [SstRowAttribute; 2] = [
   SstRowAttribute::Flags,
+  SstRowAttribute::Timestamp,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -122,16 +123,19 @@ pub struct SstRowAttribute(pub i8);
 #[allow(non_upper_case_globals)]
 impl SstRowAttribute {
   pub const Flags: Self = Self(0);
+  pub const Timestamp: Self = Self(1);
 
   pub const ENUM_MIN: i8 = 0;
-  pub const ENUM_MAX: i8 = 0;
+  pub const ENUM_MAX: i8 = 1;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::Flags,
+    Self::Timestamp,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
     match self {
       Self::Flags => Some("Flags"),
+      Self::Timestamp => Some("Timestamp"),
       _ => None,
     }
   }

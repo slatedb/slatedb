@@ -157,14 +157,14 @@ impl<'a> KeyValueIterator for SortedRunIterator<'a> {
 mod tests {
     use std::sync::Arc;
 
+    use super::*;
+    use crate::config::Clock;
+    use crate::db_state::SsTableId;
+    use crate::sst::SsTableFormat;
+    use crate::test_utils::{assert_kv, gen_attrs, OrderedBytesGenerator, TestClock};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use ulid::Ulid;
-
-    use super::*;
-    use crate::db_state::SsTableId;
-    use crate::sst::SsTableFormat;
-    use crate::test_utils::{assert_kv, OrderedBytesGenerator};
 
     #[tokio::test]
     async fn test_one_sst_sr_iter() {
@@ -181,9 +181,9 @@ mod tests {
             None,
         ));
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", Some(b"value1")).unwrap();
-        builder.add(b"key2", Some(b"value2")).unwrap();
-        builder.add(b"key3", Some(b"value3")).unwrap();
+        builder.add(b"key1", Some(b"value1"), gen_attrs(1)).unwrap();
+        builder.add(b"key2", Some(b"value2"), gen_attrs(2)).unwrap();
+        builder.add(b"key3", Some(b"value3"), gen_attrs(3)).unwrap();
         let encoded = builder.build().unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let handle = table_store.write_sst(&id, encoded).await.unwrap();
@@ -224,13 +224,13 @@ mod tests {
             None,
         ));
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", Some(b"value1")).unwrap();
-        builder.add(b"key2", Some(b"value2")).unwrap();
+        builder.add(b"key1", Some(b"value1"), gen_attrs(1)).unwrap();
+        builder.add(b"key2", Some(b"value2"), gen_attrs(2)).unwrap();
         let encoded = builder.build().unwrap();
         let id1 = SsTableId::Compacted(Ulid::new());
         let handle1 = table_store.write_sst(&id1, encoded).await.unwrap();
         let mut builder = table_store.table_builder();
-        builder.add(b"key3", Some(b"value3")).unwrap();
+        builder.add(b"key3", Some(b"value3"), gen_attrs(3)).unwrap();
         let encoded = builder.build().unwrap();
         let id2 = SsTableId::Compacted(Ulid::new());
         let handle2 = table_store.write_sst(&id2, encoded).await.unwrap();
@@ -274,7 +274,15 @@ mod tests {
         let mut test_case_key_gen = key_gen.clone();
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
         let mut test_case_val_gen = val_gen.clone();
-        let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
+        let sr = build_sr_with_ssts(
+            table_store.clone(),
+            3,
+            10,
+            key_gen,
+            val_gen,
+            Arc::new(TestClock::new()),
+        )
+        .await;
 
         for i in 0..30 {
             let mut expected_key_gen = test_case_key_gen.clone();
@@ -320,7 +328,15 @@ mod tests {
         let mut expected_key_gen = key_gen.clone();
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
         let mut expected_val_gen = val_gen.clone();
-        let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
+        let sr = build_sr_with_ssts(
+            table_store.clone(),
+            3,
+            10,
+            key_gen,
+            val_gen,
+            Arc::new(TestClock::new()),
+        )
+        .await;
 
         let mut iter =
             SortedRunIterator::new_from_key(&sr, &[b'a', 10], table_store.clone(), 1, 1, false)
@@ -353,7 +369,15 @@ mod tests {
         ));
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
-        let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
+        let sr = build_sr_with_ssts(
+            table_store.clone(),
+            3,
+            10,
+            key_gen,
+            val_gen,
+            Arc::new(TestClock::new()),
+        )
+        .await;
 
         let mut iter =
             SortedRunIterator::new_from_key(&sr, &[b'z', 30], table_store.clone(), 1, 1, false)
@@ -369,13 +393,18 @@ mod tests {
         keys_per_sst: usize,
         mut key_gen: OrderedBytesGenerator,
         mut val_gen: OrderedBytesGenerator,
+        clock: Arc<dyn Clock>,
     ) -> SortedRun {
         let mut ssts = Vec::<SsTableHandle>::new();
         for _ in 0..n {
             let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
             for _ in 0..keys_per_sst {
                 writer
-                    .add(key_gen.next().as_ref(), Some(val_gen.next().as_ref()))
+                    .add(
+                        key_gen.next().as_ref(),
+                        Some(val_gen.next().as_ref()),
+                        gen_attrs(clock.now()),
+                    )
                     .await
                     .unwrap();
             }
