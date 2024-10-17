@@ -69,8 +69,9 @@ impl DbInner {
         tokio_handle: &Handle,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let this = Arc::clone(self);
+        let mut is_stopped = false;
         Some(tokio_handle.spawn(async move {
-            loop {
+            while !(is_stopped && rx.is_empty()) {
                 match rx.recv().await.expect("unexpected channel close") {
                     WriteBatchMsg::WriteBatch(write_batch_request) => {
                         let WriteBatchRequest { batch, done } = write_batch_request;
@@ -78,7 +79,7 @@ impl DbInner {
                         _ = done.send(result);
                     }
                     WriteBatchMsg::Shutdown => {
-                        return;
+                        is_stopped = true;
                     }
                 }
             }
