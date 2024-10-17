@@ -110,20 +110,20 @@ impl WritableKVTable {
         &self.table
     }
 
-    pub(crate) fn put(&mut self, key: &[u8], value: &[u8]) {
-        self.maybe_subtract_old_val_from_size(key);
+    pub(crate) fn put(&mut self, key: Bytes, value: Bytes) {
+        self.maybe_subtract_old_val_from_size(key.clone());
         self.size = self.size + key.len() + value.len();
         self.table.put(key, value)
     }
 
-    pub(crate) fn delete(&mut self, key: &[u8]) {
-        self.maybe_subtract_old_val_from_size(key);
+    pub(crate) fn delete(&mut self, key: Bytes) {
+        self.maybe_subtract_old_val_from_size(key.clone());
         self.size += key.len();
         self.table.delete(key);
     }
 
-    fn maybe_subtract_old_val_from_size(&mut self, key: &[u8]) {
-        if let Some(old_deletable) = self.table.get(key) {
+    fn maybe_subtract_old_val_from_size(&mut self, key: Bytes) {
+        if let Some(old_deletable) = self.table.get(&key) {
             self.size = self.size
                 - key.len()
                 - match old_deletable {
@@ -160,26 +160,19 @@ impl KVTable {
     }
 
     #[allow(dead_code)] // will be used in #8
-    pub(crate) fn range_from(&self, start: &[u8]) -> MemTableIterator {
-        let bounds = (
-            Bound::Included(Bytes::copy_from_slice(start)),
-            Bound::Unbounded,
-        );
+    pub(crate) fn range_from(&self, start: Bytes) -> MemTableIterator {
+        let bounds = (Bound::Included(start), Bound::Unbounded);
         MemTableIterator(self.map.range(bounds))
     }
 
     /// Puts a value, returning as soon as the value is written to the memtable but before
     /// it is flushed to durable storage.
-    fn put(&self, key: &[u8], value: &[u8]) {
-        self.map.insert(
-            Bytes::copy_from_slice(key),
-            ValueDeletable::Value(Bytes::copy_from_slice(value)),
-        );
+    fn put(&self, key: Bytes, value: Bytes) {
+        self.map.insert(key, ValueDeletable::Value(value));
     }
 
-    fn delete(&self, key: &[u8]) {
-        self.map
-            .insert(Bytes::copy_from_slice(key), ValueDeletable::Tombstone);
+    fn delete(&self, key: Bytes) {
+        self.map.insert(key, ValueDeletable::Tombstone);
     }
 
     pub(crate) async fn await_durable(&self) {
@@ -198,11 +191,11 @@ mod tests {
     #[tokio::test]
     async fn test_memtable_iter() {
         let mut table = WritableKVTable::new();
-        table.put(b"abc333", b"value3");
-        table.put(b"abc111", b"value1");
-        table.put(b"abc555", b"value5");
-        table.put(b"abc444", b"value4");
-        table.put(b"abc222", b"value2");
+        table.put(Bytes::from_static(b"abc333"), Bytes::from_static(b"value3"));
+        table.put(Bytes::from_static(b"abc111"), Bytes::from_static(b"value1"));
+        table.put(Bytes::from_static(b"abc555"), Bytes::from_static(b"value5"));
+        table.put(Bytes::from_static(b"abc444"), Bytes::from_static(b"value4"));
+        table.put(Bytes::from_static(b"abc222"), Bytes::from_static(b"value2"));
 
         let mut iter = table.table().iter();
         let kv = iter.next().await.unwrap().unwrap();
@@ -226,13 +219,13 @@ mod tests {
     #[tokio::test]
     async fn test_memtable_range_from_existing_key() {
         let mut table = WritableKVTable::new();
-        table.put(b"abc333", b"value3");
-        table.put(b"abc111", b"value1");
-        table.put(b"abc555", b"value5");
-        table.put(b"abc444", b"value4");
-        table.put(b"abc222", b"value2");
+        table.put(Bytes::from_static(b"abc333"), Bytes::from_static(b"value3"));
+        table.put(Bytes::from_static(b"abc111"), Bytes::from_static(b"value1"));
+        table.put(Bytes::from_static(b"abc555"), Bytes::from_static(b"value5"));
+        table.put(Bytes::from_static(b"abc444"), Bytes::from_static(b"value4"));
+        table.put(Bytes::from_static(b"abc222"), Bytes::from_static(b"value2"));
 
-        let mut iter = table.table().range_from(b"abc333");
+        let mut iter = table.table().range_from(Bytes::from_static(b"abc333"));
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc333".as_slice());
         assert_eq!(kv.value, b"value3".as_slice());
@@ -248,13 +241,13 @@ mod tests {
     #[tokio::test]
     async fn test_memtable_range_from_nonexisting_key() {
         let mut table = WritableKVTable::new();
-        table.put(b"abc333", b"value3");
-        table.put(b"abc111", b"value1");
-        table.put(b"abc555", b"value5");
-        table.put(b"abc444", b"value4");
-        table.put(b"abc222", b"value2");
+        table.put(Bytes::from_static(b"abc333"), Bytes::from_static(b"value3"));
+        table.put(Bytes::from_static(b"abc111"), Bytes::from_static(b"value1"));
+        table.put(Bytes::from_static(b"abc555"), Bytes::from_static(b"value5"));
+        table.put(Bytes::from_static(b"abc444"), Bytes::from_static(b"value4"));
+        table.put(Bytes::from_static(b"abc222"), Bytes::from_static(b"value2"));
 
-        let mut iter = table.table().range_from(b"abc345");
+        let mut iter = table.table().range_from(Bytes::from_static(b"abc345"));
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc444".as_slice());
         assert_eq!(kv.value, b"value4".as_slice());
@@ -267,8 +260,8 @@ mod tests {
     #[tokio::test]
     async fn test_memtable_iter_delete() {
         let mut table = WritableKVTable::new();
-        table.put(b"abc333", b"value3");
-        table.delete(b"abc333");
+        table.put(Bytes::from_static(b"abc333"), Bytes::from_static(b"value3"));
+        table.delete(Bytes::from_static(b"abc333"));
 
         let mut iter = table.table().iter();
         assert!(iter.next().await.unwrap().is_none());
@@ -278,16 +271,19 @@ mod tests {
     async fn test_memtable_track_sz() {
         let mut table = WritableKVTable::new();
 
-        table.put(b"abc333", b"val1");
+        table.put(Bytes::from_static(b"abc333"), Bytes::from_static(b"val1"));
         assert_eq!(table.size(), 10);
 
-        table.put(b"def456", b"blablabla");
+        table.put(
+            Bytes::from_static(b"def456"),
+            Bytes::from_static(b"blablabla"),
+        );
         assert_eq!(table.size(), 25);
 
-        table.put(b"def456", b"blabla");
+        table.put(Bytes::from_static(b"def456"), Bytes::from_static(b"blabla"));
         assert_eq!(table.size(), 22);
 
-        table.delete(b"abc333");
+        table.delete(Bytes::from_static(b"abc333"));
         assert_eq!(table.size(), 18)
     }
 }

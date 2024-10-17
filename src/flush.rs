@@ -56,10 +56,10 @@ impl DbInner {
         while let Some(kv) = iter.next_entry_sync() {
             match kv.value {
                 ValueDeletable::Value(v) => {
-                    mem_table.put(&kv.key, &v);
+                    mem_table.put(kv.key, v);
                 }
                 ValueDeletable::Tombstone => {
-                    mem_table.delete(&kv.key);
+                    mem_table.delete(kv.key);
                 }
             }
         }

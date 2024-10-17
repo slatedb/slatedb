@@ -29,7 +29,7 @@ impl DbInner {
         let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
             let current_wal = guard.wal();
-            for op in &batch.ops {
+            for op in batch.ops {
                 match op {
                     WriteOp::Put(key, value) => {
                         current_wal.put(key, value);
@@ -46,7 +46,7 @@ impl DbInner {
             }
             let mut guard = self.state.write();
             let current_memtable = guard.memtable();
-            for op in &batch.ops {
+            for op in batch.ops {
                 match op {
                     WriteOp::Put(key, value) => {
                         current_memtable.put(key, value);

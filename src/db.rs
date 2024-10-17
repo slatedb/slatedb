@@ -214,6 +214,9 @@ impl DbInner {
 
         self.maybe_apply_backpressure().await;
 
+        let key = Bytes::copy_from_slice(key);
+        let value = Bytes::copy_from_slice(value);
+
         // Clone memtable to avoid a deadlock with flusher thread.
         let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
@@ -244,6 +247,8 @@ impl DbInner {
         assert!(!key.is_empty(), "key cannot be empty");
 
         self.maybe_apply_backpressure().await;
+
+        let key = Bytes::copy_from_slice(key);
 
         // Clone memtable to avoid a deadlock with flusher thread.
         let current_table = if self.wal_enabled() {
@@ -367,9 +372,9 @@ impl DbInner {
                 for kv in wal_replay_buf.iter() {
                     match &kv.value {
                         ValueDeletable::Value(value) => {
-                            guard.memtable().put(kv.key.as_ref(), value.as_ref())
+                            guard.memtable().put(kv.key.clone(), value.clone());
                         }
-                        ValueDeletable::Tombstone => guard.memtable().delete(kv.key.as_ref()),
+                        ValueDeletable::Tombstone => guard.memtable().delete(kv.key.clone()),
                     }
                 }
                 self.maybe_freeze_memtable(&mut guard, sst_id);
@@ -1111,9 +1116,18 @@ mod tests {
 
         let memtable = {
             let mut lock = kv_store.inner.state.write();
-            lock.wal().put(b"abc1111", b"value1111");
-            lock.wal().put(b"abc2222", b"value2222");
-            lock.wal().put(b"abc3333", b"value3333");
+            lock.wal().put(
+                Bytes::copy_from_slice(b"abc1111"),
+                Bytes::copy_from_slice(b"value1111"),
+            );
+            lock.wal().put(
+                Bytes::copy_from_slice(b"abc2222"),
+                Bytes::copy_from_slice(b"value2222"),
+            );
+            lock.wal().put(
+                Bytes::copy_from_slice(b"abc3333"),
+                Bytes::copy_from_slice(b"value3333"),
+            );
             lock.wal().table().clone()
         };
 
