@@ -310,8 +310,6 @@ impl DbInner {
         rx.await.expect("receive error on memtable flush")
     }
 
-    // TODO should we move this to `batch_write.rs`??
-    // TODO should we have put/delete use batches like RocksDB does/
     pub(crate) async fn maybe_apply_backpressure(&self) {
         loop {
             let table = {
