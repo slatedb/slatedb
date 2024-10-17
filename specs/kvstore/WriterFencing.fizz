@@ -1,0 +1,142 @@
+# Model to validate that there can only be one writer and that old writers can be fenced.
+SUCCESS = "success"
+CONFLICT = "conflict"
+MAX_FLUSH_COUNT = 3
+NUM_WRITERS = 3
+
+role ObjectStore:
+  action Init:
+    self.objects = {}
+
+  atomic func ConditionalWrite(name, content):
+    if name in self.objects.keys():
+        return CONFLICT
+    self.objects[name] = content
+    return SUCCESS
+
+  atomic func Read(name):
+    return self.objects.get(name)
+
+  atomic func List():
+    return sorted(self.objects.keys())
+
+role SlateDBWriter:
+    action Init:
+        self.state = "waiting"
+        self.flush_count = 0
+        self.was_ever_open = 0
+    
+    atomic action FlushWal:
+        if self.state != "opened" or self.flush_count > MAX_FLUSH_COUNT:
+            return
+        self.WriteWal()
+        self.flush_count += 1
+    
+    atomic func LoadLatestManifest():
+        store = manifest_store
+        manifests = store.List()
+        if len(manifests) > 0:
+            recent_manifest = store.Read(manifests[len(manifests) - 1])
+            new_manifest = record(id = recent_manifest.id + 1, writer_epoch = recent_manifest.writer_epoch + 1)
+            self.WriteManifest(new_manifest)
+        else:
+            new_manifest = record(id = 1, writer_epoch = 1)
+            self.WriteManifest(new_manifest)        
+
+    atomic func WriteManifest(new_manifest):
+        store = manifest_store
+        write_status = store.ConditionalWrite(new_manifest.id, new_manifest)
+        if write_status == SUCCESS:
+            self.state = "ManifestUpdated"
+            self.manifest = new_manifest
+        else:
+            self.state = "fenced"
+    
+    #db.rs\db\open_with_fp_registry() does below
+    atomic func Open():
+        self.state = "initializing"
+        self.LoadLatestManifest()
+        self.ReplayWal()
+        self.WriteFencingWal()
+
+    atomic func ReplayWal():
+        store = wal_store
+        wal = store.List()
+        if(len(wal) > 0):
+            self.next_wal = wal[len(wal) - 1] + 1
+        else:
+            self.next_wal = 1
+
+    #flush.rs\DbInner\flush() is the only method that increments next_wal on write.
+    atomic func WriteWal():
+        store = wal_store
+        write_status = store.ConditionalWrite(self.next_wal, self.manifest.writer_epoch)
+        if write_status == SUCCESS:
+            self.next_wal = self.next_wal + 1
+        else:
+            self.state = "fenced"
+        return write_status
+
+    #db.rs\DbInner\fence_writers()
+    atomic func WriteFencingWal():
+        store = manifest_store
+        while self.state == "ManifestUpdated":
+            write_status = self.WriteWal()
+            if write_status == SUCCESS:
+                self.state = "opened"
+                self.was_ever_open = 1
+                break;
+            else:
+                manifests = store.List()
+                recent_manifest = store.Read(manifests[len(manifests) - 1])
+                # if there is a new writer, set current to failed.  Otherwise, try with next wal.
+                if self.manifest.writer_epoch < recent_manifest.writer_epoch:
+                    self.state = "fenced"
+                    break
+                else:
+                    self.next_wal = self.next_wal + 1
+                
+action Init:
+    wal_store = ObjectStore()
+    manifest_store = ObjectStore()
+    writers = []
+    writer_ids = range(0, NUM_WRITERS)
+    for i in range(0,NUM_WRITERS):
+        writers.append(SlateDBWriter())
+
+atomic fair action WriterOpen:
+    writer_id = any writer_ids
+    current_writer = writers[writer_id]
+    if current_writer.state == "waiting":
+        current_writer.Open()
+
+always assertion NotMoreThanOneWriterInWritableState:
+    writable_writer_count = 0
+    wal_list = wal_store.List()
+    for i in range(0, NUM_WRITERS):
+        # writer state must be opened, and next wal slot be available in object store for the write to succeed.
+        if writers[i].state == "opened" and writers[i].next_wal not in wal_list:
+            writable_writer_count +=1
+    return writable_writer_count <=1
+
+# After a new writer writes wal, old writer cannot write its wal. Assert by reading writer epoch of sequential wal.
+always assertion OlderWriterCannotAddWal:
+    wal_list = wal_store.List()
+    previous_wal_writer_epoch = 0
+    for wal in wal_list:
+        wal_writer_epoch = wal_store.Read(wal)
+        if wal_writer_epoch < previous_wal_writer_epoch:
+            return false
+        previous_wal_writer_epoch = wal_writer_epoch
+    return True
+
+exists assertion MultipleWritersOpened:
+    num_writers_ever_opened = 0
+    for i in range(0, NUM_WRITERS):
+        num_writers_ever_opened += writers[i].was_ever_open
+    return num_writers_ever_opened >=2
+
+
+    
+    
+        
