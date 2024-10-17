@@ -6,6 +6,7 @@
 
 pub mod admin;
 pub mod batch;
+mod batch_write;
 mod blob;
 mod block;
 mod block_iterator;

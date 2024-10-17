@@ -9,7 +9,8 @@ use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Handle;
 
-use crate::batch::{WriteBatch, WriteOp};
+use crate::batch::WriteBatch;
+use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::cached_object_store::CachedObjectStore;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
@@ -25,7 +26,6 @@ use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushThreadMsg;
-use crate::mem_table_flush::MemtableFlushThreadMsg::Shutdown;
 use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
@@ -40,6 +40,7 @@ pub(crate) struct DbInner {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
     pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
+    pub(crate) write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: Arc<DbStats>,
 }
 
@@ -50,6 +51,7 @@ impl DbInner {
         core_db_state: CoreDbState,
         wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
         memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
+        write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
         db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let state = DbState::new(core_db_state);
@@ -59,6 +61,7 @@ impl DbInner {
             table_store,
             wal_flush_notifier,
             memtable_flush_notifier,
+            write_notifier,
             db_stats,
         };
         Ok(db_inner)
@@ -198,7 +201,7 @@ impl DbInner {
         Ok(false)
     }
 
-    fn wal_enabled(&self) -> bool {
+    pub(crate) fn wal_enabled(&self) -> bool {
         #[cfg(feature = "wal_disable")]
         return self.options.wal_enabled;
         #[cfg(not(feature = "wal_disable"))]
@@ -267,67 +270,27 @@ impl DbInner {
         }
     }
 
-    #[allow(clippy::panic)]
-    pub async fn write_batch_with_options(
-        self: Arc<Self>,
+    pub async fn write_with_options(
+        &self,
         batch: WriteBatch,
         options: &WriteOptions,
-    ) {
-        // If the batch is empty, return early.
+    ) -> Result<(), SlateDBError> {
         if batch.ops.is_empty() {
-            return;
+            return Ok(());
         }
 
-        self.maybe_apply_backpressure().await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
 
-        let wal_enabled = self.wal_enabled();
-        let cloned_self = Arc::clone(&self);
+        self.write_notifier.send(batch_msg).ok();
 
-        // Move the batch processing to a blocking task
-        let current_table = tokio::task::spawn_blocking(move || {
-            if wal_enabled {
-                let mut guard = cloned_self.state.write();
-                let current_wal = guard.wal();
-                for op in &batch.ops {
-                    match op {
-                        WriteOp::Put(key, value) => {
-                            current_wal.put(key, value);
-                        }
-                        WriteOp::Delete(key) => {
-                            current_wal.delete(key);
-                        }
-                    }
-                }
-                current_wal.table().clone()
-            } else {
-                if cfg!(not(feature = "wal_disable")) {
-                    panic!("wal_disabled feature must be enabled");
-                }
-                let mut guard = cloned_self.state.write();
-                let current_memtable = guard.memtable();
-                for op in &batch.ops {
-                    match op {
-                        WriteOp::Put(key, value) => {
-                            current_memtable.put(key, value);
-                        }
-                        WriteOp::Delete(key) => {
-                            current_memtable.delete(key);
-                        }
-                    }
-                }
-                let table = current_memtable.table().clone();
-                let last_wal_id = guard.last_written_wal_id();
-                cloned_self.maybe_freeze_memtable(&mut guard, last_wal_id);
-                table
-            }
-        })
-        .await
-        .expect("Blocking task panicked");
+        let current_table = rx.await.expect("write batch failed")?;
 
-        // Await durability if required
         if options.await_durable {
             current_table.await_durable().await;
         }
+
+        Ok(())
     }
 
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
@@ -347,7 +310,9 @@ impl DbInner {
         rx.await.expect("receive error on memtable flush")
     }
 
-    async fn maybe_apply_backpressure(&self) {
+    // TODO should we move this to `batch_write.rs`??
+    // TODO should we have put/delete use batches like RocksDB does/
+    pub(crate) async fn maybe_apply_backpressure(&self) {
         loop {
             let table = {
                 let guard = self.state.read();
@@ -459,6 +424,7 @@ pub struct Db {
     /// The handle for the flush thread.
     wal_flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    write_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     compactor: Mutex<Option<Compactor>>,
     garbage_collector: Mutex<Option<GarbageCollector>>,
 }
@@ -527,6 +493,7 @@ impl Db {
         let mut manifest = Self::init_db(&manifest_store).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let (wal_flush_tx, wal_flush_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
             DbInner::new(
                 options.clone(),
@@ -534,6 +501,7 @@ impl Db {
                 manifest.db_state()?.clone(),
                 wal_flush_tx,
                 memtable_flush_tx,
+                write_tx,
                 db_stats,
             )
             .await?,
@@ -550,6 +518,7 @@ impl Db {
         };
         let memtable_flush_task =
             inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
+        let write_task = inner.spawn_write_task(write_rx, &tokio_handle);
         let mut compactor = None;
         if let Some(compactor_options) = &inner.options.compactor_options {
             // not to pollute the cache during compaction
@@ -588,6 +557,7 @@ impl Db {
             inner,
             wal_flush_task: Mutex::new(flush_thread),
             memtable_flush_task: Mutex::new(memtable_flush_task),
+            write_task: Mutex::new(write_task),
             compactor: Mutex::new(compactor),
             garbage_collector: Mutex::new(garbage_collector),
         })
@@ -624,24 +594,34 @@ impl Db {
             gc.close().await;
         }
 
-        // Tell the wal flush thread to shut down.
+        // Shutdown the write batch thread.
+        self.inner.write_notifier.send(WriteBatchMsg::Shutdown).ok();
+
+        if let Some(write_task) = {
+            let mut write_task = self.write_task.lock();
+            write_task.take()
+        } {
+            write_task.await.expect("Failed to join write thread");
+        }
+
+        // Shutdown the WAL flush thread.
         self.inner
             .wal_flush_notifier
             .send(WalFlushThreadMsg::Shutdown)
             .ok();
 
         if let Some(flush_task) = {
-            // Scope the flush_thread lock so its lock isn't held while awaiting the join
-            // and the final flush below.
-            // Wait for the flush thread to finish.
             let mut flush_task = self.wal_flush_task.lock();
             flush_task.take()
         } {
             flush_task.await.expect("Failed to join flush thread");
         }
 
-        // Tell the memtable flush thread to shut down.
-        self.inner.memtable_flush_notifier.send(Shutdown).ok();
+        // Shutdown the memtable flush thread.
+        self.inner
+            .memtable_flush_notifier
+            .send(MemtableFlushThreadMsg::Shutdown)
+            .ok();
 
         if let Some(memtable_flush_task) = {
             let mut memtable_flush_task = self.memtable_flush_task.lock();
@@ -693,19 +673,19 @@ impl Db {
     /// Write a batch of put/delete operations atomically to the database. All batch
     /// operations are guaranteed to end up in the same WAL SST (or L0 memtable if
     /// WAL is disabled).
-    pub async fn write_batch(&self, batch: WriteBatch) {
-        self.write_batch_with_options(batch, DEFAULT_WRITE_OPTIONS)
-            .await;
+    pub async fn write(&self, batch: WriteBatch) -> Result<(), SlateDBError> {
+        self.write_with_options(batch, DEFAULT_WRITE_OPTIONS).await
     }
 
     /// Write a batch of put/delete operations atomically to the database. All batch
     /// operations are guaranteed to end up in the same WAL SST (or L0 memtable if
     /// WAL is disabled).
-    pub async fn write_batch_with_options(&self, batch: WriteBatch, options: &WriteOptions) {
-        self.inner
-            .clone()
-            .write_batch_with_options(batch, options)
-            .await;
+    pub async fn write_with_options(
+        &self,
+        batch: WriteBatch,
+        options: &WriteOptions,
+    ) -> Result<(), SlateDBError> {
+        self.inner.write_with_options(batch, options).await
     }
 
     pub async fn flush(&self) -> Result<(), SlateDBError> {
@@ -900,7 +880,7 @@ mod tests {
         batch.delete(b"key1");
 
         // Write the batch
-        kv_store.write_batch(batch).await;
+        kv_store.write(batch).await.expect("write batch failed");
 
         // Read back keys
         assert_eq!(kv_store.get(b"key1").await.unwrap(), None);
