@@ -21,7 +21,7 @@ pub(crate) struct WriteBatchRequest {
 }
 
 impl DbInner {
-    async fn write_batch_request(&self, batch: WriteBatch) -> Result<Arc<KVTable>, SlateDBError> {
+    async fn write_batch(&self, batch: WriteBatch) -> Result<Arc<KVTable>, SlateDBError> {
         self.maybe_apply_backpressure().await;
 
         let current_table = if self.wal_enabled() {
@@ -74,7 +74,7 @@ impl DbInner {
                 match rx.recv().await.expect("unexpected channel close") {
                     WriteBatchMsg::WriteBatch(write_batch_request) => {
                         let WriteBatchRequest { batch, done } = write_batch_request;
-                        let result = this.write_batch_request(batch).await;
+                        let result = this.write_batch(batch).await;
                         _ = done.send(result);
                     }
                     WriteBatchMsg::Shutdown => {
