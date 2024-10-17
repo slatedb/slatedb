@@ -2,7 +2,7 @@
 SUCCESS = "success"
 CONFLICT = "conflict"
 MAX_FLUSH_COUNT = 3
-NUM_WRITERS = 3
+NUM_WRITERS = 2
 
 role ObjectStore:
   action Init:
@@ -32,16 +32,18 @@ role SlateDBWriter:
         self.WriteWal()
         self.flush_count += 1
     
-    atomic func LoadLatestManifest():
+    func LoadLatestManifest():
         store = manifest_store
         manifests = store.List()
+        result = CONFLICT
         if len(manifests) > 0:
             recent_manifest = store.Read(manifests[len(manifests) - 1])
             new_manifest = record(id = recent_manifest.id + 1, writer_epoch = recent_manifest.writer_epoch + 1)
-            self.WriteManifest(new_manifest)
+            result = self.WriteManifest(new_manifest)
         else:
             new_manifest = record(id = 1, writer_epoch = 1)
-            self.WriteManifest(new_manifest)        
+            result = self.WriteManifest(new_manifest)        
+        return result
 
     atomic func WriteManifest(new_manifest):
         store = manifest_store
@@ -51,21 +53,16 @@ role SlateDBWriter:
             self.manifest = new_manifest
         else:
             self.state = "fenced"
+        return write_status
+
     
     #db.rs\db\open_with_fp_registry() does below
     atomic func Open():
         self.state = "initializing"
-        self.LoadLatestManifest()
-        self.ReplayWal()
+        load_manifest_result = self.LoadLatestManifest()
+        if load_manifest_result != SUCCESS:
+            return
         self.WriteFencingWal()
-
-    atomic func ReplayWal():
-        store = wal_store
-        wal = store.List()
-        if(len(wal) > 0):
-            self.next_wal = wal[len(wal) - 1] + 1
-        else:
-            self.next_wal = 1
 
     #flush.rs\DbInner\flush() is the only method that increments next_wal on write.
     atomic func WriteWal():
@@ -79,6 +76,12 @@ role SlateDBWriter:
 
     #db.rs\DbInner\fence_writers()
     atomic func WriteFencingWal():
+        wal = wal_store.List()
+        if(len(wal) > 0):
+            self.next_wal = wal[len(wal) - 1] + 1
+        else:
+            self.next_wal = 1
+
         store = manifest_store
         while self.state == "ManifestUpdated":
             write_status = self.WriteWal()
@@ -126,7 +129,7 @@ always assertion OlderWriterCannotAddWal:
     for wal in wal_list:
         wal_writer_epoch = wal_store.Read(wal)
         if wal_writer_epoch < previous_wal_writer_epoch:
-            return false
+            return False
         previous_wal_writer_epoch = wal_writer_epoch
     return True
 
