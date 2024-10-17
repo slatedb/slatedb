@@ -4,6 +4,8 @@
 //! collection of write operations (puts and/or deletes) that are applied
 //! atomically to the database.
 
+use bytes::Bytes;
+
 /// A batch of write operations (puts and/or deletes). All operations in the
 /// batch are applied atomically to the database. If multiple operations appear
 /// for a a single key, the last operation will be applied. The others will be
@@ -38,8 +40,8 @@ impl Default for WriteBatch {
 }
 
 pub enum WriteOp {
-    Put(Vec<u8>, Vec<u8>),
-    Delete(Vec<u8>),
+    Put(Bytes, Bytes),
+    Delete(Bytes),
 }
 
 impl WriteBatch {
@@ -50,12 +52,15 @@ impl WriteBatch {
     /// Put a key-value pair into the batch. Keys must not be empty.
     pub fn put(&mut self, key: &[u8], value: &[u8]) {
         assert!(!key.is_empty(), "key cannot be empty");
-        self.ops.push(WriteOp::Put(key.to_vec(), value.to_vec()));
+        self.ops.push(WriteOp::Put(
+            Bytes::copy_from_slice(key),
+            Bytes::copy_from_slice(value),
+        ));
     }
 
     /// Delete a key-value pair into the batch. Keys must not be empty.
     pub fn delete(&mut self, key: &[u8]) {
         assert!(!key.is_empty(), "key cannot be empty");
-        self.ops.push(WriteOp::Delete(key.to_vec()));
+        self.ops.push(WriteOp::Delete(Bytes::copy_from_slice(key)));
     }
 }
