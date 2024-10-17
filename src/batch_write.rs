@@ -1,6 +1,7 @@
 use core::panic;
 use std::sync::Arc;
 
+use log::warn;
 use tokio::runtime::Handle;
 
 use crate::{
@@ -21,6 +22,7 @@ pub(crate) struct WriteBatchRequest {
 }
 
 impl DbInner {
+    #[allow(clippy::panic)]
     async fn write_batch(&self, batch: WriteBatch) -> Result<Arc<KVTable>, SlateDBError> {
         self.maybe_apply_backpressure().await;
 
@@ -61,6 +63,28 @@ impl DbInner {
         };
 
         Ok(current_table)
+    }
+
+    pub(crate) async fn maybe_apply_backpressure(&self) {
+        loop {
+            let table = {
+                let guard = self.state.read();
+                let state = guard.state();
+                if state.imm_memtable.len() <= self.options.max_unflushed_memtable {
+                    return;
+                }
+                let Some(table) = state.imm_memtable.back() else {
+                    return;
+                };
+                warn!(
+                    "applying backpressure to write by waiting for imm table flush. imm tables({}), max({})",
+                    state.imm_memtable.len(),
+                    self.options.max_unflushed_memtable
+                );
+                table.clone()
+            };
+            table.await_flush_to_l0().await
+        }
     }
 
     pub(crate) fn spawn_write_task(

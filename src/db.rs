@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
-use log::warn;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
@@ -308,28 +307,6 @@ impl DbInner {
             .send(MemtableFlushThreadMsg::FlushImmutableMemtables(Some(tx)))
             .expect("memtable flush hung up");
         rx.await.expect("receive error on memtable flush")
-    }
-
-    pub(crate) async fn maybe_apply_backpressure(&self) {
-        loop {
-            let table = {
-                let guard = self.state.read();
-                let state = guard.state();
-                if state.imm_memtable.len() <= self.options.max_unflushed_memtable {
-                    return;
-                }
-                let Some(table) = state.imm_memtable.back() else {
-                    return;
-                };
-                warn!(
-                    "applying backpressure to write by waiting for imm table flush. imm tables({}), max({})",
-                    state.imm_memtable.len(),
-                    self.options.max_unflushed_memtable
-                );
-                table.clone()
-            };
-            table.await_flush_to_l0().await
-        }
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
