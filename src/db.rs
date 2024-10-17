@@ -670,16 +670,12 @@ impl Db {
         self.inner.delete_with_options(key, options).await;
     }
 
-    /// Write a batch of put/delete operations atomically to the database. All batch
-    /// operations are guaranteed to end up in the same WAL SST (or L0 memtable if
-    /// WAL is disabled).
+    /// Write a batch of put/delete operations atomically to the database.
     pub async fn write(&self, batch: WriteBatch) -> Result<(), SlateDBError> {
         self.write_with_options(batch, DEFAULT_WRITE_OPTIONS).await
     }
 
-    /// Write a batch of put/delete operations atomically to the database. All batch
-    /// operations are guaranteed to end up in the same WAL SST (or L0 memtable if
-    /// WAL is disabled).
+    /// Write a batch of put/delete operations atomically to the database.
     pub async fn write_with_options(
         &self,
         batch: WriteBatch,
