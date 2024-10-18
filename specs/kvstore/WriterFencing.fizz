@@ -38,10 +38,15 @@ role SlateDBWriter:
         result = CONFLICT
         if len(manifests) > 0:
             recent_manifest = store.Read(manifests[len(manifests) - 1])
+            wal = wal_store.List()
+            self.next_wal = 1
+            if len(wal) > 0:
+                self.next_wal = wal[len(wal) - 1] + 1
             new_manifest = record(id = recent_manifest.id + 1, writer_epoch = recent_manifest.writer_epoch + 1)
             result = self.WriteManifest(new_manifest)
         else:
             new_manifest = record(id = 1, writer_epoch = 1)
+            self.next_wal = 1
             result = self.WriteManifest(new_manifest)        
         return result
 
@@ -76,12 +81,6 @@ role SlateDBWriter:
 
     #db.rs\DbInner\fence_writers()
     atomic func WriteFencingWal():
-        wal = wal_store.List()
-        if(len(wal) > 0):
-            self.next_wal = wal[len(wal) - 1] + 1
-        else:
-            self.next_wal = 1
-
         store = manifest_store
         while self.state == "ManifestUpdated":
             write_status = self.WriteWal()
