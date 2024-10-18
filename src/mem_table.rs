@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
@@ -12,7 +12,8 @@ use crate::types::{KeyValueDeletable, ValueDeletable};
 
 pub(crate) struct KVTable {
     map: SkipMap<Bytes, ValueDeletable>,
-    durable_notify: Arc<Notify>,
+    is_durable_tx: watch::Sender<bool>,
+    is_durable_rx: watch::Receiver<bool>,
 }
 
 pub(crate) struct WritableKVTable {
@@ -23,7 +24,8 @@ pub(crate) struct WritableKVTable {
 pub(crate) struct ImmutableMemtable {
     last_wal_id: u64,
     table: Arc<KVTable>,
-    flush_notify: Arc<Notify>,
+    is_flushed_tx: watch::Sender<bool>,
+    is_flushed_rx: watch::Receiver<bool>,
 }
 
 pub(crate) struct ImmutableWal {
@@ -52,10 +54,12 @@ impl<'a> MemTableIterator<'a> {
 
 impl ImmutableMemtable {
     pub(crate) fn new(table: WritableKVTable, last_wal_id: u64) -> Self {
+        let (is_flushed_tx, is_flushed_rx) = watch::channel(false);
         Self {
             table: table.table,
             last_wal_id,
-            flush_notify: Arc::new(Notify::new()),
+            is_flushed_tx,
+            is_flushed_rx,
         }
     }
 
@@ -68,11 +72,14 @@ impl ImmutableMemtable {
     }
 
     pub(crate) async fn await_flush_to_l0(&self) {
-        self.flush_notify.notified().await;
+        let mut rx = self.is_flushed_rx.clone();
+        while !*rx.borrow_and_update() {
+            rx.changed().await.expect("watch channel closed");
+        }
     }
 
     pub(crate) fn notify_flush_to_l0(&self) {
-        self.flush_notify.notify_waiters()
+        self.is_flushed_tx.send(true).expect("watch channel closed");
     }
 }
 
@@ -136,9 +143,11 @@ impl WritableKVTable {
 
 impl KVTable {
     fn new() -> Self {
+        let (is_durable_tx, is_durable_rx) = watch::channel(false);
         Self {
             map: SkipMap::new(),
-            durable_notify: Arc::new(Notify::new()),
+            is_durable_tx,
+            is_durable_rx,
         }
     }
 
@@ -176,11 +185,14 @@ impl KVTable {
     }
 
     pub(crate) async fn await_durable(&self) {
-        self.durable_notify.notified().await;
+        let mut rx = self.is_durable_rx.clone();
+        while !*rx.borrow_and_update() {
+            rx.changed().await.expect("watch channel closed");
+        }
     }
 
     pub(crate) fn notify_durable(&self) {
-        self.durable_notify.notify_waiters()
+        self.is_durable_tx.send(true).expect("watch channel closed");
     }
 }
 

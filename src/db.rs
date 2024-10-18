@@ -872,6 +872,43 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn test_write_batch_without_wal() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        // Use a very small l0 size to force flushes so await is notified
+        let mut options = test_db_options(0, 8, None);
+
+        // Disable WAL
+        options.wal_enabled = false;
+
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store_without_wal"),
+            options,
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        // Create a new WriteBatch
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.put(b"key2", b"value2");
+        batch.delete(b"key1");
+
+        // Write the batch
+        kv_store.write(batch).await.expect("write batch failed");
+
+        // Read back keys
+        assert_eq!(kv_store.get(b"key1").await.unwrap(), None);
+        assert_eq!(
+            kv_store.get(b"key2").await.unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
+
+        kv_store.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_write_batch_with_empty_key() {
         let mut batch = WriteBatch::new();
