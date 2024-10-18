@@ -3,12 +3,13 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
-use log::warn;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Handle;
 
+use crate::batch::WriteBatch;
+use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::cached_object_store::CachedObjectStore;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
@@ -24,7 +25,6 @@ use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushThreadMsg;
-use crate::mem_table_flush::MemtableFlushThreadMsg::Shutdown;
 use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
@@ -39,6 +39,7 @@ pub(crate) struct DbInner {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
     pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
+    pub(crate) write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: Arc<DbStats>,
 }
 
@@ -49,6 +50,7 @@ impl DbInner {
         core_db_state: CoreDbState,
         wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
         memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
+        write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
         db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let state = DbState::new(core_db_state);
@@ -58,6 +60,7 @@ impl DbInner {
             table_store,
             wal_flush_notifier,
             memtable_flush_notifier,
+            write_notifier,
             db_stats,
         };
         Ok(db_inner)
@@ -197,7 +200,7 @@ impl DbInner {
         Ok(false)
     }
 
-    fn wal_enabled(&self) -> bool {
+    pub(crate) fn wal_enabled(&self) -> bool {
         #[cfg(feature = "wal_disable")]
         return self.options.wal_enabled;
         #[cfg(not(feature = "wal_disable"))]
@@ -210,6 +213,9 @@ impl DbInner {
         assert!(!key.is_empty(), "key cannot be empty");
 
         self.maybe_apply_backpressure().await;
+
+        let key = Bytes::copy_from_slice(key);
+        let value = Bytes::copy_from_slice(value);
 
         // Clone memtable to avoid a deadlock with flusher thread.
         let current_table = if self.wal_enabled() {
@@ -242,6 +248,8 @@ impl DbInner {
 
         self.maybe_apply_backpressure().await;
 
+        let key = Bytes::copy_from_slice(key);
+
         // Clone memtable to avoid a deadlock with flusher thread.
         let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
@@ -266,6 +274,29 @@ impl DbInner {
         }
     }
 
+    pub async fn write_with_options(
+        &self,
+        batch: WriteBatch,
+        options: &WriteOptions,
+    ) -> Result<(), SlateDBError> {
+        if batch.ops.is_empty() {
+            return Ok(());
+        }
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
+
+        self.write_notifier.send(batch_msg).ok();
+
+        let current_table = rx.await.expect("write batch failed")?;
+
+        if options.await_durable {
+            current_table.await_durable().await;
+        }
+
+        Ok(())
+    }
+
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
@@ -281,28 +312,6 @@ impl DbInner {
             .send(MemtableFlushThreadMsg::FlushImmutableMemtables(Some(tx)))
             .expect("memtable flush hung up");
         rx.await.expect("receive error on memtable flush")
-    }
-
-    async fn maybe_apply_backpressure(&self) {
-        loop {
-            let table = {
-                let guard = self.state.read();
-                let state = guard.state();
-                if state.imm_memtable.len() <= self.options.max_unflushed_memtable {
-                    return;
-                }
-                let Some(table) = state.imm_memtable.back() else {
-                    return;
-                };
-                warn!(
-                    "applying backpressure to write by waiting for imm table flush. imm tables({}), max({})",
-                    state.imm_memtable.len(),
-                    self.options.max_unflushed_memtable
-                );
-                table.clone()
-            };
-            table.await_flush_to_l0().await
-        }
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
@@ -363,9 +372,9 @@ impl DbInner {
                 for kv in wal_replay_buf.iter() {
                     match &kv.value {
                         ValueDeletable::Value(value) => {
-                            guard.memtable().put(kv.key.as_ref(), value.as_ref())
+                            guard.memtable().put(kv.key.clone(), value.clone());
                         }
-                        ValueDeletable::Tombstone => guard.memtable().delete(kv.key.as_ref()),
+                        ValueDeletable::Tombstone => guard.memtable().delete(kv.key.clone()),
                     }
                 }
                 self.maybe_freeze_memtable(&mut guard, sst_id);
@@ -395,6 +404,7 @@ pub struct Db {
     /// The handle for the flush thread.
     wal_flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    write_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     compactor: Mutex<Option<Compactor>>,
     garbage_collector: Mutex<Option<GarbageCollector>>,
 }
@@ -463,6 +473,7 @@ impl Db {
         let mut manifest = Self::init_db(&manifest_store).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let (wal_flush_tx, wal_flush_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
             DbInner::new(
                 options.clone(),
@@ -470,6 +481,7 @@ impl Db {
                 manifest.db_state()?.clone(),
                 wal_flush_tx,
                 memtable_flush_tx,
+                write_tx,
                 db_stats,
             )
             .await?,
@@ -486,6 +498,7 @@ impl Db {
         };
         let memtable_flush_task =
             inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
+        let write_task = inner.spawn_write_task(write_rx, &tokio_handle);
         let mut compactor = None;
         if let Some(compactor_options) = &inner.options.compactor_options {
             // not to pollute the cache during compaction
@@ -524,6 +537,7 @@ impl Db {
             inner,
             wal_flush_task: Mutex::new(flush_thread),
             memtable_flush_task: Mutex::new(memtable_flush_task),
+            write_task: Mutex::new(write_task),
             compactor: Mutex::new(compactor),
             garbage_collector: Mutex::new(garbage_collector),
         })
@@ -560,24 +574,34 @@ impl Db {
             gc.close().await;
         }
 
-        // Tell the wal flush thread to shut down.
+        // Shutdown the write batch thread.
+        self.inner.write_notifier.send(WriteBatchMsg::Shutdown).ok();
+
+        if let Some(write_task) = {
+            let mut write_task = self.write_task.lock();
+            write_task.take()
+        } {
+            write_task.await.expect("Failed to join write thread");
+        }
+
+        // Shutdown the WAL flush thread.
         self.inner
             .wal_flush_notifier
             .send(WalFlushThreadMsg::Shutdown)
             .ok();
 
         if let Some(flush_task) = {
-            // Scope the flush_thread lock so its lock isn't held while awaiting the join
-            // and the final flush below.
-            // Wait for the flush thread to finish.
             let mut flush_task = self.wal_flush_task.lock();
             flush_task.take()
         } {
             flush_task.await.expect("Failed to join flush thread");
         }
 
-        // Tell the memtable flush thread to shut down.
-        self.inner.memtable_flush_notifier.send(Shutdown).ok();
+        // Shutdown the memtable flush thread.
+        self.inner
+            .memtable_flush_notifier
+            .send(MemtableFlushThreadMsg::Shutdown)
+            .ok();
 
         if let Some(memtable_flush_task) = {
             let mut memtable_flush_task = self.memtable_flush_task.lock();
@@ -626,6 +650,24 @@ impl Db {
         self.inner.delete_with_options(key, options).await;
     }
 
+    /// Write a batch of put/delete operations atomically to the database. Batch writes
+    /// block other gets and writes until the batch is written to the WAL (or memtable if
+    /// WAL is disabled).
+    pub async fn write(&self, batch: WriteBatch) -> Result<(), SlateDBError> {
+        self.write_with_options(batch, DEFAULT_WRITE_OPTIONS).await
+    }
+
+    /// Write a batch of put/delete operations atomically to the database. Batch writes
+    /// block other gets and writes until the batch is written to the WAL (or memtable if
+    /// WAL is disabled).
+    pub async fn write_with_options(
+        &self,
+        batch: WriteBatch,
+        options: &WriteOptions,
+    ) -> Result<(), SlateDBError> {
+        self.inner.write_with_options(batch, options).await
+    }
+
     pub async fn flush(&self) -> Result<(), SlateDBError> {
         if self.inner.wal_enabled() {
             self.inner.flush_wals().await
@@ -643,7 +685,7 @@ impl Db {
 mod tests {
     use std::time::Duration;
 
-    use futures::StreamExt;
+    use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use tracing::info;
@@ -798,6 +840,189 @@ mod tests {
                 path
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_write_batch() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options(0, 1024, None),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        // Create a new WriteBatch
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.put(b"key2", b"value2");
+        batch.delete(b"key1");
+
+        // Write the batch
+        kv_store.write(batch).await.expect("write batch failed");
+
+        // Read back keys
+        assert_eq!(kv_store.get(b"key1").await.unwrap(), None);
+        assert_eq!(
+            kv_store.get(b"key2").await.unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn test_write_batch_without_wal() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        // Use a very small l0 size to force flushes so await is notified
+        let mut options = test_db_options(0, 8, None);
+
+        // Disable WAL
+        options.wal_enabled = false;
+
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store_without_wal"),
+            options,
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        // Create a new WriteBatch
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.put(b"key2", b"value2");
+        batch.delete(b"key1");
+
+        // Write the batch
+        kv_store.write(batch).await.expect("write batch failed");
+
+        // Read back keys
+        assert_eq!(kv_store.get(b"key1").await.unwrap(), None);
+        assert_eq!(
+            kv_store.get(b"key2").await.unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_write_batch_with_empty_key() {
+        let mut batch = WriteBatch::new();
+        let result = std::panic::catch_unwind(move || {
+            batch.put(b"", b"value");
+        });
+        assert!(
+            result.is_err(),
+            "Expected panic when using empty key in put operation"
+        );
+
+        let mut batch = WriteBatch::new();
+        let result = std::panic::catch_unwind(move || {
+            batch.delete(b"");
+        });
+        assert!(
+            result.is_err(),
+            "Expected panic when using empty key in delete operation"
+        );
+    }
+
+    /// Test that batch writes are atomic. Test does the following:
+    ///
+    /// - A set of, say 100 keys, 1-100
+    /// - Two tasks writing, one writing value to be same key, and other
+    ///   writing it to be key*2.
+    /// - We wait for both to complete.
+    /// - Assert that either all values are same as key, or all values key*2.
+    /// - Repeat above loop few times.
+    ///
+    /// _Note: This test is non-deterministic because it depends on the async
+    /// runtime to schedule the tasks in a way that the writes are concurrent._
+    #[tokio::test]
+    async fn test_concurrent_batch_writes_consistency() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Arc::new(
+            Db::open_with_opts(
+                Path::from("/tmp/test_concurrent_kv_store"),
+                test_db_options(
+                    0,
+                    1024,
+                    // Enable compactor to prevent l0 from filling up and
+                    // applying backpressure indefinitely.
+                    Some(CompactorOptions {
+                        poll_interval: Duration::from_millis(100),
+                        max_sst_size: 256,
+                        compaction_scheduler: Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+                            SizeTieredCompactionSchedulerOptions::default(),
+                        )),
+                        max_concurrent_compactions: 1,
+                        compaction_runtime: None,
+                    }),
+                ),
+                object_store.clone(),
+            )
+            .await
+            .unwrap(),
+        );
+
+        const NUM_KEYS: usize = 100;
+        const NUM_ROUNDS: usize = 20;
+
+        for _ in 0..NUM_ROUNDS {
+            // Write two tasks that write to the same keys
+            let task1 = {
+                let store = kv_store.clone();
+                tokio::spawn(async move {
+                    let mut batch = WriteBatch::new();
+                    for key in 1..=NUM_KEYS {
+                        batch.put(&key.to_be_bytes(), &key.to_be_bytes());
+                    }
+                    store.write(batch).await.expect("write batch failed");
+                })
+            };
+
+            let task2 = {
+                let store = kv_store.clone();
+                tokio::spawn(async move {
+                    let mut batch = WriteBatch::new();
+                    for key in 1..=NUM_KEYS {
+                        let value = (key * 2).to_be_bytes();
+                        batch.put(&key.to_be_bytes(), &value);
+                    }
+                    store.write(batch).await.expect("write batch failed");
+                })
+            };
+
+            // Wait for both tasks to complete
+            join_all(vec![task1, task2]).await;
+
+            // Ensure consistency: all values must be either key or key * 2
+            let mut all_key = true;
+            let mut all_key2 = true;
+
+            for key in 1..=NUM_KEYS {
+                let value = kv_store.get(&key.to_be_bytes()).await.unwrap();
+                let value = value.expect("Value should exist");
+
+                if value.as_ref() != key.to_be_bytes() {
+                    all_key = false;
+                }
+                if value.as_ref() != (key * 2).to_be_bytes() {
+                    all_key2 = false;
+                }
+            }
+
+            // Assert that the result is consistent: either all key or all key * 2
+            assert!(
+                all_key || all_key2,
+                "Inconsistent state: not all values match either key or key * 2"
+            );
+        }
+
+        kv_store.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -1027,9 +1252,18 @@ mod tests {
 
         let memtable = {
             let mut lock = kv_store.inner.state.write();
-            lock.wal().put(b"abc1111", b"value1111");
-            lock.wal().put(b"abc2222", b"value2222");
-            lock.wal().put(b"abc3333", b"value3333");
+            lock.wal().put(
+                Bytes::copy_from_slice(b"abc1111"),
+                Bytes::copy_from_slice(b"value1111"),
+            );
+            lock.wal().put(
+                Bytes::copy_from_slice(b"abc2222"),
+                Bytes::copy_from_slice(b"value2222"),
+            );
+            lock.wal().put(
+                Bytes::copy_from_slice(b"abc3333"),
+                Bytes::copy_from_slice(b"value3333"),
+            );
             lock.wal().table().clone()
         };
 
