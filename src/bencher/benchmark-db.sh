@@ -10,13 +10,29 @@ mkdir -p $OUT/dats
 mkdir -p $OUT/logs
 gnuplot -V # just to make sure gnuplot is present
 
-BENCH="cargo run -r --bin bencher --features=bencher -- --path /slatedb-bencher db \
-  --duration 60 \
-  --val-len 8192 \
-  --disable-wal \
-  --block-cache-size 134217728 \
-  --object-cache-path /tmp/slatedb-cache \
-"
+run_benchmark() {
+    local put_percentage="${1:-50}"
+    local concurrency="${2:-1}"
+    local duration="${3:-60}"
+    local val_len="${4:-8192}"
+    local disable_wal="${5:---disable-wal}"
+    local block_cache_size="${6:-134217728}"
+    local object_cache_path="${7:-/tmp/slatedb-cache}"
+    local path="/slatedb-bencher_${put_percentage}_${concurrency}"
+
+    # Build the BENCH command with the parameters
+    local bench_cmd="cargo run -r --bin bencher --features=bencher -- --path $path db \
+        --duration $duration \
+        --val-len $val_len \
+        $disable_wal \
+        --block-cache-size $block_cache_size \
+        --object-cache-path $object_cache_path \
+        --put-percentage $put_percentage \
+        --concurrency $concurrency"
+
+    # Run the benchmark
+    $bench_cmd
+}
 
 parse_stats() {
     local input_file="$1"
@@ -55,7 +71,7 @@ for put_percentage in 20 40 60 80 100; do
     dat_file="$OUT/dats/${put_percentage}_${concurrency}.dat"
     svg_file="$OUT/plots/${put_percentage}_${concurrency}.svg"
 
-    $BENCH --put-percentage $put_percentage --concurrency $concurrency | tee "$log_file"
+    run_benchmark "$put_percentage" "$concurrency" | tee "$log_file"
     parse_stats "$log_file" "$dat_file"
     generate_plot "$dat_file" "$svg_file"
   done
