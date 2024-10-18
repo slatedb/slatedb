@@ -20,7 +20,7 @@ role ObjectStore:
   atomic func List():
     return sorted(self.objects.keys())
 
-role SlateDBWriter:
+symmetric role SlateDBWriter:
     action Init:
         self.state = "waiting"
         self.flush_count = 0
