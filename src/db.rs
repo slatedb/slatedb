@@ -685,7 +685,7 @@ impl Db {
 mod tests {
     use std::time::Duration;
 
-    use futures::StreamExt;
+    use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use tracing::info;
@@ -891,6 +891,101 @@ mod tests {
             result.is_err(),
             "Expected panic when using empty key in delete operation"
         );
+    }
+
+    /// Test that batch writes are atomic. Test does the following:
+    ///
+    /// - A set of, say 100 keys, 1-100
+    /// - Two tasks writing, one writing value to be same key, and other
+    ///   writing it to be key*2.
+    /// - We wait for both to complete.
+    /// - Assert that either all values are same as key, or all values key*2.
+    /// - Repeat above loop few times.
+    ///
+    /// _Note: This test is non-deterministic because it depends on the async
+    /// runtime to schedule the tasks in a way that the writes are concurrent._
+    #[tokio::test]
+    async fn test_concurrent_batch_writes_consistency() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Arc::new(
+            Db::open_with_opts(
+                Path::from("/tmp/test_concurrent_kv_store"),
+                test_db_options(
+                    0,
+                    1024,
+                    // Enable compactor to prevent l0 from filling up and
+                    // applying backpressure indefinitely.
+                    Some(CompactorOptions {
+                        poll_interval: Duration::from_millis(100),
+                        max_sst_size: 256,
+                        compaction_scheduler: Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+                            SizeTieredCompactionSchedulerOptions::default(),
+                        )),
+                        max_concurrent_compactions: 1,
+                        compaction_runtime: None,
+                    }),
+                ),
+                object_store.clone(),
+            )
+            .await
+            .unwrap(),
+        );
+
+        const NUM_KEYS: usize = 100;
+        const NUM_ROUNDS: usize = 20;
+
+        for _ in 0..NUM_ROUNDS {
+            // Write two tasks that write to the same keys
+            let task1 = {
+                let store = kv_store.clone();
+                tokio::spawn(async move {
+                    let mut batch = WriteBatch::new();
+                    for key in 1..=NUM_KEYS {
+                        batch.put(&key.to_be_bytes(), &key.to_be_bytes());
+                    }
+                    store.write(batch).await.expect("write batch failed");
+                })
+            };
+
+            let task2 = {
+                let store = kv_store.clone();
+                tokio::spawn(async move {
+                    let mut batch = WriteBatch::new();
+                    for key in 1..=NUM_KEYS {
+                        let value = (key * 2).to_be_bytes();
+                        batch.put(&key.to_be_bytes(), &value);
+                    }
+                    store.write(batch).await.expect("write batch failed");
+                })
+            };
+
+            // Wait for both tasks to complete
+            join_all(vec![task1, task2]).await;
+
+            // Ensure consistency: all values must be either key or key * 2
+            let mut all_key = true;
+            let mut all_key2 = true;
+
+            for key in 1..=NUM_KEYS {
+                let value = kv_store.get(&key.to_be_bytes()).await.unwrap();
+                let value = value.expect("Value should exist");
+
+                if value.as_ref() != key.to_be_bytes() {
+                    all_key = false;
+                }
+                if value.as_ref() != (key * 2).to_be_bytes() {
+                    all_key2 = false;
+                }
+            }
+
+            // Assert that the result is consistent: either all key or all key * 2
+            assert!(
+                all_key || all_key2,
+                "Inconsistent state: not all values match either key or key * 2"
+            );
+        }
+
+        kv_store.close().await.unwrap();
     }
 
     #[tokio::test]
