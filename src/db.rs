@@ -119,16 +119,7 @@ impl DbInner {
     }
 
     async fn fence_writers(&self, manifest: &mut FenceableManifest) -> Result<(), SlateDBError> {
-        let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
-        let max_wal_id = self
-            .table_store
-            .list_wal_ssts((wal_id_last_compacted + 1)..)
-            .await?
-            .into_iter()
-            .map(|wal_sst| wal_sst.id.unwrap_wal_id())
-            .max()
-            .unwrap_or(0);
-        let mut empty_wal_id = max_wal_id + 1;
+        let mut empty_wal_id = self.state.read().state().core.next_wal_sst_id;
 
         loop {
             let empty_wal = WritableKVTable::new();
@@ -460,7 +451,7 @@ impl Db {
         ));
 
         let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
-        let mut manifest = Self::init_db(&manifest_store).await?;
+        let mut manifest = Self::init_db(&manifest_store, &table_store).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let (wal_flush_tx, wal_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
@@ -531,8 +522,14 @@ impl Db {
 
     async fn init_db(
         manifest_store: &Arc<ManifestStore>,
+        table_store: &Arc<TableStore>,
     ) -> Result<FenceableManifest, SlateDBError> {
         let stored_manifest = Self::init_stored_manifest(manifest_store).await?;
+        let mut state = stored_manifest.db_state().clone();
+        state.next_wal_sst_id = table_store
+            .clone()
+            .next_wal_sst_id(state.last_compacted_wal_sst_id)
+            .await?;
         FenceableManifest::init_writer(stored_manifest).await
     }
 
