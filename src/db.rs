@@ -118,7 +118,11 @@ impl DbInner {
         Ok(None)
     }
 
-    async fn fence_writers(&self, manifest: &mut FenceableManifest, next_wal_id: u64) -> Result<(), SlateDBError> {
+    async fn fence_writers(
+        &self,
+        manifest: &mut FenceableManifest,
+        next_wal_id: u64,
+    ) -> Result<(), SlateDBError> {
         let mut empty_wal_id = next_wal_id;
 
         loop {
@@ -455,8 +459,10 @@ impl Db {
 
         // get the next wal id before writing manifest.
         let wal_id_last_compacted = match &latest_manifest {
-            Some(latest_stored_manifest) => latest_stored_manifest.db_state().last_compacted_wal_sst_id,
-            None => 0
+            Some(latest_stored_manifest) => {
+                latest_stored_manifest.db_state().last_compacted_wal_sst_id
+            }
+            None => 0,
         };
         let next_wal_id = table_store.next_wal_sst_id(wal_id_last_compacted).await?;
 
@@ -531,11 +537,11 @@ impl Db {
 
     async fn init_db(
         manifest_store: &Arc<ManifestStore>,
-        latest_stored_manifest: Option<StoredManifest>
+        latest_stored_manifest: Option<StoredManifest>,
     ) -> Result<FenceableManifest, SlateDBError> {
         let stored_manifest = match latest_stored_manifest {
             Some(manifest) => manifest,
-            None => StoredManifest::init_new_db(manifest_store.clone(), CoreDbState::new()).await?
+            None => StoredManifest::init_new_db(manifest_store.clone(), CoreDbState::new()).await?,
         };
         FenceableManifest::init_writer(stored_manifest).await
     }
