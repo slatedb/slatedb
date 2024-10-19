@@ -151,7 +151,7 @@ impl TableStore {
             .into_iter()
             .map(|wal_sst| wal_sst.id.unwrap_wal_id())
             .max()
-            .unwrap_or(wal_id_last_compacted + 1))
+            .unwrap_or(wal_id_last_compacted) + 1)
     }
 
     pub(crate) fn table_writer(&self, id: SsTableId) -> EncodedSsTableWriter {
