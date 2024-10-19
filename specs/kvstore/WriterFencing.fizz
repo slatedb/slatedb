@@ -58,11 +58,12 @@ symmetric role SlateDBWriter:
 
     
     #db.rs\db\open_with_fp_registry() does below
-    atomic func Open():
+    func Open():
         self.state = "initializing"
-        load_manifest_result = self.LoadLatestManifest()
-        if load_manifest_result != SUCCESS:
-            return
+        atomic:
+            load_manifest_result = self.LoadLatestManifest()
+            if load_manifest_result != SUCCESS:
+                return
         self.WriteFencingWal()
 
     #flush.rs\DbInner\flush() is the only method that increments next_wal on write.
