@@ -13,18 +13,10 @@ arguments:
 Usage: bencher db [OPTIONS]
 
 Options:
-      --disable-wal
-          Whether to disable the write-ahead log.
-      --flush-ms <FLUSH_MS>
-          The interval in milliseconds to flush the write-ahead log.
-      --l0-sst-size-bytes <L0_SST_SIZE_BYTES>
-          The size in bytes of the L0 SSTables.
+      --db-options-path <FILE_PATH>
+          Options path to a file with options for DbOptions, `SlateDb.toml` is used if this flag is not set.
       --block-cache-size <BLOCK_CACHE_SIZE>
           The size in bytes of the block cache.
-      --object-cache-path <OBJECT_CACHE_PATH>
-          The path where object store cache part files are stored.
-      --object-cache-part-size <OBJECT_CACHE_PART_SIZE>
-          The size in bytes of the object store cache part files.
       --duration <DURATION>
           The duration in seconds to run the benchmark for.
       --key-generator <KEY_GENERATOR>
@@ -41,7 +33,7 @@ Options:
           The length of the values to generate. [default: 1024]
       --put-percentage <PUT_PERCENTAGE>
           The percentage of writes to perform in each task. [default: 20]
-  -h, --help
+      -h, --help
           Print help
 ```
 

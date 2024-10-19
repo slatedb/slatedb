@@ -2,16 +2,16 @@ use std::{
     fmt::{Display, Formatter},
     path::PathBuf,
     sync::Arc,
-    time::Duration,
 };
 
 use clap::{builder::PossibleValue, Args, Parser, Subcommand, ValueEnum};
 use slatedb::{
-    config::{CompressionCodec, DbOptions, ObjectStoreCacheOptions},
+    config::{CompressionCodec, DbOptions},
     db_cache::{
         moka::{MokaCache, MokaCacheOptions},
         DbCache,
     },
+    error::DbOptionsError,
 };
 
 use crate::db::{KeyGenerator, RandomKeyGenerator};
@@ -50,77 +50,30 @@ pub(crate) enum BencherCommands {
 pub(crate) struct DbArgs {
     #[arg(
         long,
-        help = "Whether to disable the write-ahead log.",
-        default_value_t = false
+        help = "Optional path to load the DbOptions configuration from. `Slatedb.toml` is used by default if this option is not present"
     )]
-    pub(crate) disable_wal: bool,
-
-    #[arg(
-        long,
-        help = "The interval in milliseconds to flush the write-ahead log."
-    )]
-    pub(crate) flush_ms: Option<u32>,
-
-    #[arg(long, help = "The size in bytes of the L0 SSTables.")]
-    pub(crate) l0_sst_size_bytes: Option<usize>,
-
+    db_options_path: Option<PathBuf>,
     #[arg(long, help = "The size in bytes of the block cache.")]
-    pub(crate) block_cache_size: Option<usize>,
-
-    #[arg(
-        long,
-        help = "The path where object store cache part files are stored."
-    )]
-    pub(crate) object_cache_path: Option<String>,
-
-    #[arg(long, help = "The size in bytes of the object store cache part files.")]
-    pub(crate) object_cache_part_size: Option<usize>,
-
-    #[arg(long, help = "The size in bytes of the object store cache.")]
-    pub(crate) object_cache_size_bytes: Option<usize>,
-
-    #[arg(long, help = "The interval in seconds to scan for expired objects.")]
-    pub(crate) scan_interval: Option<u32>,
+    pub(crate) block_cache_size: Option<u64>,
 }
 
 impl DbArgs {
     /// Returns a `DbOptions` struct based on DbArgs's arguments.
-    #[allow(dead_code)]
-    pub(crate) fn config(&self) -> DbOptions {
-        let mut db_options = DbOptions::default();
-        db_options.wal_enabled = !self.disable_wal;
-        db_options.flush_interval = self
-            .flush_ms
-            .map(|i| Duration::from_millis(i as u64))
-            .unwrap_or(db_options.flush_interval);
-        db_options.l0_sst_size_bytes = self
-            .l0_sst_size_bytes
-            .unwrap_or(db_options.l0_sst_size_bytes);
-        db_options.block_cache = self.block_cache_size.map(|size| {
+    pub(crate) fn config(&self) -> Result<DbOptions, DbOptionsError> {
+        let mut db_options = if let Some(path) = &self.db_options_path {
+            DbOptions::from_file(path)?
+        } else {
+            DbOptions::load()?
+        };
+
+        db_options.block_cache = self.block_cache_size.map(|max_capacity| {
             Arc::new(MokaCache::new_with_opts(MokaCacheOptions {
-                max_capacity: size as u64,
+                max_capacity,
                 ..Default::default()
             })) as Arc<dyn DbCache>
         });
-        db_options.object_store_cache_options = self
-            .object_cache_path
-            .clone()
-            .map(|path| ObjectStoreCacheOptions {
-                root_folder: Some(PathBuf::from(path)),
-                ..Default::default()
-            })
-            .unwrap_or(db_options.object_store_cache_options);
-        db_options.object_store_cache_options.part_size_bytes = self
-            .object_cache_part_size
-            .unwrap_or(db_options.object_store_cache_options.part_size_bytes);
-        db_options.object_store_cache_options.max_cache_size_bytes = self
-            .object_cache_size_bytes
-            .or(db_options.object_store_cache_options.max_cache_size_bytes);
-        db_options.object_store_cache_options.scan_interval = self
-            .scan_interval
-            .map(|i| Duration::from_secs(i as u64))
-            .or(db_options.object_store_cache_options.scan_interval);
-        db_options
+
+        Ok(db_options)
     }
 }
 
