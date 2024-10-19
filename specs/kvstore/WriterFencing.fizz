@@ -33,29 +33,25 @@ symmetric role SlateDBWriter:
         self.flush_count += 1
     
     func LoadLatestManifest():
-        store = manifest_store
-        manifests = store.List()
+        manifests = manifest_store.List()
         result = CONFLICT
         if len(manifests) > 0:
-            recent_manifest = store.Read(manifests[len(manifests) - 1])
+            recent_manifest = manifest_store.Read(manifests[len(manifests) - 1])
             wal = wal_store.List()
-            self.next_wal = 1
-            if len(wal) > 0:
-                self.next_wal = wal[len(wal) - 1] + 1
-            new_manifest = record(id = recent_manifest.id + 1, writer_epoch = recent_manifest.writer_epoch + 1)
-            result = self.WriteManifest(new_manifest)
+            self.next_wal = wal[-1] + 1 if wal else 1
+            result = self.WriteManifest(record(id = recent_manifest.id + 1, writer_epoch = recent_manifest.writer_epoch + 1))
         else:
-            new_manifest = record(id = 1, writer_epoch = 1)
-            self.next_wal = 1
-            result = self.WriteManifest(new_manifest)        
+            atomic:
+                self.next_wal = 1
+                result = self.WriteManifest(record(id = 1, writer_epoch = 1))        
         return result
 
     atomic func WriteManifest(new_manifest):
-        store = manifest_store
-        write_status = store.ConditionalWrite(new_manifest.id, new_manifest)
+        write_status = manifest_store.ConditionalWrite(new_manifest.id, new_manifest)
         if write_status == SUCCESS:
-            self.state = "ManifestUpdated"
-            self.manifest = new_manifest
+            atomic:
+                self.state = "ManifestUpdated"
+                self.manifest = new_manifest
         else:
             self.state = "fenced"
         return write_status
@@ -71,8 +67,7 @@ symmetric role SlateDBWriter:
 
     #flush.rs\DbInner\flush() is the only method that increments next_wal on write.
     atomic func WriteWal():
-        store = wal_store
-        write_status = store.ConditionalWrite(self.next_wal, self.manifest.writer_epoch)
+        write_status = wal_store.ConditionalWrite(self.next_wal, self.manifest.writer_epoch)
         if write_status == SUCCESS:
             self.next_wal = self.next_wal + 1
         else:
@@ -80,17 +75,17 @@ symmetric role SlateDBWriter:
         return write_status
 
     #db.rs\DbInner\fence_writers()
-    atomic func WriteFencingWal():
-        store = manifest_store
+    func WriteFencingWal():
         while self.state == "ManifestUpdated":
             write_status = self.WriteWal()
             if write_status == SUCCESS:
-                self.state = "opened"
-                self.was_ever_open = 1
-                break;
+                atomic:
+                    self.state = "opened"
+                    self.was_ever_open = 1
+                break
             else:
-                manifests = store.List()
-                recent_manifest = store.Read(manifests[len(manifests) - 1])
+                manifests = manifest_store.List()
+                recent_manifest = manifest_store.Read(manifests[len(manifests) - 1])
                 # if there is a new writer, set current to failed.  Otherwise, try with next wal.
                 if self.manifest.writer_epoch < recent_manifest.writer_epoch:
                     self.state = "fenced"
@@ -111,6 +106,11 @@ atomic fair action WriterOpen:
     current_writer = writers[writer_id]
     if current_writer.state == "waiting":
         current_writer.Open()
+
+atomic action NoOp:
+    # Suppress deadlock error when every writer tried to open
+    require len([w for w in writers if w.state == "waiting"]) == 0
+    pass
 
 always assertion NotMoreThanOneWriterInWritableState:
     writable_writer_count = 0
