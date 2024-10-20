@@ -1,5 +1,31 @@
 # SlateDB Transaction
 
+<!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
+
+- [Background](#background)
+- [Goals](#goals)
+- [Non-Goals](#non-goals)
+- [Constraints](#constraints)
+- [References](#references)
+- [Proposal](#proposal)
+   * [API](#api)
+   * [Isolation Levels](#isolation-levels)
+   * [Prerequisites](#prerequisites)
+      + [Snapshot](#snapshot)
+      + [Write Batch](#write-batch)
+- [Conflict Checking: Snapshot Isolation](#conflict-checking-snapshot-isolation)
+- [Conflict Checking: Serializable Snapshot Isolation](#conflict-checking-serializable-snapshot-isolation)
+- [Roadmap](#roadmap)
+- [Updates](#updates)
+
+<!-- TOC end -->
+
+Status: Reviewing
+
+Authors:
+
+* [Li Yazhou](https://github.com/flaneur2020)
+
 ## Background
 
 Transaction allows multiple operations to be executed in a single atomic operation, and control the isolation level of the operations. This is a planned feature in SlateDB, and is essential for many critical use cases, like:
