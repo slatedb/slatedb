@@ -251,8 +251,12 @@ The potential risk of this SSI approach is that ALL the read keys in the running
 
 ## Roadmap
 
-tbd
+1. Implement the WriteBatch API (related with https://github.com/slatedb/slatedb/pull/264).
+2. Add sequence to each key in the storage, and implement the Snapshot API.
+3. Add the conflict checking in the transaction, implement the SI transaction.
+4. Add the global Oracle to track the recent committed transactions, implement the SSI transaction.
 
 ## Updates
 
 - 2024-10-13: Initial draft.
+- 2024-10-20: Add a simple roadmap.
