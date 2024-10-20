@@ -121,6 +121,7 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new_opts(
         table: H,
         from_key: Option<&'a [u8]>,
@@ -197,8 +198,15 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
                         if let Some(block) = blocks.pop_front() {
                             let first_key = self.from_key.take();
                             return match first_key {
-                                None => Ok(Some(BlockIterator::from_first_key(block))),
-                                Some(k) => Ok(Some(BlockIterator::from_key(block, k))),
+                                None => Ok(Some(BlockIterator::from_first_key(
+                                    block,
+                                    self.table.as_ref().info.row_attributes.clone(),
+                                ))),
+                                Some(k) => Ok(Some(BlockIterator::from_key(
+                                    block,
+                                    k,
+                                    self.table.as_ref().info.row_attributes.clone(),
+                                ))),
                             };
                         } else {
                             self.fetch_tasks.pop_front();
@@ -333,7 +341,7 @@ mod tests {
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle).await.unwrap();
-        assert_eq!(index.borrow().block_meta().len(), 5);
+        assert_eq!(index.borrow().block_meta().len(), 6);
 
         let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 3, 3, true)
             .await

@@ -1,5 +1,6 @@
 use std::io::SeekFrom;
-use std::vec;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
@@ -7,14 +8,20 @@ use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 use object_store::{Attribute, Attributes, GetRange, GetResultPayload, PutResult};
 use object_store::{ListResult, MultipartUpload, PutMultipartOpts, PutOptions, PutPayload};
+use radix_trie::{Trie, TrieCommon};
+use rand::seq::IteratorRandom;
+use rand::SeedableRng;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncSeekExt;
+use tokio::sync::{Mutex, OnceCell};
 use tokio::{
     fs,
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncWriteExt},
 };
+use tracing::{debug, warn};
+use walkdir::WalkDir;
 
 use crate::error::SlateDBError;
 use crate::metrics::DbStats;
@@ -22,7 +29,7 @@ use crate::metrics::DbStats;
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
-    pub(crate) part_size: usize, // expected to be aligned with mb or kb
+    pub(crate) part_size_bytes: usize, // expected to be aligned with mb or kb
     pub(crate) cache_storage: Arc<dyn LocalCacheStorage>,
     db_stats: Arc<DbStats>,
 }
@@ -31,26 +38,35 @@ impl CachedObjectStore {
     pub fn new(
         object_store: Arc<dyn ObjectStore>,
         root_folder: std::path::PathBuf,
-        part_size: usize,
+        max_cache_size_bytes: Option<usize>,
+        part_size_bytes: usize,
+        scan_interval: Option<Duration>,
         db_stats: Arc<DbStats>,
     ) -> Result<Arc<Self>, SlateDBError> {
-        if part_size == 0 || part_size % 1024 != 0 {
+        if part_size_bytes == 0 || part_size_bytes % 1024 != 0 {
             return Err(SlateDBError::InvalidCachePartSize);
         }
 
-        let cache_storage = Arc::new(FsCacheStorage {
-            root_folder: root_folder.clone(),
-        });
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            root_folder.clone(),
+            max_cache_size_bytes,
+            scan_interval,
+            db_stats.clone(),
+        ));
         Ok(Arc::new(Self {
             object_store,
-            part_size,
+            part_size_bytes,
             cache_storage,
             db_stats,
         }))
     }
 
+    pub async fn start_evictor(&self) {
+        self.cache_storage.start_evictor().await;
+    }
+
     pub async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        let entry = self.cache_storage.entry(location, self.part_size);
+        let entry = self.cache_storage.entry(location, self.part_size_bytes);
         match entry.read_head().await {
             Ok(Some((meta, _))) => Ok(meta),
             _ => {
@@ -120,7 +136,7 @@ impl CachedObjectStore {
         location: &Path,
         mut opts: GetOptions,
     ) -> object_store::Result<(ObjectMeta, Attributes)> {
-        let entry = self.cache_storage.entry(location, self.part_size);
+        let entry = self.cache_storage.entry(location, self.part_size_bytes);
         match entry.read_head().await {
             Ok(Some((meta, attrs))) => return Ok((meta, attrs)),
             Ok(None) => {}
@@ -148,16 +164,18 @@ impl CachedObjectStore {
     /// files and a meta file. please note that the `range` in the GetResult is expected to be
     /// aligned with the part size.
     async fn save_result(&self, result: GetResult) -> object_store::Result<usize> {
-        assert!(result.range.start % self.part_size == 0);
-        assert!(result.range.end % self.part_size == 0 || result.range.end == result.meta.size);
+        assert!(result.range.start % self.part_size_bytes == 0);
+        assert!(
+            result.range.end % self.part_size_bytes == 0 || result.range.end == result.meta.size
+        );
 
         let entry = self
             .cache_storage
-            .entry(&result.meta.location, self.part_size);
+            .entry(&result.meta.location, self.part_size_bytes);
         entry.save_head((&result.meta, &result.attributes)).await?;
 
         let mut buffer = BytesMut::new();
-        let mut part_number = result.range.start / self.part_size;
+        let mut part_number = result.range.start / self.part_size_bytes;
         let object_size = result.meta.size;
 
         let mut stream = result.into_stream();
@@ -165,8 +183,8 @@ impl CachedObjectStore {
             let chunk = chunk?;
             buffer.extend_from_slice(&chunk);
 
-            while buffer.len() >= self.part_size {
-                let to_write = buffer.split_to(self.part_size);
+            while buffer.len() >= self.part_size_bytes {
+                let to_write = buffer.split_to(self.part_size_bytes);
                 entry.save_part(part_number, to_write.into()).await?;
                 part_number += 1;
             }
@@ -183,16 +201,16 @@ impl CachedObjectStore {
 
     // split the range into parts, and return the part id and the range inside the part.
     fn split_range_into_parts(&self, range: Range<usize>) -> Vec<(PartID, Range<usize>)> {
-        let range_aligned = self.align_range(&range, self.part_size);
-        let start_part = range_aligned.start / self.part_size;
-        let end_part = range_aligned.end / self.part_size;
+        let range_aligned = self.align_range(&range, self.part_size_bytes);
+        let start_part = range_aligned.start / self.part_size_bytes;
+        let end_part = range_aligned.end / self.part_size_bytes;
         let mut parts: Vec<_> = (start_part..end_part)
             .map(|part_id| {
                 (
                     part_id,
                     Range {
                         start: 0,
-                        end: self.part_size,
+                        end: self.part_size_bytes,
                     },
                 )
             })
@@ -201,11 +219,11 @@ impl CachedObjectStore {
             return vec![];
         }
         if let Some(first_part) = parts.first_mut() {
-            first_part.1.start = range.start % self.part_size;
+            first_part.1.start = range.start % self.part_size_bytes;
         }
         if let Some(last_part) = parts.last_mut() {
-            if range.end % self.part_size != 0 {
-                last_part.1.end = range.end % self.part_size;
+            if range.end % self.part_size_bytes != 0 {
+                last_part.1.end = range.end % self.part_size_bytes;
             }
         }
         parts
@@ -220,10 +238,10 @@ impl CachedObjectStore {
         part_id: PartID,
         range_in_part: Range<usize>,
     ) -> BoxFuture<'static, object_store::Result<Bytes>> {
-        let part_size = self.part_size;
+        let part_size = self.part_size_bytes;
         let object_store = self.object_store.clone();
         let location = location.clone();
-        let entry = self.cache_storage.entry(&location, self.part_size);
+        let entry = self.cache_storage.entry(&location, self.part_size_bytes);
         let db_stats = self.db_stats.clone();
         Box::pin(async move {
             db_stats.object_store_cache_part_access.inc();
@@ -316,15 +334,15 @@ impl CachedObjectStore {
     fn align_get_range(&self, range: &GetRange) -> GetRange {
         match range {
             GetRange::Bounded(bounded) => {
-                let aligned = self.align_range(bounded, self.part_size);
+                let aligned = self.align_range(bounded, self.part_size_bytes);
                 GetRange::Bounded(aligned)
             }
             GetRange::Suffix(suffix) => {
-                let suffix_aligned = self.align_range(&(0..*suffix), self.part_size).end;
+                let suffix_aligned = self.align_range(&(0..*suffix), self.part_size_bytes).end;
                 GetRange::Suffix(suffix_aligned)
             }
             GetRange::Offset(offset) => {
-                let offset_aligned = *offset - *offset % self.part_size;
+                let offset_aligned = *offset - *offset % self.part_size_bytes;
                 GetRange::Offset(offset_aligned)
             }
         }
@@ -503,12 +521,15 @@ pub(crate) enum InvalidGetRange {
     Inconsistent { start: usize, end: usize },
 }
 
+#[async_trait::async_trait]
 pub trait LocalCacheStorage: Send + Sync + std::fmt::Debug + Display + 'static {
     fn entry(
         &self,
         location: &object_store::path::Path,
         part_size: usize,
     ) -> Box<dyn LocalCacheEntry>;
+
+    async fn start_evictor(&self);
 }
 
 #[async_trait::async_trait]
@@ -535,8 +556,33 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
 #[derive(Debug)]
 struct FsCacheStorage {
     root_folder: std::path::PathBuf,
+    evictor: Option<Arc<FsCacheEvictor>>,
 }
 
+impl FsCacheStorage {
+    pub fn new(
+        root_folder: std::path::PathBuf,
+        max_cache_size_bytes: Option<usize>,
+        scan_interval: Option<Duration>,
+        db_stats: Arc<DbStats>,
+    ) -> Self {
+        let evictor = max_cache_size_bytes.map(|max_cache_size_bytes| {
+            Arc::new(FsCacheEvictor::new(
+                root_folder.clone(),
+                max_cache_size_bytes,
+                scan_interval,
+                db_stats,
+            ))
+        });
+
+        Self {
+            root_folder,
+            evictor,
+        }
+    }
+}
+
+#[async_trait::async_trait]
 impl LocalCacheStorage for FsCacheStorage {
     fn entry(
         &self,
@@ -546,8 +592,15 @@ impl LocalCacheStorage for FsCacheStorage {
         Box::new(FsCacheEntry {
             root_folder: self.root_folder.clone(),
             location: location.clone(),
+            evictor: self.evictor.clone(),
             part_size,
         })
+    }
+
+    async fn start_evictor(&self) {
+        if let Some(evictor) = &self.evictor {
+            evictor.start().await
+        }
     }
 }
 
@@ -562,6 +615,7 @@ struct FsCacheEntry {
     root_folder: std::path::PathBuf,
     location: Path,
     part_size: usize,
+    evictor: Option<Arc<FsCacheEvictor>>,
 }
 
 impl FsCacheEntry {
@@ -571,6 +625,13 @@ impl FsCacheEntry {
         // ensure the parent folder exists
         if let Some(folder_path) = tmp_path.parent() {
             fs::create_dir_all(folder_path).await.map_err(wrap_io_err)?;
+        }
+
+        // try triggering evict before writing
+        if let Some(evictor) = &self.evictor {
+            evictor
+                .track_entry_accessed(path.to_path_buf(), buf.len(), true)
+                .await;
         }
 
         let mut file = OpenOptions::new()
@@ -656,6 +717,14 @@ impl LocalCacheEntry for FsCacheEntry {
             return Ok(None);
         }
 
+        // track the part access for evictor
+        if let Some(evictor) = &self.evictor {
+            evictor
+                .track_entry_accessed(part_path.to_path_buf(), self.part_size, false)
+                .await;
+        }
+
+        // read the part file, and return the bytes
         let file = File::open(&part_path).await.map_err(wrap_io_err)?;
         let mut reader = tokio::io::BufReader::new(file);
         let mut buffer = vec![0; range_in_part.len()];
@@ -741,15 +810,27 @@ impl LocalCacheEntry for FsCacheEntry {
     }
 
     async fn read_head(&self) -> object_store::Result<Option<(ObjectMeta, Attributes)>> {
-        let meta_path = Self::make_head_path(self.root_folder.clone(), &self.location);
+        let head_path = Self::make_head_path(self.root_folder.clone(), &self.location);
 
-        let exists = fs::try_exists(&meta_path).await.unwrap_or(false);
-        if !exists {
-            return Ok(None);
+        // if the head file does not exist, return None
+        let head_size_bytes = match fs::metadata(&head_path).await {
+            Ok(metadata) => metadata.len() as usize,
+            Err(err) => {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(None);
+                }
+                return Err(wrap_io_err(err));
+            }
+        };
+
+        // track the head access for evictor
+        if let Some(evictor) = &self.evictor {
+            evictor
+                .track_entry_accessed(head_path.to_path_buf(), head_size_bytes, false)
+                .await;
         }
 
-        // TODO: process not found err here instead of check exists
-        let file = File::open(&meta_path).await.map_err(wrap_io_err)?;
+        let file = File::open(&head_path).await.map_err(wrap_io_err)?;
         let mut reader = tokio::io::BufReader::new(file);
         let mut content = String::new();
         reader
@@ -759,6 +840,331 @@ impl LocalCacheEntry for FsCacheEntry {
 
         let head: LocalCacheHead = serde_json::from_str(&content).map_err(wrap_io_err)?;
         Ok(Some((head.meta(), head.attributes())))
+    }
+}
+
+type FsCacheEvictorWork = (std::path::PathBuf, usize, bool);
+
+/// FsCacheEvictor evicts the cache entries when the cache size exceeds the limit. it is expected to
+/// run in the background to avoid blocking the caller, and it'll be triggered whenever a new cache entry
+/// is added.
+#[derive(Debug)]
+struct FsCacheEvictor {
+    root_folder: std::path::PathBuf,
+    max_cache_size_bytes: usize,
+    scan_interval: Option<Duration>,
+    tx: tokio::sync::mpsc::Sender<FsCacheEvictorWork>,
+    rx: Mutex<Option<tokio::sync::mpsc::Receiver<FsCacheEvictorWork>>>,
+    background_evict_handle: OnceCell<tokio::task::JoinHandle<()>>,
+    background_scan_handle: OnceCell<tokio::task::JoinHandle<()>>,
+    db_stats: Arc<DbStats>,
+}
+
+impl FsCacheEvictor {
+    pub fn new(
+        root_folder: std::path::PathBuf,
+        max_cache_size_bytes: usize,
+        scan_interval: Option<Duration>,
+        db_stats: Arc<DbStats>,
+    ) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        Self {
+            root_folder,
+            scan_interval,
+            max_cache_size_bytes,
+            tx,
+            rx: Mutex::new(Some(rx)),
+            background_evict_handle: OnceCell::new(),
+            background_scan_handle: OnceCell::new(),
+            db_stats,
+        }
+    }
+
+    async fn start(&self) {
+        let inner = Arc::new(FsCacheEvictorInner::new(
+            self.root_folder.clone(),
+            self.max_cache_size_bytes,
+            self.db_stats.clone(),
+        ));
+
+        let guard = self.rx.lock();
+        let rx = guard.await.take().expect("evictor already started");
+
+        // scan the cache folder (defaults as every 1 hour) to keep the in-memory cache_entries eventually
+        // consistent with the cache folder.
+        self.background_scan_handle
+            .set(tokio::spawn(Self::background_scan(
+                inner.clone(),
+                self.scan_interval,
+            )))
+            .ok();
+
+        // start the background evictor task, it'll be triggered whenever a new cache entry is added
+        self.background_evict_handle
+            .set(tokio::spawn(Self::background_evict(inner, rx)))
+            .ok();
+    }
+
+    async fn started(&self) -> bool {
+        self.rx.lock().await.is_none()
+    }
+
+    async fn background_evict(
+        inner: Arc<FsCacheEvictorInner>,
+        mut rx: tokio::sync::mpsc::Receiver<FsCacheEvictorWork>,
+    ) {
+        loop {
+            match rx.recv().await {
+                Some((path, bytes, evict)) => {
+                    inner
+                        .track_entry_accessed(path, bytes, SystemTime::now(), evict)
+                        .await;
+                }
+                None => return,
+            }
+        }
+    }
+
+    async fn background_scan(inner: Arc<FsCacheEvictorInner>, scan_interval: Option<Duration>) {
+        inner.clone().scan_entries(true).await;
+
+        if let Some(scan_interval) = scan_interval {
+            loop {
+                tokio::time::sleep(scan_interval).await;
+                inner.clone().scan_entries(true).await;
+            }
+        }
+    }
+
+    pub async fn track_entry_accessed(&self, path: std::path::PathBuf, bytes: usize, evict: bool) {
+        if !self.started().await {
+            return;
+        }
+
+        self.tx.send((path, bytes, evict)).await.ok();
+    }
+}
+
+/// FsCacheEvictorInner manages the cache entries in an in-memory trie, and evict the cache entries
+/// when the cache size exceeds the limit. it uses a pick-of-2 strategy to approximate LRU, and evict
+/// the older file when the cache size exceeds the limit.
+///
+/// On start up, FsCacheEvictorInner will scan the cache folder to load the cache files into the in-memory
+/// trie cache_entries. This loading process is interleaved with the maybe_evict is being called, so the
+/// cache entries should be wrapped with Mutex<_>.
+#[derive(Debug)]
+struct FsCacheEvictorInner {
+    root_folder: std::path::PathBuf,
+    batch_factor: usize,
+    max_cache_size_bytes: usize,
+    track_lock: Mutex<()>,
+    cache_entries: Mutex<Trie<std::path::PathBuf, (SystemTime, usize)>>,
+    cache_size_bytes: AtomicU64,
+    db_stats: Arc<DbStats>,
+}
+
+impl FsCacheEvictorInner {
+    pub fn new(
+        root_folder: std::path::PathBuf,
+        max_cache_size_bytes: usize,
+        db_stats: Arc<DbStats>,
+    ) -> Self {
+        Self {
+            root_folder,
+            batch_factor: 10,
+            max_cache_size_bytes,
+            track_lock: Mutex::new(()),
+            cache_entries: Mutex::new(Trie::new()),
+            cache_size_bytes: AtomicU64::new(0_u64),
+            db_stats,
+        }
+    }
+
+    // scan the cache folder, and load the cache entries into the in memory trie cache_entries.
+    // this function is only called on start up, and it's expected to runned interleavely with
+    // maybe_evict is being called.
+    pub async fn scan_entries(self: Arc<Self>, evict: bool) {
+        // walk the cache folder, record the files and their last access time into the cache_entries
+        let iter = WalkDir::new(&self.root_folder).into_iter();
+        for entry in iter {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    warn!("evictor: failed to walk the cache folder: {}", err);
+                    continue;
+                }
+            };
+            if entry.file_type().is_dir() {
+                continue;
+            }
+
+            let metadata = match tokio::fs::metadata(entry.path()).await {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    warn!(
+                        "evictor: failed to get the metadata of the cache file: {}",
+                        err
+                    );
+                    continue;
+                }
+            };
+            let atime = metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
+            let path = entry.path().to_path_buf();
+            let bytes = metadata.len() as usize;
+
+            self.track_entry_accessed(path, bytes, atime, evict).await;
+        }
+    }
+
+    /// track the cache entry access, and evict the cache files when the cache size exceeds the limit if evict is true,
+    /// return the bytes of the evicted files. please note that track_entry_accessed might be called concurrently from
+    /// the rescanner and evictor tasks, it's expected to be wrapped with a lock to ensure the serial execution.
+    pub async fn track_entry_accessed(
+        &self,
+        path: std::path::PathBuf,
+        bytes: usize,
+        accessed_time: SystemTime,
+        evict: bool,
+    ) -> usize {
+        let _track_guard = self.track_lock.lock().await;
+
+        // record the new cache entry into the cache_entries, and increase the cache_size_bytes.
+        // NOTE: only increase the cache_size_bytes if the entry is not already in the cache_entries.
+        {
+            let mut guard = self.cache_entries.lock().await;
+            if guard.insert(path.clone(), (accessed_time, bytes)).is_none() {
+                self.cache_size_bytes
+                    .fetch_add(bytes as u64, Ordering::SeqCst);
+            }
+        }
+
+        // record the metrics
+        self.db_stats
+            .object_store_cache_keys
+            .set(self.cache_entries.lock().await.len() as u64);
+        self.db_stats
+            .object_store_cache_bytes
+            .set(self.cache_size_bytes.load(Ordering::Relaxed));
+
+        if !evict {
+            return 0;
+        }
+
+        // if the cache size is still below the limit, do nothing
+        if self.cache_size_bytes.load(Ordering::Relaxed) <= self.max_cache_size_bytes as u64 {
+            return 0;
+        }
+        // TODO: check the disk space ratio here, if the disk space is low, also triggers evict.
+
+        // if the cache size exceeds the limit, evict the cache files in batch with the batch_factor,
+        // this may help to avoid the cases like triggering the evictor too frequently when the cache
+        // size is just slightly above the limit.
+        let mut total_bytes: usize = 0;
+        for _ in 0..self.batch_factor {
+            let evicted_bytes = self.maybe_evict_once().await;
+            if evicted_bytes == 0 {
+                return total_bytes;
+            }
+
+            total_bytes += evicted_bytes;
+        }
+
+        total_bytes
+    }
+
+    // find a file, and evict it from disk. return the bytes of the evicted file. if no file is evicted or
+    // any error occurs, return 0.
+    async fn maybe_evict_once(&self) -> usize {
+        let (target, target_bytes) = match self.pick_evict_target().await {
+            Some(target) => target,
+            None => return 0,
+        };
+
+        // if the file is not found, still try to remove it from the cache_entries, and decrease the cache_size_bytes.
+        // this might happen when the file is removed by other processes, but the cache_entries is not updated yet.
+        if let Err(err) = tokio::fs::remove_file(&target).await {
+            warn!("evictor: failed to remove the cache file: {}", err);
+            if err.kind() != std::io::ErrorKind::NotFound {
+                return 0;
+            }
+        }
+
+        debug!(
+            "evictor: evicted cache file: {:?}, bytes: {}",
+            target, target_bytes
+        );
+
+        // remove the entry from the cache_entries, and decrease the cache_size_bytes
+        // NOTE: only decrease the cache_size_bytes if the entry is actually removed from the cache_entries.
+        {
+            let mut guard = self.cache_entries.lock().await;
+            if guard.remove(&target).is_some() {
+                self.cache_size_bytes
+                    .fetch_sub(target_bytes as u64, Ordering::SeqCst);
+            }
+        }
+
+        // sync the metrics after eviction
+        self.db_stats
+            .object_store_cache_evicted_bytes
+            .add(target_bytes as u64);
+        self.db_stats.object_store_cache_evicted_keys.inc();
+        self.db_stats
+            .object_store_cache_keys
+            .set(self.cache_entries.lock().await.len() as u64);
+        self.db_stats
+            .object_store_cache_bytes
+            .set(self.cache_size_bytes.load(Ordering::Relaxed));
+
+        target_bytes
+    }
+
+    // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, which is an approximation
+    // of LRU, it randomized pick two files, compare their last access time, and choose the older one to evict.
+    async fn pick_evict_target(&self) -> Option<(std::path::PathBuf, usize)> {
+        if self.cache_entries.lock().await.len() < 2 {
+            return None;
+        }
+
+        loop {
+            let ((path0, (atime0, bytes0)), (path1, (atime1, bytes1))) = match (
+                self.random_pick_entry().await,
+                self.random_pick_entry().await,
+            ) {
+                (Some(o0), Some(o1)) => (o0, o1),
+                _ => return None,
+            };
+
+            // random_pick_entry might return the same file, skip it.
+            if path0 == path1 {
+                continue;
+            }
+
+            if atime0 <= atime1 {
+                return Some((path0, bytes0));
+            } else {
+                return Some((path1, bytes1));
+            }
+        }
+    }
+
+    async fn random_pick_entry(&self) -> Option<(std::path::PathBuf, (SystemTime, usize))> {
+        let cache_entries = self.cache_entries.lock().await;
+        let mut rng = rand::rngs::StdRng::from_entropy();
+
+        let mut rand_child = match cache_entries.children().choose(&mut rng) {
+            None => return None,
+            Some(child) => child,
+        };
+        loop {
+            if rand_child.is_leaf() {
+                return rand_child.key().cloned().zip(rand_child.value().cloned());
+            }
+            rand_child = match rand_child.children().choose(&mut rng) {
+                None => return None,
+                Some(child) => child,
+            };
+        }
     }
 }
 
@@ -773,15 +1179,20 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        io::Write,
+        sync::{atomic::Ordering, Arc},
+        time::SystemTime,
+    };
 
     use bytes::Bytes;
+    use filetime::FileTime;
     use object_store::{path::Path, GetOptions, GetRange, ObjectStore, PutPayload};
     use rand::{thread_rng, Rng};
 
     use super::CachedObjectStore;
     use crate::{
-        cached_object_store::{FsCacheEntry, PartID},
+        cached_object_store::{FsCacheEntry, FsCacheEvictorInner, PartID},
         metrics::DbStats,
     };
 
@@ -789,6 +1200,18 @@ mod tests {
         let mut rng = thread_rng();
         let random_bytes: Vec<u8> = (0..n).map(|_| rng.gen()).collect();
         Bytes::from(random_bytes)
+    }
+
+    fn gen_rand_file(
+        folder_path: &std::path::Path,
+        file_name: &str,
+        n: usize,
+    ) -> std::path::PathBuf {
+        let file_path = folder_path.join(file_name);
+        let bytes = gen_rand_bytes(n);
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        file.write_all(&bytes).unwrap();
+        file_path
     }
 
     fn new_test_cache_folder() -> std::path::PathBuf {
@@ -820,7 +1243,9 @@ mod tests {
         let cached_store = CachedObjectStore::new(
             object_store.clone(),
             test_cache_folder.clone(),
+            None,
             part_size,
+            None,
             db_stats,
         )
         .unwrap();
@@ -883,9 +1308,15 @@ mod tests {
         let get_result = object_store.get(&location).await?;
         let part_size = 1024;
 
-        let cached_store =
-            CachedObjectStore::new(object_store, test_cache_folder.clone(), part_size, db_stats)
-                .unwrap();
+        let cached_store = CachedObjectStore::new(
+            object_store,
+            test_cache_folder.clone(),
+            None,
+            part_size,
+            None,
+            db_stats,
+        )
+        .unwrap();
         let entry = cached_store.cache_storage.entry(&location, part_size);
         let object_size_hint = cached_store.save_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3);
@@ -920,7 +1351,8 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CachedObjectStore::new(object_store, test_cache_folder, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, test_cache_folder, None, 1024, None, db_stats)
+                .unwrap();
 
         struct Test {
             input: (Option<GetRange>, usize),
@@ -1000,7 +1432,8 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CachedObjectStore::new(object_store, test_cache_folder, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, test_cache_folder, None, 1024, None, db_stats)
+                .unwrap();
 
         let aligned = cached_store.align_range(&(9..1025), 1024);
         assert_eq!(aligned, 0..2048);
@@ -1014,7 +1447,8 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let db_stats = Arc::new(DbStats::new());
         let cached_store =
-            CachedObjectStore::new(object_store, test_cache_folder, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, test_cache_folder, None, 1024, None, db_stats)
+                .unwrap();
 
         let aligned = cached_store.align_get_range(&GetRange::Bounded(9..1025));
         assert_eq!(aligned, GetRange::Bounded(0..2048));
@@ -1037,7 +1471,9 @@ mod tests {
         let cached_store = CachedObjectStore::new(
             object_store.clone(),
             test_cache_folder,
+            None,
             1024,
+            None,
             Arc::new(DbStats::new()),
         )
         .unwrap();
@@ -1104,5 +1540,95 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_evictor() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_cache_test_evictor_")
+            .tempdir()
+            .unwrap();
+
+        let mut evictor = FsCacheEvictorInner::new(
+            temp_dir.path().to_path_buf(),
+            1024 * 2,
+            Arc::new(DbStats::new()),
+        );
+        evictor.batch_factor = 2;
+
+        let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
+        let evicted = evictor
+            .track_entry_accessed(path0, 1024, SystemTime::now(), true)
+            .await;
+        assert_eq!(evicted, 0);
+
+        let path1 = gen_rand_file(temp_dir.path(), "file1", 1024);
+        let evicted = evictor
+            .track_entry_accessed(path1, 1024, SystemTime::now(), true)
+            .await;
+        assert_eq!(evicted, 0);
+
+        let path2 = gen_rand_file(temp_dir.path(), "file2", 1024);
+        let evicted = evictor
+            .track_entry_accessed(path2, 1024, SystemTime::now(), true)
+            .await;
+        assert_eq!(evicted, 2048);
+
+        let file_paths = walkdir::WalkDir::new(temp_dir.path())
+            .into_iter()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(file_paths.len(), 2); // the folder file "." is also counted
+    }
+
+    #[tokio::test]
+    async fn test_evictor_pick() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_cache_test_evictor_")
+            .tempdir()
+            .unwrap();
+
+        let evictor = Arc::new(FsCacheEvictorInner::new(
+            temp_dir.path().to_path_buf(),
+            1024 * 2,
+            Arc::new(DbStats::new()),
+        ));
+
+        let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
+        gen_rand_file(temp_dir.path(), "file1", 1025);
+
+        filetime::set_file_atime(&path0, FileTime::from_system_time(SystemTime::UNIX_EPOCH))
+            .unwrap();
+
+        evictor.clone().scan_entries(false).await;
+
+        let (target_path, size) = evictor.pick_evict_target().await.unwrap();
+        assert_eq!(target_path, path0);
+        assert_eq!(size, 1024);
+    }
+
+    #[tokio::test]
+    async fn test_evictor_rescan() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_cache_test_evictor_")
+            .tempdir()
+            .unwrap();
+
+        let evictor = Arc::new(FsCacheEvictorInner::new(
+            temp_dir.path().to_path_buf(),
+            1024 * 2,
+            Arc::new(DbStats::new()),
+        ));
+
+        gen_rand_file(temp_dir.path(), "file0", 1024);
+        gen_rand_file(temp_dir.path(), "file1", 1025);
+
+        // rescan two times, the cache size should be 2049 unchanged
+        evictor.clone().scan_entries(false).await;
+        let cache_size_bytes = evictor.cache_size_bytes.load(Ordering::SeqCst);
+        assert_eq!(cache_size_bytes, 2049);
+        evictor.clone().scan_entries(false).await;
+        let cache_size_bytes = evictor.cache_size_bytes.load(Ordering::SeqCst);
+        assert_eq!(cache_size_bytes, 2049);
     }
 }

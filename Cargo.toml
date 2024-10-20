@@ -12,6 +12,7 @@ readme = "README.md"
 async-channel = "2.3.1"
 async-trait = "0.1.82"
 atomic = "0.6.0"
+bitflags = "2.6.0"
 bytemuck = "1.18.0"
 bytes = { version = "1.7.1", features = ["serde"] }
 clap = { version = "4.5", optional = true, features = ["derive"] }
@@ -44,11 +45,14 @@ serde_json = "1.0"
 moka = { version = "0.12.8", features = ["future"], optional = true }
 chrono = { version = "0.4.38", features = ["serde"] }
 foyer = { version = "0.11.2", optional = true }
+walkdir = "2.3.3"
+radix_trie = "0.2.1"
 
 [dev-dependencies]
 tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
 fail-parallel = { version = "0.5.1", features = ["failpoints"] }
 tempfile = "3.3"
+filetime = "0.2"
 
 [features]
 default = ["aws", "moka"]
@@ -63,11 +67,6 @@ zstd = ["dep:zstd"]
 wal_disable = []
 moka = ["dep:moka"]
 foyer = ["dep:foyer"]
-
-[[bin]]
-name = "compaction-execute-bench"
-path = "src/compaction_execute_bench/compaction_execute_bench.rs"
-required-features = ["bencher"]
 
 [[bin]]
 name = "bencher"

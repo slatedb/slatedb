@@ -16,6 +16,10 @@ impl Counter {
     pub fn inc(&self) -> u64 {
         self.value.fetch_add(1, Ordering::Relaxed)
     }
+
+    pub fn add(&self, value: u64) -> u64 {
+        self.value.fetch_add(value, Ordering::Relaxed)
+    }
 }
 
 impl Default for Counter {
@@ -59,6 +63,10 @@ pub struct DbStats {
     pub gc_count: Counter,
     pub object_store_cache_part_hits: Counter,
     pub object_store_cache_part_access: Counter,
+    pub object_store_cache_keys: Gauge<u64>,
+    pub object_store_cache_bytes: Gauge<u64>,
+    pub object_store_cache_evicted_keys: Counter,
+    pub object_store_cache_evicted_bytes: Counter,
 }
 
 impl DbStats {
@@ -72,6 +80,10 @@ impl DbStats {
             gc_count: Counter::default(),
             object_store_cache_part_hits: Counter::default(),
             object_store_cache_part_access: Counter::default(),
+            object_store_cache_bytes: Gauge::default(),
+            object_store_cache_keys: Gauge::default(),
+            object_store_cache_evicted_bytes: Counter::default(),
+            object_store_cache_evicted_keys: Counter::default(),
         }
     }
 }

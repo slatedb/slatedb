@@ -51,16 +51,18 @@ The following command runs the benchmark for 120 seconds:
 cargo run -r --bin bencher --features="bencher" -- db --duration 120
 ```
 
-Make sure to set up the following environment variables before benchmarking:
+If you're using the AWS cloud provider (`CLOUD_PROVIDER=aws`), make sure to set up the
+following environment variables before benchmarking:
 
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
 - `AWS_REGION`
-- `AWS_S3_BUCKET`
+- `AWS_BUCKET`
 - `AWS_DYNAMODB_TABLE`, see
   [DynamoCommit](https://docs.rs/object_store/latest/object_store/aws/struct.DynamoCommit.html)
   for more details.
 - `AWS_ENDPOINT` (optional), if you are using a custom S3 endpoint.
+- `AWS_SESSION_TOKEN` (optional), if you are using temporary credentials. 
 
 ### Plotting Results
 
@@ -74,3 +76,39 @@ the repository root:
 ```
 
 The command above will produce results at `target/bencher/results` directory. 
+
+## `compaction` Subcommand
+
+The `compaction` subcommand is used to benchmark the compaction process in SlateDB.
+There are three subcommands:
+
+```
+Usage: bencher compaction <COMMAND>
+
+Commands:
+  load   Load test data.
+  run    Run a compaction.
+  clear  Clear test data.
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+A typical flow would load test data, run the compaction, then clear the test data:
+
+```bash
+cargo run -r --bin bencher --features="bencher" -- compaction load
+cargo run -r --bin bencher --features="bencher" -- compaction run
+cargo run -r --bin bencher --features="bencher" -- compaction clear
+```
+
+See individual subcommands for more details.
+
+The compaction benchmarking tool can also be used to compact specific SSTables
+rather than the generated test data. To do this, set the `--compaction-sources`
+argument:
+
+```bash
+cargo run --bin bencher --features="bencher" -- compaction run --compaction-sources="1,2"
+```

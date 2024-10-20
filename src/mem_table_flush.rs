@@ -128,10 +128,9 @@ impl DbInner {
                                     }
                                     Err(err) => error!("error from memtable flush: {}", err),
                                 }
-                                match rsp {
-                                    None => {}
-                                    Some(rsp) => _ = rsp.send(result)
-                                };
+                                if let Some(rsp) = rsp {
+                                    _ = rsp.send(result)
+                                }
                             }
                         }
                     }

@@ -106,6 +106,87 @@ impl<'a> flatbuffers::Verifiable for CompressionFormat {
 }
 
 impl flatbuffers::SimpleToVerifyInSlice for CompressionFormat {}
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_SST_ROW_ATTRIBUTE: i8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_SST_ROW_ATTRIBUTE: i8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_SST_ROW_ATTRIBUTE: [SstRowAttribute; 1] = [
+  SstRowAttribute::Flags,
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct SstRowAttribute(pub i8);
+#[allow(non_upper_case_globals)]
+impl SstRowAttribute {
+  pub const Flags: Self = Self(0);
+
+  pub const ENUM_MIN: i8 = 0;
+  pub const ENUM_MAX: i8 = 0;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::Flags,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::Flags => Some("Flags"),
+      _ => None,
+    }
+  }
+}
+impl core::fmt::Debug for SstRowAttribute {
+  fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> flatbuffers::Follow<'a> for SstRowAttribute {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
+    Self(b)
+  }
+}
+
+impl flatbuffers::Push for SstRowAttribute {
+    type Output = SstRowAttribute;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
+    }
+}
+
+impl flatbuffers::EndianScalar for SstRowAttribute {
+  type Scalar = i8;
+  #[inline]
+  fn to_little_endian(self) -> i8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: i8) -> Self {
+    let b = i8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> flatbuffers::Verifiable for SstRowAttribute {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    i8::run_verifier(v, pos)
+  }
+}
+
+impl flatbuffers::SimpleToVerifyInSlice for SstRowAttribute {}
 pub enum CompactedSstIdOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -358,6 +439,7 @@ impl<'a> SsTableInfo<'a> {
   pub const VT_FILTER_OFFSET: flatbuffers::VOffsetT = 10;
   pub const VT_FILTER_LEN: flatbuffers::VOffsetT = 12;
   pub const VT_COMPRESSION_FORMAT: flatbuffers::VOffsetT = 14;
+  pub const VT_ROW_ATTRIBUTES: flatbuffers::VOffsetT = 16;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -373,6 +455,7 @@ impl<'a> SsTableInfo<'a> {
     builder.add_filter_offset(args.filter_offset);
     builder.add_index_len(args.index_len);
     builder.add_index_offset(args.index_offset);
+    if let Some(x) = args.row_attributes { builder.add_row_attributes(x); }
     if let Some(x) = args.first_key { builder.add_first_key(x); }
     builder.add_compression_format(args.compression_format);
     builder.finish()
@@ -421,6 +504,13 @@ impl<'a> SsTableInfo<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<CompressionFormat>(SsTableInfo::VT_COMPRESSION_FORMAT, Some(CompressionFormat::None)).unwrap()}
   }
+  #[inline]
+  pub fn row_attributes(&self) -> Option<flatbuffers::Vector<'a, SstRowAttribute>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, SstRowAttribute>>>(SsTableInfo::VT_ROW_ATTRIBUTES, None)}
+  }
 }
 
 impl flatbuffers::Verifiable for SsTableInfo<'_> {
@@ -436,6 +526,7 @@ impl flatbuffers::Verifiable for SsTableInfo<'_> {
      .visit_field::<u64>("filter_offset", Self::VT_FILTER_OFFSET, false)?
      .visit_field::<u64>("filter_len", Self::VT_FILTER_LEN, false)?
      .visit_field::<CompressionFormat>("compression_format", Self::VT_COMPRESSION_FORMAT, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, SstRowAttribute>>>("row_attributes", Self::VT_ROW_ATTRIBUTES, false)?
      .finish();
     Ok(())
   }
@@ -447,6 +538,7 @@ pub struct SsTableInfoArgs<'a> {
     pub filter_offset: u64,
     pub filter_len: u64,
     pub compression_format: CompressionFormat,
+    pub row_attributes: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, SstRowAttribute>>>,
 }
 impl<'a> Default for SsTableInfoArgs<'a> {
   #[inline]
@@ -458,6 +550,7 @@ impl<'a> Default for SsTableInfoArgs<'a> {
       filter_offset: 0,
       filter_len: 0,
       compression_format: CompressionFormat::None,
+      row_attributes: None,
     }
   }
 }
@@ -492,6 +585,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SsTableInfoBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<CompressionFormat>(SsTableInfo::VT_COMPRESSION_FORMAT, compression_format, CompressionFormat::None);
   }
   #[inline]
+  pub fn add_row_attributes(&mut self, row_attributes: flatbuffers::WIPOffset<flatbuffers::Vector<'b , SstRowAttribute>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(SsTableInfo::VT_ROW_ATTRIBUTES, row_attributes);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SsTableInfoBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     SsTableInfoBuilder {
@@ -515,6 +612,7 @@ impl core::fmt::Debug for SsTableInfo<'_> {
       ds.field("filter_offset", &self.filter_offset());
       ds.field("filter_len", &self.filter_len());
       ds.field("compression_format", &self.compression_format());
+      ds.field("row_attributes", &self.row_attributes());
       ds.finish()
   }
 }
