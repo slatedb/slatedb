@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args: BenchmarkDbArgs) {
-    let config = args.db_args.config();
+    let config = args.db_args.config().unwrap();
     let write_options = WriteOptions {
         await_durable: args.await_durable,
     };

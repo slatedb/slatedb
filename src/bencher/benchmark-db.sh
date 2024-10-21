@@ -13,9 +13,7 @@ gnuplot -V # just to make sure gnuplot is present
 BENCH="cargo run -r --bin bencher --features=bencher -- --path /slatedb-bencher db \
   --duration 60 \
   --val-len 8192 \
-  --disable-wal \
   --block-cache-size 134217728 \
-  --object-cache-path /tmp/slatedb-cache \
 "
 
 parse_stats() {
