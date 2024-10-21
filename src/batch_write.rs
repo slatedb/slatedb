@@ -37,6 +37,7 @@ use crate::{
     error::SlateDBError,
     mem_table::KVTable,
 };
+use crate::types::RowAttributes;
 
 pub(crate) enum WriteBatchMsg {
     Shutdown,
@@ -59,10 +60,10 @@ impl DbInner {
             for op in batch.ops {
                 match op {
                     WriteOp::Put(key, value) => {
-                        current_wal.put(key, value);
+                        current_wal.put(key, value, RowAttributes { ts: Some(self.options.clock.now()) });
                     }
                     WriteOp::Delete(key) => {
-                        current_wal.delete(key);
+                        current_wal.delete(key, RowAttributes { ts: Some(self.options.clock.now()) });
                     }
                 }
             }
@@ -76,10 +77,10 @@ impl DbInner {
             for op in batch.ops {
                 match op {
                     WriteOp::Put(key, value) => {
-                        current_memtable.put(key, value);
+                        current_memtable.put(key, value, RowAttributes { ts: Some(self.options.clock.now()) });
                     }
                     WriteOp::Delete(key) => {
-                        current_memtable.delete(key);
+                        current_memtable.delete(key,  RowAttributes { ts: Some(self.options.clock.now()) });
                     }
                 }
             }

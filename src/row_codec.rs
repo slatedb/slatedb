@@ -60,11 +60,7 @@ pub(crate) fn encode_row_v0(
     }
 }
 
-fn encode_meta(
-    row_features: &[RowFeature],
-    is_tombstone: bool,
-    timestamp: Option<i64>,
-) -> Bytes {
+fn encode_meta(row_features: &[RowFeature], is_tombstone: bool, timestamp: Option<i64>) -> Bytes {
     let mut meta = BytesMut::new();
 
     for attr in row_features {
@@ -124,10 +120,7 @@ struct RowMetadata {
     timestamp: Option<i64>,
 }
 
-fn decode_meta(
-    row_features: &[RowFeature],
-    data: &mut Bytes,
-) -> Result<RowMetadata, SlateDBError> {
+fn decode_meta(row_features: &[RowFeature], data: &mut Bytes) -> Result<RowMetadata, SlateDBError> {
     let mut meta = RowMetadata {
         flags: RowFlags::empty(),
         timestamp: None,
@@ -179,8 +172,7 @@ mod tests {
 
         let first_key = Bytes::from(b"prefixdata".as_ref());
         let mut data = Bytes::from(encoded_data);
-        let decoded =
-            decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
+        let decoded = decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
 
         // Expected key: first_key[..3] + "key" = "prekey"
         let expected_key = Bytes::from(b"prekey" as &[u8]);
@@ -211,8 +203,7 @@ mod tests {
 
         let first_key = Bytes::from(b"".as_ref());
         let mut data = Bytes::from(encoded_data);
-        let decoded =
-            decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
+        let decoded = decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
 
         assert_eq!(decoded.attributes.ts, None);
     }
@@ -237,8 +228,7 @@ mod tests {
 
         let first_key = Bytes::from(b"deadbeefdata".as_ref());
         let mut data = Bytes::from(encoded_data);
-        let decoded =
-            decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
+        let decoded = decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
 
         // Expected key: first_key[..4] + "tomb" = "deadtomb"
         let expected_key = Bytes::from(b"deadtomb" as &[u8]);
@@ -296,8 +286,7 @@ mod tests {
 
         let first_key = Bytes::from(b"keyprefixdata".as_slice());
         let mut data = Bytes::from(encoded_data);
-        let decoded =
-            decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
+        let decoded = decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
 
         // Expected key: first_key[..4] + "" = "keyp"
         let expected_key = Bytes::from(b"keyp" as &[u8]);

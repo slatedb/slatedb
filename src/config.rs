@@ -150,17 +150,16 @@
 //!     min_age: '86400s'
 //! ```
 //!
-use std::path::Path;
-use std::sync::Arc;
-use std::{str::FromStr, time::Duration};
-use std::cmp::min;
-use std::sync::atomic::AtomicI64;
-use std::sync::atomic::Ordering::SeqCst;
 use duration_str::{deserialize_duration, deserialize_option_duration};
 use figment::providers::{Env, Format, Json, Toml, Yaml};
 use figment::{Figment, Metadata, Provider};
 use serde::{Deserialize, Serialize, Serializer};
+use std::path::Path;
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::Ordering::SeqCst;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{str::FromStr, time::Duration};
 use tokio::runtime::Handle;
 
 use crate::compactor::CompactionScheduler;
@@ -247,6 +246,10 @@ impl Clock for SystemClock {
         self.last_tick.fetch_max(tick, SeqCst);
         self.last_tick.load(SeqCst)
     }
+}
+
+fn default_clock() -> Arc<dyn Clock + Send + Sync> {
+    Arc::new(SystemClock {last_tick: AtomicI64::new(i64::MIN)})
 }
 
 /// Configuration options for the database. These options are set on client startup.
@@ -355,6 +358,8 @@ pub struct DbOptions {
     /// The Clock to use for insertion timestamps
     ///
     /// Default: the default clock uses the local system time on the machine
+    #[serde(skip)]
+    #[serde(default = "default_clock")]
     pub clock: Arc<dyn Clock + Send + Sync>,
 }
 
@@ -505,9 +510,7 @@ impl Default for DbOptions {
             block_cache: default_block_cache(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
-            clock: Arc::new(SystemClock {
-                last_tick: AtomicI64::new(i64::MIN),
-            }),
+            clock: default_clock(),
         }
     }
 }

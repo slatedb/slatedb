@@ -20,7 +20,10 @@ use crate::config::CompressionCodec;
 use crate::db_state::SsTableId;
 use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
-use crate::flatbuffer_types::manifest_generated::{CompactedSsTable, CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun, SortedRunArgs, SstRowFeature};
+use crate::flatbuffer_types::manifest_generated::{
+    CompactedSsTable, CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat,
+    SortedRun, SortedRunArgs, SstRowFeature,
+};
 use crate::manifest::{Manifest, ManifestCodec};
 
 /// A wrapper around a `Bytes` buffer containing a FlatBuffer-encoded `SsTableIndex`.

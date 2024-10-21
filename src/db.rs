@@ -394,9 +394,15 @@ impl DbInner {
                 for kv in wal_replay_buf.iter() {
                     match &kv.value {
                         ValueDeletable::Value(value) => {
-                            guard.memtable().put(kv.key.clone(), value.clone(), kv.attributes.clone());
+                            guard.memtable().put(
+                                kv.key.clone(),
+                                value.clone(),
+                                kv.attributes.clone(),
+                            );
                         }
-                        ValueDeletable::Tombstone => guard.memtable().delete(kv.key.clone(), kv.attributes.clone()),
+                        ValueDeletable::Tombstone => guard
+                            .memtable()
+                            .delete(kv.key.clone(), kv.attributes.clone()),
                     }
                 }
                 self.maybe_freeze_memtable(&mut guard, sst_id);
@@ -1280,17 +1286,17 @@ mod tests {
             lock.wal().put(
                 Bytes::copy_from_slice(b"abc1111"),
                 Bytes::copy_from_slice(b"value1111"),
-                gen_attrs(1)
+                gen_attrs(1),
             );
             lock.wal().put(
                 Bytes::copy_from_slice(b"abc2222"),
                 Bytes::copy_from_slice(b"value2222"),
-                gen_attrs(2)
+                gen_attrs(2),
             );
             lock.wal().put(
                 Bytes::copy_from_slice(b"abc3333"),
                 Bytes::copy_from_slice(b"value3333"),
-                gen_attrs(3)
+                gen_attrs(3),
             );
             lock.wal().table().clone()
         };
