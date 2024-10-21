@@ -1,3 +1,155 @@
+//! Configuration options for SlateDB.
+//!
+//! This module provides structures and functions to manage database configuration options,
+//! including reading from files and environment variables.
+//!
+//! # Examples
+//!
+//! Loading the default configuration for `DbOptions`:
+//!
+//! ```rust
+//! use slatedb::config::DbOptions;
+//! let config = DbOptions::default();
+//! ```
+//!
+//! Loading `DbOptions` from a specific file:
+//!
+//! ```rust
+//! use slatedb::config::DbOptions;
+//! let config = DbOptions::from_file("config.toml").expect("Failed to load options from file");
+//! ```
+//!
+//! Loading `DbOptions` from environment variables:
+//!
+//! ```rust
+//! use slatedb::config::DbOptions;
+//! let config = DbOptions::from_env("SLATEDB_").expect("Failed to load options from env");
+//! ```
+//!
+//! Loading `DbOptions` from predefined files, SlateDb.toml, SlateDb.json, SlateDb.yaml, or SlateDb.yml.
+//! This method also merges any environment variable that starts with `SLATEDB_` to the final `DbOptions` struct:
+//!
+//! ```rust
+//! use slatedb::config::DbOptions;
+//! let config = DbOptions::load().expect("Failed to load options");
+//! ```
+//!
+//! # Configuration formats
+//!
+//! SlateDB supports three configuration formats: TOML, JSON, and YAML.
+//! Duration options in the configuration are represented as human-friendly strings,
+//! allowing you to specify time intervals in a more intuitive way, such as "100ms" or "1s".
+//!
+//! Representing `DbOptions` with TOML:
+//!
+//! ```toml
+//! flush_interval = "100ms"
+//! wal_enabled = false
+//! manifest_poll_interval = "1s"
+//! min_filter_keys = 1000
+//! filter_bits_per_key = 10
+//! l0_sst_size_bytes = 67108864
+//! l0_max_ssts = 8
+//! max_unflushed_memtable = 2
+//!
+//! [compactor_options]
+//! poll_interval = "5s"
+//! max_sst_size = 1073741824
+//! max_concurrent_compactions = 4
+//!
+//! [object_store_cache_options]
+//! root_folder = "/tmp/slatedb-cache"
+//! max_cache_size_bytes = 17179869184
+//! part_size_bytes = 4194304
+//! scan_interval = "3600s"
+//!
+//! [garbage_collector_options.manifest_options]
+//! poll_interval = "300s"
+//! min_age = "86400s"
+//!
+//! [garbage_collector_options.wal_options]
+//! poll_interval = "60s"
+//! min_age = "60s"
+//!
+//! [garbage_collector_options.compacted_options]
+//! poll_interval = "300s"
+//! min_age = "86400s"
+//! ```
+//!
+//! Representing `DbOptions` with JSON:
+//!
+//! ```json
+//!{
+//!  "flush_interval": "100ms",
+//!  "wal_enabled": false,
+//!  "manifest_poll_interval": "1s",
+//!  "min_filter_keys": 1000,
+//!  "filter_bits_per_key": 10,
+//!  "l0_sst_size_bytes": 67108864,
+//!  "l0_max_ssts": 8,
+//!  "max_unflushed_memtable": 2,
+//!  "compactor_options": {
+//!    "poll_interval": "5s",
+//!    "max_sst_size": 1073741824,
+//!    "max_concurrent_compactions": 4
+//!  },
+//!  "compression_codec": null,
+//!  "object_store_cache_options": {
+//!    "root_folder": "/tmp/slatedb-cache",
+//!    "max_cache_size_bytes": 17179869184,
+//!    "part_size_bytes": 4194304,
+//!    "scan_interval": "3600s"
+//!  },
+//!  "garbage_collector_options": {
+//!    "manifest_options": {
+//!      "poll_interval": "300s",
+//!      "min_age": "86400s"
+//!    },
+//!    "wal_options": {
+//!      "poll_interval": "60s",
+//!      "min_age": "60s"
+//!    },
+//!    "compacted_options": {
+//!      "poll_interval": "300s",
+//!      "min_age": "86400s"
+//!    }
+//!  }
+//!}
+//!```
+//!
+//! Representing `DbOptions` with YAML:
+//!
+//! ```yaml
+//! flush_interval: '100ms'
+//! wal_enabled: false
+//! manifest_poll_interval: '1s'
+//! min_filter_keys: 1000
+//! filter_bits_per_key: 10
+//! l0_sst_size_bytes: 67108864
+//! l0_max_ssts: 8
+//! max_unflushed_memtable: 2
+//! compactor_options:
+//!   poll_interval: '5s'
+//!   max_sst_size: 1073741824
+//!   max_concurrent_compactions: 4
+//! compression_codec: null
+//! object_store_cache_options:
+//!   root_folder: /tmp/slatedb-cache
+//!   max_cache_size_bytes: 17179869184
+//!   part_size_bytes: 4194304
+//!   scan_interval: '3600s'
+//! garbage_collector_options:
+//!   manifest_options:
+//!     poll_interval: '300s'
+//!     min_age: '86400s'
+//!   wal_options:
+//!     poll_interval: '60s'
+//!     min_age: '60s'
+//!   compacted_options:
+//!     poll_interval: '300s'
+//!     min_age: '86400s'
+//! ```
+//!
 use std::path::Path;
 use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
