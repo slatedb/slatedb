@@ -101,7 +101,7 @@ impl FixedSetKeyGenerator {
             keys.push(random_key_generator.next_key());
         }
         Self {
-            keys: keys,
+            keys,
             rng: rand_xorshift::XorShiftRng::from_entropy(),
         }
     }
