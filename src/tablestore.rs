@@ -838,7 +838,7 @@ mod tests {
 
         while let (Some(block), Some(expected_item)) = (block_iter.next(), expected_iter.next()) {
             let mut iter =
-                BlockIterator::from_first_key(block.clone(), handle.info.row_attributes.clone());
+                BlockIterator::from_first_key(block.clone(), handle.info.row_features.clone());
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, expected_item.0);
             assert_eq!(ValueDeletable::Value(kv.value), expected_item.1);

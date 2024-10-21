@@ -11,7 +11,7 @@ use crate::iter::KeyValueIterator;
 use crate::types::{KeyValueDeletable, RowAttributes, ValueDeletable};
 
 pub(crate) struct KVTable {
-    map: SkipMap<Bytes, MemValue>,
+    map: SkipMap<Bytes, ValueWithAttributes>,
     is_durable_tx: watch::Sender<bool>,
     is_durable_rx: watch::Receiver<bool>,
 }
@@ -33,12 +33,12 @@ pub(crate) struct ImmutableWal {
     table: Arc<KVTable>,
 }
 
-type MemTableRange<'a> = Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, MemValue>;
+type MemTableRange<'a> = Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, ValueWithAttributes>;
 
 pub struct MemTableIterator<'a>(MemTableRange<'a>);
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct MemValue {
+pub(crate) struct ValueWithAttributes {
     pub(crate) value: ValueDeletable,
     pub(crate) attrs: RowAttributes,
 }
@@ -167,7 +167,7 @@ impl KVTable {
     /// Returns None if the key is not in the memtable at all,
     /// Some(None) if the key is in the memtable but has a tombstone value,
     /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
-    pub(crate) fn get(&self, key: &[u8]) -> Option<MemValue> {
+    pub(crate) fn get(&self, key: &[u8]) -> Option<ValueWithAttributes> {
         self.map.get(key).map(|entry| entry.value().clone())
     }
 
@@ -187,7 +187,7 @@ impl KVTable {
     fn put(&self, key: Bytes, value: Bytes, attrs: RowAttributes) {
         self.map.insert(
             key,
-            MemValue {
+            ValueWithAttributes {
                 value: ValueDeletable::Value(value),
                 attrs,
             },
@@ -197,7 +197,7 @@ impl KVTable {
     fn delete(&self, key: Bytes, attrs: RowAttributes) {
         self.map.insert(
             key,
-            MemValue {
+            ValueWithAttributes {
                 value: ValueDeletable::Tombstone,
                 attrs,
             },

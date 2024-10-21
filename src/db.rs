@@ -75,18 +75,18 @@ impl DbInner {
         let snapshot = self.state.read().snapshot();
 
         if matches!(options.read_level, Uncommitted) {
-            let maybe_bytes = std::iter::once(snapshot.wal)
+            let maybe_val = std::iter::once(snapshot.wal)
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
-            if let Some(val) = maybe_bytes {
+            if let Some(val) = maybe_val {
                 return Ok(val.value.into_option());
             }
         }
 
-        let maybe_bytes = std::iter::once(snapshot.memtable)
+        let maybe_val = std::iter::once(snapshot.memtable)
             .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
-        if let Some(val) = maybe_bytes {
+        if let Some(val) = maybe_val {
             return Ok(val.value.into_option());
         }
 

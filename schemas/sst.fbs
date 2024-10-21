@@ -16,7 +16,7 @@ enum CompressionFormat: byte {
     Zstd
 }
 
-enum SstRowAttribute: byte {
+enum SstRowFeature: byte {
     Flags,
     Timestamp
 }
@@ -41,8 +41,8 @@ table SsTableInfo {
     // Type of compression algorithm used.
     compression_format: CompressionFormat;
 
-    // The row level attributes enabled for this SST
-    row_attributes: [SstRowAttribute];
+    // The row level features enabled for this SST
+    row_features: [SstRowFeature];
 }
 
 table BlockMeta {

@@ -153,7 +153,9 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
-
+use std::cmp::min;
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::Ordering::SeqCst;
 use duration_str::{deserialize_duration, deserialize_option_duration};
 use figment::providers::{Env, Format, Json, Toml, Yaml};
 use figment::{Figment, Metadata, Provider};
@@ -219,7 +221,7 @@ impl WriteOptions {
 
 /// defines the clock that SlateDB will use during this session
 pub trait Clock {
-    /// Returns a timestamp in milliseconds since the unix epoch,
+    /// Returns a timestamp (typically measured in millis since the unix epoch),
     /// must return monotonically increasing numbers (this is enforced
     /// at runtime and will panic if the invariant is broken)
     ///
@@ -232,15 +234,18 @@ pub trait Clock {
 
 /// contains the default implementation of the Clock, and will return the system time
 pub struct SystemClock {
-    pub system_time: SystemTime,
+    last_tick: AtomicI64,
 }
 
 impl Clock for SystemClock {
     fn now(&self) -> i64 {
-        match self.system_time.duration_since(UNIX_EPOCH) {
+        // since SystemTime is not guaranteed to be monotonic, we enforce it here
+        let tick = match SystemTime::now().duration_since(UNIX_EPOCH) {
             Ok(duration) => duration.as_secs() as i64, // Time is after the epoch
             Err(e) => -(e.duration().as_secs() as i64), // Time is before the epoch, return negative
-        }
+        };
+        self.last_tick.fetch_max(tick, SeqCst);
+        self.last_tick.load(SeqCst)
     }
 }
 
@@ -501,7 +506,7 @@ impl Default for DbOptions {
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
             clock: Arc::new(SystemClock {
-                system_time: SystemTime::now(),
+                last_tick: AtomicI64::new(i64::MIN),
             }),
         }
     }

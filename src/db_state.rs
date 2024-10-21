@@ -68,7 +68,7 @@ impl SsTableId {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub(crate) enum RowAttribute {
+pub(crate) enum RowFeature {
     Flags,
     Timestamp,
 }
@@ -81,7 +81,7 @@ pub(crate) struct SsTableInfo {
     pub(crate) filter_offset: u64,
     pub(crate) filter_len: u64,
     pub(crate) compression_codec: Option<CompressionCodec>,
-    pub(crate) row_attributes: Vec<RowAttribute>,
+    pub(crate) row_features: Vec<RowFeature>,
 }
 
 pub(crate) trait SsTableInfoCodec: Send + Sync {
@@ -317,7 +317,7 @@ mod tests {
     use ulid::Ulid;
 
     use crate::db_state::{
-        CoreDbState, DbState, RowAttribute, SsTableHandle, SsTableId, SsTableInfo,
+        CoreDbState, DbState, RowFeature, SsTableHandle, SsTableId, SsTableInfo,
     };
 
     #[test]
@@ -373,7 +373,7 @@ mod tests {
             filter_offset: 0,
             filter_len: 0,
             compression_codec: None,
-            row_attributes: vec![RowAttribute::Flags],
+            row_features: vec![RowFeature::Flags],
         }
     }
 }

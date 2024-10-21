@@ -200,12 +200,12 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
                             return match first_key {
                                 None => Ok(Some(BlockIterator::from_first_key(
                                     block,
-                                    self.table.as_ref().info.row_attributes.clone(),
+                                    self.table.as_ref().info.row_features.clone(),
                                 ))),
                                 Some(k) => Ok(Some(BlockIterator::from_key(
                                     block,
                                     k,
-                                    self.table.as_ref().info.row_attributes.clone(),
+                                    self.table.as_ref().info.row_features.clone(),
                                 ))),
                             };
                         } else {

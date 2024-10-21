@@ -1,4 +1,4 @@
-use crate::db_state::RowAttribute;
+use crate::db_state::RowFeature;
 use crate::error::SlateDBError;
 use crate::row_codec::encode_row_v0;
 use crate::types::RowAttributes;
@@ -58,7 +58,7 @@ pub struct BlockBuilder {
     data: Vec<u8>,
     block_size: usize,
     first_key: Bytes,
-    row_attributes: Vec<RowAttribute>,
+    row_features: Vec<RowFeature>,
 }
 
 // Details can be found: https://users.rust-lang.org/t/how-to-find-common-prefix-of-two-byte-slices-effectively/25815/4
@@ -77,13 +77,13 @@ fn compute_prefix_chunks<const N: usize>(lhs: &[u8], rhs: &[u8]) -> usize {
 }
 
 impl BlockBuilder {
-    pub fn new(block_size: usize, row_attributes: Vec<RowAttribute>) -> Self {
+    pub fn new(block_size: usize, row_features: Vec<RowFeature>) -> Self {
         Self {
             offsets: Vec::new(),
             data: Vec::new(),
             block_size,
             first_key: Bytes::new(),
-            row_attributes,
+            row_features,
         }
     }
 
@@ -93,7 +93,7 @@ impl BlockBuilder {
             data: Vec::new(),
             block_size,
             first_key: Bytes::new(),
-            row_attributes: other.row_attributes.clone(),
+            row_features: other.row_features.clone(),
         }
     }
 
@@ -130,7 +130,7 @@ impl BlockBuilder {
             key_prefix_len,
             key_suffix,
             value,
-            &self.row_attributes,
+            &self.row_features,
             attrs.ts,
         );
 
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn test_block() {
-        let mut builder = BlockBuilder::new(4096, vec![RowAttribute::Flags]);
+        let mut builder = BlockBuilder::new(4096, vec![RowFeature::Flags]);
         assert!(builder.add(b"key1", Some(b"value1"), gen_attrs(0)));
         assert!(builder.add(b"key2", Some(b"value2"), gen_attrs(1)));
         let block = builder.build().unwrap();
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_block_with_tombstone() {
-        let mut builder = BlockBuilder::new(4096, vec![RowAttribute::Flags]);
+        let mut builder = BlockBuilder::new(4096, vec![RowFeature::Flags]);
         assert!(builder.add(b"key1", Some(b"value1"), gen_attrs(0)));
         assert!(builder.add(b"key2", None, gen_attrs(1)));
         assert!(builder.add(b"key3", Some(b"value3"), gen_attrs(2)));
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn test_block_size() {
-        let mut builder = BlockBuilder::new(4096, vec![RowAttribute::Flags]);
+        let mut builder = BlockBuilder::new(4096, vec![RowFeature::Flags]);
         assert!(builder.add(b"key1", Some(b"value1"), gen_attrs(1)));
         assert!(builder.add(b"key2", Some(b"value2"), gen_attrs(2)));
         let block = builder.build().unwrap();
