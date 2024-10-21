@@ -14,7 +14,7 @@ use slatedb::{
     },
 };
 
-use crate::db::{KeyGenerator, RandomKeyGenerator};
+use crate::db::{FixedSetKeyGenerator, KeyGenerator, RandomKeyGenerator};
 
 #[derive(Parser, Clone)]
 #[command(name = "bencher")]
@@ -142,6 +142,13 @@ pub(crate) struct BenchmarkDbArgs {
 
     #[arg(
         long,
+        help = "The number of keys to generate for FixedSet key generator.",
+        default_value_t = 100_000
+    )]
+    pub(crate) key_count: u64,
+
+    #[arg(
+        long,
         help = "The length of the keys to generate.",
         default_value_t = 16
     )]
@@ -177,31 +184,35 @@ pub(crate) struct BenchmarkDbArgs {
 
 impl BenchmarkDbArgs {
     pub(crate) fn key_gen_supplier(&self) -> Box<dyn Fn() -> Box<dyn KeyGenerator>> {
-        let supplier = match self.key_generator {
-            KeyGeneratorType::Random => {
-                let key_len = self.key_len;
-                move || Box::new(RandomKeyGenerator::new(key_len)) as Box<dyn KeyGenerator>
-            }
+        let key_len = self.key_len;
+        let key_count = self.key_count;
+        let supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>> = match self.key_generator {
+            KeyGeneratorType::Random => Box::new(move || Box::new(RandomKeyGenerator::new(key_len))),
+            KeyGeneratorType::FixedSet => Box::new(move || Box::new(FixedSetKeyGenerator::new(key_len, key_count))),
         };
-        Box::new(supplier)
+
+        supplier
     }
 }
 
 #[derive(Clone)]
 pub(crate) enum KeyGeneratorType {
     Random,
+    FixedSet
 }
 
 const KEY_GENERATOR_TYPE_RANDOM: &str = "Random";
+const KEY_GENERATOR_TYPE_FIXEDSET: &str = "FixedSet";
 
 impl ValueEnum for KeyGeneratorType {
     fn value_variants<'a>() -> &'a [Self] {
-        &[KeyGeneratorType::Random]
+        &[KeyGeneratorType::Random, KeyGeneratorType::FixedSet]
     }
 
     fn to_possible_value(&self) -> Option<PossibleValue> {
         match self {
             KeyGeneratorType::Random => Some(PossibleValue::new(KEY_GENERATOR_TYPE_RANDOM)),
+            KeyGeneratorType::FixedSet => Some(PossibleValue::new(KEY_GENERATOR_TYPE_FIXEDSET)),
         }
     }
 }
@@ -213,6 +224,7 @@ impl Display for KeyGeneratorType {
             "{}",
             match self {
                 KeyGeneratorType::Random => KEY_GENERATOR_TYPE_RANDOM,
+                KeyGeneratorType::FixedSet => KEY_GENERATOR_TYPE_FIXEDSET,
             }
         )
     }

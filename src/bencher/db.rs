@@ -88,6 +88,32 @@ impl KeyGenerator for RandomKeyGenerator {
     }
 }
 
+pub struct FixedSetKeyGenerator {
+    keys: Vec<Bytes>,
+    rng: XorShiftRng,
+}
+
+impl FixedSetKeyGenerator {
+    pub fn new(key_bytes: usize, key_count: u64) -> Self {
+        let mut random_key_generator = RandomKeyGenerator::new(key_bytes);
+        let mut keys = Vec::new();
+        for _ in 0..key_count {
+            keys.push(random_key_generator.next_key());
+        }
+        Self {
+            keys: keys,
+            rng: rand_xorshift::XorShiftRng::from_entropy(),
+        }
+    }
+}
+
+impl KeyGenerator for FixedSetKeyGenerator {
+    fn next_key(&mut self) -> Bytes {
+        let index = self.rng.gen_range(0..self.keys.len());
+        self.keys[index].clone()
+    }
+}
+
 /// The database benchmarker.
 pub struct DbBench {
     key_gen_supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>>,
