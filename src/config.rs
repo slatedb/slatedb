@@ -4,8 +4,7 @@ use std::{str::FromStr, time::Duration};
 
 use duration_str::{deserialize_duration, deserialize_option_duration};
 use figment::providers::{Env, Format, Json, Toml, Yaml};
-pub use figment::Provider as DbOptionsProvider;
-use figment::{Figment, Metadata};
+use figment::{Figment, Metadata, Provider};
 use serde::{Deserialize, Serialize, Serializer};
 use tokio::runtime::Handle;
 
@@ -287,7 +286,7 @@ impl DbOptions {
     }
 }
 
-impl DbOptionsProvider for DbOptions {
+impl Provider for DbOptions {
     fn metadata(&self) -> figment::Metadata {
         Metadata::named("SlateDb configuration options")
     }
