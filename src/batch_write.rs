@@ -31,13 +31,13 @@ use std::sync::Arc;
 use log::warn;
 use tokio::runtime::Handle;
 
+use crate::types::RowAttributes;
 use crate::{
     batch::{WriteBatch, WriteOp},
     db::DbInner,
     error::SlateDBError,
     mem_table::KVTable,
 };
-use crate::types::RowAttributes;
 
 pub(crate) enum WriteBatchMsg {
     Shutdown,
@@ -60,10 +60,21 @@ impl DbInner {
             for op in batch.ops {
                 match op {
                     WriteOp::Put(key, value) => {
-                        current_wal.put(key, value, RowAttributes { ts: Some(self.options.clock.now()) });
+                        current_wal.put(
+                            key,
+                            value,
+                            RowAttributes {
+                                ts: Some(self.options.clock.now()),
+                            },
+                        );
                     }
                     WriteOp::Delete(key) => {
-                        current_wal.delete(key, RowAttributes { ts: Some(self.options.clock.now()) });
+                        current_wal.delete(
+                            key,
+                            RowAttributes {
+                                ts: Some(self.options.clock.now()),
+                            },
+                        );
                     }
                 }
             }
@@ -77,10 +88,21 @@ impl DbInner {
             for op in batch.ops {
                 match op {
                     WriteOp::Put(key, value) => {
-                        current_memtable.put(key, value, RowAttributes { ts: Some(self.options.clock.now()) });
+                        current_memtable.put(
+                            key,
+                            value,
+                            RowAttributes {
+                                ts: Some(self.options.clock.now()),
+                            },
+                        );
                     }
                     WriteOp::Delete(key) => {
-                        current_memtable.delete(key,  RowAttributes { ts: Some(self.options.clock.now()) });
+                        current_memtable.delete(
+                            key,
+                            RowAttributes {
+                                ts: Some(self.options.clock.now()),
+                            },
+                        );
                     }
                 }
             }
