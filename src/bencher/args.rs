@@ -187,8 +187,12 @@ impl BenchmarkDbArgs {
         let key_len = self.key_len;
         let key_count = self.key_count;
         let supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>> = match self.key_generator {
-            KeyGeneratorType::Random => Box::new(move || Box::new(RandomKeyGenerator::new(key_len))),
-            KeyGeneratorType::FixedSet => Box::new(move || Box::new(FixedSetKeyGenerator::new(key_len, key_count))),
+            KeyGeneratorType::Random => {
+                Box::new(move || Box::new(RandomKeyGenerator::new(key_len)))
+            }
+            KeyGeneratorType::FixedSet => {
+                Box::new(move || Box::new(FixedSetKeyGenerator::new(key_len, key_count)))
+            }
         };
 
         supplier
@@ -198,7 +202,7 @@ impl BenchmarkDbArgs {
 #[derive(Clone)]
 pub(crate) enum KeyGeneratorType {
     Random,
-    FixedSet
+    FixedSet,
 }
 
 const KEY_GENERATOR_TYPE_RANDOM: &str = "Random";
