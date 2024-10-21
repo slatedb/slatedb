@@ -312,6 +312,7 @@ impl SizeTieredCompactionScheduler {
     }
 }
 
+#[derive(Default)]
 pub struct SizeTieredCompactionSchedulerSupplier {
     options: SizeTieredCompactionSchedulerOptions,
 }

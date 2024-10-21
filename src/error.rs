@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 #[derive(thiserror::Error, Debug)]
 pub enum SlateDBError {
     #[error("IO error")]
@@ -53,4 +55,17 @@ pub enum SlateDBError {
 
     #[error("Unknown RowFlags -- this may be caused by reading data encoded with a newer codec")]
     InvalidRowFlags,
+}
+
+/// Represents errors that can occur during the database configuration.
+///
+/// This enum encapsulates various error conditions that may arise
+/// when parsing or processing database configuration options.
+#[derive(thiserror::Error, Debug)]
+pub enum DbOptionsError {
+    #[error("Unknown configuration file format: {0}")]
+    UnknownFormat(PathBuf),
+
+    #[error("Invalid configuration format")]
+    InvalidFormat(#[from] figment::Error),
 }

@@ -47,12 +47,15 @@ chrono = { version = "0.4.38", features = ["serde"] }
 foyer = { version = "0.11.2", optional = true }
 walkdir = "2.3.3"
 radix_trie = "0.2.1"
+figment = { version = "0.10.19", features = ["env", "json", "toml", "yaml"] }
+duration-str = { version = "0.11.2", features = ["serde", "time"], default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
 fail-parallel = { version = "0.5.1", features = ["failpoints"] }
 tempfile = "3.3"
 filetime = "0.2"
+figment = { version = "0.10.19", features = ["test"] }
 
 [features]
 default = ["aws", "moka"]
