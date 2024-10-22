@@ -166,7 +166,7 @@ Currently, SlateDB does not have a mechanism for backwards-compatibility of the 
 We will first introduce the following fields to the flatbuffer definitions:
 
 - `format_version`: field that specifies the codec version that encoded this SST
-- `row_attributes`: an enumeration of metadata fields that are available with each encoded row. This
+- `row_features`: an enumeration of metadata fields that are available with each encoded row. This
   makes it possible in the future to save space per row by disabling row attributes, but that is
   out of scope for this RFC
 - `creation_timestamp`: the time at which this SST file was written. For this RFC this timestamp is
@@ -176,7 +176,7 @@ We will first introduce the following fields to the flatbuffer definitions:
 ```fbs
 /// the metadata encoded with each row, note that the ordering of this enum is 
 /// sensitive and must be maintained
-enum RowAttributes: byte {
+enum RowFeature: byte {
     RowFlags,
     Timestamp,
     TimeToLive,
@@ -190,7 +190,7 @@ table SsTableInfo {
     
     // The metadata attributes that are encoded with each row. These attributes will be encoded
     // in order that they are declared in the RowAttributes enum
-    row_attributes: [RowAttributes];
+    row_features: [RowFeature];
     
     // The time at which this SST was created, based on the configured Clock in
     // DbOptions
@@ -225,7 +225,7 @@ The `format_version` will be bumped to 1 and will be modified to have the follow
 |---------|-----|------|-----------|-------|
 ```
 
-The newly introduced `attr` field will be decoded using the `row_attributes` array specified for
+The newly introduced `attr` field will be decoded using the `row_features` array specified for
 this SST. Which row attributes are included depend on the data that is being written. If
 any row in the SST has a `ttl`, the `TimeToLive` feature will be enabled.
 
@@ -287,7 +287,7 @@ a tombstone is added, the TTL (`expire_ts`) for the row will be cleared, indicat
 run of this filter should not remove the tombstone.
 
 Since this RFC does not cover the public API for compaction filters, this filter will simply run
-on any SST that specifies `row_attributes: [Timestamp && TimeToLive]`.
+on any SST that specifies `row_features: [Timestamp && TimeToLive]`.
 
 #### Periodic Compaction
 

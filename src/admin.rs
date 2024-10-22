@@ -57,6 +57,8 @@ pub fn load_object_store_from_env(
         "local" => load_local(),
         #[cfg(feature = "aws")]
         "aws" => load_aws(),
+        #[cfg(feature = "azure")]
+        "azure" => load_azure(),
         _ => Err(format!("Unknown CLOUD_PROVIDER: '{}'", provider).into()),
     }
 }
@@ -123,5 +125,24 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
         builder
     };
 
+    Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
+}
+
+/// Loads an Azure Object store instance.
+///
+/// | Env Variable | Doc | Required |
+/// |--------------|-----|----------|
+/// | AZURE_ACCOUNT | The azure storage account name | Yes |
+/// | AZURE_KEY | The azure storage account key| Yes |
+/// | AZURE_CONTAINER | The storage container name| Yes |
+#[cfg(feature = "azure")]
+pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+    let account = env::var("AZURE_ACCOUNT").expect("AZURE_ACCOUNT must be set");
+    let key = env::var("AZURE_KEY").expect("AZURE_KEY must be set");
+    let container = env::var("AZURE_CONTAINER").expect("AZURE_CONTAINER must be set");
+    let builder = object_store::azure::MicrosoftAzureBuilder::new()
+        .with_account(account)
+        .with_access_key(key)
+        .with_container_name(container);
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
 }

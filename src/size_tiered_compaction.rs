@@ -312,6 +312,7 @@ impl SizeTieredCompactionScheduler {
     }
 }
 
+#[derive(Default)]
 pub struct SizeTieredCompactionSchedulerSupplier {
     options: SizeTieredCompactionSchedulerOptions,
 }
@@ -336,7 +337,7 @@ mod tests {
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
     use crate::config::SizeTieredCompactionSchedulerOptions;
     use crate::db_state::{
-        CoreDbState, RowAttribute, SortedRun, SsTableHandle, SsTableId, SsTableInfo,
+        CoreDbState, RowFeature, SortedRun, SsTableHandle, SsTableId, SsTableInfo,
     };
     use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
 
@@ -632,7 +633,7 @@ mod tests {
             filter_offset: 0,
             filter_len: 0,
             compression_codec: None,
-            row_attributes: vec![RowAttribute::Flags],
+            row_features: vec![RowFeature::Flags],
         };
         SsTableHandle {
             id: SsTableId::Compacted(ulid::Ulid::new()),

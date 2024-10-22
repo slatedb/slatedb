@@ -14,6 +14,13 @@ pub struct KeyValue {
 pub struct KeyValueDeletable {
     pub key: Bytes,
     pub value: ValueDeletable,
+    pub attributes: RowAttributes,
+}
+
+/// The metadata associated with a `KeyValueDeletable`
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowAttributes {
+    pub ts: Option<i64>,
 }
 
 /// Represents a value that may be a tombstone.
