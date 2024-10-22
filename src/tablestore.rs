@@ -142,6 +142,20 @@ impl TableStore {
         Ok(wal_list)
     }
 
+    pub(crate) async fn next_wal_sst_id(
+        &self,
+        wal_id_last_compacted: u64,
+    ) -> Result<u64, SlateDBError> {
+        Ok(self
+            .list_wal_ssts(wal_id_last_compacted..)
+            .await?
+            .into_iter()
+            .map(|wal_sst| wal_sst.id.unwrap_wal_id())
+            .max()
+            .unwrap_or(wal_id_last_compacted)
+            + 1)
+    }
+
     pub(crate) fn table_writer(&self, id: SsTableId) -> EncodedSsTableWriter {
         let path = self.path(&id);
         EncodedSsTableWriter {
