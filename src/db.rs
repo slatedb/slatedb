@@ -121,17 +121,12 @@ impl DbInner {
         Ok(None)
     }
 
-    async fn fence_writers(&self, manifest: &mut FenceableManifest) -> Result<(), SlateDBError> {
-        let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
-        let max_wal_id = self
-            .table_store
-            .list_wal_ssts((wal_id_last_compacted + 1)..)
-            .await?
-            .into_iter()
-            .map(|wal_sst| wal_sst.id.unwrap_wal_id())
-            .max()
-            .unwrap_or(0);
-        let mut empty_wal_id = max_wal_id + 1;
+    async fn fence_writers(
+        &self,
+        manifest: &mut FenceableManifest,
+        next_wal_id: u64,
+    ) -> Result<(), SlateDBError> {
+        let mut empty_wal_id = next_wal_id;
 
         loop {
             let empty_wal = WritableKVTable::new();
@@ -498,7 +493,18 @@ impl Db {
         ));
 
         let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
-        let mut manifest = Self::init_db(&manifest_store).await?;
+        let latest_manifest = StoredManifest::load(manifest_store.clone()).await?;
+
+        // get the next wal id before writing manifest.
+        let wal_id_last_compacted = match &latest_manifest {
+            Some(latest_stored_manifest) => {
+                latest_stored_manifest.db_state().last_compacted_wal_sst_id
+            }
+            None => 0,
+        };
+        let next_wal_id = table_store.next_wal_sst_id(wal_id_last_compacted).await?;
+
+        let mut manifest = Self::init_db(&manifest_store, latest_manifest).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let (wal_flush_tx, wal_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -515,7 +521,7 @@ impl Db {
             .await?,
         );
         if inner.wal_enabled() {
-            inner.fence_writers(&mut manifest).await?;
+            inner.fence_writers(&mut manifest, next_wal_id).await?;
         }
         inner.replay_wal().await?;
         let tokio_handle = Handle::current();
@@ -573,18 +579,13 @@ impl Db {
 
     async fn init_db(
         manifest_store: &Arc<ManifestStore>,
+        latest_stored_manifest: Option<StoredManifest>,
     ) -> Result<FenceableManifest, SlateDBError> {
-        let stored_manifest = Self::init_stored_manifest(manifest_store).await?;
+        let stored_manifest = match latest_stored_manifest {
+            Some(manifest) => manifest,
+            None => StoredManifest::init_new_db(manifest_store.clone(), CoreDbState::new()).await?,
+        };
         FenceableManifest::init_writer(stored_manifest).await
-    }
-
-    async fn init_stored_manifest(
-        manifest_store: &Arc<ManifestStore>,
-    ) -> Result<StoredManifest, SlateDBError> {
-        if let Some(stored_manifest) = StoredManifest::load(manifest_store.clone()).await? {
-            return Ok(stored_manifest);
-        }
-        StoredManifest::init_new_db(manifest_store.clone(), CoreDbState::new()).await
     }
 
     pub async fn close(&self) -> Result<(), SlateDBError> {
