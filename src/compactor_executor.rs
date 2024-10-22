@@ -19,6 +19,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 
+use crate::metrics::DbStats;
 use tracing::error;
 
 pub(crate) struct CompactionJob {
@@ -43,6 +44,7 @@ impl TokioCompactionExecutor {
         options: Arc<CompactorOptions>,
         worker_tx: crossbeam_channel::Sender<WorkerToOrchestratorMsg>,
         table_store: Arc<TableStore>,
+        db_stats: Arc<DbStats>,
     ) -> Self {
         Self {
             inner: Arc::new(TokioCompactionExecutorInner {
@@ -51,6 +53,7 @@ impl TokioCompactionExecutor {
                 worker_tx,
                 table_store,
                 tasks: Arc::new(Mutex::new(HashMap::new())),
+                db_stats,
                 is_stopped: AtomicBool::new(false),
             }),
         }
@@ -81,6 +84,7 @@ pub(crate) struct TokioCompactionExecutorInner {
     worker_tx: crossbeam_channel::Sender<WorkerToOrchestratorMsg>,
     table_store: Arc<TableStore>,
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
+    db_stats: Arc<DbStats>,
     is_stopped: AtomicBool,
 }
 
@@ -134,10 +138,12 @@ impl TokioCompactionExecutorInner {
                         .table_writer(SsTableId::Compacted(Ulid::new())),
                 );
                 output_ssts.push(finished_writer.close().await?);
+                self.db_stats.bytes_compacted.add(current_size as u64);
             }
         }
         if current_size > 0 {
             output_ssts.push(current_writer.close().await?);
+            self.db_stats.bytes_compacted.add(current_size as u64);
         }
         Ok(SortedRun {
             id: compaction.destination,
@@ -151,6 +157,7 @@ impl TokioCompactionExecutorInner {
             return;
         }
         let dst = compaction.destination;
+        self.db_stats.running_compactions.inc();
         assert!(!tasks.contains_key(&dst));
         let this = self.clone();
         let task = self.handle.spawn(async move {
@@ -161,6 +168,7 @@ impl TokioCompactionExecutorInner {
                 .expect("failed to send compaction finished msg");
             let mut tasks = this.tasks.lock();
             tasks.remove(&dst);
+            this.db_stats.running_compactions.dec();
         });
         tasks.insert(dst, TokioCompactionTask { task });
     }
