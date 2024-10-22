@@ -30,7 +30,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
-use crate::types::ValueDeletable;
+use crate::types::{RowAttributes, ValueDeletable};
 use std::rc::Rc;
 
 pub(crate) struct DbInner {
@@ -75,19 +75,19 @@ impl DbInner {
         let snapshot = self.state.read().snapshot();
 
         if matches!(options.read_level, Uncommitted) {
-            let maybe_bytes = std::iter::once(snapshot.wal)
+            let maybe_val = std::iter::once(snapshot.wal)
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
-            if let Some(val) = maybe_bytes {
-                return Ok(val.into_option());
+            if let Some(val) = maybe_val {
+                return Ok(val.value.into_option());
             }
         }
 
-        let maybe_bytes = std::iter::once(snapshot.memtable)
+        let maybe_val = std::iter::once(snapshot.memtable)
             .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
-        if let Some(val) = maybe_bytes {
-            return Ok(val.into_option());
+        if let Some(val) = maybe_val {
+            return Ok(val.value.into_option());
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -221,7 +221,13 @@ impl DbInner {
         let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
             let current_wal = guard.wal();
-            current_wal.put(key, value);
+            current_wal.put(
+                key,
+                value,
+                RowAttributes {
+                    ts: Some(self.options.clock.now()),
+                },
+            );
             current_wal.table().clone()
         } else {
             if cfg!(not(feature = "wal_disable")) {
@@ -229,7 +235,13 @@ impl DbInner {
             }
             let mut guard = self.state.write();
             let current_memtable = guard.memtable();
-            current_memtable.put(key, value);
+            current_memtable.put(
+                key,
+                value,
+                RowAttributes {
+                    ts: Some(self.options.clock.now()),
+                },
+            );
             let table = current_memtable.table().clone();
             let last_wal_id = guard.last_written_wal_id();
             self.maybe_freeze_memtable(&mut guard, last_wal_id);
@@ -254,7 +266,12 @@ impl DbInner {
         let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
             let current_wal = guard.wal();
-            current_wal.delete(key);
+            current_wal.delete(
+                key,
+                RowAttributes {
+                    ts: Some(self.options.clock.now()),
+                },
+            );
             current_wal.table().clone()
         } else {
             if cfg!(not(feature = "wal_disable")) {
@@ -262,7 +279,12 @@ impl DbInner {
             }
             let mut guard = self.state.write();
             let current_memtable = guard.memtable();
-            current_memtable.delete(key);
+            current_memtable.delete(
+                key,
+                RowAttributes {
+                    ts: Some(self.options.clock.now()),
+                },
+            );
             let table = current_memtable.table().clone();
             let last_wal_id = guard.last_written_wal_id();
             self.maybe_freeze_memtable(&mut guard, last_wal_id);
@@ -372,9 +394,15 @@ impl DbInner {
                 for kv in wal_replay_buf.iter() {
                     match &kv.value {
                         ValueDeletable::Value(value) => {
-                            guard.memtable().put(kv.key.clone(), value.clone());
+                            guard.memtable().put(
+                                kv.key.clone(),
+                                value.clone(),
+                                kv.attributes.clone(),
+                            );
                         }
-                        ValueDeletable::Tombstone => guard.memtable().delete(kv.key.clone()),
+                        ValueDeletable::Tombstone => guard
+                            .memtable()
+                            .delete(kv.key.clone(), kv.attributes.clone()),
                     }
                 }
                 self.maybe_freeze_memtable(&mut guard, sst_id);
@@ -698,6 +726,7 @@ mod tests {
     use crate::sst_iter::SstIterator;
     #[cfg(feature = "wal_disable")]
     use crate::test_utils::assert_iterator;
+    use crate::test_utils::{gen_attrs, TestClock};
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -1118,11 +1147,13 @@ mod tests {
                 (
                     vec![b'a'; 32],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
+                    gen_attrs(0),
                 ),
-                (vec![b'b'; 32], ValueDeletable::Tombstone),
+                (vec![b'b'; 32], ValueDeletable::Tombstone, gen_attrs(1)),
                 (
                     vec![b'c'; 32],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
+                    gen_attrs(2),
                 ),
             ],
         )
@@ -1255,14 +1286,17 @@ mod tests {
             lock.wal().put(
                 Bytes::copy_from_slice(b"abc1111"),
                 Bytes::copy_from_slice(b"value1111"),
+                gen_attrs(1),
             );
             lock.wal().put(
                 Bytes::copy_from_slice(b"abc2222"),
                 Bytes::copy_from_slice(b"value2222"),
+                gen_attrs(2),
             );
             lock.wal().put(
                 Bytes::copy_from_slice(b"abc3333"),
                 Bytes::copy_from_slice(b"value3333"),
+                gen_attrs(3),
             );
             lock.wal().table().clone()
         };
@@ -1756,6 +1790,7 @@ mod tests {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             block_cache: None,
             garbage_collector_options: None,
+            clock: Arc::new(TestClock::new()),
         }
     }
 }

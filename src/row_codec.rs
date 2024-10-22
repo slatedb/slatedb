@@ -1,6 +1,6 @@
-use crate::db_state::RowAttribute;
+use crate::db_state::RowFeature;
 use crate::error::SlateDBError;
-use crate::types::{KeyValueDeletable, ValueDeletable};
+use crate::types::{KeyValueDeletable, RowAttributes, ValueDeletable};
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -45,13 +45,14 @@ pub(crate) fn encode_row_v0(
     key_prefix_len: usize,
     key_suffix: &[u8],
     value: Option<&[u8]>,
-    row_attributes: &Vec<RowAttribute>,
+    row_features: &[RowFeature],
+    timestamp: Option<i64>,
 ) {
     data.put_u16(key_prefix_len as u16);
     data.put_u16(key_suffix.len() as u16);
     data.put(key_suffix);
 
-    data.put(encode_meta(row_attributes, value.is_none()));
+    data.put(encode_meta(row_features, value.is_none(), timestamp));
 
     if let Some(value) = value {
         data.put_u32(value.len() as u32);
@@ -59,12 +60,13 @@ pub(crate) fn encode_row_v0(
     }
 }
 
-fn encode_meta(row_attributes: &Vec<RowAttribute>, is_tombstone: bool) -> Bytes {
+fn encode_meta(row_features: &[RowFeature], is_tombstone: bool, timestamp: Option<i64>) -> Bytes {
     let mut meta = BytesMut::new();
 
-    for attr in row_attributes {
+    for attr in row_features {
         match attr {
-            RowAttribute::Flags => meta.put_u8(encode_row_flags(is_tombstone)),
+            RowFeature::Flags => meta.put_u8(encode_row_flags(is_tombstone)),
+            RowFeature::Timestamp => meta.put_i64(timestamp.expect("Timestamp RowAttribute was enabled for SST but attempted to insert a row with no timestamp.")),
         }
     }
 
@@ -86,7 +88,7 @@ fn encode_row_flags(is_tombstone: bool) -> u8 {
 /// unknown row attributes, this method will return an error.
 pub(crate) fn decode_row_v0(
     first_key: &Bytes,
-    row_attributes: &Vec<RowAttribute>,
+    row_features: &[RowFeature],
     data: &mut Bytes,
 ) -> Result<KeyValueDeletable, SlateDBError> {
     let key_prefix_len = data.get_u16() as usize;
@@ -94,7 +96,7 @@ pub(crate) fn decode_row_v0(
     let key_suffix = data.slice(..key_suffix_len);
     data.advance(key_suffix_len);
 
-    let meta = decode_meta(row_attributes, data)?;
+    let meta = decode_meta(row_features, data)?;
     let value = if !(meta.flags & RowFlags::Tombstone).is_empty() {
         ValueDeletable::Tombstone
     } else {
@@ -109,28 +111,29 @@ pub(crate) fn decode_row_v0(
     Ok(KeyValueDeletable {
         key: key.into(),
         value,
+        attributes: RowAttributes { ts: meta.timestamp },
     })
 }
 
 struct RowMetadata {
     flags: RowFlags,
+    timestamp: Option<i64>,
 }
 
-fn decode_meta(
-    row_attributes: &Vec<RowAttribute>,
-    data: &mut Bytes,
-) -> Result<RowMetadata, SlateDBError> {
+fn decode_meta(row_features: &[RowFeature], data: &mut Bytes) -> Result<RowMetadata, SlateDBError> {
     let mut meta = RowMetadata {
         flags: RowFlags::empty(),
+        timestamp: None,
     };
-    for attr in row_attributes {
+    for attr in row_features {
         match attr {
-            RowAttribute::Flags => match decode_row_flags(data.get_u8()) {
+            RowFeature::Flags => match decode_row_flags(data.get_u8()) {
                 Ok(flags) => {
                     meta.flags = flags;
                 }
                 Err(e) => return Err(e),
             },
+            RowFeature::Timestamp => meta.timestamp = Some(data.get_i64()),
         }
     }
     Ok(meta)
@@ -146,7 +149,7 @@ fn decode_row_flags(flags: u8) -> Result<RowFlags, SlateDBError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db_state::RowAttribute;
+    use crate::db_state::RowFeature;
     use crate::types::ValueDeletable;
 
     #[test]
@@ -155,7 +158,7 @@ mod tests {
         let key_prefix_len = 3;
         let key_suffix = b"key";
         let value = Some(b"value".as_slice());
-        let row_attributes = vec![RowAttribute::Flags];
+        let row_features = vec![RowFeature::Flags, RowFeature::Timestamp];
 
         // Encode the row
         encode_row_v0(
@@ -163,13 +166,13 @@ mod tests {
             key_prefix_len,
             key_suffix,
             value,
-            &row_attributes,
+            &row_features,
+            Some(1),
         );
 
         let first_key = Bytes::from(b"prefixdata".as_ref());
         let mut data = Bytes::from(encoded_data);
-        let decoded =
-            decode_row_v0(&first_key, &row_attributes, &mut data).expect("Decoding failed");
+        let decoded = decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
 
         // Expected key: first_key[..3] + "key" = "prekey"
         let expected_key = Bytes::from(b"prekey" as &[u8]);
@@ -177,6 +180,32 @@ mod tests {
 
         assert_eq!(decoded.key, expected_key);
         assert_eq!(decoded.value, expected_value);
+        assert_eq!(decoded.attributes.ts, Some(1));
+    }
+
+    #[test]
+    fn test_encode_decode_row_with_disabled_row_attr_flag() {
+        let mut encoded_data = Vec::new();
+        let key_prefix_len = 0;
+        let key_suffix = b"";
+        let value = Some(b"value".as_slice());
+        let row_features = vec![RowFeature::Flags];
+
+        // Encode the row
+        encode_row_v0(
+            &mut encoded_data,
+            key_prefix_len,
+            key_suffix,
+            value,
+            &row_features,
+            Some(1), // pass in a timestamp, but it should not be encoded because flag is disabled
+        );
+
+        let first_key = Bytes::from(b"".as_ref());
+        let mut data = Bytes::from(encoded_data);
+        let decoded = decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
+
+        assert_eq!(decoded.attributes.ts, None);
     }
 
     #[test]
@@ -185,7 +214,7 @@ mod tests {
         let key_prefix_len = 4;
         let key_suffix = b"tomb";
         let value = None; // Indicates tombstone
-        let row_attributes = vec![RowAttribute::Flags];
+        let row_features = vec![RowFeature::Flags];
 
         // Encode the tombstone row
         encode_row_v0(
@@ -193,13 +222,13 @@ mod tests {
             key_prefix_len,
             key_suffix,
             value,
-            &row_attributes,
+            &row_features,
+            Some(1),
         );
 
         let first_key = Bytes::from(b"deadbeefdata".as_ref());
         let mut data = Bytes::from(encoded_data);
-        let decoded =
-            decode_row_v0(&first_key, &row_attributes, &mut data).expect("Decoding failed");
+        let decoded = decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
 
         // Expected key: first_key[..4] + "tomb" = "deadtomb"
         let expected_key = Bytes::from(b"deadtomb" as &[u8]);
@@ -214,7 +243,7 @@ mod tests {
         let mut encoded_data = Vec::new();
         let key_prefix_len = 3;
         let key_suffix = b"bad".as_slice();
-        let row_attributes = vec![RowAttribute::Flags];
+        let row_features = vec![RowFeature::Flags];
 
         // Manually encode invalid flags
         encoded_data.put_u16(key_prefix_len as u16);
@@ -228,7 +257,7 @@ mod tests {
         let mut data = Bytes::from(encoded_data);
 
         // Attempt to decode the row
-        let result = decode_row_v0(&first_key, &row_attributes, &mut data);
+        let result = decode_row_v0(&first_key, &row_features, &mut data);
 
         assert!(result.is_err());
         match result {
@@ -243,7 +272,7 @@ mod tests {
         let key_prefix_len = 4;
         let key_suffix = b""; // Empty key suffix
         let value = Some(b"value".as_slice());
-        let row_attributes = vec![RowAttribute::Flags];
+        let row_features = vec![RowFeature::Flags];
 
         // Encode the row
         encode_row_v0(
@@ -251,13 +280,13 @@ mod tests {
             key_prefix_len,
             key_suffix,
             value,
-            &row_attributes,
+            &row_features,
+            Some(1),
         );
 
         let first_key = Bytes::from(b"keyprefixdata".as_slice());
         let mut data = Bytes::from(encoded_data);
-        let decoded =
-            decode_row_v0(&first_key, &row_attributes, &mut data).expect("Decoding failed");
+        let decoded = decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
 
         // Expected key: first_key[..4] + "" = "keyp"
         let expected_key = Bytes::from(b"keyp" as &[u8]);
