@@ -415,6 +415,20 @@ mod tests {
     }
 
     #[test]
+    fn test_weighter() {
+        let mut cache = LruBuilder::new(NonZeroUsize::new(10).unwrap()).with_weighter(|k: &Vec<i32>, v: &Vec<i32>| k.len() + v.len()).build();
+        cache.scope(|mut cache, mut perm| {
+            cache.put(vec![1, 2, 3], vec![4, 5, 6], &mut perm);
+            // Current usage should be 6
+            assert_eq!(cache.len(), 1);
+            // Cache internal should trigger eviction and <vec![1, 2, 3], vec![4, 5, 6]> is not exist
+            cache.put(vec![7, 8, 9], vec![10, 11, 12], &mut perm);
+            assert_eq!(cache.len(), 1);
+            assert!(cache.get(&vec![1, 2, 3], &perm).is_none());
+        });
+    }
+
+    #[test]
     fn concurrent_test() {
         let mut cache: LruCache<&'static str, String> =
             LruBuilder::new(NonZeroUsize::new(3).unwrap()).build();
