@@ -9,6 +9,10 @@ use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
 use std::ptr::{self, NonNull};
 
+/// The weighter is used to calculate the weight of the cache entry.
+pub trait Weighter<K, V>: Fn(&K, &V) -> usize {}
+impl<K, V, T> Weighter<K, V> for T where T: Fn(&K, &V) -> usize {}
+
 // Phantom lifetime type that can only be subtyped by exactly the same lifetime `'brand`.
 // So we can’t create other variables with 'brand lifetime anywhere in safe rust.
 // The 'brand can be viewed as a unique ID, and variables that were annotated with
@@ -95,32 +99,22 @@ impl<'cache, 'brand, K: Hash + Eq, V> CacheHandle<'cache, 'brand, K, V> {
     pub fn put<'handle, 'perm>(
         &'handle mut self,
         key: K,
-        mut value: V,
+        value: V,
         _perm: &'perm mut ValuePerm<'brand>,
-    ) -> Option<V> {
-        let node_ref = self.cache.table.get_mut(&KeyRef { key: &key });
+    ) {
+        // Since we convert update to delete + insert, we only need to create new nodes
+        let weight = (self.cache.weighter)(&key, &value);
 
-        match node_ref {
-            // Key already exists, update the value and move it to the front of the queue
-            Some(node_ref) => {
-                let node_ptr: *mut LruEntry<K, V> = node_ref.as_ptr();
-                // gets a reference to the node to perform a swap and drops it right after
-                let node_ref = unsafe { &mut (*(*node_ptr).value.as_mut_ptr()) };
-                std::mem::swap(&mut value, node_ref);
-                let _ = node_ref;
-                self.cache.detach(node_ptr);
-                self.cache.attach(node_ptr);
-                Some(value)
-            }
-            None => {
-                let (replaced, new_node) = self.cache.replace_or_create_node(key, value);
-                let node_ptr: *mut LruEntry<K, V> = new_node.as_ptr();
-                self.cache.attach(node_ptr);
-                let key_ptr = unsafe { (*node_ptr).key.as_mut_ptr() };
-                self.cache.table.insert(KeyRef { key: key_ptr }, new_node);
-                replaced.map(|(_, v)| v)
-            }
-        }
+        // Make sure there is enough space to contain the new entry
+        self.cache.try_evict(weight);
+
+        let new_node =
+            unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(LruEntry::new(key, value)))) };
+        let node_ptr: *mut LruEntry<K, V> = new_node.as_ptr();
+        self.cache.attach(node_ptr);
+        let key_ptr = unsafe { (*node_ptr).key.as_mut_ptr() };
+        self.cache.table.insert(KeyRef { key: key_ptr }, new_node);
+        self.cache.usage += weight;
     }
 
     pub fn get<'handle, 'perm>(
@@ -158,8 +152,10 @@ impl<'cache, 'brand, K: Hash + Eq, V> CacheHandle<'cache, 'brand, K, V> {
                     old_node
                 };
                 cache.detach(node_ptr.as_ptr());
-                let LruEntry { key: _, value, .. } = old_node;
-                unsafe { Some(value.assume_init()) }
+                let (k, v) = unsafe { (old_node.key.assume_init(), old_node.value.assume_init()) };
+                let weight = (cache.weighter)(&k, &v);
+                cache.usage -= weight;
+                Some(v)
             }
         }
     }
@@ -178,7 +174,10 @@ impl<'cache, 'brand, K: Hash + Eq, V> CacheHandle<'cache, 'brand, K, V> {
                 let old_node = unsafe { *Box::from_raw(node_ptr.as_ptr()) };
                 cache.detach(node_ptr.as_ptr());
                 let LruEntry { key, value, .. } = old_node;
-                unsafe { Some((key.assume_init(), value.assume_init())) }
+                let (k, v) = unsafe { (key.assume_init(), value.assume_init()) };
+                let weight = (cache.weighter)(&k, &v);
+                cache.usage -= weight;
+                Some((k, v))
             }
         }
     }
@@ -187,6 +186,8 @@ impl<'cache, 'brand, K: Hash + Eq, V> CacheHandle<'cache, 'brand, K, V> {
 pub struct LruCache<K, V> {
     table: HashMap<KeyRef<K>, NonNull<LruEntry<K, V>>>,
     capacity: NonZeroUsize,
+    weighter: Box<dyn Weighter<K, V>>,
+    usage: usize,
 
     // Sentinel nodes
     head: *mut LruEntry<K, V>,
@@ -194,10 +195,12 @@ pub struct LruCache<K, V> {
 }
 
 impl<K: Eq + Hash, V> LruCache<K, V> {
-    pub fn new(capacity: NonZeroUsize) -> Self {
+    fn new(capacity: NonZeroUsize, weighter: impl Weighter<K, V> + 'static) -> Self {
         let cache = LruCache::<K, V> {
             table: HashMap::with_capacity(capacity.get()),
             capacity,
+            weighter: Box::new(weighter),
+            usage: 0,
 
             head: Box::into_raw(Box::new(LruEntry::new_empty())),
             tail: Box::into_raw(Box::new(LruEntry::new_empty())),
@@ -289,10 +292,28 @@ impl<K: Eq + Hash, V> LruCache<K, V> {
         }
     }
 
+    fn try_evict(&mut self, weight: usize) {
+        while self.usage + weight > self.capacity.get() {
+            // We place the oldest entry at the tail of the list
+            let old_key = KeyRef {
+                key: unsafe { &(*(*(*self.tail).prev).key.as_ptr()) },
+            };
+            let node_ptr = self.table.remove(&old_key).unwrap();
+            let node = unsafe { *Box::from_raw(node_ptr.as_ptr()) };
+            self.detach(node_ptr.as_ptr());
+            let LruEntry { key, value, .. } = node;
+            let (k, v) = unsafe { (key.assume_init(), value.assume_init()) };
+            self.usage -= (self.weighter)(&k, &v);
+        }
+    }
+
     // Puts a key-value pair into cache. If the key already exists in the cache, then it updates
     // the key's value and returns the old value. Otherwise, `None` is returned.
     pub fn put(&mut self, key: K, value: V) -> Option<V> {
-        self.scope(|mut cache, mut perm| cache.put(key, value, &mut perm))
+        // For simplicity, we convert the update operation into delete + insert
+        let old_value = self.scope(|mut cache, mut perm| cache.remove(&key, &mut perm));
+        self.scope(|mut cache, mut perm| cache.put(key, value, &mut perm));
+        old_value
     }
 
     /// Returns a reference to the value of the key in the cache or `None` if it is not
@@ -330,6 +351,29 @@ impl<K, V> Drop for LruCache<K, V> {
     }
 }
 
+pub struct LruBuilder<K: Eq + Hash, V> {
+    capacity: NonZeroUsize,
+    weighter: Box<dyn Weighter<K, V>>,
+}
+
+impl<K: Eq + Hash + 'static, V: 'static> LruBuilder<K, V> {
+    pub fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            capacity,
+            weighter: Box::new(|_, _| 1),
+        }
+    }
+
+    pub fn with_weighter(mut self, weighter: impl Weighter<K, V> + 'static) -> Self {
+        self.weighter = Box::new(weighter);
+        self
+    }
+
+    pub fn build(self) -> LruCache<K, V> {
+        LruCache::new(self.capacity, self.weighter)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,10 +386,10 @@ mod tests {
 
     #[test]
     fn test_put_get() {
-        let mut cache = LruCache::new(NonZeroUsize::new(2).unwrap());
+        let mut cache = LruBuilder::new(NonZeroUsize::new(2).unwrap()).build();
         cache.scope(|mut cache, mut perm| {
-            assert_eq!(cache.put("Saito", "Asuka", &mut perm), None);
-            assert_eq!(cache.put("Nishino", "Nanase", &mut perm), None);
+            cache.put("Saito", "Asuka", &mut perm);
+            cache.put("Nishino", "Nanase", &mut perm);
 
             assert_eq!(cache.capacity().get(), 2);
             assert_eq!(cache.len(), 2);
@@ -357,7 +401,7 @@ mod tests {
 
     #[test]
     fn test_remove() {
-        let mut cache = LruCache::new(NonZeroUsize::new(2).unwrap());
+        let mut cache = LruBuilder::new(NonZeroUsize::new(2).unwrap()).build();
         cache.scope(|mut cache, mut perm| {
             cache.put("Saito", "Asuka", &mut perm);
             assert_eq!(cache.capacity().get(), 2);
@@ -373,29 +417,29 @@ mod tests {
     #[test]
     fn concurrent_test() {
         let mut cache: LruCache<&'static str, String> =
-            LruCache::new(NonZeroUsize::new(3).unwrap());
-            let out = cache.scope(|mut handle, mut perm| {
-                handle.put("a", "bb".to_string(), &mut perm);
-                handle.put("b", "cc".to_string(), &mut perm);
-                handle.put("c", "dd".to_string(), &mut perm);
-        
-                let futs = ["a", "b", "c"].iter().map(|k| {
-                    let v = handle.get(k, &perm).unwrap();
-        
-                    async {
-                        let v: &String = v;
-                        v.get(..1).unwrap().to_string()
-                    }
-                });
-        
-                let fut = async {
-                    let out = futures::future::join_all(futs).await;
-                    out.join(" ")
-                };
-        
-                futures::executor::block_on(fut)
+            LruBuilder::new(NonZeroUsize::new(3).unwrap()).build();
+        let out = cache.scope(|mut handle, mut perm| {
+            handle.put("a", "bb".to_string(), &mut perm);
+            handle.put("b", "cc".to_string(), &mut perm);
+            handle.put("c", "dd".to_string(), &mut perm);
+
+            let futs = ["a", "b", "c"].iter().map(|k| {
+                let v = handle.get(k, &perm).unwrap();
+
+                async {
+                    let v: &String = v;
+                    v.get(..1).unwrap().to_string()
+                }
             });
-        
-            assert_eq!(out, "b c d".to_string());
+
+            let fut = async {
+                let out = futures::future::join_all(futs).await;
+                out.join(" ")
+            };
+
+            futures::executor::block_on(fut)
+        });
+
+        assert_eq!(out, "b c d".to_string());
     }
 }
