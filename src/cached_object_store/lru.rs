@@ -3,6 +3,7 @@
 //! Heavily influenced by the [Design safe collection API with compile-time reference stability in Rust](https://blog.cocl2.com/posts/rust-ref-stable-collection/)
 
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -10,13 +11,14 @@ use std::num::NonZeroUsize;
 use std::ptr::{self, NonNull};
 
 /// The weighter is used to calculate the weight of the cache entry.
-pub trait Weighter<K, V>: Fn(&K, &V) -> usize {}
-impl<K, V, T> Weighter<K, V> for T where T: Fn(&K, &V) -> usize {}
+pub trait Weighter<K, V>: Fn(&K, &V) -> usize + Send + Sync + 'static {}
+impl<K, V, T> Weighter<K, V> for T where for<'a> T: Fn(&K, &V) -> usize + Send + Sync + 'static {}
 
 // Phantom lifetime type that can only be subtyped by exactly the same lifetime `'brand`.
 // So we can’t create other variables with 'brand lifetime anywhere in safe rust.
 // The 'brand can be viewed as a unique ID, and variables that were annotated with
 // the lifetime and created together are associated uniquely.
+#[allow(unused)]
 type InvariantLifetime<'brand> = PhantomData<fn(&'brand ()) -> &'brand ()>;
 
 // The operating permissions of the LruCache value itself
@@ -46,6 +48,12 @@ impl<K: PartialEq> PartialEq for KeyRef<K> {
 }
 
 impl<K: Eq> Eq for KeyRef<K> {}
+
+impl<K: Debug> Debug for KeyRef<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyRef").field("key", &self.key).finish()
+    }
+}
 
 // Hold LRU key-value pair
 struct LruEntry<K, V> {
@@ -195,7 +203,7 @@ pub struct LruCache<K, V> {
 }
 
 impl<K: Eq + Hash, V> LruCache<K, V> {
-    fn new(capacity: NonZeroUsize, weighter: impl Weighter<K, V> + 'static) -> Self {
+    fn new(capacity: NonZeroUsize, weighter: impl Weighter<K, V>) -> Self {
         let cache = LruCache::<K, V> {
             table: HashMap::with_capacity(capacity.get()),
             capacity,
@@ -214,7 +222,7 @@ impl<K: Eq + Hash, V> LruCache<K, V> {
         cache
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.table.len()
     }
 
@@ -224,7 +232,12 @@ impl<K: Eq + Hash, V> LruCache<K, V> {
     }
 
     #[inline]
-    fn capacity(&self) -> NonZeroUsize {
+    pub fn adjust_capacity(&mut self, new_capacity: NonZeroUsize) {
+        self.capacity = new_capacity;
+    }
+
+    #[inline]
+    pub fn capacity(&self) -> NonZeroUsize {
         self.capacity
     }
 
@@ -257,39 +270,6 @@ impl<K: Eq + Hash, V> LruCache<K, V> {
             _lifetime: InvariantLifetime::default(),
         };
         func(handle, perm)
-    }
-
-    // If cache if full, evict the oldest entry and get an pointer to the new key-value pair.
-    // Otherwise, we create a new entry and get a pointer to the new key-value pair.
-    // ## Returns
-    // - `None` if the cache is not full
-    // - `Some((K, V))` which includes the evicted key-value pair
-    fn replace_or_create_node(
-        &mut self,
-        key: K,
-        value: V,
-    ) -> (Option<(K, V)>, NonNull<LruEntry<K, V>>) {
-        if self.len() == self.capacity.get() {
-            let old_key = KeyRef {
-                key: unsafe { &(*(*(*self.tail).prev).key.as_ptr()) },
-            };
-            let old_entry = self.table.remove(&old_key).unwrap();
-            let node_ptr: *mut LruEntry<K, V> = old_entry.as_ptr();
-
-            let replaced = unsafe {
-                (
-                    std::mem::replace(&mut (*node_ptr).key, MaybeUninit::new(key)).assume_init(),
-                    std::mem::replace(&mut (*node_ptr).value, MaybeUninit::new(value))
-                        .assume_init(),
-                )
-            };
-            self.detach(node_ptr);
-            (Some(replaced), old_entry)
-        } else {
-            (None, unsafe {
-                NonNull::new_unchecked(Box::into_raw(Box::new(LruEntry::new(key, value))))
-            })
-        }
     }
 
     fn try_evict(&mut self, weight: usize) {
@@ -351,6 +331,22 @@ impl<K, V> Drop for LruCache<K, V> {
     }
 }
 
+impl<K: Eq + Hash + Debug, V: Debug> Debug for LruCache<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LruCache")
+            .field("capacity", &self.capacity)
+            .field("usage", &self.usage)
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+// The compiler does not automatically derive Send and Sync for LruCache because it contains
+// raw pointers. The raw pointers are safely encapsulated by LruCache though so we can
+// implement Send and Sync for it below.
+unsafe impl<K: Send, V: Send> Send for LruCache<K, V> {}
+unsafe impl<K: Sync, V: Sync> Sync for LruCache<K, V> {}
+
 pub struct LruBuilder<K: Eq + Hash, V> {
     capacity: NonZeroUsize,
     weighter: Box<dyn Weighter<K, V>>,
@@ -364,7 +360,7 @@ impl<K: Eq + Hash + 'static, V: 'static> LruBuilder<K, V> {
         }
     }
 
-    pub fn with_weighter(mut self, weighter: impl Weighter<K, V> + 'static) -> Self {
+    pub fn with_weighter(mut self, weighter: impl Weighter<K, V>) -> Self {
         self.weighter = Box::new(weighter);
         self
     }
@@ -416,7 +412,9 @@ mod tests {
 
     #[test]
     fn test_weighter() {
-        let mut cache = LruBuilder::new(NonZeroUsize::new(10).unwrap()).with_weighter(|k: &Vec<i32>, v: &Vec<i32>| k.len() + v.len()).build();
+        let mut cache = LruBuilder::new(NonZeroUsize::new(10).unwrap())
+            .with_weighter(|k: &Vec<i32>, v: &Vec<i32>| k.len() + v.len())
+            .build();
         cache.scope(|mut cache, mut perm| {
             cache.put(vec![1, 2, 3], vec![4, 5, 6], &mut perm);
             // Current usage should be 6
@@ -455,5 +453,19 @@ mod tests {
         });
 
         assert_eq!(out, "b c d".to_string());
+    }
+
+    #[test]
+    fn test_send() {
+        use std::thread;
+
+        let mut cache = LruBuilder::new(NonZeroUsize::new(3).unwrap()).build();
+        cache.put(1, "a");
+
+        let handle = thread::spawn(move || {
+            assert_eq!(cache.get(&1), Some(&"a"));
+        });
+
+        assert!(handle.join().is_ok());
     }
 }
