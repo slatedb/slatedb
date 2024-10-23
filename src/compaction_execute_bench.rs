@@ -16,6 +16,7 @@ use ulid::Ulid;
 
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, SourceId};
+use crate::config::Clock;
 use crate::config::CompactorOptions;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -24,7 +25,7 @@ use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 use crate::test_utils::OrderedBytesGenerator;
 use crate::types::RowAttributes;
-use crate::{compactor::WorkerToOrchestratorMsg, config::CompressionCodec};
+use crate::{compactor::WorkerToOrchestratorMsg, config, config::CompressionCodec};
 
 pub struct CompactionExecuteBench {
     path: Path,
@@ -58,6 +59,7 @@ impl CompactionExecuteBench {
             self.path.clone(),
             None,
         ));
+        let clock = config::default_clock();
 
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
@@ -80,6 +82,7 @@ impl CompactionExecuteBench {
                 key_start_copy,
                 num_keys,
                 val_bytes,
+                clock.clone(),
             ));
             futures.push(jh)
         }
@@ -99,6 +102,7 @@ impl CompactionExecuteBench {
         key_start: Vec<u8>,
         num_keys: usize,
         val_bytes: usize,
+        clock: Arc<dyn Clock + Send + Sync>,
     ) -> Result<(), SlateDBError> {
         let mut retries = 0;
         loop {
@@ -108,6 +112,7 @@ impl CompactionExecuteBench {
                 key_start.clone(),
                 num_keys,
                 val_bytes,
+                clock.clone(),
             )
             .await;
             match result {
@@ -131,6 +136,7 @@ impl CompactionExecuteBench {
         key_start: Vec<u8>,
         num_keys: usize,
         val_bytes: usize,
+        clock: Arc<dyn Clock + Send + Sync>,
     ) -> Result<(), SlateDBError> {
         let mut rng = rand_xorshift::XorShiftRng::from_entropy();
         let start = std::time::Instant::now();
@@ -143,8 +149,9 @@ impl CompactionExecuteBench {
             let mut val = vec![0u8; val_bytes];
             rng.fill_bytes(val.as_mut_slice());
             let key = key_gen.next();
+            let timestamp = clock.now();
             sst_writer
-                .add(key.as_ref(), Some(val.as_ref()), RowAttributes { ts: None })
+                .add(key.as_ref(), Some(val.as_ref()), RowAttributes { ts: Some(timestamp) })
                 .await?;
         }
         let encoded = sst_writer.close().await?;

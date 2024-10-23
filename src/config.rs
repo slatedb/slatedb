@@ -248,7 +248,7 @@ impl Clock for SystemClock {
     }
 }
 
-fn default_clock() -> Arc<dyn Clock + Send + Sync> {
+pub(crate) fn default_clock() -> Arc<dyn Clock + Send + Sync> {
     Arc::new(SystemClock {
         last_tick: AtomicI64::new(i64::MIN),
     })
