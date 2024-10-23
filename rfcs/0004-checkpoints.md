@@ -135,8 +135,8 @@ impl Db {
         …
     }
 
-   /// Called to destroy the database at the given path. If `soft` is true, This method will set the destroyed_at_s field in the manifest. The GC will clean up the db after some time has passed, and all checkpoints have either been deleted or expired. As part of cleaning up the db, the GC will also remove the database’s checkpoint from the source database. If `soft` is false, then all cleanup will be performed by the call to this method.
-   pub async fn destroy(path: Path, object_store: Arc<dyn ObjectStore>, soft: bool) {
+    /// Called to destroy the database at the given path. If `soft` is true, This method will set the destroyed_at_s field in the manifest. The GC will clean up the db after some time has passed, and all checkpoints have either been deleted or expired. As part of cleaning up the db, the GC will also remove the database’s checkpoint from the source database. If `soft` is false, then all cleanup will be performed by the call to this method. If `soft` is false, the destroy will return SlateDbError::InvalidDeletion if there are any remaining non-expired checkpoints.
+   pub async fn destroy(path: Path, object_store: Arc<dyn ObjectStore>, soft: bool) -> Result<(), SlateDbError> {
        …
    }
 }
@@ -207,13 +207,11 @@ Options:
   -i, --id <ID>  The UUID of the checkpoint (e.g. 01740ee5-6459-44af-9a45-85deb6e468e3)
 ```
 
-### Client Usage of Checkpoints
-
-#### Writers
+### Writers
 
 Writers will create checkpoints to “pin” the set of SRs currently being used to serve reads. As the writer consumes manifest updates, it will re-establish its checkpoint to point to the latest manifest version. Eventually, when we support range scans, the writer will retain older checkpoints to ensure that long-lived scans can function without interference from the GC.
 
-##### Establishing Initial Checkpoint
+#### Establishing Initial Checkpoint
 
 The writer first establishes it’s checkpoint when starting up, as part of incrementing the epoch:
 1. Read the latest manifest version V.
@@ -223,7 +221,7 @@ The writer first establishes it’s checkpoint when starting up, as part of incr
 5. Set `writer_epoch` to E
 6. Write the manifest. If this fails with a CAS error, go back to 1.
 
-##### Refreshing the Checkpoint
+#### Refreshing the Checkpoint
 
 The writer will periodically re-establish its checkpoint to pin the latest SSTs and SRs. It will run the following whenever it detects that the manifest has been updated. This happens either when the manifest is polled (at `manifest_poll_interval`), or when the writer detects an update when it goes to update the manifest with it’s local view of the core db state:
 1. Read the latest manifest version V. (If the writer is applying an update from the local state then in the first iteration it can assume that it’s local version is the latest. If it’s wrong, the CAS will fail and it should reload the manifest from Object Storage))
@@ -233,14 +231,14 @@ The writer will periodically re-establish its checkpoint to pin the latest SSTs 
     3. Apply any local changes
     4. Write the new manifest. If this fails with a CAS error, go back to 1.
 
-##### Clones
+#### Clones
 
 The writer will also support initializing a new database from an existing checkpoint. This allows users to “fork” an instance of slatedb, allowing it to access all the original db’s data from the checkpoint, but isolate writes to a new db instance.
 
 To support this, we add the `Db::open_from_checkpoint` method, which accepts a `source_path` and `source_checkpoint`. When initializing the db for the first time (detected by the presence of a manifest), the writer will do the following:
 1. Read the source manifest MC at `source_checkpoint`.
 2. Copy over any WAL SSTs between `last_compacted_wal_id` and `wal_id_last_seen`
-3. Create a new checkpoint in the source database with the `manifest_id` as `source_checkpoint`.
+3. Verify that `source_checkpoint` is present and not expired. Create a new checkpoint in the source database with the `manifest_id` as `source_checkpoint`.
 4. Compute an initial manifest for the new DB. The new manifest will set its fields as follows
     - writer_epoch: set to the epoch from the source checkpoint + 1.
     - compactor_epoch: copied from the source checkpoint.
@@ -250,16 +248,31 @@ To support this, we add the `Db::open_from_checkpoint` method, which accepts a `
     - l0_last_compacted: copied from the source checkpoint
     - compacted: copied from the source checkpoint
     - checkpoints: contains a single entry with the writer’s checkpoint.
+5. If CAS fails, go back to (1) (TODO: we can skip step 2 - we just need to re-validate that the source checkpoint is still valid because the GC could clean it up)
 
-*SST Path Resolution*
+
+##### SST Path Resolution
 
 The DB may now need to look through multiple paths to find SST files, since it may need to open SST files written by a parent db. To support this, we’ll walk the manifest tree up to the root, and build a map from SST ID to Path at startup time, and maintain this in memory.
 
-#### Readers
+##### Deleting a Database
+
+With the addition of clones, we need to be a bit more careful about how we delete a database. Previously we could simply remove it's objects from the Object Store and call it a day. With clones, it's possible that a SlateDB instance is holding a checkpoint that another database relies upon. So it's not safe to just delete that data. We'll instead require that users delete a database by calling the `Db::destroy` method. `Db::destroy` can specify that the delete is either a soft or hard delete by using the `soft` parameter. This way we can support both more conservative deletes that clean up data from the GC process after some grace period, and a simple path for hard-deleting a db.
+
+A soft delete will simply mark the manifest as deleted, and rely on a separate GC process to delete the db. It requires that the GC be running in some other long-lived process from the main writer. The GC process will wait for both some grace period, and for all checkpoints to either expire or be deleted. At that point it will delete the db's SSTs and exit. This is covered in more detail in the GC section. A soft delete will be processed by the writer as follows:
+1. Claim write-ownership of the DB by bumping the epoch and fencing the WAL. The intent here is to fence any active writer. We assume that the writer will detect that it's fenced and exit by the time the GC goes to delete the data.
+2. Delete the writer's checkpoint, if any.
+3. Update the manifest by setting the `destroyed_at_s` field to the current time.
+
+A hard delete will proceed as follows. It is up to the user to ensure that there is no active writer at the time of deletion:
+1. Check that there are no active checkpoints. If there are, return `InvalidDeletion`
+2. Delete all objects under `path`.
+
+### Readers
 
 Readers are created by calling `DbReader::open`. `open` takes an optional checkpoint. If a checkpoint is provided, `DbReader` uses the provided checkpoint and does not try to refresh it. If no checkpoint is provided, `DbReader` establishes it’s own checkpoint against the latest manifest and periodically re-establishes this checkpoint at the interval specified in `manifest_poll_interval`. The checkpoints created by `DbReader` use the lifetime specified in the `checkpoint_lifetime` option.
 
-##### Establishing the Checkpoint
+#### Establishing the Checkpoint
 
 To establish the checkpoint, `DbReader` will:
 1. Read the latest manifest version V.
@@ -276,3 +289,27 @@ If the reader is opened without a checkpoint, it will periodically re-establish 
 - It will purge any in-memory tables with content from WAL SSTs lower than the new `wal_id_last_compacted`.
 
 #### Garbage Collector
+
+The GC task will be modified to handle soft deletes and manage checkpoints/clones. The GC tasks's algorithm will now look like the following:
+1. Read the current manifest. If no manifest is found, exit.
+2. If `destroyed_at_s` is set, and the current time is after `destroyed_at_s` + `db_delete_grace`, and there are no active checkpoints, then:
+    1. If the db is a clone, update the source db's manifest by deleting the checkpoint.
+    2. Delete all object's under the db's path.
+    3. Exit.
+3. Garbage collect expired checkpoints
+    1. Find any checkpoints that have expired and remove them
+    2. Write the new manifest version with checkpoints deleted. If CAS fails, go back to 1 to reload checkpoints that may be refreshed or added.
+4. Delete garbage manifests. This includes any manifest that is older than `min_age` and is not referenced by a checkpoint.
+5. Read all manifests referenced by a checkpoint. Call this set M
+6. Clean up WAL SSTs.
+    1. Let C be the lowest id of all `wal_id_last_compacted` in M.
+    2. Delete all WAL SSTs with id lower than C and age older than `min_age`
+7. Clean up SSTs.
+    1. Let S be the set of all SSTs from all manifests in M.
+    2. Delete all SSTs not in M with age older than `min_age`
+8. Detach the clone if possible.
+    1. If the DB instance is a clone, and it's manifest and contained checkpoints no longer references any SSTs from its `source_checkpoint` (we can tell this if all SSTs are under the current db's path), then detach it:
+        1. Update the source db's manifest by removing the checkpoint.
+        2. Update the db's manifest by removing the `source_checkpoint` field.
+    
+Observe that users can now configure a single GC process that can manage GC for multiple databases that use soft deletes. Whenever a new database is created, the user needs to spawn a new GC task for that database. When the GC task completes deleting a database, then the task exits. For now, it's left up to the user to spawn GC tasks for databases that they have created.
