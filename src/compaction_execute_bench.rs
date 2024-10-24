@@ -16,7 +16,7 @@ use ulid::Ulid;
 
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, SourceId};
-use crate::config::{Clock, CompactorOptions, CompressionCodec, default_clock};
+use crate::config::{Clock, CompactorOptions, CompressionCodec, DbOptions};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::manifest_store::{ManifestStore, StoredManifest};
@@ -58,7 +58,7 @@ impl CompactionExecuteBench {
             self.path.clone(),
             None,
         ));
-        let clock = default_clock();
+        let clock = DbOptions::default().clock;
 
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
