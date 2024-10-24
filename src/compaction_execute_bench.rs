@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info};
 use ulid::Ulid;
 
+use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, SourceId};
 use crate::config::{Clock, CompactorOptions, CompressionCodec, DbOptions};
@@ -24,7 +25,6 @@ use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 use crate::test_utils::OrderedBytesGenerator;
 use crate::types::RowAttributes;
-use crate::compactor::WorkerToOrchestratorMsg;
 
 pub struct CompactionExecuteBench {
     path: Path,
@@ -150,7 +150,13 @@ impl CompactionExecuteBench {
             let key = key_gen.next();
             let timestamp = clock.now();
             sst_writer
-                .add(key.as_ref(), Some(val.as_ref()), RowAttributes { ts: Some(timestamp) })
+                .add(
+                    key.as_ref(),
+                    Some(val.as_ref()),
+                    RowAttributes {
+                        ts: Some(timestamp),
+                    },
+                )
                 .await?;
         }
         let encoded = sst_writer.close().await?;
