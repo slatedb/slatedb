@@ -21,6 +21,7 @@ use crate::config::{Clock, CompactorOptions, CompressionCodec, DbOptions};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::manifest_store::{ManifestStore, StoredManifest};
+use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 use crate::test_utils::OrderedBytesGenerator;
@@ -282,11 +283,13 @@ impl CompactionExecuteBench {
         });
         let (tx, rx) = crossbeam_channel::unbounded();
         let compactor_options = CompactorOptions::default();
+        let db_stats = Arc::new(DbStats::new());
         let executor = TokioCompactionExecutor::new(
             Handle::current(),
             Arc::new(compactor_options),
             tx,
             table_store.clone(),
+            db_stats.clone(),
         );
         let os = self.object_store.clone();
         info!("load compaction job");
