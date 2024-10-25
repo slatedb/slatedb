@@ -17,7 +17,7 @@ pub enum SlateDBError {
     #[error("Empty block")]
     EmptyBlock,
 
-    #[error("Object store error")]
+    #[error("Object store error: {0}")]
     ObjectStoreError(#[from] object_store::Error),
 
     #[error("Manifest file already exists")]
