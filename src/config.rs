@@ -160,6 +160,7 @@ use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{str::FromStr, time::Duration};
+use bytes::Bytes;
 use tokio::runtime::Handle;
 
 use crate::compactor::CompactionScheduler;
@@ -167,8 +168,10 @@ use crate::error::{DbOptionsError, SlateDBError};
 
 use crate::db_cache::DbCache;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
+use crate::types::KeyValue;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
+pub const DEFAULT_SCAN_OPTIONS: &ScanOptions = &ScanOptions::default();
 pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
 
 /// Whether reads see only writes that have been committed durably to the DB.  A
@@ -197,6 +200,52 @@ impl ReadOptions {
         Self {
             read_level: ReadLevel::Commited,
         }
+    }
+}
+
+pub struct ScanOptions {
+    /// The read commit level for read operations
+    pub read_level: ReadLevel,
+    /// The number of bytes to read ahead
+    pub read_ahead_size: usize,
+    /// Whether or not fetched blocks should be cached
+    pub cache_blocks: bool,
+}
+
+impl ScanOptions {
+    /// Create a new ScanOptions with `read_level` set to `Commited`.
+    pub const fn default() -> Self {
+        Self {
+            read_level: ReadLevel::Commited,
+            read_ahead_size: 0, // FIXME
+            cache_blocks: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DbRecord {
+    pub key: Bytes,
+    pub value: Bytes,
+}
+
+impl DbRecord {
+    pub fn new(key: Bytes, value: Bytes) -> Self {
+        Self { key, value }
+    }
+}
+
+impl From<(&[u8], &[u8])> for DbRecord {
+    fn from(record: (&[u8], &[u8])) -> Self {
+        let key = Bytes::copy_from_slice(record.0);
+        let value = Bytes::copy_from_slice(record.1);
+        Self::new(key, value)
+    }
+}
+
+impl From<KeyValue> for DbRecord {
+    fn from(kv: KeyValue) -> Self {
+        Self::new(kv.key, kv.value)
     }
 }
 

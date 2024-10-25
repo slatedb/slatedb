@@ -1,6 +1,7 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
-
+use bytes::Bytes;
+use crate::db_iter::SeekToKey;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::KeyValueDeletable;
@@ -11,6 +12,7 @@ pub(crate) struct TwoMergeIterator<T1: KeyValueIterator, T2: KeyValueIterator> {
 }
 
 impl<T1: KeyValueIterator, T2: KeyValueIterator> TwoMergeIterator<T1, T2> {
+
     pub(crate) async fn new(mut iterator1: T1, mut iterator2: T2) -> Result<Self, SlateDBError> {
         let next1 = iterator1.next_entry().await?;
         let next2 = iterator2.next_entry().await?;
@@ -38,6 +40,53 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> TwoMergeIterator<T1, T2> {
             &mut self.iterator2.1,
             self.iterator2.0.next_entry().await?,
         ))
+    }
+}
+
+impl<T1,T2> TwoMergeIterator<T1, T2>
+where
+    T1: KeyValueIterator + SeekToKey,
+    T2: KeyValueIterator + SeekToKey,
+{
+    async fn seek1(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
+        match &self.iterator1.1 {
+            None => Ok(()),
+            Some(val) => {
+                if val.key < next_key {
+                    self.iterator1.0.seek(next_key).await?;
+                    self.iterator1.1 = self.iterator1.0.next_entry().await?;
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    async fn seek2(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
+        match &self.iterator2.1 {
+            None => Ok(()),
+            Some(val) => {
+                if val.key < next_key {
+                    self.iterator2.0.seek(next_key).await?;
+                    self.iterator2.1 = self.iterator2.0.next_entry().await?;
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+impl<T1,T2> SeekToKey for TwoMergeIterator<T1, T2>
+where
+    T1: KeyValueIterator + SeekToKey,
+    T2: KeyValueIterator + SeekToKey,
+{
+    async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
+        self.seek1(next_key).await?;
+        self.seek2(next_key).await
     }
 }
 
@@ -140,6 +189,28 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
             return Ok(Some(kv));
         }
         Ok(None)
+    }
+}
+
+impl<T: KeyValueIterator + SeekToKey> SeekToKey for MergeIterator<T> {
+    async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
+        loop {
+            if let Some(mut iterator_state) = self.current.take() {
+                let current_kv = iterator_state.next_kv;
+                if current_kv.key >= next_key {
+                    return Ok(())
+                } else {
+                    iterator_state.iterator.seek(next_key).await?;
+                    if let Some(kv) = iterator_state.iterator.next_entry().await? {
+                        iterator_state.next_kv = kv;
+                        self.iterators.push(Reverse(iterator_state));
+                    }
+                    self.current = self.iterators.pop().map(|r| r.0);
+                }
+            } else {
+                return Ok(())
+            }
+        }
     }
 }
 

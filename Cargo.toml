@@ -52,10 +52,12 @@ duration-str = { version = "0.11.2", features = ["serde", "time"], default-featu
 
 [dev-dependencies]
 tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
+tokio-test = "0.4.4"
 fail-parallel = { version = "0.5.1", features = ["failpoints"] }
 tempfile = "3.3"
 filetime = "0.2"
 figment = { version = "0.10.19", features = ["test"] }
+proptest = "1.5.0"
 
 [features]
 default = ["aws", "moka"]

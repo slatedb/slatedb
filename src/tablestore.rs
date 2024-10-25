@@ -115,6 +115,10 @@ impl TableStore {
         }
     }
 
+    pub(crate) fn convert_bytes_to_blocks(&self, bytes: usize) -> usize {
+        bytes / self.sst_format.block_size + 1
+    }
+
     pub(crate) async fn list_wal_ssts<R: RangeBounds<u64>>(
         &self,
         id_range: R,

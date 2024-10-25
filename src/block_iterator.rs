@@ -5,6 +5,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use crate::db_state::RowFeature;
 use crate::row_codec::decode_row_v0;
 use crate::{block::Block, error::SlateDBError, iter::KeyValueIterator, types::KeyValueDeletable};
+use crate::db_iter::SeekToKey;
 
 pub trait BlockLike {
     fn data(&self) -> &Bytes;
@@ -64,6 +65,23 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
     }
 }
 
+impl<B: BlockLike> SeekToKey for BlockIterator<B> {
+    async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
+        loop {
+            let result = self.load_at_current_off();
+            match result {
+                Ok(None) => return Ok(()),
+                Ok(Some(kv)) => if kv.key < next_key {
+                    self.advance();
+                } else {
+                    return Ok(())
+                },
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
 impl<B: BlockLike> BlockIterator<B> {
     pub fn from_first_key(block: B, row_features: Vec<RowFeature>) -> BlockIterator<B> {
         BlockIterator {
@@ -102,8 +120,12 @@ impl<B: BlockLike> BlockIterator<B> {
         self.off_off += 1;
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.off_off >= self.block.offsets().len()
+    }
+
     fn load_at_current_off(&self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
-        if self.off_off >= self.block.offsets().len() {
+        if self.is_empty() {
             return Ok(None);
         }
         let off = self.block.offsets()[self.off_off];

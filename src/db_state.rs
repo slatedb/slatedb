@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use serde::Serialize;
 use std::collections::VecDeque;
+use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::Arc;
 use tracing::info;
 use ulid::Ulid;
@@ -9,6 +10,7 @@ use SsTableId::{Compacted, Wal};
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
+use crate::range_util::BytesRange;
 
 #[derive(Clone, PartialEq, Serialize)]
 pub(crate) struct SsTableHandle {
@@ -26,6 +28,24 @@ impl SsTableHandle {
             return key >= first_key;
         }
         false
+    }
+
+    pub(crate) fn intersects_range(
+        &self,
+        end_bound_key: Option<Bytes>,
+        range: &BytesRange,
+    ) -> bool {
+        if let Some(first_key) = self.info.first_key.clone() {
+            let end_bound = match end_bound_key {
+                Some(end_bound_key) => Excluded(end_bound_key),
+                None => Unbounded,
+            };
+            let this_range = BytesRange::new(Included(first_key), end_bound);
+            let intersection = this_range.intersection(range);
+            intersection.non_empty()
+        } else {
+            false
+        }
     }
 
     pub(crate) fn estimate_size(&self) -> u64 {
@@ -131,6 +151,30 @@ impl SortedRun {
     pub(crate) fn find_sst_with_range_covering_key(&self, key: &[u8]) -> Option<&SsTableHandle> {
         self.find_sst_with_range_covering_key_idx(key)
             .map(|idx| &self.ssts[idx])
+    }
+
+    pub(crate) fn into_tables_covering_range(
+        self,
+        range: &BytesRange,
+    ) -> VecDeque<Arc<SsTableHandle>> {
+        let mut covering_ssts = VecDeque::new();
+        let ssts: Vec<Arc<SsTableHandle>> = self.ssts.into_iter().map(|sst| Arc::new(sst)).collect();
+
+        for idx in 0..ssts.len() {
+            let current_sst = &ssts[idx];
+
+            let upper_bound_key = if idx < ssts.len() {
+                let next_sst = &ssts[idx + 1];
+                next_sst.info.first_key.clone()
+            } else {
+                None
+            };
+
+            if current_sst.intersects_range(upper_bound_key, &range) {
+                covering_ssts.push_back(ssts[idx].clone());
+            }
+        }
+        covering_ssts
     }
 }
 
