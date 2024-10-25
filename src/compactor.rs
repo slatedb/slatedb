@@ -119,6 +119,7 @@ impl CompactorOrchestrator {
             options.clone(),
             worker_tx,
             table_store.clone(),
+            db_stats.clone(),
         );
         let orchestrator = Self {
             options,
