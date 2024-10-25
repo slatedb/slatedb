@@ -42,12 +42,12 @@ or bounded ranges for finer precision and efficiency.
 
 Range queries have the potential to be expensive from a resource perspective because they
 hold references to existing tables, which prevents garbage collection. Our goal here is
-to  provide a simple initial approach to state management which optimizes for common cases,
+to provide a simple initial approach to state management which optimizes for common cases,
 while leaving room for further optimization in the future.
 
 ## Public API
 
-We introduce a new `Db::scan` API which accept a `DbRange` defining the range of  the scan.
+We introduce a new `Db::scan` API which accept a `DbRange` defining the range of the scan.
 The result will be a `DbIterator` object which iterates the current records within the range.
 Users may either provide an explicit starting range in the call to `scan`, or they
 may `seek` using the returned iterator.
@@ -56,23 +56,19 @@ may `seek` using the returned iterator.
 impl Db {
     /// Scan a range of keys.
     /// 
-    /// returns a `DbIterator`  
+    /// returns a `DbIterator`
     pub async fn scan(
         &self,
-        range: &DbRange
+        range: std::ops::Range<&[u8]>
     ) -> Result<DbIterator, SlateDbError>;
-}
-
-struct DbRange {
-    lower: Bound<&[u8]>,
-    upper: Bound<&[u8]>,
 }
 
 impl DbIterator {
     /// Get the next record in the scan.
     /// 
     /// returns Ok(None) when the scan is complete
-    /// returns Err(InvalidatedIterator) if the 
+    /// returns Err(InvalidatedIterator) if the iterator has been invalidated
+    ///  due to an underlying error
     pub async fn next(
         &mut self,
     ) -> Result<Option(DbRecord), SlateDbError>;
@@ -84,7 +80,8 @@ impl DbIterator {
     /// returns SlateDbError::InvalidArgument if `lower_bound` is `Unbounded`
     /// returns SlateDbError::InvalidArgument if the key is comes before the
     ///  current iterator position.
-    /// returns Err(InvalidatedIterator) if the 
+    /// returns Err(InvalidatedIterator) if the iterator has been invalidated
+    ///  due to an underlying error
     pub async fn seek(
         &mut self,
         lower_bound: Bound<&[u8]>
@@ -92,8 +89,8 @@ impl DbIterator {
 }
 
 struct DbRecord {
-    key: &[u8],
-    value: &[u8],
+    key: Bytes,
+    value: Bytes,
 }
 ```
 
@@ -111,7 +108,7 @@ The default when `scan` is called without explicit options will be `Committed`.
 impl Db {
     /// Scan a range of keys with the provided options.
     ///
-    /// returns a `DbIterator`  
+    /// returns a `DbIterator`
     pub async fn scan_with_options(
         &self,
         range: &DbRange,
@@ -132,10 +129,10 @@ pub struct ScanOptions {
 ## Implementation
 
 A scan must iterate every table which may have keys within the query range.
-This includes the active WAL, memtables waiting to be flushed, and L0/SR tables 
+This includes tables in memory which which have not been flushed and L0/SR tables 
 which may need to be loaded from object storage. Internally, we will rely on 
-iterators which sort and merge these tables.  The latest records will
-have precedence following the same rules that a normal `get` query follows.
+iterators which sort and merge these tables. The latest records will have precedence following
+the same rules that a normal `get` query follows.
 
 The existing `MergeIterator` used for compaction provides much of the necessary
 foundation to unify multiple iterators. Additionally, `MemTableIterator` and 
@@ -148,9 +145,9 @@ only committed records in memtables, as well as L0 and SR tables will be used.
 
 Range queries must access mutable table state, such as the current WAL. It is 
 therefore possible for the query results to include some records which 
-were written after the  query began scanning its range of records. For example,
-a query may include  only a subset of records that were inserted in the same 
-`WriteBatch`. In  other words, range queries will not have snapshot isolation 
+were written after the query began scanning its range of records. For example,
+a query may include only a subset of records that were inserted in the same 
+`WriteBatch`. In other words, range queries will not have snapshot isolation 
 initially. 
 
 [RFC-????](https://github.com/slatedb/slatedb/pull/260) proposes transactional
@@ -169,7 +166,7 @@ the checkpoint state until the scan is complete.
 Checkpoints created by `Readers` have an expiry time, which is only refreshed as long
 as it remains the current checkpoint. If a `DbIterator` instance remains active long 
 enough for its referenced checkpoint to expire, the `Reader` will proactively invalidate 
-it in  order to allow for safe cleanup. Invalidated iterators will return 
+it in order to allow for safe cleanup. Invalidated iterators will return 
 `SlateDbError::InvalidatedIterator` on any subsequent call to `DbIterator::next`
 or `DbIterator::seek`.
 
@@ -182,7 +179,7 @@ scanning or we could limit the time that a `DbIterator` will remain valid.
 
 In addition to the checkpoint, a range scan may hold references to records in unflushed 
 WALs or memtables. Rather than retaining references to these tables for the full duration
-of  the query, we can filter the set of records within the query's range.  
+of the query, we can filter the set of records within the query's range.
 As new records are returned, previous ones fall out of scope and may be cleaned up. This
 makes sense for bounded queries where the number of matching keys within the WAL
 or memtables may be low. For an unbounded query, we may prefer to hold a reference to the
@@ -203,13 +200,14 @@ block, it will remain pinned in memory.
 
 **Improved isolation:** Transactional semantics proposed in 
 [RFC-????](https://github.com/slatedb/slatedb/pull/260) will provide the foundation 
-to support snapshot isolation or serializability of range scans. We  anticipate 
+to support snapshot isolation or serializability of range scans. We anticipate 
 future work to address the existing gaps.
 
 **Space optimizations:** while a range scan is in progress, some of its in-memory 
 table references may get flushed to storage. It would be possible to substitute 
 these references in order to allow the in-memory state to be cleaned up. This 
-might make sense when 
+might make sense when the rate of updates is high enough that memory must be 
+aggressively reclaimed.
 
 **Resource Limits:** As mentioned above, it is possible to impose limits on
 active range scans in order to ensure that they do not exhaust memory or create
