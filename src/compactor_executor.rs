@@ -20,6 +20,8 @@ use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 
 use crate::metrics::DbStats;
+use crate::types::ValueDeletable::Tombstone;
+use crate::types::{KeyValueDeletable, RowAttributes};
 use tracing::error;
 
 pub(crate) struct CompactionJob {
@@ -123,7 +125,30 @@ impl TokioCompactionExecutorInner {
             .table_store
             .table_writer(SsTableId::Compacted(Ulid::new()));
         let mut current_size = 0usize;
-        while let Some(kv) = all_iter.next_entry().await? {
+        let now = self.options.clock.now();
+
+        while let Some(raw_kv) = all_iter.next_entry().await? {
+            // filter out any expired entries -- eventually we can consider
+            // abstracting this away into generic, pluggable compaction filters
+            // but for now we do it inline
+            let kv = match raw_kv.attributes.expire_ts {
+                None => raw_kv,
+                Some(expire_ts) => {
+                    if expire_ts <= now {
+                        KeyValueDeletable {
+                            key: raw_kv.key,
+                            value: Tombstone,
+                            attributes: RowAttributes {
+                                ts: Some(now),
+                                expire_ts: None,
+                            },
+                        }
+                    } else {
+                        raw_kv
+                    }
+                }
+            };
+
             // Add to SST
             let value = kv.value.into_option();
             current_writer
