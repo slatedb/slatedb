@@ -136,7 +136,7 @@ the same rules that a normal `get` query follows.
 
 The existing `MergeIterator` used for compaction provides much of the necessary
 foundation to unify multiple iterators. Additionally, `MemTableIterator` and 
-`SstIterator` provide ready-to-use capabilities to scan tables which may keys
+`SstIterator` provide ready-to-use capabilities to scan tables which may have keys
 within the range. 
 
 **Query Isolation**: When using the `Uncommitted` isolation, unflushed
