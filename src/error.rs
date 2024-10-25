@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SlateDBError {
-    #[error("IO error")]
+    #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
     #[error("Checksum mismatch")]
@@ -17,7 +17,7 @@ pub enum SlateDBError {
     #[error("Empty block")]
     EmptyBlock,
 
-    #[error("Object store error")]
+    #[error("Object store error: {0}")]
     ObjectStoreError(#[from] object_store::Error),
 
     #[error("Manifest file already exists")]
@@ -29,7 +29,7 @@ pub enum SlateDBError {
     #[error("Invalid deletion")]
     InvalidDeletion,
 
-    #[error("Invalid sst error")]
+    #[error("Invalid sst error: {0}")]
     InvalidFlatbuffer(#[from] flatbuffers::InvalidFlatbuffer),
 
     #[error("Invalid DB state error")]
@@ -66,6 +66,6 @@ pub enum DbOptionsError {
     #[error("Unknown configuration file format: {0}")]
     UnknownFormat(PathBuf),
 
-    #[error("Invalid configuration format")]
+    #[error("Invalid configuration format: {0}")]
     InvalidFormat(#[from] figment::Error),
 }
