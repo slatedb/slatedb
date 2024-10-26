@@ -2,21 +2,22 @@
 
 <!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
 
-- [Background](#background)
-- [Goals](#goals)
-- [Non-Goals](#non-goals)
-- [Constraints](#constraints)
-- [References](#references)
-- [Proposal](#proposal)
-   * [API](#api)
-   * [Isolation Levels](#isolation-levels)
-   * [Prerequisites](#prerequisites)
-      + [Snapshot](#snapshot)
-      + [Write Batch](#write-batch)
-- [Conflict Checking: Snapshot Isolation](#conflict-checking-snapshot-isolation)
-- [Conflict Checking: Serializable Snapshot Isolation](#conflict-checking-serializable-snapshot-isolation)
-- [Roadmap](#roadmap)
-- [Updates](#updates)
+- [SlateDB Transaction](#slatedb-transaction)
+  - [Background](#background)
+  - [Goals](#goals)
+  - [Non-Goals](#non-goals)
+  - [Constraints](#constraints)
+  - [References](#references)
+  - [Proposal](#proposal)
+    - [API](#api)
+    - [Isolation Levels](#isolation-levels)
+    - [Prerequisites](#prerequisites)
+      - [Snapshot](#snapshot)
+      - [Write Batch](#write-batch)
+  - [Conflict Checking: Snapshot Isolation](#conflict-checking-snapshot-isolation)
+  - [Conflict Checking: Serializable Snapshot Isolation](#conflict-checking-serializable-snapshot-isolation)
+  - [Roadmap](#roadmap)
+  - [Updates](#updates)
 
 <!-- TOC end -->
 
@@ -242,9 +243,11 @@ struct Oracle {
     recent_committed_txns: Deque<Arc<TransactionState>>,
 }
 
+type KeyFingerPrint = u32;
+
 struct TransactionState {
     started_seq: u64,
-    write_keys: HashSet<String>,
+    write_keys: HashSet<KingFingerPrint>,
     read_keys: HashSet<KeyFingerPrint>,
     committed_seq: Option<u64>
 }
@@ -252,7 +255,7 @@ struct TransactionState {
 
 `Oracle` is considered as a global singleton in the DB, and it tracks the recent committed transactions in the `recent_committed_txns` deque. When a transaction commits, it should push itself into the `recent_committed_txns` deque, and the entries in `recent_committed_txns` can be GCed after they are not needed, we'll cover the details on GC later.
 
-Another detail worth to be mentioned is that we do not have to track the full keys in `String` on `read_keys`, which might be not memory efficient. Instead, we could just store the integer hash `KeyFingerPrint` of each key. There might introduce some unnecessary conflicts when different keys happens to got the same hash value, but the probability is extreme low.
+Another detail worth to be mentioned is that we do not have to track the full keys in `String` on `read_keys` and `write_keys`, which might be not memory efficient. Instead, we could just store the integer hash `KeyFingerPrint` of each key. There might introduce some unnecessary conflicts when different keys happens to got the same hash value, but the probability is extreme low.
 
 Besides the started sequence number of the transaction, we also need to track the sequence number of the transaction committed. During the execution of a transaction, some other transactions might commit, and the current transaction should check the conflicts with these committed transactions.
 
