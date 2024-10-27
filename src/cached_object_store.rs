@@ -139,7 +139,7 @@ impl CachedObjectStore {
     pub async fn cached_get_opts(
         &self,
         location: &Path,
-        mut opts: GetOptions,
+        opts: GetOptions,
     ) -> object_store::Result<GetResult> {
         let get_range = opts.range.clone();
         let entry = self.cache_storage.entry(location, self.part_size_bytes);
@@ -153,23 +153,13 @@ impl CachedObjectStore {
             }
             // Disk cache miss, we try to read the object from the object store
             Ok(None) => {
-                self.maybe_prefetch_range(location, &opts).await?;
-                // if the object is accessed for the first time, we will not store it in the disk cache
-                // so we probe local cache again to figure out whether the object is cached in the disk cache
-                match entry.read_head().await {
-                    // Object is not accessed for the first time, it is cached in the disk cache
-                    Ok(Some((meta, attributes))) => {
+                match self.maybe_prefetch_range(location, &opts).await {
+                    // Object is accessed for the first time, we will not store it in the disk cache
+                    Ok((Some(result), _, _)) => Ok(result),
+                    // Object is not accessed for the first time, we get result from disk cache
+                    Ok((None, meta, attributes)) => {
                         self.local_range_hit(location, get_range, meta, attributes)
                             .await
-                    }
-                    // Object is accessed for the first time, it is not cached in the disk cache
-                    Ok(None) => {
-                        // TODO(asukamilet): can we get a clone of `GetResult` in `maybe_prefetch_range`
-                        // so that we can avoid the object store access here?
-                        if let Some(range) = &opts.range {
-                            opts.range = Some(self.align_get_range(range));
-                        }
-                        self.object_store.get_opts(location, opts).await
                     }
                     Err(e) => Err(e),
                 }
@@ -189,8 +179,17 @@ impl CachedObjectStore {
         self.object_store.put_opts(location, payload, opts).await
     }
 
-    // if an object is not cached in disk cache and not the first time we access it, `maybe_prefetch_range`
-    // will try to prefetch the object from the object store and save the parts into the local disk cache.
+    // If an object is not cached in disk cache and not the first time we access it, `maybe_prefetch_range`
+    // will try to prefetch the object from the object store and save the parts into the local disk cache
+    // then return `Ok((None, result_meta, result_attributes))` to indicate the object already written to the object store.
+    //
+    // If the object is accessed for the first time, we will not store it in the disk cache and `maybe_prefetch_range`
+    // will return `Ok(Some(result), result_meta, result_attributes)` which indicate `maybe_prefetch_range` does not 
+    // consume the `GetResult`
+    //
+    // We always return `result_meta`, `result_attributes` to avoid overly complex pattern matches. In fact, when the object is accessed 
+    // for the first time, we can omit `result_meta, result_attributes`
+    //
     // the prefetching is helpful to reduce the number of GET requests to the object store, it'll try to
     // aggregate the parts among the range into a single GET request, and save the related parts into local
     // disks together. when it sends GET requests to the object store, the range is expected to be ALIGNED
@@ -199,27 +198,30 @@ impl CachedObjectStore {
         &self,
         location: &Path,
         opts: &GetOptions,
-    ) -> object_store::Result<()> {
+    ) -> object_store::Result<(Option<GetResult>, ObjectMeta, Attributes)> {
         let mut opts = opts.clone();
         if let Some(range) = &opts.range {
             opts.range = Some(self.align_get_range(range));
         }
         let get_result = self.object_store.get_opts(location, opts).await?;
+        let result_meta = get_result.meta.clone();
+        let result_attributes = get_result.attributes.clone();
 
         let mut ghost_guard = self.ghost.lock().await;
+        // Disk cache miss, increase ghost queue capacity
+        self.adjust_ghost_capacity(false, &mut ghost_guard);
         if ghost_guard.remove(location).is_some() {
             // swallow the error on saving to disk here (the disk might be already full), just fallback
             // to the object store.
             // TODO: add a warning log here and process `save_result` failure for ghost queue
             self.save_result(get_result).await.ok();
+            Ok((None, result_meta, result_attributes))
         } else {
             // Object is accessed for the first time, we will not store it in the disk cache
-            ghost_guard.put(location.clone(), get_result.meta);
+            let meta = get_result.meta.clone();
+            ghost_guard.put(location.clone(), meta);
+            Ok((Some(get_result), result_meta, result_attributes))
         }
-        // Disk cache miss, increase ghost queue capacity
-        self.adjust_ghost_capacity(false, &mut ghost_guard);
-
-        Ok(())
     }
 
     // Local disk cache hit, read data from local cache
