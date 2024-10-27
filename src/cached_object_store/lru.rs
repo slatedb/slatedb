@@ -9,7 +9,9 @@
 //! Heavily influenced by the [Design safe collection API with compile-time reference stability in Rust]
 //! (<https://blog.cocl2.com/posts/rust-ref-stable-collection/>)
 
-use std::collections::HashMap;
+// SipHash is too slow, even rustc does not choose it, and we don't need to worry about DoS attacks
+// Details: https://github.com/rust-lang/rustc-hash
+use hashbrown::HashMap;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
@@ -208,7 +210,7 @@ pub struct LruCache<K, V> {
 impl<K: Eq + Hash, V> LruCache<K, V> {
     fn new(capacity: NonZeroUsize, weighter: impl Weighter<K, V>) -> Self {
         let cache = LruCache::<K, V> {
-            table: HashMap::with_capacity(capacity.get()),
+            table: HashMap::new(),
             capacity,
             weighter: Box::new(weighter),
             usage: 0,
