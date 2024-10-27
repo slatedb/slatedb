@@ -161,11 +161,7 @@ impl<'cache, 'brand, K: Hash + Eq, V> CacheHandle<'cache, 'brand, K, V> {
         match cache.table.remove(&KeyRef { key }) {
             None => None,
             Some(node_ptr) => {
-                let old_node = unsafe {
-                    let mut old_node = *Box::from_raw(node_ptr.as_ptr());
-                    std::ptr::drop_in_place((old_node).key.as_mut_ptr());
-                    old_node
-                };
+                let old_node = unsafe { *Box::from_raw(node_ptr.as_ptr()) };
                 cache.detach(node_ptr.as_ptr());
                 let (k, v) = unsafe { (old_node.key.assume_init(), old_node.value.assume_init()) };
                 let weight = (cache.weighter)(&k, &v);
