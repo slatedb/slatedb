@@ -379,7 +379,10 @@ impl<K: Eq + Hash + 'static, V: 'static> LruBuilder<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fmt::Debug, sync::atomic::{AtomicUsize, Ordering}};
+    use std::{
+        fmt::Debug,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     fn assert_opt_eq<V: PartialEq + Debug>(opt: Option<&V>, v: V) {
         assert!(opt.is_some());
