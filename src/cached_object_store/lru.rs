@@ -129,7 +129,7 @@ impl<'cache, 'brand, K: Hash + Eq, V> CacheHandle<'cache, 'brand, K, V> {
             unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(LruEntry::new(key, value)))) };
         let node_ptr: *mut LruEntry<K, V> = new_node.as_ptr();
         self.cache.attach(node_ptr);
-        let key_ptr = unsafe { (*node_ptr).key.as_mut_ptr() };
+        let key_ptr = unsafe { (*node_ptr).key.as_ptr() };
         self.cache.table.insert(KeyRef { key: key_ptr }, new_node);
         self.cache.usage += weight;
     }
@@ -210,7 +210,7 @@ pub struct LruCache<K, V> {
 impl<K: Eq + Hash, V> LruCache<K, V> {
     fn new(capacity: NonZeroUsize, weighter: impl Weighter<K, V>) -> Self {
         let cache = LruCache::<K, V> {
-            table: HashMap::new(),
+            table: HashMap::default(),
             capacity,
             weighter: Box::new(weighter),
             usage: 0,
@@ -285,8 +285,8 @@ impl<K: Eq + Hash, V> LruCache<K, V> {
                 key: unsafe { &(*(*(*self.tail).prev).key.as_ptr()) },
             };
             let node_ptr = self.table.remove(&old_key).unwrap();
-            let node = unsafe { *Box::from_raw(node_ptr.as_ptr()) };
             self.detach(node_ptr.as_ptr());
+            let node = unsafe { *Box::from_raw(node_ptr.as_ptr()) };
             let LruEntry { key, value, .. } = node;
             let (k, v) = unsafe { (key.assume_init(), value.assume_init()) };
             self.usage -= (self.weighter)(&k, &v);
@@ -379,7 +379,7 @@ impl<K: Eq + Hash + 'static, V: 'static> LruBuilder<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fmt::Debug;
+    use std::{fmt::Debug, sync::atomic::{AtomicUsize, Ordering}};
 
     fn assert_opt_eq<V: PartialEq + Debug>(opt: Option<&V>, v: V) {
         assert!(opt.is_some());
@@ -473,5 +473,27 @@ mod tests {
         });
 
         assert!(handle.join().is_ok());
+    }
+
+    #[test]
+    fn test_no_memory_leaks() {
+        static DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+        struct DropCounter;
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                DROP_COUNT.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let n = 100;
+        for _ in 0..n {
+            let mut cache = LruBuilder::new(NonZeroUsize::new(1).unwrap()).build();
+            for i in 0..n {
+                cache.put(i, DropCounter {});
+            }
+        }
+        assert_eq!(DROP_COUNT.load(Ordering::SeqCst), n * n);
     }
 }
