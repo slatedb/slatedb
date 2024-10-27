@@ -73,13 +73,16 @@ impl CachedObjectStore {
         // TODO(asukamilet): Consider the case where `max_cache_bytes_size` is `Some(0)` which means we disable the disk cache
         let ghost = max_cache_size_bytes.map_or(
             Arc::new(Mutex::new(
-                LruBuilder::new(NonZeroUsize::new(32).unwrap()).build(),
+                LruBuilder::new(unsafe { NonZeroUsize::new_unchecked(32) }).build(),
             )),
             |max_cache_size_bytes| {
                 Arc::new(Mutex::new(
-                    LruBuilder::new(NonZeroUsize::new(max_cache_size_bytes / 10).unwrap())
-                        .with_weighter(|_, v: &ObjectMeta| v.size)
-                        .build(),
+                    LruBuilder::new(
+                        NonZeroUsize::new(max_cache_size_bytes / 10)
+                            .expect("LRU capacity should not be 0"),
+                    )
+                    .with_weighter(|_, v: &ObjectMeta| v.size)
+                    .build(),
                 ))
             },
         );
@@ -184,10 +187,10 @@ impl CachedObjectStore {
     // then return `Ok((None, result_meta, result_attributes))` to indicate the object already written to the object store.
     //
     // If the object is accessed for the first time, we will not store it in the disk cache and `maybe_prefetch_range`
-    // will return `Ok(Some(result), result_meta, result_attributes)` which indicate `maybe_prefetch_range` does not 
+    // will return `Ok(Some(result), result_meta, result_attributes)` which indicate `maybe_prefetch_range` does not
     // consume the `GetResult`
     //
-    // We always return `result_meta`, `result_attributes` to avoid overly complex pattern matches. In fact, when the object is accessed 
+    // We always return `result_meta`, `result_attributes` to avoid overly complex pattern matches. In fact, when the object is accessed
     // for the first time, we can omit `result_meta, result_attributes`
     //
     // the prefetching is helpful to reduce the number of GET requests to the object store, it'll try to
@@ -281,7 +284,10 @@ impl CachedObjectStore {
                     )
                 })
         };
-        ghost_guard.adjust_capacity(NonZeroUsize::new(new_capacity).unwrap());
+        ghost_guard
+            .adjust_capacity(NonZeroUsize::new(new_capacity).expect(
+                "LRU capacity should not be 0 and this situation should not happen at all",
+            ));
     }
 
     /// save the GetResult to the disk cache, a GetResult may be transformed into multiple part

@@ -1,6 +1,13 @@
-//! An implementation of a LRU cache. The cache supports `get`, `put`, `remove`,
-//! and `remove_entry` operations. Allow us to hold multiple immutable references to values in LruCache.
-//! Heavily influenced by the [Design safe collection API with compile-time reference stability in Rust](https://blog.cocl2.com/posts/rust-ref-stable-collection/)
+#![allow(clippy::needless_lifetimes)]
+#![allow(clippy::extra_unused_lifetimes)]
+#![allow(clippy::unwrap_used)]
+#![allow(unused)]
+//! An implementation of a generic LRU cache. It supports `get`, `put`, `remove`,
+//! and `remove_entry`, etc. Allow us to hold multiple immutable references to values in LruCache.
+//! Also support dynamical adjustment of the capacity and size aware eviction like moka and foyer.
+//! For the use of hold multiple immutable references to values at the same time, see unit tests.
+//! Heavily influenced by the [Design safe collection API with compile-time reference stability in Rust]
+//! (<https://blog.cocl2.com/posts/rust-ref-stable-collection/>)
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -272,6 +279,7 @@ impl<K: Eq + Hash, V> LruCache<K, V> {
         func(handle, perm)
     }
 
+    // Possible evict multiple entries in the LRU to create space for the element to be inserted
     fn try_evict(&mut self, weight: usize) {
         while self.usage + weight > self.capacity.get() {
             // We place the oldest entry at the tail of the list
