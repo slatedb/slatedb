@@ -1,12 +1,14 @@
 mod lru;
 
 use std::io::SeekFrom;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
+use lru::{LruBuilder, LruCache};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 use object_store::{Attribute, Attributes, GetRange, GetResultPayload, PutResult};
 use object_store::{ListResult, MultipartUpload, PutMultipartOpts, PutOptions, PutPayload};
@@ -16,7 +18,7 @@ use rand::SeedableRng;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncSeekExt;
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::{Mutex, MutexGuard, OnceCell};
 use tokio::{
     fs,
     fs::{File, OpenOptions},
@@ -33,6 +35,13 @@ pub(crate) struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
     pub(crate) part_size_bytes: usize, // expected to be aligned with mb or kb
     pub(crate) cache_storage: Arc<dyn LocalCacheStorage>,
+    // ghost queue is used to track identifiers of elements that are only visited once
+    // we use this to try to avoid elements that are accessed only once from actually
+    // being written to the disk cache. This helps to keep popular elements in the disk
+    // cache as much as possible, and also improves performance and extends LocalCacheStorage(SSD...)
+    // lifetime at the same time.
+    ghost: Arc<Mutex<LruCache<Path, ObjectMeta>>>,
+    max_cache_size_bytes: Option<usize>, // Used for ghost queue to self-tuning
     db_stats: Arc<DbStats>,
 }
 
@@ -55,10 +64,32 @@ impl CachedObjectStore {
             scan_interval,
             db_stats.clone(),
         ));
+
+        // If `max_cache_size_bytes` is None, the initial capacity of ghost queue is 32 entries and capacity will
+        // adjust from 32 to 64 so that we can provide some resistance even if there is no eviction on disk cache
+        //
+        // Otherwise, the initial capacity of ghost queue is `max_cache_size_bytes / 10`, and we will enable
+        // size aware eviction to adaptively provide relevant resistance
+        // TODO(asukamilet): Consider the case where `max_cache_bytes_size` is `Some(0)` which means we disable the disk cache
+        let ghost = max_cache_size_bytes.map_or(
+            Arc::new(Mutex::new(
+                LruBuilder::new(NonZeroUsize::new(32).unwrap()).build(),
+            )),
+            |max_cache_size_bytes| {
+                Arc::new(Mutex::new(
+                    LruBuilder::new(NonZeroUsize::new(max_cache_size_bytes / 10).unwrap())
+                        .with_weighter(|_, v: &ObjectMeta| v.size)
+                        .build(),
+                ))
+            },
+        );
+
         Ok(Arc::new(Self {
             object_store,
             part_size_bytes,
             cache_storage,
+            ghost,
+            max_cache_size_bytes,
             db_stats,
         }))
     }
@@ -70,7 +101,11 @@ impl CachedObjectStore {
     pub async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
         let entry = self.cache_storage.entry(location, self.part_size_bytes);
         match entry.read_head().await {
-            Ok(Some((meta, _))) => Ok(meta),
+            Ok(Some((meta, _))) => {
+                let mut ghost_guard = self.ghost.lock().await;
+                self.adjust_ghost_capacity(true, &mut ghost_guard);
+                Ok(meta)
+            }
             _ => {
                 let result = self
                     .object_store
@@ -83,8 +118,19 @@ impl CachedObjectStore {
                         },
                     )
                     .await?;
+
                 let meta = result.meta.clone();
-                self.save_result(result).await.ok();
+                let mut ghost_guard = self.ghost.lock().await;
+                // ghost queue hit, so the element is not accessed for the first time, we actually write it to
+                // the local cache otherwise we just record it in the ghost queue.
+                if ghost_guard.remove(location).is_some() {
+                    // TODO(asukamilet): process `save_result` failure, maybe we should put
+                    // identifier to the tail of ghost queue if the disk is full?
+                    self.save_result(result).await.ok();
+                } else {
+                    ghost_guard.put(location.clone(), result.meta);
+                }
+                self.adjust_ghost_capacity(false, &mut ghost_guard);
                 Ok(meta)
             }
         }
@@ -93,11 +139,98 @@ impl CachedObjectStore {
     pub async fn cached_get_opts(
         &self,
         location: &Path,
-        opts: GetOptions,
+        mut opts: GetOptions,
     ) -> object_store::Result<GetResult> {
         let get_range = opts.range.clone();
-        let (meta, attributes) = self.maybe_prefetch_range(location, opts).await?;
-        let range = self.canonicalize_range(get_range, meta.size)?;
+        let entry = self.cache_storage.entry(location, self.part_size_bytes);
+        match entry.read_head().await {
+            // Disk cache hit
+            Ok(Some((meta, attributes))) => {
+                let mut ghost_guard = self.ghost.lock().await;
+                self.adjust_ghost_capacity(true, &mut ghost_guard);
+                self.local_range_hit(location, get_range, meta, attributes)
+                    .await
+            }
+            // Disk cache miss, we try to read the object from the object store
+            Ok(None) => {
+                self.maybe_prefetch_range(location, &opts).await?;
+                // if the object is accessed for the first time, we will not store it in the disk cache
+                // so we probe local cache again to figure out whether the object is cached in the disk cache
+                match entry.read_head().await {
+                    // Object is not accessed for the first time, it is cached in the disk cache
+                    Ok(Some((meta, attributes))) => {
+                        self.local_range_hit(location, get_range, meta, attributes)
+                            .await
+                    }
+                    // Object is accessed for the first time, it is not cached in the disk cache
+                    Ok(None) => {
+                        // TODO(asukamilet): can we get a clone of `GetResult` in `maybe_prefetch_range`
+                        // so that we can avoid the object store access here?
+                        if let Some(range) = &opts.range {
+                            opts.range = Some(self.align_get_range(range));
+                        }
+                        self.object_store.get_opts(location, opts).await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    // TODO: implement the put with cache here
+    #[allow(unused)]
+    async fn cached_put_opts(
+        &self,
+        location: &Path,
+        payload: object_store::PutPayload,
+        opts: object_store::PutOptions,
+    ) -> object_store::Result<PutResult> {
+        self.object_store.put_opts(location, payload, opts).await
+    }
+
+    // if an object is not cached in disk cache and not the first time we access it, `maybe_prefetch_range`
+    // will try to prefetch the object from the object store and save the parts into the local disk cache.
+    // the prefetching is helpful to reduce the number of GET requests to the object store, it'll try to
+    // aggregate the parts among the range into a single GET request, and save the related parts into local
+    // disks together. when it sends GET requests to the object store, the range is expected to be ALIGNED
+    // with the part size.
+    async fn maybe_prefetch_range(
+        &self,
+        location: &Path,
+        opts: &GetOptions,
+    ) -> object_store::Result<()> {
+        let mut opts = opts.clone();
+        if let Some(range) = &opts.range {
+            opts.range = Some(self.align_get_range(range));
+        }
+        let get_result = self.object_store.get_opts(location, opts).await?;
+
+        let mut ghost_guard = self.ghost.lock().await;
+        if ghost_guard.remove(location).is_some() {
+            // swallow the error on saving to disk here (the disk might be already full), just fallback
+            // to the object store.
+            // TODO: add a warning log here and process `save_result` failure for ghost queue
+            self.save_result(get_result).await.ok();
+        } else {
+            // Object is accessed for the first time, we will not store it in the disk cache
+            ghost_guard.put(location.clone(), get_result.meta);
+        }
+        // Disk cache miss, increase ghost queue capacity
+        self.adjust_ghost_capacity(false, &mut ghost_guard);
+
+        Ok(())
+    }
+
+    // Local disk cache hit, read data from local cache
+    async fn local_range_hit(
+        &self,
+        location: &Path,
+        range: Option<GetRange>,
+        meta: ObjectMeta,
+        attributes: Attributes,
+    ) -> object_store::Result<GetResult> {
+        let range = self.canonicalize_range(range, meta.size)?;
         let parts = self.split_range_into_parts(range.clone());
 
         // read parts, and concatenate them into a single stream. please note that some of these part may not be cached,
@@ -116,50 +249,37 @@ impl CachedObjectStore {
         })
     }
 
-    // TODO: implement the put with cache here
-    #[allow(unused)]
-    async fn cached_put_opts(
+    fn adjust_ghost_capacity(
         &self,
-        location: &Path,
-        payload: object_store::PutPayload,
-        opts: object_store::PutOptions,
-    ) -> object_store::Result<PutResult> {
-        self.object_store.put_opts(location, payload, opts).await
-    }
-
-    // if an object is not cached before, maybe_prefetch_range will try to prefetch the object from the
-    // object store and save the parts into the local disk cache. the prefetching is helpful to reduce the
-    // number of GET requests to the object store, it'll try to aggregate the parts among the range into a
-    // single GET request, and save the related parts into local disks together.
-    // when it sends GET requests to the object store, the range is expected to be ALIGNED with the part
-    // size.
-    async fn maybe_prefetch_range(
-        &self,
-        location: &Path,
-        mut opts: GetOptions,
-    ) -> object_store::Result<(ObjectMeta, Attributes)> {
-        let entry = self.cache_storage.entry(location, self.part_size_bytes);
-        match entry.read_head().await {
-            Ok(Some((meta, attrs))) => return Ok((meta, attrs)),
-            Ok(None) => {}
-            Err(_) => {
-                // TODO: add a warning log
-            }
+        decrease: bool,
+        ghost_guard: &mut MutexGuard<'_, LruCache<Path, ObjectMeta>>,
+    ) {
+        let old_capacity = ghost_guard.capacity().get();
+        let new_capacity = if decrease {
+            // Disk cache hit, decrease the ghost queue capacity to reduce replacement rate and keep popular
+            // objects in the cache for a longer period of time
+            self.max_cache_size_bytes
+                .map_or((old_capacity - 2).max(32), |max_cache_size_bytes| {
+                    // When `max_cache_size_bytes` is not `None`, ghost queue new capacity:
+                    // new_capacity = old_capacity - (max_cache_size_bytes / (max_cache_size_bytes - old_capacity))
+                    // and the minimum capacity is `max_cache_size_bytes / 10`
+                    (max_cache_size_bytes / 10).max(
+                        old_capacity
+                            - (max_cache_size_bytes / (max_cache_size_bytes - old_capacity)),
+                    )
+                })
+        } else {
+            // Disk cache miss, increase the ghost queue capacity leads to higher replacement rate
+            // and cached blocks will be removed faster to make room for popular blocks
+            self.max_cache_size_bytes
+                .map_or((old_capacity + 3).min(64), |max_cache_size_bytes| {
+                    ((max_cache_size_bytes as f64 * 0.9).floor() as usize).min(
+                        old_capacity
+                            + (max_cache_size_bytes as f64 / old_capacity as f64).floor() as usize,
+                    )
+                })
         };
-
-        // it's strange that GetOptions did not derive Clone. maybe we could add a derive(Clone) to object_store.
-        if let Some(range) = &opts.range {
-            opts.range = Some(self.align_get_range(range));
-        }
-
-        let get_result = self.object_store.get_opts(location, opts).await?;
-        let result_meta = get_result.meta.clone();
-        let result_attrs = get_result.attributes.clone();
-        // swallow the error on saving to disk here (the disk might be already full), just fallback
-        // to the object store.
-        // TODO: add a warning log here.
-        self.save_result(get_result).await.ok();
-        Ok((result_meta, result_attrs))
+        ghost_guard.adjust_capacity(NonZeroUsize::new(new_capacity).unwrap());
     }
 
     /// save the GetResult to the disk cache, a GetResult may be transformed into multiple part
