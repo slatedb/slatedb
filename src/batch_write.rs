@@ -66,12 +66,7 @@ impl DbInner {
                             value,
                             RowAttributes {
                                 ts: Some(now),
-                                expire_ts: opts.ttl.map(|ttl| {
-                                    now + i64::try_from(ttl.as_millis()).expect(
-                                        "Duration could not be converted into an i64 timestamp. \
-            Perhaps the duration in millis exceeds the maximum i64?",
-                                    )
-                                }),
+                                expire_ts: opts.expire_ts_from(now),
                             },
                         );
                     }
@@ -79,7 +74,7 @@ impl DbInner {
                         current_wal.delete(
                             key,
                             RowAttributes {
-                                ts: Some(self.options.clock.now()),
+                                ts: Some(now),
                                 expire_ts: None,
                             },
                         );
@@ -100,13 +95,8 @@ impl DbInner {
                             key,
                             value,
                             RowAttributes {
-                                ts: Some(self.options.clock.now()),
-                                expire_ts: opts.ttl.map(|ttl| {
-                                    now + i64::try_from(ttl.as_millis()).expect(
-                                        "Duration could not be converted into an i64 timestamp. \
-            Perhaps the duration in millis exceeds the maximum i64?",
-                                    )
-                                }),
+                                ts: Some(now),
+                                expire_ts: opts.expire_ts_from(now),
                             },
                         );
                     }
@@ -114,7 +104,7 @@ impl DbInner {
                         current_memtable.delete(
                             key,
                             RowAttributes {
-                                ts: Some(self.options.clock.now()),
+                                ts: Some(now),
                                 expire_ts: None,
                             },
                         );

@@ -219,12 +219,7 @@ impl DbInner {
         let key = Bytes::copy_from_slice(key);
         let value = Bytes::copy_from_slice(value);
         let now = self.options.clock.now();
-        let expire_ts = put_opts.ttl.map(|ttl| {
-            now + i64::try_from(ttl.as_millis()).expect(
-                "Duration could not be converted into an i64 timestamp. \
-            Perhaps the duration in millis exceeds the maximum i64?",
-            )
-        });
+        let expire_ts = put_opts.expire_ts_from(now);
 
         // Clone memtable to avoid a deadlock with flusher thread.
         let current_table = if self.wal_enabled() {
@@ -249,7 +244,7 @@ impl DbInner {
                 key,
                 value,
                 RowAttributes {
-                    ts: Some(self.options.clock.now()),
+                    ts: Some(now),
                     expire_ts,
                 },
             );
@@ -272,6 +267,7 @@ impl DbInner {
         self.maybe_apply_backpressure().await;
 
         let key = Bytes::copy_from_slice(key);
+        let now = self.options.clock.now();
 
         // Clone memtable to avoid a deadlock with flusher thread.
         let current_table = if self.wal_enabled() {
@@ -280,7 +276,7 @@ impl DbInner {
             current_wal.delete(
                 key,
                 RowAttributes {
-                    ts: Some(self.options.clock.now()),
+                    ts: Some(now),
                     expire_ts: None,
                 },
             );
@@ -294,7 +290,7 @@ impl DbInner {
             current_memtable.delete(
                 key,
                 RowAttributes {
-                    ts: Some(self.options.clock.now()),
+                    ts: Some(now),
                     expire_ts: None,
                 },
             );
