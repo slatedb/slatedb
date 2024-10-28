@@ -237,9 +237,12 @@ impl PutOptions {
     }
 
     pub(crate) fn expire_ts_from(&self, now: i64) -> Option<i64> {
-        self.ttl.map(|ttl| now + i64::try_from(ttl.as_millis()).expect(
-            "Duration could not be converted into an i64 timestamp. \
-             Perhaps the duration in millis exceeds the maximum i64?"))
+        self.ttl.map(|ttl| {
+            now + i64::try_from(ttl.as_millis()).expect(
+                "Duration could not be converted into an i64 timestamp. \
+             Perhaps the duration in millis exceeds the maximum i64?",
+            )
+        })
     }
 }
 
