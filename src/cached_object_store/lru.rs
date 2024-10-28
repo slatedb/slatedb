@@ -285,8 +285,8 @@ impl<K: Eq + Hash, V> LruCache<K, V> {
                 key: unsafe { &(*(*(*self.tail).prev).key.as_ptr()) },
             };
             let node_ptr = self.table.remove(&old_key).unwrap();
-            self.detach(node_ptr.as_ptr());
-            let node = unsafe { *Box::from_raw(node_ptr.as_ptr()) };
+            let mut node = unsafe { *Box::from_raw(node_ptr.as_ptr()) };
+            self.detach(&mut node);
             let LruEntry { key, value, .. } = node;
             let (k, v) = unsafe { (key.assume_init(), value.assume_init()) };
             self.usage -= (self.weighter)(&k, &v);
