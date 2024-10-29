@@ -1,4 +1,4 @@
-mod lru;
+mod ghost;
 
 use std::io::SeekFrom;
 use std::num::NonZeroUsize;
@@ -8,7 +8,7 @@ use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
-use lru::{LruBuilder, LruCache};
+use ghost::{GhostBuilder, GhostQueue};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 use object_store::{Attribute, Attributes, GetRange, GetResultPayload, PutResult};
 use object_store::{ListResult, MultipartUpload, PutMultipartOpts, PutOptions, PutPayload};
@@ -40,7 +40,9 @@ pub(crate) struct CachedObjectStore {
     // being written to the disk cache. This helps to keep popular elements in the disk
     // cache as much as possible, and also improves performance and extends LocalCacheStorage(SSD...)
     // lifetime at the same time.
-    ghost: Arc<Mutex<LruCache<Path, ObjectMeta>>>,
+    // Main inspiration comes from [Improving Flash-Based Disk Cache with Lazy Adaptive Replacement]
+    // (https://msstconference.org/MSST-history/2013/Papers/2013.Paper.28.pdf)
+    ghost: Arc<Mutex<GhostQueue<Path, ObjectMeta>>>,
     max_cache_size_bytes: Option<usize>, // Used for ghost queue to self-tuning
     db_stats: Arc<DbStats>,
 }
@@ -70,22 +72,19 @@ impl CachedObjectStore {
         //
         // Otherwise, the initial capacity of ghost queue is `max_cache_size_bytes / 10`, and we will enable
         // size aware eviction to adaptively provide relevant resistance
-        // TODO(asukamilet): Consider the case where `max_cache_bytes_size` is `Some(0)` which means we disable the disk cache
-        let ghost = max_cache_size_bytes.map_or(
+        let ghost = if let Some(max_cache_size_bytes) = max_cache_size_bytes {
+            let capacity = NonZeroUsize::new(max_cache_size_bytes / 10)
+                .ok_or(SlateDBError::ZeroCacheCapacity)?;
             Arc::new(Mutex::new(
-                LruBuilder::new(unsafe { NonZeroUsize::new_unchecked(32) }).build(),
-            )),
-            |max_cache_size_bytes| {
-                Arc::new(Mutex::new(
-                    LruBuilder::new(
-                        NonZeroUsize::new(max_cache_size_bytes / 10)
-                            .expect("LRU capacity should not be 0"),
-                    )
+                GhostBuilder::new(capacity)
                     .with_weighter(|_, v: &ObjectMeta| v.size)
                     .build(),
-                ))
-            },
-        );
+            ))
+        } else {
+            Arc::new(Mutex::new(
+                GhostBuilder::new(unsafe { NonZeroUsize::new_unchecked(32) }).build(),
+            ))
+        };
 
         Ok(Arc::new(Self {
             object_store,
@@ -106,7 +105,7 @@ impl CachedObjectStore {
         match entry.read_head().await {
             Ok(Some((meta, _))) => {
                 let mut ghost_guard = self.ghost.lock().await;
-                self.adjust_ghost_capacity(true, &mut ghost_guard);
+                self.decrease_ghost_capacity(&mut ghost_guard);
                 Ok(meta)
             }
             _ => {
@@ -131,9 +130,9 @@ impl CachedObjectStore {
                     // identifier to the tail of ghost queue if the disk is full?
                     self.save_result(result).await.ok();
                 } else {
-                    ghost_guard.put(location.clone(), result.meta);
+                    ghost_guard.record(location.clone(), result.meta);
                 }
-                self.adjust_ghost_capacity(false, &mut ghost_guard);
+                self.increase_ghost_capacity(&mut ghost_guard);
                 Ok(meta)
             }
         }
@@ -150,7 +149,7 @@ impl CachedObjectStore {
             // Disk cache hit
             Ok(Some((meta, attributes))) => {
                 let mut ghost_guard = self.ghost.lock().await;
-                self.adjust_ghost_capacity(true, &mut ghost_guard);
+                self.decrease_ghost_capacity(&mut ghost_guard);
                 self.local_range_hit(location, get_range, meta, attributes)
                     .await
             }
@@ -212,7 +211,7 @@ impl CachedObjectStore {
 
         let mut ghost_guard = self.ghost.lock().await;
         // Disk cache miss, increase ghost queue capacity
-        self.adjust_ghost_capacity(false, &mut ghost_guard);
+        self.increase_ghost_capacity(&mut ghost_guard);
         if ghost_guard.remove(location).is_some() {
             // swallow the error on saving to disk here (the disk might be already full), just fallback
             // to the object store.
@@ -222,7 +221,7 @@ impl CachedObjectStore {
         } else {
             // Object is accessed for the first time, we will not store it in the disk cache
             let meta = get_result.meta.clone();
-            ghost_guard.put(location.clone(), meta);
+            ghost_guard.record(location.clone(), meta);
             Ok((Some(get_result), result_meta, result_attributes))
         }
     }
@@ -254,15 +253,36 @@ impl CachedObjectStore {
         })
     }
 
-    fn adjust_ghost_capacity(
+    // Disk cache miss, increase the ghost queue capacity leads to higher replacement rate
+    // and cached blocks will be removed faster to make room for popular blocks
+    fn increase_ghost_capacity(
         &self,
-        decrease: bool,
-        ghost_guard: &mut MutexGuard<'_, LruCache<Path, ObjectMeta>>,
+        ghost_guard: &mut MutexGuard<'_, GhostQueue<Path, ObjectMeta>>,
     ) {
         let old_capacity = ghost_guard.capacity().get();
-        let new_capacity = if decrease {
-            // Disk cache hit, decrease the ghost queue capacity to reduce replacement rate and keep popular
-            // objects in the cache for a longer period of time
+        let new_capacity =
+            self.max_cache_size_bytes
+                .map_or((old_capacity + 3).min(64), |max_cache_size_bytes| {
+                    ((max_cache_size_bytes as f64 * 0.9).floor() as usize).min(
+                        old_capacity
+                            + (max_cache_size_bytes as f64 / old_capacity as f64).floor() as usize,
+                    )
+                });
+
+        ghost_guard
+            .adjust_capacity(NonZeroUsize::new(new_capacity).expect(
+                "LRU capacity should not be 0 and this situation should not happen at all",
+            ));
+    }
+
+    // Disk cache hit, decrease the ghost queue capacity to reduce replacement rate and keep popular
+    // objects in the cache for a longer period of time
+    fn decrease_ghost_capacity(
+        &self,
+        ghost_guard: &mut MutexGuard<'_, GhostQueue<Path, ObjectMeta>>,
+    ) {
+        let old_capacity = ghost_guard.capacity().get();
+        let new_capacity =
             self.max_cache_size_bytes
                 .map_or((old_capacity - 2).max(32), |max_cache_size_bytes| {
                     // When `max_cache_size_bytes` is not `None`, ghost queue new capacity:
@@ -272,18 +292,8 @@ impl CachedObjectStore {
                         old_capacity
                             - (max_cache_size_bytes / (max_cache_size_bytes - old_capacity)),
                     )
-                })
-        } else {
-            // Disk cache miss, increase the ghost queue capacity leads to higher replacement rate
-            // and cached blocks will be removed faster to make room for popular blocks
-            self.max_cache_size_bytes
-                .map_or((old_capacity + 3).min(64), |max_cache_size_bytes| {
-                    ((max_cache_size_bytes as f64 * 0.9).floor() as usize).min(
-                        old_capacity
-                            + (max_cache_size_bytes as f64 / old_capacity as f64).floor() as usize,
-                    )
-                })
-        };
+                });
+
         ghost_guard
             .adjust_capacity(NonZeroUsize::new(new_capacity).expect(
                 "LRU capacity should not be 0 and this situation should not happen at all",

@@ -55,6 +55,9 @@ pub enum SlateDBError {
 
     #[error("Unknown RowFlags -- this may be caused by reading data encoded with a newer codec")]
     InvalidRowFlags,
+
+    #[error("Cache capacity is zero, invalid")]
+    ZeroCacheCapacity,
 }
 
 /// Represents errors that can occur during the database configuration.

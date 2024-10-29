@@ -49,7 +49,7 @@ walkdir = "2.3.3"
 radix_trie = "0.2.1"
 figment = { version = "0.10.19", features = ["env", "json", "toml", "yaml"] }
 duration-str = { version = "0.11.2", features = ["serde", "time"], default-features = false }
-hashbrown = "0.15.0"
+lru = {version = "0.12.5", features = ["hashbrown"]}
 
 [dev-dependencies]
 tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
