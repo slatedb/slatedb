@@ -145,7 +145,7 @@ impl TokioCompactionExecutorInner {
                             expire_ts: None,
                         },
                     }
-                },
+                }
                 _ => raw_kv,
             };
 

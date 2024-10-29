@@ -399,9 +399,7 @@ mod tests {
         db.put_with_options(
             &[2; 16],
             &[b'a'; 64],
-            &PutOptions {
-                ttl: Ttl::Default,
-            },
+            &PutOptions { ttl: Ttl::Default },
             &WriteOptions::default(),
         )
         .await;
