@@ -128,6 +128,7 @@ impl CachedObjectStore {
                 if ghost_guard.remove(location).is_some() {
                     // TODO(asukamilet): process `save_result` failure, maybe we should put
                     // identifier to the tail of ghost queue if the disk is full?
+                    self.db_stats.object_store_cache_write_num.inc();
                     self.save_result(result).await.ok();
                 } else {
                     ghost_guard.record(location.clone(), result.meta);
@@ -216,6 +217,7 @@ impl CachedObjectStore {
             // swallow the error on saving to disk here (the disk might be already full), just fallback
             // to the object store.
             // TODO: add a warning log here and process `save_result` failure for ghost queue
+            self.db_stats.object_store_cache_write_num.inc();
             self.save_result(get_result).await.ok();
             Ok((None, result_meta, result_attributes))
         } else {
