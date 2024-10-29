@@ -235,8 +235,8 @@ impl Task {
                     .put_with_options(
                         key,
                         value.as_ref(),
-                        &self.write_options,
                         &PutOptions::default(),
+                        &self.write_options,
                     )
                     .await;
                 puts += 1;

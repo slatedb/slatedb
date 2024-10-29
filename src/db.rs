@@ -209,8 +209,8 @@ impl DbInner {
         &self,
         key: &[u8],
         value: &[u8],
-        write_opts: &WriteOptions,
         put_opts: &PutOptions,
+        write_opts: &WriteOptions,
     ) {
         assert!(!key.is_empty(), "key cannot be empty");
 
@@ -219,7 +219,7 @@ impl DbInner {
         let key = Bytes::copy_from_slice(key);
         let value = Bytes::copy_from_slice(value);
         let now = self.options.clock.now();
-        let expire_ts = put_opts.expire_ts_from(now);
+        let expire_ts = put_opts.expire_ts_from(self.options.default_ttl, now);
 
         // Clone memtable to avoid a deadlock with flusher thread.
         let current_table = if self.wal_enabled() {
@@ -673,7 +673,7 @@ impl Db {
     pub async fn put(&self, key: &[u8], value: &[u8]) {
         // TODO move the put into an async block by blocking on the memtable flush
         self.inner
-            .put_with_options(key, value, DEFAULT_WRITE_OPTIONS, DEFAULT_PUT_OPTIONS)
+            .put_with_options(key, value, DEFAULT_PUT_OPTIONS, DEFAULT_WRITE_OPTIONS)
             .await;
     }
 
@@ -681,11 +681,11 @@ impl Db {
         &self,
         key: &[u8],
         value: &[u8],
-        write_opts: &WriteOptions,
         put_opts: &PutOptions,
+        write_opts: &WriteOptions,
     ) {
         self.inner
-            .put_with_options(key, value, write_opts, put_opts)
+            .put_with_options(key, value, put_opts, write_opts)
             .await;
     }
 
@@ -734,6 +734,7 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "wal_disable")]
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
@@ -1149,8 +1150,8 @@ mod tests {
         db.put_with_options(
             &[b'a'; 32],
             &[b'j'; 32],
-            &write_options,
             DEFAULT_PUT_OPTIONS,
+            &write_options,
         )
         .await;
         db.delete_with_options(&[b'b'; 32], &write_options).await;
@@ -1161,8 +1162,8 @@ mod tests {
         db.put_with_options(
             &[b'c'; 32],
             &[b'l'; 32],
-            &write_options,
             DEFAULT_PUT_OPTIONS,
+            &write_options,
         )
         .await;
 
@@ -1436,10 +1437,10 @@ mod tests {
             .put_with_options(
                 "foo".as_bytes(),
                 "bar".as_bytes(),
+                DEFAULT_PUT_OPTIONS,
                 &WriteOptions {
                     await_durable: false,
                 },
-                DEFAULT_PUT_OPTIONS,
             )
             .await;
 
@@ -1477,10 +1478,10 @@ mod tests {
             .put_with_options(
                 "foo".as_bytes(),
                 "bla".as_bytes(),
+                DEFAULT_PUT_OPTIONS,
                 &WriteOptions {
                     await_durable: false,
                 },
-                DEFAULT_PUT_OPTIONS,
             )
             .await;
 
@@ -1759,10 +1760,10 @@ mod tests {
         db1.put_with_options(
             b"1",
             b"1",
+            DEFAULT_PUT_OPTIONS,
             &WriteOptions {
                 await_durable: false,
             },
-            DEFAULT_PUT_OPTIONS,
         )
         .await;
         db1.flush().await.unwrap();
@@ -1778,20 +1779,20 @@ mod tests {
         db1.put_with_options(
             b"1",
             b"1",
+            DEFAULT_PUT_OPTIONS,
             &WriteOptions {
                 await_durable: false,
             },
-            DEFAULT_PUT_OPTIONS,
         )
         .await;
         assert!(matches!(db1.flush().await, Err(SlateDBError::Fenced)));
         db2.put_with_options(
             b"2",
             b"2",
+            DEFAULT_PUT_OPTIONS,
             &WriteOptions {
                 await_durable: false,
             },
-            DEFAULT_PUT_OPTIONS,
         )
         .await;
         db2.flush().await.unwrap();
@@ -1849,6 +1850,7 @@ mod tests {
             block_cache: None,
             garbage_collector_options: None,
             clock,
+            default_ttl: None,
         }
     }
 }

@@ -10,7 +10,7 @@ bitflags! {
     }
 }
 
-const NO_EXPIRE_TS: i64 = i64::MAX;
+const NO_EXPIRE_TS: i64 = i64::MIN;
 
 /// Encodes key and value using the binary codec for SlateDB row representation
 /// using the `v0` encoding scheme.

@@ -66,7 +66,7 @@ impl DbInner {
                             value,
                             RowAttributes {
                                 ts: Some(now),
-                                expire_ts: opts.expire_ts_from(now),
+                                expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
                             },
                         );
                     }
@@ -96,7 +96,7 @@ impl DbInner {
                             value,
                             RowAttributes {
                                 ts: Some(now),
-                                expire_ts: opts.expire_ts_from(now),
+                                expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
                             },
                         );
                     }

@@ -228,22 +228,45 @@ pub struct PutOptions {
     /// database entry, the TTL for the most recent entry will be canonical.
     ///
     /// Default: the TTL configured in DbOptions when opening a SlateDB session
-    pub ttl: Option<Duration>,
+    pub ttl: Ttl,
 }
 
 impl PutOptions {
     const fn default() -> Self {
-        Self { ttl: None }
+        Self { ttl: Ttl::Default }
     }
 
-    pub(crate) fn expire_ts_from(&self, now: i64) -> Option<i64> {
-        self.ttl.map(|ttl| {
-            now + i64::try_from(ttl.as_millis()).expect(
-                "Duration could not be converted into an i64 timestamp. \
-             Perhaps the duration in millis exceeds the maximum i64?",
-            )
-        })
+    pub(crate) fn expire_ts_from(&self, default: Option<u64>, now: i64) -> Option<i64> {
+        match self.ttl {
+            Ttl::Default => match default {
+                None => None,
+                Some(default_ttl) => Self::checked_expire_ts(now, default_ttl),
+            },
+            Ttl::NoExpiry => None,
+            Ttl::ExpireAfter(ttl) => Self::checked_expire_ts(now, ttl),
+        }
     }
+
+    fn checked_expire_ts(now: i64, ttl: u64) -> Option<i64> {
+        // for overflow, we will just assume no TTL
+        if ttl > i64::MAX as u64 {
+            return None;
+        };
+        let expire_ts = now + (ttl as i64);
+        if expire_ts < now {
+            return None;
+        };
+
+        Some(expire_ts)
+    }
+}
+
+#[derive(Clone, Default)]
+pub enum Ttl {
+    #[default]
+    Default,
+    NoExpiry,
+    ExpireAfter(u64),
 }
 
 /// defines the clock that SlateDB will use during this session
@@ -255,9 +278,7 @@ pub trait Clock {
     /// Note that this clock does not need to return a number that
     /// represents the unix timestamp; the only requirement is that
     /// it represents a sequence that can attribute a logical ordering
-    /// to actions on the database. Note that in this scenario, it will
-    /// be interpreted as milliseconds in situations where a Duration is
-    /// required (such as with TimeToLive).
+    /// to actions on the database.
     fn now(&self) -> i64;
 }
 
@@ -393,6 +414,12 @@ pub struct DbOptions {
     #[serde(skip)]
     #[serde(default = "default_clock")]
     pub clock: Arc<dyn Clock + Send + Sync>,
+
+    /// The default time-to-live (TTL) for insertions (note that re-inserting a key
+    /// with any value will update the TTL to use the default_ttl)
+    ///
+    /// Default: no TTL (insertions will remain until deleted)
+    pub default_ttl: Option<u64>,
 }
 
 impl DbOptions {
@@ -543,6 +570,7 @@ impl Default for DbOptions {
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
             clock: default_clock(),
+            default_ttl: None,
         }
     }
 }

@@ -306,7 +306,7 @@ mod tests {
     use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestratorMsg};
     use crate::compactor_state::{Compaction, SourceId};
     use crate::config::{
-        DbOptions, ObjectStoreCacheOptions, PutOptions, SizeTieredCompactionSchedulerOptions,
+        DbOptions, ObjectStoreCacheOptions, PutOptions, SizeTieredCompactionSchedulerOptions, Ttl,
         WriteOptions,
     };
     use crate::db::Db;
@@ -376,7 +376,10 @@ mod tests {
             )),
             ..compactor_options(compaction_clock.clone())
         };
-        let options = db_options(Some(compactor_opts), insert_clock.clone());
+        let options = DbOptions {
+            default_ttl: Some(50),
+            ..db_options(Some(compactor_opts), insert_clock.clone())
+        };
         let (_, manifest_store, table_store, db) = build_test_db(options).await;
 
         // ticker time = 0, expire time = 10
@@ -384,22 +387,22 @@ mod tests {
         db.put_with_options(
             &[1; 16],
             &[b'a'; 64],
-            &WriteOptions::default(),
             &PutOptions {
-                ttl: Some(Duration::from_millis(100)),
+                ttl: Ttl::ExpireAfter(10),
             },
+            &WriteOptions::default(),
         )
         .await;
 
-        // ticker time = 10, expire time = 60
+        // ticker time = 10, expire time = 60 (using default TTL)
         insert_clock.ticker.store(10, atomic::Ordering::SeqCst);
         db.put_with_options(
             &[2; 16],
             &[b'a'; 64],
-            &WriteOptions::default(),
             &PutOptions {
-                ttl: Some(Duration::from_millis(50)),
+                ttl: Ttl::Default,
             },
+            &WriteOptions::default(),
         )
         .await;
 
@@ -410,8 +413,8 @@ mod tests {
         db.put_with_options(
             &[3; 16],
             &[b'a'; 64],
+            &PutOptions { ttl: Ttl::NoExpiry },
             &WriteOptions::default(),
-            &PutOptions { ttl: None },
         )
         .await;
 
@@ -421,10 +424,10 @@ mod tests {
         db.put_with_options(
             &[1; 16],
             &[b'a'; 64],
-            &WriteOptions::default(),
             &PutOptions {
-                ttl: Some(Duration::from_millis(40)),
+                ttl: Ttl::ExpireAfter(80),
             },
+            &WriteOptions::default(),
         )
         .await;
 
@@ -616,6 +619,7 @@ mod tests {
             block_cache: None,
             garbage_collector_options: None,
             clock,
+            default_ttl: None,
         }
     }
 

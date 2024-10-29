@@ -132,21 +132,21 @@ impl TokioCompactionExecutorInner {
             // abstracting this away into generic, pluggable compaction filters
             // but for now we do it inline
             let kv = match raw_kv.attributes.expire_ts {
-                None => raw_kv,
-                Some(expire_ts) => {
-                    if expire_ts <= now {
-                        KeyValueDeletable {
-                            key: raw_kv.key,
-                            value: Tombstone,
-                            attributes: RowAttributes {
-                                ts: Some(now),
-                                expire_ts: None,
-                            },
-                        }
-                    } else {
-                        raw_kv
+                Some(expire_ts) if expire_ts <= now => {
+                    // insert a tombstone instead of just filtering out the
+                    // value in the iterator because this may otherwise "revive"
+                    // an older version of the KV pair that has a larger TTL in
+                    // a lower level of the LSM tree
+                    KeyValueDeletable {
+                        key: raw_kv.key,
+                        value: Tombstone,
+                        attributes: RowAttributes {
+                            ts: raw_kv.attributes.ts,
+                            expire_ts: None,
+                        },
                     }
-                }
+                },
+                _ => raw_kv,
             };
 
             // Add to SST
