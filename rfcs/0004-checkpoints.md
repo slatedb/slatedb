@@ -7,14 +7,24 @@ Authors:
 
 ## Current Implementation
 
-SlateDB runs a Writer, a Compactor - optionally in a separate process, and a Garbage Collector (GC) - also optionally in a separate process. The writer writes data to L0 SSTs. The Compactor then goes and compacts these L0 SSTs into Sorted Runs (SR) under the “compacted” directory, and then further compacts those SRs as they accumulate. Updates to the current set of L0s and Sorted Runs are synchronized between the Writer and Compactor through updates to the centralized manifest. When reading, the Writer gets a reference to a copy of the metadata for the current set of sorted runs and searches them for the requested data. Meanwhile, the GC scans the SSTs in Object Storage and deletes any SSTs that are not referenced by the current manifest and are older than some threshold.
+SlateDB runs a Writer, a Compactor - optionally in a separate process, and a Garbage Collector (GC) - also optionally in
+a separate process. The writer writes data to L0 SSTs. The Compactor then goes and compacts these L0 SSTs into Sorted
+Runs (SR) under the “compacted” directory, and then further compacts those SRs as they accumulate. Updates to the
+current set of L0s and Sorted Runs are synchronized between the Writer and Compactor through updates to the centralized
+manifest. When reading, the Writer gets a reference to a copy of the metadata for the current set of sorted runs and
+searches them for the requested data. Meanwhile, the GC scans the SSTs in Object Storage and deletes any SSTs that are
+not referenced by the current manifest and are older than some threshold.
 
 ## Problem
 
 The current implementation poses a few problems and limitations:
-1. There is nothing preventing the GC from deleting SSTs out from the Writer while it’s attempting to read their data. This isn’t a big deal today as we only support key lookups, which are fast. But this could become a more acute problem when we support range scans which can be long.
-1. Currently only the Writer process can interact with the database. We’d like to support additional read-only clients, called Readers that can read data.
-1. Some use cases can benefit from forking the database and establishing a new db that relies on the original DB’s SSTs but writes new data to a different set of SSTs from the original writer.
+1. There is nothing preventing the GC from deleting SSTs out from the Writer while it’s attempting to read their data.
+   This isn’t a big deal today as we only support key lookups, which are fast. But this could become a more acute
+   problem when we support range scans which can be long.
+1. Currently only the Writer process can interact with the database. We’d like to support additional read-only clients,
+   called Readers that can read data.
+1. Some use cases can benefit from forking the database and establishing a new db that relies on the original DB’s SSTs
+   but writes new data to a different set of SSTs from the original writer.
 
 ## Goals
 
@@ -22,7 +32,8 @@ In this RFC, we propose adding checkpoints and clones to address this limitation
 - Clients will be able to establish cheap db checkpoints that reference the current version of SlateDB’s manifest.
 - Writers will use checkpoints to “pin” a version of the database for reads to avoid the GC from deleting the SSTs.
 - Readers will use checkpoints similarly, and many Reader processes can coexist alongside a Writer.
-- Finally, we will support creating so-called “clones” from a checkpoint to allow spawning new Writers that write to a “fork” of the original database.
+- Finally, we will support creating so-called “clones” from a checkpoint to allow spawning new Writers that write to
+  a “fork” of the original database.
 
 ### Out Of Scope
 
@@ -31,7 +42,11 @@ This RFC does not propose:
 
 ## Proposal
 
-At a high level, this proposal covers a mechanism for establishing database checkpoints, and reviews how the various processes will interact with this mechanism. Logically, a checkpoint refers to a consistent and durable view of the database at some point in time. It is consistent in the sense that data read from a checkpoint reflects all writes up to some point in time, and durable in the sense that this property holds across process restarts. Physically, a checkpoint refers to a version of SlateDB’s manifest.
+At a high level, this proposal covers a mechanism for establishing database checkpoints, and reviews how the various
+processes will interact with this mechanism. Logically, a checkpoint refers to a consistent and durable view of the
+database at some point in time. It is consistent in the sense that data read from a checkpoint reflects all writes up
+to some point in time, and durable in the sense that this property holds across process restarts. Physically, a
+checkpoint refers to a version of SlateDB’s manifest.
 
 ### Manifest Schema
 
@@ -100,7 +115,7 @@ table Checkpoint {
 
 We’ll make the following changes to the public API to support creating and using checkpoints:
 
-```
+```rust
 /// Defines the scope targeted by a given checkpoint. If set to All, then the checkpoint will include
 /// all writes that were issued at the time that create_checkpoint is called. If force_flush is true,
 /// then SlateDB will force the current wal, or memtable if wal_enabled is false, to flush its data.
@@ -155,7 +170,8 @@ impl Db {
 /// Configuration options for the database reader. These options are set on client startup.
 #[derive(Clone)]
 pub struct DbReaderOptions {
-    /// How frequently to poll for new manifest files. Refreshing the manifest file allows readers to detect newly compacted data.
+    /// How frequently to poll for new manifest files. Refreshing the manifest file allows readers
+    /// to detect newly compacted data.
     pub manifest_poll_interval: Duration,
 
 
@@ -173,7 +189,7 @@ pub struct DbReaderOptions {
 }
 
 
-struct DbReader {
+pub struct DbReader {
     …
 }
 
@@ -199,7 +215,7 @@ pub struct GarbageCollectorOptions {
     /// Defines a grace period for deletion of a db. A db for which deletion is handled by the GC
     /// will not be deleted from object storage until this duration has passed after it's deletion
     /// timestamp.
-    pub db_delete_grace: Duration;
+    pub db_delete_grace: Duration,
 }
 ```
 
@@ -304,36 +320,57 @@ A hard delete will proceed as follows. It is up to the user to ensure that there
 
 ### Readers
 
-Readers are created by calling `DbReader::open`. `open` takes an optional checkpoint. If a checkpoint is provided, `DbReader` uses the provided checkpoint and does not try to refresh it. If no checkpoint is provided, `DbReader` establishes it’s own checkpoint against the latest manifest and periodically re-establishes this checkpoint at the interval specified in `manifest_poll_interval`. The checkpoints created by `DbReader` use the lifetime specified in the `checkpoint_lifetime` option.
+Readers are created by calling `DbReader::open`. `open` takes an optional checkpoint. If a checkpoint is provided,
+`DbReader` uses the checkpoint and does not try to refresh/re-establish it. If no checkpoint is provided, `DbReader`
+establishes its own checkpoint against the latest manifest and periodically polls the manifest at the interval specified
+in `manifest_poll_interval` to see if it needs to re-establish it. If the manifest has not changed in a way that
+requires the reader to re-establish the checkpoint, then the reader will refresh the checkpoint's expiry time once half
+the lifetime has passed. The checkpoints created by `DbReader` use the lifetime specified in  the `checkpoint_lifetime`
+option.
 
 #### Establishing the Checkpoint
 
 To establish the checkpoint, `DbReader` will:
 1. Read the latest manifest version V.
-2. Create a new checkpoint with id set to a new v4 uuid, `manifest_id` set to the next manifest version (V + 1), `checkpoint_expire_time_s` set to the current time plus `checkpoint_lifetime`, and `metadata` set to None.
+2. Create a new checkpoint with id set to a new v4 uuid, `manifest_id` set to the next manifest version (V + 1),
+   `checkpoint_expire_time_s` set to the current time plus `checkpoint_lifetime`, and `metadata` set to None.
 3. Update the manifest’s `wal_id_last_seen` to the latest WAL id found in the wal directory
 4. Write the manifest. If this fails with a CAS error, go back to 1.
 
-Then, the reader will restore data from the WAL. The reader will just replay the WAL data into an in-memory table. The size of the table will be bounded by `max_memtable_bytes`. When the table fills up, it’ll be added to a list and a new table will be initialized. The total memory used should be limited by backpressure applied by the writer. This could still be a lot of memory (e.g. up to 256MB in the default case). In the future we could have the reader read directly from the WAL SSTs, but I’m leaving that out of this proposal.
+Then, the reader will restore data from the WAL. The reader will just replay the WAL data into an in-memory table.
+The size of the table will be bounded by `max_memtable_bytes`. When the table fills up, it’ll be added to a list and a
+new table will be initialized. The total memory used should be limited by backpressure applied by the writer. This
+could still be a lot of memory (e.g. up to 256MB in the default case). In the future we could have the reader read
+directly from the WAL SSTs, but I’m leaving that out of this proposal.
 
 ##### Checkpoint Maintenance
 
-If the reader is opened without a checkpoint, it will periodically re-establish a checkpoint by re-running the initialization process described above, with the following modifications:
-- It will delete the checkpoint that it had previously created (when we support range scans, we’ll need to reference count the checkpoint).
-- It will purge any in-memory tables with content from WAL SSTs lower than the new `wal_id_last_compacted`.
+If the reader is opened without a checkpoint, it will periodically poll the manifest and potentially re-establish the
+checkpoint that it creates if the db has changed in a way that requires re-establishing the checkpoint (the set of SSTs
+has changed). It does this by re-running the initialization process described above, with the following modifications:
+- It will delete the checkpoint that it had previously created (when we support range scans, we’ll need to reference
+  count the checkpoint).
+   - It will purge any in-memory tables with content from WAL SSTs lower than the new `wal_id_last_compacted`.
+
+Additionally, if the time until `checkpoint_expire_time_s` is less than half of `checkpoint_lifetime` the Reader will
+update the `checkpoint_expire_time_s` to the current time plus `checkpoint_lifetime`.
 
 #### Garbage Collector
 
-The GC task will be modified to handle soft deletes and manage checkpoints/clones. The GC tasks's algorithm will now look like the following:
+The GC task will be modified to handle soft deletes and manage checkpoints/clones. The GC tasks's algorithm will now
+look like the following:
 1. Read the current manifest. If no manifest is found, exit.
-2. If `destroyed_at_s` is set, and the current time is after `destroyed_at_s` + `db_delete_grace`, and there are no active checkpoints, then:
+2. If `destroyed_at_s` is set, and the current time is after `destroyed_at_s` + `db_delete_grace`, and there are no
+   active checkpoints, then:
     1. If the db is a clone, update the source db's manifest by deleting the checkpoint.
     2. Delete all object's under the db's path.
     3. Exit.
 3. Garbage collect expired checkpoints
     1. Find any checkpoints that have expired and remove them
-    2. Write the new manifest version with checkpoints deleted. If CAS fails, go back to 1 to reload checkpoints that may be refreshed or added.
-4. Delete garbage manifests. This includes any manifest that is older than `min_age` and is not referenced by a checkpoint.
+    2. Write the new manifest version with checkpoints deleted. If CAS fails, go back to 1 to reload checkpoints that
+       may be refreshed or added.
+4. Delete garbage manifests. This includes any manifest that is older than `min_age` and is not referenced by a
+   checkpoint.
 5. Read all manifests referenced by a checkpoint. Call this set M
 6. Clean up WAL SSTs.
     1. Let C be the lowest id of all `wal_id_last_compacted` in M.
@@ -342,8 +379,12 @@ The GC task will be modified to handle soft deletes and manage checkpoints/clone
     1. Let S be the set of all SSTs from all manifests in M.
     2. Delete all SSTs not in M with age older than `min_age`
 8. Detach the clone if possible.
-    1. If the DB instance is a clone, and it's manifest and contained checkpoints no longer references any SSTs from its `source_checkpoint` (we can tell this if all SSTs are under the current db's path), then detach it:
+    1. If the DB instance is a clone, and it's manifest and contained checkpoints no longer references any SSTs from
+       its `source_checkpoint` (we can tell this if all SSTs are under the current db's path), then detach it:
         1. Update the source db's manifest by removing the checkpoint.
         2. Update the db's manifest by removing the `source` field.
     
-Observe that users can now configure a single GC process that can manage GC for multiple databases that use soft deletes. Whenever a new database is created, the user needs to spawn a new GC task for that database. When the GC task completes deleting a database, then the task exits. For now, it's left up to the user to spawn GC tasks for databases that they have created.
+Observe that users can now configure a single GC process that can manage GC for multiple databases that use soft
+deletes. Whenever a new database is created, the user needs to spawn a new GC task for that database. When the GC
+task completes deleting a database, then the task exits. For now, it's left up to the user to spawn GC tasks for
+databases that they have created.
