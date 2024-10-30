@@ -192,7 +192,14 @@ impl DbReader {
     ) -> Result<Self, SlateDBError> {...}
 
     /// Read a key an return the read value, if any.  
-  pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {...}
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {...}
+}
+
+pub struct GarbageCollectorOptions {
+    /// Defines a grace period for deletion of a db. A db for which deletion is handled by the GC
+    /// will not be deleted from object storage until this duration has passed after it's deletion
+    /// timestamp.
+    pub db_delete_grace: Duration;
 }
 ```
 
