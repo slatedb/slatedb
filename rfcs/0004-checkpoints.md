@@ -38,23 +38,26 @@ At a high level, this proposal covers a mechanism for establishing database chec
 Checkpoints themselves are also stored in the manifest. We’ll store them using the following schema:
 
 ```
-table ManifestV1 {
+
+table DbSource {
    // Optional path to a source database from which this database was cloned
-   source_path: string;
+   source_path: string (required);
 
+   // Optional source checkpoint ID
+   source_checkpoint: UUID (required);
+}
 
-   // Optional source checkpoint ID 
-   source_checkpoint: UUID;
-
+table ManifestV1 {
+   // Optional details about the source checkpoint for the database
+   source: DbSource
 
    // Optional epoch time in seconds that this database was destroyed
    destroyed_at_s: u64;
 
-
-
-
    ...
-   // A list of current checkpoints that may be active
+
+   // A list of current checkpoints that may be active (note: this replaces the existing
+   // snapshots field)
    checkpoint: [Checkpoints] (required);
 }
 
@@ -63,8 +66,7 @@ table WriterCheckpoint {
    epoch: u64;
 }
 
-union CheckpointMetadata { WriterCheckpointMetadata }
-
+union CheckpointMetadata { WriterCheckpoint }
 
 table Uuid {
    high: uint64;
@@ -77,18 +79,19 @@ table Checkpoint {
    // Id that must be unique across all open checkpoints.
    id: Uuid (required);
 
-
    // The manifest ID that this checkpoint is using as its `CoreDbState`.
    manifest_id: ulong;
-
 
    // The UTC unix timestamp seconds that a checkpoint expires at. Clients may update this value.
    // If `checkpoint_expire_time_s` is older than now(), the checkpoint is considered expired.
    // If `checkpoint_expire_time_s` is 0, the checkpoint will never expire.
    checkpoint_expire_time_s: uint;
 
+   // The unix timestamp seconds that a checkpoint was created.
+   checkpoint_create_time_s: uint;
 
-   // Optional metadata associated with the checkpoint. For example, the writer can use this to clean up checkpoints from older writers.
+   // Optional metadata associated with the checkpoint. For example, the writer can use this to
+   // clean up checkpoints from older writers.
    metadata: CheckpointMetadata;
 }
 ```
@@ -103,8 +106,8 @@ We’ll make the following changes to the public API to support creating and usi
 /// then SlateDB will force the current wal, or memtable if wal_enabled is false, to flush its data.
 /// Otherwise, the database will wait for the current wal or memtable to be flushed due to
 /// flush_interval or reaching l0_sst_size_bytes, respectively. If set to Durable, then the
-/// checkpoint includes only writes that were durable at the time of the call. This will be faster, but
-/// may not include data from recent writes.
+/// checkpoint includes only writes that were durable at the time of the call. This will be faster,
+/// but may not include data from recent writes.
 enum CheckpointScope {
     All{force_flush: bool},
     Durable
@@ -120,12 +123,14 @@ impl Db {
     /// the checkpoint ID specified in source_checkpoint. SlateDB will look for the manifest
     /// containing the checkpoint under source_path. The newly created database is a shallow
     /// copy of the source database, and contains all the data from source_checkpoint. New writes
-    /// will be written to the new database and will not be reflected in the source database.
+    /// will be written to the new database and will not be reflected in the source database. If
+    /// source_checkpoint is None, then this will create a new checkpoint pointing to the current
+    /// manifest of the source db.
     pub async fn open_from_checkpoint(
         path: Path,
         object_store: Arc<dyn ObjectStore>,
         source_path: Path,
-        source_checkpoint: UUID,
+        source_checkpoint: Option<UUID>,
     ) -> Result<Self, SlateDBError> {
         …
     }
@@ -135,7 +140,13 @@ impl Db {
         …
     }
 
-    /// Called to destroy the database at the given path. If `soft` is true, This method will set the destroyed_at_s field in the manifest. The GC will clean up the db after some time has passed, and all checkpoints have either been deleted or expired. As part of cleaning up the db, the GC will also remove the database’s checkpoint from the source database. If `soft` is false, then all cleanup will be performed by the call to this method. If `soft` is false, the destroy will return SlateDbError::InvalidDeletion if there are any remaining non-expired checkpoints.
+    /// Called to destroy the database at the given path. If `soft` is true, This method will
+    /// set the destroyed_at_s field in the manifest. The GC will clean up the db after some
+    /// time has passed, and all checkpoints have either been deleted or expired. As part of
+    /// cleaning up the db, the GC will also remove the database’s checkpoint from the source
+    /// database. If `soft` is false, then all cleanup will be performed by the call to this
+    /// method. If `soft` is false, the destroy will return SlateDbError::InvalidDeletion if
+    /// there are any remaining non-expired checkpoints.
    pub async fn destroy(path: Path, object_store: Arc<dyn ObjectStore>, soft: bool) -> Result<(), SlateDbError> {
        …
    }
@@ -148,7 +159,11 @@ pub struct DbReaderOptions {
     pub manifest_poll_interval: Duration,
 
 
-    /// For readers that refresh their checkpoint, this specifies the lifetime to use for the created checkpoint. The checkpoint’s expire time will be set to the current time plus this value. If not specified, then the checkpoint will be created with no expiry, and must be manually removed.
+    /// For readers that refresh their checkpoint, this specifies the lifetime to use for the
+    /// created checkpoint. The checkpoint’s expire time will be set to the current time plus
+    /// this value. If not specified, then the checkpoint will be created with no expiry, and
+    /// must be manually removed. This lifetime must always be greater than
+    /// manifest_poll_interval x 2
     pub checkpoint_lifetime: Option<Duration>,
 
 
@@ -165,7 +180,10 @@ struct DbReader {
 impl DbReader {
     /// Creates a database reader that can read the contents of a database (but cannot write any
     /// data). The caller can provide an optional checkpoint. If the checkpoint is provided, the
-    /// reader will read using the specified checkpoint and will not periodically refresh the checkpoint. Otherwise, the reader creates a new checkpoint pointing to the current manifest and refreshes it periodically as specified in the options.
+    /// reader will read using the specified checkpoint and will not periodically refresh the
+    /// checkpoint. Otherwise, the reader creates a new checkpoint pointing to the current manifest
+    /// and refreshes it periodically as specified in the options. It also removes the previous
+    /// checkpoint once any ongoing reads have completed.
     pub async fn open(
         path: Path,
         object_store: Arc<dyn ObjectStore>,
@@ -187,16 +205,25 @@ Create a new checkpoint pointing to the database's current state
 Usage: slatedb --path <PATH> create-checkpoint [OPTIONS]
 
 Options:
-  -l, --lifetime <LIFETIME>  Optionally specify a lifetime for the created checkpoint. You can specify the lifetime in a human-friendly format that uses years/days/min/s, e.g. "7days 30min". The checkpoint's expiry time will be set to the current wallclock time plus the specified lifetime. If the lifetime is not specified, then the checkpoint is set with no expiry and must be explicitly removed
+  -l, --lifetime <LIFETIME>  Optionally specify a lifetime for the created checkpoint. You can
+    specify the lifetime in a human-friendly format that uses years/days/min/s, e.g. "7days 30min".
+    The checkpoint's expiry time will be set to the current wallclock time plus the specified
+    lifetime. If the lifetime is not specified, then the checkpoint is set with no expiry and
+    must be explicitly removed
 
 $ slatedb refresh-checkpoint --help
-Refresh an existing checkpoint's expiry time. This command will look for an existing checkpoint and update its expiry time using the specified lifetime
+Refresh an existing checkpoint's expiry time. This command will look for an existing checkpoint
+and update its expiry time using the specified lifetime
 
 Usage: slatedb --path <PATH> refresh-checkpoint [OPTIONS] --id <ID>
 
 Options:
   -i, --id <ID>              The UUID of the checkpoint (e.g. 01740ee5-6459-44af-9a45-85deb6e468e3)
-  -l, --lifetime <LIFETIME>  Optionally specify a new lifetime for the checkpoint. You can specify the lifetime in a human-friendly format that uses years/days/min/s, e.g. "7days 30min". The checkpoint's expiry time will be set to the current wallclock time plus the specified lifetime. If the lifetime is not specified, then the checkpoint is updated with no expiry and must be explicitly removed
+  -l, --lifetime <LIFETIME>  Optionally specify a new lifetime for the checkpoint. You can specify
+    the lifetime in a human-friendly format that uses years/days/min/s, e.g. "7days 30min". The
+    checkpoint's expiry time will be set to the current wallclock time plus the specified lifetime.
+    If the lifetime is not specified, then the checkpoint is updated with no expiry and must be
+    explicitly removed
 
 $ slatedb delete-checkpoint --help
 Delete an existing checkpoint
@@ -235,8 +262,8 @@ The writer will periodically re-establish its checkpoint to pin the latest SSTs 
 
 The writer will also support initializing a new database from an existing checkpoint. This allows users to “fork” an instance of slatedb, allowing it to access all the original db’s data from the checkpoint, but isolate writes to a new db instance.
 
-To support this, we add the `Db::open_from_checkpoint` method, which accepts a `source_path` and `source_checkpoint`. When initializing the db for the first time (detected by the presence of a manifest), the writer will do the following:
-1. Read the source manifest MC at `source_checkpoint`.
+To support this, we add the `Db::open_from_checkpoint` method, which accepts a `source_path` and `source_checkpoint`. When initializing the db for the first time (detected by the absence of a manifest), the writer will do the following:
+1. Read the source manifest MC at `source_path`.
 2. Copy over any WAL SSTs between `last_compacted_wal_id` and `wal_id_last_seen`
 3. Verify that `source_checkpoint` is present and not expired. Create a new checkpoint in the source database with the `manifest_id` as `source_checkpoint`.
 4. Compute an initial manifest for the new DB. The new manifest will set its fields as follows
@@ -310,6 +337,6 @@ The GC task will be modified to handle soft deletes and manage checkpoints/clone
 8. Detach the clone if possible.
     1. If the DB instance is a clone, and it's manifest and contained checkpoints no longer references any SSTs from its `source_checkpoint` (we can tell this if all SSTs are under the current db's path), then detach it:
         1. Update the source db's manifest by removing the checkpoint.
-        2. Update the db's manifest by removing the `source_checkpoint` field.
+        2. Update the db's manifest by removing the `source` field.
     
 Observe that users can now configure a single GC process that can manage GC for multiple databases that use soft deletes. Whenever a new database is created, the user needs to spawn a new GC task for that database. When the GC task completes deleting a database, then the task exits. For now, it's left up to the user to spawn GC tasks for databases that they have created.
