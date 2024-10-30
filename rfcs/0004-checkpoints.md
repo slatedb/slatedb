@@ -54,17 +54,20 @@ Checkpoints themselves are also stored in the manifest. We’ll store them using
 
 ```
 
-table DbSource {
-   // Optional path to a source database from which this database was cloned
-   source_path: string (required);
+table DbParent {
+   // Optional path to a parent database from which this database was cloned
+   parent_path: string (required);
 
-   // Optional source checkpoint ID
-   source_checkpoint: UUID (required);
+   // Optional parent checkpoint ID
+   parent_checkpoint: UUID (required);
+   
+   // Flag to indicate whether initialization has finished
+   initialized: boolean
 }
 
 table ManifestV1 {
-   // Optional details about the source checkpoint for the database
-   source: DbSource
+   // Optional details about the parent checkpoint for the database
+   parent: DbParent
 
    // Optional epoch time in seconds that this database was destroyed
    destroyed_at_s: u64;
@@ -141,17 +144,17 @@ struct CheckpointOptions {
 
 impl Db {
     /// Opens a Db from a checkpoint. If no database This will create a new db under path from
-    /// the checkpoint ID specified in source_checkpoint. SlateDB will look for the manifest
-    /// containing the checkpoint under source_path. The newly created database is a shallow
-    /// copy of the source database, and contains all the data from source_checkpoint. New writes
-    /// will be written to the new database and will not be reflected in the source database. If
-    /// source_checkpoint is None, then this will create a new checkpoint pointing to the current
-    /// manifest of the source db.
+    /// the checkpoint ID specified in parent_checkpoint. SlateDB will look for the manifest
+    /// containing the checkpoint under parent_path. The newly created database is a shallow
+    /// copy of the parent database, and contains all the data from parent_checkpoint. New writes
+    /// will be written to the new database and will not be reflected in the parent database. If
+    /// parent_checkpoint is None, then this will create a new checkpoint pointing to the current
+    /// manifest of the parent db.
     pub async fn open_from_checkpoint(
         path: Path,
         object_store: Arc<dyn ObjectStore>,
-        source_path: Path,
-        source_checkpoint: Option<UUID>,
+        parent_path: Path,
+        parent_checkpoint: Option<UUID>,
     ) -> Result<Self, SlateDBError> {
         …
     }
@@ -176,7 +179,7 @@ impl Db {
     /// Called to destroy the database at the given path. If `soft` is true, This method will
     /// set the destroyed_at_s field in the manifest. The GC will clean up the db after some
     /// time has passed, and all checkpoints have either been deleted or expired. As part of
-    /// cleaning up the db, the GC will also remove the database’s checkpoint from the source
+    /// cleaning up the db, the GC will also remove the database’s checkpoint from the parent
     /// database. If `soft` is false, then all cleanup will be performed by the call to this
     /// method. If `soft` is false, the destroy will return SlateDbError::InvalidDeletion if
     /// there are any remaining non-expired checkpoints.
@@ -327,24 +330,30 @@ The writer will also support initializing a new database from an existing checkp
 instance of slatedb, allowing it to access all the original db’s data from the checkpoint, but isolate writes to a new
 db instance.
 
-To support this, we add the `Db::open_from_checkpoint` method, which accepts a `source_path` and `source_checkpoint`.
+To support this, we add the `Db::open_from_checkpoint` method, which accepts a `parent_path` and `parent_checkpoint`.
 When initializing the db for the first time (detected by the absence of a manifest), the writer will do the following:
-1. Read the source manifest MC at `source_path`.
-2. Copy over any WAL SSTs between `last_compacted_wal_id` and `wal_id_last_seen`
-3. Verify that `source_checkpoint` is present and not expired. Create a new checkpoint in the source database with the
-   `manifest_id` as `source_checkpoint`.
-4. Compute an initial manifest for the new DB. The new manifest will set its fields as follows
-    - writer_epoch: set to the epoch from the source checkpoint + 1.
-    - compactor_epoch: copied from the source checkpoint.
-    - wal_id_last_compacted: copied from the source checkpoint
-    - wal_id_last_seen: copied from the source checkpoint
-    - l0: copied from the source checkpoint
-    - l0_last_compacted: copied from the source checkpoint
-    - compacted: copied from the source checkpoint
-    - checkpoints: contains a single entry with the writer’s checkpoint.
-5. If CAS fails, go back to (1) (TODO: we can skip step 2 - we just need to re-validate that the source checkpoint is
-   still valid because the GC could clean it up)
-
+1. Read the current manifest M, which may not be present.
+2. Read the current parent manifest M_p at `parent_path`.
+3. If M is present:
+   1. If the `parent` field is empty, exit with error.
+   2. If `parent.initialized`, then go to step 10.
+4. Compute the clone's checkpoint ID
+    1. If M is present, use M.`parent.parent_checkpoint` as the checkpoint ID
+    2. Otherwise, set checkpoint ID to a new v4 UUID
+6. If `parent_checkpoint` is not None, read it's manifest M_c. Otherwise let M_c be M_p
+7. Write a new manifest M'. If CAS fails, go to step 1. M' fields are set to:
+   - parent: set to point to checkpoint ID and initialized set to false
+   - writer_epoch: set to the epoch from M_c + 1.
+   - compactor_epoch: copied from M_c.
+   - wal_id_last_compacted: copied from M_c
+   - wal_id_last_seen: copied from M_c
+   - l0: copied from M_c
+   - l0_last_compacted: copied from M_c
+   - compacted: copied from M_c
+   - checkpoints: empty 
+8. Create or update the checkpoint with checkpoint ID pointing to M_c in the parent DB. If CAS fails, go to step 1.
+9. Update M' with `parent.initialized` set to true. If CAS fails, go to step 1.
+10. Copy over any WAL SSTs between M_c.`last_compacted_wal_id` and M_c.`wal_id_last_seen`.
 
 ##### SST Path Resolution
 
@@ -419,7 +428,7 @@ look like the following:
 1. Read the current manifest. If no manifest is found, exit.
 2. If `destroyed_at_s` is set, and the current time is after `destroyed_at_s` + `db_delete_grace`, and there are no
    active checkpoints, then:
-    1. If the db is a clone, update the source db's manifest by deleting the checkpoint.
+    1. If the db is a clone, update the parent db's manifest by deleting the checkpoint.
     2. Delete all object's under the db's path.
     3. Exit.
 3. Garbage collect expired checkpoints
@@ -440,9 +449,9 @@ look like the following:
     2. Delete all SSTs not in M with age older than `min_age`
 8. Detach the clone if possible.
     1. If the DB instance is a clone, and it's manifest and contained checkpoints no longer references any SSTs from
-       its `source_checkpoint` (we can tell this if all SSTs are under the current db's path), then detach it:
-        1. Update the source db's manifest by removing the checkpoint.
-        2. Update the db's manifest by removing the `source` field.
+       its `parent_checkpoint` (we can tell this if all SSTs are under the current db's path), then detach it:
+        1. Update the parent db's manifest by removing the checkpoint.
+        2. Update the db's manifest by removing the `parent` field.
 
 Observe that users can now configure a single GC process that can manage GC for multiple databases that use soft
 deletes. Whenever a new database is created, the user needs to spawn a new GC task for that database. When the GC
