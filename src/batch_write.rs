@@ -53,18 +53,20 @@ impl DbInner {
     #[allow(clippy::panic)]
     async fn write_batch(&self, batch: WriteBatch) -> Result<Arc<KVTable>, SlateDBError> {
         self.maybe_apply_backpressure().await;
+        let now = self.options.clock.now();
 
         let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
             let current_wal = guard.wal();
             for op in batch.ops {
                 match op {
-                    WriteOp::Put(key, value) => {
+                    WriteOp::Put(key, value, opts) => {
                         current_wal.put(
                             key,
                             value,
                             RowAttributes {
-                                ts: Some(self.options.clock.now()),
+                                ts: Some(now),
+                                expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
                             },
                         );
                     }
@@ -72,7 +74,8 @@ impl DbInner {
                         current_wal.delete(
                             key,
                             RowAttributes {
-                                ts: Some(self.options.clock.now()),
+                                ts: Some(now),
+                                expire_ts: None,
                             },
                         );
                     }
@@ -87,12 +90,13 @@ impl DbInner {
             let current_memtable = guard.memtable();
             for op in batch.ops {
                 match op {
-                    WriteOp::Put(key, value) => {
+                    WriteOp::Put(key, value, opts) => {
                         current_memtable.put(
                             key,
                             value,
                             RowAttributes {
-                                ts: Some(self.options.clock.now()),
+                                ts: Some(now),
+                                expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
                             },
                         );
                     }
@@ -100,7 +104,8 @@ impl DbInner {
                         current_memtable.delete(
                             key,
                             RowAttributes {
-                                ts: Some(self.options.clock.now()),
+                                ts: Some(now),
+                                expire_ts: None,
                             },
                         );
                     }

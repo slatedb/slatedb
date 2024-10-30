@@ -14,7 +14,8 @@ use crate::cached_object_store::CachedObjectStore;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
-    DbOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
+    DbOptions, PutOptions, ReadOptions, WriteOptions, DEFAULT_PUT_OPTIONS, DEFAULT_READ_OPTIONS,
+    DEFAULT_WRITE_OPTIONS,
 };
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -204,13 +205,21 @@ impl DbInner {
 
     /// Put a key-value pair into the database. Key must not be empty.
     #[allow(clippy::panic)]
-    pub async fn put_with_options(&self, key: &[u8], value: &[u8], options: &WriteOptions) {
+    pub async fn put_with_options(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        put_opts: &PutOptions,
+        write_opts: &WriteOptions,
+    ) {
         assert!(!key.is_empty(), "key cannot be empty");
 
         self.maybe_apply_backpressure().await;
 
         let key = Bytes::copy_from_slice(key);
         let value = Bytes::copy_from_slice(value);
+        let now = self.options.clock.now();
+        let expire_ts = put_opts.expire_ts_from(self.options.default_ttl, now);
 
         // Clone memtable to avoid a deadlock with flusher thread.
         let current_table = if self.wal_enabled() {
@@ -220,7 +229,8 @@ impl DbInner {
                 key,
                 value,
                 RowAttributes {
-                    ts: Some(self.options.clock.now()),
+                    ts: Some(now),
+                    expire_ts,
                 },
             );
             current_wal.table().clone()
@@ -234,7 +244,8 @@ impl DbInner {
                 key,
                 value,
                 RowAttributes {
-                    ts: Some(self.options.clock.now()),
+                    ts: Some(now),
+                    expire_ts,
                 },
             );
             let table = current_memtable.table().clone();
@@ -243,7 +254,7 @@ impl DbInner {
             table
         };
 
-        if options.await_durable {
+        if write_opts.await_durable {
             current_table.await_durable().await;
         }
     }
@@ -256,6 +267,7 @@ impl DbInner {
         self.maybe_apply_backpressure().await;
 
         let key = Bytes::copy_from_slice(key);
+        let now = self.options.clock.now();
 
         // Clone memtable to avoid a deadlock with flusher thread.
         let current_table = if self.wal_enabled() {
@@ -264,7 +276,8 @@ impl DbInner {
             current_wal.delete(
                 key,
                 RowAttributes {
-                    ts: Some(self.options.clock.now()),
+                    ts: Some(now),
+                    expire_ts: None,
                 },
             );
             current_wal.table().clone()
@@ -277,7 +290,8 @@ impl DbInner {
             current_memtable.delete(
                 key,
                 RowAttributes {
-                    ts: Some(self.options.clock.now()),
+                    ts: Some(now),
+                    expire_ts: None,
                 },
             );
             let table = current_memtable.table().clone();
@@ -659,12 +673,20 @@ impl Db {
     pub async fn put(&self, key: &[u8], value: &[u8]) {
         // TODO move the put into an async block by blocking on the memtable flush
         self.inner
-            .put_with_options(key, value, DEFAULT_WRITE_OPTIONS)
+            .put_with_options(key, value, DEFAULT_PUT_OPTIONS, DEFAULT_WRITE_OPTIONS)
             .await;
     }
 
-    pub async fn put_with_options(&self, key: &[u8], value: &[u8], options: &WriteOptions) {
-        self.inner.put_with_options(key, value, options).await;
+    pub async fn put_with_options(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        put_opts: &PutOptions,
+        write_opts: &WriteOptions,
+    ) {
+        self.inner
+            .put_with_options(key, value, put_opts, write_opts)
+            .await;
     }
 
     pub async fn delete(&self, key: &[u8]) {
@@ -712,6 +734,8 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "wal_disable")]
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use futures::{future::join_all, StreamExt};
@@ -990,6 +1014,7 @@ mod tests {
                         )),
                         max_concurrent_compactions: 1,
                         compaction_runtime: None,
+                        clock: Arc::new(TestClock::new()),
                     }),
                 ),
                 object_store.clone(),
@@ -1098,7 +1123,8 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
     async fn test_wal_disabled() {
-        let mut options = test_db_options(0, 128, None);
+        let clock = Arc::new(TestClock::new());
+        let mut options = test_db_options_with_clock(0, 128, None, clock.clone());
         options.wal_enabled = false;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -1121,14 +1147,25 @@ mod tests {
             await_durable: false,
         };
 
-        db.put_with_options(&[b'a'; 32], &[b'j'; 32], &write_options)
-            .await;
+        db.put_with_options(
+            &[b'a'; 32],
+            &[b'j'; 32],
+            DEFAULT_PUT_OPTIONS,
+            &write_options,
+        )
+        .await;
         db.delete_with_options(&[b'b'; 32], &write_options).await;
         let write_options = WriteOptions {
             await_durable: true,
         };
-        db.put_with_options(&[b'c'; 32], &[b'l'; 32], &write_options)
-            .await;
+        clock.ticker.store(10, Ordering::SeqCst);
+        db.put_with_options(
+            &[b'c'; 32],
+            &[b'l'; 32],
+            DEFAULT_PUT_OPTIONS,
+            &write_options,
+        )
+        .await;
 
         let state = wait_for_manifest_condition(
             &mut stored_manifest,
@@ -1150,11 +1187,11 @@ mod tests {
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
                     gen_attrs(0),
                 ),
-                (vec![b'b'; 32], ValueDeletable::Tombstone, gen_attrs(1)),
+                (vec![b'b'; 32], ValueDeletable::Tombstone, gen_attrs(0)),
                 (
                     vec![b'c'; 32],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
-                    gen_attrs(2),
+                    gen_attrs(10),
                 ),
             ],
         )
@@ -1400,6 +1437,7 @@ mod tests {
             .put_with_options(
                 "foo".as_bytes(),
                 "bar".as_bytes(),
+                DEFAULT_PUT_OPTIONS,
                 &WriteOptions {
                     await_durable: false,
                 },
@@ -1440,6 +1478,7 @@ mod tests {
             .put_with_options(
                 "foo".as_bytes(),
                 "bla".as_bytes(),
+                DEFAULT_PUT_OPTIONS,
                 &WriteOptions {
                     await_durable: false,
                 },
@@ -1655,6 +1694,7 @@ mod tests {
                 )),
                 max_concurrent_compactions: 1,
                 compaction_runtime: None,
+                clock: Arc::new(TestClock::new()),
             }),
         ))
         .await;
@@ -1673,6 +1713,7 @@ mod tests {
                 )),
                 max_concurrent_compactions: 1,
                 compaction_runtime: None,
+                clock: Arc::new(TestClock::new()),
             }),
         ))
         .await
@@ -1719,6 +1760,7 @@ mod tests {
         db1.put_with_options(
             b"1",
             b"1",
+            DEFAULT_PUT_OPTIONS,
             &WriteOptions {
                 await_durable: false,
             },
@@ -1737,6 +1779,7 @@ mod tests {
         db1.put_with_options(
             b"1",
             b"1",
+            DEFAULT_PUT_OPTIONS,
             &WriteOptions {
                 await_durable: false,
             },
@@ -1746,6 +1789,7 @@ mod tests {
         db2.put_with_options(
             b"2",
             b"2",
+            DEFAULT_PUT_OPTIONS,
             &WriteOptions {
                 await_durable: false,
             },
@@ -1776,6 +1820,20 @@ mod tests {
         l0_sst_size_bytes: usize,
         compactor_options: Option<CompactorOptions>,
     ) -> DbOptions {
+        test_db_options_with_clock(
+            min_filter_keys,
+            l0_sst_size_bytes,
+            compactor_options,
+            Arc::new(TestClock::new()),
+        )
+    }
+
+    fn test_db_options_with_clock(
+        min_filter_keys: u32,
+        l0_sst_size_bytes: usize,
+        compactor_options: Option<CompactorOptions>,
+        clock: Arc<TestClock>,
+    ) -> DbOptions {
         DbOptions {
             flush_interval: Duration::from_millis(100),
             #[cfg(feature = "wal_disable")]
@@ -1791,7 +1849,8 @@ mod tests {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             block_cache: None,
             garbage_collector_options: None,
-            clock: Arc::new(TestClock::new()),
+            clock,
+            default_ttl: None,
         }
     }
 }

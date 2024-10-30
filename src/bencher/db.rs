@@ -42,7 +42,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use slatedb::config::WriteOptions;
+use slatedb::config::{PutOptions, WriteOptions};
 use slatedb::db::Db;
 use tokio::time::Instant;
 use tracing::info;
@@ -232,7 +232,12 @@ impl Task {
                 let mut value = vec![0; self.val_len];
                 random.fill_bytes(value.as_mut_slice());
                 self.db
-                    .put_with_options(key, value.as_ref(), &self.write_options)
+                    .put_with_options(
+                        key,
+                        value.as_ref(),
+                        &PutOptions::default(),
+                        &self.write_options,
+                    )
                     .await;
                 puts += 1;
             } else {

@@ -170,6 +170,7 @@ use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
 pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
+pub const DEFAULT_PUT_OPTIONS: &PutOptions = &PutOptions::default();
 
 /// Whether reads see only writes that have been committed durably to the DB.  A
 /// write is considered durably committed if all future calls to read are guaranteed
@@ -202,7 +203,7 @@ impl ReadOptions {
 
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct WriteOptions {
     /// Whether `put` calls should block until the write has been durably committed
     /// to the DB.
@@ -218,16 +219,66 @@ impl WriteOptions {
     }
 }
 
+/// Configuration for client put operations. `PutOptions` is supplied for each
+/// row inserted. This differs from [`WriteOptions`] in that a write may encompass
+/// multiple puts (such as the case with batched writes)
+#[derive(Clone, Default)]
+pub struct PutOptions {
+    /// The time-to-live (ttl) for this insertion. If this insert overwrites an existing
+    /// database entry, the TTL for the most recent entry will be canonical.
+    ///
+    /// Default: the TTL configured in DbOptions when opening a SlateDB session
+    pub ttl: Ttl,
+}
+
+impl PutOptions {
+    const fn default() -> Self {
+        Self { ttl: Ttl::Default }
+    }
+
+    pub(crate) fn expire_ts_from(&self, default: Option<u64>, now: i64) -> Option<i64> {
+        match self.ttl {
+            Ttl::Default => match default {
+                None => None,
+                Some(default_ttl) => Self::checked_expire_ts(now, default_ttl),
+            },
+            Ttl::NoExpiry => None,
+            Ttl::ExpireAfter(ttl) => Self::checked_expire_ts(now, ttl),
+        }
+    }
+
+    fn checked_expire_ts(now: i64, ttl: u64) -> Option<i64> {
+        // for overflow, we will just assume no TTL
+        if ttl > i64::MAX as u64 {
+            return None;
+        };
+        let expire_ts = now + (ttl as i64);
+        if expire_ts < now {
+            return None;
+        };
+
+        Some(expire_ts)
+    }
+}
+
+#[derive(Clone, Default)]
+pub enum Ttl {
+    #[default]
+    Default,
+    NoExpiry,
+    ExpireAfter(u64),
+}
+
 /// defines the clock that SlateDB will use during this session
 pub trait Clock {
     /// Returns a timestamp (typically measured in millis since the unix epoch),
     /// must return monotonically increasing numbers (this is enforced
-    /// at runtime and will panic if the invariant is broken)
+    /// at runtime and will panic if the invariant is broken).
     ///
     /// Note that this clock does not need to return a number that
     /// represents the unix timestamp; the only requirement is that
     /// it represents a sequence that can attribute a logical ordering
-    /// to actions on the database
+    /// to actions on the database.
     fn now(&self) -> i64;
 }
 
@@ -363,6 +414,12 @@ pub struct DbOptions {
     #[serde(skip)]
     #[serde(default = "default_clock")]
     pub clock: Arc<dyn Clock + Send + Sync>,
+
+    /// The default time-to-live (TTL) for insertions (note that re-inserting a key
+    /// with any value will update the TTL to use the default_ttl)
+    ///
+    /// Default: no TTL (insertions will remain until deleted)
+    pub default_ttl: Option<u64>,
 }
 
 impl DbOptions {
@@ -513,6 +570,7 @@ impl Default for DbOptions {
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
             clock: default_clock(),
+            default_ttl: None,
         }
     }
 }
@@ -596,6 +654,14 @@ pub struct CompactorOptions {
     /// this to isolate compactions to a dedicated thread pool.
     #[serde(skip)]
     pub compaction_runtime: Option<Handle>,
+
+    /// The Clock to use for determining the time the compaction has run. This
+    /// helps determine actions such as expiring data with a configured time-to-live.
+    ///
+    /// Default: the default clock uses the local system time on the machine
+    #[serde(skip)]
+    #[serde(default = "default_clock")]
+    pub clock: Arc<dyn Clock + Send + Sync>,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -610,6 +676,7 @@ impl Default for CompactorOptions {
             compaction_scheduler: default_compaction_scheduler(),
             max_concurrent_compactions: 4,
             compaction_runtime: None,
+            clock: default_clock(),
         }
     }
 }

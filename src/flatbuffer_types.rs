@@ -336,6 +336,7 @@ impl From<RowFeature> for SstRowFeature {
         match value {
             RowFeature::Flags => SstRowFeature::Flags,
             RowFeature::Timestamp => SstRowFeature::Timestamp,
+            RowFeature::ExpireAtTs => SstRowFeature::ExpireAtTs,
         }
     }
 }
@@ -346,6 +347,7 @@ impl From<SstRowFeature> for RowFeature {
         match value {
             SstRowFeature::Flags => RowFeature::Flags,
             SstRowFeature::Timestamp => RowFeature::Timestamp,
+            SstRowFeature::ExpireAtTs => RowFeature::ExpireAtTs,
             _ => panic!(
                 "Attempted to read SST written with unknown SstRowAttribute. Are you \
             running an older version of SlateDB than was used to write the SST?"

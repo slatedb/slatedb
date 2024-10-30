@@ -156,6 +156,7 @@ impl CompactionExecuteBench {
                     Some(val.as_ref()),
                     RowAttributes {
                         ts: Some(timestamp),
+                        expire_ts: None,
                     },
                 )
                 .await?;

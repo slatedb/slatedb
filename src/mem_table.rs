@@ -406,7 +406,10 @@ mod tests {
         table.put(
             Bytes::from_static(b"def456"),
             Bytes::from_static(b"blablabla"),
-            RowAttributes { ts: None },
+            RowAttributes {
+                ts: None,
+                expire_ts: None,
+            },
         );
         assert_eq!(table.size(), 33);
 
