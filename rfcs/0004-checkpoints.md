@@ -255,6 +255,11 @@ Usage: slatedb --path <PATH> delete-checkpoint --id <ID>
 
 Options:
   -i, --id <ID>  The UUID of the checkpoint (e.g. 01740ee5-6459-44af-9a45-85deb6e468e3)
+
+$ slatedb list-checkpoints --help
+List the current checkpoints of the db.
+
+Usage: slatedb --path <PATH> list-checkpoints
 ```
 
 ### Writers
