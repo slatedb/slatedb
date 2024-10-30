@@ -130,7 +130,13 @@ enum CheckpointScope {
 
 /// Specify options to provide when creating a checkpoint.
 struct CheckpointOptions {
-    scope: CheckpointScope
+    /// Specifies the scope targeted by the checkpoint (see above)
+    scope: CheckpointScope,
+
+    /// Optionally specifies the lifetime of the checkpoint to create. The expire time will be set to
+    /// the current wallclock time plus the specified lifetime. If lifetime is None, then the checkpoint
+    /// is created without an expiry time.
+    lifetime: Option<Duration>,
 }
 
 impl Db {
@@ -150,10 +156,22 @@ impl Db {
         …
     }
 
-    /// Create a checkpoint using the provided options. Returns the ID of the created checkpoint.
-    pub async fn create_checkpoint(options: &CheckpointOptions) -> Result<uuid::UUID, SlateDBError> {
+    /// Creates a checkpoint of an opened db using the provided options. Returns the ID of the created
+    /// checkpoint and the id of the referenced manifest.
+    pub async fn create_checkpoint(&self, options: &CheckpointOptions) -> Result<(uuid::UUID, u64), SlateDBError> {
         …
     }
+
+    /// Creates a checkpoint of the db stored in the object store at the specified path using the provided options.
+    /// Note that the scope option does not impact the behaviour of this method. The checkpoint will reference
+    /// the current active manifest of the db.
+    pub async fn create_checkpoint(
+       path: Path,
+       object_store: Arc<dyn ObjectStore>,
+       options: &CheckpointOptions,
+    ) -> Result<(uuid::UUID, u64), SlateDBError> {}
+       ...
+    )
 
     /// Called to destroy the database at the given path. If `soft` is true, This method will
     /// set the destroyed_at_s field in the manifest. The GC will clean up the db after some
@@ -207,7 +225,7 @@ impl DbReader {
         options: DbReaderOptions
     ) -> Result<Self, SlateDBError> {...}
 
-    /// Read a key an return the read value, if any.  
+    /// Read a key an return the read value, if any.
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {...}
 }
 
@@ -219,7 +237,7 @@ pub struct GarbageCollectorOptions {
 }
 ```
 
-Finally, we’ll also allow users to create checkpoints using the admin CLI:
+Finally, we’ll also allow users to create/refresh/delete/list checkpoints using the admin CLI:
 
 ```bash
 $ slatedb create-checkpoint --help
@@ -229,7 +247,7 @@ Usage: slatedb --path <PATH> create-checkpoint [OPTIONS]
 
 Options:
   -l, --lifetime <LIFETIME>  Optionally specify a lifetime for the created checkpoint. You can
-    specify the lifetime in a human-friendly format that uses years/days/min/s, e.g. "7days 30min".
+    specify the lifetime in a human-friendly format that uses years/days/min/s, e.g. "7days 30min 10s".
     The checkpoint's expiry time will be set to the current wallclock time plus the specified
     lifetime. If the lifetime is not specified, then the checkpoint is set with no expiry and
     must be explicitly removed
@@ -243,7 +261,7 @@ Usage: slatedb --path <PATH> refresh-checkpoint [OPTIONS] --id <ID>
 Options:
   -i, --id <ID>              The UUID of the checkpoint (e.g. 01740ee5-6459-44af-9a45-85deb6e468e3)
   -l, --lifetime <LIFETIME>  Optionally specify a new lifetime for the checkpoint. You can specify
-    the lifetime in a human-friendly format that uses years/days/min/s, e.g. "7days 30min". The
+    the lifetime in a human-friendly format that uses years/days/min/s, e.g. "7days 30min 10s". The
     checkpoint's expiry time will be set to the current wallclock time plus the specified lifetime.
     If the lifetime is not specified, then the checkpoint is updated with no expiry and must be
     explicitly removed
@@ -260,6 +278,8 @@ $ slatedb list-checkpoints --help
 List the current checkpoints of the db.
 
 Usage: slatedb --path <PATH> list-checkpoints
+
+
 ```
 
 ### Writers
@@ -378,8 +398,11 @@ look like the following:
    checkpoint.
 5. Read all manifests referenced by a checkpoint. Call this set M
 6. Clean up WAL SSTs.
-    1. Let C be the lowest id of all `wal_id_last_compacted` in M.
-    2. Delete all WAL SSTs with id lower than C and age older than `min_age`
+    1. For a given Manifest n Let referenced_wal(n) be the set of all WAL SSTs between n.`wal_id_last_compacted` and
+       n.`wal_id_last_seen`
+    2. Let W be the set of all referenced_wal(n) for all n in M AND all WAL SSTs larger than `wal_id_last_compacted`
+       of the current manifest.
+    2. Delete all WAL SSTs not in W.
 7. Clean up SSTs.
     1. Let S be the set of all SSTs from all manifests in M.
     2. Delete all SSTs not in M with age older than `min_age`
@@ -388,7 +411,7 @@ look like the following:
        its `source_checkpoint` (we can tell this if all SSTs are under the current db's path), then detach it:
         1. Update the source db's manifest by removing the checkpoint.
         2. Update the db's manifest by removing the `source` field.
-    
+
 Observe that users can now configure a single GC process that can manage GC for multiple databases that use soft
 deletes. Whenever a new database is created, the user needs to spawn a new GC task for that database. When the GC
 task completes deleting a database, then the task exits. For now, it's left up to the user to spawn GC tasks for
