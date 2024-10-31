@@ -7,6 +7,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Handle;
+use tracing::warn;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
@@ -214,6 +215,7 @@ impl DbInner {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
 
+        self.maybe_apply_backpressure().await;
         self.write_notifier.send(batch_msg).ok();
 
         let current_table = rx.await.expect("write batch failed")?;
@@ -223,6 +225,28 @@ impl DbInner {
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn maybe_apply_backpressure(&self) {
+        loop {
+            let table = {
+                let guard = self.state.read();
+                let state = guard.state();
+                if state.imm_memtable.len() <= self.options.max_unflushed_memtable {
+                    return;
+                }
+                let Some(table) = state.imm_memtable.back() else {
+                    return;
+                };
+                warn!(
+                    "applying backpressure to write by waiting for imm table flush. imm tables({}), max({})",
+                    state.imm_memtable.len(),
+                    self.options.max_unflushed_memtable
+                );
+                table.clone()
+            };
+            table.await_flush_to_l0().await
+        }
     }
 
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
