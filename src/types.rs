@@ -21,6 +21,7 @@ pub struct KeyValueDeletable {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RowAttributes {
     pub ts: Option<i64>,
+    pub expire_ts: Option<i64>,
 }
 
 /// Represents a value that may be a tombstone.

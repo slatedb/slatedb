@@ -57,17 +57,20 @@ pub fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
 }
 
 #[allow(dead_code)]
-pub fn gen_attrs(ts: i64) -> RowAttributes {
-    RowAttributes { ts: Some(ts) }
+pub(crate) fn gen_attrs(ts: i64) -> RowAttributes {
+    RowAttributes {
+        ts: Some(ts),
+        expire_ts: None,
+    }
 }
 
-pub struct TestClock {
-    ticker: AtomicI64,
+pub(crate) struct TestClock {
+    pub(crate) ticker: AtomicI64,
 }
 
 #[allow(dead_code)]
 impl TestClock {
-    pub fn new() -> TestClock {
+    pub(crate) fn new() -> TestClock {
         TestClock {
             ticker: AtomicI64::new(0),
         }
@@ -76,7 +79,7 @@ impl TestClock {
 
 impl Clock for TestClock {
     fn now(&self) -> i64 {
-        self.ticker.fetch_add(1, Ordering::SeqCst)
+        self.ticker.load(Ordering::SeqCst)
     }
 }
 

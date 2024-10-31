@@ -132,6 +132,7 @@ impl BlockBuilder {
             value,
             &self.row_features,
             attrs.ts,
+            attrs.expire_ts,
         );
 
         if self.first_key.is_empty() {

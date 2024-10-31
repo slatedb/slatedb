@@ -71,6 +71,7 @@ impl SsTableId {
 pub(crate) enum RowFeature {
     Flags,
     Timestamp,
+    ExpireAtTs,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
