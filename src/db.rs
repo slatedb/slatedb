@@ -14,8 +14,7 @@ use crate::cached_object_store::CachedObjectStore;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
-    DbOptions, PutOptions, ReadOptions, WriteOptions, DEFAULT_PUT_OPTIONS, DEFAULT_READ_OPTIONS,
-    DEFAULT_WRITE_OPTIONS,
+    DbOptions, PutOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -31,7 +30,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
-use crate::types::{RowAttributes, ValueDeletable};
+use crate::types::ValueDeletable;
 use std::rc::Rc;
 
 pub(crate) struct DbInner {
@@ -201,108 +200,6 @@ impl DbInner {
         return self.options.wal_enabled;
         #[cfg(not(feature = "wal_disable"))]
         return true;
-    }
-
-    /// Put a key-value pair into the database. Key must not be empty.
-    #[allow(clippy::panic)]
-    pub async fn put_with_options(
-        &self,
-        key: &[u8],
-        value: &[u8],
-        put_opts: &PutOptions,
-        write_opts: &WriteOptions,
-    ) {
-        assert!(!key.is_empty(), "key cannot be empty");
-
-        self.maybe_apply_backpressure().await;
-
-        let key = Bytes::copy_from_slice(key);
-        let value = Bytes::copy_from_slice(value);
-        let now = self.options.clock.now();
-        let expire_ts = put_opts.expire_ts_from(self.options.default_ttl, now);
-
-        // Clone memtable to avoid a deadlock with flusher thread.
-        let current_table = if self.wal_enabled() {
-            let mut guard = self.state.write();
-            let current_wal = guard.wal();
-            current_wal.put(
-                key,
-                value,
-                RowAttributes {
-                    ts: Some(now),
-                    expire_ts,
-                },
-            );
-            current_wal.table().clone()
-        } else {
-            if cfg!(not(feature = "wal_disable")) {
-                panic!("wal_disabled feature must be enabled");
-            }
-            let mut guard = self.state.write();
-            let current_memtable = guard.memtable();
-            current_memtable.put(
-                key,
-                value,
-                RowAttributes {
-                    ts: Some(now),
-                    expire_ts,
-                },
-            );
-            let table = current_memtable.table().clone();
-            let last_wal_id = guard.last_written_wal_id();
-            self.maybe_freeze_memtable(&mut guard, last_wal_id);
-            table
-        };
-
-        if write_opts.await_durable {
-            current_table.await_durable().await;
-        }
-    }
-
-    /// Delete a key from the database. Key must not be empty.
-    #[allow(clippy::panic)]
-    pub async fn delete_with_options(&self, key: &[u8], options: &WriteOptions) {
-        assert!(!key.is_empty(), "key cannot be empty");
-
-        self.maybe_apply_backpressure().await;
-
-        let key = Bytes::copy_from_slice(key);
-        let now = self.options.clock.now();
-
-        // Clone memtable to avoid a deadlock with flusher thread.
-        let current_table = if self.wal_enabled() {
-            let mut guard = self.state.write();
-            let current_wal = guard.wal();
-            current_wal.delete(
-                key,
-                RowAttributes {
-                    ts: Some(now),
-                    expire_ts: None,
-                },
-            );
-            current_wal.table().clone()
-        } else {
-            if cfg!(not(feature = "wal_disable")) {
-                panic!("wal_disabled feature must be enabled");
-            }
-            let mut guard = self.state.write();
-            let current_memtable = guard.memtable();
-            current_memtable.delete(
-                key,
-                RowAttributes {
-                    ts: Some(now),
-                    expire_ts: None,
-                },
-            );
-            let table = current_memtable.table().clone();
-            let last_wal_id = guard.last_written_wal_id();
-            self.maybe_freeze_memtable(&mut guard, last_wal_id);
-            table
-        };
-
-        if options.await_durable {
-            current_table.await_durable().await;
-        }
     }
 
     pub async fn write_with_options(
@@ -671,10 +568,9 @@ impl Db {
     }
 
     pub async fn put(&self, key: &[u8], value: &[u8]) {
-        // TODO move the put into an async block by blocking on the memtable flush
-        self.inner
-            .put_with_options(key, value, DEFAULT_PUT_OPTIONS, DEFAULT_WRITE_OPTIONS)
-            .await;
+        let mut batch = WriteBatch::new();
+        batch.put(key, value);
+        self.write(batch).await.expect("write failed");
     }
 
     pub async fn put_with_options(
@@ -684,21 +580,25 @@ impl Db {
         put_opts: &PutOptions,
         write_opts: &WriteOptions,
     ) {
-        self.inner
-            .put_with_options(key, value, put_opts, write_opts)
-            .await;
+        let mut batch = WriteBatch::new();
+        batch.put_with_options(key, value, put_opts);
+        self.write_with_options(batch, write_opts)
+            .await
+            .expect("write failed");
     }
 
     pub async fn delete(&self, key: &[u8]) {
-        // TODO move the put into an async block by blocking on the memtable flush
-        self.inner
-            .delete_with_options(key, DEFAULT_WRITE_OPTIONS)
-            .await;
+        let mut batch = WriteBatch::new();
+        batch.delete(key);
+        self.write(batch).await.expect("write failed");
     }
 
     pub async fn delete_with_options(&self, key: &[u8], options: &WriteOptions) {
-        // TODO move the put into an async block by blocking on the memtable flush
-        self.inner.delete_with_options(key, options).await;
+        let mut batch = WriteBatch::new();
+        batch.delete(key);
+        self.write_with_options(batch, options)
+            .await
+            .expect("write failed");
     }
 
     /// Write a batch of put/delete operations atomically to the database. Batch writes
@@ -746,6 +646,7 @@ mod tests {
     use super::*;
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
+        DEFAULT_PUT_OPTIONS,
     };
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
