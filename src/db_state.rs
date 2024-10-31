@@ -2,7 +2,7 @@ use bytes::Bytes;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tracing::info;
+use tracing::debug;
 use ulid::Ulid;
 use SsTableId::{Compacted, Wal};
 
@@ -177,11 +177,11 @@ impl CoreDbState {
             .iter()
             .map(|sr| (sr.id, sr.estimate_size()))
             .collect();
-        info!("DB Levels:");
-        info!("-----------------");
-        info!("{:?}", l0s);
-        info!("{:?}", compacted);
-        info!("-----------------");
+        debug!("DB Levels:");
+        debug!("-----------------");
+        debug!("{:?}", l0s);
+        debug!("{:?}", compacted);
+        debug!("-----------------");
     }
 }
 
