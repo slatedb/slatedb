@@ -60,14 +60,17 @@ table DbParent {
 
    // Optional parent checkpoint ID
    parent_checkpoint: UUID (required);
-   
-   // Flag to indicate whether initialization has finished
-   initialized: boolean
 }
 
 table ManifestV1 {
    // Optional details about the parent checkpoint for the database
    parent: DbParent
+
+   // Flag to indicate whether initialization has finished. When creating the initial manifest for
+   // a root db (one that is not a clone), this flag will be set to true. When creating the initial
+   // manifest for a clone db, this flag will be set to false and then updated to true once clone
+   // initialization has completed.
+   initialized: boolean
 
    // Optional epoch time in seconds that this database was destroyed
    destroyed_at_s: u64;
@@ -140,6 +143,10 @@ struct CheckpointOptions {
     /// the current wallclock time plus the specified lifetime. If lifetime is None, then the checkpoint
     /// is created without an expiry time.
     lifetime: Option<Duration>,
+
+    /// Optionally specifies an existing checkpoint to use as the source for this checkpoint. This is
+    /// useful for users to establish checkpoints whose lifecycle they manage from existing checkpoints.
+    source: Option<UUID>
 }
 
 impl Db {
@@ -254,6 +261,9 @@ Options:
     The checkpoint's expiry time will be set to the current wallclock time plus the specified
     lifetime. If the lifetime is not specified, then the checkpoint is set with no expiry and
     must be explicitly removed
+  -s, --source <UUID> Optionally specify an existing checkpoint to use as the base for the newly
+    created checkpoint. If not provided then the checkpoint will be taken against the latest
+    manifest.
 
 $ slatedb refresh-checkpoint --help
 Refresh an existing checkpoint's expiry time. This command will look for an existing checkpoint
@@ -285,6 +295,42 @@ Usage: slatedb --path <PATH> list-checkpoints
 
 ```
 
+### Creating a Checkpoint
+
+Checkpoints can be created using the `create_checkpoint` API, the `create-checkpoint` CLI command, or by the
+writer/reader clients as part of their normal operations (see below sections).
+
+Checkpoints can be taken form the current manifest, or from an existing checkpoint. Checkpoints cannot be created from
+arbitrary manifest versions.
+
+Generally to take a checkpoint from the current manifest, the client runs a procedure that looks like the following:
+1. Get the current manifest M at version V.
+2. If M.`initialized` is false, exit with error.
+3. Compute a new v4 UUID id for the checkpoint.
+4. Create a new entry in `checkpoints` with:
+    - `id` set to the id computed in the previous step
+    - `manfiest_id` set to V or V+1. We use V+1 to allow addition of the checkpoint to be included with other updates.
+    - other fields set as appropriate (e.g. expiry time based on relevant checkpoint creation params)
+5. Write a new manifest M' at version V+1. If CAS fails, go to step 1.
+
+To take a checkpoint from an existing checkpoint with id S, the client runs the following procedure:
+1. Get the current manifest M at version V.
+2. Look for the checkpoint C with id S under `checkpoints`. If there is no such checkpoint, exit with error.
+3. Check that C is not expired. If it is, then exit with error.
+4. Compute a new v4 UUID id for the checkpoint.
+5. Create a new entry in `checkpoints` with:
+    - `id` set to the id computed in the previous step
+    - `manifest_id` set to C.`manifest_id`
+    - other fields set as appropriate (e.g. expiry time based on relevant checkpoint creation params)
+6. Write a new manifest M' at version V+1. If CAS fails, go to step 1.
+
+The `create-checkpoint` CLI and `create_checkpoint` API will run exactly these procedures when called without
+and with a source checkpoint ID, respectively.
+
+Otherwise, the exact procedures used by the writer/reader clients vary slightly depending on the context. For example,
+the writer may include other updates along with the update that adds the checkpoint. These variants are detailed in the
+sections below.
+
 ### Writers
 
 Writers will create checkpoints to “pin” the set of SRs currently being used to serve reads. As the writer consumes
@@ -294,13 +340,17 @@ interference from the GC.
 
 #### Establishing Initial Checkpoint
 
-The writer first establishes it’s checkpoint when starting up, as part of incrementing the epoch:
+The writer first establishes it’s checkpoint against the current manifest when starting up, as part of incrementing the
+epoch:
 1. Read the latest manifest version V.
 2. Compute the writer’s epoch E
 3. Look through the checkpoints under `checkpoint` for any entries with `metadata` of type `WriterCheckpoint`, and
    remove any such entries.
-4. Create a new checkpoint with id set to a new v4 uuid, `manifest_id` set to the next manifest version (V + 1), and
-   `checkpoint_expire_time_s` set to None, and `metadata` set to `WriterCheckpoint{ epoch: E }`.
+4. Create a new checkpoint with:
+   - `id` set to a new v4 uuid
+   - `manifest_id` set to the next manifest version (V + 1)
+   - `checkpoint_expire_time_s` set to None
+   - `metadata` set to `WriterCheckpoint{ epoch: E }`.
 5. Set `writer_epoch` to E
 6. Write the manifest. If this fails with a CAS error, go back to 1.
 
@@ -315,8 +365,11 @@ view of the core db state:
    the manifest from Object Storage))
 2. Decide whether it needs to re-establish it’s checkpoint. The writer reestablishes the checkpoint whenever the set of
    L0 SSTs, or Sorted Runs has changed. This includes both changes made locally by the Writer, or by the Compactor.
-    1. If so, create a new checkpoint with `manifest_id` set to V+1, `checkpoint_expire_time` set to None, and
-       `metadata` set to `WriterCheckpoint{ epoch: E }`.
+    1. If so, create a new checkpoint with
+       - `id` set to a new v4 UUID.
+       - `manifest_id` set to V+1.
+       - `checkpoint_expire_time` set to None.
+       - `metadata` set to `WriterCheckpoint{ epoch: E }`.
     2. Delete the old checkpoint from `checkpoints`. When we support range scans, we’ll instead want to maintain
        references to the checkpoint from the range scans and delete the checkpoint when all references are dropped.
        (We should technically do this for point lookups too, but the likelihood of GC deleting an SST in this case is
@@ -334,12 +387,13 @@ To support this, we add the `Db::open_from_checkpoint` method, which accepts a `
 When initializing the db for the first time (detected by the absence of a manifest), the writer will do the following:
 1. Read the current manifest M, which may not be present.
 2. Read the current parent manifest M_p at `parent_path`.
+3. M_p.`initialized` is false, exit with error.
 3. If M is present:
    1. If the `parent` field is empty, exit with error.
-   2. If `parent.initialized`, then go to step 10.
+   2. If `initialized`, then go to step 10.
 4. Compute the clone's checkpoint ID
-    1. If M is present, use M.`parent.parent_checkpoint` as the checkpoint ID
-    2. Otherwise, set checkpoint ID to a new v4 UUID
+   1. If M is present, use M.`parent.parent_checkpoint` as the checkpoint ID
+   2. Otherwise, set checkpoint ID to a new v4 UUID
 6. If `parent_checkpoint` is not None, read it's manifest M_c. Otherwise let M_c be M_p
 7. Write a new manifest M'. If CAS fails, go to step 1. M' fields are set to:
    - parent: set to point to checkpoint ID and initialized set to false
@@ -350,10 +404,10 @@ When initializing the db for the first time (detected by the absence of a manife
    - l0: copied from M_c
    - l0_last_compacted: copied from M_c
    - compacted: copied from M_c
-   - checkpoints: empty 
+   - checkpoints: empty
 8. Create or update the checkpoint with checkpoint ID pointing to M_c in the parent DB. If CAS fails, go to step 1.
-9. Update M' with `parent.initialized` set to true. If CAS fails, go to step 1.
-10. Copy over any WAL SSTs between M_c.`last_compacted_wal_id` and M_c.`wal_id_last_seen`.
+9. Copy over any WAL SSTs between M_c.`last_compacted_wal_id` and M_c.`wal_id_last_seen`.
+10. Update M' with `initialized` set to true. If CAS fails, go to step 1.
 
 ##### SST Path Resolution
 
@@ -397,11 +451,12 @@ option.
 #### Establishing the Checkpoint
 
 To establish the checkpoint, `DbReader` will:
-1. Read the latest manifest version V.
-2. Create a new checkpoint with id set to a new v4 uuid, `manifest_id` set to the next manifest version (V + 1),
+1. Read the latest manifest M at version V.
+2. Check that M.`initialized` is true. If not, return error.
+3. Create a new checkpoint with id set to a new v4 uuid, `manifest_id` set to the next manifest version (V + 1),
    `checkpoint_expire_time_s` set to the current time plus `checkpoint_lifetime`, and `metadata` set to None.
-3. Update the manifest’s `wal_id_last_seen` to the latest WAL id found in the wal directory
-4. Write the manifest. If this fails with a CAS error, go back to 1.
+4. Update the manifest’s `wal_id_last_seen` to the latest WAL id found in the wal directory
+5. Write the manifest. If this fails with a CAS error, go back to 1.
 
 Then, the reader will restore data from the WAL. The reader will just replay the WAL data into an in-memory table.
 The size of the table will be bounded by `max_memtable_bytes`. When the table fills up, it’ll be added to a list and a
