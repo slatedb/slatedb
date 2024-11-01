@@ -63,6 +63,11 @@ impl<K: Hash + Eq, V> GhostQueue<K, V> {
     }
 
     #[inline]
+    pub fn need_cache(&self, key: &K) -> bool {
+        self.queue.contains(key)
+    }
+
+    #[inline]
     pub fn capacity(&self) -> NonZeroUsize {
         self.capacity
     }

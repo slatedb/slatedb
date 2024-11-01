@@ -125,11 +125,12 @@ impl CachedObjectStore {
                 let mut ghost_guard = self.ghost.lock().await;
                 // ghost queue hit, so the element is not accessed for the first time, we actually write it to
                 // the local cache otherwise we just record it in the ghost queue.
-                if ghost_guard.remove(location).is_some() {
+                if ghost_guard.need_cache(location) {
                     // TODO(asukamilet): process `save_result` failure, maybe we should put
                     // identifier to the tail of ghost queue if the disk is full?
-                    self.db_stats.object_store_cache_write_num.inc();
                     self.save_result(result).await.ok();
+                    self.db_stats.object_store_cache_write_num.inc();
+                    ghost_guard.remove(location);
                 } else {
                     ghost_guard.record(location.clone(), result.meta);
                 }
@@ -213,12 +214,13 @@ impl CachedObjectStore {
         let mut ghost_guard = self.ghost.lock().await;
         // Disk cache miss, increase ghost queue capacity
         self.increase_ghost_capacity(&mut ghost_guard);
-        if ghost_guard.remove(location).is_some() {
+        if ghost_guard.need_cache(location) {
             // swallow the error on saving to disk here (the disk might be already full), just fallback
             // to the object store.
             // TODO: add a warning log here and process `save_result` failure for ghost queue
-            self.db_stats.object_store_cache_write_num.inc();
             self.save_result(get_result).await.ok();
+            self.db_stats.object_store_cache_write_num.inc();
+            ghost_guard.remove(location);
             Ok((None, result_meta, result_attributes))
         } else {
             // Object is accessed for the first time, we will not store it in the disk cache
