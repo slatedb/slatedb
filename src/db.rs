@@ -7,6 +7,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Handle;
+use tracing::warn;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
@@ -14,8 +15,7 @@ use crate::cached_object_store::CachedObjectStore;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
-    DbOptions, PutOptions, ReadOptions, WriteOptions, DEFAULT_PUT_OPTIONS, DEFAULT_READ_OPTIONS,
-    DEFAULT_WRITE_OPTIONS,
+    DbOptions, PutOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -31,7 +31,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
-use crate::types::{RowAttributes, ValueDeletable};
+use crate::types::ValueDeletable;
 use std::rc::Rc;
 
 pub(crate) struct DbInner {
@@ -203,108 +203,6 @@ impl DbInner {
         return true;
     }
 
-    /// Put a key-value pair into the database. Key must not be empty.
-    #[allow(clippy::panic)]
-    pub async fn put_with_options(
-        &self,
-        key: &[u8],
-        value: &[u8],
-        put_opts: &PutOptions,
-        write_opts: &WriteOptions,
-    ) {
-        assert!(!key.is_empty(), "key cannot be empty");
-
-        self.maybe_apply_backpressure().await;
-
-        let key = Bytes::copy_from_slice(key);
-        let value = Bytes::copy_from_slice(value);
-        let now = self.options.clock.now();
-        let expire_ts = put_opts.expire_ts_from(self.options.default_ttl, now);
-
-        // Clone memtable to avoid a deadlock with flusher thread.
-        let current_table = if self.wal_enabled() {
-            let mut guard = self.state.write();
-            let current_wal = guard.wal();
-            current_wal.put(
-                key,
-                value,
-                RowAttributes {
-                    ts: Some(now),
-                    expire_ts,
-                },
-            );
-            current_wal.table().clone()
-        } else {
-            if cfg!(not(feature = "wal_disable")) {
-                panic!("wal_disabled feature must be enabled");
-            }
-            let mut guard = self.state.write();
-            let current_memtable = guard.memtable();
-            current_memtable.put(
-                key,
-                value,
-                RowAttributes {
-                    ts: Some(now),
-                    expire_ts,
-                },
-            );
-            let table = current_memtable.table().clone();
-            let last_wal_id = guard.last_written_wal_id();
-            self.maybe_freeze_memtable(&mut guard, last_wal_id);
-            table
-        };
-
-        if write_opts.await_durable {
-            current_table.await_durable().await;
-        }
-    }
-
-    /// Delete a key from the database. Key must not be empty.
-    #[allow(clippy::panic)]
-    pub async fn delete_with_options(&self, key: &[u8], options: &WriteOptions) {
-        assert!(!key.is_empty(), "key cannot be empty");
-
-        self.maybe_apply_backpressure().await;
-
-        let key = Bytes::copy_from_slice(key);
-        let now = self.options.clock.now();
-
-        // Clone memtable to avoid a deadlock with flusher thread.
-        let current_table = if self.wal_enabled() {
-            let mut guard = self.state.write();
-            let current_wal = guard.wal();
-            current_wal.delete(
-                key,
-                RowAttributes {
-                    ts: Some(now),
-                    expire_ts: None,
-                },
-            );
-            current_wal.table().clone()
-        } else {
-            if cfg!(not(feature = "wal_disable")) {
-                panic!("wal_disabled feature must be enabled");
-            }
-            let mut guard = self.state.write();
-            let current_memtable = guard.memtable();
-            current_memtable.delete(
-                key,
-                RowAttributes {
-                    ts: Some(now),
-                    expire_ts: None,
-                },
-            );
-            let table = current_memtable.table().clone();
-            let last_wal_id = guard.last_written_wal_id();
-            self.maybe_freeze_memtable(&mut guard, last_wal_id);
-            table
-        };
-
-        if options.await_durable {
-            current_table.await_durable().await;
-        }
-    }
-
     pub async fn write_with_options(
         &self,
         batch: WriteBatch,
@@ -317,6 +215,7 @@ impl DbInner {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
 
+        self.maybe_apply_backpressure().await;
         self.write_notifier.send(batch_msg).ok();
 
         let current_table = rx.await.expect("write batch failed")?;
@@ -326,6 +225,28 @@ impl DbInner {
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn maybe_apply_backpressure(&self) {
+        loop {
+            let table = {
+                let guard = self.state.read();
+                let state = guard.state();
+                if state.imm_memtable.len() <= self.options.max_unflushed_memtable {
+                    return;
+                }
+                let Some(table) = state.imm_memtable.back() else {
+                    return;
+                };
+                warn!(
+                    "applying backpressure to write by waiting for imm table flush. imm tables({}), max({})",
+                    state.imm_memtable.len(),
+                    self.options.max_unflushed_memtable
+                );
+                table.clone()
+            };
+            table.await_flush_to_l0().await
+        }
     }
 
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
@@ -670,11 +591,10 @@ impl Db {
         self.inner.get_with_options(key, options).await
     }
 
-    pub async fn put(&self, key: &[u8], value: &[u8]) {
-        // TODO move the put into an async block by blocking on the memtable flush
-        self.inner
-            .put_with_options(key, value, DEFAULT_PUT_OPTIONS, DEFAULT_WRITE_OPTIONS)
-            .await;
+    pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), SlateDBError> {
+        let mut batch = WriteBatch::new();
+        batch.put(key, value);
+        self.write(batch).await
     }
 
     pub async fn put_with_options(
@@ -683,22 +603,26 @@ impl Db {
         value: &[u8],
         put_opts: &PutOptions,
         write_opts: &WriteOptions,
-    ) {
-        self.inner
-            .put_with_options(key, value, put_opts, write_opts)
-            .await;
+    ) -> Result<(), SlateDBError> {
+        let mut batch = WriteBatch::new();
+        batch.put_with_options(key, value, put_opts);
+        self.write_with_options(batch, write_opts).await
     }
 
-    pub async fn delete(&self, key: &[u8]) {
-        // TODO move the put into an async block by blocking on the memtable flush
-        self.inner
-            .delete_with_options(key, DEFAULT_WRITE_OPTIONS)
-            .await;
+    pub async fn delete(&self, key: &[u8]) -> Result<(), SlateDBError> {
+        let mut batch = WriteBatch::new();
+        batch.delete(key);
+        self.write(batch).await
     }
 
-    pub async fn delete_with_options(&self, key: &[u8], options: &WriteOptions) {
-        // TODO move the put into an async block by blocking on the memtable flush
-        self.inner.delete_with_options(key, options).await;
+    pub async fn delete_with_options(
+        &self,
+        key: &[u8],
+        options: &WriteOptions,
+    ) -> Result<(), SlateDBError> {
+        let mut batch = WriteBatch::new();
+        batch.delete(key);
+        self.write_with_options(batch, options).await
     }
 
     /// Write a batch of put/delete operations atomically to the database. Batch writes
@@ -746,6 +670,7 @@ mod tests {
     use super::*;
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
+        DEFAULT_PUT_OPTIONS,
     };
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
@@ -765,14 +690,14 @@ mod tests {
         .unwrap();
         let key = b"test_key";
         let value = b"test_value";
-        kv_store.put(key, value).await;
+        kv_store.put(key, value).await.unwrap();
         kv_store.flush().await.unwrap();
 
         assert_eq!(
             kv_store.get(key).await.unwrap(),
             Some(Bytes::from_static(value))
         );
-        kv_store.delete(key).await;
+        kv_store.delete(key).await.unwrap();
         assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();
     }
@@ -799,7 +724,7 @@ mod tests {
         let access_count0 = kv_store.metrics().object_store_cache_part_access.get();
         let key = b"test_key";
         let value = b"test_value";
-        kv_store.put(key, value).await;
+        kv_store.put(key, value).await.unwrap();
         kv_store.flush().await.unwrap();
 
         let got = kv_store.get(key).await.unwrap();
@@ -840,7 +765,7 @@ mod tests {
         .unwrap();
         let key = b"test_key";
         let value = b"test_value";
-        kv_store.put(key, value).await;
+        kv_store.put(key, value).await.unwrap();
         kv_store.flush().await.unwrap();
 
         assert_eq!(
@@ -1090,8 +1015,8 @@ mod tests {
         let db = Db::open_with_opts(path.clone(), options, object_store.clone())
             .await
             .unwrap();
-        db.put(&[b'a'; 4], &[b'j'; 4]).await;
-        db.put(&[b'b'; 4], &[b'k'; 4]).await;
+        db.put(&[b'a'; 4], &[b'j'; 4]).await.unwrap();
+        db.put(&[b'b'; 4], &[b'k'; 4]).await.unwrap();
         db.close().await.unwrap();
 
         // open a db with wal disabled and write a memtable
@@ -1106,8 +1031,9 @@ mod tests {
                 await_durable: false,
             },
         )
-        .await;
-        db.put(&[b'a'; 4], &[b'z'; 64]).await;
+        .await
+        .unwrap();
+        db.put(&[b'a'; 4], &[b'z'; 64]).await.unwrap();
         db.close().await.unwrap();
 
         // ensure we don't overwrite the values we just put on a reload
@@ -1153,8 +1079,11 @@ mod tests {
             DEFAULT_PUT_OPTIONS,
             &write_options,
         )
-        .await;
-        db.delete_with_options(&[b'b'; 32], &write_options).await;
+        .await
+        .unwrap();
+        db.delete_with_options(&[b'b'; 32], &write_options)
+            .await
+            .unwrap();
         let write_options = WriteOptions {
             await_durable: true,
         };
@@ -1165,7 +1094,8 @@ mod tests {
             DEFAULT_PUT_OPTIONS,
             &write_options,
         )
-        .await;
+        .await
+        .unwrap();
 
         let state = wait_for_manifest_condition(
             &mut stored_manifest,
@@ -1231,10 +1161,10 @@ mod tests {
         for i in 0..3 {
             let key = [b'a' + i; 16];
             let value = [b'b' + i; 50];
-            kv_store.put(&key, &value).await;
+            kv_store.put(&key, &value).await.unwrap();
             let key = [b'j' + i; 16];
             let value = [b'k' + i; 50];
-            kv_store.put(&key, &value).await;
+            kv_store.put(&key, &value).await.unwrap();
             let db_state = wait_for_manifest_condition(
                 &mut stored_manifest,
                 |s| s.last_compacted_wal_sst_id > last_compacted,
@@ -1275,11 +1205,11 @@ mod tests {
         let db = Db::open_with_opts(Path::from("/tmp/test_kv_store"), options, object_store)
             .await
             .unwrap();
-        db.put(b"key1", b"val1").await;
-        db.put(b"key2", b"val2").await;
-        db.put(b"key3", b"val3").await;
-        db.put(b"key4", b"val4").await;
-        db.put(b"key5", b"val5").await;
+        db.put(b"key1", b"val1").await.unwrap();
+        db.put(b"key2", b"val2").await.unwrap();
+        db.put(b"key3", b"val3").await.unwrap();
+        db.put(b"key4", b"val4").await.unwrap();
+        db.put(b"key5", b"val5").await.unwrap();
 
         db.flush().await.unwrap();
 
@@ -1299,7 +1229,7 @@ mod tests {
         .unwrap();
         let key = b"test_key";
         let value = b"";
-        kv_store.put(key, value).await;
+        kv_store.put(key, value).await.unwrap();
         kv_store.flush().await.unwrap();
 
         assert_eq!(
@@ -1372,17 +1302,22 @@ mod tests {
         for i in 0..l0_count {
             kv_store
                 .put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48])
-                .await;
+                .await
+                .unwrap();
             kv_store
                 .put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48])
-                .await;
+                .await
+                .unwrap();
             next_wal_id += 2;
         }
 
         // write some smaller keys so that we populate wal without flushing to l0
         let sst_count: u64 = 5;
         for i in 0..sst_count {
-            kv_store.put(&i.to_be_bytes(), &i.to_be_bytes()).await;
+            kv_store
+                .put(&i.to_be_bytes(), &i.to_be_bytes())
+                .await
+                .unwrap();
             kv_store.flush().await.unwrap();
             next_wal_id += 1;
         }
@@ -1442,7 +1377,8 @@ mod tests {
                     await_durable: false,
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
         let val = kv_store
             .get_with_options(
@@ -1472,7 +1408,10 @@ mod tests {
         .await
         .unwrap();
 
-        kv_store.put("foo".as_bytes(), "bar".as_bytes()).await;
+        kv_store
+            .put("foo".as_bytes(), "bar".as_bytes())
+            .await
+            .unwrap();
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
         kv_store
             .put_with_options(
@@ -1483,7 +1422,8 @@ mod tests {
                     await_durable: false,
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
         let val = kv_store.get("foo".as_bytes()).await.unwrap();
         assert_eq!(val, Some(Bytes::from("bar")));
@@ -1515,7 +1455,10 @@ mod tests {
         .await
         .unwrap();
 
-        kv_store.put("foo".as_bytes(), "bar".as_bytes()).await;
+        kv_store
+            .put("foo".as_bytes(), "bar".as_bytes())
+            .await
+            .unwrap();
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
         kv_store
             .delete_with_options(
@@ -1524,7 +1467,8 @@ mod tests {
                     await_durable: false,
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
         let val = kv_store.get("foo".as_bytes()).await.unwrap();
         assert_eq!(val, Some(Bytes::from("bar")));
@@ -1569,11 +1513,11 @@ mod tests {
         // write a few keys that will result in memtable flushes
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
-        db.put(&key1, &value1).await;
+        db.put(&key1, &value1).await.unwrap();
         next_wal_id += 1;
         let key2 = [b'c'; 32];
         let value2 = [b'd'; 96];
-        db.put(&key2, &value2).await;
+        db.put(&key2, &value2).await.unwrap();
         next_wal_id += 1;
 
         db.close().await.unwrap();
@@ -1621,8 +1565,8 @@ mod tests {
 
         // write enough to fill up a few l0 SSTs
         for i in 0..4 {
-            db.put(&[b'a' + i; 32], &[1u8 + i; 32]).await;
-            db.put(&[b'm' + i; 32], &[13u8 + i; 32]).await;
+            db.put(&[b'a' + i; 32], &[1u8 + i; 32]).await.unwrap();
+            db.put(&[b'm' + i; 32], &[13u8 + i; 32]).await.unwrap();
         }
         // wait for compactor to compact them
         wait_for_manifest_condition(
@@ -1638,8 +1582,8 @@ mod tests {
         );
         // write more l0s and wait for compaction
         for i in 0..4 {
-            db.put(&[b'f' + i; 32], &[6u8 + i; 32]).await;
-            db.put(&[b's' + i; 32], &[19u8 + i; 32]).await;
+            db.put(&[b'f' + i; 32], &[6u8 + i; 32]).await.unwrap();
+            db.put(&[b's' + i; 32], &[19u8 + i; 32]).await.unwrap();
         }
         wait_for_manifest_condition(
             &mut sm,
@@ -1653,8 +1597,8 @@ mod tests {
             db.inner.state.read().state().core.compacted.len()
         );
         // write another l0
-        db.put(&[b'a'; 32], &[128u8; 32]).await;
-        db.put(&[b'm'; 32], &[129u8; 32]).await;
+        db.put(&[b'a'; 32], &[128u8; 32]).await.unwrap();
+        db.put(&[b'm'; 32], &[129u8; 32]).await.unwrap();
 
         let val = db.get(&[b'a'; 32]).await.unwrap();
         assert_eq!(val, Some(Bytes::copy_from_slice(&[128u8; 32])));
@@ -1732,7 +1676,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(db.inner.state.read().state().core.next_wal_sst_id, 2);
-        db.put(b"1", b"1").await;
+        db.put(b"1", b"1").await.unwrap();
         // assert that second open writes another empty wal.
         let db = Db::open_with_opts(
             path.clone(),
@@ -1765,7 +1709,8 @@ mod tests {
                 await_durable: false,
             },
         )
-        .await;
+        .await
+        .unwrap();
         db1.flush().await.unwrap();
         // open db2, causing it to write an empty wal and fence db1.
         let db2 = Db::open_with_opts(
@@ -1784,7 +1729,8 @@ mod tests {
                 await_durable: false,
             },
         )
-        .await;
+        .await
+        .unwrap();
         assert!(matches!(db1.flush().await, Err(SlateDBError::Fenced)));
         db2.put_with_options(
             b"2",
@@ -1794,7 +1740,8 @@ mod tests {
                 await_durable: false,
             },
         )
-        .await;
+        .await
+        .unwrap();
         db2.flush().await.unwrap();
         assert_eq!(db2.inner.state.read().state().core.next_wal_sst_id, 5);
     }

@@ -238,7 +238,8 @@ impl Task {
                         &PutOptions::default(),
                         &self.write_options,
                     )
-                    .await;
+                    .await
+                    .unwrap();
                 puts += 1;
             } else {
                 self.db.get(key).await.unwrap();
