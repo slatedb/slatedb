@@ -328,8 +328,12 @@ mod tests {
         let options = db_options(Some(compactor_options(clock.clone())), clock.clone());
         let (_, manifest_store, table_store, db) = build_test_db(options).await;
         for i in 0..4 {
-            db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48]).await;
-            db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48]).await;
+            db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48])
+                .await
+                .unwrap();
+            db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48])
+                .await
+                .unwrap();
         }
 
         // when:
@@ -392,7 +396,8 @@ mod tests {
             },
             &WriteOptions::default(),
         )
-        .await;
+        .await
+        .unwrap();
 
         // ticker time = 10, expire time = 60 (using default TTL)
         insert_clock.ticker.store(10, atomic::Ordering::SeqCst);
@@ -402,7 +407,8 @@ mod tests {
             &PutOptions { ttl: Ttl::Default },
             &WriteOptions::default(),
         )
-        .await;
+        .await
+        .unwrap();
 
         db.flush().await.unwrap();
 
@@ -414,7 +420,8 @@ mod tests {
             &PutOptions { ttl: Ttl::NoExpiry },
             &WriteOptions::default(),
         )
-        .await;
+        .await
+        .unwrap();
 
         // this revives key 1
         // ticker time = 40, expire time 80
@@ -427,7 +434,8 @@ mod tests {
             },
             &WriteOptions::default(),
         )
-        .await;
+        .await
+        .unwrap();
 
         db.flush().await.unwrap();
 
@@ -475,7 +483,7 @@ mod tests {
             .block_on(StoredManifest::load(manifest_store.clone()))
             .unwrap()
             .unwrap();
-        rt.block_on(db.put(&[b'a'; 32], &[b'b'; 96]));
+        rt.block_on(db.put(&[b'a'; 32], &[b'b'; 96])).unwrap();
         rt.block_on(db.close()).unwrap();
         let (_, external_rx) = crossbeam_channel::unbounded();
         let mut orchestrator = CompactorOrchestrator::new(
@@ -502,7 +510,7 @@ mod tests {
                 os.clone(),
             ))
             .unwrap();
-        rt.block_on(db.put(&[b'j'; 32], &[b'k'; 96]));
+        rt.block_on(db.put(&[b'j'; 32], &[b'k'; 96])).unwrap();
         rt.block_on(db.close()).unwrap();
         orchestrator
             .submit_compaction(Compaction::new(l0_ids_to_compact.clone(), 0))
