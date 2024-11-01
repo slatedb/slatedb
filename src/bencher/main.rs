@@ -54,9 +54,10 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
         args.num_rows,
         args.duration.map(|d| Duration::from_secs(d as u64)),
         args.put_percentage,
-        db,
+        db.clone(),
     );
     bencher.run().await;
+    db.close().await.expect("Failed to close db");
 }
 
 async fn exec_benchmark_compaction(
