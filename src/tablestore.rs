@@ -598,7 +598,7 @@ mod tests {
     use crate::tablestore::DbCache;
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, gen_attrs};
-    use crate::types::{RowEntry, ValueDeletable};
+    use crate::types::{RowAttributes, RowEntry, ValueDeletable};
     use crate::{
         block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
     };
@@ -641,10 +641,6 @@ mod tests {
         // when:
         let mut writer = ts.table_writer(id);
         writer
-            .add(RowEntry::new("key".into(), Some("value".into()), 0))
-            .await
-            .unwrap();
-        writer
             .add(
                 RowEntry::new(vec![b'a'; 16].into(), Some(vec![1u8; 16].into()), 0)
                     .with_create_ts(1),
@@ -653,7 +649,7 @@ mod tests {
             .unwrap();
         writer
             .add(
-                RowEntry::new(vec![b'a'; 16].into(), Some(vec![2u8; 16].into()), 0)
+                RowEntry::new(vec![b'b'; 16].into(), Some(vec![2u8; 16].into()), 0)
                     .with_create_ts(2),
             )
             .await
@@ -663,7 +659,10 @@ mod tests {
             .await
             .unwrap();
         writer
-            .add(RowEntry::new(vec![b'd'; 16].into(), None, 0).with_create_ts(3))
+            .add(
+                RowEntry::new(vec![b'd'; 16].into(), Some(vec![4u8; 16].into()), 0)
+                    .with_create_ts(4),
+            )
             .await
             .unwrap();
         let sst = writer.close().await.unwrap();
@@ -685,7 +684,14 @@ mod tests {
                     ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 16])),
                     gen_attrs(2),
                 ),
-                (vec![b'c'; 16], ValueDeletable::Tombstone, gen_attrs(3)),
+                (
+                    vec![b'c'; 16],
+                    ValueDeletable::Tombstone,
+                    RowAttributes {
+                        ts: None,
+                        expire_ts: None,
+                    },
+                ),
                 (
                     vec![b'd'; 16],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[4u8; 16])),

@@ -3,7 +3,6 @@ use crate::flatbuffer_types::{SstRowExtra, SstRowExtraArgs};
 use crate::types::{RowEntry, ValueDeletable};
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use moka::ops::compute::Op;
 
 bitflags! {
     #[derive(Debug, Clone, PartialEq, Default)]
@@ -90,10 +89,6 @@ impl SstRowEntry {
             SstRowKey::Full(key) => key,
             _ => unreachable!("the full key should be reconstructed with prefix while decoding"),
         }
-    }
-
-    fn value(&self) -> &ValueDeletable {
-        &self.value
     }
 }
 
@@ -313,7 +308,7 @@ mod tests {
         let expected_value = ValueDeletable::Tombstone;
 
         assert_eq!(decoded.key(), &expected_key);
-        assert_eq!(decoded.value(), &expected_value);
+        assert_eq!(decoded.value, expected_value);
         assert_eq!(decoded.create_ts, None);
     }
 

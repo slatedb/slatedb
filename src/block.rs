@@ -179,6 +179,8 @@ impl BlockBuilder {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_utils::gen_attrs;
+
     use super::*;
 
     #[test]
@@ -218,12 +220,8 @@ mod tests {
     #[test]
     fn test_block_size() {
         let mut builder = BlockBuilder::new(4096, vec![RowFeature::Flags]);
-        assert!(
-            builder.add(RowEntry::new("key1".into(), Some("value1".into()), 0).with_create_ts(1))
-        );
-        assert!(
-            builder.add(RowEntry::new("key2".into(), Some("value2".into()), 0).with_create_ts(2))
-        );
+        assert!(builder.add_kv(b"key1", Some(b"value1"), gen_attrs(1)));
+        assert!(builder.add_kv(b"key2", Some(b"value2"), gen_attrs(1)));
         let block = builder.build().unwrap();
         assert_eq!(41, block.size());
     }
