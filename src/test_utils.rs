@@ -72,6 +72,14 @@ pub(crate) fn gen_attrs(ts: i64) -> RowAttributes {
     }
 }
 
+#[allow(dead_code)]
+pub(crate) fn gen_empty_attrs() -> RowAttributes {
+    RowAttributes {
+        ts: None,
+        expire_ts: None,
+    }
+}
+
 pub(crate) struct TestClock {
     pub(crate) ticker: AtomicI64,
 }
