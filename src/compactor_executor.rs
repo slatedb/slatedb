@@ -21,7 +21,7 @@ use crate::tablestore::TableStore;
 
 use crate::metrics::DbStats;
 use crate::types::ValueDeletable::Tombstone;
-use crate::types::{RowEntry, RowAttributes};
+use crate::types::{RowAttributes, RowEntry};
 use tracing::error;
 
 pub(crate) struct CompactionJob {
@@ -131,7 +131,7 @@ impl TokioCompactionExecutorInner {
             // filter out any expired entries -- eventually we can consider
             // abstracting this away into generic, pluggable compaction filters
             // but for now we do it inline
-            let kv = match raw_kv.attributes.expire_ts {
+            let kv = match raw_kv.expire_ts {
                 Some(expire_ts) if expire_ts <= now => {
                     // insert a tombstone instead of just filtering out the
                     // value in the iterator because this may otherwise "revive"
@@ -140,10 +140,9 @@ impl TokioCompactionExecutorInner {
                     RowEntry {
                         key: raw_kv.key,
                         value: Tombstone,
-                        attributes: RowAttributes {
-                            ts: raw_kv.attributes.ts,
-                            expire_ts: None,
-                        },
+                        flags: raw_kv.flags,
+                        create_ts: raw_kv.create_ts,
+                        expire_ts: None,
                     }
                 }
                 _ => raw_kv,

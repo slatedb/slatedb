@@ -393,12 +393,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
         }
     }
 
-    pub fn add(
-        &mut self,
-        key: &[u8],
-        value: Option<&[u8]>,
-        attrs: RowAttributes,
-    ) -> Result<(), SlateDBError> {
+    pub fn add(&mut self, entry: RowEntry) -> Result<(), SlateDBError> {
         self.num_keys += 1;
 
         if !self.builder.add(key, value, attrs.clone()) {

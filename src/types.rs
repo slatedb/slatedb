@@ -21,6 +21,36 @@ pub struct RowEntry {
     pub expire_ts: Option<i64>,
 }
 
+impl RowEntry {
+    pub fn new(key: Bytes, value: Option<Bytes>) -> Self {
+        let flags = match &value {
+            Some(_) => RowFlags::default(),
+            None => RowFlags::Tombstone,
+        };
+        let value = match value {
+            Some(v) => ValueDeletable::Value(v),
+            None => ValueDeletable::Tombstone,
+        };
+        Self {
+            key,
+            value,
+            flags,
+            create_ts: None,
+            expire_ts: None,
+        }
+    }
+
+    pub fn with_create_ts(mut self, ts: i64) -> Self {
+        self.create_ts = Some(ts);
+        self
+    }
+
+    pub fn with_expire_ts(mut self, ts: i64) -> Self {
+        self.expire_ts = Some(ts);
+        self
+    }
+}
+
 /// The metadata associated with a `KeyValueDeletable`
 #[derive(Debug, Clone, PartialEq)]
 pub struct RowAttributes {

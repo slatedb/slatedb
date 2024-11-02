@@ -22,7 +22,7 @@ use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
-use crate::types::RowAttributes;
+use crate::types::{RowAttributes, RowEntry};
 use crate::{blob::ReadOnlyBlob, block::Block, db_cache::DbCache};
 
 pub struct TableStore {
@@ -547,13 +547,8 @@ pub(crate) struct EncodedSsTableWriter<'a> {
 }
 
 impl<'a> EncodedSsTableWriter<'a> {
-    pub async fn add(
-        &mut self,
-        key: &[u8],
-        value: Option<&[u8]>,
-        attrs: RowAttributes,
-    ) -> Result<(), SlateDBError> {
-        self.builder.add(key, value, attrs)?;
+    pub async fn add(&mut self, entry: RowEntry) -> Result<(), SlateDBError> {
+        self.builder.add(entry)?;
         self.drain_blocks().await
     }
 
