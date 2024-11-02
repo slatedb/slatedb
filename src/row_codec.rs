@@ -6,6 +6,7 @@ use crate::flatbuffer_types::{SstRowExtra, SstRowExtraArgs};
 use crate::types::{KeyValueDeletable, RowAttributes, ValueDeletable};
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use tracing::Value;
 
 bitflags! {
     pub(crate) struct RowFlags: u8 {
@@ -58,7 +59,7 @@ pub(crate) struct SstRow {
     flags: RowFlags,
     created_ts: Option<i64>,
     expire_ts: Option<i64>,
-    value: Option<Bytes>,
+    value: ValueDeletable,
 }
 
 impl SstRow {
@@ -71,7 +72,7 @@ impl SstRow {
             seq,
             created_ts: None,
             expire_ts: None,
-            value: None,
+            value: ValueDeletable::Tombstone,
             flags: RowFlags::Tombstone,
         }
     }
@@ -81,6 +82,10 @@ impl SstRow {
             SstRowKey::Full(key) => key.as_ref(),
             _ => unreachable!("the full key should be reconstructed with prefix while decoding"),
         }
+    }
+
+    fn value(&self) -> &ValueDeletable {
+        &self.value
     }
 
     fn with_create_ts(mut self, create_at: i64) -> Self {
@@ -94,13 +99,13 @@ impl SstRow {
     }
 
     fn with_value(mut self, val: Bytes) -> Self {
-        self.value = Some(val);
+        self.value = ValueDeletable::Value(val);
         self.flags.remove(RowFlags::Tombstone);
         self
     }
 
     fn with_tombstone(mut self) -> Self {
-        self.value = None;
+        self.value = ValueDeletable::Tombstone;
         self.flags.insert(RowFlags::Tombstone);
         self
     }
@@ -109,7 +114,7 @@ impl SstRow {
 struct SstRowCodecV1 {}
 
 impl SstRowCodecV1 {
-    fn encode<'a>(&self, output: &mut Vec<u8>, row: &SstRow) {
+    fn encode(&self, output: &mut Vec<u8>, row: &SstRow) {
         match &row.key {
             SstRowKey::SuffixOnly { prefix_len, suffix } => {
                 output.put_u16(*prefix_len as u16);
@@ -143,7 +148,7 @@ impl SstRowCodecV1 {
         // encode value
         let val = row
             .value
-            .as_ref()
+            .as_option()
             .expect("value is not set with no tombstone");
         output.put_u16(val.len() as u16);
         output.put(val.as_ref());
@@ -185,7 +190,7 @@ impl SstRowCodecV1 {
             flags,
             created_ts,
             expire_ts,
-            value: Some(value.into()),
+            value: ValueDeletable::Value(value.into()),
         })
     }
 }
@@ -202,35 +207,32 @@ mod tests {
         let key_prefix_len = 3;
         let key_suffix = b"key";
         let value = Some(b"value".as_slice());
-        let row_features = vec![
-            RowFeature::Flags,
-            RowFeature::Timestamp,
-            RowFeature::ExpireAtTs,
-        ];
 
         // Encode the row
-        encode_row_v0(
+        let codec = SstRowCodecV1 {};
+        codec.encode(
             &mut encoded_data,
-            key_prefix_len,
-            key_suffix,
-            value,
-            &row_features,
-            Some(1),
-            Some(10),
+            &SstRow::new(key_prefix_len, Bytes::from(key_suffix.to_vec()), 1)
+                .with_value(Bytes::from(value.unwrap().to_vec()))
+                .with_create_ts(1)
+                .with_expire_ts(10),
         );
 
         let first_key = Bytes::from(b"prefixdata".as_ref());
         let mut data = Bytes::from(encoded_data);
-        let decoded = decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
+
+        let decoded = codec
+            .decode(&first_key, &mut data)
+            .expect("decoding failed");
 
         // Expected key: first_key[..3] + "key" = "prekey"
         let expected_key = Bytes::from(b"prekey" as &[u8]);
         let expected_value = ValueDeletable::Value(Bytes::from(b"value" as &[u8]));
 
-        assert_eq!(decoded.key, expected_key);
+        assert_eq!(decoded.key(), expected_key);
         assert_eq!(decoded.value, expected_value);
-        assert_eq!(decoded.attributes.ts, Some(1));
-        assert_eq!(decoded.attributes.expire_ts, Some(10));
+        assert_eq!(decoded.created_ts, Some(1));
+        assert_eq!(decoded.expire_ts, Some(10));
     }
 
     #[test]
@@ -239,54 +241,23 @@ mod tests {
         let key_prefix_len = 3;
         let key_suffix = b"key";
         let value = Some(b"value".as_slice());
-        let row_features = vec![
-            RowFeature::Flags,
-            RowFeature::Timestamp,
-            RowFeature::ExpireAtTs,
-        ];
 
         // Encode the row
-        encode_row_v0(
+        let codec = SstRowCodecV1 {};
+        codec.encode(
             &mut encoded_data,
-            key_prefix_len,
-            key_suffix,
-            value,
-            &row_features,
-            Some(1),
-            None,
+            &SstRow::new(key_prefix_len, Bytes::from(key_suffix.to_vec()), 1)
+                .with_value(Bytes::from(value.unwrap().to_vec()))
+                .with_create_ts(1),
         );
 
         let first_key = Bytes::from(b"prefixdata".as_ref());
         let mut data = Bytes::from(encoded_data);
-        let decoded = decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
+        let decoded = codec
+            .decode(&first_key, &mut data)
+            .expect("decoding failed");
 
-        assert_eq!(decoded.attributes.expire_ts, None);
-    }
-
-    #[test]
-    fn test_encode_decode_row_with_disabled_row_attr_flag() {
-        let mut encoded_data = Vec::new();
-        let key_prefix_len = 0;
-        let key_suffix = b"";
-        let value = Some(b"value".as_slice());
-        let row_features = vec![RowFeature::Flags];
-
-        // Encode the row
-        encode_row_v0(
-            &mut encoded_data,
-            key_prefix_len,
-            key_suffix,
-            value,
-            &row_features,
-            Some(1), // pass in a timestamp, but it should not be encoded because flag is disabled
-            Some(10),
-        );
-
-        let first_key = Bytes::from(b"".as_ref());
-        let mut data = Bytes::from(encoded_data);
-        let decoded = decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
-
-        assert_eq!(decoded.attributes.ts, None);
+        assert_eq!(decoded.expire_ts, None);
     }
 
     #[test]
@@ -294,30 +265,28 @@ mod tests {
         let mut encoded_data = Vec::new();
         let key_prefix_len = 4;
         let key_suffix = b"tomb";
-        let value = None; // Indicates tombstone
-        let row_features = vec![RowFeature::Flags];
 
-        // Encode the tombstone row
-        encode_row_v0(
+        // Encode the row
+        let codec = SstRowCodecV1 {};
+        codec.encode(
             &mut encoded_data,
-            key_prefix_len,
-            key_suffix,
-            value,
-            &row_features,
-            Some(1),
-            Some(10),
+            &SstRow::new(key_prefix_len, Bytes::from(key_suffix.to_vec()), 1)
+                .with_create_ts(1)
+                .with_tombstone(),
         );
 
         let first_key = Bytes::from(b"deadbeefdata".as_ref());
         let mut data = Bytes::from(encoded_data);
-        let decoded = decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
+        let decoded = codec
+            .decode(&first_key, &mut data)
+            .expect("decoding failed");
 
         // Expected key: first_key[..4] + "tomb" = "deadtomb"
         let expected_key = Bytes::from(b"deadtomb" as &[u8]);
         let expected_value = ValueDeletable::Tombstone;
 
-        assert_eq!(decoded.key, expected_key);
-        assert_eq!(decoded.value, expected_value);
+        assert_eq!(decoded.key(), expected_key);
+        assert_eq!(decoded.value(), &expected_value);
     }
 
     #[test]

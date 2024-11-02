@@ -42,4 +42,11 @@ impl ValueDeletable {
             ValueDeletable::Tombstone => None,
         }
     }
+
+    pub fn as_option(&self) -> Option<&Bytes> {
+        match self {
+            ValueDeletable::Value(v) => Some(v),
+            ValueDeletable::Tombstone => None,
+        }
+    }
 }
