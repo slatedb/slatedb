@@ -22,6 +22,14 @@ enum SstRowFeature: byte {
     ExpireAtTs,
 }
 
+table SstRowExtra {
+    // The created timestamp of the row, used to expire keys with expiration
+    created_ts: ulong = null;
+
+    // The expire timestmp of the row
+    expire_ts: ulong = null;
+}
+
 // Has metadata about a SST file.
 table SsTableInfo {
     // First key in the SST file.
