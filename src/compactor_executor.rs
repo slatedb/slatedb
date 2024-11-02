@@ -21,7 +21,7 @@ use crate::tablestore::TableStore;
 
 use crate::metrics::DbStats;
 use crate::types::ValueDeletable::Tombstone;
-use crate::types::{KeyValueDeletable, RowAttributes};
+use crate::types::{RowEntry, RowAttributes};
 use tracing::error;
 
 pub(crate) struct CompactionJob {
@@ -137,7 +137,7 @@ impl TokioCompactionExecutorInner {
                     // value in the iterator because this may otherwise "revive"
                     // an older version of the KV pair that has a larger TTL in
                     // a lower level of the LSM tree
-                    KeyValueDeletable {
+                    RowEntry {
                         key: raw_kv.key,
                         value: Tombstone,
                         attributes: RowAttributes {

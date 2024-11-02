@@ -4,7 +4,7 @@ use bytes::{Buf, Bytes, BytesMut};
 
 use crate::db_state::RowFeature;
 use crate::row_codec::SstRowCodecV1;
-use crate::{block::Block, error::SlateDBError, iter::KeyValueIterator, types::KeyValueDeletable};
+use crate::{block::Block, error::SlateDBError, iter::KeyValueIterator, types::RowEntry};
 
 pub trait BlockLike {
     fn data(&self) -> &Bytes;
@@ -51,7 +51,7 @@ pub struct BlockIterator<B: BlockLike> {
 }
 
 impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
-    async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         let result = self.load_at_current_off();
         match result {
             Ok(None) => Ok(None),
@@ -102,7 +102,7 @@ impl<B: BlockLike> BlockIterator<B> {
         self.off_off += 1;
     }
 
-    fn load_at_current_off(&self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    fn load_at_current_off(&self) -> Result<Option<RowEntry>, SlateDBError> {
         if self.off_off >= self.block.offsets().len() {
             return Ok(None);
         }

@@ -1,5 +1,7 @@
 use bytes::Bytes;
 
+use crate::row_codec::RowFlags;
+
 /// Represents a key-value pair known not to be a tombstone.
 #[derive(Debug, Clone)]
 pub struct KeyValue {
@@ -11,10 +13,12 @@ pub struct KeyValue {
 
 /// Represents a key-value pair that may be a tombstone.
 #[derive(Debug, Clone, PartialEq)]
-pub struct KeyValueDeletable {
+pub struct RowEntry {
     pub key: Bytes,
     pub value: ValueDeletable,
-    pub attributes: RowAttributes,
+    pub flags: RowFlags,
+    pub create_ts: Option<i64>,
+    pub expire_ts: Option<i64>,
 }
 
 /// The metadata associated with a `KeyValueDeletable`

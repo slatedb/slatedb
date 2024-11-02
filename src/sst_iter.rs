@@ -9,7 +9,7 @@ use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::{
     block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, tablestore::TableStore,
-    types::KeyValueDeletable,
+    types::RowEntry,
 };
 
 enum FetchTask {
@@ -226,7 +226,7 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
 }
 
 impl<'a, H: AsRef<SsTableHandle>> KeyValueIterator for SstIterator<'a, H> {
-    async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         loop {
             let current_iter = if let Some(current_iter) = self.current_iter.as_mut() {
                 current_iter

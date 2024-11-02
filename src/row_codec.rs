@@ -5,6 +5,7 @@ use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 bitflags! {
+    #[derive(Debug, Clone, PartialEq)]
     pub(crate) struct RowFlags: u8 {
         const Tombstone = 0b00000001;
     }

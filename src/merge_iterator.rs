@@ -3,11 +3,11 @@ use std::collections::{BinaryHeap, VecDeque};
 
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
-use crate::types::KeyValueDeletable;
+use crate::types::RowEntry;
 
 pub(crate) struct TwoMergeIterator<T1: KeyValueIterator, T2: KeyValueIterator> {
-    iterator1: (T1, Option<KeyValueDeletable>),
-    iterator2: (T2, Option<KeyValueDeletable>),
+    iterator1: (T1, Option<RowEntry>),
+    iterator2: (T2, Option<RowEntry>),
 }
 
 impl<T1: KeyValueIterator, T2: KeyValueIterator> TwoMergeIterator<T1, T2> {
@@ -20,7 +20,7 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> TwoMergeIterator<T1, T2> {
         })
     }
 
-    async fn advance1(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    async fn advance1(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if self.iterator1.1.is_none() {
             return Ok(None);
         }
@@ -30,7 +30,7 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> TwoMergeIterator<T1, T2> {
         ))
     }
 
-    async fn advance2(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    async fn advance2(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if self.iterator2.1.is_none() {
             return Ok(None);
         }
@@ -42,7 +42,7 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> TwoMergeIterator<T1, T2> {
 }
 
 impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIterator<T1, T2> {
-    async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if let Some(next1) = self.iterator1.1.as_ref() {
             if let Some(next2) = self.iterator2.1.as_ref() {
                 if next1.key <= next2.key {
@@ -60,7 +60,7 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIt
 }
 
 struct MergeIteratorHeapEntry<T: KeyValueIterator> {
-    next_kv: KeyValueDeletable,
+    next_kv: RowEntry,
     index: u32,
     iterator: T,
 }
@@ -114,7 +114,7 @@ impl<T: KeyValueIterator> MergeIterator<T> {
         })
     }
 
-    async fn advance(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    async fn advance(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if let Some(mut iterator_state) = self.current.take() {
             let current_kv = iterator_state.next_kv;
             if let Some(kv) = iterator_state.iterator.next_entry().await? {
@@ -129,7 +129,7 @@ impl<T: KeyValueIterator> MergeIterator<T> {
 }
 
 impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
-    async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if let Some(kv) = self.advance().await? {
             while let Some(next_entry) = self.current.as_ref() {
                 if next_entry.next_kv.key != kv.key {
@@ -149,7 +149,7 @@ mod tests {
     use crate::iter::KeyValueIterator;
     use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
     use crate::test_utils::{assert_iterator, gen_attrs, TestClock};
-    use crate::types::{KeyValueDeletable, ValueDeletable};
+    use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
     use std::collections::VecDeque;
     use std::sync::atomic::Ordering::SeqCst;
@@ -371,7 +371,7 @@ mod tests {
     }
 
     struct TestIterator<'a> {
-        entries: VecDeque<Result<KeyValueDeletable, SlateDBError>>,
+        entries: VecDeque<Result<RowEntry, SlateDBError>>,
         clock: &'a TestClock,
     }
 
@@ -384,7 +384,7 @@ mod tests {
         }
 
         fn with_entry(mut self, key: &'static [u8], val: &'static [u8]) -> Self {
-            self.entries.push_back(Ok(KeyValueDeletable {
+            self.entries.push_back(Ok(RowEntry {
                 key: Bytes::from(key),
                 value: ValueDeletable::Value(Bytes::from(val)),
                 attributes: gen_attrs(self.clock.ticker.fetch_add(1, SeqCst)),
@@ -394,7 +394,7 @@ mod tests {
     }
 
     impl KeyValueIterator for TestIterator<'_> {
-        async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+        async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
             self.entries.pop_front().map_or(Ok(None), |e| match e {
                 Ok(kv) => Ok(Some(kv)),
                 Err(err) => Err(err),

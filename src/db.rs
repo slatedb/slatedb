@@ -31,7 +31,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
-use crate::types::ValueDeletable;
+use crate::types::{RowAttributes, ValueDeletable};
 use std::rc::Rc;
 
 pub(crate) struct DbInner {
@@ -327,12 +327,19 @@ impl DbInner {
                             guard.memtable().put(
                                 kv.key.clone(),
                                 value.clone(),
-                                kv.attributes.clone(),
+                                RowAttributes {
+                                    ts: kv.create_ts,
+                                    expire_ts: kv.expire_ts,
+                                },
                             );
                         }
-                        ValueDeletable::Tombstone => guard
-                            .memtable()
-                            .delete(kv.key.clone(), kv.attributes.clone()),
+                        ValueDeletable::Tombstone => guard.memtable().delete(
+                            kv.key.clone(),
+                            RowAttributes {
+                                ts: kv.create_ts,
+                                expire_ts: kv.expire_ts,
+                            },
+                        ),
                     }
                 }
                 self.maybe_freeze_memtable(&mut guard, sst_id);

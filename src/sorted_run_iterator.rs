@@ -6,7 +6,7 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
-use crate::types::KeyValueDeletable;
+use crate::types::RowEntry;
 
 pub(crate) struct SortedRunIterator<'a> {
     current_iter: Option<SstIterator<'a>>,
@@ -127,7 +127,7 @@ impl<'a> SortedRunIterator<'a> {
 }
 
 impl<'a> KeyValueIterator for SortedRunIterator<'a> {
-    async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         loop {
             if let Some(iter) = &mut self.current_iter {
                 if let Some(kv) = iter.next_entry().await? {

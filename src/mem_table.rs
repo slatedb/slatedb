@@ -8,7 +8,7 @@ use tokio::sync::watch;
 
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
-use crate::types::{KeyValueDeletable, RowAttributes, ValueDeletable};
+use crate::types::{RowAttributes, RowEntry, ValueDeletable};
 
 pub(crate) struct KVTable {
     map: SkipMap<Bytes, ValueWithAttributes>,
@@ -44,14 +44,14 @@ pub(crate) struct ValueWithAttributes {
 }
 
 impl<'a> KeyValueIterator for MemTableIterator<'a> {
-    async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.next_entry_sync())
     }
 }
 
 impl<'a> MemTableIterator<'a> {
-    pub(crate) fn next_entry_sync(&mut self) -> Option<KeyValueDeletable> {
-        self.0.next().map(|entry| KeyValueDeletable {
+    pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
+        self.0.next().map(|entry| RowEntry {
             key: entry.key().clone(),
             value: entry.value().value.clone(),
             attributes: entry.value().attrs.clone(),
