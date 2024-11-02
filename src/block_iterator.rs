@@ -3,7 +3,6 @@ use std::sync::Arc;
 use bytes::{Buf, Bytes, BytesMut};
 
 use crate::db_state::RowFeature;
-use crate::row_codec::decode_row_v0;
 use crate::{block::Block, error::SlateDBError, iter::KeyValueIterator, types::KeyValueDeletable};
 
 pub trait BlockLike {
@@ -111,11 +110,14 @@ impl<B: BlockLike> BlockIterator<B> {
         // TODO: bounds checks to avoid panics? (paulgb)
         let mut cursor = self.block.data().slice(off_usz..);
 
-        Ok(Some(decode_row_v0(
-            &self.first_key,
-            &self.row_features,
-            &mut cursor,
-        )?))
+        // TODO(yazhou): impl this
+        todo!();
+
+        //Ok(Some(decode_row_v0(
+        //    &self.first_key,
+        //    &self.row_features,
+        //    &mut cursor,
+        // )?))
     }
 
     pub fn decode_first_key(block: &B) -> Bytes {

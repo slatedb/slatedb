@@ -23,7 +23,7 @@ const NO_EXPIRE_TS: i64 = i64::MIN;
 ///
 /// ```txt
 ///  |-------------------------------------------------------------------------------------------------------------|
-///  |       u16      |      u16       |  var        | u64     | 1 byte    | u16       | var   |    u32    |  var  |
+///  |       u16      |      u16       |  var        | u64     | u8        | u16       | var   |    u32    |  var  |
 ///  |----------------|----------------|-------------|---------|-----------|-----------|-------|-----------|-------|
 ///  | key_prefix_len | key_suffix_len |  key_suffix | seq     | flags     | extra_len | extra | value_len | value |
 ///  |-------------------------------------------------------------------------------------------------------------|
@@ -33,7 +33,7 @@ const NO_EXPIRE_TS: i64 = i64::MIN;
 ///
 ///  ```txt
 ///  |----------------------------------------------------------|-----------|
-///  |       u16      |      u16       |  var        | u64      | 1 byte    |
+///  |       u16      |      u16       |  var        | u64      | u8        |
 ///  |----------------|----------------|-------------|----------|-----------|
 ///  | key_prefix_len | key_suffix_len |  key_suffix | seq      | flags     |
 ///  |----------------------------------------------------------------------|
@@ -48,6 +48,7 @@ const NO_EXPIRE_TS: i64 = i64::MIN;
 /// | `value_len`      | `u32` | Length of the value                          |
 /// | `value`          | `var` | Value bytes                                  |
 
+#[derive(Debug)]
 pub(crate) enum SstRowKey {
     Full(Bytes),
     SuffixOnly { prefix_len: usize, suffix: Bytes },
@@ -161,16 +162,23 @@ impl SstRowCodecV1 {
         data.advance(key_suffix_len);
 
         // reconstruct full key
-        let mut key = BytesMut::with_capacity(key_prefix_len + key_suffix_len);
-        key.extend_from_slice(&first_key[..key_prefix_len]);
-        key.extend_from_slice(&key_suffix);
+        let mut full_key = BytesMut::with_capacity(key_prefix_len + key_suffix_len);
+        full_key.extend_from_slice(&first_key[..key_prefix_len]);
+        full_key.extend_from_slice(&key_suffix);
 
         // decode seq & flags
         let seq = data.get_u64();
         let flags = RowFlags::from_bits(data.get_u8()).ok_or(SlateDBError::InvalidRowFlags)?;
 
         if flags.contains(RowFlags::Tombstone) {
-            return Ok(SstRow::new(key_prefix_len, key_suffix, seq).with_tombstone());
+            return Ok(SstRow {
+                key: SstRowKey::Full(full_key.freeze()),
+                seq,
+                flags,
+                created_ts: None,
+                expire_ts: None,
+                value: ValueDeletable::Tombstone,
+            });
         }
 
         // decode extra
@@ -185,7 +193,7 @@ impl SstRowCodecV1 {
         let value_len = data.get_u32() as usize;
         let value = data.slice(..value_len);
         Ok(SstRow {
-            key: SstRowKey::Full(key.freeze()),
+            key: SstRowKey::Full(full_key.freeze()),
             seq,
             flags,
             created_ts,
@@ -287,6 +295,7 @@ mod tests {
 
         assert_eq!(decoded.key(), expected_key);
         assert_eq!(decoded.value(), &expected_value);
+        assert_eq!(decoded.created_ts, None);
     }
 
     #[test]
@@ -294,12 +303,12 @@ mod tests {
         let mut encoded_data = Vec::new();
         let key_prefix_len = 3;
         let key_suffix = b"bad".as_slice();
-        let row_features = vec![RowFeature::Flags];
 
         // Manually encode invalid flags
         encoded_data.put_u16(key_prefix_len as u16);
         encoded_data.put_u16(key_suffix.len() as u16);
         encoded_data.put(key_suffix);
+        encoded_data.put_u64(100);
         encoded_data.put_u8(0xFF); // Invalid flag
         encoded_data.put_u32(4);
         encoded_data.put(b"data".as_slice());
@@ -308,7 +317,8 @@ mod tests {
         let mut data = Bytes::from(encoded_data);
 
         // Attempt to decode the row
-        let result = decode_row_v0(&first_key, &row_features, &mut data);
+        let codec = SstRowCodecV1 {};
+        let result = codec.decode(&first_key, &mut data);
 
         assert!(result.is_err());
         match result {
@@ -322,29 +332,28 @@ mod tests {
         let mut encoded_data = Vec::new();
         let key_prefix_len = 4;
         let key_suffix = b""; // Empty key suffix
-        let value = Some(b"value".as_slice());
         let row_features = vec![RowFeature::Flags];
 
         // Encode the row
-        encode_row_v0(
+        let codec = SstRowCodecV1 {};
+        codec.encode(
             &mut encoded_data,
-            key_prefix_len,
-            key_suffix,
-            value,
-            &row_features,
-            Some(1),
-            Some(10),
+            &SstRow::new(key_prefix_len, Bytes::from(key_suffix.to_vec()), 1)
+                .with_create_ts(1)
+                .with_value("value".into()),
         );
 
         let first_key = Bytes::from(b"keyprefixdata".as_slice());
         let mut data = Bytes::from(encoded_data);
-        let decoded = decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
+        let decoded = codec
+            .decode(&first_key, &mut data)
+            .expect("decoding failed");
 
         // Expected key: first_key[..4] + "" = "keyp"
         let expected_key = Bytes::from(b"keyp" as &[u8]);
         let expected_value = ValueDeletable::Value(Bytes::from(b"value" as &[u8]));
 
-        assert_eq!(decoded.key, expected_key);
+        assert_eq!(decoded.key(), expected_key);
         assert_eq!(decoded.value, expected_value);
     }
 }

@@ -1,6 +1,5 @@
 use crate::db_state::RowFeature;
 use crate::error::SlateDBError;
-use crate::row_codec::encode_row_v0;
 use crate::types::RowAttributes;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -125,15 +124,17 @@ impl BlockBuilder {
         }
 
         self.offsets.push(self.data.len() as u16);
-        encode_row_v0(
-            &mut self.data,
-            key_prefix_len,
-            key_suffix,
-            value,
-            &self.row_features,
-            attrs.ts,
-            attrs.expire_ts,
-        );
+        // encode_row_v0(
+        //    &mut self.data,
+        //    key_prefix_len,
+        //    key_suffix,
+        //    value,
+        //    &self.row_features,
+        //    attrs.ts,
+        //    attrs.expire_ts,
+        //);
+        // TODO(yazhou): implement the above
+        todo!();
 
         if self.first_key.is_empty() {
             self.first_key = Bytes::copy_from_slice(key);
