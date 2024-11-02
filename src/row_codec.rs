@@ -13,25 +13,26 @@ bitflags! {
 const NO_EXPIRE_TS: i64 = i64::MIN;
 
 /// Encodes key and value using the binary codec for SlateDB row representation
-/// using the `v0` encoding scheme.
+/// using the `v1` encoding scheme.
 ///
-/// The `v0` codec for the key is (for non-tombstones):
+/// The `v1` codec for the key is (for non-tombstones):
 ///
 /// ```txt
-///  |--------------------------------------------------------------------------|
-///  |       u16      |      u16       |  var        | var  |    u32    |  var  |
-///  |----------------|----------------|-------------|------|-----------|-------|
-///  | key_prefix_len | key_suffix_len |  key_suffix | meta | value_len | value |
-///  |--------------------------------------------------------------------------|
+///  |-------------------------------------------------------------------------------------------------------------|
+///  |       u16      |      u16       |  var        | u32     | 1 byte    | u16       | var   |    u32    |  var  |
+///  |----------------|----------------|-------------|---------|-----------|-----------|-------|-----------|-------|
+///  | key_prefix_len | key_suffix_len |  key_suffix | seq     | tombstone | extra_len | extra | value_len | value |
+///  |-------------------------------------------------------------------------------------------------------------|
 /// ```
 ///
-/// And for tombstones (with `meta[row_flags] & 0x01 == 1`):
+/// And for tombstones:
+///
 ///  ```txt
-///  |------------------------------------------------------|
-///  |       u16      |      u16       |  var        | var  |
-///  |----------------|----------------|-------------|------|
-///  | key_prefix_len | key_suffix_len |  key_suffix | meta |
-///  |------------------------------------------------------|
+///  |----------------------------------------------------------|-----------|
+///  |       u16      |      u16       |  var        | u32      | 1 byte    |
+///  |----------------|----------------|-------------|----------|-----------|
+///  | key_prefix_len | key_suffix_len |  key_suffix | seq      | tombstone |
+///  |----------------------------------------------------------------------|
 ///  ```
 ///
 /// | Field            | Type | Description                                   |
@@ -42,6 +43,67 @@ const NO_EXPIRE_TS: i64 = i64::MIN;
 /// | `meta`           | `var` | Metadata                                     |
 /// | `value_len`      | `u32` | Length of the value                          |
 /// | `value`          | `var` | Value bytes                                  |
+
+pub(crate) struct SstRow<'a> {
+    key_prefix_len: usize,
+    key_suffix: &'a [u8],
+    seq: u32,
+    tombstone: bool,
+    create_ts: Option<i64>,
+    expire_ts: Option<i64>,
+    value: Option<&'a [u8]>,
+}
+
+impl<'a> SstRow<'a> {
+    fn new(key_prefix_len: usize, key_suffix: &'a [u8], seq: u32) -> Self {
+        Self {
+            key_prefix_len,
+            key_suffix,
+            seq,
+            create_ts: None,
+            expire_ts: None,
+            value: None,
+            tombstone: true,
+        }
+    }
+
+    fn with_create_at(mut self, create_at: i64) -> Self {
+        self.create_ts = Some(create_at);
+        self
+    }
+
+    fn with_expire_at(mut self, expire_at: i64) -> Self {
+        self.expire_ts = Some(expire_at);
+        self
+    }
+
+    fn with_value(mut self, val: &'a [u8]) -> Self {
+        self.value = Some(val);
+        self.tombstone = false;
+        self
+    }
+
+    fn with_tombstone(mut self) -> Self {
+        self.value = None;
+        self.tombstone = true;
+        self
+    }
+
+    fn encode(self, output: &mut Vec<u8>) {}
+}
+
+struct SstRowCodec {}
+
+impl SstRowCodec {
+    fn encode<'a>(&self, output: &mut Vec<u8>, row: &SstRow<'a>) {
+        output.put_u16(row.key_prefix_len as u16);
+        output.put_u16(row.key_suffix.len() as u16);
+        output.put(row.key_suffix);
+        output.put_u32(row.seq);
+        output.put_u8(row.tombstone as u8);
+    }
+}
+
 pub(crate) fn encode_row_v0(
     data: &mut Vec<u8>,
     key_prefix_len: usize,
