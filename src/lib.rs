@@ -43,3 +43,15 @@ mod tablestore;
 mod test_utils;
 mod transactional_object_store;
 mod types;
+
+/// Re-export the object store crate.
+///
+/// This is useful for users of the crate who want to use SlateDB
+/// without having to depend on the object store crate directly.
+pub use object_store;
+
+/// Re-export the fail-parallel crate.
+///
+/// This is useful for users of the crate who want to use SlateDB
+/// with failpoints in their tests without having to depend on the fail-parallel crate directly.
+pub use fail_parallel;

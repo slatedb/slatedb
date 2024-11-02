@@ -36,9 +36,9 @@ Then you can use SlateDB in your Rust code:
 
 ```rust
 use bytes::Bytes;
-use object_store::{ObjectStore, memory::InMemory, path::Path};
 use slatedb::db::Db;
 use slatedb::config::DbOptions;
+use slatedb::object_store::{ObjectStore, memory::InMemory};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -47,7 +47,7 @@ async fn main() {
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let options = DbOptions::default();
     let kv_store = Db::open_with_opts(
-        Path::from("/tmp/test_kv_store"),
+        "/tmp/test_kv_store",
         options,
         object_store,
     )
@@ -74,7 +74,7 @@ async fn main() {
 }
 ```
 
-SlateDB uses the [`object_store`](https://docs.rs/object_store/latest/object_store/) crate to interact with object storage, and therefore supports any object storage that implements the `ObjectStore` trait.
+SlateDB uses the [`object_store`](https://docs.rs/object_store/latest/object_store/) crate to interact with object storage, and therefore supports any object storage that implements the `ObjectStore` trait. You can use the crate in your project to interact with any object storage that implements the `ObjectStore` trait. SlateDB also re-exports the [`object_store`](https://docs.rs/object_store/latest/object_store/) crate for your convenience.
 
 ## Documentation
 
