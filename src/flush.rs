@@ -9,7 +9,7 @@ use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
-use crate::types::ValueDeletable;
+use crate::types::{RowAttributes, ValueDeletable};
 
 pub(crate) enum WalFlushThreadMsg {
     Shutdown,
@@ -49,10 +49,23 @@ impl DbInner {
         while let Some(kv) = iter.next_entry_sync() {
             match kv.value {
                 ValueDeletable::Value(v) => {
-                    mem_table.put(kv.key, v, kv.attributes);
+                    mem_table.put(
+                        kv.key,
+                        v,
+                        RowAttributes {
+                            ts: kv.create_ts,
+                            expire_ts: kv.expire_ts,
+                        },
+                    );
                 }
                 ValueDeletable::Tombstone => {
-                    mem_table.delete(kv.key, kv.attributes);
+                    mem_table.delete(
+                        kv.key,
+                        RowAttributes {
+                            ts: kv.create_ts,
+                            expire_ts: kv.expire_ts,
+                        },
+                    );
                 }
             }
         }
