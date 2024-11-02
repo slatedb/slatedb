@@ -150,7 +150,7 @@ impl SstRowCodecV1 {
             .value
             .as_option()
             .expect("value is not set with no tombstone");
-        output.put_u16(val.len() as u16);
+        output.put_u32(val.len() as u32);
         output.put(val.as_ref());
     }
 
@@ -182,7 +182,7 @@ impl SstRowCodecV1 {
         let expire_ts = extra.expire_ts();
 
         // decode value
-        let value_len = data.get_u16() as usize;
+        let value_len = data.get_u32() as usize;
         let value = data.slice(..value_len);
         Ok(SstRow {
             key: SstRowKey::Full(key.freeze()),
