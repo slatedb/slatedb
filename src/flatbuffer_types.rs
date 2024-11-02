@@ -13,7 +13,7 @@ use crate::db_state::{CoreDbState, SsTableHandle};
 mod manifest_generated;
 pub use manifest_generated::{
     BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
-    SsTableInfo as FbSsTableInfo, SsTableInfoArgs,
+    SsTableInfo as FbSsTableInfo, SsTableInfoArgs, SstRowExtra, SstRowExtraArgs,
 };
 
 use crate::config::CompressionCodec;

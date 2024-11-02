@@ -1,5 +1,8 @@
+use std::borrow::Cow;
+
 use crate::db_state::RowFeature;
 use crate::error::SlateDBError;
+use crate::flatbuffer_types::{SstRowExtra, SstRowExtraArgs};
 use crate::types::{KeyValueDeletable, RowAttributes, ValueDeletable};
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -21,17 +24,17 @@ const NO_EXPIRE_TS: i64 = i64::MIN;
 ///  |-------------------------------------------------------------------------------------------------------------|
 ///  |       u16      |      u16       |  var        | u32     | 1 byte    | u16       | var   |    u32    |  var  |
 ///  |----------------|----------------|-------------|---------|-----------|-----------|-------|-----------|-------|
-///  | key_prefix_len | key_suffix_len |  key_suffix | seq     | tombstone | extra_len | extra | value_len | value |
+///  | key_prefix_len | key_suffix_len |  key_suffix | seq     | flags     | extra_len | extra | value_len | value |
 ///  |-------------------------------------------------------------------------------------------------------------|
 /// ```
 ///
-/// And for tombstones:
+/// And for tombstones (flags & Tombstone == 1):
 ///
 ///  ```txt
 ///  |----------------------------------------------------------|-----------|
 ///  |       u16      |      u16       |  var        | u32      | 1 byte    |
 ///  |----------------|----------------|-------------|----------|-----------|
-///  | key_prefix_len | key_suffix_len |  key_suffix | seq      | tombstone |
+///  | key_prefix_len | key_suffix_len |  key_suffix | seq      | flags     |
 ///  |----------------------------------------------------------------------|
 ///  ```
 ///
@@ -46,29 +49,29 @@ const NO_EXPIRE_TS: i64 = i64::MIN;
 
 pub(crate) struct SstRow<'a> {
     key_prefix_len: usize,
-    key_suffix: &'a [u8],
+    key_suffix: Cow<'a, [u8]>,
     seq: u32,
-    tombstone: bool,
-    create_ts: Option<i64>,
+    flags: RowFlags,
+    created_ts: Option<i64>,
     expire_ts: Option<i64>,
-    value: Option<&'a [u8]>,
+    value: Option<Cow<'a, [u8]>>,
 }
 
 impl<'a> SstRow<'a> {
-    fn new(key_prefix_len: usize, key_suffix: &'a [u8], seq: u32) -> Self {
+    fn new(key_prefix_len: usize, key_suffix: Cow<'a, [u8]>, seq: u32) -> Self {
         Self {
             key_prefix_len,
             key_suffix,
             seq,
-            create_ts: None,
+            created_ts: None,
             expire_ts: None,
             value: None,
-            tombstone: true,
+            flags: RowFlags::Tombstone,
         }
     }
 
     fn with_create_at(mut self, create_at: i64) -> Self {
-        self.create_ts = Some(create_at);
+        self.created_ts = Some(create_at);
         self
     }
 
@@ -77,19 +80,17 @@ impl<'a> SstRow<'a> {
         self
     }
 
-    fn with_value(mut self, val: &'a [u8]) -> Self {
+    fn with_value(mut self, val: Cow<'a, [u8]>) -> Self {
         self.value = Some(val);
-        self.tombstone = false;
+        self.flags.remove(RowFlags::Tombstone);
         self
     }
 
     fn with_tombstone(mut self) -> Self {
         self.value = None;
-        self.tombstone = true;
+        self.flags.insert(RowFlags::Tombstone);
         self
     }
-
-    fn encode(self, output: &mut Vec<u8>) {}
 }
 
 struct SstRowCodec {}
@@ -98,9 +99,37 @@ impl SstRowCodec {
     fn encode<'a>(&self, output: &mut Vec<u8>, row: &SstRow<'a>) {
         output.put_u16(row.key_prefix_len as u16);
         output.put_u16(row.key_suffix.len() as u16);
-        output.put(row.key_suffix);
+        output.put(row.key_suffix.as_ref());
         output.put_u32(row.seq);
-        output.put_u8(row.tombstone as u8);
+        output.put_u8(row.flags.bits());
+        if row.flags.contains(RowFlags::Tombstone) {
+            return;
+        }
+
+        // encode extra
+        let mut extra_builder = flatbuffers::FlatBufferBuilder::new();
+        let extra = SstRowExtra::create(
+            &mut extra_builder,
+            &SstRowExtraArgs {
+                created_ts: row.created_ts.clone(),
+                expire_ts: row.expire_ts.clone(),
+            },
+        );
+        extra_builder.finish(extra, None);
+        output.put_u16(extra_builder.finished_data().len() as u16);
+        output.put(extra_builder.finished_data());
+
+        // encode value
+        let val = row
+            .value
+            .as_ref()
+            .expect("value is not set with no tombstone");
+        output.put_u16(val.len() as u16);
+        output.put(val.as_ref());
+    }
+
+    fn decode<'a>(&self, buf: &'a [u8]) -> SstRow<'a> {
+        todo!();
     }
 }
 

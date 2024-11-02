@@ -24,10 +24,10 @@ enum SstRowFeature: byte {
 
 table SstRowExtra {
     // The created timestamp of the row, used to expire keys with expiration
-    created_ts: ulong = null;
+    created_ts: long = null;
 
     // The expire timestmp of the row
-    expire_ts: ulong = null;
+    expire_ts: long = null;
 }
 
 // Has metadata about a SST file.

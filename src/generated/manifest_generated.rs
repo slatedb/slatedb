@@ -461,18 +461,18 @@ impl<'a> SstRowExtra<'a> {
 
 
   #[inline]
-  pub fn created_ts(&self) -> Option<u64> {
+  pub fn created_ts(&self) -> Option<i64> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(SstRowExtra::VT_CREATED_TS, None)}
+    unsafe { self._tab.get::<i64>(SstRowExtra::VT_CREATED_TS, None)}
   }
   #[inline]
-  pub fn expire_ts(&self) -> Option<u64> {
+  pub fn expire_ts(&self) -> Option<i64> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(SstRowExtra::VT_EXPIRE_TS, None)}
+    unsafe { self._tab.get::<i64>(SstRowExtra::VT_EXPIRE_TS, None)}
   }
 }
 
@@ -483,15 +483,15 @@ impl flatbuffers::Verifiable for SstRowExtra<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<u64>("created_ts", Self::VT_CREATED_TS, false)?
-     .visit_field::<u64>("expire_ts", Self::VT_EXPIRE_TS, false)?
+     .visit_field::<i64>("created_ts", Self::VT_CREATED_TS, false)?
+     .visit_field::<i64>("expire_ts", Self::VT_EXPIRE_TS, false)?
      .finish();
     Ok(())
   }
 }
 pub struct SstRowExtraArgs {
-    pub created_ts: Option<u64>,
-    pub expire_ts: Option<u64>,
+    pub created_ts: Option<i64>,
+    pub expire_ts: Option<i64>,
 }
 impl<'a> Default for SstRowExtraArgs {
   #[inline]
@@ -509,12 +509,12 @@ pub struct SstRowExtraBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
 }
 impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SstRowExtraBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_created_ts(&mut self, created_ts: u64) {
-    self.fbb_.push_slot_always::<u64>(SstRowExtra::VT_CREATED_TS, created_ts);
+  pub fn add_created_ts(&mut self, created_ts: i64) {
+    self.fbb_.push_slot_always::<i64>(SstRowExtra::VT_CREATED_TS, created_ts);
   }
   #[inline]
-  pub fn add_expire_ts(&mut self, expire_ts: u64) {
-    self.fbb_.push_slot_always::<u64>(SstRowExtra::VT_EXPIRE_TS, expire_ts);
+  pub fn add_expire_ts(&mut self, expire_ts: i64) {
+    self.fbb_.push_slot_always::<i64>(SstRowExtra::VT_EXPIRE_TS, expire_ts);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SstRowExtraBuilder<'a, 'b, A> {
