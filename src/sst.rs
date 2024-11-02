@@ -14,7 +14,7 @@ use crate::flatbuffer_types::{
     BlockMeta, BlockMetaArgs, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs,
     SsTableIndexOwned,
 };
-use crate::types::{RowAttributes, RowEntry};
+use crate::types::RowEntry;
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
 
@@ -422,7 +422,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
         &mut self,
         key: &[u8],
         val: Option<&[u8]>,
-        attrs: RowAttributes,
+        attrs: crate::types::RowAttributes,
     ) -> Result<(), SlateDBError> {
         let mut entry = RowEntry::new(key.to_vec().into(), val.map(|v| v.to_vec().into()), 0);
         if let Some(expire_ts) = attrs.expire_ts {
@@ -546,18 +546,15 @@ mod tests {
     use crate::db_state::SsTableId;
     use crate::filter::filter_hash;
     use crate::tablestore::TableStore;
-    use crate::test_utils::{assert_iterator, gen_attrs};
+    use crate::test_utils::{assert_iterator, gen_attrs, gen_empty_attrs};
     use crate::types::ValueDeletable;
 
-    fn next_block_to_iter(
-        builder: &mut EncodedSsTableBuilder,
-        row_features: Vec<RowFeature>,
-    ) -> BlockIterator<Block> {
+    fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIterator<Block> {
         let block = builder.next_block();
         assert!(block.is_some());
         let block = block.unwrap();
         let block = Block::decode(block.slice(..block.len() - 4));
-        BlockIterator::from_first_key(block, row_features)
+        BlockIterator::from_first_key(block)
     }
 
     #[tokio::test]
@@ -582,7 +579,7 @@ mod tests {
             .unwrap();
 
         // when:
-        let mut iter = next_block_to_iter(&mut builder, row_features.clone());
+        let mut iter = next_block_to_iter(&mut builder);
         assert_iterator(
             &mut iter,
             &[(
@@ -592,7 +589,7 @@ mod tests {
             )],
         )
         .await;
-        let mut iter = next_block_to_iter(&mut builder, row_features.clone());
+        let mut iter = next_block_to_iter(&mut builder);
         assert_iterator(
             &mut iter,
             &[(
@@ -606,7 +603,7 @@ mod tests {
         builder
             .add_kv(&[b'd'; 8], Some(&[b'4'; 8]), gen_attrs(1))
             .unwrap();
-        let mut iter = next_block_to_iter(&mut builder, row_features.clone());
+        let mut iter = next_block_to_iter(&mut builder);
         assert_iterator(
             &mut iter,
             &[(
@@ -654,7 +651,7 @@ mod tests {
         let block = format
             .read_block_raw(&encoded.info, &index, 0, &raw_sst)
             .unwrap();
-        let mut iter = BlockIterator::from_first_key(block, row_features.clone());
+        let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
             &[(
@@ -667,7 +664,7 @@ mod tests {
         let block = format
             .read_block_raw(&encoded.info, &index, 1, &raw_sst)
             .unwrap();
-        let mut iter = BlockIterator::from_first_key(block, row_features.clone());
+        let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
             &[(
@@ -680,7 +677,7 @@ mod tests {
         let block = format
             .read_block_raw(&encoded.info, &index, 2, &raw_sst)
             .unwrap();
-        let mut iter = BlockIterator::from_first_key(block, row_features.clone());
+        let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
             &[(
@@ -915,28 +912,13 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let row_features = format.row_features.clone();
         let table_store = TableStore::new(object_store, format.clone(), root_path, None);
         let mut builder = table_store.table_builder();
         builder
-            .add_kv(
-                &[b'a'; 2],
-                Some(&[1u8; 2]),
-                RowAttributes {
-                    expire_ts: None,
-                    ts: None,
-                },
-            )
+            .add_kv(&[b'a'; 2], Some(&[1u8; 2]), gen_empty_attrs())
             .unwrap();
         builder
-            .add_kv(
-                &[b'b'; 2],
-                Some(&[2u8; 2]),
-                RowAttributes {
-                    expire_ts: None,
-                    ts: None,
-                },
-            )
+            .add_kv(&[b'b'; 2], Some(&[2u8; 2]), gen_empty_attrs())
             .unwrap();
         builder
             .add_kv(&[b'c'; 20], Some(&[3u8; 20]), gen_attrs(3))
@@ -962,32 +944,24 @@ mod tests {
             .unwrap();
 
         // then:
-        let mut iter =
-            BlockIterator::from_first_key(blocks.pop_front().unwrap(), row_features.clone());
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             &[
                 (
                     vec![b'a'; 2],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 2])),
-                    RowAttributes {
-                        expire_ts: None,
-                        ts: None,
-                    },
+                    gen_empty_attrs(),
                 ),
                 (
                     vec![b'b'; 2],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 2])),
-                    RowAttributes {
-                        expire_ts: None,
-                        ts: None,
-                    },
+                    gen_empty_attrs(),
                 ),
             ],
         )
         .await;
-        let mut iter =
-            BlockIterator::from_first_key(blocks.pop_front().unwrap(), row_features.clone());
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             &[(
@@ -1010,28 +984,13 @@ mod tests {
             block_size: 48,
             ..SsTableFormat::default()
         };
-        let row_features = format.row_features.clone();
         let table_store = TableStore::new(object_store, format.clone(), root_path, None);
         let mut builder = table_store.table_builder();
         builder
-            .add_kv(
-                &[b'a'; 2],
-                Some(&[1u8; 2]),
-                RowAttributes {
-                    ts: None,
-                    expire_ts: None,
-                },
-            )
+            .add_kv(&[b'a'; 2], Some(&[1u8; 2]), gen_empty_attrs())
             .unwrap();
         builder
-            .add_kv(
-                &[b'b'; 2],
-                Some(&[2u8; 2]),
-                RowAttributes {
-                    ts: None,
-                    expire_ts: None,
-                },
-            )
+            .add_kv(&[b'b'; 2], Some(&[2u8; 2]), gen_empty_attrs())
             .unwrap();
         builder
             .add_kv(&[b'c'; 20], Some(&[3u8; 20]), gen_attrs(3))
@@ -1057,32 +1016,24 @@ mod tests {
             .unwrap();
 
         // then:
-        let mut iter =
-            BlockIterator::from_first_key(blocks.pop_front().unwrap(), row_features.clone());
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             &[
                 (
                     vec![b'a'; 2],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 2])),
-                    RowAttributes {
-                        ts: None,
-                        expire_ts: None,
-                    },
+                    gen_empty_attrs(),
                 ),
                 (
                     vec![b'b'; 2],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 2])),
-                    RowAttributes {
-                        ts: None,
-                        expire_ts: None,
-                    },
+                    gen_empty_attrs(),
                 ),
             ],
         )
         .await;
-        let mut iter =
-            BlockIterator::from_first_key(blocks.pop_front().unwrap(), row_features.clone());
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             &[(
@@ -1092,8 +1043,7 @@ mod tests {
             )],
         )
         .await;
-        let mut iter =
-            BlockIterator::from_first_key(blocks.pop_front().unwrap(), row_features.clone());
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             &[(

@@ -198,15 +198,8 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
                         if let Some(block) = blocks.pop_front() {
                             let first_key = self.from_key.take();
                             return match first_key {
-                                None => Ok(Some(BlockIterator::from_first_key(
-                                    block,
-                                    self.table.as_ref().info.row_features.clone(),
-                                ))),
-                                Some(k) => Ok(Some(BlockIterator::from_key(
-                                    block,
-                                    k,
-                                    self.table.as_ref().info.row_features.clone(),
-                                ))),
+                                None => Ok(Some(BlockIterator::from_first_key(block))),
+                                Some(k) => Ok(Some(BlockIterator::from_key(block, k))),
                             };
                         } else {
                             self.fetch_tasks.pop_front();

@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use bytes::{Buf, Bytes, BytesMut};
 
-use crate::db_state::RowFeature;
 use crate::row_codec::SstRowCodecV1;
 use crate::{block::Block, error::SlateDBError, iter::KeyValueIterator, types::RowEntry};
 
@@ -47,7 +46,6 @@ pub struct BlockIterator<B: BlockLike> {
     // first key in the block, because slateDB does not support multi version of keys
     // so we use `Bytes` temporarily
     first_key: Bytes,
-    row_features: Vec<RowFeature>,
 }
 
 impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
@@ -65,18 +63,17 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
 }
 
 impl<B: BlockLike> BlockIterator<B> {
-    pub fn from_first_key(block: B, row_features: Vec<RowFeature>) -> BlockIterator<B> {
+    pub fn from_first_key(block: B) -> BlockIterator<B> {
         BlockIterator {
             first_key: BlockIterator::decode_first_key(&block),
             block,
             off_off: 0,
-            row_features,
         }
     }
 
     /// Construct a BlockIterator that starts at the given key, or at the first
     /// key greater than the given key if the exact key given is not in the block.
-    pub fn from_key(block: B, key: &[u8], row_features: Vec<RowFeature>) -> BlockIterator<B> {
+    pub fn from_key(block: B, key: &[u8]) -> BlockIterator<B> {
         let first_key = BlockIterator::decode_first_key(&block);
 
         let idx = block.offsets().partition_point(|offset| {
@@ -94,7 +91,6 @@ impl<B: BlockLike> BlockIterator<B> {
             block,
             off_off: idx,
             first_key,
-            row_features,
         }
     }
 
@@ -145,7 +141,7 @@ mod tests {
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_first_key(&block, features());
+        let mut iter = BlockIterator::from_first_key(&block);
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"donkey", b"kong");
         let kv = iter.next().await.unwrap().unwrap();
@@ -162,7 +158,7 @@ mod tests {
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"kratos".as_ref(), features());
+        let mut iter = BlockIterator::from_key(&block, b"kratos".as_ref());
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
@@ -177,7 +173,7 @@ mod tests {
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"ka".as_ref(), features());
+        let mut iter = BlockIterator::from_key(&block, b"ka".as_ref());
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
@@ -192,7 +188,7 @@ mod tests {
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"zzz".as_ref(), features());
+        let mut iter = BlockIterator::from_key(&block, b"zzz".as_ref());
         assert!(iter.next().await.unwrap().is_none());
     }
 }

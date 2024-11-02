@@ -20,8 +20,8 @@ use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 
 use crate::metrics::DbStats;
+use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
-use crate::types::{RowAttributes, RowEntry};
 use tracing::error;
 
 pub(crate) struct CompactionJob {
