@@ -265,7 +265,6 @@ mod tests {
     use object_store::{local::LocalFileSystem, path::Path};
     use ulid::Ulid;
 
-    use crate::test_utils::gen_attrs;
     use crate::types::RowEntry;
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},

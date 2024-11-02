@@ -1056,6 +1056,8 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
     async fn test_wal_disabled() {
+        use crate::test_utils::gen_empty_attrs;
+
         let clock = Arc::new(TestClock::new());
         let mut options = test_db_options_with_clock(0, 128, None, clock.clone());
         options.wal_enabled = false;
@@ -1124,7 +1126,7 @@ mod tests {
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
                     gen_attrs(0),
                 ),
-                (vec![b'b'; 32], ValueDeletable::Tombstone, gen_attrs(0)),
+                (vec![b'b'; 32], ValueDeletable::Tombstone, gen_empty_attrs()),
                 (
                     vec![b'c'; 32],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
