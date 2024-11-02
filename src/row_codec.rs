@@ -1,20 +1,14 @@
-use std::borrow::Cow;
-
-use crate::db_state::RowFeature;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SstRowExtra, SstRowExtraArgs};
-use crate::types::{KeyValueDeletable, RowAttributes, ValueDeletable};
+use crate::types::ValueDeletable;
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use tracing::Value;
 
 bitflags! {
     pub(crate) struct RowFlags: u8 {
         const Tombstone = 0b00000001;
     }
 }
-
-const NO_EXPIRE_TS: i64 = i64::MIN;
 
 /// Encodes key and value using the binary codec for SlateDB row representation
 /// using the `v1` encoding scheme.
@@ -112,10 +106,14 @@ impl SstRow {
     }
 }
 
-struct SstRowCodecV1 {}
+pub(crate) struct SstRowCodecV1 {}
 
 impl SstRowCodecV1 {
-    fn encode(&self, output: &mut Vec<u8>, row: &SstRow) {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    pub fn encode(&self, output: &mut Vec<u8>, row: &SstRow) {
         match &row.key {
             SstRowKey::SuffixOnly { prefix_len, suffix } => {
                 output.put_u16(*prefix_len as u16);
@@ -155,7 +153,7 @@ impl SstRowCodecV1 {
         output.put(val.as_ref());
     }
 
-    fn decode<'a>(&self, first_key: &Bytes, data: &mut Bytes) -> Result<SstRow, SlateDBError> {
+    pub fn decode<'a>(&self, first_key: &Bytes, data: &mut Bytes) -> Result<SstRow, SlateDBError> {
         let key_prefix_len = data.get_u16() as usize;
         let key_suffix_len = data.get_u16() as usize;
         let key_suffix = data.slice(..key_suffix_len);
@@ -332,7 +330,6 @@ mod tests {
         let mut encoded_data = Vec::new();
         let key_prefix_len = 4;
         let key_suffix = b""; // Empty key suffix
-        let row_features = vec![RowFeature::Flags];
 
         // Encode the row
         let codec = SstRowCodecV1 {};
