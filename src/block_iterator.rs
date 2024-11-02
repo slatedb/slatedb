@@ -112,9 +112,7 @@ impl<B: BlockLike> BlockIterator<B> {
         let mut cursor = self.block.data().slice(off_usz..);
         let codec = SstRowCodecV1::new();
         let row = codec.decode(&self.first_key, &mut cursor)?;
-
-        todo!("convert row to row_entry");
-        // Ok(Some(row))
+        Ok(Some(row.into()))
     }
 
     pub fn decode_first_key(block: &B) -> Bytes {

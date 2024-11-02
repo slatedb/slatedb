@@ -709,12 +709,14 @@ mod tests {
 
         // write a wal sst
         let mut sst1 = ts.table_builder();
-        sst1.add(RowEntry::new("key".into(), Some("value".into()), 0).with_create_ts(1));
+        sst1.add(RowEntry::new("key".into(), Some("value".into()), 0).with_create_ts(1))
+            .unwrap();
         let table = sst1.build().unwrap();
         ts.write_sst(&wal_id, table).await.unwrap();
 
         let mut sst2 = ts.table_builder();
-        sst2.add(RowEntry::new("key".into(), Some("value".into()), 0).with_create_ts(2));
+        sst2.add(RowEntry::new("key".into(), Some("value".into()), 0).with_create_ts(2))
+            .unwrap();
         let table2 = sst2.build().unwrap();
 
         // write another wal sst with the same id.

@@ -1,8 +1,9 @@
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SstRowExtra, SstRowExtraArgs};
-use crate::types::ValueDeletable;
+use crate::types::{RowEntry, ValueDeletable};
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use moka::ops::compute::Op;
 
 bitflags! {
     #[derive(Debug, Clone, PartialEq, Default)]
@@ -49,33 +50,44 @@ pub(crate) enum SstRowKey {
     SuffixOnly { prefix_len: usize, suffix: Bytes },
 }
 
-pub(crate) struct SstRow {
+pub(crate) struct SstRowEntry {
     key: SstRowKey,
     seq: u64,
     flags: RowFlags,
-    created_ts: Option<i64>,
+    create_ts: Option<i64>,
     expire_ts: Option<i64>,
     value: ValueDeletable,
 }
 
-impl SstRow {
-    fn new(key_prefix_len: usize, key_suffix: Bytes, seq: u64) -> Self {
+impl SstRowEntry {
+    pub fn new(
+        key_prefix_len: usize,
+        key_suffix: Bytes,
+        seq: u64,
+        value: ValueDeletable,
+        create_ts: Option<i64>,
+        expire_ts: Option<i64>,
+    ) -> Self {
+        let flags = match &value {
+            ValueDeletable::Value(_) => RowFlags::default(),
+            ValueDeletable::Tombstone => RowFlags::Tombstone,
+        };
         Self {
             key: SstRowKey::SuffixOnly {
                 prefix_len: key_prefix_len,
                 suffix: key_suffix,
             },
             seq,
-            created_ts: None,
-            expire_ts: None,
-            value: ValueDeletable::Tombstone,
-            flags: RowFlags::Tombstone,
+            create_ts,
+            expire_ts,
+            value,
+            flags,
         }
     }
 
-    fn key(&self) -> &[u8] {
+    fn key(&self) -> &Bytes {
         match &self.key {
-            SstRowKey::Full(key) => key.as_ref(),
+            SstRowKey::Full(key) => key,
             _ => unreachable!("the full key should be reconstructed with prefix while decoding"),
         }
     }
@@ -83,27 +95,18 @@ impl SstRow {
     fn value(&self) -> &ValueDeletable {
         &self.value
     }
+}
 
-    fn with_create_ts(mut self, create_at: i64) -> Self {
-        self.created_ts = Some(create_at);
-        self
-    }
-
-    fn with_expire_ts(mut self, expire_at: i64) -> Self {
-        self.expire_ts = Some(expire_at);
-        self
-    }
-
-    fn with_value(mut self, val: Bytes) -> Self {
-        self.value = ValueDeletable::Value(val);
-        self.flags.remove(RowFlags::Tombstone);
-        self
-    }
-
-    fn with_tombstone(mut self) -> Self {
-        self.value = ValueDeletable::Tombstone;
-        self.flags.insert(RowFlags::Tombstone);
-        self
+impl Into<RowEntry> for SstRowEntry {
+    fn into(self) -> RowEntry {
+        RowEntry {
+            key: self.key().clone(),
+            value: self.value,
+            seq: self.seq,
+            flags: self.flags,
+            create_ts: self.create_ts,
+            expire_ts: self.expire_ts,
+        }
     }
 }
 
@@ -114,7 +117,7 @@ impl SstRowCodecV1 {
         Self {}
     }
 
-    pub fn encode(&self, output: &mut Vec<u8>, row: &SstRow) {
+    pub fn encode(&self, output: &mut Vec<u8>, row: &SstRowEntry) {
         match &row.key {
             SstRowKey::SuffixOnly { prefix_len, suffix } => {
                 output.put_u16(*prefix_len as u16);
@@ -137,7 +140,7 @@ impl SstRowCodecV1 {
         let extra = SstRowExtra::create(
             &mut extra_builder,
             &SstRowExtraArgs {
-                created_ts: row.created_ts.clone(),
+                created_ts: row.create_ts.clone(),
                 expire_ts: row.expire_ts.clone(),
             },
         );
@@ -154,7 +157,11 @@ impl SstRowCodecV1 {
         output.put(val.as_ref());
     }
 
-    pub fn decode<'a>(&self, first_key: &Bytes, data: &mut Bytes) -> Result<SstRow, SlateDBError> {
+    pub fn decode<'a>(
+        &self,
+        first_key: &Bytes,
+        data: &mut Bytes,
+    ) -> Result<SstRowEntry, SlateDBError> {
         let key_prefix_len = data.get_u16() as usize;
         let key_suffix_len = data.get_u16() as usize;
         let key_suffix = data.slice(..key_suffix_len);
@@ -170,11 +177,11 @@ impl SstRowCodecV1 {
         let flags = RowFlags::from_bits(data.get_u8()).ok_or(SlateDBError::InvalidRowFlags)?;
 
         if flags.contains(RowFlags::Tombstone) {
-            return Ok(SstRow {
+            return Ok(SstRowEntry {
                 key: SstRowKey::Full(full_key.freeze()),
                 seq,
                 flags,
-                created_ts: None,
+                create_ts: None,
                 expire_ts: None,
                 value: ValueDeletable::Tombstone,
             });
@@ -185,17 +192,17 @@ impl SstRowCodecV1 {
         let extra_buf = data.slice(..extra_len);
         data.advance(extra_len);
         let extra = flatbuffers::root::<SstRowExtra>(extra_buf.as_ref())?;
-        let created_ts = extra.created_ts();
+        let create_ts = extra.created_ts();
         let expire_ts = extra.expire_ts();
 
         // decode value
         let value_len = data.get_u32() as usize;
         let value = data.slice(..value_len);
-        Ok(SstRow {
+        Ok(SstRowEntry {
             key: SstRowKey::Full(full_key.freeze()),
             seq,
             flags,
-            created_ts,
+            create_ts,
             expire_ts,
             value: ValueDeletable::Value(value.into()),
         })
@@ -205,7 +212,6 @@ impl SstRowCodecV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db_state::RowFeature;
     use crate::types::ValueDeletable;
 
     #[test]
@@ -219,10 +225,14 @@ mod tests {
         let codec = SstRowCodecV1 {};
         codec.encode(
             &mut encoded_data,
-            &SstRow::new(key_prefix_len, Bytes::from(key_suffix.to_vec()), 1)
-                .with_value(Bytes::from(value.unwrap().to_vec()))
-                .with_create_ts(1)
-                .with_expire_ts(10),
+            &SstRowEntry::new(
+                key_prefix_len,
+                Bytes::from(key_suffix.to_vec()),
+                1,
+                ValueDeletable::Value(Bytes::from(value.unwrap().to_vec())),
+                Some(1),
+                Some(10),
+            ),
         );
 
         let first_key = Bytes::from(b"prefixdata".as_ref());
@@ -236,9 +246,9 @@ mod tests {
         let expected_key = Bytes::from(b"prekey" as &[u8]);
         let expected_value = ValueDeletable::Value(Bytes::from(b"value" as &[u8]));
 
-        assert_eq!(decoded.key(), expected_key);
+        assert_eq!(decoded.key(), &expected_key);
         assert_eq!(decoded.value, expected_value);
-        assert_eq!(decoded.created_ts, Some(1));
+        assert_eq!(decoded.create_ts, Some(1));
         assert_eq!(decoded.expire_ts, Some(10));
     }
 
@@ -253,9 +263,14 @@ mod tests {
         let codec = SstRowCodecV1 {};
         codec.encode(
             &mut encoded_data,
-            &SstRow::new(key_prefix_len, Bytes::from(key_suffix.to_vec()), 1)
-                .with_value(Bytes::from(value.unwrap().to_vec()))
-                .with_create_ts(1),
+            &SstRowEntry::new(
+                key_prefix_len,
+                Bytes::from(key_suffix.to_vec()),
+                1,
+                ValueDeletable::Value(Bytes::from(value.unwrap().to_vec())),
+                Some(1),
+                None,
+            ),
         );
 
         let first_key = Bytes::from(b"prefixdata".as_ref());
@@ -277,9 +292,14 @@ mod tests {
         let codec = SstRowCodecV1 {};
         codec.encode(
             &mut encoded_data,
-            &SstRow::new(key_prefix_len, Bytes::from(key_suffix.to_vec()), 1)
-                .with_create_ts(1)
-                .with_tombstone(),
+            &SstRowEntry::new(
+                key_prefix_len,
+                Bytes::from(key_suffix.to_vec()),
+                1,
+                ValueDeletable::Tombstone,
+                Some(1),
+                None,
+            ),
         );
 
         let first_key = Bytes::from(b"deadbeefdata".as_ref());
@@ -292,9 +312,9 @@ mod tests {
         let expected_key = Bytes::from(b"deadtomb" as &[u8]);
         let expected_value = ValueDeletable::Tombstone;
 
-        assert_eq!(decoded.key(), expected_key);
+        assert_eq!(decoded.key(), &expected_key);
         assert_eq!(decoded.value(), &expected_value);
-        assert_eq!(decoded.created_ts, None);
+        assert_eq!(decoded.create_ts, None);
     }
 
     #[test]
@@ -336,9 +356,14 @@ mod tests {
         let codec = SstRowCodecV1 {};
         codec.encode(
             &mut encoded_data,
-            &SstRow::new(key_prefix_len, Bytes::from(key_suffix.to_vec()), 1)
-                .with_create_ts(1)
-                .with_value("value".into()),
+            &SstRowEntry::new(
+                key_prefix_len,
+                Bytes::from(key_suffix.to_vec()),
+                1,
+                ValueDeletable::Value(Bytes::from(b"value".to_vec())),
+                Some(1),
+                None,
+            ),
         );
 
         let first_key = Bytes::from(b"keyprefixdata".as_slice());
@@ -351,7 +376,7 @@ mod tests {
         let expected_key = Bytes::from(b"keyp" as &[u8]);
         let expected_value = ValueDeletable::Value(Bytes::from(b"value" as &[u8]));
 
-        assert_eq!(decoded.key(), expected_key);
+        assert_eq!(decoded.key(), &expected_key);
         assert_eq!(decoded.value, expected_value);
     }
 }

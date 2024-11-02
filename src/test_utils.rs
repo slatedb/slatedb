@@ -35,12 +35,16 @@ pub(crate) async fn assert_iterator<T: KeyValueIterator>(
             .expect("expected iterator to return a value");
         assert_eq!(kv.key, Bytes::from(expected_k.clone()));
         assert_eq!(kv.value, *expected_v);
-        // TODO(yazhou): impl this
-        // assert_eq!(
-        //    kv.attributes, *expected_attr,
-        //    "Attribute mismatch at key {:?}",
-        //    kv.key
-        // );
+        assert_eq!(
+            kv.create_ts, expected_attr.ts,
+            "Attribute create_ts mismatch at key {:?}",
+            kv.key
+        );
+        assert_eq!(
+            kv.expire_ts, expected_attr.expire_ts,
+            "Attribute expire_ts mismatch at key {:?}",
+            kv.key
+        );
     }
     assert!(iterator
         .next_entry()

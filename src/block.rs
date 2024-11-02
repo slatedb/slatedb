@@ -1,5 +1,5 @@
 use crate::error::SlateDBError;
-use crate::types::RowAttributes;
+use crate::row_codec::{SstRowCodecV1, SstRowEntry};
 use crate::{db_state::RowFeature, types::RowEntry};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -108,7 +108,7 @@ impl BlockBuilder {
     pub fn add(&mut self, entry: RowEntry) -> bool {
         assert!(!entry.key.is_empty(), "key must not be empty");
         let key_prefix_len = compute_prefix(&self.first_key, &entry.key);
-        let key_suffix = &entry.key[key_prefix_len..];
+        let key_suffix = entry.key.slice(key_prefix_len..);
 
         // If adding the key-value pair would exceed the block size limit, don't add it.
         // (Unless the block is empty, in which case, allow the block to exceed the limit.)
@@ -124,27 +124,34 @@ impl BlockBuilder {
         }
 
         self.offsets.push(self.data.len() as u16);
-        // encode_row_v0(
-        //    &mut self.data,
-        //    key_prefix_len,
-        //    key_suffix,
-        //    value,
-        //    &self.row_features,
-        //    attrs.ts,
-        //    attrs.expire_ts,
-        //);
-        // TODO(yazhou): implement the above
-        todo!();
+        let codec = SstRowCodecV1::new();
+        let key = entry.key.clone();
+        codec.encode(
+            &mut self.data,
+            &SstRowEntry::new(
+                key_prefix_len,
+                key_suffix,
+                entry.seq,
+                entry.value,
+                entry.create_ts,
+                entry.expire_ts,
+            ),
+        );
 
         if self.first_key.is_empty() {
-            self.first_key = Bytes::copy_from_slice(&entry.key);
+            self.first_key = Bytes::copy_from_slice(&key);
         }
 
         true
     }
 
     #[cfg(test)]
-    pub fn add_kv(&mut self, key: &[u8], value: Option<&[u8]>, attrs: RowAttributes) -> bool {
+    pub fn add_kv(
+        &mut self,
+        key: &[u8],
+        value: Option<&[u8]>,
+        attrs: crate::types::RowAttributes,
+    ) -> bool {
         let mut entry = RowEntry::new(key.to_vec().into(), value.map(|v| v.to_vec().into()), 0);
         if let Some(ts) = attrs.ts {
             entry = entry.with_create_ts(ts);
