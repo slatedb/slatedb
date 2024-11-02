@@ -385,7 +385,7 @@ mod tests {
 
         fn with_entry(mut self, key: &'static [u8], val: &'static [u8]) -> Self {
             let ts = self.clock.ticker.fetch_add(1, SeqCst);
-            let entry = RowEntry::new(key.into(), Some(val.to_vec().into()), 0).with_create_ts(ts);
+            let entry = RowEntry::new(key.into(), Some(val.to_vec().into()), 0, Some(ts), None);
             self.entries.push_back(Ok(entry));
             self
         }

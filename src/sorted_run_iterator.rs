@@ -411,8 +411,13 @@ mod tests {
         for _ in 0..n {
             let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
             for _ in 0..keys_per_sst {
-                let entry = RowEntry::new(key_gen.next().into(), Some(val_gen.next().into()), 0)
-                    .with_create_ts(clock.now());
+                let entry = RowEntry::new(
+                    key_gen.next().into(),
+                    Some(val_gen.next().into()),
+                    0,
+                    Some(clock.now()),
+                    None,
+                );
                 writer.add(entry).await.unwrap();
             }
             ssts.push(writer.close().await.unwrap());

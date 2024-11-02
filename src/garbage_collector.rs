@@ -433,15 +433,27 @@ mod tests {
         // write a wal sst
         let id1 = SsTableId::Wal(1);
         let mut sst1 = table_store.table_builder();
-        sst1.add(RowEntry::new("key".into(), Some("value".into()), 0).with_create_ts(1))
-            .unwrap();
+        sst1.add(RowEntry::new(
+            "key".into(),
+            Some("value".into()),
+            0,
+            Some(1),
+            None,
+        ))
+        .unwrap();
         let table1 = sst1.build().unwrap();
         table_store.write_sst(&id1, table1).await.unwrap();
 
         let id2 = SsTableId::Wal(2);
         let mut sst2 = table_store.table_builder();
-        sst2.add(RowEntry::new("key".into(), Some("value".into()), 0).with_create_ts(2))
-            .unwrap();
+        sst2.add(RowEntry::new(
+            "key".into(),
+            Some("value".into()),
+            0,
+            Some(2),
+            None,
+        ))
+        .unwrap();
         let table2 = sst2.build().unwrap();
         table_store.write_sst(&id2, table2).await.unwrap();
 
@@ -504,16 +516,28 @@ mod tests {
         // write a wal sst
         let id1 = SsTableId::Wal(1);
         let mut sst1 = table_store.table_builder();
-        sst1.add(RowEntry::new("key".into(), Some("value".into()), 0).with_create_ts(1))
-            .unwrap();
+        sst1.add(RowEntry::new(
+            "key".into(),
+            Some("value".into()),
+            0,
+            Some(1),
+            None,
+        ))
+        .unwrap();
 
         let table1 = sst1.build().unwrap();
         table_store.write_sst(&id1, table1).await.unwrap();
 
         let id2 = SsTableId::Wal(2);
         let mut sst2 = table_store.table_builder();
-        sst2.add(RowEntry::new("key".into(), Some("value".into()), 0).with_create_ts(2))
-            .unwrap();
+        sst2.add(RowEntry::new(
+            "key".into(),
+            Some("value".into()),
+            0,
+            Some(2),
+            None,
+        ))
+        .unwrap();
         let table2 = sst2.build().unwrap();
         table_store.write_sst(&id2, table2).await.unwrap();
 
@@ -801,8 +825,14 @@ mod tests {
 
         let sst_id = SsTableId::Compacted(Ulid::new());
         let mut sst = table_store.table_builder();
-        sst.add(RowEntry::new("key".into(), Some("value".into()), 0).with_create_ts(1))
-            .unwrap();
+        sst.add(RowEntry::new(
+            "key".into(),
+            Some("value".into()),
+            0,
+            Some(1),
+            None,
+        ))
+        .unwrap();
         let table = sst.build().unwrap();
         table_store.write_sst(&sst_id, table).await.unwrap()
     }

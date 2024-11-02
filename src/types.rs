@@ -23,7 +23,13 @@ pub struct RowEntry {
 }
 
 impl RowEntry {
-    pub fn new(key: Bytes, value: Option<Bytes>, seq: u64) -> Self {
+    pub fn new(
+        key: Bytes,
+        value: Option<Bytes>,
+        seq: u64,
+        create_ts: Option<i64>,
+        expire_ts: Option<i64>,
+    ) -> Self {
         let flags = match &value {
             Some(_) => RowFlags::default(),
             None => RowFlags::Tombstone,
@@ -37,19 +43,9 @@ impl RowEntry {
             value,
             flags,
             seq,
-            create_ts: None,
-            expire_ts: None,
+            create_ts,
+            expire_ts,
         }
-    }
-
-    pub fn with_create_ts(mut self, ts: i64) -> Self {
-        self.create_ts = Some(ts);
-        self
-    }
-
-    pub fn with_expire_ts(mut self, ts: i64) -> Self {
-        self.expire_ts = Some(ts);
-        self
     }
 }
 

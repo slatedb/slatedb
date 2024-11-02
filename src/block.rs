@@ -152,13 +152,13 @@ impl BlockBuilder {
         value: Option<&[u8]>,
         attrs: crate::types::RowAttributes,
     ) -> bool {
-        let mut entry = RowEntry::new(key.to_vec().into(), value.map(|v| v.to_vec().into()), 0);
-        if let Some(ts) = attrs.ts {
-            entry = entry.with_create_ts(ts);
-        }
-        if let Some(expire_ts) = attrs.expire_ts {
-            entry = entry.with_expire_ts(expire_ts);
-        }
+        let entry = RowEntry::new(
+            key.to_vec().into(),
+            value.map(|v| v.to_vec().into()),
+            0,
+            attrs.ts,
+            attrs.expire_ts,
+        );
         self.add(entry)
     }
 
@@ -179,25 +179,34 @@ impl BlockBuilder {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        test_utils::{gen_attrs, gen_empty_attrs},
-        types::RowAttributes,
-    };
+    use crate::test_utils::{gen_attrs, gen_empty_attrs};
 
     use super::*;
 
     #[test]
     fn test_block() {
         let mut builder = BlockBuilder::new(4096, vec![RowFeature::Flags]);
-        assert!(
-            builder.add(RowEntry::new("key1".into(), Some("value1".into()), 0).with_create_ts(1))
-        );
-        assert!(
-            builder.add(RowEntry::new("key1".into(), Some("value1".into()), 0).with_create_ts(0))
-        );
-        assert!(
-            builder.add(RowEntry::new("key2".into(), Some("value2".into()), 0).with_create_ts(1))
-        );
+        assert!(builder.add(RowEntry::new(
+            "key1".into(),
+            Some("value1".into()),
+            0,
+            Some(1),
+            None
+        )));
+        assert!(builder.add(RowEntry::new(
+            "key1".into(),
+            Some("value1".into()),
+            0,
+            Some(0),
+            None
+        )));
+        assert!(builder.add(RowEntry::new(
+            "key2".into(),
+            Some("value2".into()),
+            0,
+            Some(1),
+            None
+        )));
         let block = builder.build().unwrap();
         let encoded = block.encode();
         let decoded = Block::decode(encoded);
@@ -208,13 +217,21 @@ mod tests {
     #[test]
     fn test_block_with_tombstone() {
         let mut builder = BlockBuilder::new(4096, vec![RowFeature::Flags]);
-        assert!(
-            builder.add(RowEntry::new("key1".into(), Some("value1".into()), 0).with_create_ts(0))
-        );
-        assert!(builder.add(RowEntry::new("key2".into(), None, 0).with_create_ts(1)));
-        assert!(
-            builder.add(RowEntry::new("key3".into(), Some("value3".into()), 0).with_create_ts(2))
-        );
+        assert!(builder.add(RowEntry::new(
+            "key1".into(),
+            Some("value1".into()),
+            0,
+            Some(0),
+            None
+        )));
+        assert!(builder.add(RowEntry::new("key2".into(), None, 0, Some(1), None)));
+        assert!(builder.add(RowEntry::new(
+            "key3".into(),
+            Some("value3".into()),
+            0,
+            Some(2),
+            None
+        )));
         let block = builder.build().unwrap();
         let encoded = block.encode();
         let _decoded = Block::decode(encoded);

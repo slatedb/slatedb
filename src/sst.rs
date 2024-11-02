@@ -424,13 +424,13 @@ impl<'a> EncodedSsTableBuilder<'a> {
         val: Option<&[u8]>,
         attrs: crate::types::RowAttributes,
     ) -> Result<(), SlateDBError> {
-        let mut entry = RowEntry::new(key.to_vec().into(), val.map(|v| v.to_vec().into()), 0);
-        if let Some(expire_ts) = attrs.expire_ts {
-            entry = entry.with_expire_ts(expire_ts);
-        }
-        if let Some(create_ts) = attrs.ts {
-            entry = entry.with_create_ts(create_ts);
-        }
+        let entry = RowEntry::new(
+            key.to_vec().into(),
+            val.map(|v| v.to_vec().into()),
+            0,
+            attrs.ts,
+            attrs.expire_ts,
+        );
         self.add(entry)
     }
 
@@ -565,7 +565,6 @@ mod tests {
             block_size: 32,
             ..SsTableFormat::default()
         };
-        let row_features = format.row_features.clone();
         let table_store = TableStore::new(object_store, format, root_path, None);
         let mut builder = table_store.table_builder();
         builder
@@ -624,7 +623,6 @@ mod tests {
             block_size: 32,
             ..SsTableFormat::default()
         };
-        let row_features = format.row_features.clone();
         let table_store = TableStore::new(object_store, format.clone(), root_path, None);
         let mut builder = table_store.table_builder();
         builder
