@@ -140,6 +140,7 @@ impl TokioCompactionExecutorInner {
                     RowEntry {
                         key: raw_kv.key,
                         value: Tombstone,
+                        seq: raw_kv.seq,
                         flags: raw_kv.flags,
                         create_ts: raw_kv.create_ts,
                         expire_ts: None,
@@ -149,15 +150,10 @@ impl TokioCompactionExecutorInner {
             };
 
             // Add to SST
-            let value = kv.value.into_option();
-            current_writer
-                .add(
-                    kv.key.as_ref(),
-                    value.as_ref().map(|b| b.as_ref()),
-                    kv.attributes,
-                )
-                .await?;
-            current_size += kv.key.len() + value.map_or(0, |b| b.len());
+            let value = kv.value.as_option().cloned();
+            let key_len = kv.key.len();
+            current_writer.add(kv).await?;
+            current_size += key_len + value.map_or(0, |b| b.len());
             if current_size > self.options.max_sst_size {
                 current_size = 0;
                 let finished_writer = mem::replace(
