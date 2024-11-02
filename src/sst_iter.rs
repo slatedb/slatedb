@@ -276,10 +276,18 @@ mod tests {
             None,
         ));
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", Some(b"value1"), gen_attrs(1)).unwrap();
-        builder.add(b"key2", Some(b"value2"), gen_attrs(2)).unwrap();
-        builder.add(b"key3", Some(b"value3"), gen_attrs(3)).unwrap();
-        builder.add(b"key4", Some(b"value4"), gen_attrs(4)).unwrap();
+        builder
+            .add_kv(b"key1", Some(b"value1"), gen_attrs(1))
+            .unwrap();
+        builder
+            .add_kv(b"key2", Some(b"value2"), gen_attrs(2))
+            .unwrap();
+        builder
+            .add_kv(b"key3", Some(b"value3"), gen_attrs(3))
+            .unwrap();
+        builder
+            .add_kv(b"key4", Some(b"value4"), gen_attrs(4))
+            .unwrap();
         let encoded = builder.build().unwrap();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded)
@@ -326,7 +334,7 @@ mod tests {
 
         for i in 0..1000 {
             builder
-                .add(
+                .add_kv(
                     format!("key{}", i).as_bytes(),
                     Some(format!("value{}", i).as_bytes()),
                     gen_attrs(i),
@@ -506,14 +514,9 @@ mod tests {
         let mut writer = ts.table_writer(SsTableId::Wal(0));
         let mut nkeys = 0usize;
         while writer.blocks_written() < n {
-            writer
-                .add(
-                    key_gen.next().as_ref(),
-                    Some(val_gen.next().as_ref()),
-                    gen_attrs(clock.now()),
-                )
-                .await
-                .unwrap();
+            let entry = RowEntry::new(key_gen.next().into(), Some(val_gen.next().into()), 0)
+                .with_create_ts(clock.now());
+            writer.add(entry).await.unwrap();
             nkeys += 1;
         }
         (writer.close().await.unwrap(), nkeys)
