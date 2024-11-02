@@ -55,7 +55,9 @@ impl<'a> MemTableIterator<'a> {
             key: entry.key().clone(),
             value: entry.value().value.clone(),
             flags: Default::default(),
-            attributes: entry.value().attrs.clone(),
+            seq: 0,
+            create_ts: entry.value().attrs.ts,
+            expire_ts: entry.value().attrs.expire_ts,
         })
     }
 }
@@ -291,10 +293,10 @@ mod tests {
         let mut iter = table.table().iter();
         let kv = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc111".as_slice());
-        assert_eq!(kv.attributes.ts, Some(2));
+        assert_eq!(kv.create_ts, Some(2));
         let kv = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc333".as_slice());
-        assert_eq!(kv.attributes.ts, Some(1));
+        assert_eq!(kv.create_ts, Some(1));
         assert!(iter.next().await.unwrap().is_none());
     }
 
