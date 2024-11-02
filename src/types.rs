@@ -23,6 +23,7 @@ pub struct RowEntry {
 }
 
 impl RowEntry {
+    #[allow(unused)]
     pub fn new(
         key: Bytes,
         value: Option<Bytes>,

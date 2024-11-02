@@ -25,7 +25,7 @@ use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 use crate::test_utils::OrderedBytesGenerator;
-use crate::types::RowAttributes;
+use crate::types::RowEntry;
 
 pub struct CompactionExecuteBench {
     path: Path,
@@ -150,16 +150,8 @@ impl CompactionExecuteBench {
             rng.fill_bytes(val.as_mut_slice());
             let key = key_gen.next();
             let timestamp = clock.now();
-            sst_writer
-                .add(
-                    key.as_ref(),
-                    Some(val.as_ref()),
-                    RowAttributes {
-                        ts: Some(timestamp),
-                        expire_ts: None,
-                    },
-                )
-                .await?;
+            let row_entry = RowEntry::new(key.into(), Some(val.into()), 0, Some(timestamp), None);
+            sst_writer.add(row_entry).await?;
         }
         let encoded = sst_writer.close().await?;
         info!("wrote sst with id: {:?} {:?}", &encoded.id, start.elapsed());
