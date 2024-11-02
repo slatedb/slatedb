@@ -23,7 +23,7 @@ const NO_EXPIRE_TS: i64 = i64::MIN;
 ///
 /// ```txt
 ///  |-------------------------------------------------------------------------------------------------------------|
-///  |       u16      |      u16       |  var        | u32     | 1 byte    | u16       | var   |    u32    |  var  |
+///  |       u16      |      u16       |  var        | u64     | 1 byte    | u16       | var   |    u32    |  var  |
 ///  |----------------|----------------|-------------|---------|-----------|-----------|-------|-----------|-------|
 ///  | key_prefix_len | key_suffix_len |  key_suffix | seq     | flags     | extra_len | extra | value_len | value |
 ///  |-------------------------------------------------------------------------------------------------------------|
@@ -33,7 +33,7 @@ const NO_EXPIRE_TS: i64 = i64::MIN;
 ///
 ///  ```txt
 ///  |----------------------------------------------------------|-----------|
-///  |       u16      |      u16       |  var        | u32      | 1 byte    |
+///  |       u16      |      u16       |  var        | u64      | 1 byte    |
 ///  |----------------|----------------|-------------|----------|-----------|
 ///  | key_prefix_len | key_suffix_len |  key_suffix | seq      | flags     |
 ///  |----------------------------------------------------------------------|
@@ -55,7 +55,7 @@ pub(crate) enum SstRowKey {
 
 pub(crate) struct SstRow {
     key: SstRowKey,
-    seq: u32,
+    seq: u64,
     flags: RowFlags,
     created_ts: Option<i64>,
     expire_ts: Option<i64>,
@@ -63,7 +63,7 @@ pub(crate) struct SstRow {
 }
 
 impl SstRow {
-    fn new(key_prefix_len: usize, key_suffix: Bytes, seq: u32) -> Self {
+    fn new(key_prefix_len: usize, key_suffix: Bytes, seq: u64) -> Self {
         Self {
             key: SstRowKey::SuffixOnly {
                 prefix_len: key_prefix_len,
@@ -125,7 +125,7 @@ impl SstRowCodecV1 {
         }
 
         // encode seq & flags
-        output.put_u32(row.seq);
+        output.put_u64(row.seq);
         output.put_u8(row.flags.bits());
         if row.flags.contains(RowFlags::Tombstone) {
             return;
@@ -166,7 +166,7 @@ impl SstRowCodecV1 {
         key.extend_from_slice(&key_suffix);
 
         // decode seq & flags
-        let seq = data.get_u32();
+        let seq = data.get_u64();
         let flags = RowFlags::from_bits(data.get_u8()).ok_or(SlateDBError::InvalidRowFlags)?;
 
         if flags.contains(RowFlags::Tombstone) {
