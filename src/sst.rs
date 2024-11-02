@@ -14,7 +14,7 @@ use crate::flatbuffer_types::{
     BlockMeta, BlockMetaArgs, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs,
     SsTableIndexOwned,
 };
-use crate::types::RowAttributes;
+use crate::types::{RowAttributes, RowEntry};
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
 
@@ -395,8 +395,9 @@ impl<'a> EncodedSsTableBuilder<'a> {
 
     pub fn add(&mut self, entry: RowEntry) -> Result<(), SlateDBError> {
         self.num_keys += 1;
+        let key = entry.key.clone();
 
-        if !self.builder.add(key, value, attrs.clone()) {
+        if !self.builder.add(entry.clone()) {
             // Create a new block builder and append block data
             if let Some(block) = self.finish_block()? {
                 self.current_len += block.len();
@@ -404,14 +405,14 @@ impl<'a> EncodedSsTableBuilder<'a> {
             }
 
             // New block must always accept the first KV pair
-            assert!(self.builder.add(key, value, attrs));
-            self.first_key = Some(self.index_builder.create_vector(key));
+            assert!(self.builder.add(entry));
+            self.first_key = Some(self.index_builder.create_vector(&key));
         } else if self.sst_first_key.is_none() {
-            self.sst_first_key = Some(Bytes::copy_from_slice(key));
-            self.first_key = Some(self.index_builder.create_vector(key));
+            self.sst_first_key = Some(Bytes::copy_from_slice(&key));
+            self.first_key = Some(self.index_builder.create_vector(&key));
         }
 
-        self.filter_builder.add_key(key);
+        self.filter_builder.add_key(&key);
 
         Ok(())
     }

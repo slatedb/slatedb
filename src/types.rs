@@ -16,13 +16,14 @@ pub struct KeyValue {
 pub struct RowEntry {
     pub key: Bytes,
     pub value: ValueDeletable,
+    pub seq: u64,
     pub flags: RowFlags,
     pub create_ts: Option<i64>,
     pub expire_ts: Option<i64>,
 }
 
 impl RowEntry {
-    pub fn new(key: Bytes, value: Option<Bytes>) -> Self {
+    pub fn new(key: Bytes, value: Option<Bytes>, seq: u64) -> Self {
         let flags = match &value {
             Some(_) => RowFlags::default(),
             None => RowFlags::Tombstone,
@@ -35,6 +36,7 @@ impl RowEntry {
             key,
             value,
             flags,
+            seq,
             create_ts: None,
             expire_ts: None,
         }

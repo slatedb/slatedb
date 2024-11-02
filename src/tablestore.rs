@@ -641,23 +641,29 @@ mod tests {
         // when:
         let mut writer = ts.table_writer(id);
         writer
-            .add(RowEntry::new("key".into(), Some("value".into())))
+            .add(RowEntry::new("key".into(), Some("value".into()), 0))
             .await
             .unwrap();
         writer
-            .add(RowEntry::new(vec![b'a'; 16].into(), Some(vec![1u8; 16].into())).with_create_ts(1))
+            .add(
+                RowEntry::new(vec![b'a'; 16].into(), Some(vec![1u8; 16].into()), 0)
+                    .with_create_ts(1),
+            )
             .await
             .unwrap();
         writer
-            .add(RowEntry::new(vec![b'a'; 16].into(), Some(vec![2u8; 16].into())).with_create_ts(2))
+            .add(
+                RowEntry::new(vec![b'a'; 16].into(), Some(vec![2u8; 16].into()), 0)
+                    .with_create_ts(2),
+            )
             .await
             .unwrap();
         writer
-            .add(RowEntry::new(vec![b'c'; 16].into(), None).with_create_ts(3))
+            .add(RowEntry::new(vec![b'c'; 16].into(), None, 0).with_create_ts(3))
             .await
             .unwrap();
         writer
-            .add(RowEntry::new(vec![b'd'; 16].into(), None).with_create_ts(3))
+            .add(RowEntry::new(vec![b'd'; 16].into(), None, 0).with_create_ts(3))
             .await
             .unwrap();
         let sst = writer.close().await.unwrap();
@@ -703,12 +709,12 @@ mod tests {
 
         // write a wal sst
         let mut sst1 = ts.table_builder();
-        sst1.add(RowEntry::new("key".into(), Some("value".into())).with_create_ts(1));
+        sst1.add(RowEntry::new("key".into(), Some("value".into()), 0).with_create_ts(1));
         let table = sst1.build().unwrap();
         ts.write_sst(&wal_id, table).await.unwrap();
 
         let mut sst2 = ts.table_builder();
-        sst2.add(RowEntry::new("key".into(), Some("value".into())).with_create_ts(2));
+        sst2.add(RowEntry::new("key".into(), Some("value".into()), 0).with_create_ts(2));
         let table2 = sst2.build().unwrap();
 
         // write another wal sst with the same id.
@@ -749,7 +755,7 @@ mod tests {
             ));
             writer
                 .add(
-                    RowEntry::new(key.to_vec().into(), Some(value.to_vec().into()))
+                    RowEntry::new(key.to_vec().into(), Some(value.to_vec().into()), 0)
                         .with_create_ts(i as i64),
                 )
                 .await

@@ -54,6 +54,7 @@ impl<'a> MemTableIterator<'a> {
         self.0.next().map(|entry| RowEntry {
             key: entry.key().clone(),
             value: entry.value().value.clone(),
+            flags: Default::default(),
             attributes: entry.value().attrs.clone(),
         })
     }
