@@ -92,6 +92,7 @@ impl SstRowEntry {
     }
 }
 
+#[allow(clippy::from_over_into)]
 impl Into<RowEntry> for SstRowEntry {
     fn into(self) -> RowEntry {
         RowEntry {
@@ -136,15 +137,15 @@ impl SstRowCodecV1 {
             let extra = SstRowExtra::create(
                 &mut extra_builder,
                 &SstRowExtraArgs {
-                    created_ts: row.create_ts.clone(),
-                    expire_ts: row.expire_ts.clone(),
+                    created_ts: row.create_ts,
+                    expire_ts: row.expire_ts,
                 },
             );
             extra_builder.finish(extra, None);
             output.put_u16(extra_builder.finished_data().len() as u16);
             output.put(extra_builder.finished_data());
         } else {
-            output.put_u16(0 as u16);
+            output.put_u16(0_u16);
         }
 
         // encode value
@@ -156,11 +157,7 @@ impl SstRowCodecV1 {
         output.put(val.as_ref());
     }
 
-    pub fn decode<'a>(
-        &self,
-        first_key: &Bytes,
-        data: &mut Bytes,
-    ) -> Result<SstRowEntry, SlateDBError> {
+    pub fn decode(&self, first_key: &Bytes, data: &mut Bytes) -> Result<SstRowEntry, SlateDBError> {
         let key_prefix_len = data.get_u16() as usize;
         let key_suffix_len = data.get_u16() as usize;
         let key_suffix = data.slice(..key_suffix_len);
@@ -206,7 +203,7 @@ impl SstRowCodecV1 {
             flags,
             create_ts,
             expire_ts,
-            value: ValueDeletable::Value(value.into()),
+            value: ValueDeletable::Value(value),
         })
     }
 }

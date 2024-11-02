@@ -150,7 +150,7 @@ impl CompactionExecuteBench {
             rng.fill_bytes(val.as_mut_slice());
             let key = key_gen.next();
             let timestamp = clock.now();
-            let row_entry = RowEntry::new(key.into(), Some(val.into()), 0, Some(timestamp), None);
+            let row_entry = RowEntry::new(key, Some(val.into()), 0, Some(timestamp), None);
             sst_writer.add(row_entry).await?;
         }
         let encoded = sst_writer.close().await?;
