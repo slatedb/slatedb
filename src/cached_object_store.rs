@@ -43,7 +43,7 @@ pub(crate) struct CachedObjectStore {
     // Main inspiration comes from [Improving Flash-Based Disk Cache with Lazy Adaptive Replacement]
     // (https://msstconference.org/MSST-history/2013/Papers/2013.Paper.28.pdf)
     ghost: Arc<Mutex<GhostQueue<Path, ObjectMeta>>>,
-    max_cache_size_bytes: Option<usize>, // Used for ghost queue to self-tuning
+    max_cache_size_bytes: Option<usize>, // Local cache capacity
     db_stats: Arc<DbStats>,
 }
 
