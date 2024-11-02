@@ -30,15 +30,8 @@ impl DbInner {
     ) -> Result<SsTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = imm_table.iter();
-        while let Some(kv) = iter.next_entry().await? {
-            match kv.value {
-                ValueDeletable::Value(v) => {
-                    sst_builder.add(&kv.key, Some(&v), kv.attributes)?;
-                }
-                ValueDeletable::Tombstone => {
-                    sst_builder.add(&kv.key, None, kv.attributes)?;
-                }
-            }
+        while let Some(entry) = iter.next_entry().await? {
+            sst_builder.add(entry)?;
         }
 
         let encoded_sst = sst_builder.build()?;

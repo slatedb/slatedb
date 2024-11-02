@@ -583,10 +583,10 @@ impl<'a> EncodedSsTableWriter<'a> {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
     use std::collections::VecDeque;
     use std::sync::Arc;
 
-    use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use ulid::Ulid;
 
@@ -598,7 +598,7 @@ mod tests {
     use crate::tablestore::DbCache;
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, gen_attrs};
-    use crate::types::ValueDeletable;
+    use crate::types::{RowEntry, ValueDeletable};
     use crate::{
         block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
     };
@@ -641,16 +641,23 @@ mod tests {
         // when:
         let mut writer = ts.table_writer(id);
         writer
-            .add(&[b'a'; 16], Some(&[1u8; 16]), gen_attrs(1))
+            .add(RowEntry::new("key".into(), Some("value".into())))
             .await
             .unwrap();
         writer
-            .add(&[b'b'; 16], Some(&[2u8; 16]), gen_attrs(2))
+            .add(RowEntry::new(vec![b'a'; 16].into(), Some(vec![1u8; 16].into())).with_create_ts(1))
             .await
             .unwrap();
-        writer.add(&[b'c'; 16], None, gen_attrs(3)).await.unwrap();
         writer
-            .add(&[b'd'; 16], Some(&[4u8; 16]), gen_attrs(4))
+            .add(RowEntry::new(vec![b'a'; 16].into(), Some(vec![2u8; 16].into())).with_create_ts(2))
+            .await
+            .unwrap();
+        writer
+            .add(RowEntry::new(vec![b'c'; 16].into(), None).with_create_ts(3))
+            .await
+            .unwrap();
+        writer
+            .add(RowEntry::new(vec![b'd'; 16].into(), None).with_create_ts(3))
             .await
             .unwrap();
         let sst = writer.close().await.unwrap();
@@ -696,12 +703,12 @@ mod tests {
 
         // write a wal sst
         let mut sst1 = ts.table_builder();
-        sst1.add(b"key", Some(b"value"), gen_attrs(1)).unwrap();
+        sst1.add(RowEntry::new("key".into(), Some("value".into())).with_create_ts(1));
         let table = sst1.build().unwrap();
         ts.write_sst(&wal_id, table).await.unwrap();
 
         let mut sst2 = ts.table_builder();
-        sst2.add(b"key", Some(b"value"), gen_attrs(2)).unwrap();
+        sst2.add(RowEntry::new("key".into(), Some("value".into())).with_create_ts(2));
         let table2 = sst2.build().unwrap();
 
         // write another wal sst with the same id.
@@ -740,7 +747,13 @@ mod tests {
                 Vec::from(key.as_slice()),
                 ValueDeletable::Value(Bytes::copy_from_slice(&value)),
             ));
-            writer.add(&key, Some(&value), gen_attrs(i)).await.unwrap();
+            writer
+                .add(
+                    RowEntry::new(key.to_vec().into(), Some(value.to_vec().into()))
+                        .with_create_ts(i as i64),
+                )
+                .await
+                .unwrap();
         }
         let handle = writer.close().await.unwrap();
 
