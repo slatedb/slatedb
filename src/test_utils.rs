@@ -32,7 +32,10 @@ pub(crate) async fn assert_iterator<T: KeyValueIterator>(
             .next_entry()
             .await
             .expect("iterator next_entry failed")
-            .expect("expected iterator to return a value");
+            .expect(&format!(
+                "expected iterator to return a value on {:?}",
+                String::from_utf8_lossy(expected_k)
+            ));
         assert_eq!(kv.key, Bytes::from(expected_k.clone()));
         assert_eq!(kv.value, *expected_v);
         assert_eq!(

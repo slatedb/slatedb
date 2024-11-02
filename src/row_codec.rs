@@ -131,17 +131,21 @@ impl SstRowCodecV1 {
 
         // encode extra
         // TODO: maybe moved to flatbuffer_types.rs
-        let mut extra_builder = flatbuffers::FlatBufferBuilder::new();
-        let extra = SstRowExtra::create(
-            &mut extra_builder,
-            &SstRowExtraArgs {
-                created_ts: row.create_ts.clone(),
-                expire_ts: row.expire_ts.clone(),
-            },
-        );
-        extra_builder.finish(extra, None);
-        output.put_u16(extra_builder.finished_data().len() as u16);
-        output.put(extra_builder.finished_data());
+        if row.create_ts.is_some() || row.expire_ts.is_some() {
+            let mut extra_builder = flatbuffers::FlatBufferBuilder::new();
+            let extra = SstRowExtra::create(
+                &mut extra_builder,
+                &SstRowExtraArgs {
+                    created_ts: row.create_ts.clone(),
+                    expire_ts: row.expire_ts.clone(),
+                },
+            );
+            extra_builder.finish(extra, None);
+            output.put_u16(extra_builder.finished_data().len() as u16);
+            output.put(extra_builder.finished_data());
+        } else {
+            output.put_u16(0 as u16);
+        }
 
         // encode value
         let val = row
@@ -184,11 +188,14 @@ impl SstRowCodecV1 {
 
         // decode extra
         let extra_len = data.get_u16() as usize;
-        let extra_buf = data.slice(..extra_len);
-        data.advance(extra_len);
-        let extra = flatbuffers::root::<SstRowExtra>(extra_buf.as_ref())?;
-        let create_ts = extra.created_ts();
-        let expire_ts = extra.expire_ts();
+        let (create_ts, expire_ts) = if extra_len > 0 {
+            let extra_buf = data.slice(..extra_len);
+            data.advance(extra_len);
+            let extra = flatbuffers::root::<SstRowExtra>(extra_buf.as_ref())?;
+            (extra.created_ts(), extra.expire_ts())
+        } else {
+            (None, None)
+        };
 
         // decode value
         let value_len = data.get_u32() as usize;

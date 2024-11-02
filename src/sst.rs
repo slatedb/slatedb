@@ -994,10 +994,24 @@ mod tests {
         let table_store = TableStore::new(object_store, format.clone(), root_path, None);
         let mut builder = table_store.table_builder();
         builder
-            .add_kv(&[b'a'; 2], Some(&[1u8; 2]), gen_attrs(1))
+            .add_kv(
+                &[b'a'; 2],
+                Some(&[1u8; 2]),
+                RowAttributes {
+                    ts: None,
+                    expire_ts: None,
+                },
+            )
             .unwrap();
         builder
-            .add_kv(&[b'b'; 2], Some(&[2u8; 2]), gen_attrs(2))
+            .add_kv(
+                &[b'b'; 2],
+                Some(&[2u8; 2]),
+                RowAttributes {
+                    ts: None,
+                    expire_ts: None,
+                },
+            )
             .unwrap();
         builder
             .add_kv(&[b'c'; 20], Some(&[3u8; 20]), gen_attrs(3))
@@ -1031,12 +1045,18 @@ mod tests {
                 (
                     vec![b'a'; 2],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 2])),
-                    gen_attrs(1),
+                    RowAttributes {
+                        ts: None,
+                        expire_ts: None,
+                    },
                 ),
                 (
                     vec![b'b'; 2],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 2])),
-                    gen_attrs(2),
+                    RowAttributes {
+                        ts: None,
+                        expire_ts: None,
+                    },
                 ),
             ],
         )
