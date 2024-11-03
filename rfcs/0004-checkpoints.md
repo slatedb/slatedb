@@ -145,18 +145,20 @@ struct CheckpointOptions {
     lifetime: Option<Duration>,
 
     /// Optionally specifies an existing checkpoint to use as the source for this checkpoint. This is
-    /// useful for users to establish checkpoints whose lifecycle they manage from existing checkpoints.
+    /// useful for users to establish checkpoints from existing checkpoints, but with a different lifecycle
+    /// and/or metadata.
     source: Option<UUID>
 }
 
 impl Db {
-    /// Opens a Db from a checkpoint. If no database This will create a new db under path from
-    /// the checkpoint ID specified in parent_checkpoint. SlateDB will look for the manifest
-    /// containing the checkpoint under parent_path. The newly created database is a shallow
-    /// copy of the parent database, and contains all the data from parent_checkpoint. New writes
-    /// will be written to the new database and will not be reflected in the parent database. If
-    /// parent_checkpoint is None, then this will create a new checkpoint pointing to the current
-    /// manifest of the parent db.
+    /// Opens a Db from a checkpoint. If no db already exists at the specified path, then this will create
+    /// a new db under the path that is a clone of the db at parent_path. A clone is a shallow copy of the
+    /// parent database - it starts with a manifest that references the same SSTs, but doesn't actually copy
+    /// those SSTs, except for the WAL. New writes will be written to the newly created db and will not be
+    /// reflected in the parent database. The clone can optionally be created from an existing checkpoint. If
+    /// parent_checkpoint is None, then the manifest referenced by parent_checkpoint is used as the base for
+    /// the clone db's manifest. Otherwise, this method creates a new checkpoint for the current version of
+    /// the parent db.
     pub async fn open_from_checkpoint(
         path: Path,
         object_store: Arc<dyn ObjectStore>,
