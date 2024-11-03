@@ -302,7 +302,7 @@ Usage: slatedb --path <PATH> list-checkpoints
 Checkpoints can be created using the `create_checkpoint` API, the `create-checkpoint` CLI command, or by the
 writer/reader clients as part of their normal operations (see below sections).
 
-Checkpoints can be taken form the current manifest, or from an existing checkpoint. Checkpoints cannot be created from
+Checkpoints can be taken from the current manifest, or from an existing checkpoint. Checkpoints cannot be created from
 arbitrary manifest versions.
 
 Generally to take a checkpoint from the current manifest, the client runs a procedure that looks like the following:
