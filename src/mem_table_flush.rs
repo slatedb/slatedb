@@ -7,12 +7,8 @@ use ulid::Ulid;
 use crate::db::DbInner;
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
+use crate::flush::FlushThreadMsg;
 use crate::manifest_store::FenceableManifest;
-
-pub(crate) enum MemtableFlushThreadMsg {
-    Shutdown,
-    FlushImmutableMemtables(Option<tokio::sync::oneshot::Sender<Result<(), SlateDBError>>>),
-}
 
 pub(crate) struct MemtableFlusher {
     db_inner: Arc<DbInner>,
@@ -84,7 +80,7 @@ impl DbInner {
     pub(crate) fn spawn_memtable_flush_task(
         self: &Arc<Self>,
         manifest: FenceableManifest,
-        mut rx: tokio::sync::mpsc::UnboundedReceiver<MemtableFlushThreadMsg>,
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<FlushThreadMsg>,
         tokio_handle: &Handle,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let this = Arc::clone(self);
@@ -117,10 +113,10 @@ impl DbInner {
                     msg = rx.recv() => {
                         let msg = msg.expect("channel unexpectedly closed");
                         match msg {
-                            MemtableFlushThreadMsg::Shutdown => {
+                            FlushThreadMsg::Shutdown => {
                                 is_stopped = true
                             },
-                            MemtableFlushThreadMsg::FlushImmutableMemtables(rsp) => {
+                            FlushThreadMsg::Flush(rsp) => {
                                 let result = flusher.flush_imm_memtables_to_l0().await;
                                 match &result {
                                     Ok(_) => {

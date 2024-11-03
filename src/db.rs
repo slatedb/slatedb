@@ -41,12 +41,11 @@ use crate::config::{
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter;
-use crate::flush::WalFlushThreadMsg;
+use crate::flush::FlushThreadMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::WritableKVTable;
-use crate::mem_table_flush::MemtableFlushThreadMsg;
 use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
@@ -59,8 +58,8 @@ pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
-    pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
+    pub(crate) wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<FlushThreadMsg>,
+    pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<FlushThreadMsg>,
     pub(crate) write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: Arc<DbStats>,
 }
@@ -70,8 +69,8 @@ impl DbInner {
         options: DbOptions,
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
-        wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
-        memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
+        wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<FlushThreadMsg>,
+        memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<FlushThreadMsg>,
         write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
         db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
@@ -239,7 +238,7 @@ impl DbInner {
         self.maybe_apply_backpressure().await;
         self.write_notifier.send(batch_msg).ok();
 
-        let current_table = rx.await.expect("write batch failed")?;
+        let current_table = rx.await??;
 
         if options.await_durable {
             current_table.await_durable().await;
@@ -273,18 +272,16 @@ impl DbInner {
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
-            .send(WalFlushThreadMsg::FlushImmutableWals(Some(tx)))
-            .expect("wal flush hung up");
-        rx.await.expect("received error on wal flush")
+            .send(FlushThreadMsg::Flush(Some(tx)))?;
+        rx.await?
     }
 
     // use to manually flush memtables
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
-            .send(MemtableFlushThreadMsg::FlushImmutableMemtables(Some(tx)))
-            .expect("memtable flush hung up");
-        rx.await.expect("receive error on memtable flush")
+            .send(FlushThreadMsg::Flush(Some(tx)))?;
+        rx.await?
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
@@ -356,7 +353,7 @@ impl DbInner {
                             .delete(kv.key.clone(), kv.attributes.clone()),
                     }
                 }
-                self.maybe_freeze_memtable(&mut guard, sst_id);
+                self.maybe_freeze_memtable(&mut guard, sst_id)?;
                 if guard.state().core.next_wal_sst_id == sst_id {
                     guard.increment_next_wal_id();
                 }
@@ -676,7 +673,7 @@ impl Db {
         // Shutdown the WAL flush thread.
         self.inner
             .wal_flush_notifier
-            .send(WalFlushThreadMsg::Shutdown)
+            .send(FlushThreadMsg::Shutdown)
             .ok();
 
         if let Some(flush_task) = {
@@ -689,7 +686,7 @@ impl Db {
         // Shutdown the memtable flush thread.
         self.inner
             .memtable_flush_notifier
-            .send(MemtableFlushThreadMsg::Shutdown)
+            .send(FlushThreadMsg::Shutdown)
             .ok();
 
         if let Some(memtable_flush_task) = {

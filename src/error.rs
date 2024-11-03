@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::flush::FlushThreadMsg;
+
 #[derive(thiserror::Error, Debug)]
 pub enum SlateDBError {
     #[error("IO error: {0}")]
@@ -55,6 +57,12 @@ pub enum SlateDBError {
 
     #[error("Unknown RowFlags -- this may be caused by reading data encoded with a newer codec")]
     InvalidRowFlags,
+
+    #[error("Flush channel error: {0}")]
+    FlushChannelError(#[from] tokio::sync::mpsc::error::SendError<FlushThreadMsg>),
+
+    #[error("Read channel error: {0}")]
+    ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
 }
 
 /// Represents errors that can occur during the database configuration.

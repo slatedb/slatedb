@@ -2,20 +2,21 @@ use parking_lot::RwLockWriteGuard;
 
 use crate::db::DbInner;
 use crate::db_state::DbState;
-use crate::mem_table_flush::MemtableFlushThreadMsg::FlushImmutableMemtables;
+use crate::error::SlateDBError;
+use crate::flush::FlushThreadMsg;
 
 impl DbInner {
     pub(crate) fn maybe_freeze_memtable(
         &self,
         guard: &mut RwLockWriteGuard<'_, DbState>,
         wal_id: u64,
-    ) {
+    ) -> Result<(), SlateDBError> {
         if guard.memtable().size() < self.options.l0_sst_size_bytes {
-            return;
+            return Ok(());
         }
         guard.freeze_memtable(wal_id);
         self.memtable_flush_notifier
-            .send(FlushImmutableMemtables(None))
-            .expect("failed to send memtable flush msg");
+            .send(FlushThreadMsg::Flush(None))?;
+        Ok(())
     }
 }
