@@ -1,3 +1,24 @@
+//! This module provides the core database functionality for SlateDB.
+//! It provides methods for reading and writing to the database, as well as for flushing the database to disk.
+//!
+//! The `Db` struct represents a database.
+//!
+//! # Examples
+//!
+//! Basic usage of the `Db` struct:
+//!
+//! ```
+//! use slatedb::{db::Db, error::SlateDBError};
+//! use slatedb::object_store::{ObjectStore, memory::InMemory};
+//! use std::sync::Arc;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), SlateDBError> {
+//!     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+//!     let db = Db::open("test_db", object_store).await?;
+//!     Ok(())
+//! }
+//! ```
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -365,15 +386,68 @@ pub struct Db {
 }
 
 impl Db {
-    pub async fn open(
-        path: Path,
+    /// Open a new database with default options.
+    ///
+    /// ## Arguments
+    /// - `path`: the path to the database
+    /// - `object_store`: the object store to use for the database
+    ///
+    /// ## Returns
+    /// - `Db`: the database
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error opening the database
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn open<P: Into<Path>>(
+        path: P,
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self, SlateDBError> {
         Self::open_with_opts(path, DbOptions::default(), object_store).await
     }
 
-    pub async fn open_with_opts(
-        path: Path,
+    /// Open a new database with custom `DbOptions`.
+    ///
+    /// ## Arguments
+    /// - `path`: the path to the database
+    /// - `options`: the options to use for the database
+    /// - `object_store`: the object store to use for the database
+    ///
+    /// ## Returns
+    /// - `Db`: the database
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error opening the database
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, config::DbOptions, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open_with_opts("test_db", DbOptions::default(), object_store).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn open_with_opts<P: Into<Path>>(
+        path: P,
         options: DbOptions,
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self, SlateDBError> {
@@ -386,12 +460,43 @@ impl Db {
         .await
     }
 
-    pub async fn open_with_fp_registry(
-        path: Path,
+    /// Open a new database with a custom `FailPointRegistry`.
+    ///
+    /// ## Arguments
+    /// - `path`: the path to the database
+    /// - `options`: the options to use for the database
+    /// - `object_store`: the object store to use for the database
+    /// - `fp_registry`: the failpoint registry to use for the database
+    ///
+    /// ## Returns
+    /// - `Db`: the database
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error opening the database
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, config::DbOptions, error::SlateDBError};
+    /// use slatedb::fail_parallel::FailPointRegistry;
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let fp_registry = Arc::new(FailPointRegistry::new());
+    ///     let db = Db::open_with_fp_registry("test_db", DbOptions::default(), object_store, fp_registry).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn open_with_fp_registry<P: Into<Path>>(
+        path: P,
         options: DbOptions,
         object_store: Arc<dyn ObjectStore>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
+        let path = path.into();
         let db_stats = Arc::new(DbStats::new());
         let sst_format = SsTableFormat {
             min_filter_keys: options.min_filter_keys,
@@ -520,6 +625,26 @@ impl Db {
         FenceableManifest::init_writer(stored_manifest).await
     }
 
+    /// Close the database.
+    ///
+    /// ## Returns
+    /// - `Result<(), SlateDBError>`: if there was an error closing the database
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.close().await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn close(&self) -> Result<(), SlateDBError> {
         if let Some(compactor) = {
             let mut maybe_compactor = self.compactor.lock();
@@ -576,10 +701,71 @@ impl Db {
         Ok(())
     }
 
+    /// Get a value from the database with default read options.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to get
+    ///
+    /// ## Returns
+    /// - `Result<Option<Bytes>, SlateDBError>`:
+    ///     - `Some(Bytes)`: the value if it exists
+    ///     - `None`: if the value does not exist
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error getting the value
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"key", b"value").await?;
+    ///     assert_eq!(db.get(b"key").await?, Some(Bytes::from_static(b"value")));
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
         self.inner.get_with_options(key, DEFAULT_READ_OPTIONS).await
     }
 
+    /// Get a value from the database with custom read options.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to get
+    /// - `options`: the read options to use
+    ///
+    /// ## Returns
+    /// - `Result<Option<Bytes>, SlateDBError>`:
+    ///     - `Some(Bytes)`: the value if it exists
+    ///     - `None`: if the value does not exist
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error getting the value
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use slatedb::{db::Db, config::ReadOptions, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"key", b"value").await?;
+    ///     assert_eq!(db.get_with_options(b"key", &ReadOptions::default()).await?, Some(Bytes::from_static(b"value")));
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn get_with_options(
         &self,
         key: &[u8],
@@ -588,12 +774,62 @@ impl Db {
         self.inner.get_with_options(key, options).await
     }
 
+    /// Write a value into the database with default `WriteOptions`.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to write
+    /// - `value`: the value to write
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error writing the value
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"key", b"value").await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), SlateDBError> {
         let mut batch = WriteBatch::new();
         batch.put(key, value);
         self.write(batch).await
     }
 
+    /// Write a value into the database with custom `PutOptions` and `WriteOptions`.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to write
+    /// - `value`: the value to write
+    /// - `put_opts`: the put options to use
+    /// - `write_opts`: the write options to use
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error writing the value
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, config::{PutOptions, WriteOptions}, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put_with_options(b"key", b"value", &PutOptions::default(), &WriteOptions::default()).await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn put_with_options(
         &self,
         key: &[u8],
@@ -606,12 +842,59 @@ impl Db {
         self.write_with_options(batch, write_opts).await
     }
 
+    /// Delete a key from the database with default `WriteOptions`.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to delete
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error deleting the key
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.delete(b"key").await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn delete(&self, key: &[u8]) -> Result<(), SlateDBError> {
         let mut batch = WriteBatch::new();
         batch.delete(key);
         self.write(batch).await
     }
 
+    /// Delete a key from the database with custom `WriteOptions`.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to delete
+    /// - `options`: the write options to use
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error deleting the key
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, config::WriteOptions, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.delete_with_options(b"key", &WriteOptions::default()).await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn delete_with_options(
         &self,
         key: &[u8],
@@ -625,6 +908,34 @@ impl Db {
     /// Write a batch of put/delete operations atomically to the database. Batch writes
     /// block other gets and writes until the batch is written to the WAL (or memtable if
     /// WAL is disabled).
+    ///
+    /// ## Arguments
+    /// - `batch`: the batch of put/delete operations to write
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error writing the batch
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{batch::WriteBatch, db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///
+    ///     let mut batch = WriteBatch::new();
+    ///     batch.put(b"key1", b"value1");
+    ///     batch.put(b"key2", b"value2");
+    ///     batch.delete(b"key1");
+    ///     db.write(batch).await?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn write(&self, batch: WriteBatch) -> Result<(), SlateDBError> {
         self.write_with_options(batch, DEFAULT_WRITE_OPTIONS).await
     }
@@ -632,6 +943,35 @@ impl Db {
     /// Write a batch of put/delete operations atomically to the database. Batch writes
     /// block other gets and writes until the batch is written to the WAL (or memtable if
     /// WAL is disabled).
+    ///
+    /// ## Arguments
+    /// - `batch`: the batch of put/delete operations to write
+    /// - `options`: the write options to use
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error writing the batch
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{batch::WriteBatch, db::Db, config::WriteOptions, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///
+    ///     let mut batch = WriteBatch::new();
+    ///     batch.put(b"key1", b"value1");
+    ///     batch.put(b"key2", b"value2");
+    ///     batch.delete(b"key1");
+    ///     db.write_with_options(batch, &WriteOptions::default()).await?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn write_with_options(
         &self,
         batch: WriteBatch,
@@ -640,6 +980,28 @@ impl Db {
         self.inner.write_with_options(batch, options).await
     }
 
+    /// Flush the database to disk.
+    /// If WAL is enabled, flushes the WAL to disk.
+    /// If WAL is disabled, flushes the memtables to disk.
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error flushing the database
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.flush().await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn flush(&self) -> Result<(), SlateDBError> {
         if self.inner.wal_enabled() {
             self.inner.flush_wals().await
