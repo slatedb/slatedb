@@ -2,6 +2,7 @@
 
 set -eu # stop on errors and undefined variables
 
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WARMUP=0 # ignore the first N samples, equal to 30 seconds with default settings
 OUT="target/bencher/results"
 
@@ -15,7 +16,9 @@ run_bench() {
   local concurrency="$2"
   local log_file="$3"
 
-  local bench_cmd="cargo run -r --bin bencher --features=bencher -- --path /slatedb-bencher_${put_percentage}_${concurrency} db \
+  local bench_cmd="cargo run -r --bin bencher --features=bencher -- \
+    --path /slatedb-bencher_${put_percentage}_${concurrency} db \
+    --db-options-path $DIR/Slatedb.toml \
     --duration 60 \
     --val-len 8192 \
     --block-cache-size 134217728 \
