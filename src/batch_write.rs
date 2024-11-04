@@ -79,7 +79,9 @@ impl DbInner {
                     }
                 }
             }
-            current_wal.table().clone()
+            let table = current_wal.table().clone();
+            self.maybe_freeze_wal(&mut guard)?;
+            table
         } else {
             if cfg!(not(feature = "wal_disable")) {
                 panic!("wal_disabled feature must be enabled");

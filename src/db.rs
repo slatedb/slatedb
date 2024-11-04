@@ -228,23 +228,38 @@ impl DbInner {
 
     pub(crate) async fn maybe_apply_backpressure(&self) {
         loop {
-            let table = {
+            let mut wal_table = None;
+            let mut mem_table = None;
+            {
                 let guard = self.state.read();
                 let state = guard.state();
-                if state.imm_memtable.len() <= self.options.max_unflushed_memtable {
-                    return;
+                if state.imm_wal.len() > 4 {
+                    if let Some(table) = state.imm_wal.back() {
+                        warn!(
+                        "applying backpressure to write by waiting for imm wal flush. imm wals({}), max({})",
+                        state.imm_wal.len(),
+                        4
+                    );
+                        wal_table = Some(table.clone());
+                    }
+                } else if state.imm_memtable.len() > self.options.max_unflushed_memtable {
+                    if let Some(table) = state.imm_memtable.back() {
+                        warn!(
+                        "applying backpressure to write by waiting for imm table flush. imm tables({}), max({})",
+                        state.imm_memtable.len(),
+                        self.options.max_unflushed_memtable
+                    );
+                        mem_table = Some(table.clone());
+                    }
+                } else {
+                    break;
                 }
-                let Some(table) = state.imm_memtable.back() else {
-                    return;
-                };
-                warn!(
-                    "applying backpressure to write by waiting for imm table flush. imm tables({}), max({})",
-                    state.imm_memtable.len(),
-                    self.options.max_unflushed_memtable
-                );
-                table.clone()
-            };
-            table.await_flush_to_l0().await
+            }
+            if let Some(table) = wal_table {
+                table.table().await_durable().await;
+            } else if let Some(table) = mem_table {
+                table.await_flush_to_l0().await;
+            }
         }
     }
 

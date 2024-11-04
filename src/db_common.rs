@@ -19,4 +19,16 @@ impl DbInner {
             .send(FlushThreadMsg::Flush(None))?;
         Ok(())
     }
+
+    pub(crate) fn maybe_freeze_wal(
+        &self,
+        guard: &mut RwLockWriteGuard<'_, DbState>,
+    ) -> Result<(), SlateDBError> {
+        if guard.wal().size() < 64 * 1024 * 1024 {
+            return Ok(());
+        }
+        guard.freeze_wal();
+        self.wal_flush_notifier.send(FlushThreadMsg::Flush(None))?;
+        Ok(())
+    }
 }
