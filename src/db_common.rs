@@ -24,7 +24,7 @@ impl DbInner {
         &self,
         guard: &mut RwLockWriteGuard<'_, DbState>,
     ) -> Result<(), SlateDBError> {
-        if guard.wal().size() < 64 * 1024 * 1024 {
+        if guard.wal().size() < self.options.wal_sst_size_bytes {
             return Ok(());
         }
         guard.freeze_wal();

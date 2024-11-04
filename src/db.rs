@@ -235,7 +235,7 @@ impl DbInner {
             let table = {
                 let guard = self.state.read();
                 let state = guard.state();
-                if state.imm_wal.len() <= 4 {
+                if state.imm_wal.len() <= self.options.max_unflushed_wal {
                     return;
                 }
                 let Some(table) = state.imm_wal.back() else {
@@ -244,7 +244,7 @@ impl DbInner {
                 warn!(
                     "applying backpressure to write by waiting for imm wal flush. imm wal({}), max({})",
                     state.imm_wal.len(),
-                    4
+                    self.options.max_unflushed_wal
                 );
                 table.clone()
             };
