@@ -356,6 +356,15 @@ pub struct DbOptions {
     /// you may benefit from setting this higher (if you have enough memory available)
     pub filter_bits_per_key: u32,
 
+    /// The max size a WAL SSTable can be before it is frozen and added to the flush
+    /// queue. If this value exceeds `l0_sst_size_bytes``, you might see L0 SSTables that
+    /// are larger than `l0_sst_size_bytes``.
+    pub wal_sst_size_bytes: usize,
+
+    /// The max number of unflushed WAL SSTables. Writes will be paused if there are
+    /// more unflushed WAL SSTables than this value.
+    pub max_unflushed_wal: usize,
+
     /// The minimum size a memtable needs to be before it is frozen and flushed to
     /// L0 object storage. Writes will still be flushed to the object storage WAL
     /// (based on flush_interval) regardless of this value. Memtable sizes are checked
@@ -560,6 +569,8 @@ impl Default for DbOptions {
             wal_enabled: true,
             manifest_poll_interval: Duration::from_secs(1),
             min_filter_keys: 1000,
+            wal_sst_size_bytes: 64 * 1024 * 1024,
+            max_unflushed_wal: 4,
             l0_sst_size_bytes: 64 * 1024 * 1024,
             max_unflushed_memtable: 2,
             l0_max_ssts: 8,

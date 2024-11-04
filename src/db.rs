@@ -1810,6 +1810,8 @@ mod tests {
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),
+            wal_sst_size_bytes: 1024,
+            max_unflushed_wal: 2,
             max_unflushed_memtable: 2,
             l0_max_ssts: 8,
             min_filter_keys,
