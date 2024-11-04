@@ -1,4 +1,4 @@
-wal_enabled = true
+wal_enabled = false
 flush_interval = "100ms"
 
 [object_store_cache_options]
