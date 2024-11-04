@@ -3,7 +3,7 @@ use crate::error::SlateDBError;
 use bytes::Bytes;
 use serde::Serialize;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, PartialEq, Debug)]
 pub(crate) struct Manifest {
     pub(crate) core: CoreDbState,
     pub(crate) writer_epoch: u64,

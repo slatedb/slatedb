@@ -1,9 +1,12 @@
 use bytes::Bytes;
 use serde::Serialize;
 use std::collections::VecDeque;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
+use std::time::SystemTime;
 use tracing::debug;
 use ulid::Ulid;
+use uuid::Uuid;
 use SsTableId::{Compacted, Wal};
 
 use crate::config::CompressionCodec;
@@ -14,6 +17,12 @@ use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable
 pub(crate) struct SsTableHandle {
     pub id: SsTableId,
     pub info: SsTableInfo,
+}
+
+impl Debug for SsTableHandle {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("SsTableHandle({:?})", self.id))
+    }
 }
 
 impl SsTableHandle {
@@ -102,7 +111,7 @@ impl Clone for Box<dyn SsTableInfoCodec> {
     }
 }
 
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Debug)]
 pub(crate) struct SortedRun {
     pub(crate) id: u32,
     pub(crate) ssts: Vec<SsTableHandle>,
@@ -135,6 +144,14 @@ impl SortedRun {
     }
 }
 
+#[derive(Clone, PartialEq, Serialize, Debug)]
+pub(crate) struct Checkpoint {
+    pub(crate) id: Uuid,
+    pub(crate) manifest_id: u64,
+    pub(crate) expire_time: Option<SystemTime>,
+    pub(crate) create_time: SystemTime,
+}
+
 pub(crate) struct DbState {
     memtable: WritableKVTable,
     wal: WritableKVTable,
@@ -150,25 +167,29 @@ pub(crate) struct COWDbState {
 }
 
 // represents the core db state that we persist in the manifest
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Debug)]
 pub(crate) struct CoreDbState {
+    pub(crate) initialized: bool,
     pub(crate) l0_last_compacted: Option<Ulid>,
     pub(crate) l0: VecDeque<SsTableHandle>,
     pub(crate) compacted: Vec<SortedRun>,
     pub(crate) next_wal_sst_id: u64,
     pub(crate) last_compacted_wal_sst_id: u64,
     pub(crate) last_clock_tick: i64,
+    pub(crate) checkpoints: Vec<Checkpoint>,
 }
 
 impl CoreDbState {
     pub(crate) fn new() -> Self {
         Self {
+            initialized: true,
             l0_last_compacted: None,
             l0: VecDeque::new(),
             compacted: vec![],
             next_wal_sst_id: 1,
             last_compacted_wal_sst_id: 0,
             last_clock_tick: i64::MIN,
+            checkpoints: vec![],
         }
     }
 
