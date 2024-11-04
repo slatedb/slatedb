@@ -214,7 +214,10 @@ impl DbInner {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
 
-        self.maybe_apply_backpressure().await;
+        if self.wal_enabled() {
+            self.maybe_apply_wal_backpressure().await;
+        }
+        self.maybe_apply_memtable_backpressure().await;
         self.write_notifier.send(batch_msg).ok();
 
         let current_table = rx.await??;
@@ -226,40 +229,49 @@ impl DbInner {
         Ok(())
     }
 
-    pub(crate) async fn maybe_apply_backpressure(&self) {
+    #[inline]
+    pub(crate) async fn maybe_apply_wal_backpressure(&self) {
         loop {
-            let mut wal_table = None;
-            let mut mem_table = None;
-            {
+            let table = {
                 let guard = self.state.read();
                 let state = guard.state();
-                if state.imm_wal.len() > 4 {
-                    if let Some(table) = state.imm_wal.back() {
-                        warn!(
-                        "applying backpressure to write by waiting for imm wal flush. imm wals({}), max({})",
-                        state.imm_wal.len(),
-                        4
-                    );
-                        wal_table = Some(table.clone());
-                    }
-                } else if state.imm_memtable.len() > self.options.max_unflushed_memtable {
-                    if let Some(table) = state.imm_memtable.back() {
-                        warn!(
-                        "applying backpressure to write by waiting for imm table flush. imm tables({}), max({})",
-                        state.imm_memtable.len(),
-                        self.options.max_unflushed_memtable
-                    );
-                        mem_table = Some(table.clone());
-                    }
-                } else {
-                    break;
+                if state.imm_wal.len() <= 4 {
+                    return;
                 }
-            }
-            if let Some(table) = wal_table {
-                table.table().await_durable().await;
-            } else if let Some(table) = mem_table {
-                table.await_flush_to_l0().await;
-            }
+                let Some(table) = state.imm_wal.back() else {
+                    return;
+                };
+                warn!(
+                    "applying backpressure to write by waiting for imm wal flush. imm wal({}), max({})",
+                    state.imm_wal.len(),
+                    4
+                );
+                table.clone()
+            };
+            table.table().await_durable().await;
+        }
+    }
+
+    #[inline]
+    pub(crate) async fn maybe_apply_memtable_backpressure(&self) {
+        loop {
+            let table = {
+                let guard = self.state.read();
+                let state = guard.state();
+                if state.imm_memtable.len() <= self.options.max_unflushed_memtable {
+                    return;
+                }
+                let Some(table) = state.imm_memtable.back() else {
+                    return;
+                };
+                warn!(
+                    "applying backpressure to write by waiting for imm table flush. imm tables({}), max({})",
+                    state.imm_memtable.len(),
+                    self.options.max_unflushed_memtable
+                );
+                table.clone()
+            };
+            table.await_flush_to_l0().await
         }
     }
 
