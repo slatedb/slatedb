@@ -115,7 +115,6 @@ impl WritableKVTable {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn size(&self) -> usize {
         self.size
     }
