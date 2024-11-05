@@ -275,7 +275,7 @@ impl DbInner {
                     let guard = self.state.read();
                     (
                         guard.state().imm_wal.back().map(|imm| imm.table().clone()),
-                        guard.state().imm_memtable.back().map(|imm| imm.clone()),
+                        guard.state().imm_memtable.back().cloned(),
                     )
                 };
                 warn!(
