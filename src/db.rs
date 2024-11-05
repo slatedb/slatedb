@@ -32,6 +32,7 @@ use tracing::warn;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
+use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
 use crate::cached_object_store::CachedObjectStore;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
@@ -544,13 +545,17 @@ impl Db {
         let maybe_cached_object_store = match &options.object_store_cache_options.root_folder {
             None => object_store.clone(),
             Some(cache_root_folder) => {
-                let part_size_bytes = options.object_store_cache_options.part_size_bytes;
-                let cached_object_store = CachedObjectStore::new(
-                    object_store.clone(),
+                let cache_storage = Arc::new(FsCacheStorage::new(
                     cache_root_folder.clone(),
                     options.object_store_cache_options.max_cache_size_bytes,
-                    part_size_bytes,
                     options.object_store_cache_options.scan_interval,
+                    db_stats.clone(),
+                ));
+
+                let cached_object_store = CachedObjectStore::new(
+                    object_store.clone(),
+                    cache_storage,
+                    options.object_store_cache_options.part_size_bytes,
                     db_stats.clone(),
                 )?;
                 cached_object_store.start_evictor().await;
@@ -1064,6 +1069,7 @@ mod tests {
     use tracing::info;
 
     use super::*;
+    use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
         DEFAULT_PUT_OPTIONS,
@@ -1141,12 +1147,17 @@ mod tests {
             .unwrap();
         let db_stats = Arc::new(DbStats::new());
         let part_size = 1024;
-        let cached_object_store = CachedObjectStore::new(
-            object_store.clone(),
+        let cache_storage = Arc::new(FsCacheStorage::new(
             temp_dir.path().to_path_buf(),
             None,
-            part_size,
             None,
+            db_stats.clone(),
+        ));
+
+        let cached_object_store = CachedObjectStore::new(
+            object_store.clone(),
+            cache_storage,
+            part_size,
             db_stats.clone(),
         )
         .unwrap();
