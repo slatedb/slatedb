@@ -42,4 +42,11 @@ impl ValueDeletable {
             ValueDeletable::Tombstone => None,
         }
     }
+
+    pub fn is_tombstone(&self) -> bool {
+        match self {
+            ValueDeletable::Value(_) => false,
+            ValueDeletable::Tombstone => true,
+        }
+    }
 }

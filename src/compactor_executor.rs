@@ -28,6 +28,7 @@ pub(crate) struct CompactionJob {
     pub(crate) destination: u32,
     pub(crate) ssts: Vec<SsTableHandle>,
     pub(crate) sorted_runs: Vec<SortedRun>,
+    pub(crate) is_dest_last_run: bool,
 }
 
 pub(crate) trait CompactionExecutor {
@@ -149,16 +150,22 @@ impl TokioCompactionExecutorInner {
                 _ => raw_kv,
             };
 
-            // Add to SST
-            let value = kv.value.into_option();
-            current_writer
-                .add(
-                    kv.key.as_ref(),
-                    value.as_ref().map(|b| b.as_ref()),
-                    kv.attributes,
-                )
-                .await?;
-            current_size += kv.key.len() + value.map_or(0, |b| b.len());
+            // When we compact to the last sorted run, all tombstone space is physically deleted
+            if compaction.is_dest_last_run && kv.value.is_tombstone() {
+                continue;
+            } else {
+                // Add to SST
+                let value = kv.value.into_option();
+                current_writer
+                    .add(
+                        kv.key.as_ref(),
+                        value.as_ref().map(|b| b.as_ref()),
+                        kv.attributes,
+                    )
+                    .await?;
+                current_size += kv.key.len() + value.map_or(0, |b| b.len());
+            }
+
             if current_size > self.options.max_sst_size {
                 current_size = 0;
                 let finished_writer = mem::replace(
