@@ -32,6 +32,7 @@ pub(crate) struct CompactionJob {
     pub(crate) ssts: Vec<SsTableHandle>,
     pub(crate) sorted_runs: Vec<SortedRun>,
     pub(crate) compaction_ts: i64,
+    pub(crate) is_dest_last_run: bool,
 }
 
 pub(crate) trait CompactionExecutor {
@@ -157,6 +158,10 @@ impl TokioCompactionExecutorInner {
                 }
                 _ => raw_kv,
             };
+
+            if compaction.is_dest_last_run && kv.value.is_tombstone() {
+                continue;
+            }
 
             // Add to SST
             let key_len = kv.key.len();

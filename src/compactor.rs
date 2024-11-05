@@ -341,12 +341,19 @@ impl CompactorEventHandler {
             .filter_map(|s| s.maybe_unwrap_sorted_run())
             .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
             .collect();
+        // if there are no SRs when we compact L0 then the resulting SR is the last sorted run.
+        let is_dest_last_run = db_state.compacted.is_empty()
+            || db_state
+                .compacted
+                .last()
+                .is_some_and(|sr| compaction.destination == sr.id);
         self.executor.start_compaction(CompactionJob {
             id,
             destination: compaction.destination,
             ssts,
             sorted_runs,
             compaction_ts: db_state.last_l0_clock_tick,
+            is_dest_last_run,
         });
     }
 
