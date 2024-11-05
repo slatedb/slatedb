@@ -1719,10 +1719,11 @@ mod tests {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_opts(
+        let kv_store = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
+            fp_registry.clone(),
         )
         .await
         .unwrap();
@@ -1760,10 +1761,11 @@ mod tests {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_opts(
+        let kv_store = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
+            fp_registry.clone(),
         )
         .await
         .unwrap();
@@ -1807,10 +1809,11 @@ mod tests {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_opts(
+        let kv_store = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
+            fp_registry.clone(),
         )
         .await
         .unwrap();
