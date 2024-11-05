@@ -644,7 +644,7 @@ mod tests {
                 vec![b'a'; 16].into(),
                 Some(vec![1u8; 16].into()),
                 0,
-                Some(1),
+                None,
                 None,
             ))
             .await
@@ -654,13 +654,13 @@ mod tests {
                 vec![b'b'; 16].into(),
                 Some(vec![2u8; 16].into()),
                 0,
-                Some(2),
+                None,
                 None,
             ))
             .await
             .unwrap();
         writer
-            .add(RowEntry::new(vec![b'c'; 16].into(), None, 0, Some(3), None))
+            .add(RowEntry::new(vec![b'c'; 16].into(), None, 0, None, None))
             .await
             .unwrap();
         writer
@@ -668,7 +668,7 @@ mod tests {
                 vec![b'd'; 16].into(),
                 Some(vec![4u8; 16].into()),
                 0,
-                Some(4),
+                None,
                 None,
             ))
             .await
@@ -727,7 +727,7 @@ mod tests {
             "key".into(),
             Some("value".into()),
             0,
-            Some(1),
+            None,
             None,
         ))
         .unwrap();
@@ -739,7 +739,7 @@ mod tests {
             "key".into(),
             Some("value".into()),
             0,
-            Some(1),
+            None,
             None,
         ))
         .unwrap();
@@ -786,7 +786,7 @@ mod tests {
                     key.to_vec().into(),
                     Some(value.to_vec().into()),
                     0,
-                    Some(i),
+                    None,
                     None,
                 ))
                 .await

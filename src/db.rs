@@ -328,7 +328,7 @@ impl DbInner {
                                 kv.key.clone(),
                                 value.clone(),
                                 RowAttributes {
-                                    ts: kv.create_ts,
+                                    ts: None,
                                     expire_ts: kv.expire_ts,
                                 },
                             );
@@ -336,7 +336,7 @@ impl DbInner {
                         ValueDeletable::Tombstone => guard.memtable().delete(
                             kv.key.clone(),
                             RowAttributes {
-                                ts: kv.create_ts,
+                                ts: None,
                                 expire_ts: kv.expire_ts,
                             },
                         ),

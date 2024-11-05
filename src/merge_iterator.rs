@@ -148,30 +148,28 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
     use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
-    use crate::test_utils::{assert_iterator, gen_attrs, TestClock};
+    use crate::test_utils::{assert_iterator, gen_attrs};
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
     use std::collections::VecDeque;
-    use std::sync::atomic::Ordering::SeqCst;
 
     #[tokio::test]
     async fn test_merge_iterator_should_include_entries_in_order() {
         let mut iters = VecDeque::new();
-        let clock = TestClock::new();
         iters.push_back(
-            TestIterator::new(&clock)
+            TestIterator::new()
                 .with_entry(b"aaaa", b"1111")
                 .with_entry(b"cccc", b"3333")
                 .with_entry(b"zzzz", b"26262626"),
         );
         iters.push_back(
-            TestIterator::new(&clock)
+            TestIterator::new()
                 .with_entry(b"bbbb", b"2222")
                 .with_entry(b"xxxx", b"24242424")
                 .with_entry(b"yyyy", b"25252525"),
         );
         iters.push_back(
-            TestIterator::new(&clock)
+            TestIterator::new()
                 .with_entry(b"dddd", b"4444")
                 .with_entry(b"eeee", b"5555")
                 .with_entry(b"gggg", b"7777"),
@@ -235,19 +233,18 @@ mod tests {
     #[tokio::test]
     async fn test_merge_iterator_should_write_one_entry_with_given_key() {
         let mut iters = VecDeque::new();
-        let clock = TestClock::new();
         iters.push_back(
-            TestIterator::new(&clock)
+            TestIterator::new()
                 .with_entry(b"aaaa", b"1111")
                 .with_entry(b"cccc", b"use this one c"),
         );
         iters.push_back(
-            TestIterator::new(&clock)
+            TestIterator::new()
                 .with_entry(b"cccc", b"badc1")
                 .with_entry(b"xxxx", b"use this one x"),
         );
         iters.push_back(
-            TestIterator::new(&clock)
+            TestIterator::new()
                 .with_entry(b"bbbb", b"2222")
                 .with_entry(b"cccc", b"badc2")
                 .with_entry(b"xxxx", b"badx1"),
@@ -285,12 +282,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_two_iterator_should_include_entries_in_order() {
-        let clock = TestClock::new();
-        let iter1 = TestIterator::new(&clock)
+        let iter1 = TestIterator::new()
             .with_entry(b"aaaa", b"1111")
             .with_entry(b"cccc", b"3333")
             .with_entry(b"zzzz", b"26262626");
-        let iter2 = TestIterator::new(&clock)
+        let iter2 = TestIterator::new()
             .with_entry(b"bbbb", b"2222")
             .with_entry(b"xxxx", b"24242424")
             .with_entry(b"yyyy", b"25252525");
@@ -337,11 +333,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_two_iterator_should_write_one_entry_with_given_key() {
-        let clock = TestClock::new();
-        let iter1 = TestIterator::new(&clock)
+        let iter1 = TestIterator::new()
             .with_entry(b"aaaa", b"1111")
             .with_entry(b"cccc", b"use this one c");
-        let iter2 = TestIterator::new(&clock)
+        let iter2 = TestIterator::new()
             .with_entry(b"cccc", b"badc")
             .with_entry(b"xxxx", b"24242424");
 
@@ -370,28 +365,25 @@ mod tests {
         .await;
     }
 
-    struct TestIterator<'a> {
+    struct TestIterator {
         entries: VecDeque<Result<RowEntry, SlateDBError>>,
-        clock: &'a TestClock,
     }
 
-    impl<'a> TestIterator<'a> {
-        fn new(clock: &'a TestClock) -> Self {
+    impl TestIterator {
+        fn new() -> Self {
             Self {
                 entries: VecDeque::new(),
-                clock,
             }
         }
 
         fn with_entry(mut self, key: &'static [u8], val: &'static [u8]) -> Self {
-            let ts = self.clock.ticker.fetch_add(1, SeqCst);
-            let entry = RowEntry::new(key.into(), Some(val.to_vec().into()), 0, Some(ts), None);
+            let entry = RowEntry::new(key.into(), Some(val.to_vec().into()), 0, None, None);
             self.entries.push_back(Ok(entry));
             self
         }
     }
 
-    impl KeyValueIterator for TestIterator<'_> {
+    impl KeyValueIterator for TestIterator {
         async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
             self.entries.pop_front().map_or(Ok(None), |e| match e {
                 Ok(kv) => Ok(Some(kv)),

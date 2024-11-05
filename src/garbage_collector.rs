@@ -436,7 +436,7 @@ mod tests {
             "key".into(),
             Some("value".into()),
             0,
-            Some(1),
+            None,
             None,
         ))
         .unwrap();
@@ -449,7 +449,7 @@ mod tests {
             "key".into(),
             Some("value".into()),
             0,
-            Some(2),
+            None,
             None,
         ))
         .unwrap();
@@ -519,7 +519,7 @@ mod tests {
             "key".into(),
             Some("value".into()),
             0,
-            Some(1),
+            None,
             None,
         ))
         .unwrap();
@@ -533,7 +533,7 @@ mod tests {
             "key".into(),
             Some("value".into()),
             0,
-            Some(2),
+            None,
             None,
         ))
         .unwrap();
@@ -828,7 +828,7 @@ mod tests {
             "key".into(),
             Some("value".into()),
             0,
-            Some(1),
+            None,
             None,
         ))
         .unwrap();

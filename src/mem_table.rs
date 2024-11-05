@@ -293,10 +293,8 @@ mod tests {
         let mut iter = table.table().iter();
         let kv = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc111".as_slice());
-        assert_eq!(kv.create_ts, Some(2));
         let kv = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc333".as_slice());
-        assert_eq!(kv.create_ts, Some(1));
         assert!(iter.next().await.unwrap().is_none());
     }
 

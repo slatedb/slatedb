@@ -1,5 +1,4 @@
 use crate::error::SlateDBError;
-use crate::flatbuffer_types::{SstRowExtra, SstRowExtraArgs};
 use crate::types::{RowEntry, ValueDeletable};
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -8,6 +7,8 @@ bitflags! {
     #[derive(Debug, Clone, PartialEq, Default)]
     pub(crate) struct RowFlags: u8 {
         const Tombstone = 0b00000001;
+        const HAS_EXPIRE_TS = 0b00000010;
+        const HAS_CREATE_TS = 0b00000100;
     }
 }
 
@@ -17,11 +18,11 @@ bitflags! {
 /// The `v1` codec for the key is (for non-tombstones):
 ///
 /// ```txt
-///  |-------------------------------------------------------------------------------------------------------------|
-///  |       u16      |      u16       |  var        | u64     | u8        | u16       | var   |    u32    |  var  |
-///  |----------------|----------------|-------------|---------|-----------|-----------|-------|-----------|-------|
-///  | key_prefix_len | key_suffix_len |  key_suffix | seq     | flags     | extra_len | extra | value_len | value |
-///  |-------------------------------------------------------------------------------------------------------------|
+///  |---------------------------------------------------------------------------------------------------------------------|
+///  |       u16      |      u16       |  var        | u64     | u8        | i64       | i64       | u32       |  var      |
+///  |----------------|----------------|-------------|---------|-----------|-----------|-----------|-----------|-----------|
+///  | key_prefix_len | key_suffix_len |  key_suffix | seq     | flags     | expire_ts | create_ts | value_len | value     |
+///  |---------------------------------------------------------------------------------------------------------------------|
 /// ```
 ///
 /// And for tombstones (flags & Tombstone == 1):
@@ -34,14 +35,16 @@ bitflags! {
 ///  |----------------------------------------------------------------------|
 ///  ```
 ///
-/// | Field            | Type | Description                                   |
-/// |------------------|------|-----------------------------------------------|
-/// | `key_prefix_len` | `u16` | Length of the key prefix                     |
-/// | `key_suffix_len` | `u16` | Length of the key suffix                     |
-/// | `key_suffix`     | `var` | Suffix of the key                            |
-/// | `meta`           | `var` | Metadata                                     |
-/// | `value_len`      | `u32` | Length of the value                          |
-/// | `value`          | `var` | Value bytes                                  |
+/// | Field            | Type  | Description                                            |
+/// |------------------|-------|--------------------------------------------------------|
+/// | `key_prefix_len` | `u16` | Length of the key prefix                               |
+/// | `key_suffix_len` | `u16` | Length of the key suffix                               |
+/// | `key_suffix`     | `var` | Suffix of the key                                      |
+/// | `seq`            | `u64` | Sequence                                               |
+/// | `flags`          | `u8`  | Flags of the row                                       |
+/// | `expire_ts`      | `u64` | Optional, only has value when flags & HAS_EXPIRE_TS    |
+/// | `value_len`      | `u32` | Length of the value                                    |
+/// | `value`          | `var` | Value bytes                                            |
 
 #[derive(Debug)]
 pub(crate) enum SstRowKey {
@@ -53,8 +56,8 @@ pub(crate) struct SstRowEntry {
     key: SstRowKey,
     seq: u64,
     flags: RowFlags,
-    create_ts: Option<i64>,
     expire_ts: Option<i64>,
+    create_ts: Option<i64>,
     value: ValueDeletable,
 }
 
@@ -67,10 +70,16 @@ impl SstRowEntry {
         create_ts: Option<i64>,
         expire_ts: Option<i64>,
     ) -> Self {
-        let flags = match &value {
+        let mut flags = match &value {
             ValueDeletable::Value(_) => RowFlags::default(),
             ValueDeletable::Tombstone => RowFlags::Tombstone,
         };
+        if expire_ts.is_some() {
+            flags |= RowFlags::HAS_EXPIRE_TS;
+        }
+        if create_ts.is_some() {
+            flags |= RowFlags::HAS_CREATE_TS;
+        }
         Self {
             key: SstRowKey::SuffixOnly {
                 prefix_len: key_prefix_len,
@@ -123,29 +132,33 @@ impl SstRowCodecV1 {
             _ => unreachable!("only suffix only key is supported on encode"),
         }
 
+        let flags = {
+            let mut flags = RowFlags::empty();
+            if row.expire_ts.is_some() {
+                flags |= RowFlags::HAS_EXPIRE_TS;
+            }
+            if row.create_ts.is_some() {
+                flags |= RowFlags::HAS_CREATE_TS;
+            }
+            if row.value.as_option().is_none() {
+                flags |= RowFlags::Tombstone;
+            }
+            flags
+        };
+
         // encode seq & flags
         output.put_u64(row.seq);
-        output.put_u8(row.flags.bits());
-        if row.flags.contains(RowFlags::Tombstone) {
+        output.put_u8(flags.bits());
+        if flags.contains(RowFlags::Tombstone) {
             return;
         }
 
-        // encode extra
-        // TODO: maybe moved to flatbuffer_types.rs
-        if row.create_ts.is_some() || row.expire_ts.is_some() {
-            let mut extra_builder = flatbuffers::FlatBufferBuilder::new();
-            let extra = SstRowExtra::create(
-                &mut extra_builder,
-                &SstRowExtraArgs {
-                    created_ts: row.create_ts,
-                    expire_ts: row.expire_ts,
-                },
-            );
-            extra_builder.finish(extra, None);
-            output.put_u16(extra_builder.finished_data().len() as u16);
-            output.put(extra_builder.finished_data());
-        } else {
-            output.put_u16(0_u16);
+        // encode expire & create ts
+        if flags.contains(RowFlags::HAS_EXPIRE_TS) {
+            output.put_i64(row.expire_ts.unwrap_or(0));
+        }
+        if flags.contains(RowFlags::HAS_CREATE_TS) {
+            output.put_i64(row.create_ts.unwrap_or(0));
         }
 
         // encode value
@@ -177,22 +190,23 @@ impl SstRowCodecV1 {
                 key: SstRowKey::Full(full_key.freeze()),
                 seq,
                 flags,
-                create_ts: None,
                 expire_ts: None,
+                create_ts: None,
                 value: ValueDeletable::Tombstone,
             });
         }
 
-        // decode extra
-        let extra_len = data.get_u16() as usize;
-        let (create_ts, expire_ts) = if extra_len > 0 {
-            let extra_buf = data.slice(..extra_len);
-            data.advance(extra_len);
-            let extra = flatbuffers::root::<SstRowExtra>(extra_buf.as_ref())?;
-            (extra.created_ts(), extra.expire_ts())
-        } else {
-            (None, None)
-        };
+        // decode expire_ts & create_ts
+        let (expire_ts, create_ts) =
+            if flags.contains(RowFlags::HAS_EXPIRE_TS | RowFlags::HAS_CREATE_TS) {
+                (Some(data.get_i64()), Some(data.get_i64()))
+            } else if flags.contains(RowFlags::HAS_EXPIRE_TS) {
+                (Some(data.get_i64()), None)
+            } else if flags.contains(RowFlags::HAS_CREATE_TS) {
+                (None, Some(data.get_i64()))
+            } else {
+                (None, None)
+            };
 
         // decode value
         let value_len = data.get_u32() as usize;
@@ -201,8 +215,8 @@ impl SstRowCodecV1 {
             key: SstRowKey::Full(full_key.freeze()),
             seq,
             flags,
-            create_ts,
             expire_ts,
+            create_ts,
             value: ValueDeletable::Value(value),
         })
     }
@@ -229,7 +243,7 @@ mod tests {
                 Bytes::from(key_suffix.to_vec()),
                 1,
                 ValueDeletable::Value(Bytes::from(value.unwrap().to_vec())),
-                Some(1),
+                None,
                 Some(10),
             ),
         );
@@ -247,7 +261,7 @@ mod tests {
 
         assert_eq!(decoded.key(), &expected_key);
         assert_eq!(decoded.value, expected_value);
-        assert_eq!(decoded.create_ts, Some(1));
+        assert_eq!(decoded.create_ts, None);
         assert_eq!(decoded.expire_ts, Some(10));
     }
 
@@ -267,7 +281,7 @@ mod tests {
                 Bytes::from(key_suffix.to_vec()),
                 1,
                 ValueDeletable::Value(Bytes::from(value.unwrap().to_vec())),
-                Some(1),
+                None,
                 None,
             ),
         );
@@ -296,8 +310,8 @@ mod tests {
                 Bytes::from(key_suffix.to_vec()),
                 1,
                 ValueDeletable::Tombstone,
-                Some(1),
                 None,
+                Some(1),
             ),
         );
 
@@ -313,7 +327,7 @@ mod tests {
 
         assert_eq!(decoded.key(), &expected_key);
         assert_eq!(decoded.value, expected_value);
-        assert_eq!(decoded.create_ts, None);
+        assert_eq!(decoded.expire_ts, None);
     }
 
     #[test]
@@ -360,7 +374,7 @@ mod tests {
                 Bytes::from(key_suffix.to_vec()),
                 1,
                 ValueDeletable::Value(Bytes::from(b"value".to_vec())),
-                Some(1),
+                None,
                 None,
             ),
         );

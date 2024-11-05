@@ -190,21 +190,21 @@ mod tests {
             "key1".into(),
             Some("value1".into()),
             0,
-            Some(1),
+            None,
             None
         )));
         assert!(builder.add(RowEntry::new(
             "key1".into(),
             Some("value1".into()),
             0,
-            Some(0),
+            None,
             None
         )));
         assert!(builder.add(RowEntry::new(
             "key2".into(),
             Some("value2".into()),
             0,
-            Some(1),
+            None,
             None
         )));
         let block = builder.build().unwrap();
@@ -221,15 +221,15 @@ mod tests {
             "key1".into(),
             Some("value1".into()),
             0,
-            Some(0),
+            None,
             None
         )));
-        assert!(builder.add(RowEntry::new("key2".into(), None, 0, Some(1), None)));
+        assert!(builder.add(RowEntry::new("key2".into(), None, 0, None, None)));
         assert!(builder.add(RowEntry::new(
             "key3".into(),
             Some("value3".into()),
             0,
-            Some(2),
+            None,
             None
         )));
         let block = builder.build().unwrap();
@@ -243,13 +243,13 @@ mod tests {
         assert!(builder.add_kv(b"key1", Some(b"value1"), gen_attrs(1)));
         assert!(builder.add_kv(b"key2", Some(b"value2"), gen_attrs(1)));
         let block = builder.build().unwrap();
-        assert_eq!(109, block.size());
+        assert_eq!(73, block.size());
 
         let mut builder = BlockBuilder::new(4096, vec![RowFeature::Flags]);
         assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
         assert!(builder.add_kv(b"key2", Some(b"value2"), gen_empty_attrs()));
         let block = builder.build().unwrap();
-        assert_eq!(61, block.size());
+        assert_eq!(57, block.size());
     }
 
     #[test]

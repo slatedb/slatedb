@@ -246,10 +246,9 @@ impl<'a, H: AsRef<SsTableHandle>> KeyValueIterator for SstIterator<'a, H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Clock;
     use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
-    use crate::test_utils::{assert_kv, gen_attrs, OrderedBytesGenerator, TestClock};
+    use crate::test_utils::{assert_kv, gen_attrs, OrderedBytesGenerator};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use std::sync::Arc;
@@ -342,7 +341,7 @@ mod tests {
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle).await.unwrap();
-        assert_eq!(index.borrow().block_meta().len(), 14);
+        assert_eq!(index.borrow().block_meta().len(), 10);
 
         let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 3, 3, true)
             .await
@@ -378,14 +377,7 @@ mod tests {
         let first_val = [1u8; 16];
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
         let mut test_case_val_gen = val_gen.clone();
-        let (sst, nkeys) = build_sst_with_n_blocks(
-            3,
-            table_store.clone(),
-            key_gen,
-            val_gen,
-            Arc::new(TestClock::new()),
-        )
-        .await;
+        let (sst, nkeys) = build_sst_with_n_blocks(3, table_store.clone(), key_gen, val_gen).await;
 
         // iterate over all keys and make sure we iterate from that key
         for i in 0..nkeys {
@@ -436,14 +428,7 @@ mod tests {
         let first_val = [2u8; 16];
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
         let mut expected_val_gen = val_gen.clone();
-        let (sst, nkeys) = build_sst_with_n_blocks(
-            2,
-            table_store.clone(),
-            key_gen,
-            val_gen,
-            Arc::new(TestClock::new()),
-        )
-        .await;
+        let (sst, nkeys) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
         let mut iter =
             SstIterator::new_from_key(&sst, table_store.clone(), &[b'a'; 16], 1, 1, false)
@@ -480,14 +465,7 @@ mod tests {
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
         let first_val = [2u8; 16];
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
-        let (sst, _) = build_sst_with_n_blocks(
-            2,
-            table_store.clone(),
-            key_gen,
-            val_gen,
-            Arc::new(TestClock::new()),
-        )
-        .await;
+        let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
         let mut iter =
             SstIterator::new_from_key(&sst, table_store.clone(), &[b'z'; 16], 1, 1, false)
@@ -502,7 +480,6 @@ mod tests {
         ts: Arc<TableStore>,
         mut key_gen: OrderedBytesGenerator,
         mut val_gen: OrderedBytesGenerator,
-        clock: Arc<dyn Clock>,
     ) -> (SsTableHandle, usize) {
         let mut writer = ts.table_writer(SsTableId::Wal(0));
         let mut nkeys = 0usize;
@@ -511,7 +488,7 @@ mod tests {
                 key_gen.next().into(),
                 Some(val_gen.next().into()),
                 0,
-                Some(clock.now()),
+                None,
                 None,
             );
             writer.add(entry).await.unwrap();

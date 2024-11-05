@@ -158,10 +158,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::config::Clock;
     use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
-    use crate::test_utils::{assert_kv, gen_attrs, OrderedBytesGenerator, TestClock};
+    use crate::test_utils::{assert_kv, gen_attrs, OrderedBytesGenerator};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use ulid::Ulid;
@@ -286,15 +285,7 @@ mod tests {
         let mut test_case_key_gen = key_gen.clone();
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
         let mut test_case_val_gen = val_gen.clone();
-        let sr = build_sr_with_ssts(
-            table_store.clone(),
-            3,
-            10,
-            key_gen,
-            val_gen,
-            Arc::new(TestClock::new()),
-        )
-        .await;
+        let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
 
         for i in 0..30 {
             let mut expected_key_gen = test_case_key_gen.clone();
@@ -340,15 +331,7 @@ mod tests {
         let mut expected_key_gen = key_gen.clone();
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
         let mut expected_val_gen = val_gen.clone();
-        let sr = build_sr_with_ssts(
-            table_store.clone(),
-            3,
-            10,
-            key_gen,
-            val_gen,
-            Arc::new(TestClock::new()),
-        )
-        .await;
+        let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
 
         let mut iter =
             SortedRunIterator::new_from_key(&sr, &[b'a', 10], table_store.clone(), 1, 1, false)
@@ -381,15 +364,7 @@ mod tests {
         ));
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
-        let sr = build_sr_with_ssts(
-            table_store.clone(),
-            3,
-            10,
-            key_gen,
-            val_gen,
-            Arc::new(TestClock::new()),
-        )
-        .await;
+        let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
 
         let mut iter =
             SortedRunIterator::new_from_key(&sr, &[b'z', 30], table_store.clone(), 1, 1, false)
@@ -405,7 +380,6 @@ mod tests {
         keys_per_sst: usize,
         mut key_gen: OrderedBytesGenerator,
         mut val_gen: OrderedBytesGenerator,
-        clock: Arc<dyn Clock>,
     ) -> SortedRun {
         let mut ssts = Vec::<SsTableHandle>::new();
         for _ in 0..n {
@@ -415,7 +389,7 @@ mod tests {
                     key_gen.next().into(),
                     Some(val_gen.next().into()),
                     0,
-                    Some(clock.now()),
+                    None,
                     None,
                 );
                 writer.add(entry).await.unwrap();

@@ -36,11 +36,6 @@ pub(crate) async fn assert_iterator<T: KeyValueIterator>(
         assert_eq!(kv.key, Bytes::from(expected_k.clone()));
         assert_eq!(kv.value, *expected_v);
         assert_eq!(
-            kv.create_ts, expected_attr.ts,
-            "Attribute create_ts mismatch at key {:?}",
-            kv.key
-        );
-        assert_eq!(
             kv.expire_ts, expected_attr.expire_ts,
             "Attribute expire_ts mismatch at key {:?}",
             kv.key
