@@ -51,6 +51,7 @@
 //! l0_sst_size_bytes = 67108864
 //! l0_max_ssts = 8
 //! max_unflushed_memtable = 2
+//! max_unflushed_wal = 2
 //!
 //! [compactor_options]
 //! poll_interval = "5s"
@@ -88,6 +89,7 @@
 //!  "l0_sst_size_bytes": 67108864,
 //!  "l0_max_ssts": 8,
 //!  "max_unflushed_memtable": 2,
+//!  "max_unflushed_wal": 2,
 //!  "compactor_options": {
 //!    "poll_interval": "5s",
 //!    "max_sst_size": 1073741824,
@@ -128,6 +130,7 @@
 //! l0_sst_size_bytes: 67108864
 //! l0_max_ssts: 8
 //! max_unflushed_memtable: 2
+//! max_unflushed_wal: 2
 //! compactor_options:
 //!   poll_interval: '5s'
 //!   max_sst_size: 1073741824
