@@ -125,7 +125,7 @@ impl Db {
     /// Scan a range of keys with the provided options.
     ///
     /// returns a `DbIterator`
-    pub async fn scan<T>(
+    pub async fn scan_with_options<T>(
         &self,
         range: &T
         options: &ScanOptions,
