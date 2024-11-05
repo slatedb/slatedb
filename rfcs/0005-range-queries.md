@@ -25,7 +25,7 @@ References:
 * https://github.com/facebook/rocksdb/wiki/Iterator
 * https://github.com/facebook/rocksdb/wiki/Iterator-Implementation
 * https://github.com/slatedb/slatedb/pull/260
-* https://github.com/slatedb/slatedb/pull/278
+* https://github.com/slatedb/slatedb/blob/main/rfcs/0004-checkpoints.md
 
 ## Motivation
 
@@ -57,10 +57,14 @@ impl Db {
     /// Scan a range of keys.
     /// 
     /// returns a `DbIterator`
-    pub async fn scan(
+    pub async fn scan<T>(
         &self,
-        range: std::ops::Range<&[u8]>
-    ) -> Result<DbIterator, SlateDbError>;
+        range: &T
+    ) -> Result<DbIterator, SlateDbError> where
+        T: RangeBounds<Bytes> {
+	...
+    }
+	
 }
 
 impl DbIterator {
@@ -71,21 +75,33 @@ impl DbIterator {
     ///  due to an underlying error
     pub async fn next(
         &mut self,
-    ) -> Result<Option(DbRecord), SlateDbError>;
+    ) -> Result<Option(DbRecord), SlateDbError> {
+        ...
+    }
 
     /// Seek to a key ahead of the last key returned from the iterator or
-    /// the lower range bound if no records have yet been returned.
+    /// the lower range bound if no records have yet been returned. 
     /// 
     /// returns Ok(()) if the position is successfully advanced
     /// returns SlateDbError::InvalidArgument if `lower_bound` is `Unbounded`
     /// returns SlateDbError::InvalidArgument if the key is comes before the
-    ///  current iterator position.
+    ///  current iterator position
+    /// returns SlateDbError::InvalidArgument if `lower_bound` is beyond the
+    ///  upper bound specified in the original `scan` parameters
     /// returns Err(InvalidatedIterator) if the iterator has been invalidated
-    ///  due to an underlying error
+    ///  in order to reclaim resources
     pub async fn seek(
         &mut self,
         lower_bound: Bound<&[u8]>
-    ) -> Result<(), SlateDbError>;
+    ) -> Result<(), SlateDbError> {
+        ...
+    }	
+
+    /// Get the id of the checkpoint that this scan references.
+    pub fn checkpoint(&self) -> UUID {
+        ...
+    }
+
 }
 
 struct DbRecord {
@@ -109,11 +125,14 @@ impl Db {
     /// Scan a range of keys with the provided options.
     ///
     /// returns a `DbIterator`
-    pub async fn scan_with_options(
+    pub async fn scan<T>(
         &self,
-        range: &DbRange,
+        range: &T
         options: &ScanOptions,
-    ) -> Result<DbIterator, SlateDbError>;
+    ) -> Result<DbIterator, SlateDbError> where
+        T: RangeBounds<Bytes> {
+	...
+    }
 }
 
 pub struct ScanOptions {
@@ -134,10 +153,18 @@ which may need to be loaded from object storage. Internally, we will rely on
 iterators which sort and merge these tables. The latest records will have precedence following
 the same rules that a normal `get` query follows.
 
+We will rely on the latest checkpoint state in order to obtain references to memtables, SSTs,
+and sorted runs needed for the query. The `DbIterator` will expose the UUID of the checkpoint
+that it was generated from. The `DbIterator` will only maintain references to
+tables which cover the range specified in the `scan` parameters.
+
+Note that if the `DbReader` was created with a reference to a specific checkpoint,
+then the `DbIterator` will only refer to that checkpoint.
+
 The existing `MergeIterator` used for compaction provides much of the necessary
-foundation to unify multiple iterators. Additionally, `MemTableIterator` and 
-`SstIterator` provide ready-to-use capabilities to scan tables which may have keys
-within the range. 
+foundation to unify multiple iterators. We will build an iterator which sorts
+and merges memtables (e.g. with `MemTableIterator`), L0 tables (`SstIterator`),
+and sorted runs (`SortedRunIterator`). 
 
 **Query Isolation**: When using the `Uncommitted` isolation, unflushed
 records recorded in WALs will be used as a source for the key range. Otherwise,
@@ -150,6 +177,10 @@ a query may include only a subset of records that were inserted in the same
 `WriteBatch`. In other words, range queries will not have snapshot isolation 
 initially. 
 
+When a `Db` or `DbReader` is closed, active iterators will be invalidated. This
+will cause calls to `DbIterator::next` or `DbIterator::seek` to fail with an
+`InvalidatedIterator` error which indicates that the database was shutdown.
+
 [RFC-????](https://github.com/slatedb/slatedb/pull/260) proposes transactional
 semantics for SlateDB. This relies on a monotonic sequence number which is tagged
 on each key update. Range queries could leverage this sequence number to improve
@@ -158,15 +189,17 @@ at the time the query was executed. We leave this as a gap for future work to ad
 
 ### Checkpoint References
 
-We intend to rely on state checkpoints introduced in [RFC-????](https://github.com/slatedb/slatedb/pull/278) in order to prevent the cleanup
-of durable state referenced by the query. When a range scan is created, it will create
-an internal reference to the current checkpoint. This reference will prevent cleanup of
-the checkpoint state until the scan is complete. 
+We intend to rely on state checkpoints introduced in [RFC-0004(https://github.com/slatedb/slatedb/blob/main/rfcs/0004-checkpoints.md)
+in order to prevent the cleanup of durable state referenced by the query. When a range
+scan is created, it will create an internal reference to the current checkpoint. This
+reference will prevent cleanup of the checkpoint state until the scan is complete. 
 
-Checkpoints created by `Readers` have an expiry time, which is only refreshed as long
-as it remains the current checkpoint. If a `DbIterator` instance remains active long 
-enough for its referenced checkpoint to expire, the `Reader` will proactively invalidate 
-it in order to allow for safe cleanup. Invalidated iterators will return 
+Checkpoints created by `DbReaders` have an expiry time, which is only refreshed as long
+as long as the checkpoint remains current. If a `DbIterator` instance remains active long 
+enough for its referenced checkpoint to expire, then the `DbIterator` may eventually encounter
+a NotFound error from the object store. This error will be propagated to the next
+invocation of `DbIterator::next` or `DbIterator::seek`. After encountering this error,
+the iterator will be invalidated. Invalidated iterators will return 
 `SlateDbError::InvalidatedIterator` on any subsequent call to `DbIterator::next`
 or `DbIterator::seek`.
 
@@ -178,12 +211,9 @@ scanning or we could limit the time that a `DbIterator` will remain valid.
 ### Memory Usage
 
 In addition to the checkpoint, a range scan may hold references to records in unflushed 
-WALs or memtables. Rather than retaining references to these tables for the full duration
-of the query, we can filter the set of records within the query's range.
-As new records are returned, previous ones fall out of scope and may be cleaned up. This
-makes sense for bounded queries where the number of matching keys within the WAL
-or memtables may be low. For an unbounded query, we may prefer to hold a reference to the
-full table.
+WALs or memtables. A potential optimization is to pre-merge these tables in order to
+filter the records within the scan range. This can be useful when targeting a small
+range of keys with the scan. This is left for future work.
 
 Iterators will use prefetching to improve performance. Internally, this is 
 already implemented by `SstIterator`. Users can influence prefetching to improve
@@ -203,7 +233,16 @@ block, it will remain pinned in memory.
 to support snapshot isolation or serializability of range scans. We anticipate 
 future work to address the existing gaps.
 
-**Space optimizations:** while a range scan is in progress, some of its in-memory 
+**Space optimizations:**
+
+- Rather than retaining references to in-memory tables for the full duration
+of the query, we can filter the set of records within the query's range.
+As new records are returned, previous ones fall out of scope and may be cleaned up. This
+makes sense for bounded queries where the number of matching keys within the WAL
+or memtables may be low. For an unbounded query, we may prefer to hold a reference to the
+full table.
+
+- While a range scan is in progress, some of its in-memory 
 table references may get flushed to storage. It would be possible to substitute 
 these references in order to allow the in-memory state to be cleaned up. This 
 might make sense when the rate of updates is high enough that memory must be 
