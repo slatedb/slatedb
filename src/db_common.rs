@@ -3,7 +3,9 @@ use parking_lot::RwLockWriteGuard;
 use crate::db::DbInner;
 use crate::db_state::DbState;
 use crate::error::SlateDBError;
+use crate::flush::WalFlushThreadMsg;
 use crate::mem_table_flush::MemtableFlushThreadMsg;
+
 impl DbInner {
     pub(crate) fn maybe_freeze_memtable(
         &self,
@@ -31,7 +33,8 @@ impl DbInner {
             return Ok(());
         }
         guard.freeze_wal();
-        self.wal_flush_notifier.send(FlushThreadMsg::Flush(None))?;
+        self.wal_flush_notifier
+            .send(WalFlushThreadMsg::FlushImmutableWals(None))?;
         Ok(())
     }
 }

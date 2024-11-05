@@ -240,7 +240,9 @@ impl DbInner {
             self.maybe_apply_wal_backpressure().await;
         }
         self.maybe_apply_memtable_backpressure().await;
-        self.write_notifier.send(batch_msg).ok();
+        self.write_notifier
+            .send(batch_msg)
+            .expect("write notifier closed");
 
         let current_table = rx.await??;
 
@@ -1582,6 +1584,45 @@ mod tests {
             assert!(kv.is_none());
         }
         assert!(kv_store.metrics().immutable_memtable_flushes.get() > 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 32)]
+    async fn test_apply_backpressure_to_wal_flush() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let mut options = test_db_options(0, 1, None);
+        options.l0_max_ssts = 2;
+        let db = Db::open_with_fp_registry(
+            path.clone(),
+            options,
+            object_store.clone(),
+            fp_registry.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Block WAL flush
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+
+        // 1 imm_wal in memory
+        db.put_with_options(
+            b"key5",
+            b"val5",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Sleep for 2 seconds
+        let snapshot = db.inner.state.read().snapshot();
+        assert_eq!(snapshot.state.imm_wal.len(), 1);
+
+        // Unblock WAL flush so runtime shuts down nicely
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
     }
 
     #[tokio::test]
