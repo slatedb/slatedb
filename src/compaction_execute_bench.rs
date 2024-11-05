@@ -301,11 +301,16 @@ impl CompactionExecuteBench {
         let job = match &compaction {
             Some(compaction) => {
                 info!("load job from existing compaction");
-                CompactionExecuteBench::load_compaction_as_job(&manifest, compaction)
+                CompactionExecuteBench::load_compaction_as_job(&manifest, compaction, false)
             }
             None => {
-                CompactionExecuteBench::load_compaction_job(&manifest, num_ssts, &table_store)
-                    .await?
+                CompactionExecuteBench::load_compaction_job(
+                    &manifest,
+                    num_ssts,
+                    &table_store,
+                    false,
+                )
+                .await?
             }
         };
         let start = std::time::Instant::now();
