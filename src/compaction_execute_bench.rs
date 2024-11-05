@@ -308,9 +308,11 @@ impl CompactionExecuteBench {
                 let manifest = StoredManifest::load(manifest_store)
                     .await?
                     .expect("expected manifest");
-                CompactionExecuteBench::load_compaction_as_job(manifest, compaction)
+                CompactionExecuteBench::load_compaction_as_job(manifest, compaction, true)
             }
-            None => CompactionExecuteBench::load_compaction_job(num_ssts, &table_store).await?,
+            None => {
+                CompactionExecuteBench::load_compaction_job(num_ssts, &table_store, ture).await?
+            }
         };
         let start = std::time::Instant::now();
         info!("start compaction job");
