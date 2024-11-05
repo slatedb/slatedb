@@ -311,7 +311,7 @@ impl CompactionExecuteBench {
                 CompactionExecuteBench::load_compaction_as_job(manifest, compaction, true)
             }
             None => {
-                CompactionExecuteBench::load_compaction_job(num_ssts, &table_store, ture).await?
+                CompactionExecuteBench::load_compaction_job(num_ssts, &table_store, true).await?
             }
         };
         let start = std::time::Instant::now();
