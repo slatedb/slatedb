@@ -1622,6 +1622,7 @@ mod tests {
         // Unblock WAL flush so runtime shuts down nicely even if we have a failure
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
 
+        // WAL should pile up in memory since it can't be flushed
         assert_eq!(snapshot.state.imm_wal.len(), 1);
     }
 
