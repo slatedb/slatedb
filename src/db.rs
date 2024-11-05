@@ -1586,13 +1586,16 @@ mod tests {
         assert!(kv_store.metrics().immutable_memtable_flushes.get() > 0);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 32)]
+    // 2 threads so we can can wait on the write_with_options (main) thread
+    // while the write_batch (background) thread is blocked on writing the
+    // WAL SST.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_apply_backpressure_to_wal_flush() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let mut options = test_db_options(0, 1, None);
-        options.l0_max_ssts = 2;
+        options.max_unflushed_wal = 1;
         let db = Db::open_with_fp_registry(
             path.clone(),
             options,
@@ -1602,27 +1605,24 @@ mod tests {
         .await
         .unwrap();
 
+        let write_opts = WriteOptions {
+            await_durable: false,
+        };
+
         // Block WAL flush
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
 
         // 1 imm_wal in memory
-        db.put_with_options(
-            b"key5",
-            b"val5",
-            &PutOptions::default(),
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await
-        .unwrap();
+        db.put_with_options(b"key1", b"val1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
 
-        // Sleep for 2 seconds
         let snapshot = db.inner.state.read().snapshot();
-        assert_eq!(snapshot.state.imm_wal.len(), 1);
 
-        // Unblock WAL flush so runtime shuts down nicely
+        // Unblock WAL flush so runtime shuts down nicely even if we have a failure
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+
+        assert_eq!(snapshot.state.imm_wal.len(), 1);
     }
 
     #[tokio::test]
