@@ -50,8 +50,7 @@
 //! filter_bits_per_key = 10
 //! l0_sst_size_bytes = 67108864
 //! l0_max_ssts = 8
-//! max_unflushed_memtable = 2
-//! max_unflushed_wal = 2
+//! max_unflushed_bytes = 536870912
 //!
 //! [compactor_options]
 //! poll_interval = "5s"
@@ -88,8 +87,7 @@
 //!  "filter_bits_per_key": 10,
 //!  "l0_sst_size_bytes": 67108864,
 //!  "l0_max_ssts": 8,
-//!  "max_unflushed_memtable": 2,
-//!  "max_unflushed_wal": 2,
+//!  "max_unflushed_bytes": 536870912,
 //!  "compactor_options": {
 //!    "poll_interval": "5s",
 //!    "max_sst_size": 1073741824,
@@ -129,8 +127,7 @@
 //! filter_bits_per_key: 10
 //! l0_sst_size_bytes: 67108864
 //! l0_max_ssts: 8
-//! max_unflushed_memtable: 2
-//! max_unflushed_wal: 2
+//! max_unflushed_bytes: 536870912
 //! compactor_options:
 //!   poll_interval: '5s'
 //!   max_sst_size: 1073741824
@@ -362,10 +359,6 @@ pub struct DbOptions {
     /// you may benefit from setting this higher (if you have enough memory available)
     pub filter_bits_per_key: u32,
 
-    /// The max number of unflushed WAL SSTables. Writes will be paused if there are
-    /// more unflushed WAL SSTables than this value.
-    pub max_unflushed_wal: usize,
-
     /// The minimum size a memtable needs to be before it is frozen and flushed to
     /// L0 object storage. Writes will still be flushed to the object storage WAL
     /// (based on flush_interval) regardless of this value. Memtable sizes are checked
@@ -398,9 +391,12 @@ pub struct DbOptions {
     /// l0 ssts than this value, until compaction can compact the ssts into compacted.
     pub l0_max_ssts: usize,
 
-    /// Defines the max number of unflushed memtables. Writes will be paused if there
-    /// are more unflushed memtables than this value
-    pub max_unflushed_memtable: usize,
+    /// Defines the max number of unflushed key/value pair bytes that should reside in memory
+    /// before applying backpressure to writers. This includes key/value pairs in both the
+    /// immutable WAL flush queue and the immutable memtable flush queue. Writes will be
+    /// paused if the total number of unflushed bytes exceeds this value until data is flushed
+    /// to object storage.
+    pub max_unflushed_bytes: usize,
 
     /// Configuration options for the compactor.
     pub compactor_options: Option<CompactorOptions>,
@@ -570,9 +566,8 @@ impl Default for DbOptions {
             wal_enabled: true,
             manifest_poll_interval: Duration::from_secs(1),
             min_filter_keys: 1000,
-            max_unflushed_wal: 4,
+            max_unflushed_bytes: 1_073_741_824,
             l0_sst_size_bytes: 64 * 1024 * 1024,
-            max_unflushed_memtable: 2,
             l0_max_ssts: 8,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,

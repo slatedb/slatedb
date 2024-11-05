@@ -236,10 +236,7 @@ impl DbInner {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
 
-        if self.wal_enabled() {
-            self.maybe_apply_wal_backpressure().await;
-        }
-        self.maybe_apply_memtable_backpressure().await;
+        self.maybe_apply_backpressure().await;
         self.write_notifier
             .send(batch_msg)
             .expect("write notifier closed");
@@ -254,48 +251,58 @@ impl DbInner {
     }
 
     #[inline]
-    pub(crate) async fn maybe_apply_wal_backpressure(&self) {
+    pub(crate) async fn maybe_apply_backpressure(&self) {
         loop {
-            let table = {
+            let mem_size_bytes = {
                 let guard = self.state.read();
-                let state = guard.state();
-                if state.imm_wal.len() <= self.options.max_unflushed_wal {
-                    return;
-                }
-                let Some(table) = state.imm_wal.back() else {
-                    return;
+                // Exclude active memtable and WAL to avoid a write lock.
+                let imm_wal_size = guard
+                    .state()
+                    .imm_wal
+                    .iter()
+                    .map(|imm| imm.table().size())
+                    .sum::<usize>();
+                let imm_memtable_size = guard
+                    .state()
+                    .imm_memtable
+                    .iter()
+                    .map(|imm| imm.table().size())
+                    .sum::<usize>();
+                imm_wal_size + imm_memtable_size
+            };
+            if mem_size_bytes >= self.options.max_unflushed_bytes {
+                let (wal_table, mem_table) = {
+                    let guard = self.state.read();
+                    (
+                        guard.state().imm_wal.back().map(|imm| imm.table().clone()),
+                        guard.state().imm_memtable.back().map(|imm| imm.clone()),
+                    )
                 };
                 warn!(
-                    "applying backpressure to write by waiting for imm wal flush. imm wal({}), max({})",
-                    state.imm_wal.len(),
-                    self.options.max_unflushed_wal
+                    "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
+                    mem_size_bytes, self.options.max_unflushed_bytes,
                 );
-                table.clone()
-            };
-            table.table().await_durable().await;
-        }
-    }
-
-    #[inline]
-    pub(crate) async fn maybe_apply_memtable_backpressure(&self) {
-        loop {
-            let table = {
-                let guard = self.state.read();
-                let state = guard.state();
-                if state.imm_memtable.len() <= self.options.max_unflushed_memtable {
-                    return;
+                match (wal_table, mem_table) {
+                    (Some(wal_table), Some(mem_table)) => {
+                        tokio::select! {
+                            _ = wal_table.await_durable() => {}
+                            _ = mem_table.await_flush_to_l0() => {}
+                        }
+                    }
+                    (Some(wal_table), None) => {
+                        wal_table.await_durable().await;
+                    }
+                    (None, Some(mem_table)) => {
+                        mem_table.await_flush_to_l0().await;
+                    }
+                    _ => {
+                        // No tables to flush, so backpressure is no longer needed.
+                        break;
+                    }
                 }
-                let Some(table) = state.imm_memtable.back() else {
-                    return;
-                };
-                warn!(
-                    "applying backpressure to write by waiting for imm table flush. imm tables({}), max({})",
-                    state.imm_memtable.len(),
-                    self.options.max_unflushed_memtable
-                );
-                table.clone()
-            };
-            table.await_flush_to_l0().await
+            } else {
+                break;
+            }
         }
     }
 
@@ -1590,12 +1597,12 @@ mod tests {
     // while the write_batch (background) thread is blocked on writing the
     // WAL SST.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_apply_backpressure_to_wal_flush() {
+    async fn test_apply_wal_memory_backpressure() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let mut options = test_db_options(0, 1, None);
-        options.max_unflushed_wal = 1;
+        options.max_unflushed_bytes = 1;
         let db = Db::open_with_fp_registry(
             path.clone(),
             options,
@@ -2215,8 +2222,7 @@ mod tests {
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),
-            max_unflushed_wal: 2,
-            max_unflushed_memtable: 2,
+            max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,
             min_filter_keys,
             filter_bits_per_key: 10,
