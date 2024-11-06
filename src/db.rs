@@ -1725,15 +1725,16 @@ mod tests {
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_should_read_uncommitted_data_if_read_level_uncommitted() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_opts(
+        let kv_store = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
+            fp_registry.clone(),
         )
         .await
         .unwrap();
@@ -1751,6 +1752,7 @@ mod tests {
             .await
             .unwrap();
 
+        // Validate uncommitted read
         let val = kv_store
             .get_with_options(
                 "foo".as_bytes(),
@@ -1762,19 +1764,24 @@ mod tests {
             .unwrap();
         assert_eq!(val, Some(Bytes::from("bar")));
 
+        // Validate committed read should still return None
+        let val = kv_store.get("foo".as_bytes()).await.unwrap();
+        assert_eq!(val, None);
+
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
         kv_store.close().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_should_read_only_committed_data() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_opts(
+        let kv_store = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
+            fp_registry.clone(),
         )
         .await
         .unwrap();
@@ -1818,10 +1825,11 @@ mod tests {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_opts(
+        let kv_store = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
+            fp_registry.clone(),
         )
         .await
         .unwrap();
