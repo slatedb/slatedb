@@ -106,7 +106,7 @@ impl DbInner {
                             WalFlushThreadMsg::FlushImmutableWals(rsp) => {
                                 let result = this.flush().await;
                                 if let Some(rsp) = rsp {
-                                    _ = rsp.send(result)
+                                    rsp.send(result).expect("send flush result");
                                 }
                             },
                         }
