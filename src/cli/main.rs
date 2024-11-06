@@ -2,9 +2,13 @@ use crate::args::{parse_args, CliArgs, CliCommands};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use slatedb::admin;
-use slatedb::admin::{list_manifests, read_manifest};
+use slatedb::admin::{list_checkpoints, list_manifests, read_manifest};
+use slatedb::config::{CheckpointOptions, CheckpointScope};
+use slatedb::db::Db;
 use std::error::Error;
 use std::sync::Arc;
+use std::time::Duration;
+use uuid::Uuid;
 
 mod args;
 
@@ -20,6 +24,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         CliCommands::ListManifests { start, end } => {
             exec_list_manifest(&path, object_store, start, end).await?
         }
+        CliCommands::CreateCheckpoint { lifetime, source } => {
+            exec_create_checkpoint(&path, object_store, lifetime, source).await?
+        }
+        CliCommands::RefreshCheckpoint { id, lifetime } => {
+            exec_refresh_checkpoint(&path, object_store, id, lifetime).await?
+        }
+        CliCommands::DeleteCheckpoint { id } => {
+            exec_delete_checkpoint(&path, object_store, id).await?
+        }
+        CliCommands::ListCheckpoints {} => exec_list_checkpoints(&path, object_store).await?,
     }
 
     Ok(())
@@ -58,4 +72,53 @@ async fn exec_list_manifest(
         "{}",
         list_manifests(path, object_store, range).await?
     ))
+}
+
+async fn exec_create_checkpoint(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    lifetime: Option<Duration>,
+    source: Option<Uuid>,
+) -> Result<(), Box<dyn Error>> {
+    let result = Db::create_checkpoint(
+        path,
+        object_store,
+        &CheckpointOptions {
+            scope: CheckpointScope::Durable,
+            lifetime,
+            source,
+        },
+    )
+    .await?;
+    Ok(println!("{:?}", result))
+}
+
+async fn exec_refresh_checkpoint(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    id: Uuid,
+    lifetime: Option<Duration>,
+) -> Result<(), Box<dyn Error>> {
+    Ok(println!(
+        "{:?}",
+        Db::refresh_checkpoint(path, object_store, id, lifetime).await?
+    ))
+}
+
+async fn exec_delete_checkpoint(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    id: Uuid,
+) -> Result<(), Box<dyn Error>> {
+    Ok(println!(
+        "{:?}",
+        Db::delete_checkpoint(path, object_store, id).await?
+    ))
+}
+
+async fn exec_list_checkpoints(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+) -> Result<(), Box<dyn Error>> {
+    Ok(println!("{}", list_checkpoints(path, object_store).await?))
 }
