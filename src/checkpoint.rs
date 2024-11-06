@@ -13,7 +13,7 @@ impl Db {
     /// provided options. Note that the scope option does not impact the behaviour of this method.
     /// The checkpoint will reference the current active manifest of the db.
     pub async fn create_checkpoint(
-        path: Path,
+        path: &Path,
         object_store: Arc<dyn ObjectStore>,
         options: &CheckpointOptions,
     ) -> Result<(uuid::Uuid, u64), SlateDBError> {
@@ -92,13 +92,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let (checkpoint_id, checkpoint_manifest_id) = Db::create_checkpoint(
-            path.clone(),
-            object_store.clone(),
-            &CheckpointOptions::default(),
-        )
-        .await
-        .unwrap();
+        let (checkpoint_id, checkpoint_manifest_id) =
+            Db::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
+                .await
+                .unwrap();
 
         let (_, manifest) = manifest_store
             .read_latest_manifest()
@@ -129,7 +126,7 @@ mod tests {
         let checkpoint_time = SystemTime::now();
 
         let (checkpoint_id, _) = Db::create_checkpoint(
-            path.clone(),
+            &path,
             object_store.clone(),
             &CheckpointOptions {
                 lifetime: Some(Duration::from_secs(3600)),
@@ -165,16 +162,13 @@ mod tests {
             .await
             .unwrap();
         db.close().await.unwrap();
-        let (source_checkpoint_id, source_checkpoint_manifest_id) = Db::create_checkpoint(
-            path.clone(),
-            object_store.clone(),
-            &CheckpointOptions::default(),
-        )
-        .await
-        .unwrap();
+        let (source_checkpoint_id, source_checkpoint_manifest_id) =
+            Db::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
+                .await
+                .unwrap();
 
         let (_, checkpoint_manifest_id) = Db::create_checkpoint(
-            path.clone(),
+            &path,
             object_store.clone(),
             &CheckpointOptions {
                 source: Some(source_checkpoint_id),
@@ -197,7 +191,7 @@ mod tests {
             .unwrap();
 
         let result = Db::create_checkpoint(
-            path.clone(),
+            &path,
             object_store.clone(),
             &CheckpointOptions {
                 source: Some(uuid::Uuid::new_v4()),
@@ -215,12 +209,8 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
 
-        let result = Db::create_checkpoint(
-            path.clone(),
-            object_store.clone(),
-            &CheckpointOptions::default(),
-        )
-        .await;
+        let result =
+            Db::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default()).await;
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), SlateDBError::ManifestMissing));
