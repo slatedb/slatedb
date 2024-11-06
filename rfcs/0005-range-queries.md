@@ -59,10 +59,11 @@ impl Db {
     /// returns a `DbIterator`
     pub async fn scan<T>(
         &self,
-        range: &T
+        range: T
     ) -> Result<DbIterator, SlateDbError> where
-        T: RangeBounds<Bytes> {
-	...
+        T: RangeBounds<Bytes> 
+    {
+	    ...
     }
 	
 }
@@ -127,11 +128,12 @@ impl Db {
     /// returns a `DbIterator`
     pub async fn scan_with_options<T>(
         &self,
-        range: &T
+        range: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDbError> where
-        T: RangeBounds<Bytes> {
-	...
+        T: RangeBounds<Bytes> 
+    {
+	    ...
     }
 }
 
