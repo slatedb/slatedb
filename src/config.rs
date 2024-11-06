@@ -426,6 +426,80 @@ pub struct DbOptions {
 }
 
 impl DbOptions {
+    /// Logs the current configuration and enabled features
+    pub fn log_config(&self) {
+        tracing::info!("SlateDB Configuration:");
+        tracing::info!("  Flush Interval: {:?}", self.flush_interval);
+        
+        #[cfg(feature = "wal_disable")]
+        tracing::info!("  WAL Enabled: {}", self.wal_enabled);
+        
+        tracing::info!("  Manifest Poll Interval: {:?}", self.manifest_poll_interval);
+        tracing::info!("  Min Filter Keys: {}", self.min_filter_keys);
+        tracing::info!("  Filter Bits Per Key: {}", self.filter_bits_per_key);
+        tracing::info!("  L0 SST Size Bytes: {}", self.l0_sst_size_bytes);
+        tracing::info!("  L0 Max SSTs: {}", self.l0_max_ssts);
+        tracing::info!("  Max Unflushed Memtable: {}", self.max_unflushed_memtable);
+        tracing::info!("  Default TTL: {:?}", self.default_ttl);
+
+        if let Some(ref compactor) = self.compactor_options {
+            tracing::info!("  Compactor Options:");
+            tracing::info!("    Poll Interval: {:?}", compactor.poll_interval);
+            tracing::info!("    Max SST Size: {}", compactor.max_sst_size);
+            tracing::info!("    Max Concurrent Compactions: {}", compactor.max_concurrent_compactions);
+            tracing::info!("    Custom Runtime: {}", compactor.compaction_runtime.is_some());
+        }
+
+        if let Some(ref codec) = self.compression_codec {
+            tracing::info!("  Compression Codec: {:?}", codec);
+        }
+
+        tracing::info!("  Object Store Cache Options:");
+        tracing::info!("    Root Folder: {:?}", self.object_store_cache_options.root_folder);
+        tracing::info!("    Max Cache Size: {:?}", self.object_store_cache_options.max_cache_size_bytes);
+        tracing::info!("    Part Size: {}", self.object_store_cache_options.part_size_bytes);
+        tracing::info!("    Scan Interval: {:?}", self.object_store_cache_options.scan_interval);
+
+        tracing::info!("    Block Cache Enabled: {}", self.block_cache.is_some());
+
+        if let Some(ref gc) = self.garbage_collector_options {
+            tracing::info!("  Garbage Collector Options:");
+            if let Some(ref manifest) = gc.manifest_options {
+                tracing::info!("    Manifest:");
+                tracing::info!("      Poll Interval: {:?}", manifest.poll_interval);
+                tracing::info!("      Min Age: {:?}", manifest.min_age);
+            }
+            if let Some(ref wal) = gc.wal_options {
+                tracing::info!("    WAL:");
+                tracing::info!("      Poll Interval: {:?}", wal.poll_interval);
+                tracing::info!("      Min Age: {:?}", wal.min_age);
+            }
+            if let Some(ref compacted) = gc.compacted_options {
+                tracing::info!("    Compacted:");
+                tracing::info!("      Poll Interval: {:?}", compacted.poll_interval);
+                tracing::info!("      Min Age: {:?}", compacted.min_age);
+            }
+            tracing::info!("    Custom Runtime: {}", gc.gc_runtime.is_some());
+        }
+
+        // Log enabled features
+        tracing::info!("Enabled Features:");
+        #[cfg(feature = "wal_disable")]
+        tracing::info!("  - wal_disable");
+        #[cfg(feature = "snappy")]
+        tracing::info!("  - snappy");
+        #[cfg(feature = "zlib")]
+        tracing::info!("  - zlib");
+        #[cfg(feature = "lz4")]
+        tracing::info!("  - lz4");
+        #[cfg(feature = "zstd")]
+        tracing::info!("  - zstd");
+        #[cfg(feature = "moka")]
+        tracing::info!("  - moka");
+        #[cfg(feature = "foyer")]
+        tracing::info!("  - foyer");
+    }
+
     /// Loads DbOptions from a file.
     ///
     /// This function attempts to read and parse a configuration file to create a DbOptions instance.
@@ -458,19 +532,24 @@ impl DbOptions {
     /// let config = DbOptions::from_file("config.toml").expect("Failed to load options from file");
     /// ```
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<DbOptions, DbOptionsError> {
-        let path = path.as_ref();
-        let Some(ext) = path.extension() else {
-            return Err(DbOptionsError::UnknownFormat(path.into()));
-        };
+        let options = {
+            let path = path.as_ref();
+            let Some(ext) = path.extension() else {
+                return Err(DbOptionsError::UnknownFormat(path.into()));
+            };
 
-        let mut builder = Figment::from(DbOptions::default());
-        match ext.to_str().unwrap_or_default() {
-            "json" => builder = builder.merge(Json::file(path)),
-            "toml" => builder = builder.merge(Toml::file(path)),
-            "yaml" | "yml" => builder = builder.merge(Yaml::file(path)),
-            _ => return Err(DbOptionsError::UnknownFormat(path.into())),
-        }
-        builder.extract().map_err(Into::into)
+            let mut builder = Figment::from(DbOptions::default());
+            match ext.to_str().unwrap_or_default() {
+                "json" => builder = builder.merge(Json::file(path)),
+                "toml" => builder = builder.merge(Toml::file(path)),
+                "yaml" | "yml" => builder = builder.merge(Yaml::file(path)),
+                _ => return Err(DbOptionsError::UnknownFormat(path.into())),
+            }
+            builder.extract().map_err(Into::into)
+        };
+        options.validate()?;
+        options.log_config();
+        Ok(options)
     }
 
     /// Loads DbOptions from environment variables with a specified prefix.
@@ -501,10 +580,12 @@ impl DbOptions {
     /// let config = DbOptions::from_env("SLATEDB_").expect("Failed to load options from env");
     /// ```
     pub fn from_env(prefix: &str) -> Result<DbOptions, DbOptionsError> {
-        Figment::from(DbOptions::default())
+        let options = Figment::from(DbOptions::default())
             .merge(Env::prefixed(prefix))
-            .extract()
-            .map_err(Into::into)
+            .extract()?;
+        options.validate()?;
+        options.log_config();
+        Ok(options)
     }
 
     /// Loads DbOptions from multiple configuration sources in a specific order.
@@ -532,14 +613,16 @@ impl DbOptions {
     /// let config = DbOptions::load().expect("Failed to load options");
     /// ```
     pub fn load() -> Result<DbOptions, DbOptionsError> {
-        Figment::from(DbOptions::default())
+        let options = Figment::from(DbOptions::default())
             .merge(Json::file("SlateDb.json"))
             .merge(Toml::file("SlateDb.toml"))
             .merge(Yaml::file("SlateDb.yaml"))
             .merge(Yaml::file("SlateDb.yml"))
             .admerge(Env::prefixed("SLATEDB_"))
-            .extract()
-            .map_err(Into::into)
+            .extract()?;
+        options.validate()?;
+        options.log_config();
+        Ok(options)
     }
 }
 
