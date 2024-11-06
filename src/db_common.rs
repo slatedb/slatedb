@@ -28,7 +28,7 @@ impl DbInner {
         // Use L0 SST size as the threshold for freezing a WAL table because
         // a single WAL table gets added to a single L0 SST. If the WAL table
         // were allowed to grow larger than the L0 SST threshold, the L0 SST
-        // size would threshold.
+        // size would be greater than the threshold.
         if guard.wal().size() < self.options.l0_sst_size_bytes {
             return Ok(());
         }
