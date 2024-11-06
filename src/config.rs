@@ -426,7 +426,7 @@ pub struct DbOptions {
 }
 
 impl DbOptions {
-    /// Logs the current configuration and enabled features
+    /// Logs the current configuration and enabled features.
     pub fn log_config(&self) {
         tracing::info!("SlateDB Configuration:");
         tracing::info!("  Flush Interval: {:?}", self.flush_interval);
