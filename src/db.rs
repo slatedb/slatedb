@@ -745,6 +745,11 @@ impl Db {
 
     /// Get a value from the database with default read options.
     ///
+    /// The `Bytes` object returned contains a slice of an entire
+    /// 4 KiB block. The block will be held in memory as long as the
+    /// caller holds a reference to the `Bytes` object. Consider
+    /// copying the data if you need to hold it for a long time.
+    ///
     /// ## Arguments
     /// - `key`: the key to get
     ///
@@ -778,6 +783,11 @@ impl Db {
     }
 
     /// Get a value from the database with custom read options.
+    ///
+    /// The `Bytes` object returned contains a slice of an entire
+    /// 4 KiB block. The block will be held in memory as long as the
+    /// caller holds a reference to the `Bytes` object. Consider
+    /// copying the data if you need to hold it for a long time.
     ///
     /// ## Arguments
     /// - `key`: the key to get
