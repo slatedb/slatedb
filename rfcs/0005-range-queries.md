@@ -76,7 +76,7 @@ impl DbIterator {
     ///  due to an underlying error
     pub async fn next(
         &mut self,
-    ) -> Result<Option(DbRecord), SlateDbError> {
+    ) -> Result<Option<DbRecord>, SlateDbError> {
         ...
     }
 
@@ -97,11 +97,6 @@ impl DbIterator {
     ) -> Result<(), SlateDbError> {
         ...
     }	
-
-    /// Get the id of the checkpoint that this scan references.
-    pub fn checkpoint(&self) -> UUID {
-        ...
-    }
 
 }
 
@@ -253,6 +248,12 @@ aggressively reclaimed.
 **Resource Limits:** As mentioned above, it is possible to impose limits on
 active range scans in order to ensure that they do not exhaust memory or create
 unnecessary garbage accumulation.
+
+**Persistent Queries** It may be useful in some use cases to persist query state
+in order to allow a process to resume after a migration or restart. This may
+require exposing the checkpoint that the query results were fetched from through
+the `DbIterator`.
+
 
 ## Updates
 
