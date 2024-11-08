@@ -1,8 +1,34 @@
 # SlateDB Checkpoints and Clones
 
-Status: Under Review
+Table of Contents:
+
+<!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
+
+- [Current Implementation](#current-implementation)
+- [Problem](#problem)
+- [Goals](#goals)
+   * [Out Of Scope](#out-of-scope)
+- [Proposal](#proposal)
+   * [Manifest Schema](#manifest-schema)
+   * [Public API](#public-api)
+   * [Creating a Checkpoint](#creating-a-checkpoint)
+   * [Writers](#writers)
+      + [Establishing Initial Checkpoint](#establishing-initial-checkpoint)
+      + [Refreshing the Checkpoint](#refreshing-the-checkpoint)
+      + [Clones](#clones)
+         - [SST Path Resolution](#sst-path-resolution)
+         - [Deleting a Database](#deleting-a-database)
+   * [Readers](#readers)
+      + [Establishing the Checkpoint](#establishing-the-checkpoint)
+         - [Checkpoint Maintenance](#checkpoint-maintenance)
+      + [Garbage Collector](#garbage-collector)
+
+<!-- TOC end -->
+
+Status: Accepted
 
 Authors:
+
 * [Rohan Desai](https://github.com/rodesai)
 
 ## Current Implementation
