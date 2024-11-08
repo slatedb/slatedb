@@ -186,7 +186,7 @@ at the time the query was executed. We leave this as a gap for future work to ad
 
 ### Checkpoint References
 
-We intend to rely on state checkpoints introduced in [RFC-0004(https://github.com/slatedb/slatedb/blob/main/rfcs/0004-checkpoints.md)
+We intend to rely on state checkpoints introduced in [RFC-0004](https://github.com/slatedb/slatedb/blob/main/rfcs/0004-checkpoints.md)
 in order to prevent the cleanup of durable state referenced by the query. When a range
 scan is created, it will create an internal reference to the current checkpoint. This
 reference will prevent cleanup of the checkpoint state until the scan is complete. 
