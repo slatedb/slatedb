@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tokio::runtime::Handle;
 use tokio::select;
+use tracing::error;
 
 use crate::db::DbInner;
 use crate::db_state;
@@ -93,7 +94,11 @@ impl DbInner {
                 select! {
                   // Tick to freeze and flush the memtable
                   _ = ticker.tick() => {
-                    _ = this.flush().await;
+                     let result = this.flush().await;
+                     if let Err(err) = result {
+                        error!("error from wal flush: {err}");
+                        this.state.write().set_error_if_none(err);
+                     }
                   }
                   msg = rx.recv() => {
                         let msg = msg.expect("channel unexpectedly closed");
@@ -105,8 +110,17 @@ impl DbInner {
                             },
                             WalFlushThreadMsg::FlushImmutableWals(rsp) => {
                                 let result = this.flush().await;
+                                if let Err(err) = &result {
+                                    error!("error from wal flush: {err}");
+                                    this.state.write().set_error_if_none(err.clone());
+                                }
+
                                 if let Some(rsp) = rsp {
-                                    rsp.send(result).expect("send flush result");
+                                    let res = rsp.send(result);
+                                    if let Err(Err(err)) = res {
+                                        error!("error sending flush response: {err}");
+                                        this.state.write().set_error_if_none(err);
+                                    }
                                 }
                             },
                         }

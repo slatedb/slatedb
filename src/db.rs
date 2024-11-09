@@ -95,7 +95,13 @@ impl DbInner {
         key: &[u8],
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        let snapshot = self.state.read().snapshot();
+        let snapshot = {
+            let state = self.state.read();
+            if let Some(err) = state.error() {
+                return Err(err);
+            }
+            state.snapshot()
+        };
 
         if matches!(options.read_level, Uncommitted) {
             let maybe_val = std::iter::once(snapshot.wal)
@@ -230,6 +236,13 @@ impl DbInner {
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
+        {
+            let state = self.state.read();
+            if let Some(err) = state.error() {
+                return Err(err);
+            }
+        }
+
         if batch.ops.is_empty() {
             return Ok(());
         }
@@ -310,7 +323,8 @@ impl DbInner {
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
-            .send(WalFlushThreadMsg::FlushImmutableWals(Some(tx)))?;
+            .send(WalFlushThreadMsg::FlushImmutableWals(Some(tx)))
+            .map_err(|_| SlateDBError::WalFlushChannelError)?;
         rx.await?
     }
 
@@ -318,7 +332,8 @@ impl DbInner {
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
-            .send(MemtableFlushThreadMsg::FlushImmutableMemtables(Some(tx)))?;
+            .send(MemtableFlushThreadMsg::FlushImmutableMemtables(Some(tx)))
+            .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         rx.await?
     }
 
@@ -1955,7 +1970,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_recover_imm_from_wal() {
+    async fn test_should_recover_imm_from_wal_after_flush_error() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         fail_parallel::cfg(
             fp_registry.clone(),
@@ -1966,7 +1981,6 @@ mod tests {
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let mut next_wal_id = 1;
         let db = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 128, None),
@@ -1975,17 +1989,20 @@ mod tests {
         )
         .await
         .unwrap();
-        next_wal_id += 1;
 
         // write a few keys that will result in memtable flushes
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
-        db.put(&key1, &value1).await.unwrap();
-        next_wal_id += 1;
+        let result = db.put(&key1, &value1).await;
+        assert!(result.is_ok(), "Failed to write key1");
+
         let key2 = [b'c'; 32];
         let value2 = [b'd'; 96];
-        db.put(&key2, &value2).await.unwrap();
-        next_wal_id += 1;
+        let result = db.put(&key2, &value2).await;
+        match result {
+            Ok(_) => panic!("Successfully wrote key2"),
+            Err(e) => assert!(matches!(e, SlateDBError::IoError(_))),
+        }
 
         db.close().await.unwrap();
 
@@ -1997,27 +2014,24 @@ mod tests {
         )
         .await
         .unwrap();
-        // increment wal id for the empty wal
-        next_wal_id += 1;
+        // // increment wal id for the empty wal
+        // next_wal_id += 1;
 
         // verify that we reload imm
         let snapshot = db.inner.state.read().snapshot();
-        assert_eq!(snapshot.state.imm_memtable.len(), 2);
+        assert_eq!(snapshot.state.imm_memtable.len(), 1);
 
-        // one empty wal and two wals for the puts
+        // one empty wal and one wal for the first put
         assert_eq!(
             snapshot.state.imm_memtable.front().unwrap().last_wal_id(),
-            1 + 2
+            1 + 1
         );
-        assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 2);
-        assert_eq!(snapshot.state.core.next_wal_sst_id, next_wal_id);
+        assert!(snapshot.state.imm_memtable.get(1).is_none());
+
+        assert_eq!(snapshot.state.core.next_wal_sst_id, 4);
         assert_eq!(
             db.get(&key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
-        );
-        assert_eq!(
-            db.get(&key2).await.unwrap(),
-            Some(Bytes::copy_from_slice(&value2))
         );
     }
 

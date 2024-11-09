@@ -1,11 +1,10 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
+use thiserror::Error;
 
-use crate::{flush::WalFlushThreadMsg, mem_table_flush::MemtableFlushThreadMsg};
-
-#[derive(thiserror::Error, Debug)]
+#[derive(Clone, Debug, Error)]
 pub enum SlateDBError {
     #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
+    IoError(#[from] Arc<std::io::Error>),
 
     #[error("Checksum mismatch")]
     ChecksumMismatch,
@@ -20,7 +19,7 @@ pub enum SlateDBError {
     EmptyBlock,
 
     #[error("Object store error: {0}")]
-    ObjectStoreError(#[from] object_store::Error),
+    ObjectStoreError(#[from] Arc<object_store::Error>),
 
     #[error("Manifest file already exists")]
     ManifestVersionExists,
@@ -65,14 +64,26 @@ pub enum SlateDBError {
     #[error("Unknown RowFlags -- this may be caused by reading data encoded with a newer codec")]
     InvalidRowFlags,
 
-    #[error("Error flushing immutable wals: {0}")]
-    FlushChannelError(#[from] tokio::sync::mpsc::error::SendError<WalFlushThreadMsg>),
+    #[error("Error flushing immutable wals: channel closed")]
+    WalFlushChannelError,
 
-    #[error("Error flushing memtables: {0}")]
-    MemtableFlushError(#[from] tokio::sync::mpsc::error::SendError<MemtableFlushThreadMsg>),
+    #[error("Error flushing memtables: channel closed")]
+    MemtableFlushChannelError,
 
     #[error("Read channel error: {0}")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
+}
+
+impl From<std::io::Error> for SlateDBError {
+    fn from(value: std::io::Error) -> Self {
+        Self::IoError(Arc::new(value))
+    }
+}
+
+impl From<object_store::Error> for SlateDBError {
+    fn from(value: object_store::Error) -> Self {
+        Self::ObjectStoreError(Arc::new(value))
+    }
 }
 
 /// Represents errors that can occur during the database configuration.

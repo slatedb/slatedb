@@ -164,6 +164,7 @@ pub(crate) struct COWDbState {
     pub(crate) imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
     pub(crate) imm_wal: VecDeque<Arc<ImmutableWal>>,
     pub(crate) core: CoreDbState,
+    pub(crate) error: Option<SlateDBError>,
 }
 
 // represents the core db state that we persist in the manifest
@@ -225,6 +226,7 @@ impl DbState {
                 imm_memtable: VecDeque::new(),
                 imm_wal: VecDeque::new(),
                 core: core_db_state,
+                error: None,
             }),
         }
     }
@@ -244,6 +246,12 @@ impl DbState {
     pub fn last_written_wal_id(&self) -> u64 {
         assert!(self.state.core.next_wal_sst_id > 0);
         self.state.core.next_wal_sst_id - 1
+    }
+
+    /// Return an error if the state has encountered
+    /// an unrecoverable error.
+    pub fn error(&self) -> Option<SlateDBError> {
+        self.state.error.clone()
     }
 
     // mutations
@@ -347,6 +355,19 @@ impl DbState {
         state.core.l0 = new_l0;
         state.core.compacted = compacted;
         self.update_state(state);
+    }
+
+    /// Set the state error if it is not already set.
+    ///
+    /// We only care about the first error because
+    /// subsequent errors are likely to be the result of
+    /// the first error.
+    pub fn set_error_if_none(&mut self, error: SlateDBError) {
+        let mut state = self.state_copy();
+        if state.error.is_none() {
+            state.error = Some(error);
+            self.update_state(state);
+        }
     }
 }
 
