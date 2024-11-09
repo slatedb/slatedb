@@ -657,14 +657,6 @@ pub struct CompactorOptions {
     /// this to isolate compactions to a dedicated thread pool.
     #[serde(skip)]
     pub compaction_runtime: Option<Handle>,
-
-    /// The Clock to use for determining the time the compaction has run. This
-    /// helps determine actions such as expiring data with a configured time-to-live.
-    ///
-    /// Default: the default clock uses the local system time on the machine
-    #[serde(skip)]
-    #[serde(default = "default_clock")]
-    pub clock: Arc<dyn Clock + Send + Sync>,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -679,7 +671,6 @@ impl Default for CompactorOptions {
             compaction_scheduler: default_compaction_scheduler(),
             max_concurrent_compactions: 4,
             compaction_runtime: None,
-            clock: default_clock(),
         }
     }
 }
