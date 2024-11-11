@@ -55,7 +55,6 @@ pub(crate) enum SstRowKey {
 pub(crate) struct SstRowEntry {
     key: SstRowKey,
     seq: u64,
-    flags: RowFlags,
     expire_ts: Option<i64>,
     create_ts: Option<i64>,
     value: ValueDeletable,
@@ -70,16 +69,6 @@ impl SstRowEntry {
         create_ts: Option<i64>,
         expire_ts: Option<i64>,
     ) -> Self {
-        let mut flags = match &value {
-            ValueDeletable::Value(_) => RowFlags::default(),
-            ValueDeletable::Tombstone => RowFlags::Tombstone,
-        };
-        if expire_ts.is_some() {
-            flags |= RowFlags::HAS_EXPIRE_TS;
-        }
-        if create_ts.is_some() {
-            flags |= RowFlags::HAS_CREATE_TS;
-        }
         Self {
             key: SstRowKey::SuffixOnly {
                 prefix_len: key_prefix_len,
@@ -89,8 +78,21 @@ impl SstRowEntry {
             create_ts,
             expire_ts,
             value,
-            flags,
         }
+    }
+
+    fn flags(&self) -> RowFlags {
+        let mut flags = match &self.value {
+            ValueDeletable::Value(_) => RowFlags::default(),
+            ValueDeletable::Tombstone => RowFlags::Tombstone,
+        };
+        if self.expire_ts.is_some() {
+            flags |= RowFlags::HAS_EXPIRE_TS;
+        }
+        if self.create_ts.is_some() {
+            flags |= RowFlags::HAS_CREATE_TS;
+        }
+        flags
     }
 
     fn key(&self) -> &Bytes {
@@ -131,21 +133,8 @@ impl SstRowCodecV1 {
             _ => unreachable!("only suffix only key is supported on encode"),
         }
 
-        let flags = {
-            let mut flags = RowFlags::empty();
-            if row.expire_ts.is_some() {
-                flags |= RowFlags::HAS_EXPIRE_TS;
-            }
-            if row.create_ts.is_some() {
-                flags |= RowFlags::HAS_CREATE_TS;
-            }
-            if row.value.as_option().is_none() {
-                flags |= RowFlags::Tombstone;
-            }
-            flags
-        };
-
         // encode seq & flags
+        let flags = row.flags();
         output.put_u64(row.seq);
         output.put_u8(flags.bits());
         if flags.contains(RowFlags::Tombstone) {
@@ -188,7 +177,6 @@ impl SstRowCodecV1 {
             return Ok(SstRowEntry {
                 key: SstRowKey::Full(full_key.freeze()),
                 seq,
-                flags,
                 expire_ts: None,
                 create_ts: None,
                 value: ValueDeletable::Tombstone,
@@ -213,7 +201,6 @@ impl SstRowCodecV1 {
         Ok(SstRowEntry {
             key: SstRowKey::Full(full_key.freeze()),
             seq,
-            flags,
             expire_ts,
             create_ts,
             value: ValueDeletable::Value(value),
