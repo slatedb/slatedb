@@ -47,14 +47,9 @@ bitflags! {
 /// | `value_len`      | `u32` | Length of the value                                    |
 /// | `value`          | `var` | Value bytes                                            |
 
-#[derive(Debug)]
-pub(crate) enum SstRowKey {
-    Full(Bytes),
-    SuffixOnly { prefix_len: usize, suffix: Bytes },
-}
-
 pub(crate) struct SstRowEntry {
-    key: SstRowKey,
+    key_prefix_len: usize,
+    key_suffix: Bytes,
     seq: u64,
     expire_ts: Option<i64>,
     create_ts: Option<i64>,
@@ -71,10 +66,8 @@ impl SstRowEntry {
         expire_ts: Option<i64>,
     ) -> Self {
         Self {
-            key: SstRowKey::SuffixOnly {
-                prefix_len: key_prefix_len,
-                suffix: key_suffix,
-            },
+            key_prefix_len,
+            key_suffix,
             seq,
             create_ts,
             expire_ts,
@@ -96,11 +89,14 @@ impl SstRowEntry {
         flags
     }
 
+    // only called after decoding from SST file, the full key should be reconstructed with prefix
+    // concatenated with suffix. when the full key is constructed, the prefix length is zero, and
+    // the suffix is the full key.
     fn key(&self) -> &Bytes {
-        match &self.key {
-            SstRowKey::Full(key) => key,
-            _ => unreachable!("the full key should be reconstructed with prefix while decoding"),
+        if self.key_prefix_len != 0 {
+            unreachable!("the full key should be reconstructed with prefix while decoding");
         }
+        &self.key_suffix
     }
 }
 
@@ -125,14 +121,9 @@ impl SstRowCodecV0 {
     }
 
     pub fn encode(&self, output: &mut Vec<u8>, row: &SstRowEntry) {
-        match &row.key {
-            SstRowKey::SuffixOnly { prefix_len, suffix } => {
-                output.put_u16(*prefix_len as u16);
-                output.put_u16(suffix.len() as u16);
-                output.put(suffix.as_ref());
-            }
-            _ => unreachable!("only suffix only key is supported on encode"),
-        }
+        output.put_u16(row.key_prefix_len as u16);
+        output.put_u16(row.key_suffix.len() as u16);
+        output.put(row.key_suffix.as_ref());
 
         // encode seq & flags
         let flags = row.flags();
@@ -197,7 +188,8 @@ impl SstRowCodecV0 {
         // skip decoding value for tombstone.
         if flags.contains(RowFlags::Tombstone) {
             return Ok(SstRowEntry {
-                key: SstRowKey::Full(full_key.freeze()),
+                key_prefix_len: 0,
+                key_suffix: full_key.freeze(),
                 seq,
                 expire_ts: None, // it does not make sense to have expire_ts for tombstone
                 create_ts,
@@ -209,7 +201,8 @@ impl SstRowCodecV0 {
         let value_len = data.get_u32() as usize;
         let value = data.slice(..value_len);
         Ok(SstRowEntry {
-            key: SstRowKey::Full(full_key.freeze()),
+            key_prefix_len: 0,
+            key_suffix: full_key.freeze(),
             seq,
             expire_ts,
             create_ts,
