@@ -336,9 +336,7 @@ mod tests {
     use crate::compactor::CompactionScheduler;
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
     use crate::config::SizeTieredCompactionSchedulerOptions;
-    use crate::db_state::{
-        CoreDbState, RowFeature, SortedRun, SsTableHandle, SsTableId, SsTableInfo,
-    };
+    use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
 
     #[test]
@@ -633,7 +631,6 @@ mod tests {
             filter_offset: 0,
             filter_len: 0,
             compression_codec: None,
-            row_features: vec![RowFeature::Flags],
         };
         SsTableHandle {
             id: SsTableId::Compacted(ulid::Ulid::new()),

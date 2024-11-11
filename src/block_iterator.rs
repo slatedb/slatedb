@@ -125,18 +125,13 @@ impl<B: BlockLike> BlockIterator<B> {
 mod tests {
     use crate::block::BlockBuilder;
     use crate::block_iterator::BlockIterator;
-    use crate::db_state::RowFeature;
     use crate::iter::KeyValueIterator;
     use crate::test_utils;
     use crate::test_utils::gen_attrs;
 
-    fn features() -> Vec<RowFeature> {
-        vec![RowFeature::Flags]
-    }
-
     #[tokio::test]
     async fn test_iterator() {
-        let mut block_builder = BlockBuilder::new(1024, features());
+        let mut block_builder = BlockBuilder::new(1024);
         assert!(block_builder.add_kv("donkey".as_ref(), Some("kong".as_ref()), gen_attrs(1)));
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
@@ -153,7 +148,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_iter_from_existing_key() {
-        let mut block_builder = BlockBuilder::new(1024, features());
+        let mut block_builder = BlockBuilder::new(1024);
         assert!(block_builder.add_kv("donkey".as_ref(), Some("kong".as_ref()), gen_attrs(1)));
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
@@ -168,7 +163,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_iter_from_nonexisting_key() {
-        let mut block_builder = BlockBuilder::new(1024, features());
+        let mut block_builder = BlockBuilder::new(1024);
         assert!(block_builder.add_kv("donkey".as_ref(), Some("kong".as_ref()), gen_attrs(1)));
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
@@ -183,7 +178,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_iter_from_end() {
-        let mut block_builder = BlockBuilder::new(1024, features());
+        let mut block_builder = BlockBuilder::new(1024);
         assert!(block_builder.add_kv("donkey".as_ref(), Some("kong".as_ref()), gen_attrs(1)));
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));

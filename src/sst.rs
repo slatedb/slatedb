@@ -8,7 +8,7 @@ use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
 
 use crate::block::Block;
-use crate::db_state::{RowFeature, SsTableInfo, SsTableInfoCodec};
+use crate::db_state::{SsTableInfo, SsTableInfoCodec};
 use crate::filter::{BloomFilter, BloomFilterBuilder};
 use crate::flatbuffer_types::{
     BlockMeta, BlockMetaArgs, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs,
@@ -25,7 +25,6 @@ pub(crate) struct SsTableFormat {
     pub(crate) sst_codec: Box<dyn SsTableInfoCodec>,
     pub(crate) filter_bits_per_key: u32,
     pub(crate) compression_codec: Option<CompressionCodec>,
-    pub(crate) row_features: Vec<RowFeature>,
 }
 
 impl Default for SsTableFormat {
@@ -36,11 +35,6 @@ impl Default for SsTableFormat {
             sst_codec: Box::new(FlatBufferSsTableInfoCodec {}),
             filter_bits_per_key: 10,
             compression_codec: None,
-            row_features: vec![
-                RowFeature::Flags,
-                RowFeature::Timestamp,
-                RowFeature::ExpireAtTs,
-            ],
         }
     }
 }
@@ -271,7 +265,6 @@ impl SsTableFormat {
             self.sst_codec.clone(),
             self.filter_bits_per_key,
             self.compression_codec,
-            self.row_features.clone(),
         )
     }
 }
@@ -322,7 +315,6 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     filter_builder: BloomFilterBuilder,
     sst_codec: Box<dyn SsTableInfoCodec>,
     compression_codec: Option<CompressionCodec>,
-    row_features: Vec<RowFeature>,
 }
 
 impl<'a> EncodedSsTableBuilder<'a> {
@@ -333,7 +325,6 @@ impl<'a> EncodedSsTableBuilder<'a> {
         sst_codec: Box<dyn SsTableInfoCodec>,
         filter_bits_per_key: u32,
         compression_codec: Option<CompressionCodec>,
-        row_features: Vec<RowFeature>,
     ) -> Self {
         Self {
             current_len: 0,
@@ -342,14 +333,13 @@ impl<'a> EncodedSsTableBuilder<'a> {
             first_key: None,
             sst_first_key: None,
             block_size,
-            builder: BlockBuilder::new(block_size, row_features.clone()),
+            builder: BlockBuilder::new(block_size),
             min_filter_keys,
             num_keys: 0,
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
             compression_codec,
-            row_features,
         }
     }
 
@@ -448,7 +438,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
             return Ok(None);
         }
 
-        let new_builder = BlockBuilder::new_with_same_attributes(&self.builder, self.block_size);
+        let new_builder = BlockBuilder::new(self.block_size);
         let builder = std::mem::replace(&mut self.builder, new_builder);
         let encoded_block = builder.build()?.encode();
         let compressed_block = match self.compression_codec {
@@ -516,7 +506,6 @@ impl<'a> EncodedSsTableBuilder<'a> {
             filter_offset: filter_offset as u64,
             filter_len: filter_len as u64,
             compression_codec: self.compression_codec,
-            row_features: self.row_features,
         };
         SsTableInfo::encode(&info, &mut buf, &*self.sst_codec);
 

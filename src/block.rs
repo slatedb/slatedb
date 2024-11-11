@@ -1,6 +1,6 @@
 use crate::error::SlateDBError;
 use crate::row_codec::{SstRowCodecV1, SstRowEntry};
-use crate::{db_state::RowFeature, types::RowEntry};
+use crate::types::RowEntry;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
@@ -57,7 +57,6 @@ pub struct BlockBuilder {
     data: Vec<u8>,
     block_size: usize,
     first_key: Bytes,
-    row_features: Vec<RowFeature>,
 }
 
 // Details can be found: https://users.rust-lang.org/t/how-to-find-common-prefix-of-two-byte-slices-effectively/25815/4
@@ -76,23 +75,12 @@ fn compute_prefix_chunks<const N: usize>(lhs: &[u8], rhs: &[u8]) -> usize {
 }
 
 impl BlockBuilder {
-    pub fn new(block_size: usize, row_features: Vec<RowFeature>) -> Self {
+    pub fn new(block_size: usize) -> Self {
         Self {
             offsets: Vec::new(),
             data: Vec::new(),
             block_size,
             first_key: Bytes::new(),
-            row_features,
-        }
-    }
-
-    pub fn new_with_same_attributes(other: &BlockBuilder, block_size: usize) -> Self {
-        Self {
-            offsets: Vec::new(),
-            data: Vec::new(),
-            block_size,
-            first_key: Bytes::new(),
-            row_features: other.row_features.clone(),
         }
     }
 
@@ -184,7 +172,7 @@ mod tests {
 
     #[test]
     fn test_block() {
-        let mut builder = BlockBuilder::new(4096, vec![RowFeature::Flags]);
+        let mut builder = BlockBuilder::new(4096);
         assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
         assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
         assert!(builder.add_kv(b"key2", Some(b"value2"), gen_empty_attrs()));
@@ -197,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_block_with_tombstone() {
-        let mut builder = BlockBuilder::new(4096, vec![RowFeature::Flags]);
+        let mut builder = BlockBuilder::new(4096);
         assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
         assert!(builder.add_kv(b"key2", None, gen_empty_attrs()));
         assert!(builder.add_kv(b"key3", Some(b"value3"), gen_empty_attrs()));
@@ -208,13 +196,13 @@ mod tests {
 
     #[test]
     fn test_block_size() {
-        let mut builder = BlockBuilder::new(4096, vec![RowFeature::Flags]);
+        let mut builder = BlockBuilder::new(4096);
         assert!(builder.add_kv(b"key1", Some(b"value1"), gen_attrs(1)));
         assert!(builder.add_kv(b"key2", Some(b"value2"), gen_attrs(1)));
         let block = builder.build().unwrap();
         assert_eq!(73, block.size());
 
-        let mut builder = BlockBuilder::new(4096, vec![RowFeature::Flags]);
+        let mut builder = BlockBuilder::new(4096);
         assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
         assert!(builder.add_kv(b"key2", Some(b"value2"), gen_empty_attrs()));
         let block = builder.build().unwrap();
