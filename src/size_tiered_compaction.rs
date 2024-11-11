@@ -661,6 +661,7 @@ mod tests {
             compacted: srs,
             next_wal_sst_id: 0,
             last_compacted_wal_sst_id: 0,
+            last_clock_tick: 0,
         }
     }
 
