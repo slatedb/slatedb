@@ -1,5 +1,5 @@
 use crate::error::SlateDBError;
-use crate::row_codec::{SstRowCodecV1, SstRowEntry};
+use crate::row_codec::{SstRowCodecV0, SstRowEntry};
 use crate::types::RowEntry;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -112,7 +112,7 @@ impl BlockBuilder {
         }
 
         self.offsets.push(self.data.len() as u16);
-        let codec = SstRowCodecV1::new();
+        let codec = SstRowCodecV0::new();
         let key = entry.key.clone();
         codec.encode(
             &mut self.data,

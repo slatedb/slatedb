@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::{Buf, Bytes, BytesMut};
 
-use crate::row_codec::SstRowCodecV1;
+use crate::row_codec::SstRowCodecV0;
 use crate::{block::Block, error::SlateDBError, iter::KeyValueIterator, types::RowEntry};
 
 pub trait BlockLike {
@@ -106,7 +106,7 @@ impl<B: BlockLike> BlockIterator<B> {
         let off_usz = off as usize;
         // TODO: bounds checks to avoid panics? (paulgb)
         let mut cursor = self.block.data().slice(off_usz..);
-        let codec = SstRowCodecV1::new();
+        let codec = SstRowCodecV0::new();
         let row = codec.decode(&self.first_key, &mut cursor)?;
         Ok(Some(row.into()))
     }

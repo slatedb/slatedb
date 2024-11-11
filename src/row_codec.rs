@@ -13,9 +13,9 @@ bitflags! {
 }
 
 /// Encodes key and value using the binary codec for SlateDB row representation
-/// using the `v1` encoding scheme.
+/// using the `v0` encoding scheme.
 ///
-/// The `v1` codec for the key is (for non-tombstones):
+/// The `v0` codec for the key is (for non-tombstones):
 ///
 /// ```txt
 ///  |---------------------------------------------------------------------------------------------------------------------|
@@ -116,9 +116,9 @@ impl Into<RowEntry> for SstRowEntry {
     }
 }
 
-pub(crate) struct SstRowCodecV1 {}
+pub(crate) struct SstRowCodecV0 {}
 
-impl SstRowCodecV1 {
+impl SstRowCodecV0 {
     pub fn new() -> Self {
         Self {}
     }
@@ -221,7 +221,7 @@ mod tests {
         let value = Some(b"value".as_slice());
 
         // Encode the row
-        let codec = SstRowCodecV1 {};
+        let codec = SstRowCodecV0 {};
         codec.encode(
             &mut encoded_data,
             &SstRowEntry::new(
@@ -259,7 +259,7 @@ mod tests {
         let value = Some(b"value".as_slice());
 
         // Encode the row
-        let codec = SstRowCodecV1 {};
+        let codec = SstRowCodecV0 {};
         codec.encode(
             &mut encoded_data,
             &SstRowEntry::new(
@@ -288,7 +288,7 @@ mod tests {
         let key_suffix = b"tomb";
 
         // Encode the row
-        let codec = SstRowCodecV1 {};
+        let codec = SstRowCodecV0 {};
         codec.encode(
             &mut encoded_data,
             &SstRowEntry::new(
@@ -335,7 +335,7 @@ mod tests {
         let mut data = Bytes::from(encoded_data);
 
         // Attempt to decode the row
-        let codec = SstRowCodecV1 {};
+        let codec = SstRowCodecV0 {};
         let result = codec.decode(&first_key, &mut data);
 
         assert!(result.is_err());
@@ -352,7 +352,7 @@ mod tests {
         let key_suffix = b""; // Empty key suffix
 
         // Encode the row
-        let codec = SstRowCodecV1 {};
+        let codec = SstRowCodecV0 {};
         codec.encode(
             &mut encoded_data,
             &SstRowEntry::new(
