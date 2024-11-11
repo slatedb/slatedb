@@ -1,7 +1,5 @@
 use bytes::Bytes;
 
-use crate::row_codec::RowFlags;
-
 /// Represents a key-value pair known not to be a tombstone.
 #[derive(Debug, Clone)]
 pub struct KeyValue {
@@ -17,7 +15,6 @@ pub struct RowEntry {
     pub key: Bytes,
     pub value: ValueDeletable,
     pub seq: u64,
-    pub flags: RowFlags,
     pub create_ts: Option<i64>,
     pub expire_ts: Option<i64>,
 }
@@ -31,10 +28,6 @@ impl RowEntry {
         create_ts: Option<i64>,
         expire_ts: Option<i64>,
     ) -> Self {
-        let flags = match &value {
-            Some(_) => RowFlags::default(),
-            None => RowFlags::Tombstone,
-        };
         let value = match value {
             Some(v) => ValueDeletable::Value(v),
             None => ValueDeletable::Tombstone,
@@ -42,7 +35,6 @@ impl RowEntry {
         Self {
             key,
             value,
-            flags,
             seq,
             create_ts,
             expire_ts,

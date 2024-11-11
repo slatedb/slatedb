@@ -141,7 +141,6 @@ impl TokioCompactionExecutorInner {
                         key: raw_kv.key,
                         value: Tombstone,
                         seq: raw_kv.seq,
-                        flags: raw_kv.flags,
                         expire_ts: None,
                         create_ts: raw_kv.create_ts,
                     }

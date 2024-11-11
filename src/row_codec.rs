@@ -108,7 +108,6 @@ impl Into<RowEntry> for SstRowEntry {
             key: self.key().clone(),
             value: self.value,
             seq: self.seq,
-            flags: self.flags,
             create_ts: self.create_ts,
             expire_ts: self.expire_ts,
         }
