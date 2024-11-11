@@ -55,6 +55,8 @@ impl DbInner {
 
         let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
+
+            guard.update_clock_tick(now)?;
             let current_wal = guard.wal();
             for op in batch.ops {
                 match op {
@@ -79,12 +81,15 @@ impl DbInner {
                     }
                 }
             }
-            current_wal.table().clone()
+            let table = current_wal.table().clone();
+            self.maybe_freeze_wal(&mut guard)?;
+            table
         } else {
             if cfg!(not(feature = "wal_disable")) {
                 panic!("wal_disabled feature must be enabled");
             }
             let mut guard = self.state.write();
+            guard.update_clock_tick(now)?;
             let current_memtable = guard.memtable();
             for op in batch.ops {
                 match op {
@@ -111,7 +116,7 @@ impl DbInner {
             }
             let table = current_memtable.table().clone();
             let last_wal_id = guard.last_written_wal_id();
-            self.maybe_freeze_memtable(&mut guard, last_wal_id);
+            self.maybe_freeze_memtable(&mut guard, last_wal_id)?;
             table
         };
 

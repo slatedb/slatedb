@@ -78,10 +78,10 @@ pub(crate) struct SstFileMetadata {
 
 impl TableStore {
     #[allow(dead_code)]
-    pub fn new(
+    pub fn new<P: Into<Path>>(
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
-        root_path: Path,
+        root_path: P,
         block_cache: Option<Arc<dyn DbCache>>,
     ) -> Self {
         Self::new_with_fp_registry(
@@ -93,17 +93,17 @@ impl TableStore {
         )
     }
 
-    pub fn new_with_fp_registry(
+    pub fn new_with_fp_registry<P: Into<Path>>(
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
-        root_path: Path,
+        root_path: P,
         fp_registry: Arc<FailPointRegistry>,
         block_cache: Option<Arc<dyn DbCache>>,
     ) -> Self {
         Self {
             object_store: object_store.clone(),
             sst_format,
-            root_path: root_path.clone(),
+            root_path: root_path.into(),
             wal_path: "wal",
             compacted_path: "compacted",
             fp_registry,

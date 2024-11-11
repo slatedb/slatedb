@@ -1,3 +1,24 @@
+//! This module provides the core database functionality for SlateDB.
+//! It provides methods for reading and writing to the database, as well as for flushing the database to disk.
+//!
+//! The `Db` struct represents a database.
+//!
+//! # Examples
+//!
+//! Basic usage of the `Db` struct:
+//!
+//! ```
+//! use slatedb::{db::Db, error::SlateDBError};
+//! use slatedb::object_store::{ObjectStore, memory::InMemory};
+//! use std::sync::Arc;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), SlateDBError> {
+//!     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+//!     let db = Db::open("test_db", object_store).await?;
+//!     Ok(())
+//! }
+//! ```
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -11,6 +32,7 @@ use tracing::warn;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
+use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
 use crate::cached_object_store::CachedObjectStore;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
@@ -216,9 +238,11 @@ impl DbInner {
         let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
 
         self.maybe_apply_backpressure().await;
-        self.write_notifier.send(batch_msg).ok();
+        self.write_notifier
+            .send(batch_msg)
+            .expect("write notifier closed");
 
-        let current_table = rx.await.expect("write batch failed")?;
+        let current_table = rx.await??;
 
         if options.await_durable {
             current_table.await_durable().await;
@@ -227,43 +251,75 @@ impl DbInner {
         Ok(())
     }
 
+    #[inline]
     pub(crate) async fn maybe_apply_backpressure(&self) {
         loop {
-            let table = {
+            let mem_size_bytes = {
                 let guard = self.state.read();
-                let state = guard.state();
-                if state.imm_memtable.len() <= self.options.max_unflushed_memtable {
-                    return;
-                }
-                let Some(table) = state.imm_memtable.back() else {
-                    return;
+                // Exclude active memtable and WAL to avoid a write lock.
+                let imm_wal_size = guard
+                    .state()
+                    .imm_wal
+                    .iter()
+                    .map(|imm| imm.table().size())
+                    .sum::<usize>();
+                let imm_memtable_size = guard
+                    .state()
+                    .imm_memtable
+                    .iter()
+                    .map(|imm| imm.table().size())
+                    .sum::<usize>();
+                imm_wal_size + imm_memtable_size
+            };
+            if mem_size_bytes >= self.options.max_unflushed_bytes {
+                let (wal_table, mem_table) = {
+                    let guard = self.state.read();
+                    (
+                        guard.state().imm_wal.back().map(|imm| imm.table().clone()),
+                        guard.state().imm_memtable.back().cloned(),
+                    )
                 };
                 warn!(
-                    "applying backpressure to write by waiting for imm table flush. imm tables({}), max({})",
-                    state.imm_memtable.len(),
-                    self.options.max_unflushed_memtable
+                    "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
+                    mem_size_bytes, self.options.max_unflushed_bytes,
                 );
-                table.clone()
-            };
-            table.await_flush_to_l0().await
+                match (wal_table, mem_table) {
+                    (Some(wal_table), Some(mem_table)) => {
+                        tokio::select! {
+                            _ = wal_table.await_durable() => {}
+                            _ = mem_table.await_flush_to_l0() => {}
+                        }
+                    }
+                    (Some(wal_table), None) => {
+                        wal_table.await_durable().await;
+                    }
+                    (None, Some(mem_table)) => {
+                        mem_table.await_flush_to_l0().await;
+                    }
+                    _ => {
+                        // No tables to flush, so backpressure is no longer needed.
+                        break;
+                    }
+                }
+            } else {
+                break;
+            }
         }
     }
 
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
-            .send(WalFlushThreadMsg::FlushImmutableWals(Some(tx)))
-            .expect("wal flush hung up");
-        rx.await.expect("received error on wal flush")
+            .send(WalFlushThreadMsg::FlushImmutableWals(Some(tx)))?;
+        rx.await?
     }
 
     // use to manually flush memtables
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
-            .send(MemtableFlushThreadMsg::FlushImmutableMemtables(Some(tx)))
-            .expect("memtable flush hung up");
-        rx.await.expect("receive error on memtable flush")
+            .send(MemtableFlushThreadMsg::FlushImmutableMemtables(Some(tx)))?;
+        rx.await?
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
@@ -322,6 +378,10 @@ impl DbInner {
             {
                 let mut guard = self.state.write();
                 for kv in wal_replay_buf.iter() {
+                    if let Some(ts) = kv.attributes.ts {
+                        guard.update_clock_tick(ts)?;
+                    }
+
                     match &kv.value {
                         ValueDeletable::Value(value) => {
                             guard.memtable().put(
@@ -342,7 +402,7 @@ impl DbInner {
                         ),
                     }
                 }
-                self.maybe_freeze_memtable(&mut guard, sst_id);
+                self.maybe_freeze_memtable(&mut guard, sst_id)?;
                 if guard.state().core.next_wal_sst_id == sst_id {
                     guard.increment_next_wal_id();
                 }
@@ -375,15 +435,68 @@ pub struct Db {
 }
 
 impl Db {
-    pub async fn open(
-        path: Path,
+    /// Open a new database with default options.
+    ///
+    /// ## Arguments
+    /// - `path`: the path to the database
+    /// - `object_store`: the object store to use for the database
+    ///
+    /// ## Returns
+    /// - `Db`: the database
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error opening the database
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn open<P: Into<Path>>(
+        path: P,
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self, SlateDBError> {
         Self::open_with_opts(path, DbOptions::default(), object_store).await
     }
 
-    pub async fn open_with_opts(
-        path: Path,
+    /// Open a new database with custom `DbOptions`.
+    ///
+    /// ## Arguments
+    /// - `path`: the path to the database
+    /// - `options`: the options to use for the database
+    /// - `object_store`: the object store to use for the database
+    ///
+    /// ## Returns
+    /// - `Db`: the database
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error opening the database
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, config::DbOptions, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open_with_opts("test_db", DbOptions::default(), object_store).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn open_with_opts<P: Into<Path>>(
+        path: P,
         options: DbOptions,
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self, SlateDBError> {
@@ -396,12 +509,43 @@ impl Db {
         .await
     }
 
-    pub async fn open_with_fp_registry(
-        path: Path,
+    /// Open a new database with a custom `FailPointRegistry`.
+    ///
+    /// ## Arguments
+    /// - `path`: the path to the database
+    /// - `options`: the options to use for the database
+    /// - `object_store`: the object store to use for the database
+    /// - `fp_registry`: the failpoint registry to use for the database
+    ///
+    /// ## Returns
+    /// - `Db`: the database
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error opening the database
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, config::DbOptions, error::SlateDBError};
+    /// use slatedb::fail_parallel::FailPointRegistry;
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let fp_registry = Arc::new(FailPointRegistry::new());
+    ///     let db = Db::open_with_fp_registry("test_db", DbOptions::default(), object_store, fp_registry).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn open_with_fp_registry<P: Into<Path>>(
+        path: P,
         options: DbOptions,
         object_store: Arc<dyn ObjectStore>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
+        let path = path.into();
         let db_stats = Arc::new(DbStats::new());
         let sst_format = SsTableFormat {
             min_filter_keys: options.min_filter_keys,
@@ -412,13 +556,17 @@ impl Db {
         let maybe_cached_object_store = match &options.object_store_cache_options.root_folder {
             None => object_store.clone(),
             Some(cache_root_folder) => {
-                let part_size_bytes = options.object_store_cache_options.part_size_bytes;
-                let cached_object_store = CachedObjectStore::new(
-                    object_store.clone(),
+                let cache_storage = Arc::new(FsCacheStorage::new(
                     cache_root_folder.clone(),
                     options.object_store_cache_options.max_cache_size_bytes,
-                    part_size_bytes,
                     options.object_store_cache_options.scan_interval,
+                    db_stats.clone(),
+                ));
+
+                let cached_object_store = CachedObjectStore::new(
+                    object_store.clone(),
+                    cache_storage,
+                    options.object_store_cache_options.part_size_bytes,
                     db_stats.clone(),
                 )?;
                 cached_object_store.start_evictor().await;
@@ -530,6 +678,26 @@ impl Db {
         FenceableManifest::init_writer(stored_manifest).await
     }
 
+    /// Close the database.
+    ///
+    /// ## Returns
+    /// - `Result<(), SlateDBError>`: if there was an error closing the database
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.close().await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn close(&self) -> Result<(), SlateDBError> {
         if let Some(compactor) = {
             let mut maybe_compactor = self.compactor.lock();
@@ -586,10 +754,81 @@ impl Db {
         Ok(())
     }
 
+    /// Get a value from the database with default read options.
+    ///
+    /// The `Bytes` object returned contains a slice of an entire
+    /// 4 KiB block. The block will be held in memory as long as the
+    /// caller holds a reference to the `Bytes` object. Consider
+    /// copying the data if you need to hold it for a long time.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to get
+    ///
+    /// ## Returns
+    /// - `Result<Option<Bytes>, SlateDBError>`:
+    ///     - `Some(Bytes)`: the value if it exists
+    ///     - `None`: if the value does not exist
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error getting the value
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"key", b"value").await?;
+    ///     assert_eq!(db.get(b"key").await?, Some(Bytes::from_static(b"value")));
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
         self.inner.get_with_options(key, DEFAULT_READ_OPTIONS).await
     }
 
+    /// Get a value from the database with custom read options.
+    ///
+    /// The `Bytes` object returned contains a slice of an entire
+    /// 4 KiB block. The block will be held in memory as long as the
+    /// caller holds a reference to the `Bytes` object. Consider
+    /// copying the data if you need to hold it for a long time.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to get
+    /// - `options`: the read options to use
+    ///
+    /// ## Returns
+    /// - `Result<Option<Bytes>, SlateDBError>`:
+    ///     - `Some(Bytes)`: the value if it exists
+    ///     - `None`: if the value does not exist
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error getting the value
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use slatedb::{db::Db, config::ReadOptions, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"key", b"value").await?;
+    ///     assert_eq!(db.get_with_options(b"key", &ReadOptions::default()).await?, Some(Bytes::from_static(b"value")));
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn get_with_options(
         &self,
         key: &[u8],
@@ -598,12 +837,62 @@ impl Db {
         self.inner.get_with_options(key, options).await
     }
 
+    /// Write a value into the database with default `WriteOptions`.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to write
+    /// - `value`: the value to write
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error writing the value
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"key", b"value").await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), SlateDBError> {
         let mut batch = WriteBatch::new();
         batch.put(key, value);
         self.write(batch).await
     }
 
+    /// Write a value into the database with custom `PutOptions` and `WriteOptions`.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to write
+    /// - `value`: the value to write
+    /// - `put_opts`: the put options to use
+    /// - `write_opts`: the write options to use
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error writing the value
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, config::{PutOptions, WriteOptions}, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put_with_options(b"key", b"value", &PutOptions::default(), &WriteOptions::default()).await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn put_with_options(
         &self,
         key: &[u8],
@@ -616,12 +905,59 @@ impl Db {
         self.write_with_options(batch, write_opts).await
     }
 
+    /// Delete a key from the database with default `WriteOptions`.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to delete
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error deleting the key
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.delete(b"key").await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn delete(&self, key: &[u8]) -> Result<(), SlateDBError> {
         let mut batch = WriteBatch::new();
         batch.delete(key);
         self.write(batch).await
     }
 
+    /// Delete a key from the database with custom `WriteOptions`.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to delete
+    /// - `options`: the write options to use
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error deleting the key
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, config::WriteOptions, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.delete_with_options(b"key", &WriteOptions::default()).await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn delete_with_options(
         &self,
         key: &[u8],
@@ -635,6 +971,34 @@ impl Db {
     /// Write a batch of put/delete operations atomically to the database. Batch writes
     /// block other gets and writes until the batch is written to the WAL (or memtable if
     /// WAL is disabled).
+    ///
+    /// ## Arguments
+    /// - `batch`: the batch of put/delete operations to write
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error writing the batch
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{batch::WriteBatch, db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///
+    ///     let mut batch = WriteBatch::new();
+    ///     batch.put(b"key1", b"value1");
+    ///     batch.put(b"key2", b"value2");
+    ///     batch.delete(b"key1");
+    ///     db.write(batch).await?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn write(&self, batch: WriteBatch) -> Result<(), SlateDBError> {
         self.write_with_options(batch, DEFAULT_WRITE_OPTIONS).await
     }
@@ -642,6 +1006,35 @@ impl Db {
     /// Write a batch of put/delete operations atomically to the database. Batch writes
     /// block other gets and writes until the batch is written to the WAL (or memtable if
     /// WAL is disabled).
+    ///
+    /// ## Arguments
+    /// - `batch`: the batch of put/delete operations to write
+    /// - `options`: the write options to use
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error writing the batch
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{batch::WriteBatch, db::Db, config::WriteOptions, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///
+    ///     let mut batch = WriteBatch::new();
+    ///     batch.put(b"key1", b"value1");
+    ///     batch.put(b"key2", b"value2");
+    ///     batch.delete(b"key1");
+    ///     db.write_with_options(batch, &WriteOptions::default()).await?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn write_with_options(
         &self,
         batch: WriteBatch,
@@ -650,6 +1043,28 @@ impl Db {
         self.inner.write_with_options(batch, options).await
     }
 
+    /// Flush the database to disk.
+    /// If WAL is enabled, flushes the WAL to disk.
+    /// If WAL is disabled, flushes the memtables to disk.
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error flushing the database
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.flush().await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn flush(&self) -> Result<(), SlateDBError> {
         if self.inner.wal_enabled() {
             self.inner.flush_wals().await
@@ -665,7 +1080,6 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "wal_disable")]
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
@@ -675,6 +1089,7 @@ mod tests {
     use tracing::info;
 
     use super::*;
+    use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
         DEFAULT_PUT_OPTIONS,
@@ -752,12 +1167,17 @@ mod tests {
             .unwrap();
         let db_stats = Arc::new(DbStats::new());
         let part_size = 1024;
-        let cached_object_store = CachedObjectStore::new(
-            object_store.clone(),
+        let cache_storage = Arc::new(FsCacheStorage::new(
             temp_dir.path().to_path_buf(),
             None,
-            part_size,
             None,
+            db_stats.clone(),
+        ));
+
+        let cached_object_store = CachedObjectStore::new(
+            object_store.clone(),
+            cache_storage,
+            part_size,
             db_stats.clone(),
         )
         .unwrap();
@@ -946,7 +1366,6 @@ mod tests {
                         )),
                         max_concurrent_compactions: 1,
                         compaction_runtime: None,
-                        clock: Arc::new(TestClock::new()),
                     }),
                 ),
                 object_store.clone(),
@@ -1206,6 +1625,46 @@ mod tests {
         assert!(kv_store.metrics().immutable_memtable_flushes.get() > 0);
     }
 
+    // 2 threads so we can can wait on the write_with_options (main) thread
+    // while the write_batch (background) thread is blocked on writing the
+    // WAL SST.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_apply_wal_memory_backpressure() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let mut options = test_db_options(0, 1, None);
+        options.max_unflushed_bytes = 1;
+        let db = Db::open_with_fp_registry(
+            path.clone(),
+            options,
+            object_store.clone(),
+            fp_registry.clone(),
+        )
+        .await
+        .unwrap();
+
+        let write_opts = WriteOptions {
+            await_durable: false,
+        };
+
+        // Block WAL flush
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+
+        // 1 imm_wal in memory
+        db.put_with_options(b"key1", b"val1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+
+        let snapshot = db.inner.state.read().snapshot();
+
+        // Unblock WAL flush so runtime shuts down nicely even if we have a failure
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+
+        // WAL should pile up in memory since it can't be flushed
+        assert_eq!(snapshot.state.imm_wal.len(), 1);
+    }
+
     #[tokio::test]
     async fn test_apply_backpressure_to_memtable_flush() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -1363,15 +1822,16 @@ mod tests {
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_should_read_uncommitted_data_if_read_level_uncommitted() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_opts(
+        let kv_store = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
+            fp_registry.clone(),
         )
         .await
         .unwrap();
@@ -1389,6 +1849,7 @@ mod tests {
             .await
             .unwrap();
 
+        // Validate uncommitted read
         let val = kv_store
             .get_with_options(
                 "foo".as_bytes(),
@@ -1400,19 +1861,24 @@ mod tests {
             .unwrap();
         assert_eq!(val, Some(Bytes::from("bar")));
 
+        // Validate committed read should still return None
+        let val = kv_store.get("foo".as_bytes()).await.unwrap();
+        assert_eq!(val, None);
+
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
         kv_store.close().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_should_read_only_committed_data() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_opts(
+        let kv_store = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
+            fp_registry.clone(),
         )
         .await
         .unwrap();
@@ -1456,10 +1922,11 @@ mod tests {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_opts(
+        let kv_store = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
+            fp_registry.clone(),
         )
         .await
         .unwrap();
@@ -1647,7 +2114,6 @@ mod tests {
                 )),
                 max_concurrent_compactions: 1,
                 compaction_runtime: None,
-                clock: Arc::new(TestClock::new()),
             }),
         ))
         .await;
@@ -1666,7 +2132,6 @@ mod tests {
                 )),
                 max_concurrent_compactions: 1,
                 compaction_runtime: None,
-                clock: Arc::new(TestClock::new()),
             }),
         ))
         .await
@@ -1755,6 +2220,87 @@ mod tests {
         assert_eq!(db2.inner.state.read().state().core.next_wal_sst_id, 5);
     }
 
+    #[tokio::test]
+    async fn test_invalid_clock_progression() {
+        // Given:
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+
+        let clock = Arc::new(TestClock::new());
+        let db = Db::open_with_opts(
+            path.clone(),
+            DbOptions {
+                clock: clock.clone(),
+                ..test_db_options(0, 128, None)
+            },
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        // When:
+        // put with time = 10
+        clock.ticker.store(10, Ordering::SeqCst);
+        db.put(b"1", b"1").await.unwrap();
+
+        // Then:
+        // put with time goes backwards, should fail
+        clock.ticker.store(5, Ordering::SeqCst);
+        match db.put(b"1", b"1").await {
+            Ok(_) => panic!("expected an error on inserting backwards time"),
+            Err(e) => assert!(
+                e.to_string().contains("Last tick: 10, Next tick: 5"),
+                "{}",
+                e.to_string()
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_invalid_clock_progression_across_db_instances() {
+        // Given:
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+
+        let clock = Arc::new(TestClock::new());
+        let db = Db::open_with_opts(
+            path.clone(),
+            DbOptions {
+                clock: clock.clone(),
+                ..test_db_options(0, 128, None)
+            },
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        // When:
+        // put with time = 10
+        clock.ticker.store(10, Ordering::SeqCst);
+        db.put(b"1", b"1").await.unwrap();
+        db.flush().await.unwrap();
+
+        let db2 = Db::open_with_opts(
+            path.clone(),
+            DbOptions {
+                clock: clock.clone(),
+                ..test_db_options(0, 128, None)
+            },
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+        clock.ticker.store(5, Ordering::SeqCst);
+        match db2.put(b"1", b"1").await {
+            Ok(_) => panic!("expected an error on inserting backwards time"),
+            Err(e) => assert!(
+                e.to_string().contains("Last tick: 10, Next tick: 5"),
+                "{}",
+                e.to_string()
+            ),
+        }
+    }
+
     async fn wait_for_manifest_condition(
         sm: &mut StoredManifest,
         cond: impl Fn(&CoreDbState) -> bool,
@@ -1795,7 +2341,7 @@ mod tests {
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),
-            max_unflushed_memtable: 2,
+            max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,
             min_filter_keys,
             filter_bits_per_key: 10,

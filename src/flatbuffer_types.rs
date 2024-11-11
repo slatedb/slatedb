@@ -135,6 +135,7 @@ impl FlatBufferManifestCodec {
             compacted,
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
             last_compacted_wal_sst_id: manifest.wal_id_last_compacted(),
+            last_clock_tick: manifest.last_clock_tick(),
         };
         Manifest {
             core,
@@ -269,6 +270,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 l0: Some(l0),
                 compacted: Some(compacted),
                 snapshots: None,
+                last_clock_tick: core.last_clock_tick,
             },
         );
         self.builder.finish(manifest, None);

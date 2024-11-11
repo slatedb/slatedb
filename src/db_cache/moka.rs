@@ -26,7 +26,7 @@
 //!         block_cache: Some(Arc::new(MokaCache::new())),
 //!         ..Default::default()
 //!     };
-//!     let db = Db::open_with_opts("path/to/db".into(), options, object_store).await;
+//!     let db = Db::open_with_opts("path/to/db", options, object_store).await;
 //! }
 //! ```
 //!

@@ -175,6 +175,7 @@ impl CompactionExecuteBench {
     }
 
     async fn load_compaction_job(
+        manifest: &StoredManifest,
         num_ssts: usize,
         table_store: &Arc<TableStore>,
     ) -> Result<CompactionJob, SlateDBError> {
@@ -216,10 +217,11 @@ impl CompactionExecuteBench {
             destination: 0,
             ssts,
             sorted_runs: vec![],
+            compaction_ts: manifest.db_state().last_clock_tick,
         })
     }
 
-    fn load_compaction_as_job(manifest: StoredManifest, compaction: &Compaction) -> CompactionJob {
+    fn load_compaction_as_job(manifest: &StoredManifest, compaction: &Compaction) -> CompactionJob {
         let state = manifest.db_state();
         let srs_by_id: HashMap<_, _> = state
             .compacted
@@ -241,6 +243,7 @@ impl CompactionExecuteBench {
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,
+            compaction_ts: state.last_clock_tick,
         }
     }
 
@@ -279,16 +282,19 @@ impl CompactionExecuteBench {
         );
         let os = self.object_store.clone();
         info!("load compaction job");
+        let manifest_store = Arc::new(ManifestStore::new(&self.path, os.clone()));
+        let manifest = StoredManifest::load(manifest_store)
+            .await?
+            .expect("expected manifest");
         let job = match &compaction {
             Some(compaction) => {
                 info!("load job from existing compaction");
-                let manifest_store = Arc::new(ManifestStore::new(&self.path, os.clone()));
-                let manifest = StoredManifest::load(manifest_store)
-                    .await?
-                    .expect("expected manifest");
-                CompactionExecuteBench::load_compaction_as_job(manifest, compaction)
+                CompactionExecuteBench::load_compaction_as_job(&manifest, compaction)
             }
-            None => CompactionExecuteBench::load_compaction_job(num_ssts, &table_store).await?,
+            None => {
+                CompactionExecuteBench::load_compaction_job(&manifest, num_ssts, &table_store)
+                    .await?
+            }
         };
         let start = std::time::Instant::now();
         info!("start compaction job");

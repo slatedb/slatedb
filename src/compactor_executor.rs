@@ -28,6 +28,7 @@ pub(crate) struct CompactionJob {
     pub(crate) destination: u32,
     pub(crate) ssts: Vec<SsTableHandle>,
     pub(crate) sorted_runs: Vec<SortedRun>,
+    pub(crate) compaction_ts: i64,
 }
 
 pub(crate) trait CompactionExecutor {
@@ -125,14 +126,13 @@ impl TokioCompactionExecutorInner {
             .table_store
             .table_writer(SsTableId::Compacted(Ulid::new()));
         let mut current_size = 0usize;
-        let now = self.options.clock.now();
 
         while let Some(raw_kv) = all_iter.next_entry().await? {
             // filter out any expired entries -- eventually we can consider
             // abstracting this away into generic, pluggable compaction filters
             // but for now we do it inline
             let kv = match raw_kv.expire_ts {
-                Some(expire_ts) if expire_ts <= now => {
+                Some(expire_ts) if expire_ts <= compaction.compaction_ts => {
                     // insert a tombstone instead of just filtering out the
                     // value in the iterator because this may otherwise "revive"
                     // an older version of the KV pair that has a larger TTL in

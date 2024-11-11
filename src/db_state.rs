@@ -149,6 +149,7 @@ pub(crate) struct CoreDbState {
     pub(crate) compacted: Vec<SortedRun>,
     pub(crate) next_wal_sst_id: u64,
     pub(crate) last_compacted_wal_sst_id: u64,
+    pub(crate) last_clock_tick: i64,
 }
 
 impl CoreDbState {
@@ -159,6 +160,7 @@ impl CoreDbState {
             compacted: vec![],
             next_wal_sst_id: 1,
             last_compacted_wal_sst_id: 0,
+            last_clock_tick: i64::MIN,
         }
     }
 
@@ -282,6 +284,20 @@ impl DbState {
         let mut state = self.state_copy();
         state.core.next_wal_sst_id += 1;
         self.update_state(state);
+    }
+
+    pub fn update_clock_tick(&mut self, tick: i64) -> Result<i64, SlateDBError> {
+        if self.state.core.last_clock_tick > tick {
+            return Err(SlateDBError::InvalidClockTick {
+                last_tick: self.state.core.last_clock_tick,
+                next_tick: tick,
+            });
+        }
+
+        let mut state = self.state_copy();
+        state.core.last_clock_tick = tick;
+        self.update_state(state);
+        Ok(tick)
     }
 
     pub fn refresh_db_state(&mut self, compactor_state: &CoreDbState) {

@@ -1,4 +1,5 @@
 use std::ops::Bound;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -14,11 +15,11 @@ pub(crate) struct KVTable {
     map: SkipMap<Bytes, ValueWithAttributes>,
     is_durable_tx: watch::Sender<bool>,
     is_durable_rx: watch::Receiver<bool>,
+    size: AtomicUsize,
 }
 
 pub(crate) struct WritableKVTable {
     table: Arc<KVTable>,
-    size: usize,
 }
 
 pub(crate) struct ImmutableMemtable {
@@ -113,13 +114,7 @@ impl WritableKVTable {
     pub(crate) fn new() -> Self {
         Self {
             table: Arc::new(KVTable::new()),
-            size: 0,
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn size(&self) -> usize {
-        self.size
     }
 
     pub(crate) fn table(&self) -> &Arc<KVTable> {
@@ -127,27 +122,15 @@ impl WritableKVTable {
     }
 
     pub(crate) fn put(&mut self, key: Bytes, value: Bytes, attrs: RowAttributes) {
-        self.maybe_subtract_old_val_from_size(key.clone());
-        self.size = self.size + key.len() + value.len() + sizeof_attributes(&attrs);
         self.table.put(key, value, attrs)
     }
 
     pub(crate) fn delete(&mut self, key: Bytes, attrs: RowAttributes) {
-        self.maybe_subtract_old_val_from_size(key.clone());
-        self.size += key.len();
         self.table.delete(key, attrs);
     }
 
-    fn maybe_subtract_old_val_from_size(&mut self, key: Bytes) {
-        if let Some(old_deletable) = self.table.get(&key) {
-            self.size = self.size
-                - key.len()
-                - match old_deletable.value {
-                    ValueDeletable::Tombstone => 0,
-                    ValueDeletable::Value(old) => old.len(),
-                }
-                - sizeof_attributes(&old_deletable.attrs)
-        }
+    pub(crate) fn size(&self) -> usize {
+        self.table.size()
     }
 }
 
@@ -156,6 +139,7 @@ impl KVTable {
         let (is_durable_tx, is_durable_rx) = watch::channel(false);
         Self {
             map: SkipMap::new(),
+            size: AtomicUsize::new(0),
             is_durable_tx,
             is_durable_rx,
         }
@@ -163,6 +147,10 @@ impl KVTable {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        self.size.load(Ordering::Relaxed)
     }
 
     /// Get the value for a given key.
@@ -187,6 +175,11 @@ impl KVTable {
     /// Puts a value, returning as soon as the value is written to the memtable but before
     /// it is flushed to durable storage.
     fn put(&self, key: Bytes, value: Bytes, attrs: RowAttributes) {
+        self.maybe_subtract_old_val_from_size(key.clone());
+        self.size.fetch_add(
+            key.len() + value.len() + sizeof_attributes(&attrs),
+            Ordering::Relaxed,
+        );
         self.map.insert(
             key,
             ValueWithAttributes {
@@ -197,6 +190,8 @@ impl KVTable {
     }
 
     fn delete(&self, key: Bytes, attrs: RowAttributes) {
+        self.maybe_subtract_old_val_from_size(key.clone());
+        self.size.fetch_add(key.len(), Ordering::Relaxed);
         self.map.insert(
             key,
             ValueWithAttributes {
@@ -204,6 +199,18 @@ impl KVTable {
                 attrs,
             },
         );
+    }
+
+    fn maybe_subtract_old_val_from_size(&self, key: Bytes) {
+        if let Some(old_deletable) = self.get(&key) {
+            let old_size = key.len()
+                + match old_deletable.value {
+                    ValueDeletable::Tombstone => 0,
+                    ValueDeletable::Value(old) => old.len(),
+                }
+                + sizeof_attributes(&old_deletable.attrs);
+            self.size.fetch_sub(old_size, Ordering::Relaxed);
+        }
     }
 
     pub(crate) async fn await_durable(&self) {
@@ -401,7 +408,7 @@ mod tests {
             Bytes::from_static(b"val1"),
             gen_attrs(1),
         );
-        assert_eq!(table.size(), 18);
+        assert_eq!(table.table.size(), 18);
 
         table.put(
             Bytes::from_static(b"def456"),
@@ -411,16 +418,16 @@ mod tests {
                 expire_ts: None,
             },
         );
-        assert_eq!(table.size(), 33);
+        assert_eq!(table.table.size(), 33);
 
         table.put(
             Bytes::from_static(b"def456"),
             Bytes::from_static(b"blabla"),
             gen_attrs(3),
         );
-        assert_eq!(table.size(), 38);
+        assert_eq!(table.table.size(), 38);
 
         table.delete(Bytes::from_static(b"abc333"), gen_attrs(4));
-        assert_eq!(table.size(), 26)
+        assert_eq!(table.table.size(), 26)
     }
 }
