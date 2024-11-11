@@ -6,7 +6,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 bitflags! {
     #[derive(Debug, Clone, PartialEq, Default)]
     pub(crate) struct RowFlags: u8 {
-        const Tombstone = 0b00000001;
+        const TOMBSTONE = 0b00000001;
         const HAS_EXPIRE_TS = 0b00000010;
         const HAS_CREATE_TS = 0b00000100;
     }
@@ -78,7 +78,7 @@ impl SstRowEntry {
     fn flags(&self) -> RowFlags {
         let mut flags = match &self.value {
             ValueDeletable::Value(_) => RowFlags::default(),
-            ValueDeletable::Tombstone => RowFlags::Tombstone,
+            ValueDeletable::Tombstone => RowFlags::TOMBSTONE,
         };
         if self.expire_ts.is_some() {
             flags |= RowFlags::HAS_EXPIRE_TS;
@@ -145,7 +145,7 @@ impl SstRowCodecV0 {
         }
 
         // skip encoding value for tombstone
-        if flags.contains(RowFlags::Tombstone) {
+        if flags.contains(RowFlags::TOMBSTONE) {
             return;
         }
 
@@ -186,7 +186,7 @@ impl SstRowCodecV0 {
             };
 
         // skip decoding value for tombstone.
-        if flags.contains(RowFlags::Tombstone) {
+        if flags.contains(RowFlags::TOMBSTONE) {
             return Ok(SstRowEntry {
                 key_prefix_len: 0,
                 key_suffix: full_key.freeze(),
