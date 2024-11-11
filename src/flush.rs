@@ -53,7 +53,7 @@ impl DbInner {
                         kv.key,
                         v,
                         RowAttributes {
-                            ts: None,
+                            ts: kv.create_ts,
                             expire_ts: kv.expire_ts,
                         },
                     );
@@ -62,7 +62,7 @@ impl DbInner {
                     mem_table.delete(
                         kv.key,
                         RowAttributes {
-                            ts: None,
+                            ts: kv.create_ts,
                             expire_ts: kv.expire_ts,
                         },
                     );
