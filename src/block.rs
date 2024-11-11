@@ -179,34 +179,15 @@ impl BlockBuilder {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{gen_attrs, gen_empty_attrs};
-
     use super::*;
+    use crate::test_utils::{gen_attrs, gen_empty_attrs};
 
     #[test]
     fn test_block() {
         let mut builder = BlockBuilder::new(4096, vec![RowFeature::Flags]);
-        assert!(builder.add(RowEntry::new(
-            "key1".into(),
-            Some("value1".into()),
-            0,
-            None,
-            None
-        )));
-        assert!(builder.add(RowEntry::new(
-            "key1".into(),
-            Some("value1".into()),
-            0,
-            None,
-            None
-        )));
-        assert!(builder.add(RowEntry::new(
-            "key2".into(),
-            Some("value2".into()),
-            0,
-            None,
-            None
-        )));
+        assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
+        assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
+        assert!(builder.add_kv(b"key2", Some(b"value2"), gen_empty_attrs()));
         let block = builder.build().unwrap();
         let encoded = block.encode();
         let decoded = Block::decode(encoded);
@@ -217,21 +198,9 @@ mod tests {
     #[test]
     fn test_block_with_tombstone() {
         let mut builder = BlockBuilder::new(4096, vec![RowFeature::Flags]);
-        assert!(builder.add(RowEntry::new(
-            "key1".into(),
-            Some("value1".into()),
-            0,
-            None,
-            None
-        )));
-        assert!(builder.add(RowEntry::new("key2".into(), None, 0, None, None)));
-        assert!(builder.add(RowEntry::new(
-            "key3".into(),
-            Some("value3".into()),
-            0,
-            None,
-            None
-        )));
+        assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
+        assert!(builder.add_kv(b"key2", None, gen_empty_attrs()));
+        assert!(builder.add_kv(b"key3", Some(b"value3"), gen_empty_attrs()));
         let block = builder.build().unwrap();
         let encoded = block.encode();
         let _decoded = Block::decode(encoded);
