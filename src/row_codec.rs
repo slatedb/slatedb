@@ -40,7 +40,7 @@ bitflags! {
 /// | `key_prefix_len` | `u16` | Length of the key prefix                               |
 /// | `key_suffix_len` | `u16` | Length of the key suffix                               |
 /// | `key_suffix`     | `var` | Suffix of the key                                      |
-/// | `seq`            | `u64` | Sequence                                               |
+/// | `seq`            | `u64` | Sequence Number                                        |
 /// | `flags`          | `u8`  | Flags of the row                                       |
 /// | `expire_ts`      | `u64` | Optional, only has value when flags & HAS_EXPIRE_TS    |
 /// | `value_len`      | `u32` | Length of the value                                    |
