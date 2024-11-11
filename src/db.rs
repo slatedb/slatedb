@@ -378,7 +378,7 @@ impl DbInner {
             {
                 let mut guard = self.state.write();
                 for kv in wal_replay_buf.iter() {
-                    if let Some(ts) = kv.attributes.ts {
+                    if let Some(ts) = kv.create_ts {
                         guard.update_clock_tick(ts)?;
                     }
 
