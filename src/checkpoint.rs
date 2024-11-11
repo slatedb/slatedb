@@ -8,6 +8,14 @@ use object_store::ObjectStore;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+#[derive(Debug)]
+pub struct CheckpointCreateResult {
+    /// The id of the created checkpoint.
+    id: uuid::Uuid,
+    /// The manifest id referenced by the created checkpoint.
+    manifest_id: u64,
+}
+
 impl Db {
     /// Creates a checkpoint of the db stored in the object store at the specified path using the
     /// provided options. Note that the scope option does not impact the behaviour of this method.
@@ -16,8 +24,8 @@ impl Db {
         path: &Path,
         object_store: Arc<dyn ObjectStore>,
         options: &CheckpointOptions,
-    ) -> Result<(uuid::Uuid, u64), SlateDBError> {
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store));
+    ) -> Result<CheckpointCreateResult, SlateDBError> {
+        let manifest_store = Arc::new(ManifestStore::new(path, object_store));
         let Some(mut stored_manifest) = StoredManifest::load(manifest_store).await? else {
             return Err(SlateDBError::ManifestMissing);
         };
@@ -60,12 +68,16 @@ impl Db {
             .iter()
             .find(|c| c.id == id)
             .expect("update applied but checkpoint not found");
-        Ok((id, checkpoint.manifest_id))
+        Ok(CheckpointCreateResult {
+            id,
+            manifest_id: checkpoint.manifest_id,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::checkpoint::CheckpointCreateResult;
     use crate::config::{CheckpointOptions, DbOptions};
     use crate::db::Db;
     use crate::error::SlateDBError;
@@ -92,10 +104,12 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let (checkpoint_id, checkpoint_manifest_id) =
-            Db::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
-                .await
-                .unwrap();
+        let CheckpointCreateResult {
+            id: checkpoint_id,
+            manifest_id: checkpoint_manifest_id,
+        } = Db::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
+            .await
+            .unwrap();
 
         let (_, manifest) = manifest_store
             .read_latest_manifest()
@@ -125,7 +139,10 @@ mod tests {
         let manifest_store = ManifestStore::new(&path, object_store.clone());
         let checkpoint_time = SystemTime::now();
 
-        let (checkpoint_id, _) = Db::create_checkpoint(
+        let CheckpointCreateResult {
+            id: checkpoint_id,
+            manifest_id: _,
+        } = Db::create_checkpoint(
             &path,
             object_store.clone(),
             &CheckpointOptions {
@@ -162,12 +179,17 @@ mod tests {
             .await
             .unwrap();
         db.close().await.unwrap();
-        let (source_checkpoint_id, source_checkpoint_manifest_id) =
-            Db::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
-                .await
-                .unwrap();
+        let CheckpointCreateResult {
+            id: source_checkpoint_id,
+            manifest_id: source_checkpoint_manifest_id,
+        } = Db::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
+            .await
+            .unwrap();
 
-        let (_, checkpoint_manifest_id) = Db::create_checkpoint(
+        let CheckpointCreateResult {
+            id: _,
+            manifest_id: checkpoint_manifest_id,
+        } = Db::create_checkpoint(
             &path,
             object_store.clone(),
             &CheckpointOptions {
