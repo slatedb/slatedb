@@ -28,11 +28,11 @@ bitflags! {
 /// And for tombstones (flags & Tombstone == 1):
 ///
 ///  ```txt
-///  |----------------------------------------------------------|-----------|
-///  |       u16      |      u16       |  var        | u64      | u8        |
-///  |----------------|----------------|-------------|----------|-----------|
-///  | key_prefix_len | key_suffix_len |  key_suffix | seq      | flags     |
-///  |----------------------------------------------------------------------|
+///  |----------------------------------------------------------|-----------|-----------|
+///  |       u16      |      u16       |  var        | u64      | u8        | i64       |
+///  |----------------|----------------|-------------|----------|-----------|-----------|
+///  | key_prefix_len | key_suffix_len |  key_suffix | seq      | flags     | create_ts |
+///  |----------------------------------------------------------------------------------|
 ///  ```
 ///
 /// | Field            | Type  | Description                                            |
@@ -43,6 +43,7 @@ bitflags! {
 /// | `seq`            | `u64` | Sequence Number                                        |
 /// | `flags`          | `u8`  | Flags of the row                                       |
 /// | `expire_ts`      | `u64` | Optional, only has value when flags & HAS_EXPIRE_TS    |
+/// | `create_ts`      | `u64` | Optional, only has value when flags & HAS_CREATE_TS    |
 /// | `value_len`      | `u32` | Length of the value                                    |
 /// | `value`          | `var` | Value bytes                                            |
 
@@ -137,9 +138,6 @@ impl SstRowCodecV0 {
         let flags = row.flags();
         output.put_u64(row.seq);
         output.put_u8(flags.bits());
-        if flags.contains(RowFlags::Tombstone) {
-            return;
-        }
 
         // encode expire & create ts
         if flags.contains(RowFlags::HAS_EXPIRE_TS) {
@@ -153,6 +151,11 @@ impl SstRowCodecV0 {
                 row.create_ts
                     .expect("create_ts should be set with HAS_CREATE_TS"),
             );
+        }
+
+        // skip encoding value for tombstone
+        if flags.contains(RowFlags::Tombstone) {
+            return;
         }
 
         // encode value
@@ -179,16 +182,6 @@ impl SstRowCodecV0 {
         let seq = data.get_u64();
         let flags = RowFlags::from_bits(data.get_u8()).ok_or(SlateDBError::InvalidRowFlags)?;
 
-        if flags.contains(RowFlags::Tombstone) {
-            return Ok(SstRowEntry {
-                key: SstRowKey::Full(full_key.freeze()),
-                seq,
-                expire_ts: None,
-                create_ts: None,
-                value: ValueDeletable::Tombstone,
-            });
-        }
-
         // decode expire_ts & create_ts
         let (expire_ts, create_ts) =
             if flags.contains(RowFlags::HAS_EXPIRE_TS | RowFlags::HAS_CREATE_TS) {
@@ -200,6 +193,17 @@ impl SstRowCodecV0 {
             } else {
                 (None, None)
             };
+
+        // skip decoding value for tombstone.
+        if flags.contains(RowFlags::Tombstone) {
+            return Ok(SstRowEntry {
+                key: SstRowKey::Full(full_key.freeze()),
+                seq,
+                expire_ts: None, // it does not make sense to have expire_ts for tombstone
+                create_ts,
+                value: ValueDeletable::Tombstone,
+            });
+        }
 
         // decode value
         let value_len = data.get_u32() as usize;
@@ -302,7 +306,7 @@ mod tests {
                 Bytes::from(key_suffix.to_vec()),
                 1,
                 ValueDeletable::Tombstone,
-                None,
+                Some(2),
                 Some(1),
             ),
         );
@@ -320,6 +324,7 @@ mod tests {
         assert_eq!(decoded.key(), &expected_key);
         assert_eq!(decoded.value, expected_value);
         assert_eq!(decoded.expire_ts, None);
+        assert_eq!(decoded.create_ts, Some(2));
     }
 
     #[test]
