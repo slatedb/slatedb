@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::flush::FlushThreadMsg;
+use crate::{flush::WalFlushThreadMsg, mem_table_flush::MemtableFlushThreadMsg};
 
 #[derive(thiserror::Error, Debug)]
 pub enum SlateDBError {
@@ -65,8 +65,11 @@ pub enum SlateDBError {
     #[error("Unknown RowFlags -- this may be caused by reading data encoded with a newer codec")]
     InvalidRowFlags,
 
-    #[error("Flush channel error: {0}")]
-    FlushChannelError(#[from] tokio::sync::mpsc::error::SendError<FlushThreadMsg>),
+    #[error("Error flushing immutable wals: {0}")]
+    FlushChannelError(#[from] tokio::sync::mpsc::error::SendError<WalFlushThreadMsg>),
+
+    #[error("Error flushing memtables: {0}")]
+    MemtableFlushError(#[from] tokio::sync::mpsc::error::SendError<MemtableFlushThreadMsg>),
 
     #[error("Read channel error: {0}")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),

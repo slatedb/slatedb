@@ -32,6 +32,7 @@ use tracing::warn;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
+use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
 use crate::cached_object_store::CachedObjectStore;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
@@ -41,11 +42,12 @@ use crate::config::{
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter;
-use crate::flush::FlushThreadMsg;
+use crate::flush::WalFlushThreadMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::WritableKVTable;
+use crate::mem_table_flush::MemtableFlushThreadMsg;
 use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
@@ -58,8 +60,8 @@ pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<FlushThreadMsg>,
-    pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<FlushThreadMsg>,
+    pub(crate) wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
+    pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
     pub(crate) write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: Arc<DbStats>,
 }
@@ -69,8 +71,8 @@ impl DbInner {
         options: DbOptions,
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
-        wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<FlushThreadMsg>,
-        memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<FlushThreadMsg>,
+        wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
+        memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
         write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
         db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
@@ -236,7 +238,9 @@ impl DbInner {
         let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
 
         self.maybe_apply_backpressure().await;
-        self.write_notifier.send(batch_msg).ok();
+        self.write_notifier
+            .send(batch_msg)
+            .expect("write notifier closed");
 
         let current_table = rx.await??;
 
@@ -247,32 +251,66 @@ impl DbInner {
         Ok(())
     }
 
+    #[inline]
     pub(crate) async fn maybe_apply_backpressure(&self) {
         loop {
-            let table = {
+            let mem_size_bytes = {
                 let guard = self.state.read();
-                let state = guard.state();
-                if state.imm_memtable.len() <= self.options.max_unflushed_memtable {
-                    return;
-                }
-                let Some(table) = state.imm_memtable.back() else {
-                    return;
+                // Exclude active memtable and WAL to avoid a write lock.
+                let imm_wal_size = guard
+                    .state()
+                    .imm_wal
+                    .iter()
+                    .map(|imm| imm.table().size())
+                    .sum::<usize>();
+                let imm_memtable_size = guard
+                    .state()
+                    .imm_memtable
+                    .iter()
+                    .map(|imm| imm.table().size())
+                    .sum::<usize>();
+                imm_wal_size + imm_memtable_size
+            };
+            if mem_size_bytes >= self.options.max_unflushed_bytes {
+                let (wal_table, mem_table) = {
+                    let guard = self.state.read();
+                    (
+                        guard.state().imm_wal.back().map(|imm| imm.table().clone()),
+                        guard.state().imm_memtable.back().cloned(),
+                    )
                 };
                 warn!(
-                    "applying backpressure to write by waiting for imm table flush. imm tables({}), max({})",
-                    state.imm_memtable.len(),
-                    self.options.max_unflushed_memtable
+                    "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
+                    mem_size_bytes, self.options.max_unflushed_bytes,
                 );
-                table.clone()
-            };
-            table.await_flush_to_l0().await
+                match (wal_table, mem_table) {
+                    (Some(wal_table), Some(mem_table)) => {
+                        tokio::select! {
+                            _ = wal_table.await_durable() => {}
+                            _ = mem_table.await_flush_to_l0() => {}
+                        }
+                    }
+                    (Some(wal_table), None) => {
+                        wal_table.await_durable().await;
+                    }
+                    (None, Some(mem_table)) => {
+                        mem_table.await_flush_to_l0().await;
+                    }
+                    _ => {
+                        // No tables to flush, so backpressure is no longer needed.
+                        break;
+                    }
+                }
+            } else {
+                break;
+            }
         }
     }
 
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
-            .send(FlushThreadMsg::Flush(Some(tx)))?;
+            .send(WalFlushThreadMsg::FlushImmutableWals(Some(tx)))?;
         rx.await?
     }
 
@@ -280,7 +318,7 @@ impl DbInner {
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
-            .send(FlushThreadMsg::Flush(Some(tx)))?;
+            .send(MemtableFlushThreadMsg::FlushImmutableMemtables(Some(tx)))?;
         rx.await?
     }
 
@@ -511,13 +549,17 @@ impl Db {
         let maybe_cached_object_store = match &options.object_store_cache_options.root_folder {
             None => object_store.clone(),
             Some(cache_root_folder) => {
-                let part_size_bytes = options.object_store_cache_options.part_size_bytes;
-                let cached_object_store = CachedObjectStore::new(
-                    object_store.clone(),
+                let cache_storage = Arc::new(FsCacheStorage::new(
                     cache_root_folder.clone(),
                     options.object_store_cache_options.max_cache_size_bytes,
-                    part_size_bytes,
                     options.object_store_cache_options.scan_interval,
+                    db_stats.clone(),
+                ));
+
+                let cached_object_store = CachedObjectStore::new(
+                    object_store.clone(),
+                    cache_storage,
+                    options.object_store_cache_options.part_size_bytes,
                     db_stats.clone(),
                 )?;
                 cached_object_store.start_evictor().await;
@@ -677,7 +719,7 @@ impl Db {
         // Shutdown the WAL flush thread.
         self.inner
             .wal_flush_notifier
-            .send(FlushThreadMsg::Shutdown)
+            .send(WalFlushThreadMsg::Shutdown)
             .ok();
 
         if let Some(flush_task) = {
@@ -690,7 +732,7 @@ impl Db {
         // Shutdown the memtable flush thread.
         self.inner
             .memtable_flush_notifier
-            .send(FlushThreadMsg::Shutdown)
+            .send(MemtableFlushThreadMsg::Shutdown)
             .ok();
 
         if let Some(memtable_flush_task) = {
@@ -706,6 +748,11 @@ impl Db {
     }
 
     /// Get a value from the database with default read options.
+    ///
+    /// The `Bytes` object returned contains a slice of an entire
+    /// 4 KiB block. The block will be held in memory as long as the
+    /// caller holds a reference to the `Bytes` object. Consider
+    /// copying the data if you need to hold it for a long time.
     ///
     /// ## Arguments
     /// - `key`: the key to get
@@ -740,6 +787,11 @@ impl Db {
     }
 
     /// Get a value from the database with custom read options.
+    ///
+    /// The `Bytes` object returned contains a slice of an entire
+    /// 4 KiB block. The block will be held in memory as long as the
+    /// caller holds a reference to the `Bytes` object. Consider
+    /// copying the data if you need to hold it for a long time.
     ///
     /// ## Arguments
     /// - `key`: the key to get
@@ -1030,6 +1082,7 @@ mod tests {
     use tracing::info;
 
     use super::*;
+    use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
         DEFAULT_PUT_OPTIONS,
@@ -1107,12 +1160,17 @@ mod tests {
             .unwrap();
         let db_stats = Arc::new(DbStats::new());
         let part_size = 1024;
-        let cached_object_store = CachedObjectStore::new(
-            object_store.clone(),
+        let cache_storage = Arc::new(FsCacheStorage::new(
             temp_dir.path().to_path_buf(),
             None,
-            part_size,
             None,
+            db_stats.clone(),
+        ));
+
+        let cached_object_store = CachedObjectStore::new(
+            object_store.clone(),
+            cache_storage,
+            part_size,
             db_stats.clone(),
         )
         .unwrap();
@@ -1558,6 +1616,46 @@ mod tests {
         assert!(kv_store.metrics().immutable_memtable_flushes.get() > 0);
     }
 
+    // 2 threads so we can can wait on the write_with_options (main) thread
+    // while the write_batch (background) thread is blocked on writing the
+    // WAL SST.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_apply_wal_memory_backpressure() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let mut options = test_db_options(0, 1, None);
+        options.max_unflushed_bytes = 1;
+        let db = Db::open_with_fp_registry(
+            path.clone(),
+            options,
+            object_store.clone(),
+            fp_registry.clone(),
+        )
+        .await
+        .unwrap();
+
+        let write_opts = WriteOptions {
+            await_durable: false,
+        };
+
+        // Block WAL flush
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+
+        // 1 imm_wal in memory
+        db.put_with_options(b"key1", b"val1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+
+        let snapshot = db.inner.state.read().snapshot();
+
+        // Unblock WAL flush so runtime shuts down nicely even if we have a failure
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+
+        // WAL should pile up in memory since it can't be flushed
+        assert_eq!(snapshot.state.imm_wal.len(), 1);
+    }
+
     #[tokio::test]
     async fn test_apply_backpressure_to_memtable_flush() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -1715,15 +1813,16 @@ mod tests {
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_should_read_uncommitted_data_if_read_level_uncommitted() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_opts(
+        let kv_store = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
+            fp_registry.clone(),
         )
         .await
         .unwrap();
@@ -1741,6 +1840,7 @@ mod tests {
             .await
             .unwrap();
 
+        // Validate uncommitted read
         let val = kv_store
             .get_with_options(
                 "foo".as_bytes(),
@@ -1752,19 +1852,24 @@ mod tests {
             .unwrap();
         assert_eq!(val, Some(Bytes::from("bar")));
 
+        // Validate committed read should still return None
+        let val = kv_store.get("foo".as_bytes()).await.unwrap();
+        assert_eq!(val, None);
+
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
         kv_store.close().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_should_read_only_committed_data() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_opts(
+        let kv_store = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
+            fp_registry.clone(),
         )
         .await
         .unwrap();
@@ -1808,10 +1913,11 @@ mod tests {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_opts(
+        let kv_store = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 1024, None),
             object_store.clone(),
+            fp_registry.clone(),
         )
         .await
         .unwrap();
@@ -2226,7 +2332,7 @@ mod tests {
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),
-            max_unflushed_memtable: 2,
+            max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,
             min_filter_keys,
             filter_bits_per_key: 10,
