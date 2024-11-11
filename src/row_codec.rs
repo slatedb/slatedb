@@ -143,10 +143,16 @@ impl SstRowCodecV0 {
 
         // encode expire & create ts
         if flags.contains(RowFlags::HAS_EXPIRE_TS) {
-            output.put_i64(row.expire_ts.unwrap_or(0));
+            output.put_i64(
+                row.expire_ts
+                    .expect("expire_ts should be set with HAS_EXPIRE_TS"),
+            );
         }
         if flags.contains(RowFlags::HAS_CREATE_TS) {
-            output.put_i64(row.create_ts.unwrap_or(0));
+            output.put_i64(
+                row.create_ts
+                    .expect("create_ts should be set with HAS_CREATE_TS"),
+            );
         }
 
         // encode value
