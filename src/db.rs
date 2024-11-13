@@ -543,7 +543,7 @@ impl Db {
         if let Ok(options_json) = options.to_json_string() {
             tracing::info!("Using options: {}", options_json);
         }
-        
+
         let db_stats = Arc::new(DbStats::new());
         let sst_format = SsTableFormat {
             min_filter_keys: options.min_filter_keys,

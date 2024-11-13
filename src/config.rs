@@ -440,11 +440,14 @@ impl DbOptions {
     pub fn log_config(&self) {
         tracing::info!("SlateDB Configuration:");
         tracing::info!("  Flush Interval: {:?}", self.flush_interval);
-        
+
         #[cfg(feature = "wal_disable")]
         tracing::info!("  WAL Enabled: {}", self.wal_enabled);
-        
-        tracing::info!("  Manifest Poll Interval: {:?}", self.manifest_poll_interval);
+
+        tracing::info!(
+            "  Manifest Poll Interval: {:?}",
+            self.manifest_poll_interval
+        );
         tracing::info!("  Min Filter Keys: {}", self.min_filter_keys);
         tracing::info!("  Filter Bits Per Key: {}", self.filter_bits_per_key);
         tracing::info!("  L0 SST Size Bytes: {}", self.l0_sst_size_bytes);
@@ -456,8 +459,14 @@ impl DbOptions {
             tracing::info!("  Compactor Options:");
             tracing::info!("    Poll Interval: {:?}", compactor.poll_interval);
             tracing::info!("    Max SST Size: {}", compactor.max_sst_size);
-            tracing::info!("    Max Concurrent Compactions: {}", compactor.max_concurrent_compactions);
-            tracing::info!("    Custom Runtime: {}", compactor.compaction_runtime.is_some());
+            tracing::info!(
+                "    Max Concurrent Compactions: {}",
+                compactor.max_concurrent_compactions
+            );
+            tracing::info!(
+                "    Custom Runtime: {}",
+                compactor.compaction_runtime.is_some()
+            );
         }
 
         if let Some(ref codec) = self.compression_codec {
@@ -465,10 +474,22 @@ impl DbOptions {
         }
 
         tracing::info!("  Object Store Cache Options:");
-        tracing::info!("    Root Folder: {:?}", self.object_store_cache_options.root_folder);
-        tracing::info!("    Max Cache Size: {:?}", self.object_store_cache_options.max_cache_size_bytes);
-        tracing::info!("    Part Size: {}", self.object_store_cache_options.part_size_bytes);
-        tracing::info!("    Scan Interval: {:?}", self.object_store_cache_options.scan_interval);
+        tracing::info!(
+            "    Root Folder: {:?}",
+            self.object_store_cache_options.root_folder
+        );
+        tracing::info!(
+            "    Max Cache Size: {:?}",
+            self.object_store_cache_options.max_cache_size_bytes
+        );
+        tracing::info!(
+            "    Part Size: {}",
+            self.object_store_cache_options.part_size_bytes
+        );
+        tracing::info!(
+            "    Scan Interval: {:?}",
+            self.object_store_cache_options.scan_interval
+        );
 
         tracing::info!("    Block Cache Enabled: {}", self.block_cache.is_some());
 
@@ -555,7 +576,6 @@ impl DbOptions {
             _ => return Err(DbOptionsError::UnknownFormat(path.into())),
         }
         builder.extract().map_err(Into::into)
-        
     }
 
     /// Loads DbOptions from environment variables with a specified prefix.
