@@ -176,6 +176,14 @@ struct CheckpointOptions {
     source: Option<UUID>
 }
 
+#[derive(Debug)]
+pub struct CheckpointCreateResult {
+    /// The id of the created checkpoint.
+    id: uuid::Uuid,
+    /// The manifest id referenced by the created checkpoint.
+    manifest_id: u64,
+}
+
 impl Db {
     /// Opens a Db from a checkpoint. If no db already exists at the specified path, then this will create
     /// a new db under the path that is a clone of the db at parent_path. A clone is a shallow copy of the
@@ -196,7 +204,7 @@ impl Db {
 
     /// Creates a checkpoint of an opened db using the provided options. Returns the ID of the created
     /// checkpoint and the id of the referenced manifest.
-    pub async fn create_checkpoint(&self, options: &CheckpointOptions) -> Result<(uuid::UUID, u64), SlateDBError> {
+    pub async fn create_checkpoint(&self, options: &CheckpointOptions) -> Result<CheckpointCreateResult, SlateDBError> {
         …
     }
 
@@ -207,7 +215,7 @@ impl Db {
        path: Path,
        object_store: Arc<dyn ObjectStore>,
        options: &CheckpointOptions,
-    ) -> Result<(uuid::UUID, u64), SlateDBError> {}
+    ) -> Result<CheckpointCreateResult, SlateDBError> {}
        ...
     )
 
