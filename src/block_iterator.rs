@@ -107,8 +107,14 @@ impl<B: BlockLike> BlockIterator<B> {
         // TODO: bounds checks to avoid panics? (paulgb)
         let mut cursor = self.block.data().slice(off_usz..);
         let codec = SstRowCodecV0::new();
-        let row = codec.decode(&self.first_key, &mut cursor)?;
-        Ok(Some(row.into()))
+        let sst_row = codec.decode(&mut cursor)?;
+        Ok(Some(RowEntry::new(
+            sst_row.restore_full_key(&self.first_key),
+            sst_row.value.into_option(),
+            sst_row.seq,
+            sst_row.create_ts,
+            sst_row.expire_ts,
+        )))
     }
 
     pub fn decode_first_key(block: &B) -> Bytes {

@@ -1,5 +1,5 @@
 use crate::error::SlateDBError;
-use crate::types::{RowEntry, ValueDeletable};
+use crate::types::ValueDeletable;
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -48,12 +48,12 @@ bitflags! {
 /// | `value`          | `var` | Value bytes                                            |
 
 pub(crate) struct SstRowEntry {
-    key_prefix_len: usize,
-    key_suffix: Bytes,
-    seq: u64,
-    expire_ts: Option<i64>,
-    create_ts: Option<i64>,
-    value: ValueDeletable,
+    pub key_prefix_len: usize,
+    pub key_suffix: Bytes,
+    pub seq: u64,
+    pub expire_ts: Option<i64>,
+    pub create_ts: Option<i64>,
+    pub value: ValueDeletable,
 }
 
 impl SstRowEntry {
@@ -89,27 +89,13 @@ impl SstRowEntry {
         flags
     }
 
-    // only called after decoding from SST file, the full key should be reconstructed with prefix
-    // concatenated with suffix. when the full key is constructed, the prefix length is zero, and
-    // the suffix is the full key.
-    fn key(&self) -> &Bytes {
-        if self.key_prefix_len != 0 {
-            unreachable!("the full key should be reconstructed with prefix while decoding");
-        }
-        &self.key_suffix
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<RowEntry> for SstRowEntry {
-    fn into(self) -> RowEntry {
-        RowEntry {
-            key: self.key().clone(),
-            value: self.value,
-            seq: self.seq,
-            create_ts: self.create_ts,
-            expire_ts: self.expire_ts,
-        }
+    /// Keys in a Block are stored with prefix stripped off to compress the storage size. This function
+    /// restores the full key by prepending the prefix to the key suffix.
+    pub fn restore_full_key(&self, prefix: &Bytes) -> Bytes {
+        let mut full_key = BytesMut::with_capacity(self.key_prefix_len + self.key_suffix.len());
+        full_key.extend_from_slice(&prefix[..self.key_prefix_len]);
+        full_key.extend_from_slice(&self.key_suffix);
+        full_key.freeze()
     }
 }
 
@@ -158,16 +144,11 @@ impl SstRowCodecV0 {
         output.put(val.as_ref());
     }
 
-    pub fn decode(&self, first_key: &Bytes, data: &mut Bytes) -> Result<SstRowEntry, SlateDBError> {
+    pub fn decode(&self, data: &mut Bytes) -> Result<SstRowEntry, SlateDBError> {
         let key_prefix_len = data.get_u16() as usize;
         let key_suffix_len = data.get_u16() as usize;
         let key_suffix = data.slice(..key_suffix_len);
         data.advance(key_suffix_len);
-
-        // reconstruct full key
-        let mut full_key = BytesMut::with_capacity(key_prefix_len + key_suffix_len);
-        full_key.extend_from_slice(&first_key[..key_prefix_len]);
-        full_key.extend_from_slice(&key_suffix);
 
         // decode seq & flags
         let seq = data.get_u64();
@@ -188,8 +169,8 @@ impl SstRowCodecV0 {
         // skip decoding value for tombstone.
         if flags.contains(RowFlags::TOMBSTONE) {
             return Ok(SstRowEntry {
-                key_prefix_len: 0,
-                key_suffix: full_key.freeze(),
+                key_prefix_len,
+                key_suffix,
                 seq,
                 expire_ts: None, // it does not make sense to have expire_ts for tombstone
                 create_ts,
@@ -201,8 +182,8 @@ impl SstRowCodecV0 {
         let value_len = data.get_u32() as usize;
         let value = data.slice(..value_len);
         Ok(SstRowEntry {
-            key_prefix_len: 0,
-            key_suffix: full_key.freeze(),
+            key_prefix_len,
+            key_suffix,
             seq,
             expire_ts,
             create_ts,
@@ -240,15 +221,13 @@ mod tests {
         let first_key = Bytes::from(b"prefixdata".as_ref());
         let mut data = Bytes::from(encoded_data);
 
-        let decoded = codec
-            .decode(&first_key, &mut data)
-            .expect("decoding failed");
+        let decoded = codec.decode(&mut data).expect("decoding failed");
 
         // Expected key: first_key[..3] + "key" = "prekey"
         let expected_key = Bytes::from(b"prekey" as &[u8]);
         let expected_value = ValueDeletable::Value(Bytes::from(b"value" as &[u8]));
 
-        assert_eq!(decoded.key(), &expected_key);
+        assert_eq!(decoded.restore_full_key(&first_key), &expected_key);
         assert_eq!(decoded.value, expected_value);
         assert_eq!(decoded.create_ts, None);
         assert_eq!(decoded.expire_ts, Some(10));
@@ -275,11 +254,8 @@ mod tests {
             ),
         );
 
-        let first_key = Bytes::from(b"prefixdata".as_ref());
         let mut data = Bytes::from(encoded_data);
-        let decoded = codec
-            .decode(&first_key, &mut data)
-            .expect("decoding failed");
+        let decoded = codec.decode(&mut data).expect("decoding failed");
 
         assert_eq!(decoded.expire_ts, None);
     }
@@ -306,15 +282,13 @@ mod tests {
 
         let first_key = Bytes::from(b"deadbeefdata".as_ref());
         let mut data = Bytes::from(encoded_data);
-        let decoded = codec
-            .decode(&first_key, &mut data)
-            .expect("decoding failed");
+        let decoded = codec.decode(&mut data).expect("decoding failed");
 
         // Expected key: first_key[..4] + "tomb" = "deadtomb"
         let expected_key = Bytes::from(b"deadtomb" as &[u8]);
         let expected_value = ValueDeletable::Tombstone;
 
-        assert_eq!(decoded.key(), &expected_key);
+        assert_eq!(decoded.restore_full_key(&first_key), &expected_key);
         assert_eq!(decoded.value, expected_value);
         assert_eq!(decoded.expire_ts, None);
         assert_eq!(decoded.create_ts, Some(2));
@@ -335,12 +309,11 @@ mod tests {
         encoded_data.put_u32(4);
         encoded_data.put(b"data".as_slice());
 
-        let first_key = Bytes::from(b"prefixdata".as_ref());
         let mut data = Bytes::from(encoded_data);
 
         // Attempt to decode the row
         let codec = SstRowCodecV0 {};
-        let result = codec.decode(&first_key, &mut data);
+        let result = codec.decode(&mut data);
 
         assert!(result.is_err());
         match result {
@@ -371,15 +344,13 @@ mod tests {
 
         let first_key = Bytes::from(b"keyprefixdata".as_slice());
         let mut data = Bytes::from(encoded_data);
-        let decoded = codec
-            .decode(&first_key, &mut data)
-            .expect("decoding failed");
+        let decoded = codec.decode(&mut data).expect("decoding failed");
 
         // Expected key: first_key[..4] + "" = "keyp"
         let expected_key = Bytes::from(b"keyp" as &[u8]);
         let expected_value = ValueDeletable::Value(Bytes::from(b"value" as &[u8]));
 
-        assert_eq!(decoded.key(), &expected_key);
+        assert_eq!(decoded.restore_full_key(&first_key), &expected_key);
         assert_eq!(decoded.value, expected_value);
     }
 }
