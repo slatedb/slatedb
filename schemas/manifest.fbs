@@ -28,6 +28,9 @@ table ManifestV1 {
 
     // A list of read snapshots that are currently open.
     snapshots: [Snapshot];
+
+    // The last clock tick
+    last_clock_tick: long;
 }
 
 table SortedRun {

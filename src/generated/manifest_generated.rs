@@ -862,6 +862,7 @@ impl<'a> ManifestV1<'a> {
   pub const VT_L0: flatbuffers::VOffsetT = 16;
   pub const VT_COMPACTED: flatbuffers::VOffsetT = 18;
   pub const VT_SNAPSHOTS: flatbuffers::VOffsetT = 20;
+  pub const VT_LAST_CLOCK_TICK: flatbuffers::VOffsetT = 22;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -873,6 +874,7 @@ impl<'a> ManifestV1<'a> {
     args: &'args ManifestV1Args<'args>
   ) -> flatbuffers::WIPOffset<ManifestV1<'bldr>> {
     let mut builder = ManifestV1Builder::new(_fbb);
+    builder.add_last_clock_tick(args.last_clock_tick);
     builder.add_wal_id_last_seen(args.wal_id_last_seen);
     builder.add_wal_id_last_compacted(args.wal_id_last_compacted);
     builder.add_compactor_epoch(args.compactor_epoch);
@@ -949,6 +951,13 @@ impl<'a> ManifestV1<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Snapshot>>>>(ManifestV1::VT_SNAPSHOTS, None)}
   }
+  #[inline]
+  pub fn last_clock_tick(&self) -> i64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<i64>(ManifestV1::VT_LAST_CLOCK_TICK, Some(0)).unwrap()}
+  }
 }
 
 impl flatbuffers::Verifiable for ManifestV1<'_> {
@@ -967,6 +976,7 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("l0", Self::VT_L0, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRun>>>>("compacted", Self::VT_COMPACTED, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Snapshot>>>>("snapshots", Self::VT_SNAPSHOTS, false)?
+     .visit_field::<i64>("last_clock_tick", Self::VT_LAST_CLOCK_TICK, false)?
      .finish();
     Ok(())
   }
@@ -981,6 +991,7 @@ pub struct ManifestV1Args<'a> {
     pub l0: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
     pub compacted: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRun<'a>>>>>,
     pub snapshots: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Snapshot<'a>>>>>,
+    pub last_clock_tick: i64,
 }
 impl<'a> Default for ManifestV1Args<'a> {
   #[inline]
@@ -995,6 +1006,7 @@ impl<'a> Default for ManifestV1Args<'a> {
       l0: None, // required field
       compacted: None, // required field
       snapshots: None,
+      last_clock_tick: 0,
     }
   }
 }
@@ -1041,6 +1053,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_SNAPSHOTS, snapshots);
   }
   #[inline]
+  pub fn add_last_clock_tick(&mut self, last_clock_tick: i64) {
+    self.fbb_.push_slot::<i64>(ManifestV1::VT_LAST_CLOCK_TICK, last_clock_tick, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> ManifestV1Builder<'a, 'b, A> {
     let start = _fbb.start_table();
     ManifestV1Builder {
@@ -1069,6 +1085,7 @@ impl core::fmt::Debug for ManifestV1<'_> {
       ds.field("l0", &self.l0());
       ds.field("compacted", &self.compacted());
       ds.field("snapshots", &self.snapshots());
+      ds.field("last_clock_tick", &self.last_clock_tick());
       ds.finish()
   }
 }

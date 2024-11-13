@@ -40,6 +40,13 @@ pub enum SlateDBError {
     #[error("Invalid Compaction")]
     InvalidCompaction,
 
+    #[error(
+        "Invalid clock tick, most be monotonic. Last tick: {}, Next tick: {}",
+        last_tick,
+        next_tick
+    )]
+    InvalidClockTick { last_tick: i64, next_tick: i64 },
+
     #[error("Detected newer DB client")]
     Fenced,
 

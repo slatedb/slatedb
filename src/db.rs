@@ -378,6 +378,10 @@ impl DbInner {
             {
                 let mut guard = self.state.write();
                 for kv in wal_replay_buf.iter() {
+                    if let Some(ts) = kv.attributes.ts {
+                        guard.update_clock_tick(ts)?;
+                    }
+
                     match &kv.value {
                         ValueDeletable::Value(value) => {
                             guard.memtable().put(
@@ -745,6 +749,11 @@ impl Db {
 
     /// Get a value from the database with default read options.
     ///
+    /// The `Bytes` object returned contains a slice of an entire
+    /// 4 KiB block. The block will be held in memory as long as the
+    /// caller holds a reference to the `Bytes` object. Consider
+    /// copying the data if you need to hold it for a long time.
+    ///
     /// ## Arguments
     /// - `key`: the key to get
     ///
@@ -778,6 +787,11 @@ impl Db {
     }
 
     /// Get a value from the database with custom read options.
+    ///
+    /// The `Bytes` object returned contains a slice of an entire
+    /// 4 KiB block. The block will be held in memory as long as the
+    /// caller holds a reference to the `Bytes` object. Consider
+    /// copying the data if you need to hold it for a long time.
     ///
     /// ## Arguments
     /// - `key`: the key to get
@@ -1059,7 +1073,6 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "wal_disable")]
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
@@ -1346,7 +1359,6 @@ mod tests {
                         )),
                         max_concurrent_compactions: 1,
                         compaction_runtime: None,
-                        clock: Arc::new(TestClock::new()),
                     }),
                 ),
                 object_store.clone(),
@@ -2093,7 +2105,6 @@ mod tests {
                 )),
                 max_concurrent_compactions: 1,
                 compaction_runtime: None,
-                clock: Arc::new(TestClock::new()),
             }),
         ))
         .await;
@@ -2112,7 +2123,6 @@ mod tests {
                 )),
                 max_concurrent_compactions: 1,
                 compaction_runtime: None,
-                clock: Arc::new(TestClock::new()),
             }),
         ))
         .await
@@ -2199,6 +2209,87 @@ mod tests {
         .unwrap();
         db2.flush().await.unwrap();
         assert_eq!(db2.inner.state.read().state().core.next_wal_sst_id, 5);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_clock_progression() {
+        // Given:
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+
+        let clock = Arc::new(TestClock::new());
+        let db = Db::open_with_opts(
+            path.clone(),
+            DbOptions {
+                clock: clock.clone(),
+                ..test_db_options(0, 128, None)
+            },
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        // When:
+        // put with time = 10
+        clock.ticker.store(10, Ordering::SeqCst);
+        db.put(b"1", b"1").await.unwrap();
+
+        // Then:
+        // put with time goes backwards, should fail
+        clock.ticker.store(5, Ordering::SeqCst);
+        match db.put(b"1", b"1").await {
+            Ok(_) => panic!("expected an error on inserting backwards time"),
+            Err(e) => assert!(
+                e.to_string().contains("Last tick: 10, Next tick: 5"),
+                "{}",
+                e.to_string()
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_invalid_clock_progression_across_db_instances() {
+        // Given:
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+
+        let clock = Arc::new(TestClock::new());
+        let db = Db::open_with_opts(
+            path.clone(),
+            DbOptions {
+                clock: clock.clone(),
+                ..test_db_options(0, 128, None)
+            },
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        // When:
+        // put with time = 10
+        clock.ticker.store(10, Ordering::SeqCst);
+        db.put(b"1", b"1").await.unwrap();
+        db.flush().await.unwrap();
+
+        let db2 = Db::open_with_opts(
+            path.clone(),
+            DbOptions {
+                clock: clock.clone(),
+                ..test_db_options(0, 128, None)
+            },
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+        clock.ticker.store(5, Ordering::SeqCst);
+        match db2.put(b"1", b"1").await {
+            Ok(_) => panic!("expected an error on inserting backwards time"),
+            Err(e) => assert!(
+                e.to_string().contains("Last tick: 10, Next tick: 5"),
+                "{}",
+                e.to_string()
+            ),
+        }
     }
 
     async fn wait_for_manifest_condition(
