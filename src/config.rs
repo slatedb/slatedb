@@ -426,9 +426,16 @@ pub struct DbOptions {
     ///
     /// Default: no TTL (insertions will remain until deleted)
     pub default_ttl: Option<u64>,
+
+    pub max_unflushed_memtable: usize,
 }
 
 impl DbOptions {
+    /// Converts the DbOptions to a JSON string representation
+    pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
     /// Logs the current configuration and enabled features.
     pub fn log_config(&self) {
         tracing::info!("SlateDB Configuration:");
@@ -535,24 +542,20 @@ impl DbOptions {
     /// let config = DbOptions::from_file("config.toml").expect("Failed to load options from file");
     /// ```
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<DbOptions, DbOptionsError> {
-        let options = {
-            let path = path.as_ref();
-            let Some(ext) = path.extension() else {
-                return Err(DbOptionsError::UnknownFormat(path.into()));
-            };
-
-            let mut builder = Figment::from(DbOptions::default());
-            match ext.to_str().unwrap_or_default() {
-                "json" => builder = builder.merge(Json::file(path)),
-                "toml" => builder = builder.merge(Toml::file(path)),
-                "yaml" | "yml" => builder = builder.merge(Yaml::file(path)),
-                _ => return Err(DbOptionsError::UnknownFormat(path.into())),
-            }
-            builder.extract().map_err(Into::into)
+        let path = path.as_ref();
+        let Some(ext) = path.extension() else {
+            return Err(DbOptionsError::UnknownFormat(path.into()));
         };
-        options.validate()?;
-        options.log_config();
-        Ok(options)
+
+        let mut builder = Figment::from(DbOptions::default());
+        match ext.to_str().unwrap_or_default() {
+            "json" => builder = builder.merge(Json::file(path)),
+            "toml" => builder = builder.merge(Toml::file(path)),
+            "yaml" | "yml" => builder = builder.merge(Yaml::file(path)),
+            _ => return Err(DbOptionsError::UnknownFormat(path.into())),
+        }
+        builder.extract().map_err(Into::into)
+        
     }
 
     /// Loads DbOptions from environment variables with a specified prefix.
@@ -583,12 +586,10 @@ impl DbOptions {
     /// let config = DbOptions::from_env("SLATEDB_").expect("Failed to load options from env");
     /// ```
     pub fn from_env(prefix: &str) -> Result<DbOptions, DbOptionsError> {
-        let options = Figment::from(DbOptions::default())
+        Figment::from(DbOptions::default())
             .merge(Env::prefixed(prefix))
-            .extract()?;
-        options.validate()?;
-        options.log_config();
-        Ok(options)
+            .extract()
+            .map_err(Into::into)
     }
 
     /// Loads DbOptions from multiple configuration sources in a specific order.
@@ -616,16 +617,14 @@ impl DbOptions {
     /// let config = DbOptions::load().expect("Failed to load options");
     /// ```
     pub fn load() -> Result<DbOptions, DbOptionsError> {
-        let options = Figment::from(DbOptions::default())
+        Figment::from(DbOptions::default())
             .merge(Json::file("SlateDb.json"))
             .merge(Toml::file("SlateDb.toml"))
             .merge(Yaml::file("SlateDb.yaml"))
             .merge(Yaml::file("SlateDb.yml"))
             .admerge(Env::prefixed("SLATEDB_"))
-            .extract()?;
-        options.validate()?;
-        options.log_config();
-        Ok(options)
+            .extract()
+            .map_err(Into::into)
     }
 }
 
@@ -660,6 +659,7 @@ impl Default for DbOptions {
             filter_bits_per_key: 10,
             clock: default_clock(),
             default_ttl: None,
+            max_unflushed_memtable: 1,
         }
     }
 }

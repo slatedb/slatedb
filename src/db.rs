@@ -539,6 +539,11 @@ impl Db {
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         let path = path.into();
+        tracing::info!("Opening database at path: {:?}", path);
+        if let Ok(options_json) = options.to_json_string() {
+            tracing::info!("Using options: {}", options_json);
+        }
+        
         let db_stats = Arc::new(DbStats::new());
         let sst_format = SsTableFormat {
             min_filter_keys: options.min_filter_keys,
@@ -2344,6 +2349,7 @@ mod tests {
             garbage_collector_options: None,
             clock,
             default_ttl: None,
+            max_unflushed_memtable: 1,
         }
     }
 }
