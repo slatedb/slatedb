@@ -4,7 +4,6 @@ use crate::types::RowEntry;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
-pub(crate) const SIZEOF_U32: usize = std::mem::size_of::<u32>();
 
 pub(crate) struct Block {
     pub(crate) data: Bytes,
@@ -98,33 +97,25 @@ impl BlockBuilder {
         let key_prefix_len = compute_prefix(&self.first_key, &entry.key);
         let key_suffix = entry.key.slice(key_prefix_len..);
 
+        let sst_row_entry = &SstRowEntry::new(
+            key_prefix_len,
+            key_suffix,
+            entry.seq,
+            entry.value,
+            entry.create_ts,
+            entry.expire_ts,
+        );
+
         // If adding the key-value pair would exceed the block size limit, don't add it.
         // (Unless the block is empty, in which case, allow the block to exceed the limit.)
-        if self.estimated_size()
-                + key_suffix.len()
-                + entry.value.as_option().map(|v| v.len()).unwrap_or_default() // None takes no space (besides u32)
-                + SIZEOF_U16 * 3 // overlap key size + rest key size + offset size
-                + SIZEOF_U32 // value size
-                > self.block_size
-            && !self.is_empty()
-        {
+        if self.estimated_size() + sst_row_entry.size() > self.block_size && !self.is_empty() {
             return false;
         }
 
         self.offsets.push(self.data.len() as u16);
         let codec = SstRowCodecV0::new();
         let key = entry.key.clone();
-        codec.encode(
-            &mut self.data,
-            &SstRowEntry::new(
-                key_prefix_len,
-                key_suffix,
-                entry.seq,
-                entry.value,
-                entry.create_ts,
-                entry.expire_ts,
-            ),
-        );
+        codec.encode(&mut self.data, sst_row_entry);
 
         if self.first_key.is_empty() {
             self.first_key = Bytes::copy_from_slice(&key);

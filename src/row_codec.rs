@@ -75,7 +75,7 @@ impl SstRowEntry {
         }
     }
 
-    fn flags(&self) -> RowFlags {
+    pub fn flags(&self) -> RowFlags {
         let mut flags = match &self.value {
             ValueDeletable::Value(_) => RowFlags::default(),
             ValueDeletable::Tombstone => RowFlags::TOMBSTONE,
@@ -87,6 +87,25 @@ impl SstRowEntry {
             flags |= RowFlags::HAS_CREATE_TS;
         }
         flags
+    }
+
+    pub fn size(&self) -> usize {
+        let mut size = 2  // u16 key_prefix_len
+        + 2 // u16 key_suffix_len
+        + self.key_suffix.len() // key_suffix
+        + 8  // u64 seq
+        + 1; // u8 flags
+        if self.expire_ts.is_some() {
+            size += 8; // i64 expire_ts
+        }
+        if self.create_ts.is_some() {
+            size += 8; // i64 create_ts
+        }
+        if let Some(value) = self.value.as_option() {
+            size += 4; // u32 value_len
+            size += value.len(); // value
+        }
+        size
     }
 
     /// Keys in a Block are stored with prefix stripped off to compress the storage size. This function
@@ -228,6 +247,7 @@ mod tests {
         let expected_value = ValueDeletable::Value(Bytes::from(b"value" as &[u8]));
 
         assert_eq!(decoded.restore_full_key(&first_key), &expected_key);
+        assert_eq!(decoded.size(), 33);
         assert_eq!(decoded.value, expected_value);
         assert_eq!(decoded.create_ts, None);
         assert_eq!(decoded.expire_ts, Some(10));
@@ -258,6 +278,7 @@ mod tests {
         let decoded = codec.decode(&mut data).expect("decoding failed");
 
         assert_eq!(decoded.expire_ts, None);
+        assert_eq!(decoded.size(), 25);
     }
 
     #[test]
@@ -292,6 +313,7 @@ mod tests {
         assert_eq!(decoded.value, expected_value);
         assert_eq!(decoded.expire_ts, None);
         assert_eq!(decoded.create_ts, Some(2));
+        assert_eq!(decoded.size(), 25);
     }
 
     #[test]
@@ -351,6 +373,7 @@ mod tests {
         let expected_value = ValueDeletable::Value(Bytes::from(b"value" as &[u8]));
 
         assert_eq!(decoded.restore_full_key(&first_key), &expected_key);
+        assert_eq!(decoded.size(), 22);
         assert_eq!(decoded.value, expected_value);
     }
 }
