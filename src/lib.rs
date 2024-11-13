@@ -11,7 +11,7 @@ mod blob;
 mod block;
 mod block_iterator;
 mod cached_object_store;
-mod checkpoint;
+pub mod checkpoint;
 #[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;
 mod compactor;

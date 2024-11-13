@@ -11,9 +11,9 @@ use std::time::SystemTime;
 #[derive(Debug)]
 pub struct CheckpointCreateResult {
     /// The id of the created checkpoint.
-    id: uuid::Uuid,
+    pub id: uuid::Uuid,
     /// The manifest id referenced by the created checkpoint.
-    manifest_id: u64,
+    pub manifest_id: u64,
 }
 
 impl Db {
