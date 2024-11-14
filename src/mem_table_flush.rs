@@ -105,7 +105,7 @@ impl DbInner {
                         if !is_stopped {
                             if let Err(err) = flusher.load_manifest().await {
                                 error!("error loading manifest: {err}");
-                                this.state.write().set_error_if_none(err);
+                                this.set_error_if_none(err);
                             }
                             match flusher.flush_imm_memtables_to_l0().await {
                                 Ok(_) => {
@@ -113,7 +113,7 @@ impl DbInner {
                                 }
                                 Err(err) => {
                                     error!("error from memtable flush: {err}");
-                                    this.state.write().set_error_if_none(err);
+                                    this.set_error_if_none(err);
                                 }
                             }
                         }
@@ -132,14 +132,14 @@ impl DbInner {
                                     }
                                     Err(err) => {
                                         error!("error from memtable flush: {err}");
-                                        this.state.write().set_error_if_none(err.clone());
+                                        this.set_error_if_none(err.clone());
                                     }
                                 }
                                 if let Some(rsp) = rsp {
                                     let res = rsp.send(result);
                                     if let Err(Err(err)) = res {
                                         error!("error sending flush response: {err}");
-                                        this.state.write().set_error_if_none(err);
+                                        this.set_error_if_none(err);
                                     }
                                 }
                             }

@@ -103,7 +103,7 @@ impl DbInner {
                      let result = this.flush().await;
                      if let Err(err) = result {
                         error!("error from wal flush: {err}");
-                        this.state.write().set_error_if_none(err);
+                        this.set_error_if_none(err);
                      }
                   }
                   msg = rx.recv() => {
@@ -118,14 +118,14 @@ impl DbInner {
                                 let result = this.flush().await;
                                 if let Err(err) = &result {
                                     error!("error from wal flush: {err}");
-                                    this.state.write().set_error_if_none(err.clone());
+                                    this.set_error_if_none(err.clone());
                                 }
 
                                 if let Some(rsp) = rsp {
                                     let res = rsp.send(result);
                                     if let Err(Err(err)) = res {
                                         error!("error sending flush response: {err}");
-                                        this.state.write().set_error_if_none(err);
+                                        this.set_error_if_none(err);
                                     }
                                 }
                             },
