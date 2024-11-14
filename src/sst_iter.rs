@@ -9,7 +9,7 @@ use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::{
     block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, tablestore::TableStore,
-    types::KeyValueDeletable,
+    types::RowEntry,
 };
 
 enum FetchTask {
@@ -198,15 +198,8 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
                         if let Some(block) = blocks.pop_front() {
                             let first_key = self.from_key.take();
                             return match first_key {
-                                None => Ok(Some(BlockIterator::from_first_key(
-                                    block,
-                                    self.table.as_ref().info.row_features.clone(),
-                                ))),
-                                Some(k) => Ok(Some(BlockIterator::from_key(
-                                    block,
-                                    k,
-                                    self.table.as_ref().info.row_features.clone(),
-                                ))),
+                                None => Ok(Some(BlockIterator::from_first_key(block))),
+                                Some(k) => Ok(Some(BlockIterator::from_key(block, k))),
                             };
                         } else {
                             self.fetch_tasks.pop_front();
@@ -226,7 +219,7 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
 }
 
 impl<'a, H: AsRef<SsTableHandle>> KeyValueIterator for SstIterator<'a, H> {
-    async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         loop {
             let current_iter = if let Some(current_iter) = self.current_iter.as_mut() {
                 current_iter
@@ -253,10 +246,9 @@ impl<'a, H: AsRef<SsTableHandle>> KeyValueIterator for SstIterator<'a, H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Clock;
     use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
-    use crate::test_utils::{assert_kv, gen_attrs, OrderedBytesGenerator, TestClock};
+    use crate::test_utils::{assert_kv, gen_attrs, OrderedBytesGenerator};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use std::sync::Arc;
@@ -276,10 +268,18 @@ mod tests {
             None,
         ));
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", Some(b"value1"), gen_attrs(1)).unwrap();
-        builder.add(b"key2", Some(b"value2"), gen_attrs(2)).unwrap();
-        builder.add(b"key3", Some(b"value3"), gen_attrs(3)).unwrap();
-        builder.add(b"key4", Some(b"value4"), gen_attrs(4)).unwrap();
+        builder
+            .add_kv(b"key1", Some(b"value1"), gen_attrs(1))
+            .unwrap();
+        builder
+            .add_kv(b"key2", Some(b"value2"), gen_attrs(2))
+            .unwrap();
+        builder
+            .add_kv(b"key3", Some(b"value3"), gen_attrs(3))
+            .unwrap();
+        builder
+            .add_kv(b"key4", Some(b"value4"), gen_attrs(4))
+            .unwrap();
         let encoded = builder.build().unwrap();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded)
@@ -326,7 +326,7 @@ mod tests {
 
         for i in 0..1000 {
             builder
-                .add(
+                .add_kv(
                     format!("key{}", i).as_bytes(),
                     Some(format!("value{}", i).as_bytes()),
                     gen_attrs(i),
@@ -377,14 +377,7 @@ mod tests {
         let first_val = [1u8; 16];
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
         let mut test_case_val_gen = val_gen.clone();
-        let (sst, nkeys) = build_sst_with_n_blocks(
-            3,
-            table_store.clone(),
-            key_gen,
-            val_gen,
-            Arc::new(TestClock::new()),
-        )
-        .await;
+        let (sst, nkeys) = build_sst_with_n_blocks(3, table_store.clone(), key_gen, val_gen).await;
 
         // iterate over all keys and make sure we iterate from that key
         for i in 0..nkeys {
@@ -435,14 +428,7 @@ mod tests {
         let first_val = [2u8; 16];
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
         let mut expected_val_gen = val_gen.clone();
-        let (sst, nkeys) = build_sst_with_n_blocks(
-            2,
-            table_store.clone(),
-            key_gen,
-            val_gen,
-            Arc::new(TestClock::new()),
-        )
-        .await;
+        let (sst, nkeys) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
         let mut iter =
             SstIterator::new_from_key(&sst, table_store.clone(), &[b'a'; 16], 1, 1, false)
@@ -479,14 +465,7 @@ mod tests {
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
         let first_val = [2u8; 16];
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
-        let (sst, _) = build_sst_with_n_blocks(
-            2,
-            table_store.clone(),
-            key_gen,
-            val_gen,
-            Arc::new(TestClock::new()),
-        )
-        .await;
+        let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
         let mut iter =
             SstIterator::new_from_key(&sst, table_store.clone(), &[b'z'; 16], 1, 1, false)
@@ -501,19 +480,18 @@ mod tests {
         ts: Arc<TableStore>,
         mut key_gen: OrderedBytesGenerator,
         mut val_gen: OrderedBytesGenerator,
-        clock: Arc<dyn Clock>,
     ) -> (SsTableHandle, usize) {
         let mut writer = ts.table_writer(SsTableId::Wal(0));
         let mut nkeys = 0usize;
         while writer.blocks_written() < n {
-            writer
-                .add(
-                    key_gen.next().as_ref(),
-                    Some(val_gen.next().as_ref()),
-                    gen_attrs(clock.now()),
-                )
-                .await
-                .unwrap();
+            let entry = RowEntry::new(
+                key_gen.next().into(),
+                Some(val_gen.next().into()),
+                0,
+                None,
+                None,
+            );
+            writer.add(entry).await.unwrap();
             nkeys += 1;
         }
         (writer.close().await.unwrap(), nkeys)

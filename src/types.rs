@@ -11,10 +11,35 @@ pub struct KeyValue {
 
 /// Represents a key-value pair that may be a tombstone.
 #[derive(Debug, Clone, PartialEq)]
-pub struct KeyValueDeletable {
+pub struct RowEntry {
     pub key: Bytes,
     pub value: ValueDeletable,
-    pub attributes: RowAttributes,
+    pub seq: u64,
+    pub create_ts: Option<i64>,
+    pub expire_ts: Option<i64>,
+}
+
+impl RowEntry {
+    #[allow(unused)]
+    pub fn new(
+        key: Bytes,
+        value: Option<Bytes>,
+        seq: u64,
+        create_ts: Option<i64>,
+        expire_ts: Option<i64>,
+    ) -> Self {
+        let value = match value {
+            Some(v) => ValueDeletable::Value(v),
+            None => ValueDeletable::Tombstone,
+        };
+        Self {
+            key,
+            value,
+            seq,
+            create_ts,
+            expire_ts,
+        }
+    }
 }
 
 /// The metadata associated with a `KeyValueDeletable`
@@ -37,6 +62,13 @@ pub enum ValueDeletable {
 
 impl ValueDeletable {
     pub fn into_option(self) -> Option<Bytes> {
+        match self {
+            ValueDeletable::Value(v) => Some(v),
+            ValueDeletable::Tombstone => None,
+        }
+    }
+
+    pub fn as_option(&self) -> Option<&Bytes> {
         match self {
             ValueDeletable::Value(v) => Some(v),
             ValueDeletable::Tombstone => None,

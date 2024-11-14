@@ -9,7 +9,7 @@ use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
-use crate::types::ValueDeletable;
+use crate::types::{RowAttributes, ValueDeletable};
 
 pub enum WalFlushThreadMsg {
     Shutdown,
@@ -30,15 +30,8 @@ impl DbInner {
     ) -> Result<SsTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = imm_table.iter();
-        while let Some(kv) = iter.next_entry().await? {
-            match kv.value {
-                ValueDeletable::Value(v) => {
-                    sst_builder.add(&kv.key, Some(&v), kv.attributes)?;
-                }
-                ValueDeletable::Tombstone => {
-                    sst_builder.add(&kv.key, None, kv.attributes)?;
-                }
-            }
+        while let Some(entry) = iter.next_entry().await? {
+            sst_builder.add(entry)?;
         }
 
         let encoded_sst = sst_builder.build()?;
@@ -56,10 +49,23 @@ impl DbInner {
         while let Some(kv) = iter.next_entry_sync() {
             match kv.value {
                 ValueDeletable::Value(v) => {
-                    mem_table.put(kv.key, v, kv.attributes);
+                    mem_table.put(
+                        kv.key,
+                        v,
+                        RowAttributes {
+                            ts: kv.create_ts,
+                            expire_ts: kv.expire_ts,
+                        },
+                    );
                 }
                 ValueDeletable::Tombstone => {
-                    mem_table.delete(kv.key, kv.attributes);
+                    mem_table.delete(
+                        kv.key,
+                        RowAttributes {
+                            ts: kv.create_ts,
+                            expire_ts: kv.expire_ts,
+                        },
+                    );
                 }
             }
         }

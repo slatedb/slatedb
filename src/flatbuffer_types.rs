@@ -5,7 +5,7 @@ use bytes::Bytes;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
 use ulid::Ulid;
 
-use crate::db_state::{self, RowFeature, SsTableInfo, SsTableInfoCodec};
+use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SsTableHandle};
 
 #[path = "./generated/manifest_generated.rs"]
@@ -23,8 +23,8 @@ use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::manifest_generated::{
     Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable, CompactedSsTableArgs,
-    CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun, SortedRunArgs, SstRowFeature,
-    Uuid, UuidArgs,
+    CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun, SortedRunArgs, Uuid,
+    UuidArgs,
 };
 use crate::manifest::{Manifest, ManifestCodec};
 
@@ -74,11 +74,6 @@ impl FlatBufferSsTableInfoCodec {
             .first_key()
             .map(|key| Bytes::copy_from_slice(key.bytes()));
 
-        let row_features: Vec<RowFeature> = match info.row_features() {
-            Some(vec) => vec.into_iter().map(|attr| attr.into()).collect(),
-            None => Vec::new(),
-        };
-
         SsTableInfo {
             first_key,
             index_offset: info.index_offset(),
@@ -86,7 +81,6 @@ impl FlatBufferSsTableInfoCodec {
             filter_offset: info.filter_offset(),
             filter_len: info.filter_len(),
             compression_codec: info.compression_format().into(),
-            row_features,
         }
     }
 
@@ -204,14 +198,6 @@ impl<'b> DbFlatBufferBuilder<'b> {
             Some(first_key_vector) => Some(self.builder.create_vector(first_key_vector)),
         };
 
-        let sst_row_features: Vec<SstRowFeature> = info
-            .row_features
-            .clone()
-            .into_iter()
-            .map(|attr| attr.into())
-            .collect();
-        let row_features = Some(self.builder.create_vector(&sst_row_features));
-
         FbSsTableInfo::create(
             &mut self.builder,
             &SsTableInfoArgs {
@@ -221,7 +207,6 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 filter_offset: info.filter_offset,
                 filter_len: info.filter_len,
                 compression_format: info.compression_codec.into(),
-                row_features,
             },
         )
     }
@@ -398,31 +383,6 @@ impl From<CompressionFormat> for Option<CompressionCodec> {
             #[cfg(feature = "zstd")]
             CompressionFormat::Zstd => Some(CompressionCodec::Zstd),
             _ => None,
-        }
-    }
-}
-
-impl From<RowFeature> for SstRowFeature {
-    fn from(value: RowFeature) -> Self {
-        match value {
-            RowFeature::Flags => SstRowFeature::Flags,
-            RowFeature::Timestamp => SstRowFeature::Timestamp,
-            RowFeature::ExpireAtTs => SstRowFeature::ExpireAtTs,
-        }
-    }
-}
-
-#[allow(clippy::panic)]
-impl From<SstRowFeature> for RowFeature {
-    fn from(value: SstRowFeature) -> Self {
-        match value {
-            SstRowFeature::Flags => RowFeature::Flags,
-            SstRowFeature::Timestamp => RowFeature::Timestamp,
-            SstRowFeature::ExpireAtTs => RowFeature::ExpireAtTs,
-            _ => panic!(
-                "Attempted to read SST written with unknown SstRowAttribute. Are you \
-            running an older version of SlateDB than was used to write the SST?"
-            ),
         }
     }
 }
