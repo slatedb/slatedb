@@ -8,13 +8,13 @@ use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
 
 use crate::block::Block;
-use crate::db_state::{RowFeature, SsTableInfo, SsTableInfoCodec};
+use crate::db_state::{SsTableInfo, SsTableInfoCodec};
 use crate::filter::{BloomFilter, BloomFilterBuilder};
 use crate::flatbuffer_types::{
     BlockMeta, BlockMetaArgs, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs,
     SsTableIndexOwned,
 };
-use crate::types::RowAttributes;
+use crate::types::RowEntry;
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
 
@@ -25,7 +25,6 @@ pub(crate) struct SsTableFormat {
     pub(crate) sst_codec: Box<dyn SsTableInfoCodec>,
     pub(crate) filter_bits_per_key: u32,
     pub(crate) compression_codec: Option<CompressionCodec>,
-    pub(crate) row_features: Vec<RowFeature>,
 }
 
 impl Default for SsTableFormat {
@@ -36,11 +35,6 @@ impl Default for SsTableFormat {
             sst_codec: Box::new(FlatBufferSsTableInfoCodec {}),
             filter_bits_per_key: 10,
             compression_codec: None,
-            row_features: vec![
-                RowFeature::Flags,
-                RowFeature::Timestamp,
-                RowFeature::ExpireAtTs,
-            ],
         }
     }
 }
@@ -271,7 +265,6 @@ impl SsTableFormat {
             self.sst_codec.clone(),
             self.filter_bits_per_key,
             self.compression_codec,
-            self.row_features.clone(),
         )
     }
 }
@@ -322,7 +315,6 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     filter_builder: BloomFilterBuilder,
     sst_codec: Box<dyn SsTableInfoCodec>,
     compression_codec: Option<CompressionCodec>,
-    row_features: Vec<RowFeature>,
 }
 
 impl<'a> EncodedSsTableBuilder<'a> {
@@ -333,7 +325,6 @@ impl<'a> EncodedSsTableBuilder<'a> {
         sst_codec: Box<dyn SsTableInfoCodec>,
         filter_bits_per_key: u32,
         compression_codec: Option<CompressionCodec>,
-        row_features: Vec<RowFeature>,
     ) -> Self {
         Self {
             current_len: 0,
@@ -342,14 +333,13 @@ impl<'a> EncodedSsTableBuilder<'a> {
             first_key: None,
             sst_first_key: None,
             block_size,
-            builder: BlockBuilder::new(block_size, row_features.clone()),
+            builder: BlockBuilder::new(block_size),
             min_filter_keys,
             num_keys: 0,
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
             compression_codec,
-            row_features,
         }
     }
 
@@ -393,15 +383,11 @@ impl<'a> EncodedSsTableBuilder<'a> {
         }
     }
 
-    pub fn add(
-        &mut self,
-        key: &[u8],
-        value: Option<&[u8]>,
-        attrs: RowAttributes,
-    ) -> Result<(), SlateDBError> {
+    pub fn add(&mut self, entry: RowEntry) -> Result<(), SlateDBError> {
         self.num_keys += 1;
+        let key = entry.key.clone();
 
-        if !self.builder.add(key, value, attrs.clone()) {
+        if !self.builder.add(entry.clone()) {
             // Create a new block builder and append block data
             if let Some(block) = self.finish_block()? {
                 self.current_len += block.len();
@@ -409,16 +395,33 @@ impl<'a> EncodedSsTableBuilder<'a> {
             }
 
             // New block must always accept the first KV pair
-            assert!(self.builder.add(key, value, attrs));
-            self.first_key = Some(self.index_builder.create_vector(key));
+            assert!(self.builder.add(entry));
+            self.first_key = Some(self.index_builder.create_vector(&key));
         } else if self.sst_first_key.is_none() {
-            self.sst_first_key = Some(Bytes::copy_from_slice(key));
-            self.first_key = Some(self.index_builder.create_vector(key));
+            self.sst_first_key = Some(Bytes::copy_from_slice(&key));
+            self.first_key = Some(self.index_builder.create_vector(&key));
         }
 
-        self.filter_builder.add_key(key);
+        self.filter_builder.add_key(&key);
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn add_kv(
+        &mut self,
+        key: &[u8],
+        val: Option<&[u8]>,
+        attrs: crate::types::RowAttributes,
+    ) -> Result<(), SlateDBError> {
+        let entry = RowEntry::new(
+            key.to_vec().into(),
+            val.map(|v| v.to_vec().into()),
+            0,
+            attrs.ts,
+            attrs.expire_ts,
+        );
+        self.add(entry)
     }
 
     pub fn next_block(&mut self) -> Option<Bytes> {
@@ -435,7 +438,7 @@ impl<'a> EncodedSsTableBuilder<'a> {
             return Ok(None);
         }
 
-        let new_builder = BlockBuilder::new_with_same_attributes(&self.builder, self.block_size);
+        let new_builder = BlockBuilder::new(self.block_size);
         let builder = std::mem::replace(&mut self.builder, new_builder);
         let encoded_block = builder.build()?.encode();
         let compressed_block = match self.compression_codec {
@@ -503,7 +506,6 @@ impl<'a> EncodedSsTableBuilder<'a> {
             filter_offset: filter_offset as u64,
             filter_len: filter_len as u64,
             compression_codec: self.compression_codec,
-            row_features: self.row_features,
         };
         SsTableInfo::encode(&info, &mut buf, &*self.sst_codec);
 
@@ -533,18 +535,15 @@ mod tests {
     use crate::db_state::SsTableId;
     use crate::filter::filter_hash;
     use crate::tablestore::TableStore;
-    use crate::test_utils::{assert_iterator, gen_attrs};
+    use crate::test_utils::{assert_iterator, gen_attrs, gen_empty_attrs};
     use crate::types::ValueDeletable;
 
-    fn next_block_to_iter(
-        builder: &mut EncodedSsTableBuilder,
-        row_features: Vec<RowFeature>,
-    ) -> BlockIterator<Block> {
+    fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIterator<Block> {
         let block = builder.next_block();
         assert!(block.is_some());
         let block = block.unwrap();
         let block = Block::decode(block.slice(..block.len() - 4));
-        BlockIterator::from_first_key(block, row_features)
+        BlockIterator::from_first_key(block)
     }
 
     #[tokio::test]
@@ -555,21 +554,20 @@ mod tests {
             block_size: 32,
             ..SsTableFormat::default()
         };
-        let row_features = format.row_features.clone();
         let table_store = TableStore::new(object_store, format, root_path, None);
         let mut builder = table_store.table_builder();
         builder
-            .add(&[b'a'; 8], Some(&[b'1'; 8]), gen_attrs(1))
+            .add_kv(&[b'a'; 8], Some(&[b'1'; 8]), gen_attrs(1))
             .unwrap();
         builder
-            .add(&[b'b'; 8], Some(&[b'2'; 8]), gen_attrs(2))
+            .add_kv(&[b'b'; 8], Some(&[b'2'; 8]), gen_attrs(2))
             .unwrap();
         builder
-            .add(&[b'c'; 8], Some(&[b'3'; 8]), gen_attrs(3))
+            .add_kv(&[b'c'; 8], Some(&[b'3'; 8]), gen_attrs(3))
             .unwrap();
 
         // when:
-        let mut iter = next_block_to_iter(&mut builder, row_features.clone());
+        let mut iter = next_block_to_iter(&mut builder);
         assert_iterator(
             &mut iter,
             &[(
@@ -579,7 +577,7 @@ mod tests {
             )],
         )
         .await;
-        let mut iter = next_block_to_iter(&mut builder, row_features.clone());
+        let mut iter = next_block_to_iter(&mut builder);
         assert_iterator(
             &mut iter,
             &[(
@@ -591,9 +589,9 @@ mod tests {
         .await;
         assert!(builder.next_block().is_none());
         builder
-            .add(&[b'd'; 8], Some(&[b'4'; 8]), gen_attrs(1))
+            .add_kv(&[b'd'; 8], Some(&[b'4'; 8]), gen_attrs(1))
             .unwrap();
-        let mut iter = next_block_to_iter(&mut builder, row_features.clone());
+        let mut iter = next_block_to_iter(&mut builder);
         assert_iterator(
             &mut iter,
             &[(
@@ -614,17 +612,16 @@ mod tests {
             block_size: 32,
             ..SsTableFormat::default()
         };
-        let row_features = format.row_features.clone();
         let table_store = TableStore::new(object_store, format.clone(), root_path, None);
         let mut builder = table_store.table_builder();
         builder
-            .add(&[b'a'; 8], Some(&[b'1'; 8]), gen_attrs(1))
+            .add_kv(&[b'a'; 8], Some(&[b'1'; 8]), gen_attrs(1))
             .unwrap();
         builder
-            .add(&[b'b'; 8], Some(&[b'2'; 8]), gen_attrs(2))
+            .add_kv(&[b'b'; 8], Some(&[b'2'; 8]), gen_attrs(2))
             .unwrap();
         builder
-            .add(&[b'c'; 8], Some(&[b'3'; 8]), gen_attrs(3))
+            .add_kv(&[b'c'; 8], Some(&[b'3'; 8]), gen_attrs(3))
             .unwrap();
         let first_block = builder.next_block();
 
@@ -641,7 +638,7 @@ mod tests {
         let block = format
             .read_block_raw(&encoded.info, &index, 0, &raw_sst)
             .unwrap();
-        let mut iter = BlockIterator::from_first_key(block, row_features.clone());
+        let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
             &[(
@@ -654,7 +651,7 @@ mod tests {
         let block = format
             .read_block_raw(&encoded.info, &index, 1, &raw_sst)
             .unwrap();
-        let mut iter = BlockIterator::from_first_key(block, row_features.clone());
+        let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
             &[(
@@ -667,7 +664,7 @@ mod tests {
         let block = format
             .read_block_raw(&encoded.info, &index, 2, &raw_sst)
             .unwrap();
-        let mut iter = BlockIterator::from_first_key(block, row_features.clone());
+        let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
             &[(
@@ -686,8 +683,12 @@ mod tests {
         let format = SsTableFormat::default();
         let table_store = TableStore::new(object_store, format, root_path, None);
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", Some(b"value1"), gen_attrs(1)).unwrap();
-        builder.add(b"key2", Some(b"value2"), gen_attrs(2)).unwrap();
+        builder
+            .add_kv(b"key1", Some(b"value1"), gen_attrs(1))
+            .unwrap();
+        builder
+            .add_kv(b"key2", Some(b"value2"), gen_attrs(2))
+            .unwrap();
         let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
 
@@ -735,8 +736,12 @@ mod tests {
         };
         let table_store = TableStore::new(object_store, format, root_path, None);
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", Some(b"value1"), gen_attrs(1)).unwrap();
-        builder.add(b"key2", Some(b"value2"), gen_attrs(2)).unwrap();
+        builder
+            .add_kv(b"key1", Some(b"value1"), gen_attrs(1))
+            .unwrap();
+        builder
+            .add_kv(b"key2", Some(b"value2"), gen_attrs(2))
+            .unwrap();
         let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
         table_store
@@ -761,7 +766,7 @@ mod tests {
             let mut builder = table_store.table_builder();
             for k in 0..8 {
                 builder
-                    .add(format!("{}", k).as_bytes(), Some(b"value"), gen_attrs(1))
+                    .add_kv(format!("{}", k).as_bytes(), Some(b"value"), gen_attrs(1))
                     .unwrap();
             }
             let encoded = builder.build().unwrap();
@@ -787,8 +792,12 @@ mod tests {
             };
             let table_store = TableStore::new(object_store, format, root_path, None);
             let mut builder = table_store.table_builder();
-            builder.add(b"key1", Some(b"value1"), gen_attrs(1)).unwrap();
-            builder.add(b"key2", Some(b"value2"), gen_attrs(2)).unwrap();
+            builder
+                .add_kv(b"key1", Some(b"value1"), gen_attrs(1))
+                .unwrap();
+            builder
+                .add_kv(b"key2", Some(b"value2"), gen_attrs(2))
+                .unwrap();
             let encoded = builder.build().unwrap();
             let encoded_info = encoded.info.clone();
             table_store
@@ -824,8 +833,12 @@ mod tests {
             let table_store =
                 TableStore::new(object_store.clone(), format, root_path.clone(), None);
             let mut builder = table_store.table_builder();
-            builder.add(b"key1", Some(b"value1"), gen_attrs(1)).unwrap();
-            builder.add(b"key2", Some(b"value2"), gen_attrs(2)).unwrap();
+            builder
+                .add_kv(b"key1", Some(b"value1"), gen_attrs(1))
+                .unwrap();
+            builder
+                .add_kv(b"key2", Some(b"value2"), gen_attrs(2))
+                .unwrap();
             let encoded = builder.build().unwrap();
             let encoded_info = encoded.info.clone();
             table_store
@@ -886,20 +899,19 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let row_features = format.row_features.clone();
         let table_store = TableStore::new(object_store, format.clone(), root_path, None);
         let mut builder = table_store.table_builder();
         builder
-            .add(&[b'a'; 2], Some(&[1u8; 2]), gen_attrs(1))
+            .add_kv(&[b'a'; 2], Some(&[1u8; 2]), gen_empty_attrs())
             .unwrap();
         builder
-            .add(&[b'b'; 2], Some(&[2u8; 2]), gen_attrs(2))
+            .add_kv(&[b'b'; 2], Some(&[2u8; 2]), gen_empty_attrs())
             .unwrap();
         builder
-            .add(&[b'c'; 20], Some(&[3u8; 20]), gen_attrs(3))
+            .add_kv(&[b'c'; 20], Some(&[3u8; 20]), gen_attrs(3))
             .unwrap();
         builder
-            .add(&[b'd'; 20], Some(&[4u8; 20]), gen_attrs(4))
+            .add_kv(&[b'd'; 20], Some(&[4u8; 20]), gen_attrs(4))
             .unwrap();
         let encoded = builder.build().unwrap();
         let info = encoded.info.clone();
@@ -919,26 +931,24 @@ mod tests {
             .unwrap();
 
         // then:
-        let mut iter =
-            BlockIterator::from_first_key(blocks.pop_front().unwrap(), row_features.clone());
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             &[
                 (
                     vec![b'a'; 2],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 2])),
-                    gen_attrs(1),
+                    gen_empty_attrs(),
                 ),
                 (
                     vec![b'b'; 2],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 2])),
-                    gen_attrs(2),
+                    gen_empty_attrs(),
                 ),
             ],
         )
         .await;
-        let mut iter =
-            BlockIterator::from_first_key(blocks.pop_front().unwrap(), row_features.clone());
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             &[(
@@ -961,20 +971,19 @@ mod tests {
             block_size: 48,
             ..SsTableFormat::default()
         };
-        let row_features = format.row_features.clone();
         let table_store = TableStore::new(object_store, format.clone(), root_path, None);
         let mut builder = table_store.table_builder();
         builder
-            .add(&[b'a'; 2], Some(&[1u8; 2]), gen_attrs(1))
+            .add_kv(&[b'a'; 2], Some(&[1u8; 2]), gen_empty_attrs())
             .unwrap();
         builder
-            .add(&[b'b'; 2], Some(&[2u8; 2]), gen_attrs(2))
+            .add_kv(&[b'b'; 2], Some(&[2u8; 2]), gen_empty_attrs())
             .unwrap();
         builder
-            .add(&[b'c'; 20], Some(&[3u8; 20]), gen_attrs(3))
+            .add_kv(&[b'c'; 20], Some(&[3u8; 20]), gen_attrs(3))
             .unwrap();
         builder
-            .add(&[b'd'; 20], Some(&[4u8; 20]), gen_attrs(4))
+            .add_kv(&[b'd'; 20], Some(&[4u8; 20]), gen_attrs(4))
             .unwrap();
         let encoded = builder.build().unwrap();
         let info = encoded.info.clone();
@@ -994,26 +1003,24 @@ mod tests {
             .unwrap();
 
         // then:
-        let mut iter =
-            BlockIterator::from_first_key(blocks.pop_front().unwrap(), row_features.clone());
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             &[
                 (
                     vec![b'a'; 2],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 2])),
-                    gen_attrs(1),
+                    gen_empty_attrs(),
                 ),
                 (
                     vec![b'b'; 2],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 2])),
-                    gen_attrs(2),
+                    gen_empty_attrs(),
                 ),
             ],
         )
         .await;
-        let mut iter =
-            BlockIterator::from_first_key(blocks.pop_front().unwrap(), row_features.clone());
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             &[(
@@ -1023,8 +1030,7 @@ mod tests {
             )],
         )
         .await;
-        let mut iter =
-            BlockIterator::from_first_key(blocks.pop_front().unwrap(), row_features.clone());
+        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             &[(
@@ -1048,8 +1054,12 @@ mod tests {
 
         let table_store = TableStore::new(object_store, format, root_path, None);
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", Some(b"value1"), gen_attrs(1)).unwrap();
-        builder.add(b"key2", Some(b"value2"), gen_attrs(2)).unwrap();
+        builder
+            .add_kv(b"key1", Some(b"value1"), gen_attrs(1))
+            .unwrap();
+        builder
+            .add_kv(b"key2", Some(b"value2"), gen_attrs(2))
+            .unwrap();
         let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
 

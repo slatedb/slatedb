@@ -53,7 +53,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
-use crate::types::ValueDeletable;
+use crate::types::{RowAttributes, ValueDeletable};
 use std::rc::Rc;
 
 pub(crate) struct DbInner {
@@ -378,7 +378,7 @@ impl DbInner {
             {
                 let mut guard = self.state.write();
                 for kv in wal_replay_buf.iter() {
-                    if let Some(ts) = kv.attributes.ts {
+                    if let Some(ts) = kv.create_ts {
                         guard.update_clock_tick(ts)?;
                     }
 
@@ -387,12 +387,19 @@ impl DbInner {
                             guard.memtable().put(
                                 kv.key.clone(),
                                 value.clone(),
-                                kv.attributes.clone(),
+                                RowAttributes {
+                                    ts: kv.create_ts,
+                                    expire_ts: kv.expire_ts,
+                                },
                             );
                         }
-                        ValueDeletable::Tombstone => guard
-                            .memtable()
-                            .delete(kv.key.clone(), kv.attributes.clone()),
+                        ValueDeletable::Tombstone => guard.memtable().delete(
+                            kv.key.clone(),
+                            RowAttributes {
+                                ts: kv.create_ts,
+                                expire_ts: kv.expire_ts,
+                            },
+                        ),
                     }
                 }
                 self.maybe_freeze_memtable(&mut guard, sst_id)?;
@@ -1468,6 +1475,8 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
     async fn test_wal_disabled() {
+        use crate::test_utils::gen_empty_attrs;
+
         let clock = Arc::new(TestClock::new());
         let mut options = test_db_options_with_clock(0, 128, None, clock.clone());
         options.wal_enabled = false;
@@ -1536,7 +1545,7 @@ mod tests {
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
                     gen_attrs(0),
                 ),
-                (vec![b'b'; 32], ValueDeletable::Tombstone, gen_attrs(0)),
+                (vec![b'b'; 32], ValueDeletable::Tombstone, gen_empty_attrs()),
                 (
                     vec![b'c'; 32],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),

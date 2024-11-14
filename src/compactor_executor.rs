@@ -20,8 +20,8 @@ use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 
 use crate::metrics::DbStats;
+use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
-use crate::types::{KeyValueDeletable, RowAttributes};
 use tracing::error;
 
 pub(crate) struct CompactionJob {
@@ -131,34 +131,28 @@ impl TokioCompactionExecutorInner {
             // filter out any expired entries -- eventually we can consider
             // abstracting this away into generic, pluggable compaction filters
             // but for now we do it inline
-            let kv = match raw_kv.attributes.expire_ts {
+            let kv = match raw_kv.expire_ts {
                 Some(expire_ts) if expire_ts <= compaction.compaction_ts => {
                     // insert a tombstone instead of just filtering out the
                     // value in the iterator because this may otherwise "revive"
                     // an older version of the KV pair that has a larger TTL in
                     // a lower level of the LSM tree
-                    KeyValueDeletable {
+                    RowEntry {
                         key: raw_kv.key,
                         value: Tombstone,
-                        attributes: RowAttributes {
-                            ts: raw_kv.attributes.ts,
-                            expire_ts: None,
-                        },
+                        seq: raw_kv.seq,
+                        expire_ts: None,
+                        create_ts: raw_kv.create_ts,
                     }
                 }
                 _ => raw_kv,
             };
 
             // Add to SST
-            let value = kv.value.into_option();
-            current_writer
-                .add(
-                    kv.key.as_ref(),
-                    value.as_ref().map(|b| b.as_ref()),
-                    kv.attributes,
-                )
-                .await?;
-            current_size += kv.key.len() + value.map_or(0, |b| b.len());
+            let value = kv.value.as_option().cloned();
+            let key_len = kv.key.len();
+            current_writer.add(kv).await?;
+            current_size += key_len + value.map_or(0, |b| b.len());
             if current_size > self.options.max_sst_size {
                 current_size = 0;
                 let finished_writer = mem::replace(

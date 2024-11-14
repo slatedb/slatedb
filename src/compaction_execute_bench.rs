@@ -17,7 +17,7 @@ use ulid::Ulid;
 use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, SourceId};
-use crate::config::{Clock, CompactorOptions, CompressionCodec, DbOptions};
+use crate::config::{CompactorOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::manifest_store::{ManifestStore, StoredManifest};
@@ -25,7 +25,7 @@ use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 use crate::test_utils::OrderedBytesGenerator;
-use crate::types::RowAttributes;
+use crate::types::RowEntry;
 
 pub struct CompactionExecuteBench {
     path: Path,
@@ -59,8 +59,6 @@ impl CompactionExecuteBench {
             self.path.clone(),
             None,
         ));
-        let clock = DbOptions::default().clock;
-
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
         let mut rng = rand_xorshift::XorShiftRng::from_entropy();
@@ -82,7 +80,6 @@ impl CompactionExecuteBench {
                 key_start_copy,
                 num_keys,
                 val_bytes,
-                clock.clone(),
             ));
             futures.push(jh)
         }
@@ -102,7 +99,6 @@ impl CompactionExecuteBench {
         key_start: Vec<u8>,
         num_keys: usize,
         val_bytes: usize,
-        clock: Arc<dyn Clock + Send + Sync>,
     ) -> Result<(), SlateDBError> {
         let mut retries = 0;
         loop {
@@ -112,7 +108,6 @@ impl CompactionExecuteBench {
                 key_start.clone(),
                 num_keys,
                 val_bytes,
-                clock.clone(),
             )
             .await;
             match result {
@@ -136,7 +131,6 @@ impl CompactionExecuteBench {
         key_start: Vec<u8>,
         num_keys: usize,
         val_bytes: usize,
-        clock: Arc<dyn Clock + Send + Sync>,
     ) -> Result<(), SlateDBError> {
         let mut rng = rand_xorshift::XorShiftRng::from_entropy();
         let start = std::time::Instant::now();
@@ -149,17 +143,8 @@ impl CompactionExecuteBench {
             let mut val = vec![0u8; val_bytes];
             rng.fill_bytes(val.as_mut_slice());
             let key = key_gen.next();
-            let timestamp = clock.now();
-            sst_writer
-                .add(
-                    key.as_ref(),
-                    Some(val.as_ref()),
-                    RowAttributes {
-                        ts: Some(timestamp),
-                        expire_ts: None,
-                    },
-                )
-                .await?;
+            let row_entry = RowEntry::new(key, Some(val.into()), 0, None, None);
+            sst_writer.add(row_entry).await?;
         }
         let encoded = sst_writer.close().await?;
         info!("wrote sst with id: {:?} {:?}", &encoded.id, start.elapsed());

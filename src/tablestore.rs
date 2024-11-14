@@ -22,7 +22,7 @@ use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
-use crate::types::RowAttributes;
+use crate::types::RowEntry;
 use crate::{blob::ReadOnlyBlob, block::Block, db_cache::DbCache};
 
 pub struct TableStore {
@@ -547,13 +547,8 @@ pub(crate) struct EncodedSsTableWriter<'a> {
 }
 
 impl<'a> EncodedSsTableWriter<'a> {
-    pub async fn add(
-        &mut self,
-        key: &[u8],
-        value: Option<&[u8]>,
-        attrs: RowAttributes,
-    ) -> Result<(), SlateDBError> {
-        self.builder.add(key, value, attrs)?;
+    pub async fn add(&mut self, entry: RowEntry) -> Result<(), SlateDBError> {
+        self.builder.add(entry)?;
         self.drain_blocks().await
     }
 
@@ -588,14 +583,13 @@ impl<'a> EncodedSsTableWriter<'a> {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
     use std::collections::VecDeque;
     use std::sync::Arc;
 
-    use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use ulid::Ulid;
 
-    use crate::db_state::SsTableHandle;
     use crate::error;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstIterator;
@@ -603,7 +597,7 @@ mod tests {
     use crate::tablestore::DbCache;
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, gen_attrs};
-    use crate::types::ValueDeletable;
+    use crate::types::{RowAttributes, RowEntry, ValueDeletable};
     use crate::{
         block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
     };
@@ -646,16 +640,37 @@ mod tests {
         // when:
         let mut writer = ts.table_writer(id);
         writer
-            .add(&[b'a'; 16], Some(&[1u8; 16]), gen_attrs(1))
+            .add(RowEntry::new(
+                vec![b'a'; 16].into(),
+                Some(vec![1u8; 16].into()),
+                0,
+                None,
+                None,
+            ))
             .await
             .unwrap();
         writer
-            .add(&[b'b'; 16], Some(&[2u8; 16]), gen_attrs(2))
+            .add(RowEntry::new(
+                vec![b'b'; 16].into(),
+                Some(vec![2u8; 16].into()),
+                0,
+                None,
+                None,
+            ))
             .await
             .unwrap();
-        writer.add(&[b'c'; 16], None, gen_attrs(3)).await.unwrap();
         writer
-            .add(&[b'd'; 16], Some(&[4u8; 16]), gen_attrs(4))
+            .add(RowEntry::new(vec![b'c'; 16].into(), None, 0, None, None))
+            .await
+            .unwrap();
+        writer
+            .add(RowEntry::new(
+                vec![b'd'; 16].into(),
+                Some(vec![4u8; 16].into()),
+                0,
+                None,
+                None,
+            ))
             .await
             .unwrap();
         let sst = writer.close().await.unwrap();
@@ -677,7 +692,14 @@ mod tests {
                     ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 16])),
                     gen_attrs(2),
                 ),
-                (vec![b'c'; 16], ValueDeletable::Tombstone, gen_attrs(3)),
+                (
+                    vec![b'c'; 16],
+                    ValueDeletable::Tombstone,
+                    RowAttributes {
+                        ts: None,
+                        expire_ts: None,
+                    },
+                ),
                 (
                     vec![b'd'; 16],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[4u8; 16])),
@@ -701,12 +723,26 @@ mod tests {
 
         // write a wal sst
         let mut sst1 = ts.table_builder();
-        sst1.add(b"key", Some(b"value"), gen_attrs(1)).unwrap();
+        sst1.add(RowEntry::new(
+            "key".into(),
+            Some("value".into()),
+            0,
+            None,
+            None,
+        ))
+        .unwrap();
         let table = sst1.build().unwrap();
         ts.write_sst(&wal_id, table).await.unwrap();
 
         let mut sst2 = ts.table_builder();
-        sst2.add(b"key", Some(b"value"), gen_attrs(2)).unwrap();
+        sst2.add(RowEntry::new(
+            "key".into(),
+            Some("value".into()),
+            0,
+            None,
+            None,
+        ))
+        .unwrap();
         let table2 = sst2.build().unwrap();
 
         // write another wal sst with the same id.
@@ -745,7 +781,16 @@ mod tests {
                 Vec::from(key.as_slice()),
                 ValueDeletable::Value(Bytes::copy_from_slice(&value)),
             ));
-            writer.add(&key, Some(&value), gen_attrs(i)).await.unwrap();
+            writer
+                .add(RowEntry::new(
+                    key.to_vec().into(),
+                    Some(value.to_vec().into()),
+                    0,
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap();
         }
         let handle = writer.close().await.unwrap();
 
@@ -758,7 +803,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_blocks(&blocks, &expected_data, &handle).await;
+        assert_blocks(&blocks, &expected_data).await;
 
         // Check that all blocks are now in cache
         for i in 0..20 {
@@ -788,7 +833,7 @@ mod tests {
             .read_blocks_using_index(&handle, index.clone(), 0..20, true)
             .await
             .unwrap();
-        assert_blocks(&blocks, &expected_data, &handle).await;
+        assert_blocks(&blocks, &expected_data).await;
 
         // Check that all blocks are again in cache
         for i in 0..20 {
@@ -812,7 +857,7 @@ mod tests {
             .read_blocks_using_index(&handle, index.clone(), 0..20, true)
             .await
             .unwrap();
-        assert_blocks(&blocks, &expected_data, &handle).await;
+        assert_blocks(&blocks, &expected_data).await;
 
         // Check that all blocks are still in cache
         for i in 0..20 {
@@ -832,27 +877,22 @@ mod tests {
             .read_blocks_using_index(&handle, index.clone(), 5..10, true)
             .await
             .unwrap();
-        assert_blocks(&blocks, &expected_data[5..10], &handle).await;
+        assert_blocks(&blocks, &expected_data[5..10]).await;
 
         let blocks = ts
             .read_blocks_using_index(&handle, index.clone(), 15..20, true)
             .await
             .unwrap();
-        assert_blocks(&blocks, &expected_data[15..20], &handle).await;
+        assert_blocks(&blocks, &expected_data[15..20]).await;
     }
 
     #[allow(dead_code)]
-    async fn assert_blocks(
-        blocks: &VecDeque<Arc<Block>>,
-        expected: &[(Vec<u8>, ValueDeletable)],
-        handle: &SsTableHandle,
-    ) {
+    async fn assert_blocks(blocks: &VecDeque<Arc<Block>>, expected: &[(Vec<u8>, ValueDeletable)]) {
         let mut block_iter = blocks.iter();
         let mut expected_iter = expected.iter();
 
         while let (Some(block), Some(expected_item)) = (block_iter.next(), expected_iter.next()) {
-            let mut iter =
-                BlockIterator::from_first_key(block.clone(), handle.info.row_features.clone());
+            let mut iter = BlockIterator::from_first_key(block.clone());
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, expected_item.0);
             assert_eq!(ValueDeletable::Value(kv.value), expected_item.1);
