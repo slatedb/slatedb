@@ -2,7 +2,7 @@
 
 SlateDB releases are published using a Github release action defined in `.github/workflows/release.yml`. To create a new release:
 
-1. Go to the [release action page](https://github.com/slatedb/slatedb/actions/workflows/pr.yaml)
+1. Go to the [release action page](https://github.com/slatedb/slatedb/actions/workflows/release.yaml)
 2. Input a version value in the format `X.Y.Z` and click `Run workflow`.
 
 The release action will do the following:
