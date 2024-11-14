@@ -1,13 +1,21 @@
 use crate::config::CheckpointOptions;
 use crate::db::Db;
-use crate::db_state::Checkpoint;
 use crate::error::SlateDBError;
 use crate::manifest_store::{apply_db_state_update, ManifestStore, StoredManifest};
 use object_store::path::Path;
 use object_store::ObjectStore;
+use serde::Serialize;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
+
+#[derive(Clone, PartialEq, Serialize, Debug)]
+pub struct Checkpoint {
+    pub id: Uuid,
+    pub manifest_id: u64,
+    pub expire_time: Option<SystemTime>,
+    pub create_time: SystemTime,
+}
 
 #[derive(Debug)]
 pub struct CheckpointCreateResult {
@@ -133,10 +141,10 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
     use crate::config::{CheckpointOptions, DbOptions};
     use crate::db::Db;
-    use crate::db_state::Checkpoint;
     use crate::error::SlateDBError;
     use crate::manifest_store::ManifestStore;
     use object_store::memory::InMemory;

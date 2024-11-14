@@ -120,5 +120,7 @@ async fn exec_list_checkpoints(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
 ) -> Result<(), Box<dyn Error>> {
-    Ok(println!("{}", list_checkpoints(path, object_store).await?))
+    let checkpoint = list_checkpoints(path, object_store).await?;
+    let checkpoint_json = serde_json::to_string(&checkpoint)?;
+    Ok(println!("{}", checkpoint_json))
 }

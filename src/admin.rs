@@ -1,3 +1,4 @@
+use crate::checkpoint::Checkpoint;
 use crate::error::SlateDBError;
 use crate::manifest_store::ManifestStore;
 #[cfg(feature = "aws")]
@@ -40,12 +41,12 @@ pub async fn list_manifests<R: RangeBounds<u64>>(
 pub async fn list_checkpoints(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
-) -> Result<String, Box<dyn Error>> {
+) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
     let manifest_store = ManifestStore::new(path, object_store);
     let Some((_, manifest)) = manifest_store.read_latest_manifest().await? else {
         return Err(Box::new(SlateDBError::ManifestMissing));
     };
-    Ok(serde_json::to_string(&manifest.core.checkpoints)?)
+    Ok(manifest.core.checkpoints)
 }
 
 /// Loads an object store from configured environment variables.
