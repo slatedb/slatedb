@@ -625,7 +625,6 @@ mod tests {
             garbage_collector_options: None,
             clock,
             default_ttl: None,
-            max_unflushed_memtable: 1,
         }
     }
 
