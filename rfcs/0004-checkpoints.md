@@ -212,12 +212,28 @@ impl Db {
     /// Note that the scope option does not impact the behaviour of this method. The checkpoint will reference
     /// the current active manifest of the db.
     pub async fn create_checkpoint(
-       path: Path,
+       path: &Path,
        object_store: Arc<dyn ObjectStore>,
        options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {}
-       ...
-    )
+
+    /// Refresh the lifetime of an existing checkpoint. Takes the id of an existing checkpoint
+    /// and a lifetime, and sets the lifetime of the checkpoint to the specified lifetime. If
+    /// there is no checkpoint with the specified id, then this fn fails with
+    /// SlateDBError::InvalidDbState
+    pub async fn refresh_checkpoint(
+        path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        id: Uuid,
+        lifetime: Option<Duration>,
+    ) -> Result<(), SlateDBError> {}
+    
+    /// Deletes the checkpoint with the specified id.
+    pub async fn delete_checkpoint(
+        path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        id: Uuid,
+    ) -> Result<(), SlateDBError> {}
 
     /// Called to destroy the database at the given path. If `soft` is true, This method will
     /// set the destroyed_at_s field in the manifest. The GC will clean up the db after some
