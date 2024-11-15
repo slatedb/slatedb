@@ -76,13 +76,4 @@ impl ValueDeletable {
             ValueDeletable::Tombstone => None,
         }
     }
-
-    #[deprecated]
-    pub fn as_option(&self) -> Option<&Bytes> {
-        match self {
-            ValueDeletable::Value(v) => Some(v),
-            ValueDeletable::Merge(_) => todo!(),
-            ValueDeletable::Tombstone => None,
-        }
-    }
 }
