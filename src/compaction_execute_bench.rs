@@ -25,7 +25,7 @@ use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 use crate::test_utils::OrderedBytesGenerator;
-use crate::types::RowEntry;
+use crate::types::{RowEntry, ValueDeletable};
 
 pub struct CompactionExecuteBench {
     path: Path,
@@ -143,7 +143,7 @@ impl CompactionExecuteBench {
             let mut val = vec![0u8; val_bytes];
             rng.fill_bytes(val.as_mut_slice());
             let key = key_gen.next();
-            let row_entry = RowEntry::new(key, Some(val.into()), 0, None, None);
+            let row_entry = RowEntry::new(key, ValueDeletable::Value(val.into()), 0, None, None);
             sst_writer.add(row_entry).await?;
         }
         let encoded = sst_writer.close().await?;

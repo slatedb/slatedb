@@ -103,12 +103,22 @@ impl DbInner {
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
 
+        macro_rules! as_result {
+            ($deletable:expr) => {
+                match $deletable {
+                    ValueDeletable::Value(v) => Ok(Some(v)),
+                    ValueDeletable::Merge(_) => Err(SlateDBError::MergeUnsupported),
+                    ValueDeletable::Tombstone => Ok(None),
+                }
+            };
+        }
+
         if matches!(options.read_level, Uncommitted) {
             let maybe_val = std::iter::once(snapshot.wal)
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
             if let Some(val) = maybe_val {
-                return Ok(val.value.into_option());
+                return as_result!(val.value);
             }
         }
 
@@ -116,7 +126,7 @@ impl DbInner {
             .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
         if let Some(val) = maybe_val {
-            return Ok(val.value.into_option());
+            return as_result!(val.value);
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -130,7 +140,7 @@ impl DbInner {
                         .await?; // cache blocks that are being read
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return Ok(entry.value.into_option());
+                        return as_result!(entry.value);
                     }
                 }
             }
@@ -142,7 +152,7 @@ impl DbInner {
                         .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return Ok(entry.value.into_option());
+                        return as_result!(entry.value);
                     }
                 }
             }
