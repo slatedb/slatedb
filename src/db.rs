@@ -97,9 +97,7 @@ impl DbInner {
         key: &[u8],
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        if let Some(err) = self.error() {
-            return Err(err);
-        }
+        let _ = self.check_error()?;
         let snapshot = self.state.read().snapshot();
 
         if matches!(options.read_level, Uncommitted) {
@@ -235,9 +233,7 @@ impl DbInner {
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
-        if let Some(err) = self.error() {
-            return Err(err);
-        }
+        let _ = self.check_error()?;
 
         if batch.ops.is_empty() {
             return Ok(());
@@ -436,8 +432,13 @@ impl DbInner {
 
     /// Return an error if the state has encountered
     /// an unrecoverable error.
-    pub(crate) fn error(&self) -> Option<SlateDBError> {
-        self.error.read().clone()
+    pub(crate) fn check_error(&self) -> Result<(), SlateDBError> {
+        let error = self.error.read();
+        if let Some(err) = error.as_ref() {
+            Err(err.clone())
+        } else {
+            Ok(())
+        }
     }
 
     /// Set the state error if it is not already set.
@@ -2043,11 +2044,11 @@ mod tests {
         assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 2);
         assert_eq!(snapshot.state.core.next_wal_sst_id, next_wal_id);
         assert_eq!(
-            db.get(&key1).await.unwrap(),
+            reader.get(&key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
         );
         assert_eq!(
-            db.get(&key2).await.unwrap(),
+            reader.get(&key2).await.unwrap(),
             Some(Bytes::copy_from_slice(&value2))
         );
 
