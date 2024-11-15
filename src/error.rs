@@ -79,6 +79,9 @@ pub enum SlateDBError {
 
     #[error("Read channel error: {0}")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
+
+    #[error("Merge Operator is not fully implemented")]
+    MergeUnsupported,
 }
 
 impl From<std::io::Error> for SlateDBError {
