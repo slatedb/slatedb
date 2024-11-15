@@ -97,7 +97,7 @@ impl DbInner {
         key: &[u8],
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        let _ = self.check_error()?;
+        self.check_error()?;
         let snapshot = self.state.read().snapshot();
 
         if matches!(options.read_level, Uncommitted) {
@@ -233,7 +233,7 @@ impl DbInner {
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
-        let _ = self.check_error()?;
+        self.check_error()?;
 
         if batch.ops.is_empty() {
             return Ok(());
