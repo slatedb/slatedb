@@ -56,20 +56,32 @@ pub struct RowAttributes {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValueDeletable {
     Value(Bytes),
+    Merge(Bytes),
     Tombstone,
 }
 
 impl ValueDeletable {
+    pub fn len(&self) -> usize {
+        match self {
+            ValueDeletable::Value(v) | ValueDeletable::Merge(v) => v.len(),
+            ValueDeletable::Tombstone => 0,
+        }
+    }
+
+    #[deprecated]
     pub fn into_option(self) -> Option<Bytes> {
         match self {
             ValueDeletable::Value(v) => Some(v),
+            ValueDeletable::Merge(_) => todo!(),
             ValueDeletable::Tombstone => None,
         }
     }
 
+    #[deprecated]
     pub fn as_option(&self) -> Option<&Bytes> {
         match self {
             ValueDeletable::Value(v) => Some(v),
+            ValueDeletable::Merge(_) => todo!(),
             ValueDeletable::Tombstone => None,
         }
     }

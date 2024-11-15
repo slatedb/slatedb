@@ -79,6 +79,7 @@ impl SstRowEntry {
     pub fn flags(&self) -> RowFlags {
         let mut flags = match &self.value {
             ValueDeletable::Value(_) => RowFlags::default(),
+            ValueDeletable::Merge(_) => todo!(),
             ValueDeletable::Tombstone => RowFlags::TOMBSTONE,
         };
         if self.expire_ts.is_some() {
@@ -102,9 +103,9 @@ impl SstRowEntry {
         if self.create_ts.is_some() {
             size += 8; // i64 create_ts
         }
-        if let Some(value) = self.value.as_option() {
+        if !matches!(self.value, ValueDeletable::Tombstone) {
             size += 4; // u32 value_len
-            size += value.len(); // value
+            size += self.value.len(); // value
         }
         size
     }
