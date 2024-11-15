@@ -204,12 +204,8 @@ impl KVTable {
 
     fn maybe_subtract_old_val_from_size(&self, key: Bytes) {
         if let Some(old_deletable) = self.get(&key) {
-            let old_size = key.len()
-                + match old_deletable.value {
-                    ValueDeletable::Tombstone => 0,
-                    ValueDeletable::Value(old) => old.len(),
-                }
-                + sizeof_attributes(&old_deletable.attrs);
+            let old_size =
+                key.len() + old_deletable.value.len() + sizeof_attributes(&old_deletable.attrs);
             self.size.fetch_sub(old_size, Ordering::Relaxed);
         }
     }

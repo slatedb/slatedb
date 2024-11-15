@@ -403,6 +403,9 @@ impl DbInner {
                                 },
                             );
                         }
+                        ValueDeletable::Merge(_) => {
+                            todo!()
+                        }
                         ValueDeletable::Tombstone => guard.memtable().delete(
                             kv.key.clone(),
                             RowAttributes {
