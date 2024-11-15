@@ -19,24 +19,40 @@ pub struct RowEntry {
 }
 
 impl RowEntry {
-    #[allow(unused)]
     pub fn new(
         key: Bytes,
-        value: Option<Bytes>,
+        value: ValueDeletable,
         seq: u64,
         create_ts: Option<i64>,
         expire_ts: Option<i64>,
     ) -> Self {
-        let value = match value {
-            Some(v) => ValueDeletable::Value(v),
-            None => ValueDeletable::Tombstone,
-        };
         Self {
             key,
             value,
             seq,
             create_ts,
             expire_ts,
+        }
+    }
+    #[cfg(test)]
+    pub fn new_value(key: &[u8], value: &[u8], seq: u64) -> Self {
+        Self {
+            key: Bytes::copy_from_slice(key),
+            value: ValueDeletable::Value(Bytes::copy_from_slice(value)),
+            seq,
+            create_ts: None,
+            expire_ts: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_tombstone(key: &[u8], seq: u64) -> Self {
+        Self {
+            key: Bytes::copy_from_slice(key),
+            value: ValueDeletable::Tombstone,
+            seq,
+            create_ts: None,
+            expire_ts: None,
         }
     }
 }
@@ -65,15 +81,6 @@ impl ValueDeletable {
         match self {
             ValueDeletable::Value(v) | ValueDeletable::Merge(v) => v.len(),
             ValueDeletable::Tombstone => 0,
-        }
-    }
-
-    #[deprecated]
-    pub fn into_option(self) -> Option<Bytes> {
-        match self {
-            ValueDeletable::Value(v) => Some(v),
-            ValueDeletable::Merge(_) => todo!(),
-            ValueDeletable::Tombstone => None,
         }
     }
 }
