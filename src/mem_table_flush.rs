@@ -104,13 +104,17 @@ impl DbInner {
                     _ = manifest_poll_interval.tick() => {
                         if !is_stopped {
                             if let Err(err) = flusher.load_manifest().await {
-                                error!("error loading manifest: {}", err);
+                                error!("error loading manifest: {err}");
+                                this.set_error_if_none(err);
                             }
                             match flusher.flush_imm_memtables_to_l0().await {
                                 Ok(_) => {
                                     this.db_stats.immutable_memtable_flushes.inc();
                                 }
-                                Err(err) => error!("error from memtable flush: {}", err),
+                                Err(err) => {
+                                    error!("error from memtable flush: {err}");
+                                    this.set_error_if_none(err);
+                                }
                             }
                         }
                     }
@@ -126,10 +130,17 @@ impl DbInner {
                                     Ok(_) => {
                                         this.db_stats.immutable_memtable_flushes.inc();
                                     }
-                                    Err(err) => error!("error from memtable flush: {}", err),
+                                    Err(err) => {
+                                        error!("error from memtable flush: {err}");
+                                        this.set_error_if_none(err.clone());
+                                    }
                                 }
                                 if let Some(rsp) = rsp {
-                                    _ = rsp.send(result)
+                                    let res = rsp.send(result);
+                                    if let Err(Err(err)) = res {
+                                        error!("error sending flush response: {err}");
+                                        this.set_error_if_none(err);
+                                    }
                                 }
                             }
                         }
