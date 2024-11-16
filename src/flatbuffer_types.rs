@@ -5,6 +5,7 @@ use bytes::Bytes;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
 use ulid::Ulid;
 
+use crate::checkpoint;
 use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SsTableHandle};
 
@@ -143,10 +144,10 @@ impl FlatBufferManifestCodec {
                 ssts,
             })
         }
-        let checkpoints: Vec<db_state::Checkpoint> = manifest
+        let checkpoints: Vec<checkpoint::Checkpoint> = manifest
             .checkpoints()
             .iter()
-            .map(|cp| db_state::Checkpoint {
+            .map(|cp| checkpoint::Checkpoint {
                 id: uuid::Uuid::from_u64_pair(cp.id().high(), cp.id().low()),
                 manifest_id: cp.manifest_id(),
                 expire_time: Self::maybe_unix_ts_to_time(cp.checkpoint_expire_time_s()),
@@ -291,7 +292,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         time.map(Self::time_to_unix_ts).unwrap_or(0)
     }
 
-    fn add_checkpoint(&mut self, checkpoint: &db_state::Checkpoint) -> WIPOffset<Checkpoint<'b>> {
+    fn add_checkpoint(&mut self, checkpoint: &checkpoint::Checkpoint) -> WIPOffset<Checkpoint<'b>> {
         let id = self.add_uuid(checkpoint.id);
         let checkpoint_expire_time_s = Self::maybe_time_to_unix_ts(checkpoint.expire_time.as_ref());
         let checkpoint_create_time_s = Self::time_to_unix_ts(&checkpoint.create_time);
@@ -310,7 +311,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
 
     fn add_checkpoints(
         &mut self,
-        checkpoints: &[db_state::Checkpoint],
+        checkpoints: &[checkpoint::Checkpoint],
     ) -> WIPOffset<Vector<'b, ForwardsUOffset<Checkpoint<'b>>>> {
         let checkpoints_fb_vec: Vec<WIPOffset<Checkpoint>> =
             checkpoints.iter().map(|c| self.add_checkpoint(c)).collect();
@@ -389,7 +390,7 @@ impl From<CompressionFormat> for Option<CompressionCodec> {
 
 #[cfg(test)]
 mod tests {
-    use crate::db_state;
+    use crate::checkpoint;
     use crate::db_state::CoreDbState;
     use crate::flatbuffer_types::FlatBufferManifestCodec;
     use crate::manifest::{Manifest, ManifestCodec};
@@ -400,13 +401,13 @@ mod tests {
         // given:
         let mut core = CoreDbState::new();
         core.checkpoints = vec![
-            db_state::Checkpoint {
+            checkpoint::Checkpoint {
                 id: uuid::Uuid::new_v4(),
                 manifest_id: 1,
                 expire_time: None,
                 create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(100),
             },
-            db_state::Checkpoint {
+            checkpoint::Checkpoint {
                 id: uuid::Uuid::new_v4(),
                 manifest_id: 2,
                 expire_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)),

@@ -1,4 +1,6 @@
 use clap::{Parser, Subcommand};
+use std::time::Duration;
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "slatedb")]
@@ -43,6 +45,54 @@ pub(crate) enum CliCommands {
         #[arg(short, long)]
         end: Option<u64>,
     },
+
+    /// Create a new checkpoint pointing to the database's current state.
+    CreateCheckpoint {
+        /// Optionally specify a lifetime for the created checkpoint. You can specify the lifetime
+        /// in a human-friendly format that uses years/days/min/s, e.g. "7days 30min 10s". The
+        /// checkpoint's expiry time will be set to the current wallclock time plus the specified
+        /// lifetime. If the lifetime is not specified, then the checkpoint is set with no expiry
+        /// and must be explicitly removed.
+        #[arg(short, long)]
+        #[clap(value_parser = humantime::parse_duration)]
+        lifetime: Option<Duration>,
+
+        /// Optionally specify the id (e.g. 01740ee5-6459-44af-9a45-85deb6e468e3) of an existing
+        /// checkpoint to use as the base for the newly created checkpoint. If not provided then
+        /// the checkpoint will be taken against the latest manifest.
+        #[arg(short, long)]
+        #[clap(value_parser = uuid::Uuid::parse_str)]
+        source: Option<Uuid>,
+    },
+
+    /// Refresh an existing checkpoint's expiry time. This command will look for an existing
+    /// checkpoint and update its expiry time using the specified lifetime.
+    RefreshCheckpoint {
+        /// The id of the checkpoint (e.g. 01740ee5-6459-44af-9a45-85deb6e468e3) to refresh.
+        #[arg(short, long)]
+        #[clap(value_parser = uuid::Uuid::parse_str)]
+        id: Uuid,
+
+        /// Optionally specify a new lifetime for the checkpoint. You can specify the lifetime in a
+        /// human-friendly format that uses years/days/min/s, e.g. "7days 30min 10s". The
+        /// checkpoint's expiry time will be set to the current wallclock time plus the specified
+        /// lifetime. If the lifetime is not specified, then the checkpoint is updated with no
+        /// expiry and must be explicitly removed.
+        #[arg(short, long)]
+        #[clap(value_parser = humantime::parse_duration)]
+        lifetime: Option<Duration>,
+    },
+
+    /// Delete an existing checkpoint.
+    DeleteCheckpoint {
+        /// The id of the checkpoint (e.g. 01740ee5-6459-44af-9a45-85deb6e468e3) to delete.
+        #[arg(short, long)]
+        #[clap(value_parser = uuid::Uuid::parse_str)]
+        id: Uuid,
+    },
+
+    /// List the current checkpoints of the db.
+    ListCheckpoints {},
 }
 
 pub(crate) fn parse_args() -> CliArgs {

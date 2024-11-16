@@ -248,7 +248,7 @@ impl ManifestStore {
                 if let AlreadyExists { path: _, source: _ } = err {
                     SlateDBError::ManifestVersionExists
                 } else {
-                    SlateDBError::ObjectStoreError(err)
+                    SlateDBError::from(err)
                 }
             })?;
 
@@ -284,7 +284,7 @@ impl ManifestStore {
 
         while let Some(file) = match files_stream.next().await.transpose() {
             Ok(file) => file,
-            Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
+            Err(e) => return Err(SlateDBError::from(e)),
         } {
             match self.parse_id(&file.location, "manifest") {
                 Ok(id) if id_range.contains(&id) => {
@@ -322,12 +322,12 @@ impl ManifestStore {
         let manifest_bytes = match self.object_store.get(manifest_path).await {
             Ok(manifest) => match manifest.bytes().await {
                 Ok(bytes) => bytes,
-                Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
+                Err(e) => return Err(SlateDBError::from(e)),
             },
             Err(e) => {
                 return match e {
                     Error::NotFound { .. } => Ok(None),
-                    _ => Err(SlateDBError::ObjectStoreError(e)),
+                    _ => Err(SlateDBError::from(e)),
                 }
             }
         };

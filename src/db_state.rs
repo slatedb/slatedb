@@ -1,12 +1,11 @@
+use crate::checkpoint::Checkpoint;
 use bytes::Bytes;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use std::time::SystemTime;
 use tracing::debug;
 use ulid::Ulid;
-use uuid::Uuid;
 use SsTableId::{Compacted, Wal};
 
 use crate::config::CompressionCodec;
@@ -134,14 +133,6 @@ impl SortedRun {
         self.find_sst_with_range_covering_key_idx(key)
             .map(|idx| &self.ssts[idx])
     }
-}
-
-#[derive(Clone, PartialEq, Serialize, Debug)]
-pub(crate) struct Checkpoint {
-    pub(crate) id: Uuid,
-    pub(crate) manifest_id: u64,
-    pub(crate) expire_time: Option<SystemTime>,
-    pub(crate) create_time: SystemTime,
 }
 
 pub(crate) struct DbState {
