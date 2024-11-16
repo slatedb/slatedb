@@ -64,6 +64,7 @@ pub(crate) struct DbInner {
     pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
     pub(crate) write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: Arc<DbStats>,
+    pub(crate) error: RwLock<Option<SlateDBError>>,
 }
 
 impl DbInner {
@@ -85,6 +86,7 @@ impl DbInner {
             memtable_flush_notifier,
             write_notifier,
             db_stats,
+            error: RwLock::new(None),
         };
         Ok(db_inner)
     }
@@ -95,6 +97,7 @@ impl DbInner {
         key: &[u8],
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
+        self.check_error()?;
         let snapshot = self.state.read().snapshot();
 
         if matches!(options.read_level, Uncommitted) {
@@ -230,6 +233,8 @@ impl DbInner {
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
+        self.check_error()?;
+
         if batch.ops.is_empty() {
             return Ok(());
         }
@@ -310,7 +315,8 @@ impl DbInner {
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
-            .send(WalFlushThreadMsg::FlushImmutableWals(Some(tx)))?;
+            .send(WalFlushThreadMsg::FlushImmutableWals(Some(tx)))
+            .map_err(|_| SlateDBError::WalFlushChannelError)?;
         rx.await?
     }
 
@@ -318,7 +324,8 @@ impl DbInner {
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
-            .send(MemtableFlushThreadMsg::FlushImmutableMemtables(Some(tx)))?;
+            .send(MemtableFlushThreadMsg::FlushImmutableMemtables(Some(tx)))
+            .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         rx.await?
     }
 
@@ -421,6 +428,29 @@ impl DbInner {
         );
 
         Ok(())
+    }
+
+    /// Return an error if the state has encountered
+    /// an unrecoverable error.
+    pub(crate) fn check_error(&self) -> Result<(), SlateDBError> {
+        let error = self.error.read();
+        if let Some(err) = error.as_ref() {
+            Err(err.clone())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Set the state error if it is not already set.
+    ///
+    /// We only care about the first error because
+    /// subsequent errors are likely to be the result of
+    /// the first error.
+    pub(crate) fn set_error_if_none(&self, new_error: SlateDBError) {
+        let mut error = self.error.write();
+        if error.is_none() {
+            *error = Some(new_error);
+        }
     }
 }
 
@@ -1963,15 +1993,10 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_recover_imm_from_wal() {
         let fp_registry = Arc::new(FailPointRegistry::new());
-        fail_parallel::cfg(
-            fp_registry.clone(),
-            "write-compacted-sst-io-error",
-            "return",
-        )
-        .unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "pause").unwrap();
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -1996,21 +2021,19 @@ mod tests {
         db.put(&key2, &value2).await.unwrap();
         next_wal_id += 1;
 
-        db.close().await.unwrap();
-
-        // reload the db
-        let db = Db::open_with_opts(
+        let reader = Db::open_with_opts(
             path.clone(),
             test_db_options(0, 128, None),
             object_store.clone(),
         )
         .await
         .unwrap();
+
         // increment wal id for the empty wal
         next_wal_id += 1;
 
         // verify that we reload imm
-        let snapshot = db.inner.state.read().snapshot();
+        let snapshot = reader.inner.state.read().snapshot();
         assert_eq!(snapshot.state.imm_memtable.len(), 2);
 
         // one empty wal and two wals for the puts
@@ -2021,12 +2044,77 @@ mod tests {
         assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 2);
         assert_eq!(snapshot.state.core.next_wal_sst_id, next_wal_id);
         assert_eq!(
-            db.get(&key1).await.unwrap(),
+            reader.get(&key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
         );
         assert_eq!(
-            db.get(&key2).await.unwrap(),
+            reader.get(&key2).await.unwrap(),
             Some(Bytes::copy_from_slice(&value2))
+        );
+
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
+        db.close().await.unwrap();
+        reader.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_should_recover_imm_from_wal_after_flush_error() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            "return",
+        )
+        .unwrap();
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let db = Db::open_with_fp_registry(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+            fp_registry.clone(),
+        )
+        .await
+        .unwrap();
+
+        // write a few keys that will result in memtable flushes
+        let key1 = [b'a'; 32];
+        let value1 = [b'b'; 96];
+        let result = db.put(&key1, &value1).await;
+        assert!(result.is_ok(), "Failed to write key1");
+
+        let flush_result = db.inner.flush_memtables().await;
+        match flush_result {
+            Err(e) => assert!(matches!(e, SlateDBError::IoError(_))),
+            _ => panic!("Expected flush error"),
+        }
+        db.close().await.unwrap();
+
+        // reload the db
+        let db = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        // verify that we reload imm
+        let snapshot = db.inner.state.read().snapshot();
+        assert_eq!(snapshot.state.imm_memtable.len(), 1);
+
+        // one empty wal and one wal for the first put
+        assert_eq!(
+            snapshot.state.imm_memtable.front().unwrap().last_wal_id(),
+            1 + 1
+        );
+        assert!(snapshot.state.imm_memtable.get(1).is_none());
+
+        assert_eq!(snapshot.state.core.next_wal_sst_id, 4);
+        assert_eq!(
+            db.get(&key1).await.unwrap(),
+            Some(Bytes::copy_from_slice(&value1))
         );
     }
 

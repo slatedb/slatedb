@@ -23,6 +23,7 @@ dotenvy = { version = "0.15.7" }
 fail-parallel = "0.5.1"
 flatbuffers = "24.3.25"
 futures = "0.3.30"
+humantime = {  version = "2.1.0", optional = true }
 leaky-bucket = {  version = "1.1", optional = true }
 object_store = "0.11.0"
 parking_lot = "0.12.3"
@@ -62,7 +63,7 @@ figment = { version = "0.10.19", features = ["test"] }
 default = ["aws", "moka"]
 aws = ["object_store/aws"]
 azure = ["object_store/azure"]
-cli = ["clap", "clap/derive"]
+cli = ["clap", "clap/derive", "humantime"]
 bencher = ["aws", "azure", "wal_disable", "clap", "clap/derive", "moka"]
 compression = ["snappy"]
 snappy = ["dep:snap"]

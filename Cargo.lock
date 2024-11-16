@@ -2246,6 +2246,7 @@ dependencies = [
  "flate2",
  "foyer",
  "futures",
+ "humantime",
  "leaky-bucket",
  "log",
  "lz4_flex",
