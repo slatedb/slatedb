@@ -98,15 +98,15 @@ impl DbInner {
             let mut ticker = tokio::time::interval(this.options.flush_interval);
             loop {
                 select! {
-                  // Tick to freeze and flush the memtable
-                  _ = ticker.tick() => {
-                     let result = this.flush().await;
-                     if let Err(err) = result {
-                        error!("error from wal flush: {err}");
-                        this.set_error_if_none(err);
-                     }
-                  }
-                  msg = rx.recv() => {
+                    // Tick to freeze and flush the memtable
+                    _ = ticker.tick() => {
+                        let result = this.flush().await;
+                        if let Err(err) = result {
+                            error!("error from wal flush: {err}");
+                            this.set_error_if_none(err);
+                        }
+                    }
+                    msg = rx.recv() => {
                         let msg = msg.expect("channel unexpectedly closed");
                         match msg {
                             WalFlushThreadMsg::Shutdown => {
@@ -130,7 +130,7 @@ impl DbInner {
                                 }
                             },
                         }
-                  }
+                    }
                 }
             }
         }))
