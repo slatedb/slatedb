@@ -28,6 +28,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Handle;
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::warn;
 
 use crate::batch::WriteBatch;
@@ -56,13 +57,16 @@ use crate::tablestore::TableStore;
 use crate::types::{RowAttributes, ValueDeletable};
 use std::rc::Rc;
 
+pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
+pub(crate) type FlushMsg<T> = (Option<FlushSender>, T);
+
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
-    pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
-    pub(crate) write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
+    pub(crate) wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
+    pub(crate) memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
+    pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: Arc<DbStats>,
     pub(crate) error: RwLock<Option<SlateDBError>>,
 }
@@ -72,9 +76,9 @@ impl DbInner {
         options: DbOptions,
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
-        wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
-        memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
-        write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
+        wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
+        memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
+        write_notifier: UnboundedSender<WriteBatchMsg>,
         db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let state = DbState::new(core_db_state);
@@ -315,7 +319,7 @@ impl DbInner {
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
-            .send(WalFlushThreadMsg::FlushImmutableWals(Some(tx)))
+            .send((Some(tx), WalFlushThreadMsg::FlushImmutableWals))
             .map_err(|_| SlateDBError::WalFlushChannelError)?;
         rx.await?
     }
@@ -324,7 +328,7 @@ impl DbInner {
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
-            .send(MemtableFlushThreadMsg::FlushImmutableMemtables(Some(tx)))
+            .send((Some(tx), MemtableFlushThreadMsg::FlushImmutableMemtables))
             .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         rx.await?
     }
@@ -756,7 +760,7 @@ impl Db {
         // Shutdown the WAL flush thread.
         self.inner
             .wal_flush_notifier
-            .send(WalFlushThreadMsg::Shutdown)
+            .send((None, WalFlushThreadMsg::Shutdown))
             .ok();
 
         if let Some(flush_task) = {
@@ -769,7 +773,7 @@ impl Db {
         // Shutdown the memtable flush thread.
         self.inner
             .memtable_flush_notifier
-            .send(MemtableFlushThreadMsg::Shutdown)
+            .send((None, MemtableFlushThreadMsg::Shutdown))
             .ok();
 
         if let Some(memtable_flush_task) = {
