@@ -2057,7 +2057,7 @@ mod tests {
         reader.close().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_recover_imm_from_wal_after_flush_error() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         fail_parallel::cfg(
@@ -2084,14 +2084,11 @@ mod tests {
         let result = db.put(&key1, &value1).await;
         assert!(result.is_ok(), "Failed to write key1");
 
-        let key2 = [b'c'; 32];
-        let value2 = [b'd'; 96];
-        let result = db.put(&key2, &value2).await;
-        match result {
-            Ok(_) => panic!("Successfully wrote key2"),
+        let flush_result = db.inner.flush_memtables().await;
+        match flush_result {
             Err(e) => assert!(matches!(e, SlateDBError::IoError(_))),
+            _ => panic!("Expected flush error"),
         }
-
         db.close().await.unwrap();
 
         // reload the db
