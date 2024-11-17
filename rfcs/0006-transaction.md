@@ -18,6 +18,7 @@
   - [Proposal](#proposal)
     - [API](#api)
     - [Conflict Checking](#conflict-checking)
+    - [How to Test](#how-to-test)
   - [Roadmap](#roadmap)
   - [Updates](#updates)
 
@@ -279,6 +280,18 @@ It does not need to check conflicts with `txn1`, because `txn1` is committed bef
 The potential risk of this SSI approach is that ALL the read keys in the running transactions should be tracked in the `read_keys` of the `TransactionState` before commit. If I scanned 1 million rows in a transaction and finally only updated 1 row, all the keys of the 1 million rows scanned should be tracked inside it. This issue could be mitigated by `KeyFingerPrint` mechanism, let's say each finger print is 32 bytes, then the 1 million keys would cost roughly 32MB memory, which might be acceptable in most cases.
 
 This approach can be adjusted to support SI as well by only tracking the keys that are being written to. When user set the isolation level to SI, the `read_keys` could always be set as None. The GC mechanism to release inactive transactions could be the same as the SSI.
+
+### How to Test
+
+Testing transaction implementations requires verifying both correctness and isolation guarantees.
+
+To test the transaction feature, we could write some test cases that cover the following aspects:
+
+1. Basic transaction operations.
+2. Isolation guarantees for both SI and SSI modes.
+3. Edge cases and concurrency control.
+
+We could consider to port the test cases from [RocksDB](https://github.com/facebook/rocksdb/blob/3495c94761629404f5476f732e2130134cfcc51b/utilities/transactions/optimistic_transaction_test.cc), [Badger](https://github.com/dgraph-io/badger/blob/36c461a435c53a8a81e7377c2b026b24d37eee0c/txn_test.go) to have a comprehensive coverage of the above aspects.
 
 ## Roadmap
 
