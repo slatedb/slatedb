@@ -147,13 +147,13 @@ However, it may produce massive writes on read intensive workloads when you hope
 > transactions offer simple semantics: users can treat their transactions
 > as though they were running in isolation.
 
-As above, I think it's better to finally have SSI support in the transaction feature, we could consider to implement the Snapshot Isolation + `GetForUpdate()` first, and then implement the SSI support after it.
+As above, I think it's better to finally have SSI support in the transaction feature, we could consider to implement the Snapshot Isolation first, and then implement the SSI support after it.
 
 We'll cover the implementation details about the SI and SSI in the later section.
 
 ## Other Systems
 
-We'll refer to the transaction implementation of other LSM-tree based storage engines to understand the possible approaches to implement the transaction feature in SlateDB. The following sections are the transaction implementation of RocksDB and Badger.
+Before diving into the details of the transaction implementation in SlateDB, let's first review the transaction implementation of other LSM-tree based storage engines, to understand the possible approaches to implement the transaction feature in SlateDB.
 
 ### RocksDB
 
@@ -169,34 +169,31 @@ The conflict checking in RocksDB is very straightforward:
 
 RocksDB assumes each transaction is short-lived, and only checks the conflicts with the changes in recent. In LSM, the "recent changes" are buffered in MemTable, so RocksDB leverages MemTable to check the conflicts, making conflict checks a pure in-memory operation without any IO overhead.
 
-However, since the size of MemTable is limited and might be flushed & rotated at any time, it cannot buffer ALL the changes since the earliest running transaction. To deal with this limitation, RocksDB's solution is:
+However, since the size of MemTable is limited and might be flushed & rotated at any time, it cannot buffer ALL the changes since the earliest running transaction. To deal with this limitation, RocksDB's solution is simply abort the transaction as 'Expired' if the MemTable's earliest sequence number is bigger than the transaction's sequence number.
 
-1. Track the earliest sequence number of keys in the MemTable.
-2. When transaction commits, if the MemTable's earliest sequence number is bigger than the transaction's sequence number, then the transaction is considered as `Expired`.
-
-The good part of this approach is that it's very efficient and simple, and it's free of floating garbage. The bad part is that it may abort the transaction when it's not necessary, and tends to encourage users to set a bigger MemTable size.
+The good part of this approach is that it's very efficient and simple, and it's free of floating garbage. The bad part is that it may abort the transaction when it's not necessary, and tends to encourage users to set a bigger MemTable size to reduce the probability of the expired transaction.
 
 ### Badger
 
-Badger takes a different approach from RocksDB, it provides Serializable isolation level by default. The key idea is to track both read and write operations in the transaction state, and check conflicts with all the committed transactions during commit.
+Badger takes a different approach from RocksDB, it provides Serializable isolation level by default. The key idea is to track both read and write operations in the transaction state, and check conflicts with the recent committed transactions tracked in a global Oracle during commit.
 
-Badger maintains a global Oracle which tracks the recent committed transactions. When a transaction commits, it should push itself into the Oracle's recent committed transactions list. The Oracle also maintains a sequence number generator, which is used to assign sequence numbers to transactions.
+Badger maintains a global "Oracle" which tracks the recent committed transactions. When a transaction commits, it should push itself into the Oracle's recent committed transactions list. The Oracle also maintains a sequence number generator, which is used to assign sequence numbers to transactions.
 
-The conflict checking in Badger is more accurate than RocksDB:
+The conflict checking in Badger is as follows:
 
-1. Track both read and write operations in the transaction state.
-2. Track the sequence number when transaction started.
-3. When `commit()` is called, check conflicts with all the committed transactions in the Oracle which committed after the transaction started.
+1. Track the sequence number when transaction started.
+2. Track both read and write keys in the transaction state.
+3. When `commit()` is called, check conflicts with the recent committed transactions in the Oracle which committed after the transaction started.
 4. The conflict check verifies that: the transaction's read and write keys do not conflict with other transactions' write keys
 
-This approach provides Serializable isolation level by detecting both Write-Write conflicts and Read-Write conflicts. It does not rely on MemTable size like RocksDB does, and provides more accurate conflict detection.
+This approach provides Serializable isolation level by detecting both Write-Write conflicts and Read-Write conflicts. It does not rely on MemTable size like RocksDB does, and provides more accurate conflict detection, without worrying about the MemTable size.
 
-The downside is that it requires more memory to track the read operations and recent committed transactions. However, Badger mitigates this by:
+The downside is that it requires more memory to track the read keys and recent committed transactions. However, Badger mitigates this by:
 
-1. Using integer fingerprints instead of full keys to track read/write operations
-2. Having an efficient GC mechanism to clean up old committed transactions from the Oracle
+1. Using u64 key fingerprints instead of full keys to track read/write keys.
+2. Having an GC mechanism to clean up old committed transactions from the Oracle.
 
-The GC is straightforward - when all running transactions have sequence numbers greater than a committed transaction's sequence number, that committed transaction can be removed from the Oracle.
+The GC is also straightforward - when all running transactions have sequence numbers greater than a committed transaction's sequence number, that committed transaction can be removed from the Oracle.
 
 ## Proposal
 
