@@ -29,8 +29,8 @@ jobs:
         uses: actions/checkout@v4
 
       # Set up Rust stable
-      - name: Set up Rust stable
-        run: rustup default stable
+      - name: Install cargo-edit
+        run: cargo install cargo-edit
 
       # Set Cargo.toml version using cargo-edit
       - name: Set version
