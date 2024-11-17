@@ -27,6 +27,8 @@ jobs:
       # Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ssh-key: ${{ secrets.RELEASE_SSH_KEY }}
 
       # Set up Rust stable
       - name: Install cargo-edit
