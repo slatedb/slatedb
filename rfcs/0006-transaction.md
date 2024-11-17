@@ -70,7 +70,7 @@ This RFC proposes the goals & design proposal of the transaction feature in Slat
 Snapshot and WriteBatch are considered as the prerequisites for the Transaction feature. We could implement the Transaction feature upon them, with the following requirements:
 
 1. Adding a **conflict check before writing a WriteBatch** to guarantee the transaction isolation.
-2. Adding an **iterator over WriteBatch & Snapshot** to make MVCC possible.
+2. Adding an **iterator that merges WriteBatch & Snapshot** to provide a consistent view that includes both uncommitted changes and the underlying snapshot.
 
 In this section, we'll discuss the requirements for implementing transactions, including the necessary capabilities of Snapshots and WriteBatches, as well as the semantics of different Isolation Levels.
 
@@ -230,9 +230,7 @@ txn.commit().await?;
 
 ### Conflict Checking
 
-We'd prefer to finally implement the Serializable Snapshot Isolation (SSI) in SlateDB, so the conflict checking should be able to detect both Write-Write conflicts and Read-Write conflicts.
-
-The approach we choose is similar to Badger's approach of tracking recent committed transactions globally and checking conflicts against them. This provides accurate SSI conflict detection while remaining memory efficient through key fingerprinting.
+The approach we choose on conflict checking is expected to be more similar to Badger's global `Oracle` approach, since we hope to provide SSI in the transaction feature, and it's less prone to unnecessarily abort the transaction with limited MemTable size.
 
 Below is the data structure of the global `Oracle` and the transaction state:
 
@@ -275,7 +273,7 @@ It does not need to check conflicts with `txn1`, because `txn1` is committed bef
 
 The potential risk of this SSI approach is that ALL the read keys in the running transactions should be tracked in the `read_keys` of the `TransactionState` before commit. If I scanned 1 million rows in a transaction and finally only updated 1 row, all the keys of the 1 million rows scanned should be tracked inside it. This issue could be mitigated by `KeyFingerPrint` mechanism, let's say each finger print is 32 bytes, then the 1 million keys would cost roughly 32MB memory, which might be acceptable in most cases.
 
-This approach can be adjusted to support SI as well by only tracking the keys that are being written to. When user set the isolation level to SI, the `read_keys` could always be set as None. The GC mechanism to release inactive transactions could be the same as the SSI.
+This approach can be adjusted to support SI as well by only tracking the keys that are being written to. When user set the isolation level to SI, the `read_keys` could always be set as None. The GC mechanism to release inactive transactions is still the same as the SSI.
 
 ### How to Test
 
