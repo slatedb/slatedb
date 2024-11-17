@@ -233,9 +233,11 @@ txn.commit().await?;
 
 ### Conflict Checking
 
-The difference between SSI and SI is simple: not only check the conflicts between the current transactions's Writes with others' Writes, but also check the conflicts between the current transaction's Reads with others' Writes.
+We'd prefer to finally implement the Serializable Snapshot Isolation (SSI) in SlateDB, so the conflict checking should be able to detect both Write-Write conflicts and Read-Write conflicts.
 
-The key idea is to track the recent committed transactions globally, and let the current transaction checks conflicts with them, belike:
+The approach we choose is similar to Badger's approach of tracking recent committed transactions globally and checking conflicts against them. This provides accurate SSI conflict detection while remaining memory efficient through key fingerprinting.
+
+Below is the data structure of the global `Oracle` and the transaction state:
 
 ```rust
 struct Oracle {
@@ -255,7 +257,7 @@ struct TransactionState {
 
 `Oracle` is considered as a global singleton in the DB, and it tracks the recent committed transactions in the `recent_committed_txns` deque. When a transaction commits, it should push itself into the `recent_committed_txns` deque, and the entries in `recent_committed_txns` can be GCed after they are not needed, we'll cover the details on GC later.
 
-Another detail worth to be mentioned is that we do not have to track the full keys in `String` on `read_keys` and `write_keys`, which might be not memory efficient. Instead, we could just store the integer hash `KeyFingerPrint` of each key. There might introduce some unnecessary conflicts when different keys happens to got the same hash value, but the probability is extreme low.
+To avoid the memory usage of tracking the full keys, we could just store the integer hash `KeyFingerPrint` of each key. There might introduce some unnecessary conflicts when different keys happens to got the same hash value, but the probability is considered as extremely low.
 
 Besides the started sequence number of the transaction, we also need to track the sequence number of the transaction committed. During the execution of a transaction, some other transactions might commit, and the current transaction should check the conflicts with these committed transactions.
 
@@ -274,9 +276,9 @@ Let's say the current transaction is `txn4`, it should check conflicts with `txn
 
 It does not need to check conflicts with `txn1`, because `txn1` is committed before `txn4` started. This could tell us when to GC the entry in the `recent_committed_txns` deque: when ALL the running transactions' sequence number are bigger than the committed sequence number of the entry, then the entry could be GCed.
 
-In my opinion, the approach using a global in memory `Oracle` which tracks the recent committed transactions is kinda better than the RocksDB's approach, because it could provide a more accurate conflict check, without coupling with the MemTable size & unpredicatble MemTable flushes. It might introduce some additional memory usage on tracking the recent transactions, but the GC mechamism is also considered as very simple and efficient.
+The potential risk of this SSI approach is that ALL the read keys in the running transactions should be tracked in the `read_keys` of the `TransactionState` before commit. If I scanned 1 million rows in a transaction and finally only updated 1 row, all the keys of the 1 million rows scanned should be tracked inside it. This issue could be mitigated by `KeyFingerPrint` mechanism, let's say each finger print is 32 bytes, then the 1 million keys would cost roughly 32MB memory, which might be acceptable in most cases.
 
-The potential risk of this SSI approach is that ALL the read keys in the running transactions should be tracked in the `read_keys` of the `TransactionState` before commit. If I scanned 1 million rows in a transaction and finally only updated 1 row, all the keys of the 1 million rows scanned should be tracked in side it. This issue could be mitigated by the `KeyFingerPrint` approach, let's say each finger print is 32 bytes, then the 1 million keys would cost roughly 32MB memory, which might be acceptable in most cases.
+This approach can be adjusted to support SI as well by only tracking the keys that are being written to. When user set the isolation level to SI, the `read_keys` could always be set as None. The GC mechanism to release inactive transactions could be the same as the SSI.
 
 ## Roadmap
 
