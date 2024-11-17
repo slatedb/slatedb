@@ -191,9 +191,7 @@ However, it may produce massive writes on read intensive workloads when you hope
 > transactions offer simple semantics: users can treat their transactions
 > as though they were running in isolation.
 
-As above, I think it's better to finally have SSI support in the transaction feature, but thanks to the simplicity of the RocksDB approach, we could consider to implement the RocksDB approach (Snapshot Isolation + `GetForUpdate()`) first, and then implement the SSI support after it.
-
-With regard of the SSI implementation in Badger, it's a good reference for us about SSI could be implemented as an "additive feature" over the SI.
+As above, I think it's better to finally have SSI support in the transaction feature, we could consider to implement the Snapshot Isolation + `GetForUpdate()` first, and then implement the SSI support after it.
 
 We'll cover the implementation details about the SI and SSI in the later section.
 
@@ -208,17 +206,13 @@ As a fork of LevelDB, all the transaction feature in RocksDB needs to do is to p
 1. Adding a **conflict check before writing a WriteBatch** to guarantee the transaction isolation.
 2. Adding an **iterator over WriteBatch & Snapshot** to make MVCC possible.
 
-This is also true for the Badger's implementation.
-
 Let's discuss the prerequisites in this section, and evaluate the possible approaches we'd take in SlateDB to smooth the implementation of the transaction feature.
 
 #### Snapshot
 
 LevelDB and its derivatives mostly tags a sequence number to each key, and each Snapshot simply bounds with a sequence number. All the read in the Snapshot filters out the values with bigger sequence number, including a new value or a tombstone on the same key.
 
-At the moment of writing, SlateDB still haven't have the equivant of sequence number yet, instead, we could regard a manifest + wal number to represent a consistent view of a table.
-
-There're an in-progress RFC on exploring the design on Snapshot. We can refer to that RFC for the details later. However, we'd **assume that each key has a sequence number** in this doc, because it's considered as a common practice in LSM-tree based storage engines.
+At the moment of writing, adding sequence number to each key is still WIP in SlateDB. However, we'd **assume that each key has a sequence number** in this doc, because it's considered as a common practice in LSM-tree based storage engines.
 
 #### Write Batch
 
@@ -243,9 +237,9 @@ You may notice that the `WriteBatch` API is very similar to the `Transaction` AP
 1. the `WriteBatch` is committed by `db.write(batch)`, while the `Transaction` is committed by `txn.commit()`
 2. beside the write operations, the `Transaction` should also support the read operations, and if one key is updated in the `Transaction`, the read operation should return the updated value during the transaction.
 
-The `WriteBatch` is considered as a prerequisite for the transaction feature, as it plays as a place to buffer the writes, and it makes MVCC possible with an iterator over it in front of the iterator over Snapshot. So we should implement the `WriteBatch` first before the transaction feature.
+The `WriteBatch` is also considered as a prerequisite for the transaction feature, as it plays as a place to buffer the writes, and it makes MVCC possible with an iterator over it in front of the iterator over Snapshot.
 
-We can refer to the WriteBatch RFC or PR for the details later.
+Now WriteBatch has been implemented in SlateDB in [this PR](https://github.com/slatedb/slatedb/pull/264). We can further add the iterator over WriteBatch in front of the iterator over Snapshot while implementing the transaction feature.
 
 ## Conflict Checking: Snapshot Isolation
 
