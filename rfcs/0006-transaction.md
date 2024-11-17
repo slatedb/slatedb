@@ -37,11 +37,7 @@ Transaction allows multiple operations to be executed in a single atomic operati
 - Using SlateDB as a metadata store or coordinator for a distributed system, such as the backend of [Kine](https://github.com/k3s-io/kine) or various metadata stores in OLAP systems.
 - Using SlateDB as a underlying KV layer in an OLTP system, such as a [TiKV](https://tikv.org/) replacement or other SQL engines.
 
-This RFC proposes the goals & design draft of the transaction feature in SlateDB.
-
-There're still some ongoing RFCs on the prerequisites of the Transaction feature, such as the Snapshot API and WriteBatch API. We'll refer to these RFCs or PRs in this RFC when they're ready.
-
-Is this RFC considered as too early? Yes, the implementation of the Transaction feature can not be started until the prerequisites got ready. However, this RFC may help us to clarify the requirements of the Snapshot API and WriteBatch API in the sense of the Transaction feature, and organize the roadmap on these developments.
+This RFC proposes the goals & design proposal of the transaction feature in SlateDB.
 
 ## Goals
 
