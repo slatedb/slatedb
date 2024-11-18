@@ -9,7 +9,7 @@ use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::manifest_store::FenceableManifest;
 
-pub(crate) enum MemtableFlushThreadMsg {
+pub enum MemtableFlushThreadMsg {
     Shutdown,
     FlushImmutableMemtables(Option<tokio::sync::oneshot::Sender<Result<(), SlateDBError>>>),
 }

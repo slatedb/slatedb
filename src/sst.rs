@@ -36,7 +36,11 @@ impl Default for SsTableFormat {
             sst_codec: Box::new(FlatBufferSsTableInfoCodec {}),
             filter_bits_per_key: 10,
             compression_codec: None,
-            row_features: vec![RowFeature::Flags, RowFeature::Timestamp],
+            row_features: vec![
+                RowFeature::Flags,
+                RowFeature::Timestamp,
+                RowFeature::ExpireAtTs,
+            ],
         }
     }
 }
@@ -878,7 +882,7 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
-            block_size: 40,
+            block_size: 48,
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
@@ -954,7 +958,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
             min_filter_keys: 1,
-            block_size: 40,
+            block_size: 48,
             ..SsTableFormat::default()
         };
         let row_features = format.row_features.clone();

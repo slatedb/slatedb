@@ -50,7 +50,7 @@
 //! filter_bits_per_key = 10
 //! l0_sst_size_bytes = 67108864
 //! l0_max_ssts = 8
-//! max_unflushed_memtable = 2
+//! max_unflushed_bytes = 536870912
 //!
 //! [compactor_options]
 //! poll_interval = "5s"
@@ -87,7 +87,7 @@
 //!  "filter_bits_per_key": 10,
 //!  "l0_sst_size_bytes": 67108864,
 //!  "l0_max_ssts": 8,
-//!  "max_unflushed_memtable": 2,
+//!  "max_unflushed_bytes": 536870912,
 //!  "compactor_options": {
 //!    "poll_interval": "5s",
 //!    "max_sst_size": 1073741824,
@@ -127,7 +127,7 @@
 //! filter_bits_per_key: 10
 //! l0_sst_size_bytes: 67108864
 //! l0_max_ssts: 8
-//! max_unflushed_memtable: 2
+//! max_unflushed_bytes: 536870912
 //! compactor_options:
 //!   poll_interval: '5s'
 //!   max_sst_size: 1073741824
@@ -173,13 +173,16 @@ use crate::types::KeyValue;
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
 pub const DEFAULT_SCAN_OPTIONS: &ScanOptions = &ScanOptions::default();
 pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
+pub const DEFAULT_PUT_OPTIONS: &PutOptions = &PutOptions::default();
 
 /// Whether reads see only writes that have been committed durably to the DB.  A
 /// write is considered durably committed if all future calls to read are guaranteed
 /// to serve the data written by the write, until some later durably committed write
 /// updates the same key.
+#[derive(Clone, Default)]
 pub enum ReadLevel {
     /// Client reads will only see data that's been committed durably to the DB.
+    #[default]
     Commited,
 
     /// Clients will see all writes, including those not yet durably committed to the
@@ -189,13 +192,14 @@ pub enum ReadLevel {
 
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
+#[derive(Clone, Default)]
 pub struct ReadOptions {
     /// The read commit level for read operations.
     pub read_level: ReadLevel,
 }
 
 impl ReadOptions {
-    /// Create a new ReadOptions with `read_level` set to `Commited`.
+    /// Create a new `ReadOptions` with `read_level` set to `Commited`.
     const fn default() -> Self {
         Self {
             read_level: ReadLevel::Commited,
@@ -251,7 +255,7 @@ impl From<KeyValue> for DbRecord {
 
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct WriteOptions {
     /// Whether `put` calls should block until the write has been durably committed
     /// to the DB.
@@ -267,16 +271,66 @@ impl WriteOptions {
     }
 }
 
+/// Configuration for client put operations. `PutOptions` is supplied for each
+/// row inserted. This differs from [`WriteOptions`] in that a write may encompass
+/// multiple puts (such as the case with batched writes)
+#[derive(Clone, Default)]
+pub struct PutOptions {
+    /// The time-to-live (ttl) for this insertion. If this insert overwrites an existing
+    /// database entry, the TTL for the most recent entry will be canonical.
+    ///
+    /// Default: the TTL configured in DbOptions when opening a SlateDB session
+    pub ttl: Ttl,
+}
+
+impl PutOptions {
+    const fn default() -> Self {
+        Self { ttl: Ttl::Default }
+    }
+
+    pub(crate) fn expire_ts_from(&self, default: Option<u64>, now: i64) -> Option<i64> {
+        match self.ttl {
+            Ttl::Default => match default {
+                None => None,
+                Some(default_ttl) => Self::checked_expire_ts(now, default_ttl),
+            },
+            Ttl::NoExpiry => None,
+            Ttl::ExpireAfter(ttl) => Self::checked_expire_ts(now, ttl),
+        }
+    }
+
+    fn checked_expire_ts(now: i64, ttl: u64) -> Option<i64> {
+        // for overflow, we will just assume no TTL
+        if ttl > i64::MAX as u64 {
+            return None;
+        };
+        let expire_ts = now + (ttl as i64);
+        if expire_ts < now {
+            return None;
+        };
+
+        Some(expire_ts)
+    }
+}
+
+#[derive(Clone, Default)]
+pub enum Ttl {
+    #[default]
+    Default,
+    NoExpiry,
+    ExpireAfter(u64),
+}
+
 /// defines the clock that SlateDB will use during this session
 pub trait Clock {
     /// Returns a timestamp (typically measured in millis since the unix epoch),
     /// must return monotonically increasing numbers (this is enforced
-    /// at runtime and will panic if the invariant is broken)
+    /// at runtime and will panic if the invariant is broken).
     ///
     /// Note that this clock does not need to return a number that
     /// represents the unix timestamp; the only requirement is that
     /// it represents a sequence that can attribute a logical ordering
-    /// to actions on the database
+    /// to actions on the database.
     fn now(&self) -> i64;
 }
 
@@ -386,9 +440,12 @@ pub struct DbOptions {
     /// l0 ssts than this value, until compaction can compact the ssts into compacted.
     pub l0_max_ssts: usize,
 
-    /// Defines the max number of unflushed memtables. Writes will be paused if there
-    /// are more unflushed memtables than this value
-    pub max_unflushed_memtable: usize,
+    /// Defines the max number of unflushed key/value pair bytes that should reside in memory
+    /// before applying backpressure to writers. This includes key/value pairs in both the
+    /// immutable WAL flush queue and the immutable memtable flush queue. Writes will be
+    /// paused if the total number of unflushed bytes exceeds this value until data is flushed
+    /// to object storage.
+    pub max_unflushed_bytes: usize,
 
     /// Configuration options for the compactor.
     pub compactor_options: Option<CompactorOptions>,
@@ -412,6 +469,12 @@ pub struct DbOptions {
     #[serde(skip)]
     #[serde(default = "default_clock")]
     pub clock: Arc<dyn Clock + Send + Sync>,
+
+    /// The default time-to-live (TTL) for insertions (note that re-inserting a key
+    /// with any value will update the TTL to use the default_ttl)
+    ///
+    /// Default: no TTL (insertions will remain until deleted)
+    pub default_ttl: Option<u64>,
 }
 
 impl DbOptions {
@@ -552,8 +615,8 @@ impl Default for DbOptions {
             wal_enabled: true,
             manifest_poll_interval: Duration::from_secs(1),
             min_filter_keys: 1000,
+            max_unflushed_bytes: 1_073_741_824,
             l0_sst_size_bytes: 64 * 1024 * 1024,
-            max_unflushed_memtable: 2,
             l0_max_ssts: 8,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
@@ -562,6 +625,7 @@ impl Default for DbOptions {
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
             clock: default_clock(),
+            default_ttl: None,
         }
     }
 }
@@ -645,6 +709,14 @@ pub struct CompactorOptions {
     /// this to isolate compactions to a dedicated thread pool.
     #[serde(skip)]
     pub compaction_runtime: Option<Handle>,
+
+    /// The Clock to use for determining the time the compaction has run. This
+    /// helps determine actions such as expiring data with a configured time-to-live.
+    ///
+    /// Default: the default clock uses the local system time on the machine
+    #[serde(skip)]
+    #[serde(default = "default_clock")]
+    pub clock: Arc<dyn Clock + Send + Sync>,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -659,6 +731,7 @@ impl Default for CompactorOptions {
             compaction_scheduler: default_compaction_scheduler(),
             max_concurrent_compactions: 4,
             compaction_runtime: None,
+            clock: default_clock(),
         }
     }
 }

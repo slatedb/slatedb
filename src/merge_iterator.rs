@@ -216,15 +216,14 @@ impl<T: KeyValueIterator + SeekToKey> SeekToKey for MergeIterator<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-
-    use crate::config::Clock;
     use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
     use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
     use crate::test_utils::{assert_iterator, gen_attrs, TestClock};
     use crate::types::{KeyValueDeletable, ValueDeletable};
     use bytes::Bytes;
+    use std::collections::VecDeque;
+    use std::sync::atomic::Ordering::SeqCst;
 
     #[tokio::test]
     async fn test_merge_iterator_should_include_entries_in_order() {
@@ -459,7 +458,7 @@ mod tests {
             self.entries.push_back(Ok(KeyValueDeletable {
                 key: Bytes::from(key),
                 value: ValueDeletable::Value(Bytes::from(val)),
-                attributes: gen_attrs(self.clock.now()),
+                attributes: gen_attrs(self.clock.ticker.fetch_add(1, SeqCst)),
             }));
             self
         }

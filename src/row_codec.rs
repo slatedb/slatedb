@@ -10,6 +10,8 @@ bitflags! {
     }
 }
 
+const NO_EXPIRE_TS: i64 = i64::MIN;
+
 /// Encodes key and value using the binary codec for SlateDB row representation
 /// using the `v0` encoding scheme.
 ///
@@ -47,12 +49,18 @@ pub(crate) fn encode_row_v0(
     value: Option<&[u8]>,
     row_features: &[RowFeature],
     timestamp: Option<i64>,
+    expire_at: Option<i64>,
 ) {
     data.put_u16(key_prefix_len as u16);
     data.put_u16(key_suffix.len() as u16);
     data.put(key_suffix);
 
-    data.put(encode_meta(row_features, value.is_none(), timestamp));
+    data.put(encode_meta(
+        row_features,
+        value.is_none(),
+        timestamp,
+        expire_at,
+    ));
 
     if let Some(value) = value {
         data.put_u32(value.len() as u32);
@@ -60,13 +68,19 @@ pub(crate) fn encode_row_v0(
     }
 }
 
-fn encode_meta(row_features: &[RowFeature], is_tombstone: bool, timestamp: Option<i64>) -> Bytes {
+fn encode_meta(
+    row_features: &[RowFeature],
+    is_tombstone: bool,
+    timestamp: Option<i64>,
+    expire_at: Option<i64>,
+) -> Bytes {
     let mut meta = BytesMut::new();
 
     for attr in row_features {
         match attr {
             RowFeature::Flags => meta.put_u8(encode_row_flags(is_tombstone)),
             RowFeature::Timestamp => meta.put_i64(timestamp.expect("Timestamp RowAttribute was enabled for SST but attempted to insert a row with no timestamp.")),
+            RowFeature::ExpireAtTs => meta.put_i64(expire_at.unwrap_or(NO_EXPIRE_TS))
         }
     }
 
@@ -111,19 +125,24 @@ pub(crate) fn decode_row_v0(
     Ok(KeyValueDeletable {
         key: key.into(),
         value,
-        attributes: RowAttributes { ts: meta.timestamp },
+        attributes: RowAttributes {
+            ts: meta.timestamp,
+            expire_ts: meta.expire_ts,
+        },
     })
 }
 
 struct RowMetadata {
     flags: RowFlags,
     timestamp: Option<i64>,
+    expire_ts: Option<i64>,
 }
 
 fn decode_meta(row_features: &[RowFeature], data: &mut Bytes) -> Result<RowMetadata, SlateDBError> {
     let mut meta = RowMetadata {
         flags: RowFlags::empty(),
         timestamp: None,
+        expire_ts: None,
     };
     for attr in row_features {
         match attr {
@@ -134,6 +153,14 @@ fn decode_meta(row_features: &[RowFeature], data: &mut Bytes) -> Result<RowMetad
                 Err(e) => return Err(e),
             },
             RowFeature::Timestamp => meta.timestamp = Some(data.get_i64()),
+            RowFeature::ExpireAtTs => {
+                let expire_ts = data.get_i64();
+                meta.expire_ts = if expire_ts == NO_EXPIRE_TS {
+                    None
+                } else {
+                    Some(expire_ts)
+                };
+            }
         }
     }
     Ok(meta)
@@ -158,7 +185,11 @@ mod tests {
         let key_prefix_len = 3;
         let key_suffix = b"key";
         let value = Some(b"value".as_slice());
-        let row_features = vec![RowFeature::Flags, RowFeature::Timestamp];
+        let row_features = vec![
+            RowFeature::Flags,
+            RowFeature::Timestamp,
+            RowFeature::ExpireAtTs,
+        ];
 
         // Encode the row
         encode_row_v0(
@@ -168,6 +199,7 @@ mod tests {
             value,
             &row_features,
             Some(1),
+            Some(10),
         );
 
         let first_key = Bytes::from(b"prefixdata".as_ref());
@@ -181,6 +213,37 @@ mod tests {
         assert_eq!(decoded.key, expected_key);
         assert_eq!(decoded.value, expected_value);
         assert_eq!(decoded.attributes.ts, Some(1));
+        assert_eq!(decoded.attributes.expire_ts, Some(10));
+    }
+
+    #[test]
+    fn test_encode_decode_normal_row_no_expire_ts() {
+        let mut encoded_data = Vec::new();
+        let key_prefix_len = 3;
+        let key_suffix = b"key";
+        let value = Some(b"value".as_slice());
+        let row_features = vec![
+            RowFeature::Flags,
+            RowFeature::Timestamp,
+            RowFeature::ExpireAtTs,
+        ];
+
+        // Encode the row
+        encode_row_v0(
+            &mut encoded_data,
+            key_prefix_len,
+            key_suffix,
+            value,
+            &row_features,
+            Some(1),
+            None,
+        );
+
+        let first_key = Bytes::from(b"prefixdata".as_ref());
+        let mut data = Bytes::from(encoded_data);
+        let decoded = decode_row_v0(&first_key, &row_features, &mut data).expect("Decoding failed");
+
+        assert_eq!(decoded.attributes.expire_ts, None);
     }
 
     #[test]
@@ -199,6 +262,7 @@ mod tests {
             value,
             &row_features,
             Some(1), // pass in a timestamp, but it should not be encoded because flag is disabled
+            Some(10),
         );
 
         let first_key = Bytes::from(b"".as_ref());
@@ -224,6 +288,7 @@ mod tests {
             value,
             &row_features,
             Some(1),
+            Some(10),
         );
 
         let first_key = Bytes::from(b"deadbeefdata".as_ref());
@@ -282,6 +347,7 @@ mod tests {
             value,
             &row_features,
             Some(1),
+            Some(10),
         );
 
         let first_key = Bytes::from(b"keyprefixdata".as_slice());

@@ -28,7 +28,6 @@
 use core::panic;
 use std::sync::Arc;
 
-use log::warn;
 use tokio::runtime::Handle;
 
 use crate::types::RowAttributes;
@@ -52,19 +51,20 @@ pub(crate) struct WriteBatchRequest {
 impl DbInner {
     #[allow(clippy::panic)]
     async fn write_batch(&self, batch: WriteBatch) -> Result<Arc<KVTable>, SlateDBError> {
-        self.maybe_apply_backpressure().await;
+        let now = self.options.clock.now();
 
         let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
             let current_wal = guard.wal();
             for op in batch.ops {
                 match op {
-                    WriteOp::Put(key, value) => {
+                    WriteOp::Put(key, value, opts) => {
                         current_wal.put(
                             key,
                             value,
                             RowAttributes {
-                                ts: Some(self.options.clock.now()),
+                                ts: Some(now),
+                                expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
                             },
                         );
                     }
@@ -72,13 +72,16 @@ impl DbInner {
                         current_wal.delete(
                             key,
                             RowAttributes {
-                                ts: Some(self.options.clock.now()),
+                                ts: Some(now),
+                                expire_ts: None,
                             },
                         );
                     }
                 }
             }
-            current_wal.table().clone()
+            let table = current_wal.table().clone();
+            self.maybe_freeze_wal(&mut guard)?;
+            table
         } else {
             if cfg!(not(feature = "wal_disable")) {
                 panic!("wal_disabled feature must be enabled");
@@ -87,12 +90,13 @@ impl DbInner {
             let current_memtable = guard.memtable();
             for op in batch.ops {
                 match op {
-                    WriteOp::Put(key, value) => {
+                    WriteOp::Put(key, value, opts) => {
                         current_memtable.put(
                             key,
                             value,
                             RowAttributes {
-                                ts: Some(self.options.clock.now()),
+                                ts: Some(now),
+                                expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
                             },
                         );
                     }
@@ -100,7 +104,8 @@ impl DbInner {
                         current_memtable.delete(
                             key,
                             RowAttributes {
-                                ts: Some(self.options.clock.now()),
+                                ts: Some(now),
+                                expire_ts: None,
                             },
                         );
                     }
@@ -108,33 +113,11 @@ impl DbInner {
             }
             let table = current_memtable.table().clone();
             let last_wal_id = guard.last_written_wal_id();
-            self.maybe_freeze_memtable(&mut guard, last_wal_id);
+            self.maybe_freeze_memtable(&mut guard, last_wal_id)?;
             table
         };
 
         Ok(current_table)
-    }
-
-    pub(crate) async fn maybe_apply_backpressure(&self) {
-        loop {
-            let table = {
-                let guard = self.state.read();
-                let state = guard.state();
-                if state.imm_memtable.len() <= self.options.max_unflushed_memtable {
-                    return;
-                }
-                let Some(table) = state.imm_memtable.back() else {
-                    return;
-                };
-                warn!(
-                    "applying backpressure to write by waiting for imm table flush. imm tables({}), max({})",
-                    state.imm_memtable.len(),
-                    self.options.max_unflushed_memtable
-                );
-                table.clone()
-            };
-            table.await_flush_to_l0().await
-        }
     }
 
     pub(crate) fn spawn_write_task(

@@ -305,8 +305,12 @@ mod tests {
 
     use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestratorMsg};
     use crate::compactor_state::{Compaction, SourceId};
-    use crate::config::{DbOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions};
+    use crate::config::{
+        DbOptions, ObjectStoreCacheOptions, PutOptions, SizeTieredCompactionSchedulerOptions, Ttl,
+        WriteOptions,
+    };
     use crate::db::Db;
+    use crate::db_state::CoreDbState;
     use crate::iter::KeyValueIterator;
     use crate::manifest_store::{ManifestStore, StoredManifest};
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
@@ -320,26 +324,20 @@ mod tests {
     #[tokio::test]
     async fn test_compactor_compacts_l0() {
         // given:
-        let options = db_options(Some(compactor_options()));
+        let clock = Arc::new(TestClock::new());
+        let options = db_options(Some(compactor_options(clock.clone())), clock.clone());
         let (_, manifest_store, table_store, db) = build_test_db(options).await;
         for i in 0..4 {
-            db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48]).await;
-            db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48]).await;
+            db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48])
+                .await
+                .unwrap();
+            db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48])
+                .await
+                .unwrap();
         }
 
         // when:
-        let db_state = run_for(Duration::from_secs(10), || async {
-            let stored_manifest = StoredManifest::load(manifest_store.clone())
-                .await
-                .unwrap()
-                .unwrap();
-            let db_state = stored_manifest.db_state();
-            if db_state.l0_last_compacted.is_some() {
-                return Some(db_state.clone());
-            }
-            None
-        })
-        .await;
+        let db_state = await_compaction(manifest_store).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -365,22 +363,131 @@ mod tests {
         // todo: test that the db can read the k/vs (once we implement reading from compacted)
     }
 
+    #[tokio::test]
+    async fn test_should_compact_expired_entries() {
+        // given:
+        let insert_clock = Arc::new(TestClock::new());
+        let compaction_clock = Arc::new(TestClock::new());
+
+        let compactor_opts = CompactorOptions {
+            compaction_scheduler: Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+                SizeTieredCompactionSchedulerOptions {
+                    // compact as soon as we have data
+                    min_compaction_sources: 1,
+                    max_compaction_sources: 10,
+                    include_size_threshold: 4.0,
+                },
+            )),
+            ..compactor_options(compaction_clock.clone())
+        };
+        let options = DbOptions {
+            default_ttl: Some(50),
+            ..db_options(Some(compactor_opts), insert_clock.clone())
+        };
+        let (_, manifest_store, table_store, db) = build_test_db(options).await;
+
+        // ticker time = 0, expire time = 10
+        insert_clock.ticker.store(0, atomic::Ordering::SeqCst);
+        db.put_with_options(
+            &[1; 16],
+            &[b'a'; 64],
+            &PutOptions {
+                ttl: Ttl::ExpireAfter(10),
+            },
+            &WriteOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        // ticker time = 10, expire time = 60 (using default TTL)
+        insert_clock.ticker.store(10, atomic::Ordering::SeqCst);
+        db.put_with_options(
+            &[2; 16],
+            &[b'a'; 64],
+            &PutOptions { ttl: Ttl::Default },
+            &WriteOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        db.flush().await.unwrap();
+
+        // ticker time = 30, no expire time
+        insert_clock.ticker.store(30, atomic::Ordering::SeqCst);
+        db.put_with_options(
+            &[3; 16],
+            &[b'a'; 64],
+            &PutOptions { ttl: Ttl::NoExpiry },
+            &WriteOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        // this revives key 1
+        // ticker time = 40, expire time 80
+        insert_clock.ticker.store(40, atomic::Ordering::SeqCst);
+        db.put_with_options(
+            &[1; 16],
+            &[b'a'; 64],
+            &PutOptions {
+                ttl: Ttl::ExpireAfter(80),
+            },
+            &WriteOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        db.flush().await.unwrap();
+
+        // when:
+        // advance time to 70
+        compaction_clock.ticker.store(70, atomic::Ordering::SeqCst);
+        let db_state = await_compaction(manifest_store).await;
+
+        // then:
+        let db_state = db_state.expect("db was not compacted");
+        assert!(db_state.l0_last_compacted.is_some());
+        assert_eq!(db_state.compacted.len(), 1);
+        let compacted = &db_state.compacted.first().unwrap().ssts;
+        assert_eq!(compacted.len(), 1);
+        let handle = compacted.first().unwrap();
+        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1, false)
+            .await
+            .unwrap();
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), &[1; 16]);
+
+        // skip k2 because its expired
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), &[3; 16]);
+
+        let maybe_kv = iter.next().await.unwrap();
+        assert!(
+            maybe_kv.is_none(),
+            "Expected no more entries, but got: {:?}",
+            maybe_kv
+        );
+    }
+
     #[test]
     fn test_should_write_manifest_safely() {
         // given:
         // write an l0
-        let options = db_options(None);
+        let clock = Arc::new(TestClock::new());
+        let options = db_options(None, clock.clone());
         let rt = build_runtime();
         let (os, manifest_store, table_store, db) = rt.block_on(build_test_db(options.clone()));
         let mut stored_manifest = rt
             .block_on(StoredManifest::load(manifest_store.clone()))
             .unwrap()
             .unwrap();
-        rt.block_on(db.put(&[b'a'; 32], &[b'b'; 96]));
+        rt.block_on(db.put(&[b'a'; 32], &[b'b'; 96])).unwrap();
         rt.block_on(db.close()).unwrap();
         let (_, external_rx) = crossbeam_channel::unbounded();
         let mut orchestrator = CompactorOrchestrator::new(
-            compactor_options(),
+            compactor_options(clock.clone()),
             manifest_store.clone(),
             table_store.clone(),
             rt.handle().clone(),
@@ -403,7 +510,7 @@ mod tests {
                 os.clone(),
             ))
             .unwrap();
-        rt.block_on(db.put(&[b'j'; 32], &[b'k'; 96]));
+        rt.block_on(db.put(&[b'j'; 32], &[b'k'; 96])).unwrap();
         rt.block_on(db.close()).unwrap();
         orchestrator
             .submit_compaction(Compaction::new(l0_ids_to_compact.clone(), 0))
@@ -486,7 +593,22 @@ mod tests {
         (os, manifest_store, table_store, db)
     }
 
-    fn db_options(compactor_options: Option<CompactorOptions>) -> DbOptions {
+    async fn await_compaction(manifest_store: Arc<ManifestStore>) -> Option<CoreDbState> {
+        run_for(Duration::from_secs(10), || async {
+            let stored_manifest = StoredManifest::load(manifest_store.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            let db_state = stored_manifest.db_state();
+            if db_state.l0_last_compacted.is_some() {
+                return Some(db_state.clone());
+            }
+            None
+        })
+        .await
+    }
+
+    fn db_options(compactor_options: Option<CompactorOptions>, clock: Arc<TestClock>) -> DbOptions {
         DbOptions {
             flush_interval: Duration::from_millis(100),
             #[cfg(feature = "wal_disable")]
@@ -494,19 +616,20 @@ mod tests {
             manifest_poll_interval: Duration::from_millis(100),
             min_filter_keys: 0,
             filter_bits_per_key: 10,
+            max_unflushed_bytes: 1_073_741_824,
             l0_sst_size_bytes: 128,
-            max_unflushed_memtable: 2,
             l0_max_ssts: 8,
             compactor_options,
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             block_cache: None,
             garbage_collector_options: None,
-            clock: Arc::new(TestClock::new()),
+            clock,
+            default_ttl: None,
         }
     }
 
-    fn compactor_options() -> CompactorOptions {
+    fn compactor_options(clock: Arc<TestClock>) -> CompactorOptions {
         CompactorOptions {
             poll_interval: Duration::from_millis(100),
             max_sst_size: 1024 * 1024 * 1024,
@@ -515,6 +638,7 @@ mod tests {
             )),
             max_concurrent_compactions: 1,
             compaction_runtime: None,
+            clock,
         }
     }
 }
