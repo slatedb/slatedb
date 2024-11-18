@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use tokio::runtime::Handle;
 use tokio::select;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::error;
 
-use crate::db::DbInner;
+use crate::db::{DbInner, FlushMsg};
 use crate::db_state;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
@@ -12,9 +13,10 @@ use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
 use crate::types::{RowAttributes, ValueDeletable};
 
-pub enum WalFlushThreadMsg {
+#[derive(Debug)]
+pub(crate) enum WalFlushThreadMsg {
     Shutdown,
-    FlushImmutableWals(Option<tokio::sync::oneshot::Sender<Result<(), SlateDBError>>>),
+    FlushImmutableWals,
 }
 
 impl DbInner {
@@ -90,7 +92,7 @@ impl DbInner {
 
     pub(crate) fn spawn_flush_task(
         self: &Arc<Self>,
-        mut rx: tokio::sync::mpsc::UnboundedReceiver<WalFlushThreadMsg>,
+        mut rx: UnboundedReceiver<FlushMsg<WalFlushThreadMsg>>,
         tokio_handle: &Handle,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let this = Arc::clone(self);
@@ -107,22 +109,22 @@ impl DbInner {
                         }
                     }
                     msg = rx.recv() => {
-                        let msg = msg.expect("channel unexpectedly closed");
+                        let (rsp_sender, msg) = msg.expect("channel unexpectedly closed");
                         match msg {
                             WalFlushThreadMsg::Shutdown => {
                                 // Stop the thread.
                                 _ = this.flush().await;
                                 return
                             },
-                            WalFlushThreadMsg::FlushImmutableWals(rsp) => {
+                            WalFlushThreadMsg::FlushImmutableWals => {
                                 let result = this.flush().await;
                                 if let Err(err) = &result {
                                     error!("error from wal flush: {err}");
                                     this.set_error_if_none(err.clone());
                                 }
 
-                                if let Some(rsp) = rsp {
-                                    let res = rsp.send(result);
+                                if let Some(rsp_sender) = rsp_sender {
+                                    let res = rsp_sender.send(result);
                                     if let Err(Err(err)) = res {
                                         error!("error sending flush response: {err}");
                                         this.set_error_if_none(err);
