@@ -139,7 +139,7 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
         assert!(max_fetch_tasks > 0);
         assert!(blocks_to_fetch > 0);
         let index = table_store.read_index(table.as_ref()).await?;
-        let next_block_idx_to_fetch = match range.start_bound().clone() {
+        let next_block_idx_to_fetch = match range.start_bound() {
             Unbounded => 0,
             Included(k) | Excluded(k) => {
                 Self::first_block_with_data_including_or_after_key(&index.borrow(), k.as_ref())
@@ -207,13 +207,10 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
                         if let Some(block) = blocks.pop_front() {
                             let start_bound = self.range.start_bound();
                             return match start_bound {
-                                Unbounded => Ok(Some(BlockIterator::from_first_key(
-                                    block,
-                                ))),
-                                Included(key) | Excluded(key) => Ok(Some(BlockIterator::from_key(
-                                    block,
-                                    key,
-                                ))),
+                                Unbounded => Ok(Some(BlockIterator::from_first_key(block))),
+                                Included(key) | Excluded(key) => {
+                                    Ok(Some(BlockIterator::from_key(block, key)))
+                                }
                             };
                         } else {
                             self.fetch_tasks.pop_front();

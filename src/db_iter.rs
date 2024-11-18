@@ -84,13 +84,17 @@ impl<'a> DbIterator<'a> {
         if self.invalidated {
             Err(SlateDBError::InvalidatedIterator)
         } else if !self.range.contains(&next_key) {
-            Err(SlateDBError::InvalidArgument)
+            Err(SlateDBError::InvalidArgument {
+                msg: "Next key must be contained in the original range".to_string(),
+            })
         } else if self
             .last_key
             .clone()
             .map_or(false, |last_key| next_key <= last_key)
         {
-            Err(SlateDBError::InvalidArgument)
+            Err(SlateDBError::InvalidArgument {
+                msg: "Cannot seek to a key less than the last returned key".to_string(),
+            })
         } else {
             self.iter.seek(&next_key).await
         }

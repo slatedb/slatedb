@@ -9,10 +9,10 @@ use crossbeam_skiplist::SkipMap;
 use tokio::sync::watch;
 
 use crate::db_iter::SeekToKey;
-use crate::merge_iterator::MergeIterator;
-use crate::range_util::BytesRange;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
+use crate::merge_iterator::MergeIterator;
+use crate::range_util::BytesRange;
 use crate::types::{RowAttributes, RowEntry, ValueDeletable};
 
 pub(crate) struct KVTable {

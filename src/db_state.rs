@@ -159,8 +159,7 @@ impl SortedRun {
         range: &BytesRange,
     ) -> VecDeque<Arc<SsTableHandle>> {
         let mut covering_ssts = VecDeque::new();
-        let ssts: Vec<Arc<SsTableHandle>> =
-            self.ssts.into_iter().map(|sst| Arc::new(sst)).collect();
+        let ssts: Vec<Arc<SsTableHandle>> = self.ssts.into_iter().map(Arc::new).collect();
 
         for idx in 0..ssts.len() {
             let current_sst = &ssts[idx];
@@ -172,7 +171,7 @@ impl SortedRun {
                 None
             };
 
-            if current_sst.intersects_range(upper_bound_key, &range) {
+            if current_sst.intersects_range(upper_bound_key, range) {
                 covering_ssts.push_back(ssts[idx].clone());
             }
         }

@@ -1,10 +1,10 @@
 use crate::db_iter::SeekToKey;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
+use crate::types::RowEntry;
 use bytes::Bytes;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
-use crate::types::RowEntry;
 
 pub(crate) struct TwoMergeIterator<T1: KeyValueIterator, T2: KeyValueIterator> {
     iterator1: (T1, Option<RowEntry>),

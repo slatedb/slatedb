@@ -77,7 +77,7 @@ pub enum SlateDBError {
     InvalidatedIterator,
 
     #[error("Invalid Argument")]
-    InvalidArgument,
+    InvalidArgument { msg: String },
 }
 
 impl From<std::io::Error> for SlateDBError {

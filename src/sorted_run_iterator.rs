@@ -5,12 +5,11 @@ use crate::iter::KeyValueIterator;
 use crate::range_util::BytesRange;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
+use crate::types::RowEntry;
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use crate::types::RowEntry;
-
 
 pub(crate) struct SortedRunIterator<'a, H: AsRef<SsTableHandle> = &'a SsTableHandle> {
     current_iter: Option<SstIterator<'a, H>>,
@@ -53,7 +52,7 @@ impl<'a> SortedRunIterator<'a, Arc<SsTableHandle>> {
         let sorted_run_iter = SsTableHandleIter::new(ssts);
         let start_key = range.start_bound_opt();
 
-        Ok(Self::new_from_iter(
+        Self::new_from_iter(
             sorted_run_iter,
             start_key.clone(),
             table_store,
@@ -62,7 +61,7 @@ impl<'a> SortedRunIterator<'a, Arc<SsTableHandle>> {
             true,
             cache_blocks,
         )
-        .await?)
+        .await
     }
 }
 
@@ -137,7 +136,7 @@ impl<'a> SortedRunIterator<'a, &'a SsTableHandle> {
         cache_blocks: bool,
     ) -> Result<Self, SlateDBError> {
         let sorted_run_iter = Self::find_iter_from_key(from_key.clone(), sorted_run);
-        Ok(Self::new_from_iter(
+        Self::new_from_iter(
             sorted_run_iter,
             from_key,
             table_store,
@@ -146,7 +145,7 @@ impl<'a> SortedRunIterator<'a, &'a SsTableHandle> {
             spawn,
             cache_blocks,
         )
-        .await?)
+        .await
     }
 
     fn find_iter_from_key(
@@ -154,8 +153,7 @@ impl<'a> SortedRunIterator<'a, &'a SsTableHandle> {
         sorted_run: &'a SortedRun,
     ) -> SsTableHandleIter<'a, &'a SsTableHandle> {
         let sorted_runs = from_key
-            .map(|key| sorted_run.find_sst_with_range_covering_key_idx(key.as_ref()))
-            .flatten()
+            .and_then(|key| sorted_run.find_sst_with_range_covering_key_idx(key.as_ref()))
             .map(|idx| sorted_run.ssts[idx..].iter())
             .unwrap_or(sorted_run.ssts.iter())
             .collect();

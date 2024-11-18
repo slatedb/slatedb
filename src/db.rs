@@ -949,10 +949,7 @@ impl Db {
     /// Scan a range of keys with the provided options.
     ///
     /// returns a `DbIterator`
-    pub async fn scan<'a, T: RangeBounds<Bytes>>(
-        &'a self,
-        range: T,
-    ) -> Result<DbIterator<'a>, SlateDBError> {
+    pub async fn scan<T: RangeBounds<Bytes>>(&self, range: T) -> Result<DbIterator, SlateDBError> {
         self.inner
             .scan_with_options(range.into(), DEFAULT_SCAN_OPTIONS)
             .await
@@ -961,11 +958,11 @@ impl Db {
     /// Scan a range of keys with the provided options.
     ///
     /// returns a `DbIterator`
-    pub async fn scan_with_options<'a, T: RangeBounds<Bytes>>(
-        &'a self,
+    pub async fn scan_with_options<T: RangeBounds<Bytes>>(
+        &self,
         range: T,
         options: &ScanOptions,
-    ) -> Result<DbIterator<'a>, SlateDBError> {
+    ) -> Result<DbIterator, SlateDBError> {
         self.inner.scan_with_options(range.into(), options).await
     }
 
@@ -1523,7 +1520,7 @@ mod tests {
             let value = arbitrary_bytes_in_range(&lower_bounded_range);
             assert!(matches!(
                 iter.seek(value).await,
-                Err(SlateDBError::InvalidArgument)
+                Err(SlateDBError::InvalidArgument { msg: _ })
             ));
 
             let mut iter = db
@@ -1535,7 +1532,7 @@ mod tests {
             let value = arbitrary_bytes_in_range(&upper_bounded_range.into());
             assert!(matches!(
                 iter.seek(value).await,
-                Err(SlateDBError::InvalidArgument)
+                Err(SlateDBError::InvalidArgument { msg: _ })
             ));
         }
     }
