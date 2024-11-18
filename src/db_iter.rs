@@ -13,7 +13,10 @@ use std::sync::Arc;
 
 type ScanIterator<'a> = TwoMergeIterator<
     VecDequeKeyValueIterator,
-    TwoMergeIterator<MergeIterator<SstIterator<'a, Arc<SsTableHandle>>>, MergeIterator<SortedRunIterator<'a, Arc<SsTableHandle>>>>,
+    TwoMergeIterator<
+        MergeIterator<SstIterator<'a, Arc<SsTableHandle>>>,
+        MergeIterator<SortedRunIterator<'a, Arc<SsTableHandle>>>,
+    >,
 >;
 
 pub struct DbIterator<'a> {
@@ -82,7 +85,11 @@ impl<'a> DbIterator<'a> {
             Err(SlateDBError::InvalidatedIterator)
         } else if !self.range.contains(&next_key) {
             Err(SlateDBError::InvalidArgument)
-        } else if self.last_key.clone().map_or(false, |last_key| { next_key <= last_key }) {
+        } else if self
+            .last_key
+            .clone()
+            .map_or(false, |last_key| next_key <= last_key)
+        {
             Err(SlateDBError::InvalidArgument)
         } else {
             self.iter.seek(&next_key).await
@@ -92,5 +99,4 @@ impl<'a> DbIterator<'a> {
 
 pub(crate) trait SeekToKey {
     async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError>;
-
 }

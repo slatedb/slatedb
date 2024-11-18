@@ -1,10 +1,10 @@
-use std::cmp::{Ordering, Reverse};
-use std::collections::{BinaryHeap, VecDeque};
-use bytes::Bytes;
 use crate::db_iter::SeekToKey;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::KeyValueDeletable;
+use bytes::Bytes;
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, VecDeque};
 
 pub(crate) struct TwoMergeIterator<T1: KeyValueIterator, T2: KeyValueIterator> {
     iterator1: (T1, Option<KeyValueDeletable>),
@@ -12,7 +12,6 @@ pub(crate) struct TwoMergeIterator<T1: KeyValueIterator, T2: KeyValueIterator> {
 }
 
 impl<T1: KeyValueIterator, T2: KeyValueIterator> TwoMergeIterator<T1, T2> {
-
     pub(crate) async fn new(mut iterator1: T1, mut iterator2: T2) -> Result<Self, SlateDBError> {
         let next1 = iterator1.next_entry().await?;
         let next2 = iterator2.next_entry().await?;
@@ -43,7 +42,7 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> TwoMergeIterator<T1, T2> {
     }
 }
 
-impl<T1,T2> TwoMergeIterator<T1, T2>
+impl<T1, T2> TwoMergeIterator<T1, T2>
 where
     T1: KeyValueIterator + SeekToKey,
     T2: KeyValueIterator + SeekToKey,
@@ -79,7 +78,7 @@ where
     }
 }
 
-impl<T1,T2> SeekToKey for TwoMergeIterator<T1, T2>
+impl<T1, T2> SeekToKey for TwoMergeIterator<T1, T2>
 where
     T1: KeyValueIterator + SeekToKey,
     T2: KeyValueIterator + SeekToKey,
@@ -198,7 +197,7 @@ impl<T: KeyValueIterator + SeekToKey> SeekToKey for MergeIterator<T> {
             if let Some(mut iterator_state) = self.current.take() {
                 let current_kv = iterator_state.next_kv;
                 if current_kv.key >= next_key {
-                    return Ok(())
+                    return Ok(());
                 } else {
                     iterator_state.iterator.seek(next_key).await?;
                     if let Some(kv) = iterator_state.iterator.next_entry().await? {
@@ -208,7 +207,7 @@ impl<T: KeyValueIterator + SeekToKey> SeekToKey for MergeIterator<T> {
                     self.current = self.iterators.pop().map(|r| r.0);
                 }
             } else {
-                return Ok(())
+                return Ok(());
             }
         }
     }

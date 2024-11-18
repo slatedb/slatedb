@@ -1,6 +1,6 @@
-use std::ops::{Bound, RangeBounds};
-use std::ops::Bound::{Unbounded, Excluded, Included};
 use bytes::Bytes;
+use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::{Bound, RangeBounds};
 
 /// Concrete struct representing a range of Bytes. Gets around much of
 /// the cumbersome work associated with the generic trait RangeBounds<Bytes>
@@ -19,7 +19,7 @@ fn is_prefix_increment(prefix: &Bytes, b: &Bytes) -> bool {
     }
 
     for i in 0..prefix.len() {
-        if i >= b.len() || b[i] != prefix[i]{
+        if i >= b.len() || b[i] != prefix[i] {
             return false;
         }
     }
@@ -28,27 +28,21 @@ fn is_prefix_increment(prefix: &Bytes, b: &Bytes) -> bool {
 }
 
 impl BytesRange {
-
-    pub(crate) fn new(
-        start_bound: Bound<Bytes>,
-        end_bound: Bound<Bytes>,
-    ) -> Self {
-        Self{ start_bound, end_bound }
+    pub(crate) fn new(start_bound: Bound<Bytes>, end_bound: Bound<Bytes>) -> Self {
+        Self {
+            start_bound,
+            end_bound,
+        }
     }
 
-    pub(crate) fn with_start_key(
-        start_key: Option<Bytes>,
-    ) -> Self {
+    pub(crate) fn with_start_key(start_key: Option<Bytes>) -> Self {
         match start_key {
             None => Self::from(..),
             Some(k) => Self::from(k..),
         }
     }
 
-    pub(crate) fn contains(
-        &self,
-        value: &Bytes
-    ) -> bool {
+    pub(crate) fn contains(&self, value: &Bytes) -> bool {
         let above_start_bound = match &self.start_bound {
             Unbounded => true,
             Included(b) => value >= b,
@@ -81,7 +75,7 @@ impl BytesRange {
                 Included(start_bytes) => start_bytes >= end,
                 Excluded(start) if start >= end => true,
                 Excluded(start) => is_prefix_increment(start, end),
-            }
+            },
         }
     }
 
@@ -122,91 +116,73 @@ impl BytesRange {
         }
     }
 
-    fn min_end_bound<'a>(
-        a: Bound<&'a Bytes>,
-        b: Bound<&'a Bytes>,
-    ) -> Bound<&'a Bytes> {
+    fn min_end_bound<'a>(a: Bound<&'a Bytes>, b: Bound<&'a Bytes>) -> Bound<&'a Bytes> {
         Self::compare_bound(a, b, |a, b| a < b)
     }
 
-    fn max_start_bound<'a>(
-        a: Bound<&'a Bytes>,
-        b: Bound<&'a Bytes>,
-    ) -> Bound<&'a Bytes> {
+    fn max_start_bound<'a>(a: Bound<&'a Bytes>, b: Bound<&'a Bytes>) -> Bound<&'a Bytes> {
         Self::compare_bound(a, b, |a, b| a > b)
     }
 
-    pub(crate) fn intersection(
-        &self,
-        other: &BytesRange
-    ) -> BytesRange {
-        let start_bound = Self::max_start_bound(
-            self.start_bound(),
-            other.start_bound(),
-        );
+    pub(crate) fn intersection(&self, other: &BytesRange) -> BytesRange {
+        let start_bound = Self::max_start_bound(self.start_bound(), other.start_bound());
 
-        let end_bound = Self::min_end_bound(
-            self.end_bound(),
-            other.end_bound(),
-        );
+        let end_bound = Self::min_end_bound(self.end_bound(), other.end_bound());
 
-        BytesRange{
+        BytesRange {
             start_bound: start_bound.cloned(),
-            end_bound: end_bound.cloned()
+            end_bound: end_bound.cloned(),
         }
     }
-
 }
 
 impl<T: RangeBounds<Bytes>> From<T> for BytesRange {
     fn from(value: T) -> Self {
         BytesRange {
             start_bound: value.start_bound().cloned(),
-            end_bound: value.end_bound().cloned()
+            end_bound: value.end_bound().cloned(),
         }
     }
 }
 
-fn as_option<T>(bound: Bound<&T>) -> Option<&T> where
-    T: ?Sized
+fn as_option<T>(bound: Bound<&T>) -> Option<&T>
+where
+    T: ?Sized,
 {
     match bound {
         Included(b) => Some(b),
         Excluded(b) => Some(b),
-        Unbounded => None
+        Unbounded => None,
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::ops::Bound::{Excluded, Included, Unbounded};
-    use std::cmp::max;
-    use std::ops::Bound;
-    use bytes::{BufMut, Bytes, BytesMut};
-    use proptest::collection::vec;
-    use proptest::prelude::{any, Strategy, Just};
-    use proptest::{prop_oneof, proptest};
-    use rand::random;
     use crate::config::DbRecord;
     use crate::range_util::{is_prefix_increment, BytesRange};
+    use bytes::{BufMut, Bytes, BytesMut};
+    use proptest::collection::vec;
+    use proptest::prelude::{any, Just, Strategy};
+    use proptest::{prop_oneof, proptest};
+    use rand::random;
+    use std::cmp::max;
+    use std::ops::Bound;
+    use std::ops::Bound::{Excluded, Included, Unbounded};
 
     pub(crate) fn arbitrary_bytes(size: usize) -> impl Strategy<Value = Bytes> {
-        vec(any::<u8>(), 0..size).prop_map(|v| {
-            Bytes::from(v)
-        })
+        vec(any::<u8>(), 0..size).prop_map(|v| Bytes::from(v))
     }
 
     pub(crate) fn arbitrary_records(size_upto: usize) -> impl Strategy<Value = DbRecord> {
-        (arbitrary_nonempty_bytes(size_upto), arbitrary_bytes(size_upto))
-            .prop_map(|(key, value)| {
-                DbRecord::new(key, value)
-            })
+        (
+            arbitrary_nonempty_bytes(size_upto),
+            arbitrary_bytes(size_upto),
+        )
+            .prop_map(|(key, value)| DbRecord::new(key, value))
     }
 
-    pub(crate) fn arbitrary_nonempty_bytes(size: usize) ->  impl Strategy<Value = Bytes> {
-        vec(any::<u8>(), 1..size).prop_map(|v| {
-            Bytes::from(v)
-        })
+    pub(crate) fn arbitrary_nonempty_bytes(size: usize) -> impl Strategy<Value = Bytes> {
+        vec(any::<u8>(), 1..size).prop_map(|v| Bytes::from(v))
     }
 
     fn arbitrary_nonempty_bounded_range(size: usize) -> impl Strategy<Value = BytesRange> {
@@ -214,22 +190,33 @@ pub(crate) mod tests {
             .prop_filter_map("Filter non-empty ranges", nonempty_range_filter)
             .prop_flat_map(|(start, end)| {
                 prop_oneof![
-                    Just(BytesRange::new(Included(start.clone()), Included(end.clone()))),
-                    Just(BytesRange::new(Excluded(start.clone()), Excluded(end.clone()))),
-                    Just(BytesRange::new(Included(start.clone()), Excluded(end.clone()))),
-                    Just(BytesRange::new(Excluded(start.clone()), Included(end.clone()))),
+                    Just(BytesRange::new(
+                        Included(start.clone()),
+                        Included(end.clone())
+                    )),
+                    Just(BytesRange::new(
+                        Excluded(start.clone()),
+                        Excluded(end.clone())
+                    )),
+                    Just(BytesRange::new(
+                        Included(start.clone()),
+                        Excluded(end.clone())
+                    )),
+                    Just(BytesRange::new(
+                        Excluded(start.clone()),
+                        Included(end.clone())
+                    )),
                 ]
             })
     }
 
     fn arbitrary_nonempty_partial_bounded_range(size: usize) -> impl Strategy<Value = BytesRange> {
-        arbitrary_nonempty_bytes(size)
-            .prop_flat_map(|a| {
-                prop_oneof![
-                    Just(BytesRange::new(Unbounded, Included(a.clone()))),
-                    Just(BytesRange::new(Unbounded, Excluded(a.clone()))),
-                    Just(BytesRange::new(Included(a.clone()), Unbounded)),
-                    Just(BytesRange::new(Excluded(a.clone()), Unbounded)),
+        arbitrary_nonempty_bytes(size).prop_flat_map(|a| {
+            prop_oneof![
+                Just(BytesRange::new(Unbounded, Included(a.clone()))),
+                Just(BytesRange::new(Unbounded, Excluded(a.clone()))),
+                Just(BytesRange::new(Included(a.clone()), Unbounded)),
+                Just(BytesRange::new(Excluded(a.clone()), Unbounded)),
             ]
         })
     }
@@ -245,8 +232,14 @@ pub(crate) mod tests {
             let a_extended = extend_prefix(&a);
             prop_oneof![
                 Just(BytesRange::new(Included(a.clone()), Included(a.clone()))),
-                Just(BytesRange::new(Included(a.clone()), Excluded(a_extended.clone()))),
-                Just(BytesRange::new(Excluded(a.clone()), Included(a_extended.clone()))),
+                Just(BytesRange::new(
+                    Included(a.clone()),
+                    Excluded(a_extended.clone())
+                )),
+                Just(BytesRange::new(
+                    Excluded(a.clone()),
+                    Included(a_extended.clone())
+                )),
             ]
         })
     }
@@ -334,10 +327,7 @@ pub(crate) mod tests {
         panic!("Overflow when decrementing bytes {b:?}")
     }
 
-    fn arbitrary_bytes_between(
-        start: &Bytes,
-        end: &Bytes,
-    ) -> Bytes {
+    fn arbitrary_bytes_between(start: &Bytes, end: &Bytes) -> Bytes {
         assert_eq!(start.len(), end.len());
         let mut res = BytesMut::new();
         let mut start_bound_satisfied = false;
@@ -389,11 +379,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn padded_bytes(
-        b: &Bytes,
-        value: u8,
-        len: usize
-    ) -> Bytes {
+    fn padded_bytes(b: &Bytes, value: u8, len: usize) -> Bytes {
         let mut padded = BytesMut::from(b.as_ref());
         while padded.len() < len {
             padded.put_u8(value);
@@ -407,7 +393,7 @@ pub(crate) mod tests {
             Included(b) | Excluded(b) => {
                 let b = padded_bytes(&b, u8::MIN, len);
                 decrement_lex(&b)
-            },
+            }
         }
     }
 
@@ -418,18 +404,15 @@ pub(crate) mod tests {
             Excluded(b) => {
                 let b = padded_bytes(&b, u8::MIN, len);
                 increment_lex(&b)
-            },
+            }
         }
     }
 
     fn can_decrement_without_truncation(bytes: &Bytes) -> bool {
-        bytes.iter().any(|b| { *b > u8::MIN })
+        bytes.iter().any(|b| *b > u8::MIN)
     }
 
-    fn arbitrary_minvalue_bytes(
-        min_bound: Bound<usize>,
-        max_bound: Bound<usize>,
-    ) -> Bytes {
+    fn arbitrary_minvalue_bytes(min_bound: Bound<usize>, max_bound: Bound<usize>) -> Bytes {
         let min_len = match min_bound {
             Unbounded => 0,
             Included(len) => len,
@@ -452,7 +435,10 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn arbitrary_bytes_in_range(range: &BytesRange) -> Bytes {
-        assert!(range.non_empty(), "Cannot choose arbitrary value from an empty range");
+        assert!(
+            range.non_empty(),
+            "Cannot choose arbitrary value from an empty range"
+        );
 
         if let Some(end) = range.end_bound_opt() {
             if !can_decrement_without_truncation(&end) {
@@ -462,8 +448,7 @@ pub(crate) mod tests {
             } else if range.start_bound() == Included(&end) {
                 return end.clone();
             } else {
-                let start = range.start_bound_opt()
-                    .unwrap_or_else(|| Bytes::new());
+                let start = range.start_bound_opt().unwrap_or_else(|| Bytes::new());
                 if is_prefix_increment(&start, &end) {
                     return if range.start_bound() == Included(&start) {
                         start.clone()
@@ -474,10 +459,7 @@ pub(crate) mod tests {
             }
         }
 
-        let len = max(
-            bound_len(range.start_bound()),
-            bound_len(range.end_bound())
-        ) + 3;
+        let len = max(bound_len(range.start_bound()), bound_len(range.end_bound())) + 3;
 
         let start_bound = inclusive_start_bound(&range, len);
         let end_bound = inclusive_end_bound(&range, len);

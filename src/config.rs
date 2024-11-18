@@ -150,6 +150,7 @@
 //!     min_age: '86400s'
 //! ```
 //!
+use bytes::Bytes;
 use duration_str::{deserialize_duration, deserialize_option_duration};
 use figment::providers::{Env, Format, Json, Toml, Yaml};
 use figment::{Figment, Metadata, Provider};
@@ -160,7 +161,6 @@ use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{str::FromStr, time::Duration};
-use bytes::Bytes;
 use tokio::runtime::Handle;
 
 use crate::compactor::CompactionScheduler;

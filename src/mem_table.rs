@@ -3,16 +3,16 @@ use std::ops::Bound;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use bytes::Bytes;
-use crossbeam_skiplist::map::Range;
-use crossbeam_skiplist::SkipMap;
-use tokio::sync::watch;
 use crate::db_iter::SeekToKey;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::range_util::BytesRange;
 use crate::types::{KeyValueDeletable, RowAttributes, ValueDeletable};
+use bytes::Bytes;
+use crossbeam_skiplist::map::Range;
+use crossbeam_skiplist::SkipMap;
+use tokio::sync::watch;
 
 pub(crate) struct KVTable {
     map: SkipMap<Bytes, ValueWithAttributes>,
@@ -42,7 +42,7 @@ type MemTableRange<'a> = Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, V
 pub(crate) struct MemTableIterator<'a>(MemTableRange<'a>);
 
 pub(crate) struct VecDequeKeyValueIterator {
-    records: VecDeque<KeyValueDeletable>
+    records: VecDeque<KeyValueDeletable>,
 }
 
 impl VecDequeKeyValueIterator {
@@ -61,7 +61,7 @@ impl VecDequeKeyValueIterator {
             let next_entry = merge_iter.next_entry().await?;
             match next_entry {
                 Some(entry) => records.push_back(entry.clone()),
-                None => return Ok(VecDequeKeyValueIterator {records}),
+                None => return Ok(VecDequeKeyValueIterator { records }),
             }
         }
     }
@@ -77,10 +77,10 @@ impl SeekToKey for VecDequeKeyValueIterator {
     async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
         loop {
             let front = self.records.front();
-            if front.map_or(false, |record| { record.key < next_key }) {
+            if front.map_or(false, |record| record.key < next_key) {
                 self.records.pop_front();
             } else {
-                return Ok(())
+                return Ok(());
             }
         }
     }
@@ -218,14 +218,8 @@ impl KVTable {
         MemTableIterator(self.map.range(bounds))
     }
 
-    pub(crate) fn range_iter(
-        &self,
-        range: BytesRange,
-    ) -> MemTableIterator {
-        let bounds = (
-            range.start_bound().cloned(),
-            range.end_bound().cloned(),
-        );
+    pub(crate) fn range_iter(&self, range: BytesRange) -> MemTableIterator {
+        let bounds = (range.start_bound().cloned(), range.end_bound().cloned());
         MemTableIterator(self.map.range(bounds))
     }
 

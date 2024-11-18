@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use bytes::{Buf, Bytes, BytesMut};
 
+use crate::db_iter::SeekToKey;
 use crate::db_state::RowFeature;
 use crate::row_codec::decode_row_v0;
 use crate::{block::Block, error::SlateDBError, iter::KeyValueIterator, types::KeyValueDeletable};
-use crate::db_iter::SeekToKey;
 
 pub trait BlockLike {
     fn data(&self) -> &Bytes;
@@ -71,11 +71,13 @@ impl<B: BlockLike> SeekToKey for BlockIterator<B> {
             let result = self.load_at_current_off();
             match result {
                 Ok(None) => return Ok(()),
-                Ok(Some(kv)) => if kv.key < next_key {
-                    self.advance();
-                } else {
-                    return Ok(())
-                },
+                Ok(Some(kv)) => {
+                    if kv.key < next_key {
+                        self.advance();
+                    } else {
+                        return Ok(());
+                    }
+                }
                 Err(e) => return Err(e),
             }
         }

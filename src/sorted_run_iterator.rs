@@ -1,7 +1,3 @@
-use std::collections::VecDeque;
-use std::marker::PhantomData;
-use std::sync::Arc;
-use bytes::Bytes;
 use crate::db_iter::SeekToKey;
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
@@ -10,6 +6,10 @@ use crate::range_util::BytesRange;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::KeyValueDeletable;
+use bytes::Bytes;
+use std::collections::VecDeque;
+use std::marker::PhantomData;
+use std::sync::Arc;
 
 pub(crate) struct SortedRunIterator<'a, H: AsRef<SsTableHandle> = &'a SsTableHandle> {
     current_iter: Option<SstIterator<'a, H>>,
@@ -22,13 +22,15 @@ pub(crate) struct SortedRunIterator<'a, H: AsRef<SsTableHandle> = &'a SsTableHan
 
 pub(crate) struct SsTableHandleIter<'a, H: AsRef<SsTableHandle> = &'a SsTableHandle> {
     vec: VecDeque<H>,
-    _marker: PhantomData<&'a H>
+    _marker: PhantomData<&'a H>,
 }
 
 impl<'a, H: AsRef<SsTableHandle>> SsTableHandleIter<'a, H> {
-
     fn new(vec: VecDeque<H>) -> Self {
-        Self { vec, _marker: PhantomData }
+        Self {
+            vec,
+            _marker: PhantomData,
+        }
     }
 
     pub(crate) fn next(&mut self) -> Option<H> {
@@ -57,8 +59,9 @@ impl<'a> SortedRunIterator<'a, Arc<SsTableHandle>> {
             max_fetch_tasks,
             blocks_to_fetch,
             true,
-            cache_blocks
-        ).await?)
+            cache_blocks,
+        )
+        .await?)
     }
 }
 
@@ -140,8 +143,9 @@ impl<'a> SortedRunIterator<'a, &'a SsTableHandle> {
             max_fetch_tasks,
             blocks_to_fetch,
             spawn,
-            cache_blocks
-        ).await?)
+            cache_blocks,
+        )
+        .await?)
     }
 
     fn find_iter_from_key(
@@ -170,15 +174,18 @@ impl<'a, H: AsRef<SsTableHandle>> SortedRunIterator<'a, H> {
     ) -> Result<Self, SlateDBError> {
         let current_iter = match sorted_run_iter.next() {
             None => None,
-            Some(h) => Some(SstIterator::new_opts(
-                h,
-                BytesRange::with_start_key(from_key),
-                table_store.clone(),
-                max_fetch_tasks,
-                blocks_to_fetch,
-                spawn,
-                cache_blocks,
-            ).await?),
+            Some(h) => Some(
+                SstIterator::new_opts(
+                    h,
+                    BytesRange::with_start_key(from_key),
+                    table_store.clone(),
+                    max_fetch_tasks,
+                    blocks_to_fetch,
+                    spawn,
+                    cache_blocks,
+                )
+                .await?,
+            ),
         };
         Ok(Self {
             current_iter,
@@ -200,7 +207,8 @@ impl<'a, H: AsRef<SsTableHandle>> SortedRunIterator<'a, H> {
                     self.blocks_to_fetch,
                     self.blocks_to_buffer,
                     self.cache_blocks,
-                ).await?,
+                )
+                .await?,
             ),
         };
         Ok(())
@@ -376,16 +384,10 @@ mod tests {
             let mut expected_val_gen = test_case_val_gen.clone();
             let from_key = test_case_key_gen.next();
             _ = test_case_val_gen.next();
-            let mut iter = SortedRunIterator::new_from_key(
-                &sr,
-                from_key,
-                table_store.clone(),
-                1,
-                1,
-                false,
-            )
-            .await
-            .unwrap();
+            let mut iter =
+                SortedRunIterator::new_from_key(&sr, from_key, table_store.clone(), 1, 1, false)
+                    .await
+                    .unwrap();
             for _ in 0..30 - i {
                 assert_kv(
                     &iter.next().await.unwrap().unwrap(),
@@ -425,10 +427,16 @@ mod tests {
         )
         .await;
 
-        let mut iter =
-            SortedRunIterator::new_from_key(&sr, Bytes::from_static(&[b'a', 10]), table_store.clone(), 1, 1, false)
-                .await
-                .unwrap();
+        let mut iter = SortedRunIterator::new_from_key(
+            &sr,
+            Bytes::from_static(&[b'a', 10]),
+            table_store.clone(),
+            1,
+            1,
+            false,
+        )
+        .await
+        .unwrap();
 
         for _ in 0..30 {
             assert_kv(
@@ -466,10 +474,16 @@ mod tests {
         )
         .await;
 
-        let mut iter =
-            SortedRunIterator::new_from_key(&sr, Bytes::from_static(&[b'z', 30]), table_store.clone(), 1, 1, false)
-                .await
-                .unwrap();
+        let mut iter = SortedRunIterator::new_from_key(
+            &sr,
+            Bytes::from_static(&[b'z', 30]),
+            table_store.clone(),
+            1,
+            1,
+            false,
+        )
+        .await
+        .unwrap();
 
         assert!(iter.next().await.unwrap().is_none());
     }

@@ -38,11 +38,11 @@ use crate::cached_object_store::CachedObjectStore;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
-    DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
-    DEFAULT_READ_OPTIONS, DEFAULT_SCAN_OPTIONS, DEFAULT_WRITE_OPTIONS,
+    DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions, DEFAULT_READ_OPTIONS,
+    DEFAULT_SCAN_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
-use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::db_iter::DbIterator;
+use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter;
 use crate::flush::WalFlushThreadMsg;
@@ -52,13 +52,13 @@ use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::{VecDequeKeyValueIterator, WritableKVTable};
 use crate::mem_table_flush::MemtableFlushThreadMsg;
 use crate::metrics::DbStats;
+use crate::range_util::BytesRange;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
 use std::rc::Rc;
-use crate::range_util::BytesRange;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -123,10 +123,19 @@ impl DbInner {
         let key_bytes = Bytes::copy_from_slice(key);
 
         for sst in &snapshot.state.core.l0 {
-            if self.sst_might_include_key(sst, &key_bytes, key_hash).await? {
-                let mut iter =
-                    SstIterator::new_from_key(sst, self.table_store.clone(), key_bytes.clone(), 1, 1, true)
-                        .await?; // cache blocks that are being read
+            if self
+                .sst_might_include_key(sst, &key_bytes, key_hash)
+                .await?
+            {
+                let mut iter = SstIterator::new_from_key(
+                    sst,
+                    self.table_store.clone(),
+                    key_bytes.clone(),
+                    1,
+                    1,
+                    true,
+                )
+                .await?; // cache blocks that are being read
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
                         return Ok(entry.value.into_option());
@@ -136,9 +145,15 @@ impl DbInner {
         }
         for sr in &snapshot.state.core.compacted {
             if self.sr_might_include_key(sr, key, key_hash).await? {
-                let mut iter: SortedRunIterator<&SsTableHandle> =
-                    SortedRunIterator::new_from_key(sr, key_bytes.clone(), self.table_store.clone(), 1, 1, true) // cache blocks
-                        .await?;
+                let mut iter: SortedRunIterator<&SsTableHandle> = SortedRunIterator::new_from_key(
+                    sr,
+                    key_bytes.clone(),
+                    self.table_store.clone(),
+                    1,
+                    1,
+                    true,
+                ) // cache blocks
+                .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
                         return Ok(entry.value.into_option());
@@ -169,16 +184,13 @@ impl DbInner {
             memtables.push_back(memtable.table());
         }
 
-        let mem_iter = VecDequeKeyValueIterator::from_range(
-            memtables,
-            range.clone(),
-        ).await?;
+        let mem_iter = VecDequeKeyValueIterator::from_range(memtables, range.clone()).await?;
 
         let state = snapshot.state.as_ref().clone();
         let mut l0_iters = VecDeque::new();
-        let blocks_to_fetch = self.table_store.convert_bytes_to_blocks(
-            options.read_ahead_size
-        );
+        let blocks_to_fetch = self
+            .table_store
+            .convert_bytes_to_blocks(options.read_ahead_size);
 
         for sst in state.core.l0 {
             let iter = SstIterator::new_opts(
@@ -189,7 +201,8 @@ impl DbInner {
                 blocks_to_fetch,
                 true,
                 options.cache_blocks,
-            ).await?;
+            )
+            .await?;
             l0_iters.push_back(iter);
         }
 
@@ -201,18 +214,13 @@ impl DbInner {
                 self.table_store.clone(),
                 1,
                 blocks_to_fetch,
-                options.cache_blocks
-            ).await?;
+                options.cache_blocks,
+            )
+            .await?;
             sr_iters.push_back(sorted_run_iter);
         }
 
-        DbIterator::new(
-            snapshot,
-            range.clone(),
-            mem_iter,
-            l0_iters,
-            sr_iters,
-        ).await
+        DbIterator::new(snapshot, range.clone(), mem_iter, l0_iters, sr_iters).await
     }
 
     async fn fence_writers(
@@ -894,7 +902,9 @@ impl Db {
         &'a self,
         range: T,
     ) -> Result<DbIterator<'a>, SlateDBError> {
-        self.inner.scan_with_options(range.into(), DEFAULT_SCAN_OPTIONS).await
+        self.inner
+            .scan_with_options(range.into(), DEFAULT_SCAN_OPTIONS)
+            .await
     }
 
     /// Scan a range of keys with the provided options.
@@ -1160,7 +1170,7 @@ mod tests {
     use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
-    use proptest::strategy::{ValueTree, Strategy};
+    use proptest::strategy::{Strategy, ValueTree};
     use proptest::test_runner::{Config, TestRunner};
     use tracing::info;
 
@@ -1172,7 +1182,7 @@ mod tests {
     };
     use crate::range_util::tests::{
         arbitrary_bytes_in_range, arbitrary_empty_range, arbitrary_nonempty_bytes,
-        arbitrary_nonempty_range, arbitrary_records
+        arbitrary_nonempty_range, arbitrary_records,
     };
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
@@ -1333,21 +1343,19 @@ mod tests {
         range: &BytesRange,
         iter: &mut DbIterator<'_>,
     ) {
-        let mut expected = table.range(
-            (range.start_bound().cloned(), range.end_bound().cloned())
-        );
+        let mut expected = table.range((range.start_bound().cloned(), range.end_bound().cloned()));
 
         loop {
-            match (expected.next(), iter.next().await.unwrap()){
+            match (expected.next(), iter.next().await.unwrap()) {
                 (None, None) => break,
                 (Some((expected_key, expected_value)), Some(actual)) => {
                     assert_eq!(expected_key, &actual.key);
                     assert_eq!(expected_value, &actual.value);
-                },
-                (Some(expected_record), None) =>
-                    panic!("Expected record {expected_record:?} missing from scan result"),
-                (None, Some(actual)) =>
-                    panic!("Unexpected record {actual:?} in scan result"),
+                }
+                (Some(expected_record), None) => {
+                    panic!("Expected record {expected_record:?} missing from scan result")
+                }
+                (None, Some(actual)) => panic!("Unexpected record {actual:?} in scan result"),
             }
         }
     }
@@ -1371,8 +1379,10 @@ mod tests {
                 &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
-                }
-            ).await.unwrap();
+                },
+            )
+            .await
+            .unwrap();
             records.insert(record.key, record.value);
         }
         db.flush().await.unwrap();
@@ -1386,25 +1396,23 @@ mod tests {
             Path::from("/tmp/test_kv_store"),
             test_db_options(0, 1024, None),
             object_store,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let mut runner = TestRunner::new(Config::default());
-        seed_arbitrary_records(
-            &db,
-            &mut runner,
-            5000,
-            5
-        ).await;
+        seed_arbitrary_records(&db, &mut runner, 5000, 5).await;
 
         for _ in 0..1000 {
             let range = arbitrary_empty_range(4)
                 .new_tree(&mut runner)
                 .unwrap()
                 .current();
-            let mut iter = db.inner.scan_with_options(
-                range.clone(),
-                &ScanOptions::default()
-            ).await.unwrap();
+            let mut iter = db
+                .inner
+                .scan_with_options(range.clone(), &ScanOptions::default())
+                .await
+                .unwrap();
 
             assert_eq!(None, iter.next().await.unwrap());
         }
@@ -1417,31 +1425,25 @@ mod tests {
             Path::from("/tmp/test_kv_store"),
             test_db_options(0, 1024, None),
             object_store,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let mut runner = TestRunner::new(Config::default());
-        let records = seed_arbitrary_records(
-            &db,
-            &mut runner,
-            5000,
-            5
-        ).await;
+        let records = seed_arbitrary_records(&db, &mut runner, 5000, 5).await;
 
         for _ in 0..1000 {
             let range = arbitrary_nonempty_range(4)
                 .new_tree(&mut runner)
                 .unwrap()
                 .current();
-            let mut iter = db.inner.scan_with_options(
-                range.clone(),
-                &ScanOptions::default()
-            ).await.unwrap();
+            let mut iter = db
+                .inner
+                .scan_with_options(range.clone(), &ScanOptions::default())
+                .await
+                .unwrap();
 
-            assert_ordered_scan_in_range(
-                &records,
-                &range,
-                &mut iter
-            ).await;
+            assert_ordered_scan_in_range(&records, &range, &mut iter).await;
         }
     }
 
@@ -1452,7 +1454,9 @@ mod tests {
             Path::from("/tmp/test_kv_store"),
             test_db_options(0, 1024, None),
             object_store,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let mut runner = TestRunner::new(Config::default());
         for _ in 0..100 {
@@ -1460,23 +1464,29 @@ mod tests {
                 .new_tree(&mut runner)
                 .unwrap()
                 .current();
-            let mut iter = db.scan_with_options(
-                ..end.clone(),
-                &ScanOptions::default()
-            ).await.unwrap();
+            let mut iter = db
+                .scan_with_options(..end.clone(), &ScanOptions::default())
+                .await
+                .unwrap();
 
             let lower_bounded_range = BytesRange::from(end.clone()..);
             let value = arbitrary_bytes_in_range(&lower_bounded_range);
-            assert!(matches!(iter.seek(value).await, Err(SlateDBError::InvalidArgument)));
+            assert!(matches!(
+                iter.seek(value).await,
+                Err(SlateDBError::InvalidArgument)
+            ));
 
-            let mut iter = db.scan_with_options(
-                end.clone()..,
-                &ScanOptions::default()
-            ).await.unwrap();
+            let mut iter = db
+                .scan_with_options(end.clone().., &ScanOptions::default())
+                .await
+                .unwrap();
 
             let upper_bounded_range = BytesRange::from(..end.clone());
             let value = arbitrary_bytes_in_range(&upper_bounded_range.into());
-            assert!(matches!(iter.seek(value).await, Err(SlateDBError::InvalidArgument)));
+            assert!(matches!(
+                iter.seek(value).await,
+                Err(SlateDBError::InvalidArgument)
+            ));
         }
     }
 
@@ -1487,15 +1497,12 @@ mod tests {
             Path::from("/tmp/test_kv_store"),
             test_db_options(0, 1024, None),
             object_store,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let mut runner = TestRunner::new(Config::default());
-        let records = seed_arbitrary_records(
-            &db,
-            &mut runner,
-            10,
-            3
-        ).await;
+        let records = seed_arbitrary_records(&db, &mut runner, 10, 3).await;
 
         for _ in 0..1000 {
             let range = arbitrary_nonempty_range(5)
@@ -1503,24 +1510,18 @@ mod tests {
                 .unwrap()
                 .current();
 
-            let mut iter = db.inner.scan_with_options(
-                range.clone(),
-                &ScanOptions::default()
-            ).await.unwrap();
+            let mut iter = db
+                .inner
+                .scan_with_options(range.clone(), &ScanOptions::default())
+                .await
+                .unwrap();
 
             let seek_key = arbitrary_bytes_in_range(&range);
             iter.seek(seek_key.clone()).await.unwrap();
 
-            let seek_range = BytesRange::new(
-                Included(seek_key),
-                range.end_bound().cloned()
-            );
+            let seek_range = BytesRange::new(Included(seek_key), range.end_bound().cloned());
 
-            assert_ordered_scan_in_range(
-                &records,
-                &seek_range,
-                &mut iter
-            ).await;
+            assert_ordered_scan_in_range(&records, &seek_range, &mut iter).await;
         }
     }
 

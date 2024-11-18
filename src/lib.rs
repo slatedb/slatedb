@@ -20,6 +20,7 @@ pub mod config;
 pub mod db;
 pub mod db_cache;
 mod db_common;
+mod db_iter;
 mod db_state;
 pub mod error;
 mod filter;
@@ -33,6 +34,7 @@ mod mem_table;
 mod mem_table_flush;
 mod merge_iterator;
 mod metrics;
+mod range_util;
 mod row_codec;
 pub mod size_tiered_compaction;
 mod sorted_run_iterator;
@@ -43,8 +45,6 @@ mod tablestore;
 mod test_utils;
 mod transactional_object_store;
 mod types;
-mod range_util;
-mod db_iter;
 
 /// Re-export the object store crate.
 ///
@@ -57,4 +57,3 @@ pub use object_store;
 /// This is useful for users of the crate who want to use SlateDB
 /// with failpoints in their tests without having to depend on the fail-parallel crate directly.
 pub use fail_parallel;
-g
