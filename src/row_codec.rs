@@ -217,103 +217,197 @@ mod tests {
     use crate::types::ValueDeletable;
 
     #[test]
-    fn test_encode_decode_normal_row() {
-        let mut encoded_data = Vec::new();
-        let key_prefix_len = 3;
-        let key_suffix = b"key";
-        let value = Some(b"value".as_slice());
+    fn test_encode_decode() {
+        struct TestCase {
+            name: &'static str,
+            key_prefix_len: usize,
+            key_suffix: Vec<u8>,
+            seq: u64,
+            value: Option<Vec<u8>>,
+            create_ts: Option<i64>,
+            expire_ts: Option<i64>,
+            first_key: Vec<u8>,
+            expected_key: Vec<u8>,
+            expected_encoded: &'static [u8],
+        }
 
-        // Encode the row
-        let codec = SstRowCodecV0 {};
-        codec.encode(
-            &mut encoded_data,
-            &SstRowEntry::new(
-                key_prefix_len,
-                Bytes::from(key_suffix.to_vec()),
-                1,
-                ValueDeletable::Value(Bytes::from(value.unwrap().to_vec())),
-                None,
-                Some(10),
-            ),
-        );
+        let test_cases = vec![
+            TestCase {
+                name: "normal row with expire_ts",
+                key_prefix_len: 3,
+                key_suffix: b"key".to_vec(),
+                seq: 1,
+                value: Some(b"value".to_vec()),
+                create_ts: None,
+                expire_ts: Some(10),
+                first_key: b"prefixdata".to_vec(),
+                expected_key: b"prekey".to_vec(),
+                expected_encoded: b"\x00\x03\x00\x03\x6B\x65\x79\x00\x00\x00\x00\x00\x00\x00\x01\x02\x00\x00\x00\x00\x00\x00\x00\x0A\x00\x00\x00\x05\x76\x61\x6C\x75\x65",
+            },
+            TestCase {
+                name: "normal row without expire_ts", 
+                key_prefix_len: 3,
+                key_suffix: b"key".to_vec(),
+                seq: 1,
+                value: Some(b"value".to_vec()),
+                create_ts: None,
+                expire_ts: None,
+                first_key: b"".to_vec(),    // Not used in assertions
+                expected_key: b"".to_vec(), // Not used in assertions
+                expected_encoded: b"\x00\x03\x00\x03\x6b\x65\x79\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x05\x76\x61\x6c\x75\x65",
+            },
+            TestCase {
+                name: "row with both timestamps",
+                key_prefix_len: 5,
+                key_suffix: b"both".to_vec(),
+                seq: 100,
+                value: Some(b"value".to_vec()),
+                create_ts: Some(1234567890),
+                expire_ts: Some(9876543210),
+                first_key: b"test_both".to_vec(),
+                expected_key: b"test_both".to_vec(),
+                expected_encoded: b"\x00\x05\x00\x04\x62\x6F\x74\x68\x00\x00\x00\x00\x00\x00\x00\x64\x06\x00\x00\x00\x02\x4C\xB0\x16\xEA\x00\x00\x00\x00\x49\x96\x02\xD2\x00\x00\x00\x05\x76\x61\x6C\x75\x65",
+            },
+            TestCase {
+                name: "row with only create_ts",
+                key_prefix_len: 4,
+                key_suffix: b"create".to_vec(),
+                seq: 50,
+                value: Some(b"test_value".to_vec()),
+                create_ts: Some(1234567890),
+                expire_ts: None,
+                first_key: b"timecreate".to_vec(),
+                expected_key: b"timecreate".to_vec(),
+                expected_encoded: b"\x00\x04\x00\x06\x63\x72\x65\x61\x74\x65\x00\x00\x00\x00\x00\x00\x00\x32\x04\x00\x00\x00\x00\x49\x96\x02\xD2\x00\x00\x00\x0A\x74\x65\x73\x74\x5F\x76\x61\x6C\x75\x65",
+            },
+            TestCase {
+                name: "tombstone row",
+                key_prefix_len: 4,
+                key_suffix: b"tomb".to_vec(),
+                seq: 1,
+                value: None,
+                create_ts: Some(2),
+                expire_ts: Some(1), // Will be ignored for tombstone
+                first_key: b"deadbeefdata".to_vec(),
+                expected_key: b"deadtomb".to_vec(),
+                expected_encoded: b"\x00\x04\x00\x04\x74\x6F\x6D\x62\x00\x00\x00\x00\x00\x00\x00\x01\x07\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x02",
+            },
+            TestCase {
+                name: "empty key suffix",
+                key_prefix_len: 4,
+                key_suffix: b"".to_vec(),
+                seq: 1,
+                value: Some(b"value".to_vec()),
+                create_ts: None,
+                expire_ts: None,
+                first_key: b"keyprefixdata".to_vec(),
+                expected_key: b"keyp".to_vec(),
+                expected_encoded: b"\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x05\x76\x61\x6c\x75\x65",
+            },
+            TestCase {
+                name: "large sequence number",
+                key_prefix_len: 3,
+                key_suffix: b"seq".to_vec(),
+                seq: u64::MAX,
+                value: Some(b"value".to_vec()),
+                create_ts: None,
+                expire_ts: None,
+                first_key: b"bigseq".to_vec(),
+                expected_key: b"bigseq".to_vec(),
+                expected_encoded: b"\x00\x03\x00\x03seq\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\x05value",
+            },
+            TestCase {
+                name: "large value",
+                key_prefix_len: 2,
+                key_suffix: b"big".to_vec(),
+                seq: 1,
+                value: Some(vec![b'x'; 100]),
+                create_ts: None,
+                expire_ts: None,
+                first_key: b"bigvalue".to_vec(),
+                expected_key: b"bibig".to_vec(),
+                expected_encoded: b"\x00\x02\x00\x03\x62\x69\x67\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x64\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78",
+            },
+            TestCase {
+                name: "long key suffix",
+                key_prefix_len: 2,
+                key_suffix: vec![b'k'; 100],
+                seq: 1,
+                value: Some(b"value".to_vec()),
+                create_ts: None,
+                expire_ts: None,
+                first_key: b"longkey".to_vec(),
+                expected_key: b"lokkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk".to_vec(),
+                expected_encoded: b"\x00\x02\x00\x64\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x05\x76\x61\x6c\x75\x65",
+            },
+            TestCase {
+                name: "unicode key suffix",
+                key_prefix_len: 3,
+                key_suffix: "你好世界".as_bytes().to_vec(),
+                seq: 1,
+                value: Some(b"value".to_vec()),
+                create_ts: None,
+                expire_ts: None,
+                first_key: b"unicode".to_vec(),
+                expected_key: b"uni\xe4\xbd\xa0\xe5\xa5\xbd\xe4\xb8\x96\xe7\x95\x8c".to_vec(),
+                expected_encoded: b"\x00\x03\x00\x0c\xe4\xbd\xa0\xe5\xa5\xbd\xe4\xb8\x96\xe7\x95\x8c\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x05\x76\x61\x6c\x75\x65",
+            },
+        ];
 
-        let first_key = Bytes::from(b"prefixdata".as_ref());
-        let mut data = Bytes::from(encoded_data);
+        for tc in test_cases {
+            let mut encoded_data = Vec::new();
+            let codec = SstRowCodecV0 {};
 
-        let decoded = codec.decode(&mut data).expect("decoding failed");
+            // Encode the row
+            let value = match tc.value {
+                Some(v) => ValueDeletable::Value(Bytes::from(v)),
+                None => ValueDeletable::Tombstone,
+            };
 
-        // Expected key: first_key[..3] + "key" = "prekey"
-        let expected_key = Bytes::from(b"prekey" as &[u8]);
-        let expected_value = ValueDeletable::Value(Bytes::from(b"value" as &[u8]));
+            codec.encode(
+                &mut encoded_data,
+                &SstRowEntry::new(
+                    tc.key_prefix_len,
+                    Bytes::from(tc.key_suffix),
+                    tc.seq,
+                    value.clone(),
+                    tc.create_ts,
+                    tc.expire_ts,
+                ),
+            );
 
-        assert_eq!(decoded.restore_full_key(&first_key), &expected_key);
-        assert_eq!(decoded.size(), 33);
-        assert_eq!(decoded.value, expected_value);
-        assert_eq!(decoded.create_ts, None);
-        assert_eq!(decoded.expire_ts, Some(10));
-    }
+            let mut data = Bytes::from(encoded_data.clone());
+            let decoded = codec.decode(&mut data).expect("decoding failed");
 
-    #[test]
-    fn test_encode_decode_normal_row_no_expire_ts() {
-        let mut encoded_data = Vec::new();
-        let key_prefix_len = 3;
-        let key_suffix = b"key";
-        let value = Some(b"value".as_slice());
+            // Run assertions
+            if !tc.first_key.is_empty() {
+                assert_eq!(
+                    decoded.restore_full_key(&Bytes::from(tc.first_key)),
+                    &Bytes::from(tc.expected_key),
+                    "test case: {}",
+                    tc.name
+                );
+            }
+            assert_eq!(
+                encoded_data,
+                tc.expected_encoded,
+                "test case: {} encoded: {:?}",
+                tc.name,
+                String::from_utf8_lossy(&encoded_data)
+            );
+            assert_eq!(decoded.value, value, "test case: {}", tc.name);
 
-        // Encode the row
-        let codec = SstRowCodecV0 {};
-        codec.encode(
-            &mut encoded_data,
-            &SstRowEntry::new(
-                key_prefix_len,
-                Bytes::from(key_suffix.to_vec()),
-                1,
-                ValueDeletable::Value(Bytes::from(value.unwrap().to_vec())),
-                None,
-                None,
-            ),
-        );
-
-        let mut data = Bytes::from(encoded_data);
-        let decoded = codec.decode(&mut data).expect("decoding failed");
-
-        assert_eq!(decoded.expire_ts, None);
-        assert_eq!(decoded.size(), 25);
-    }
-
-    #[test]
-    fn test_encode_decode_tombstone_row() {
-        let mut encoded_data = Vec::new();
-        let key_prefix_len = 4;
-        let key_suffix = b"tomb";
-
-        // Encode the row
-        let codec = SstRowCodecV0 {};
-        codec.encode(
-            &mut encoded_data,
-            &SstRowEntry::new(
-                key_prefix_len,
-                Bytes::from(key_suffix.to_vec()),
-                1,
-                ValueDeletable::Tombstone,
-                Some(2),
-                Some(1),
-            ),
-        );
-
-        let first_key = Bytes::from(b"deadbeefdata".as_ref());
-        let mut data = Bytes::from(encoded_data);
-        let decoded = codec.decode(&mut data).expect("decoding failed");
-
-        // Expected key: first_key[..4] + "tomb" = "deadtomb"
-        let expected_key = Bytes::from(b"deadtomb" as &[u8]);
-        let expected_value = ValueDeletable::Tombstone;
-
-        assert_eq!(decoded.restore_full_key(&first_key), &expected_key);
-        assert_eq!(decoded.value, expected_value);
-        assert_eq!(decoded.expire_ts, None);
-        assert_eq!(decoded.create_ts, Some(2));
-        assert_eq!(decoded.size(), 25);
+            match value {
+                ValueDeletable::Tombstone => {
+                    assert_eq!(decoded.expire_ts, None, "test case: {}", tc.name);
+                    assert_eq!(decoded.create_ts, tc.create_ts, "test case: {}", tc.name);
+                }
+                ValueDeletable::Value(_) => {
+                    assert_eq!(decoded.expire_ts, tc.expire_ts, "test case: {}", tc.name);
+                    assert_eq!(decoded.create_ts, tc.create_ts, "test case: {}", tc.name);
+                }
+            }
+        }
     }
 
     #[test]
@@ -342,38 +436,5 @@ mod tests {
             Err(SlateDBError::InvalidRowFlags) => (),
             _ => panic!("Expected InvalidRowFlags"),
         }
-    }
-
-    #[test]
-    fn test_encode_decode_empty_key_suffix() {
-        let mut encoded_data = Vec::new();
-        let key_prefix_len = 4;
-        let key_suffix = b""; // Empty key suffix
-
-        // Encode the row
-        let codec = SstRowCodecV0 {};
-        codec.encode(
-            &mut encoded_data,
-            &SstRowEntry::new(
-                key_prefix_len,
-                Bytes::from(key_suffix.to_vec()),
-                1,
-                ValueDeletable::Value(Bytes::from(b"value".to_vec())),
-                None,
-                None,
-            ),
-        );
-
-        let first_key = Bytes::from(b"keyprefixdata".as_slice());
-        let mut data = Bytes::from(encoded_data);
-        let decoded = codec.decode(&mut data).expect("decoding failed");
-
-        // Expected key: first_key[..4] + "" = "keyp"
-        let expected_key = Bytes::from(b"keyp" as &[u8]);
-        let expected_value = ValueDeletable::Value(Bytes::from(b"value" as &[u8]));
-
-        assert_eq!(decoded.restore_full_key(&first_key), &expected_key);
-        assert_eq!(decoded.size(), 22);
-        assert_eq!(decoded.value, expected_value);
     }
 }
