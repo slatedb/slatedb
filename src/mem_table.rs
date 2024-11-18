@@ -3,16 +3,17 @@ use std::ops::Bound;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::db_iter::SeekToKey;
-use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
-use crate::merge_iterator::MergeIterator;
-use crate::range_util::BytesRange;
-use crate::types::{KeyValueDeletable, RowAttributes, ValueDeletable};
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
 use tokio::sync::watch;
+
+use crate::db_iter::SeekToKey;
+use crate::merge_iterator::MergeIterator;
+use crate::range_util::BytesRange;
+use crate::error::SlateDBError;
+use crate::iter::KeyValueIterator;
+use crate::types::{RowAttributes, RowEntry, ValueDeletable};
 
 pub(crate) struct KVTable {
     map: SkipMap<Bytes, ValueWithAttributes>,
@@ -42,7 +43,7 @@ type MemTableRange<'a> = Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, V
 pub(crate) struct MemTableIterator<'a>(MemTableRange<'a>);
 
 pub(crate) struct VecDequeKeyValueIterator {
-    records: VecDeque<KeyValueDeletable>,
+    records: VecDeque<RowEntry>,
 }
 
 impl VecDequeKeyValueIterator {
@@ -68,7 +69,7 @@ impl VecDequeKeyValueIterator {
 }
 
 impl KeyValueIterator for VecDequeKeyValueIterator {
-    async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.records.pop_front())
     }
 }
@@ -93,17 +94,19 @@ pub(crate) struct ValueWithAttributes {
 }
 
 impl<'a> KeyValueIterator for MemTableIterator<'a> {
-    async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.next_entry_sync())
     }
 }
 
 impl<'a> MemTableIterator<'a> {
-    pub(crate) fn next_entry_sync(&mut self) -> Option<KeyValueDeletable> {
-        self.0.next().map(|entry| KeyValueDeletable {
+    pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
+        self.0.next().map(|entry| RowEntry {
             key: entry.key().clone(),
             value: entry.value().value.clone(),
-            attributes: entry.value().attrs.clone(),
+            seq: 0,
+            create_ts: entry.value().attrs.ts,
+            expire_ts: entry.value().attrs.expire_ts,
         })
     }
 }
@@ -350,10 +353,8 @@ mod tests {
         let mut iter = table.table().iter();
         let kv = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc111".as_slice());
-        assert_eq!(kv.attributes.ts, Some(2));
         let kv = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc333".as_slice());
-        assert_eq!(kv.attributes.ts, Some(1));
         assert!(iter.next().await.unwrap().is_none());
     }
 

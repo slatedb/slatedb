@@ -168,6 +168,7 @@ impl CompactorState {
         merged.l0 = merged_l0s;
         merged.last_compacted_wal_sst_id = writer_state.last_compacted_wal_sst_id;
         merged.next_wal_sst_id = writer_state.next_wal_sst_id;
+        merged.last_clock_tick = writer_state.last_clock_tick;
         self.db_state = merged;
     }
 

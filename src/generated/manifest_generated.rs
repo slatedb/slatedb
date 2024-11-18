@@ -107,44 +107,40 @@ impl<'a> flatbuffers::Verifiable for CompressionFormat {
 
 impl flatbuffers::SimpleToVerifyInSlice for CompressionFormat {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MIN_SST_ROW_FEATURE: i8 = 0;
+pub const ENUM_MIN_CHECKPOINT_METADATA: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_SST_ROW_FEATURE: i8 = 2;
+pub const ENUM_MAX_CHECKPOINT_METADATA: u8 = 1;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_SST_ROW_FEATURE: [SstRowFeature; 3] = [
-  SstRowFeature::Flags,
-  SstRowFeature::Timestamp,
-  SstRowFeature::ExpireAtTs,
+pub const ENUM_VALUES_CHECKPOINT_METADATA: [CheckpointMetadata; 2] = [
+  CheckpointMetadata::NONE,
+  CheckpointMetadata::WriterCheckpoint,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
-pub struct SstRowFeature(pub i8);
+pub struct CheckpointMetadata(pub u8);
 #[allow(non_upper_case_globals)]
-impl SstRowFeature {
-  pub const Flags: Self = Self(0);
-  pub const Timestamp: Self = Self(1);
-  pub const ExpireAtTs: Self = Self(2);
+impl CheckpointMetadata {
+  pub const NONE: Self = Self(0);
+  pub const WriterCheckpoint: Self = Self(1);
 
-  pub const ENUM_MIN: i8 = 0;
-  pub const ENUM_MAX: i8 = 2;
+  pub const ENUM_MIN: u8 = 0;
+  pub const ENUM_MAX: u8 = 1;
   pub const ENUM_VALUES: &'static [Self] = &[
-    Self::Flags,
-    Self::Timestamp,
-    Self::ExpireAtTs,
+    Self::NONE,
+    Self::WriterCheckpoint,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
     match self {
-      Self::Flags => Some("Flags"),
-      Self::Timestamp => Some("Timestamp"),
-      Self::ExpireAtTs => Some("ExpireAtTs"),
+      Self::NONE => Some("NONE"),
+      Self::WriterCheckpoint => Some("WriterCheckpoint"),
       _ => None,
     }
   }
 }
-impl core::fmt::Debug for SstRowFeature {
+impl core::fmt::Debug for CheckpointMetadata {
   fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
     if let Some(name) = self.variant_name() {
       f.write_str(name)
@@ -153,48 +149,50 @@ impl core::fmt::Debug for SstRowFeature {
     }
   }
 }
-impl<'a> flatbuffers::Follow<'a> for SstRowFeature {
+impl<'a> flatbuffers::Follow<'a> for CheckpointMetadata {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
+    let b = flatbuffers::read_scalar_at::<u8>(buf, loc);
     Self(b)
   }
 }
 
-impl flatbuffers::Push for SstRowFeature {
-    type Output = SstRowFeature;
+impl flatbuffers::Push for CheckpointMetadata {
+    type Output = CheckpointMetadata;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        flatbuffers::emplace_scalar::<i8>(dst, self.0);
+        flatbuffers::emplace_scalar::<u8>(dst, self.0);
     }
 }
 
-impl flatbuffers::EndianScalar for SstRowFeature {
-  type Scalar = i8;
+impl flatbuffers::EndianScalar for CheckpointMetadata {
+  type Scalar = u8;
   #[inline]
-  fn to_little_endian(self) -> i8 {
+  fn to_little_endian(self) -> u8 {
     self.0.to_le()
   }
   #[inline]
   #[allow(clippy::wrong_self_convention)]
-  fn from_little_endian(v: i8) -> Self {
-    let b = i8::from_le(v);
+  fn from_little_endian(v: u8) -> Self {
+    let b = u8::from_le(v);
     Self(b)
   }
 }
 
-impl<'a> flatbuffers::Verifiable for SstRowFeature {
+impl<'a> flatbuffers::Verifiable for CheckpointMetadata {
   #[inline]
   fn run_verifier(
     v: &mut flatbuffers::Verifier, pos: usize
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
-    i8::run_verifier(v, pos)
+    u8::run_verifier(v, pos)
   }
 }
 
-impl flatbuffers::SimpleToVerifyInSlice for SstRowFeature {}
+impl flatbuffers::SimpleToVerifyInSlice for CheckpointMetadata {}
+pub struct CheckpointMetadataUnionTableOffset {}
+
 pub enum CompactedSstIdOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -447,7 +445,6 @@ impl<'a> SsTableInfo<'a> {
   pub const VT_FILTER_OFFSET: flatbuffers::VOffsetT = 10;
   pub const VT_FILTER_LEN: flatbuffers::VOffsetT = 12;
   pub const VT_COMPRESSION_FORMAT: flatbuffers::VOffsetT = 14;
-  pub const VT_ROW_FEATURES: flatbuffers::VOffsetT = 16;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -463,7 +460,6 @@ impl<'a> SsTableInfo<'a> {
     builder.add_filter_offset(args.filter_offset);
     builder.add_index_len(args.index_len);
     builder.add_index_offset(args.index_offset);
-    if let Some(x) = args.row_features { builder.add_row_features(x); }
     if let Some(x) = args.first_key { builder.add_first_key(x); }
     builder.add_compression_format(args.compression_format);
     builder.finish()
@@ -512,13 +508,6 @@ impl<'a> SsTableInfo<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<CompressionFormat>(SsTableInfo::VT_COMPRESSION_FORMAT, Some(CompressionFormat::None)).unwrap()}
   }
-  #[inline]
-  pub fn row_features(&self) -> Option<flatbuffers::Vector<'a, SstRowFeature>> {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, SstRowFeature>>>(SsTableInfo::VT_ROW_FEATURES, None)}
-  }
 }
 
 impl flatbuffers::Verifiable for SsTableInfo<'_> {
@@ -534,7 +523,6 @@ impl flatbuffers::Verifiable for SsTableInfo<'_> {
      .visit_field::<u64>("filter_offset", Self::VT_FILTER_OFFSET, false)?
      .visit_field::<u64>("filter_len", Self::VT_FILTER_LEN, false)?
      .visit_field::<CompressionFormat>("compression_format", Self::VT_COMPRESSION_FORMAT, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, SstRowFeature>>>("row_features", Self::VT_ROW_FEATURES, false)?
      .finish();
     Ok(())
   }
@@ -546,7 +534,6 @@ pub struct SsTableInfoArgs<'a> {
     pub filter_offset: u64,
     pub filter_len: u64,
     pub compression_format: CompressionFormat,
-    pub row_features: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, SstRowFeature>>>,
 }
 impl<'a> Default for SsTableInfoArgs<'a> {
   #[inline]
@@ -558,7 +545,6 @@ impl<'a> Default for SsTableInfoArgs<'a> {
       filter_offset: 0,
       filter_len: 0,
       compression_format: CompressionFormat::None,
-      row_features: None,
     }
   }
 }
@@ -593,10 +579,6 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SsTableInfoBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<CompressionFormat>(SsTableInfo::VT_COMPRESSION_FORMAT, compression_format, CompressionFormat::None);
   }
   #[inline]
-  pub fn add_row_features(&mut self, row_features: flatbuffers::WIPOffset<flatbuffers::Vector<'b , SstRowFeature>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(SsTableInfo::VT_ROW_FEATURES, row_features);
-  }
-  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SsTableInfoBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     SsTableInfoBuilder {
@@ -620,7 +602,6 @@ impl core::fmt::Debug for SsTableInfo<'_> {
       ds.field("filter_offset", &self.filter_offset());
       ds.field("filter_len", &self.filter_len());
       ds.field("compression_format", &self.compression_format());
-      ds.field("row_features", &self.row_features());
       ds.finish()
   }
 }
@@ -837,6 +818,120 @@ impl core::fmt::Debug for SsTableIndex<'_> {
       ds.finish()
   }
 }
+pub enum UuidOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct Uuid<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for Uuid<'a> {
+  type Inner = Uuid<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> Uuid<'a> {
+  pub const VT_HIGH: flatbuffers::VOffsetT = 4;
+  pub const VT_LOW: flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    Uuid { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args UuidArgs
+  ) -> flatbuffers::WIPOffset<Uuid<'bldr>> {
+    let mut builder = UuidBuilder::new(_fbb);
+    builder.add_low(args.low);
+    builder.add_high(args.high);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn high(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(Uuid::VT_HIGH, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn low(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(Uuid::VT_LOW, Some(0)).unwrap()}
+  }
+}
+
+impl flatbuffers::Verifiable for Uuid<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<u64>("high", Self::VT_HIGH, false)?
+     .visit_field::<u64>("low", Self::VT_LOW, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct UuidArgs {
+    pub high: u64,
+    pub low: u64,
+}
+impl<'a> Default for UuidArgs {
+  #[inline]
+  fn default() -> Self {
+    UuidArgs {
+      high: 0,
+      low: 0,
+    }
+  }
+}
+
+pub struct UuidBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> UuidBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_high(&mut self, high: u64) {
+    self.fbb_.push_slot::<u64>(Uuid::VT_HIGH, high, 0);
+  }
+  #[inline]
+  pub fn add_low(&mut self, low: u64) {
+    self.fbb_.push_slot::<u64>(Uuid::VT_LOW, low, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> UuidBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    UuidBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<Uuid<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for Uuid<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("Uuid");
+      ds.field("high", &self.high());
+      ds.field("low", &self.low());
+      ds.finish()
+  }
+}
 pub enum ManifestV1Offset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -854,14 +949,16 @@ impl<'a> flatbuffers::Follow<'a> for ManifestV1<'a> {
 
 impl<'a> ManifestV1<'a> {
   pub const VT_MANIFEST_ID: flatbuffers::VOffsetT = 4;
-  pub const VT_WRITER_EPOCH: flatbuffers::VOffsetT = 6;
-  pub const VT_COMPACTOR_EPOCH: flatbuffers::VOffsetT = 8;
-  pub const VT_WAL_ID_LAST_COMPACTED: flatbuffers::VOffsetT = 10;
-  pub const VT_WAL_ID_LAST_SEEN: flatbuffers::VOffsetT = 12;
-  pub const VT_L0_LAST_COMPACTED: flatbuffers::VOffsetT = 14;
-  pub const VT_L0: flatbuffers::VOffsetT = 16;
-  pub const VT_COMPACTED: flatbuffers::VOffsetT = 18;
-  pub const VT_SNAPSHOTS: flatbuffers::VOffsetT = 20;
+  pub const VT_INITIALIZED: flatbuffers::VOffsetT = 6;
+  pub const VT_WRITER_EPOCH: flatbuffers::VOffsetT = 8;
+  pub const VT_COMPACTOR_EPOCH: flatbuffers::VOffsetT = 10;
+  pub const VT_WAL_ID_LAST_COMPACTED: flatbuffers::VOffsetT = 12;
+  pub const VT_WAL_ID_LAST_SEEN: flatbuffers::VOffsetT = 14;
+  pub const VT_L0_LAST_COMPACTED: flatbuffers::VOffsetT = 16;
+  pub const VT_L0: flatbuffers::VOffsetT = 18;
+  pub const VT_COMPACTED: flatbuffers::VOffsetT = 20;
+  pub const VT_LAST_CLOCK_TICK: flatbuffers::VOffsetT = 22;
+  pub const VT_CHECKPOINTS: flatbuffers::VOffsetT = 24;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -873,15 +970,17 @@ impl<'a> ManifestV1<'a> {
     args: &'args ManifestV1Args<'args>
   ) -> flatbuffers::WIPOffset<ManifestV1<'bldr>> {
     let mut builder = ManifestV1Builder::new(_fbb);
+    builder.add_last_clock_tick(args.last_clock_tick);
     builder.add_wal_id_last_seen(args.wal_id_last_seen);
     builder.add_wal_id_last_compacted(args.wal_id_last_compacted);
     builder.add_compactor_epoch(args.compactor_epoch);
     builder.add_writer_epoch(args.writer_epoch);
     builder.add_manifest_id(args.manifest_id);
-    if let Some(x) = args.snapshots { builder.add_snapshots(x); }
+    if let Some(x) = args.checkpoints { builder.add_checkpoints(x); }
     if let Some(x) = args.compacted { builder.add_compacted(x); }
     if let Some(x) = args.l0 { builder.add_l0(x); }
     if let Some(x) = args.l0_last_compacted { builder.add_l0_last_compacted(x); }
+    builder.add_initialized(args.initialized);
     builder.finish()
   }
 
@@ -892,6 +991,13 @@ impl<'a> ManifestV1<'a> {
     // Created from valid Table for this object
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u64>(ManifestV1::VT_MANIFEST_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn initialized(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(ManifestV1::VT_INITIALIZED, Some(false)).unwrap()}
   }
   #[inline]
   pub fn writer_epoch(&self) -> u64 {
@@ -943,11 +1049,18 @@ impl<'a> ManifestV1<'a> {
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRun>>>>(ManifestV1::VT_COMPACTED, None).unwrap()}
   }
   #[inline]
-  pub fn snapshots(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Snapshot<'a>>>> {
+  pub fn last_clock_tick(&self) -> i64 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Snapshot>>>>(ManifestV1::VT_SNAPSHOTS, None)}
+    unsafe { self._tab.get::<i64>(ManifestV1::VT_LAST_CLOCK_TICK, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn checkpoints(&self) -> flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Checkpoint<'a>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Checkpoint>>>>(ManifestV1::VT_CHECKPOINTS, None).unwrap()}
   }
 }
 
@@ -959,6 +1072,7 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
      .visit_field::<u64>("manifest_id", Self::VT_MANIFEST_ID, false)?
+     .visit_field::<bool>("initialized", Self::VT_INITIALIZED, false)?
      .visit_field::<u64>("writer_epoch", Self::VT_WRITER_EPOCH, false)?
      .visit_field::<u64>("compactor_epoch", Self::VT_COMPACTOR_EPOCH, false)?
      .visit_field::<u64>("wal_id_last_compacted", Self::VT_WAL_ID_LAST_COMPACTED, false)?
@@ -966,13 +1080,15 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
      .visit_field::<flatbuffers::ForwardsUOffset<CompactedSstId>>("l0_last_compacted", Self::VT_L0_LAST_COMPACTED, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("l0", Self::VT_L0, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRun>>>>("compacted", Self::VT_COMPACTED, true)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Snapshot>>>>("snapshots", Self::VT_SNAPSHOTS, false)?
+     .visit_field::<i64>("last_clock_tick", Self::VT_LAST_CLOCK_TICK, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Checkpoint>>>>("checkpoints", Self::VT_CHECKPOINTS, true)?
      .finish();
     Ok(())
   }
 }
 pub struct ManifestV1Args<'a> {
     pub manifest_id: u64,
+    pub initialized: bool,
     pub writer_epoch: u64,
     pub compactor_epoch: u64,
     pub wal_id_last_compacted: u64,
@@ -980,13 +1096,15 @@ pub struct ManifestV1Args<'a> {
     pub l0_last_compacted: Option<flatbuffers::WIPOffset<CompactedSstId<'a>>>,
     pub l0: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
     pub compacted: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRun<'a>>>>>,
-    pub snapshots: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Snapshot<'a>>>>>,
+    pub last_clock_tick: i64,
+    pub checkpoints: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Checkpoint<'a>>>>>,
 }
 impl<'a> Default for ManifestV1Args<'a> {
   #[inline]
   fn default() -> Self {
     ManifestV1Args {
       manifest_id: 0,
+      initialized: false,
       writer_epoch: 0,
       compactor_epoch: 0,
       wal_id_last_compacted: 0,
@@ -994,7 +1112,8 @@ impl<'a> Default for ManifestV1Args<'a> {
       l0_last_compacted: None,
       l0: None, // required field
       compacted: None, // required field
-      snapshots: None,
+      last_clock_tick: 0,
+      checkpoints: None, // required field
     }
   }
 }
@@ -1007,6 +1126,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
   #[inline]
   pub fn add_manifest_id(&mut self, manifest_id: u64) {
     self.fbb_.push_slot::<u64>(ManifestV1::VT_MANIFEST_ID, manifest_id, 0);
+  }
+  #[inline]
+  pub fn add_initialized(&mut self, initialized: bool) {
+    self.fbb_.push_slot::<bool>(ManifestV1::VT_INITIALIZED, initialized, false);
   }
   #[inline]
   pub fn add_writer_epoch(&mut self, writer_epoch: u64) {
@@ -1037,8 +1160,12 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_COMPACTED, compacted);
   }
   #[inline]
-  pub fn add_snapshots(&mut self, snapshots: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Snapshot<'b >>>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_SNAPSHOTS, snapshots);
+  pub fn add_last_clock_tick(&mut self, last_clock_tick: i64) {
+    self.fbb_.push_slot::<i64>(ManifestV1::VT_LAST_CLOCK_TICK, last_clock_tick, 0);
+  }
+  #[inline]
+  pub fn add_checkpoints(&mut self, checkpoints: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Checkpoint<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_CHECKPOINTS, checkpoints);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> ManifestV1Builder<'a, 'b, A> {
@@ -1053,6 +1180,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
     let o = self.fbb_.end_table(self.start_);
     self.fbb_.required(o, ManifestV1::VT_L0,"l0");
     self.fbb_.required(o, ManifestV1::VT_COMPACTED,"compacted");
+    self.fbb_.required(o, ManifestV1::VT_CHECKPOINTS,"checkpoints");
     flatbuffers::WIPOffset::new(o.value())
   }
 }
@@ -1061,6 +1189,7 @@ impl core::fmt::Debug for ManifestV1<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut ds = f.debug_struct("ManifestV1");
       ds.field("manifest_id", &self.manifest_id());
+      ds.field("initialized", &self.initialized());
       ds.field("writer_epoch", &self.writer_epoch());
       ds.field("compactor_epoch", &self.compactor_epoch());
       ds.field("wal_id_last_compacted", &self.wal_id_last_compacted());
@@ -1068,7 +1197,8 @@ impl core::fmt::Debug for ManifestV1<'_> {
       ds.field("l0_last_compacted", &self.l0_last_compacted());
       ds.field("l0", &self.l0());
       ds.field("compacted", &self.compacted());
-      ds.field("snapshots", &self.snapshots());
+      ds.field("last_clock_tick", &self.last_clock_tick());
+      ds.field("checkpoints", &self.checkpoints());
       ds.finish()
   }
 }
@@ -1187,134 +1317,314 @@ impl core::fmt::Debug for SortedRun<'_> {
       ds.finish()
   }
 }
-pub enum SnapshotOffset {}
+pub enum WriterCheckpointOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
-pub struct Snapshot<'a> {
+pub struct WriterCheckpoint<'a> {
   pub _tab: flatbuffers::Table<'a>,
 }
 
-impl<'a> flatbuffers::Follow<'a> for Snapshot<'a> {
-  type Inner = Snapshot<'a>;
+impl<'a> flatbuffers::Follow<'a> for WriterCheckpoint<'a> {
+  type Inner = WriterCheckpoint<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
     Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
-impl<'a> Snapshot<'a> {
-  pub const VT_ID: flatbuffers::VOffsetT = 4;
-  pub const VT_MANIFEST_ID: flatbuffers::VOffsetT = 6;
-  pub const VT_SNAPSHOT_EXPIRE_TIME_S: flatbuffers::VOffsetT = 8;
+impl<'a> WriterCheckpoint<'a> {
+  pub const VT_EPOCH: flatbuffers::VOffsetT = 4;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
-    Snapshot { _tab: table }
+    WriterCheckpoint { _tab: table }
   }
   #[allow(unused_mut)]
   pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
     _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args SnapshotArgs
-  ) -> flatbuffers::WIPOffset<Snapshot<'bldr>> {
-    let mut builder = SnapshotBuilder::new(_fbb);
-    builder.add_manifest_id(args.manifest_id);
-    builder.add_id(args.id);
-    builder.add_snapshot_expire_time_s(args.snapshot_expire_time_s);
+    args: &'args WriterCheckpointArgs
+  ) -> flatbuffers::WIPOffset<WriterCheckpoint<'bldr>> {
+    let mut builder = WriterCheckpointBuilder::new(_fbb);
+    builder.add_epoch(args.epoch);
     builder.finish()
   }
 
 
   #[inline]
-  pub fn id(&self) -> u64 {
+  pub fn epoch(&self) -> u64 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(Snapshot::VT_ID, Some(0)).unwrap()}
-  }
-  #[inline]
-  pub fn manifest_id(&self) -> u64 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(Snapshot::VT_MANIFEST_ID, Some(0)).unwrap()}
-  }
-  #[inline]
-  pub fn snapshot_expire_time_s(&self) -> u32 {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<u32>(Snapshot::VT_SNAPSHOT_EXPIRE_TIME_S, Some(0)).unwrap()}
+    unsafe { self._tab.get::<u64>(WriterCheckpoint::VT_EPOCH, Some(0)).unwrap()}
   }
 }
 
-impl flatbuffers::Verifiable for Snapshot<'_> {
+impl flatbuffers::Verifiable for WriterCheckpoint<'_> {
   #[inline]
   fn run_verifier(
     v: &mut flatbuffers::Verifier, pos: usize
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<u64>("id", Self::VT_ID, false)?
-     .visit_field::<u64>("manifest_id", Self::VT_MANIFEST_ID, false)?
-     .visit_field::<u32>("snapshot_expire_time_s", Self::VT_SNAPSHOT_EXPIRE_TIME_S, false)?
+     .visit_field::<u64>("epoch", Self::VT_EPOCH, false)?
      .finish();
     Ok(())
   }
 }
-pub struct SnapshotArgs {
-    pub id: u64,
-    pub manifest_id: u64,
-    pub snapshot_expire_time_s: u32,
+pub struct WriterCheckpointArgs {
+    pub epoch: u64,
 }
-impl<'a> Default for SnapshotArgs {
+impl<'a> Default for WriterCheckpointArgs {
   #[inline]
   fn default() -> Self {
-    SnapshotArgs {
-      id: 0,
-      manifest_id: 0,
-      snapshot_expire_time_s: 0,
+    WriterCheckpointArgs {
+      epoch: 0,
     }
   }
 }
 
-pub struct SnapshotBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+pub struct WriterCheckpointBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
   fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
   start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
 }
-impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SnapshotBuilder<'a, 'b, A> {
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> WriterCheckpointBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_id(&mut self, id: u64) {
-    self.fbb_.push_slot::<u64>(Snapshot::VT_ID, id, 0);
+  pub fn add_epoch(&mut self, epoch: u64) {
+    self.fbb_.push_slot::<u64>(WriterCheckpoint::VT_EPOCH, epoch, 0);
   }
   #[inline]
-  pub fn add_manifest_id(&mut self, manifest_id: u64) {
-    self.fbb_.push_slot::<u64>(Snapshot::VT_MANIFEST_ID, manifest_id, 0);
-  }
-  #[inline]
-  pub fn add_snapshot_expire_time_s(&mut self, snapshot_expire_time_s: u32) {
-    self.fbb_.push_slot::<u32>(Snapshot::VT_SNAPSHOT_EXPIRE_TIME_S, snapshot_expire_time_s, 0);
-  }
-  #[inline]
-  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SnapshotBuilder<'a, 'b, A> {
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> WriterCheckpointBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
-    SnapshotBuilder {
+    WriterCheckpointBuilder {
       fbb_: _fbb,
       start_: start,
     }
   }
   #[inline]
-  pub fn finish(self) -> flatbuffers::WIPOffset<Snapshot<'a>> {
+  pub fn finish(self) -> flatbuffers::WIPOffset<WriterCheckpoint<'a>> {
     let o = self.fbb_.end_table(self.start_);
     flatbuffers::WIPOffset::new(o.value())
   }
 }
 
-impl core::fmt::Debug for Snapshot<'_> {
+impl core::fmt::Debug for WriterCheckpoint<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    let mut ds = f.debug_struct("Snapshot");
+    let mut ds = f.debug_struct("WriterCheckpoint");
+      ds.field("epoch", &self.epoch());
+      ds.finish()
+  }
+}
+pub enum CheckpointOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct Checkpoint<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for Checkpoint<'a> {
+  type Inner = Checkpoint<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> Checkpoint<'a> {
+  pub const VT_ID: flatbuffers::VOffsetT = 4;
+  pub const VT_MANIFEST_ID: flatbuffers::VOffsetT = 6;
+  pub const VT_CHECKPOINT_EXPIRE_TIME_S: flatbuffers::VOffsetT = 8;
+  pub const VT_CHECKPOINT_CREATE_TIME_S: flatbuffers::VOffsetT = 10;
+  pub const VT_METADATA_TYPE: flatbuffers::VOffsetT = 12;
+  pub const VT_METADATA: flatbuffers::VOffsetT = 14;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    Checkpoint { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args CheckpointArgs<'args>
+  ) -> flatbuffers::WIPOffset<Checkpoint<'bldr>> {
+    let mut builder = CheckpointBuilder::new(_fbb);
+    builder.add_manifest_id(args.manifest_id);
+    if let Some(x) = args.metadata { builder.add_metadata(x); }
+    builder.add_checkpoint_create_time_s(args.checkpoint_create_time_s);
+    builder.add_checkpoint_expire_time_s(args.checkpoint_expire_time_s);
+    if let Some(x) = args.id { builder.add_id(x); }
+    builder.add_metadata_type(args.metadata_type);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn id(&self) -> Uuid<'a> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Uuid>>(Checkpoint::VT_ID, None).unwrap()}
+  }
+  #[inline]
+  pub fn manifest_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(Checkpoint::VT_MANIFEST_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn checkpoint_expire_time_s(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(Checkpoint::VT_CHECKPOINT_EXPIRE_TIME_S, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn checkpoint_create_time_s(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(Checkpoint::VT_CHECKPOINT_CREATE_TIME_S, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn metadata_type(&self) -> CheckpointMetadata {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<CheckpointMetadata>(Checkpoint::VT_METADATA_TYPE, Some(CheckpointMetadata::NONE)).unwrap()}
+  }
+  #[inline]
+  pub fn metadata(&self) -> Option<flatbuffers::Table<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(Checkpoint::VT_METADATA, None)}
+  }
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn metadata_as_writer_checkpoint(&self) -> Option<WriterCheckpoint<'a>> {
+    if self.metadata_type() == CheckpointMetadata::WriterCheckpoint {
+      self.metadata().map(|t| {
+       // Safety:
+       // Created from a valid Table for this object
+       // Which contains a valid union in this slot
+       unsafe { WriterCheckpoint::init_from_table(t) }
+     })
+    } else {
+      None
+    }
+  }
+
+}
+
+impl flatbuffers::Verifiable for Checkpoint<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<flatbuffers::ForwardsUOffset<Uuid>>("id", Self::VT_ID, true)?
+     .visit_field::<u64>("manifest_id", Self::VT_MANIFEST_ID, false)?
+     .visit_field::<u32>("checkpoint_expire_time_s", Self::VT_CHECKPOINT_EXPIRE_TIME_S, false)?
+     .visit_field::<u32>("checkpoint_create_time_s", Self::VT_CHECKPOINT_CREATE_TIME_S, false)?
+     .visit_union::<CheckpointMetadata, _>("metadata_type", Self::VT_METADATA_TYPE, "metadata", Self::VT_METADATA, false, |key, v, pos| {
+        match key {
+          CheckpointMetadata::WriterCheckpoint => v.verify_union_variant::<flatbuffers::ForwardsUOffset<WriterCheckpoint>>("CheckpointMetadata::WriterCheckpoint", pos),
+          _ => Ok(()),
+        }
+     })?
+     .finish();
+    Ok(())
+  }
+}
+pub struct CheckpointArgs<'a> {
+    pub id: Option<flatbuffers::WIPOffset<Uuid<'a>>>,
+    pub manifest_id: u64,
+    pub checkpoint_expire_time_s: u32,
+    pub checkpoint_create_time_s: u32,
+    pub metadata_type: CheckpointMetadata,
+    pub metadata: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+}
+impl<'a> Default for CheckpointArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    CheckpointArgs {
+      id: None, // required field
+      manifest_id: 0,
+      checkpoint_expire_time_s: 0,
+      checkpoint_create_time_s: 0,
+      metadata_type: CheckpointMetadata::NONE,
+      metadata: None,
+    }
+  }
+}
+
+pub struct CheckpointBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CheckpointBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_id(&mut self, id: flatbuffers::WIPOffset<Uuid<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Uuid>>(Checkpoint::VT_ID, id);
+  }
+  #[inline]
+  pub fn add_manifest_id(&mut self, manifest_id: u64) {
+    self.fbb_.push_slot::<u64>(Checkpoint::VT_MANIFEST_ID, manifest_id, 0);
+  }
+  #[inline]
+  pub fn add_checkpoint_expire_time_s(&mut self, checkpoint_expire_time_s: u32) {
+    self.fbb_.push_slot::<u32>(Checkpoint::VT_CHECKPOINT_EXPIRE_TIME_S, checkpoint_expire_time_s, 0);
+  }
+  #[inline]
+  pub fn add_checkpoint_create_time_s(&mut self, checkpoint_create_time_s: u32) {
+    self.fbb_.push_slot::<u32>(Checkpoint::VT_CHECKPOINT_CREATE_TIME_S, checkpoint_create_time_s, 0);
+  }
+  #[inline]
+  pub fn add_metadata_type(&mut self, metadata_type: CheckpointMetadata) {
+    self.fbb_.push_slot::<CheckpointMetadata>(Checkpoint::VT_METADATA_TYPE, metadata_type, CheckpointMetadata::NONE);
+  }
+  #[inline]
+  pub fn add_metadata(&mut self, metadata: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Checkpoint::VT_METADATA, metadata);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> CheckpointBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    CheckpointBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<Checkpoint<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    self.fbb_.required(o, Checkpoint::VT_ID,"id");
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for Checkpoint<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("Checkpoint");
       ds.field("id", &self.id());
       ds.field("manifest_id", &self.manifest_id());
-      ds.field("snapshot_expire_time_s", &self.snapshot_expire_time_s());
+      ds.field("checkpoint_expire_time_s", &self.checkpoint_expire_time_s());
+      ds.field("checkpoint_create_time_s", &self.checkpoint_create_time_s());
+      ds.field("metadata_type", &self.metadata_type());
+      match self.metadata_type() {
+        CheckpointMetadata::WriterCheckpoint => {
+          if let Some(x) = self.metadata_as_writer_checkpoint() {
+            ds.field("metadata", &x)
+          } else {
+            ds.field("metadata", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        _ => {
+          let x: Option<()> = None;
+          ds.field("metadata", &x)
+        },
+      };
       ds.finish()
   }
 }

@@ -176,6 +176,14 @@ struct CheckpointOptions {
     source: Option<UUID>
 }
 
+#[derive(Debug)]
+pub struct CheckpointCreateResult {
+    /// The id of the created checkpoint.
+    id: uuid::Uuid,
+    /// The manifest id referenced by the created checkpoint.
+    manifest_id: u64,
+}
+
 impl Db {
     /// Opens a Db from a checkpoint. If no db already exists at the specified path, then this will create
     /// a new db under the path that is a clone of the db at parent_path. A clone is a shallow copy of the
@@ -196,7 +204,7 @@ impl Db {
 
     /// Creates a checkpoint of an opened db using the provided options. Returns the ID of the created
     /// checkpoint and the id of the referenced manifest.
-    pub async fn create_checkpoint(&self, options: &CheckpointOptions) -> Result<(uuid::UUID, u64), SlateDBError> {
+    pub async fn create_checkpoint(&self, options: &CheckpointOptions) -> Result<CheckpointCreateResult, SlateDBError> {
         …
     }
 
@@ -204,12 +212,28 @@ impl Db {
     /// Note that the scope option does not impact the behaviour of this method. The checkpoint will reference
     /// the current active manifest of the db.
     pub async fn create_checkpoint(
-       path: Path,
+       path: &Path,
        object_store: Arc<dyn ObjectStore>,
        options: &CheckpointOptions,
-    ) -> Result<(uuid::UUID, u64), SlateDBError> {}
-       ...
-    )
+    ) -> Result<CheckpointCreateResult, SlateDBError> {}
+
+    /// Refresh the lifetime of an existing checkpoint. Takes the id of an existing checkpoint
+    /// and a lifetime, and sets the lifetime of the checkpoint to the specified lifetime. If
+    /// there is no checkpoint with the specified id, then this fn fails with
+    /// SlateDBError::InvalidDbState
+    pub async fn refresh_checkpoint(
+        path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        id: Uuid,
+        lifetime: Option<Duration>,
+    ) -> Result<(), SlateDBError> {}
+    
+    /// Deletes the checkpoint with the specified id.
+    pub async fn delete_checkpoint(
+        path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        id: Uuid,
+    ) -> Result<(), SlateDBError> {}
 
     /// Called to destroy the database at the given path. If `soft` is true, This method will
     /// set the destroyed_at_s field in the manifest. The GC will clean up the db after some
@@ -333,7 +357,7 @@ arbitrary manifest versions.
 
 Generally to take a checkpoint from the current manifest, the client runs a procedure that looks like the following:
 1. Get the current manifest M at version V.
-2. If M.`initialized` is false, exit with error.
+2. If M.`initialized` is false, or M.`destroyed_at_s` is set, exit with error.
 3. Compute a new v4 UUID id for the checkpoint.
 4. Create a new entry in `checkpoints` with:
     - `id` set to the id computed in the previous step
@@ -343,14 +367,15 @@ Generally to take a checkpoint from the current manifest, the client runs a proc
 
 To take a checkpoint from an existing checkpoint with id S, the client runs the following procedure:
 1. Get the current manifest M at version V.
-2. Look for the checkpoint C with id S under `checkpoints`. If there is no such checkpoint, exit with error.
-3. Check that C is not expired. If it is, then exit with error.
-4. Compute a new v4 UUID id for the checkpoint.
-5. Create a new entry in `checkpoints` with:
+2. If `destroyed_at_s` is set, exit with error.
+3. Look for the checkpoint C with id S under `checkpoints`. If there is no such checkpoint, exit with error.
+4. Check that C is not expired. If it is, then exit with error.
+5. Compute a new v4 UUID id for the checkpoint.
+6. Create a new entry in `checkpoints` with:
     - `id` set to the id computed in the previous step
     - `manifest_id` set to C.`manifest_id`
     - other fields set as appropriate (e.g. expiry time based on relevant checkpoint creation params)
-6. Write a new manifest M' at version V+1. If CAS fails, go to step 1.
+7. Write a new manifest M' at version V+1. If CAS fails, go to step 1.
 
 The `create-checkpoint` CLI and `create_checkpoint` API will run exactly these procedures when called without
 and with a source checkpoint ID, respectively.
@@ -416,14 +441,17 @@ When initializing the db for the first time (detected by the absence of a manife
 1. Read the current manifest M, which may not be present.
 2. Read the current parent manifest M_p at `parent_path`.
 3. M_p.`initialized` is false, exit with error.
-3. If M is present:
+4. If M is present:
    1. If the `parent` field is empty, exit with error.
    2. If `initialized`, then go to step 10.
-4. Compute the clone's checkpoint ID
+5. Compute the clone's checkpoint ID
    1. If M is present, use M.`parent.parent_checkpoint` as the checkpoint ID
    2. Otherwise, set checkpoint ID to a new v4 UUID
-6. If `parent_checkpoint` is not None, read it's manifest M_c. Otherwise let M_c be M_p
-7. Write a new manifest M'. If CAS fails, go to step 1. M' fields are set to:
+6. If M_p.`destroyed_at_s` is set:
+   1. Delete the checkpoint with checkpoint ID from the parent, if any. If CAS fails, go to step 1.
+   2. Exit with error.
+7. If `parent_checkpoint` is not None, read it's manifest M_c. Otherwise let M_c be M_p
+8. Write a new manifest M'. If CAS fails, go to step 1. M' fields are set to:
    - parent: set to point to checkpoint ID and initialized set to false
    - writer_epoch: set to the epoch from M_c + 1.
    - compactor_epoch: copied from M_c.
@@ -433,9 +461,9 @@ When initializing the db for the first time (detected by the absence of a manife
    - l0_last_compacted: copied from M_c
    - compacted: copied from M_c
    - checkpoints: empty
-8. Create or update the checkpoint with checkpoint ID pointing to M_c in the parent DB. If CAS fails, go to step 1.
-9. Copy over any WAL SSTs between M_c.`last_compacted_wal_id` and M_c.`wal_id_last_seen`.
-10. Update M' with `initialized` set to true. If CAS fails, go to step 1.
+9. Create or update the checkpoint with checkpoint ID pointing to M_c in the parent DB. If CAS fails, go to step 1.
+10. Copy over any WAL SSTs between M_c.`last_compacted_wal_id` and M_c.`wal_id_last_seen`.
+11. Update M' with `initialized` set to true. If CAS fails, go to step 1.
 
 ##### SST Path Resolution
 
@@ -464,7 +492,10 @@ exit. This is covered in more detail in the GC section. A soft delete will be pr
 A hard delete will proceed as follows. It is up to the user to ensure that there is no active writer at the time of
 deletion:
 1. Check that there are no active checkpoints. If there are, return `InvalidDeletion`
-2. Delete all objects under `path`.
+2. If `destroyed_at_s` is not set, then update the manifest by setting `destroyed_at_s` field to the current time. If
+   CAS fails, go to step 1.
+3. Delete all objects under `path` other than the current manifest.
+4. Delete the current manifest.
 
 ### Readers
 
@@ -480,7 +511,7 @@ option.
 
 To establish the checkpoint, `DbReader` will:
 1. Read the latest manifest M at version V.
-2. Check that M.`initialized` is true. If not, return error.
+2. Check that M.`initialized` is true and M.`destroyed_at_s` is not set. Otherwise, return error.
 3. Create a new checkpoint with id set to a new v4 uuid, `manifest_id` set to the next manifest version (V + 1),
    `checkpoint_expire_time_s` set to the current time plus `checkpoint_lifetime`, and `metadata` set to None.
 4. Update the manifest’s `wal_id_last_seen` to the latest WAL id found in the wal directory
@@ -512,7 +543,8 @@ look like the following:
 2. If `destroyed_at_s` is set, and the current time is after `destroyed_at_s` + `db_delete_grace`, and there are no
    active checkpoints, then:
     1. If the db is a clone, update the parent db's manifest by deleting the checkpoint.
-    2. Delete all object's under the db's path.
+    2. Delete all object's under the db's path other than the current manifest.
+    3. Delete the current manifest.
     3. Exit.
 3. Garbage collect expired checkpoints
     1. Find any checkpoints that have expired and remove them

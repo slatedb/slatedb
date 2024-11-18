@@ -162,6 +162,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{str::FromStr, time::Duration};
 use tokio::runtime::Handle;
+use uuid::Uuid;
 
 use crate::compactor::CompactionScheduler;
 use crate::error::{DbOptionsError, SlateDBError};
@@ -355,6 +356,44 @@ fn default_clock() -> Arc<dyn Clock + Send + Sync> {
     Arc::new(SystemClock {
         last_tick: AtomicI64::new(i64::MIN),
     })
+}
+
+/// Defines the scope targeted by a given checkpoint. If set to All, then the checkpoint will
+/// include all writes that were issued at the time that create_checkpoint is called. If force_flush
+/// is true, then SlateDB will force the current wal, or memtable if wal_enabled is false, to flush
+/// its data. Otherwise, the database will wait for the current wal or memtable to be flushed due to
+/// flush_interval or reaching l0_sst_size_bytes, respectively. If set to Durable, then the
+/// checkpoint includes only writes that were durable at the time of the call. This will be faster,
+/// but may not include data from recent writes.
+pub enum CheckpointScope {
+    All { force_flush: bool },
+    Durable,
+}
+
+/// Specify options to provide when creating a checkpoint.
+pub struct CheckpointOptions {
+    /// Specifies the scope targeted by the checkpoint (see above)
+    pub scope: CheckpointScope,
+
+    /// Optionally specifies the lifetime of the checkpoint to create. The expire time will be
+    /// set to the current wallclock time plus the specified lifetime. If lifetime is None, then
+    /// the checkpoint is created without an expiry time.
+    pub lifetime: Option<Duration>,
+
+    /// Optionally specifies an existing checkpoint to use as the source for this checkpoint. This
+    /// is useful for users to establish checkpoints from existing checkpoints, but with a different
+    /// lifecycle and/or metadata.
+    pub source: Option<Uuid>,
+}
+
+impl Default for CheckpointOptions {
+    fn default() -> Self {
+        Self {
+            scope: CheckpointScope::Durable,
+            lifetime: None,
+            source: None,
+        }
+    }
 }
 
 /// Configuration options for the database. These options are set on client startup.
@@ -709,14 +748,6 @@ pub struct CompactorOptions {
     /// this to isolate compactions to a dedicated thread pool.
     #[serde(skip)]
     pub compaction_runtime: Option<Handle>,
-
-    /// The Clock to use for determining the time the compaction has run. This
-    /// helps determine actions such as expiring data with a configured time-to-live.
-    ///
-    /// Default: the default clock uses the local system time on the machine
-    #[serde(skip)]
-    #[serde(default = "default_clock")]
-    pub clock: Arc<dyn Clock + Send + Sync>,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -731,7 +762,6 @@ impl Default for CompactorOptions {
             compaction_scheduler: default_compaction_scheduler(),
             max_concurrent_compactions: 4,
             compaction_runtime: None,
-            clock: default_clock(),
         }
     }
 }

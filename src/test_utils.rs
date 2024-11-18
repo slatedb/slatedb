@@ -36,8 +36,8 @@ pub(crate) async fn assert_iterator<T: KeyValueIterator>(
         assert_eq!(kv.key, Bytes::from(expected_k.clone()));
         assert_eq!(kv.value, *expected_v);
         assert_eq!(
-            kv.attributes, *expected_attr,
-            "Attribute mismatch at key {:?}",
+            kv.expire_ts, expected_attr.expire_ts,
+            "Attribute expire_ts mismatch at key {:?}",
             kv.key
         );
     }
@@ -60,6 +60,14 @@ pub fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
 pub(crate) fn gen_attrs(ts: i64) -> RowAttributes {
     RowAttributes {
         ts: Some(ts),
+        expire_ts: None,
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn gen_empty_attrs() -> RowAttributes {
+    RowAttributes {
+        ts: None,
         expire_ts: None,
     }
 }

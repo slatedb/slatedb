@@ -91,6 +91,7 @@ impl BytesRange {
         self.end_bound.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn end_bound_opt(&self) -> Option<Bytes> {
         as_option(self.end_bound()).cloned()
     }

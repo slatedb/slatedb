@@ -5,11 +5,12 @@ use crate::iter::KeyValueIterator;
 use crate::range_util::BytesRange;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
-use crate::types::KeyValueDeletable;
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use crate::types::RowEntry;
+
 
 pub(crate) struct SortedRunIterator<'a, H: AsRef<SsTableHandle> = &'a SsTableHandle> {
     current_iter: Option<SstIterator<'a, H>>,
@@ -216,7 +217,7 @@ impl<'a, H: AsRef<SsTableHandle>> SortedRunIterator<'a, H> {
 }
 
 impl<'a, H: AsRef<SsTableHandle>> KeyValueIterator for SortedRunIterator<'a, H> {
-    async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         loop {
             if let Some(iter) = &mut self.current_iter {
                 if let Some(kv) = iter.next_entry().await? {
@@ -253,10 +254,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::config::Clock;
     use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
-    use crate::test_utils::{assert_kv, gen_attrs, OrderedBytesGenerator, TestClock};
+    use crate::test_utils::{assert_kv, gen_attrs, OrderedBytesGenerator};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use ulid::Ulid;
@@ -276,9 +276,15 @@ mod tests {
             None,
         ));
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", Some(b"value1"), gen_attrs(1)).unwrap();
-        builder.add(b"key2", Some(b"value2"), gen_attrs(2)).unwrap();
-        builder.add(b"key3", Some(b"value3"), gen_attrs(3)).unwrap();
+        builder
+            .add_kv(b"key1", Some(b"value1"), gen_attrs(1))
+            .unwrap();
+        builder
+            .add_kv(b"key2", Some(b"value2"), gen_attrs(2))
+            .unwrap();
+        builder
+            .add_kv(b"key3", Some(b"value3"), gen_attrs(3))
+            .unwrap();
         let encoded = builder.build().unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let handle = table_store.write_sst(&id, encoded).await.unwrap();
@@ -319,13 +325,19 @@ mod tests {
             None,
         ));
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", Some(b"value1"), gen_attrs(1)).unwrap();
-        builder.add(b"key2", Some(b"value2"), gen_attrs(2)).unwrap();
+        builder
+            .add_kv(b"key1", Some(b"value1"), gen_attrs(1))
+            .unwrap();
+        builder
+            .add_kv(b"key2", Some(b"value2"), gen_attrs(2))
+            .unwrap();
         let encoded = builder.build().unwrap();
         let id1 = SsTableId::Compacted(Ulid::new());
         let handle1 = table_store.write_sst(&id1, encoded).await.unwrap();
         let mut builder = table_store.table_builder();
-        builder.add(b"key3", Some(b"value3"), gen_attrs(3)).unwrap();
+        builder
+            .add_kv(b"key3", Some(b"value3"), gen_attrs(3))
+            .unwrap();
         let encoded = builder.build().unwrap();
         let id2 = SsTableId::Compacted(Ulid::new());
         let handle2 = table_store.write_sst(&id2, encoded).await.unwrap();
@@ -369,15 +381,7 @@ mod tests {
         let mut test_case_key_gen = key_gen.clone();
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
         let mut test_case_val_gen = val_gen.clone();
-        let sr = build_sr_with_ssts(
-            table_store.clone(),
-            3,
-            10,
-            key_gen,
-            val_gen,
-            Arc::new(TestClock::new()),
-        )
-        .await;
+        let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
 
         for i in 0..30 {
             let mut expected_key_gen = test_case_key_gen.clone();
@@ -417,15 +421,7 @@ mod tests {
         let mut expected_key_gen = key_gen.clone();
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
         let mut expected_val_gen = val_gen.clone();
-        let sr = build_sr_with_ssts(
-            table_store.clone(),
-            3,
-            10,
-            key_gen,
-            val_gen,
-            Arc::new(TestClock::new()),
-        )
-        .await;
+        let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
 
         let mut iter = SortedRunIterator::new_from_key(
             &sr,
@@ -464,15 +460,7 @@ mod tests {
         ));
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
-        let sr = build_sr_with_ssts(
-            table_store.clone(),
-            3,
-            10,
-            key_gen,
-            val_gen,
-            Arc::new(TestClock::new()),
-        )
-        .await;
+        let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
 
         let mut iter = SortedRunIterator::new_from_key(
             &sr,
@@ -494,20 +482,19 @@ mod tests {
         keys_per_sst: usize,
         mut key_gen: OrderedBytesGenerator,
         mut val_gen: OrderedBytesGenerator,
-        clock: Arc<dyn Clock>,
     ) -> SortedRun {
         let mut ssts = Vec::<SsTableHandle>::new();
         for _ in 0..n {
             let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
             for _ in 0..keys_per_sst {
-                writer
-                    .add(
-                        key_gen.next().as_ref(),
-                        Some(val_gen.next().as_ref()),
-                        gen_attrs(clock.now()),
-                    )
-                    .await
-                    .unwrap();
+                let entry = RowEntry::new(
+                    key_gen.next().into(),
+                    Some(val_gen.next().into()),
+                    0,
+                    None,
+                    None,
+                );
+                writer.add(entry).await.unwrap();
             }
             ssts.push(writer.close().await.unwrap());
         }

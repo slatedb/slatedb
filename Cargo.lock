@@ -1518,9 +1518,9 @@ dependencies = [
 
 [[package]]
 name = "object_store"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25a0c4b3a0e31f8b66f71ad8064521efa773910196e2cde791436f13409f3b45"
+checksum = "6eb4c22c6154a1e759d7099f9ffad7cc5ef8245f9efbab4a41b92623079c82f3"
 dependencies = [
  "async-trait",
  "base64",
@@ -2290,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -2312,6 +2312,7 @@ dependencies = [
  "flate2",
  "foyer",
  "futures",
+ "humantime",
  "leaky-bucket",
  "log",
  "lz4_flex",
@@ -2334,6 +2335,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
+ "uuid",
  "walkdir",
  "zstd",
 ]
@@ -2830,11 +2832,12 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.10.0"
+version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81dfa00651efa65069b0b6b651f4aaa31ba9e3c3ce0137aaad053604ee7e0314"
+checksum = "f8c5f0a0af699448548ad1a2fbf920fb4bee257eae39953ba95cb84891a0446a"
 dependencies = [
  "getrandom",
+ "serde",
 ]
 
 [[package]]
