@@ -47,7 +47,7 @@ bitflags! {
 /// | `value_len`      | `u32` | Length of the value                                    |
 /// | `value`          | `var` | Value bytes                                            |
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SstRowEntry {
     pub key_prefix_len: usize,
     pub key_suffix: Bytes,
@@ -215,13 +215,10 @@ impl SstRowCodecV0 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::init_insta_settings;
     use crate::types::ValueDeletable;
 
     #[test]
     fn test_encode_decode() {
-        let _g = init_insta_settings().bind_to_scope();
-
         struct TestCase {
             name: &'static str,
             key_prefix_len: usize,
@@ -246,7 +243,7 @@ mod tests {
             },
             TestCase {
                 name: "normal row without expire_ts",
-                key_prefix_len: 3,
+                key_prefix_len: 0,
                 key_suffix: b"key".to_vec(),
                 seq: 1,
                 value: Some(b"value".to_vec()),
@@ -336,6 +333,7 @@ mod tests {
             },
         ];
 
+        let mut golden_outputs = Vec::new();
         for tc in test_cases {
             let mut encoded_data = Vec::new();
             let codec = SstRowCodecV0 {};
@@ -360,17 +358,15 @@ mod tests {
 
             let mut data = Bytes::from(encoded_data.clone());
             let decoded = codec.decode(&mut data).expect("decoding failed");
-
-            // Run assertions
-            if !tc.first_key.is_empty() {
-                insta::assert_debug_snapshot!(
-                    format!("{}_full_key", tc.name),
-                    decoded.restore_full_key(&Bytes::from(tc.first_key))
-                );
-            }
-            insta::assert_debug_snapshot!(format!("{}_encoded", tc.name), encoded_data);
-            insta::assert_debug_snapshot!(format!("{}_decoded", tc.name), decoded);
+            golden_outputs.push((
+                tc.name,
+                encoded_data,
+                decoded.clone(),
+                decoded.restore_full_key(&Bytes::from(tc.first_key)),
+            ));
         }
+
+        goldie::assert_debug!(golden_outputs);
     }
 
     #[test]
