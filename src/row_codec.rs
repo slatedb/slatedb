@@ -215,18 +215,9 @@ impl SstRowCodecV0 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::assert_debug_snapshot;
     use crate::types::ValueDeletable;
     use rstest::rstest;
-
-    macro_rules! assert_snapshot {
-        ($name:expr, $output:expr) => {
-            let mut settings = insta::Settings::clone_current();
-            let path =
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/snapshots");
-            settings.set_snapshot_path(path);
-            settings.bind(|| insta::assert_debug_snapshot!($name, $output));
-        };
-    }
 
     #[derive(Debug)]
     struct CodecTestCase {
@@ -372,7 +363,7 @@ mod tests {
             decoded.restore_full_key(&Bytes::from(test_case.first_key)),
         );
 
-        assert_snapshot!(test_case.name, output);
+        assert_debug_snapshot!(test_case.name, output);
     }
 
     #[test]
