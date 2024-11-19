@@ -85,7 +85,7 @@ table DbParent {
    parent_path: string (required);
 
    // Optional parent checkpoint ID
-   parent_checkpoint: UUID (required);
+   parent_checkpoint: Uuid (required);
 }
 
 table ManifestV1 {
@@ -173,7 +173,7 @@ struct CheckpointOptions {
     /// Optionally specifies an existing checkpoint to use as the source for this checkpoint. This is
     /// useful for users to establish checkpoints from existing checkpoints, but with a different lifecycle
     /// and/or metadata.
-    source: Option<UUID>
+    source: Option<Uuid>
 }
 
 #[derive(Debug)]
@@ -197,7 +197,7 @@ impl Db {
         path: Path,
         object_store: Arc<dyn ObjectStore>,
         parent_path: Path,
-        parent_checkpoint: Option<UUID>,
+        parent_checkpoint: Option<Uuid>,
     ) -> Result<Self, SlateDBError> {
         …
     }
