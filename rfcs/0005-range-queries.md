@@ -93,7 +93,7 @@ impl DbIterator {
     ///  in order to reclaim resources
     pub async fn seek(
         &mut self,
-        lower_bound: Bound<&[u8]>
+        next_key: Bytes,
     ) -> Result<(), SlateDbError> {
         ...
     }	
