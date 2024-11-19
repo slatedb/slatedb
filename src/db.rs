@@ -58,7 +58,6 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::{RowAttributes, ValueDeletable};
-use slatedb::config::ScanOptions;
 use std::rc::Rc;
 
 pub(crate) struct DbInner {
@@ -1281,6 +1280,7 @@ mod tests {
 
     use super::*;
     use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
+    use crate::config::ReadLevel::Commited;
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
         DEFAULT_PUT_OPTIONS,
@@ -1470,6 +1470,7 @@ mod tests {
         runner: &mut TestRunner,
         num_records: u32,
         record_size_upto: usize,
+        await_durable: bool,
     ) -> BTreeMap<Bytes, Bytes> {
         let mut records = BTreeMap::new();
         for _ in 0..num_records {
@@ -1482,15 +1483,12 @@ mod tests {
                 &record.key,
                 &record.value,
                 &PutOptions::default(),
-                &WriteOptions {
-                    await_durable: false,
-                },
+                &WriteOptions { await_durable },
             )
             .await
             .unwrap();
             records.insert(record.key, record.value);
         }
-        db.flush().await.unwrap();
         records
     }
 
@@ -1506,7 +1504,8 @@ mod tests {
         .unwrap();
 
         let mut runner = TestRunner::new(Config::default());
-        seed_arbitrary_records(&db, &mut runner, 5000, 5).await;
+        seed_arbitrary_records(&db, &mut runner, 5000, 5, false).await;
+        db.flush().await.unwrap();
 
         for _ in 0..1000 {
             let range = arbitrary_empty_range(4)
@@ -1535,7 +1534,8 @@ mod tests {
         .unwrap();
 
         let mut runner = TestRunner::new(Config::default());
-        let records = seed_arbitrary_records(&db, &mut runner, 5000, 5).await;
+        let records = seed_arbitrary_records(&db, &mut runner, 5000, 5, false).await;
+        db.flush().await.unwrap();
 
         for _ in 0..1000 {
             let range = arbitrary_nonempty_range(4)
@@ -1548,6 +1548,40 @@ mod tests {
                 .await
                 .unwrap();
 
+            assert_ordered_scan_in_range(&records, &range, &mut iter).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scan_returns_uncommitted_records_if_read_level_uncommitted() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options(0, 1024, None),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let mut runner = TestRunner::new(Config::default());
+        let records = seed_arbitrary_records(&db, &mut runner, 5000, 5, false).await;
+
+        for _ in 0..1000 {
+            let range = arbitrary_nonempty_range(4)
+                .new_tree(&mut runner)
+                .unwrap()
+                .current();
+            let mut iter = db
+                .inner
+                .scan_with_options(
+                    range.clone(),
+                    &ScanOptions {
+                        read_level: Uncommitted,
+                        ..ScanOptions::default()
+                    },
+                )
+                .await
+                .unwrap();
             assert_ordered_scan_in_range(&records, &range, &mut iter).await;
         }
     }
@@ -1607,7 +1641,8 @@ mod tests {
         .unwrap();
 
         let mut runner = TestRunner::new(Config::default());
-        let records = seed_arbitrary_records(&db, &mut runner, 10, 3).await;
+        let records = seed_arbitrary_records(&db, &mut runner, 10, 3, false).await;
+        db.flush().await.unwrap();
 
         for _ in 0..1000 {
             let range = arbitrary_nonempty_range(5)
