@@ -4,6 +4,7 @@ use bytes::Bytes;
 use object_store::ObjectStore;
 use object_store::path::Path;
 use uuid::Uuid;
+use crate::config::ReadOptions;
 use crate::error::SlateDBError;
 
 /// Read-only
@@ -28,6 +29,88 @@ struct DbReaderOptions {
     pub max_memtable_bytes: u64
 }
 
+pub trait Reader {
+    /// Get a value from the database with default read options.
+    ///
+    /// The `Bytes` object returned contains a slice of an entire
+    /// 4 KiB block. The block will be held in memory as long as the
+    /// caller holds a reference to the `Bytes` object. Consider
+    /// copying the data if you need to hold it for a long time.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to get
+    ///
+    /// ## Returns
+    /// - `Result<Option<Bytes>, SlateDBError>`:
+    ///     - `Some(Bytes)`: the value if it exists
+    ///     - `None`: if the value does not exist
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error getting the value
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"key", b"value").await?;
+    ///     assert_eq!(db.get(b"key").await?, Some(Bytes::from_static(b"value")));
+    ///     Ok(())
+    /// }
+    /// ```
+    async fn get(&self, _key: &[u8]) -> Result<Option<Bytes>, SlateDBError>;
+
+    /// Get a value from the database with custom read options.
+    ///
+    /// The `Bytes` object returned contains a slice of an entire
+    /// 4 KiB block. The block will be held in memory as long as the
+    /// caller holds a reference to the `Bytes` object. Consider
+    /// copying the data if you need to hold it for a long time.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to get
+    /// - `options`: the read options to use
+    ///
+    /// ## Returns
+    /// - `Result<Option<Bytes>, SlateDBError>`:
+    ///     - `Some(Bytes)`: the value if it exists
+    ///     - `None`: if the value does not exist
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error getting the value
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use slatedb::{db::Db, config::ReadOptions, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"key", b"value").await?;
+    ///     assert_eq!(db.get_with_options(b"key", &ReadOptions::default()).await?, Some(Bytes::from_static(b"value")));
+    ///     Ok(())
+    /// }
+    /// ```
+    async fn get_with_options(
+        &self,
+        key: &[u8],
+        options: &ReadOptions,
+    ) -> Result<Option<Bytes>, SlateDBError>;
+}
+
+
 impl DbReader {
     /// Creates a database reader that can read the contents of a database (but cannot write any
     /// data). The caller can provide an optional checkpoint. If the checkpoint is provided, the
@@ -44,8 +127,17 @@ impl DbReader {
         unimplemented!()
     }
 
-    /// Read a key an return the read value, if any.
-    pub async fn get(&self, _key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
+    pub async fn close(&self) -> Result<(), SlateDBError> {
         unimplemented!()
+    }
+}
+
+impl Reader for DbReader {
+    async fn get(&self, _key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
+        todo!()
+    }
+
+    async fn get_with_options(&self, key: &[u8], options: &ReadOptions) -> Result<Option<Bytes>, SlateDBError> {
+        todo!()
     }
 }
