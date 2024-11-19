@@ -217,156 +217,60 @@ mod tests {
     use super::*;
     use crate::types::ValueDeletable;
 
-    #[test]
-    fn test_encode_decode() {
-        struct TestCase {
-            name: &'static str,
-            key_prefix_len: usize,
-            key_suffix: Vec<u8>,
-            seq: u64,
-            value: Option<Vec<u8>>,
-            create_ts: Option<i64>,
-            expire_ts: Option<i64>,
-            first_key: Vec<u8>,
-        }
+    use rstest::rstest;
 
-        let test_cases = vec![
-            TestCase {
-                name: "normal row with expire_ts",
-                key_prefix_len: 3,
-                key_suffix: b"key".to_vec(),
-                seq: 1,
-                value: Some(b"value".to_vec()),
-                create_ts: None,
-                expire_ts: Some(10),
-                first_key: b"prefixdata".to_vec(),
-            },
-            TestCase {
-                name: "normal row without expire_ts",
-                key_prefix_len: 0,
-                key_suffix: b"key".to_vec(),
-                seq: 1,
-                value: Some(b"value".to_vec()),
-                create_ts: None,
-                expire_ts: None,
-                first_key: b"".to_vec(),
-            },
-            TestCase {
-                name: "row with both timestamps",
-                key_prefix_len: 5,
-                key_suffix: b"both".to_vec(),
-                seq: 100,
-                value: Some(b"value".to_vec()),
-                create_ts: Some(1234567890),
-                expire_ts: Some(9876543210),
-                first_key: b"test_both".to_vec(),
-            },
-            TestCase {
-                name: "row with only create_ts",
-                key_prefix_len: 4,
-                key_suffix: b"create".to_vec(),
-                seq: 50,
-                value: Some(b"test_value".to_vec()),
-                create_ts: Some(1234567890),
-                expire_ts: None,
-                first_key: b"timecreate".to_vec(),
-            },
-            TestCase {
-                name: "tombstone row",
-                key_prefix_len: 4,
-                key_suffix: b"tomb".to_vec(),
-                seq: 1,
-                value: None,
-                create_ts: Some(2),
-                expire_ts: Some(1), // Will be ignored for tombstone
-                first_key: b"deadbeefdata".to_vec(),
-            },
-            TestCase {
-                name: "empty key suffix",
-                key_prefix_len: 4,
-                key_suffix: b"".to_vec(),
-                seq: 1,
-                value: Some(b"value".to_vec()),
-                create_ts: None,
-                expire_ts: None,
-                first_key: b"keyprefixdata".to_vec(),
-            },
-            TestCase {
-                name: "large sequence number",
-                key_prefix_len: 3,
-                key_suffix: b"seq".to_vec(),
-                seq: u64::MAX,
-                value: Some(b"value".to_vec()),
-                create_ts: None,
-                expire_ts: None,
-                first_key: b"bigseq".to_vec(),
-            },
-            TestCase {
-                name: "large value",
-                key_prefix_len: 2,
-                key_suffix: b"big".to_vec(),
-                seq: 1,
-                value: Some(vec![b'x'; 100]),
-                create_ts: None,
-                expire_ts: None,
-                first_key: b"bigvalue".to_vec(),
-            },
-            TestCase {
-                name: "long key suffix",
-                key_prefix_len: 2,
-                key_suffix: vec![b'k'; 100],
-                seq: 1,
-                value: Some(b"value".to_vec()),
-                create_ts: None,
-                expire_ts: None,
-                first_key: b"longkey".to_vec(),
-            },
-            TestCase {
-                name: "unicode key suffix",
-                key_prefix_len: 3,
-                key_suffix: "你好世界".as_bytes().to_vec(),
-                seq: 1,
-                value: Some(b"value".to_vec()),
-                create_ts: None,
-                expire_ts: None,
-                first_key: b"unicode".to_vec(),
-            },
-        ];
+    #[rstest]
+    #[case("normal row with expire_ts", 3, b"key".to_vec(), 1, Some(b"value".to_vec()), None, Some(10), b"prefixdata".to_vec())]
+    #[case("normal row without expire_ts", 0, b"key".to_vec(), 1, Some(b"value".to_vec()), None, None, b"".to_vec())]
+    #[case("row with both timestamps", 5, b"both".to_vec(), 100, Some(b"value".to_vec()), Some(1234567890), Some(9876543210), b"test_both".to_vec())]
+    #[case("row with only create_ts", 4, b"create".to_vec(), 50, Some(b"test_value".to_vec()), Some(1234567890), None, b"timecreate".to_vec())]
+    #[case("tombstone row", 4, b"tomb".to_vec(), 1, None, Some(2), Some(1), b"deadbeefdata".to_vec())]
+    #[case("empty key suffix", 4, b"".to_vec(), 1, Some(b"value".to_vec()), None, None, b"keyprefixdata".to_vec())]
+    #[case("large sequence number", 3, b"seq".to_vec(), u64::MAX, Some(b"value".to_vec()), None, None, b"bigseq".to_vec())]
+    #[case("large value", 2, b"big".to_vec(), 1, Some(vec![b'x'; 100]), None, None, b"bigvalue".to_vec())]
+    #[case("long key suffix", 2, vec![b'k'; 100], 1, Some(b"value".to_vec()), None, None, b"longkey".to_vec())]
+    #[case("unicode key suffix", 3, "你好世界".as_bytes().to_vec(), 1, Some(b"value".to_vec()), None, None, b"unicode".to_vec())]
+    fn test_encode_decode(
+        #[case] name: &str,
+        #[case] key_prefix_len: usize,
+        #[case] key_suffix: Vec<u8>,
+        #[case] seq: u64,
+        #[case] value: Option<Vec<u8>>,
+        #[case] create_ts: Option<i64>,
+        #[case] expire_ts: Option<i64>,
+        #[case] first_key: Vec<u8>,
+    ) {
+        let mut encoded_data = Vec::new();
+        let codec = SstRowCodecV0 {};
 
-        let mut golden_outputs = Vec::new();
-        for tc in test_cases {
-            let mut encoded_data = Vec::new();
-            let codec = SstRowCodecV0 {};
+        // Encode the row
+        let value = match value {
+            Some(v) => ValueDeletable::Value(Bytes::from(v)),
+            None => ValueDeletable::Tombstone,
+        };
 
-            // Encode the row
-            let value = match tc.value {
-                Some(v) => ValueDeletable::Value(Bytes::from(v)),
-                None => ValueDeletable::Tombstone,
-            };
+        codec.encode(
+            &mut encoded_data,
+            &SstRowEntry::new(
+                key_prefix_len,
+                Bytes::from(key_suffix),
+                seq,
+                value.clone(),
+                create_ts,
+                expire_ts,
+            ),
+        );
 
-            codec.encode(
-                &mut encoded_data,
-                &SstRowEntry::new(
-                    tc.key_prefix_len,
-                    Bytes::from(tc.key_suffix),
-                    tc.seq,
-                    value.clone(),
-                    tc.create_ts,
-                    tc.expire_ts,
-                ),
-            );
+        let mut data = Bytes::from(encoded_data.clone());
+        let decoded = codec.decode(&mut data).expect("decoding failed");
+        let output = (
+            name,
+            encoded_data,
+            decoded.clone(),
+            decoded.restore_full_key(&Bytes::from(first_key)),
+        );
 
-            let mut data = Bytes::from(encoded_data.clone());
-            let decoded = codec.decode(&mut data).expect("decoding failed");
-            golden_outputs.push((
-                tc.name,
-                encoded_data,
-                decoded.clone(),
-                decoded.restore_full_key(&Bytes::from(tc.first_key)),
-            ));
-        }
-
-        goldie::assert_debug!(golden_outputs);
+        goldie::assert_debug!(vec![output]);
     }
 
     #[test]
