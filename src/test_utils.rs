@@ -142,6 +142,7 @@ impl OrderedBytesGenerator {
 
 // it seems that insta still does not allow to customize the snapshot path in insta.yaml,
 // we can remove this macro once insta supports it.
+#[cfg(test)]
 macro_rules! assert_debug_snapshot {
     ($name:expr, $output:expr) => {
         let mut settings = insta::Settings::clone_current();
@@ -151,6 +152,7 @@ macro_rules! assert_debug_snapshot {
     };
 }
 
+#[cfg(test)]
 pub(crate) use assert_debug_snapshot;
 
 #[cfg(test)]
