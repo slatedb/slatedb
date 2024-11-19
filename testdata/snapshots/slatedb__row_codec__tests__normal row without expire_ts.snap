@@ -1,0 +1,46 @@
+---
+source: src/row_codec.rs
+expression: output
+snapshot_kind: text
+---
+(
+    "normal row without expire_ts",
+    [
+        0,
+        0,
+        0,
+        3,
+        107,
+        101,
+        121,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        5,
+        118,
+        97,
+        108,
+        117,
+        101,
+    ],
+    SstRowEntry {
+        key_prefix_len: 0,
+        key_suffix: b"key",
+        seq: 1,
+        expire_ts: None,
+        create_ts: None,
+        value: Value(
+            b"value",
+        ),
+    },
+    b"key",
+)

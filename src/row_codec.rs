@@ -270,7 +270,9 @@ mod tests {
             decoded.restore_full_key(&Bytes::from(first_key)),
         );
 
-        goldie::assert_debug!(vec![output]);
+        let mut settings = insta::Settings::clone_current();
+        settings.set_snapshot_path("../testdata/snapshots");
+        settings.bind(|| insta::assert_debug_snapshot!(name, output));
     }
 
     #[test]
