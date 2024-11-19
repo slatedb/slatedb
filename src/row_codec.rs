@@ -47,6 +47,7 @@ bitflags! {
 /// | `value_len`      | `u32` | Length of the value                                    |
 /// | `value`          | `var` | Value bytes                                            |
 
+#[derive(Debug)]
 pub(crate) struct SstRowEntry {
     pub key_prefix_len: usize,
     pub key_suffix: Bytes,
@@ -218,6 +219,10 @@ mod tests {
 
     #[test]
     fn test_encode_decode() {
+        let mut settings = insta::Settings::clone_current();
+        settings.set_snapshot_path("../testdata/snapshots");
+        let _guard = settings.bind_to_scope();
+
         struct TestCase {
             name: &'static str,
             key_prefix_len: usize,
@@ -227,8 +232,6 @@ mod tests {
             create_ts: Option<i64>,
             expire_ts: Option<i64>,
             first_key: Vec<u8>,
-            expected_key: Vec<u8>,
-            expected_encoded: &'static [u8],
         }
 
         let test_cases = vec![
@@ -241,20 +244,16 @@ mod tests {
                 create_ts: None,
                 expire_ts: Some(10),
                 first_key: b"prefixdata".to_vec(),
-                expected_key: b"prekey".to_vec(),
-                expected_encoded: b"\x00\x03\x00\x03\x6B\x65\x79\x00\x00\x00\x00\x00\x00\x00\x01\x02\x00\x00\x00\x00\x00\x00\x00\x0A\x00\x00\x00\x05\x76\x61\x6C\x75\x65",
             },
             TestCase {
-                name: "normal row without expire_ts", 
+                name: "normal row without expire_ts",
                 key_prefix_len: 3,
                 key_suffix: b"key".to_vec(),
                 seq: 1,
                 value: Some(b"value".to_vec()),
                 create_ts: None,
                 expire_ts: None,
-                first_key: b"".to_vec(),    // Not used in assertions
-                expected_key: b"".to_vec(), // Not used in assertions
-                expected_encoded: b"\x00\x03\x00\x03\x6b\x65\x79\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x05\x76\x61\x6c\x75\x65",
+                first_key: b"".to_vec(),
             },
             TestCase {
                 name: "row with both timestamps",
@@ -265,8 +264,6 @@ mod tests {
                 create_ts: Some(1234567890),
                 expire_ts: Some(9876543210),
                 first_key: b"test_both".to_vec(),
-                expected_key: b"test_both".to_vec(),
-                expected_encoded: b"\x00\x05\x00\x04\x62\x6F\x74\x68\x00\x00\x00\x00\x00\x00\x00\x64\x06\x00\x00\x00\x02\x4C\xB0\x16\xEA\x00\x00\x00\x00\x49\x96\x02\xD2\x00\x00\x00\x05\x76\x61\x6C\x75\x65",
             },
             TestCase {
                 name: "row with only create_ts",
@@ -277,8 +274,6 @@ mod tests {
                 create_ts: Some(1234567890),
                 expire_ts: None,
                 first_key: b"timecreate".to_vec(),
-                expected_key: b"timecreate".to_vec(),
-                expected_encoded: b"\x00\x04\x00\x06\x63\x72\x65\x61\x74\x65\x00\x00\x00\x00\x00\x00\x00\x32\x04\x00\x00\x00\x00\x49\x96\x02\xD2\x00\x00\x00\x0A\x74\x65\x73\x74\x5F\x76\x61\x6C\x75\x65",
             },
             TestCase {
                 name: "tombstone row",
@@ -289,8 +284,6 @@ mod tests {
                 create_ts: Some(2),
                 expire_ts: Some(1), // Will be ignored for tombstone
                 first_key: b"deadbeefdata".to_vec(),
-                expected_key: b"deadtomb".to_vec(),
-                expected_encoded: b"\x00\x04\x00\x04\x74\x6F\x6D\x62\x00\x00\x00\x00\x00\x00\x00\x01\x07\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x02",
             },
             TestCase {
                 name: "empty key suffix",
@@ -301,8 +294,6 @@ mod tests {
                 create_ts: None,
                 expire_ts: None,
                 first_key: b"keyprefixdata".to_vec(),
-                expected_key: b"keyp".to_vec(),
-                expected_encoded: b"\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x05\x76\x61\x6c\x75\x65",
             },
             TestCase {
                 name: "large sequence number",
@@ -313,8 +304,6 @@ mod tests {
                 create_ts: None,
                 expire_ts: None,
                 first_key: b"bigseq".to_vec(),
-                expected_key: b"bigseq".to_vec(),
-                expected_encoded: b"\x00\x03\x00\x03seq\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\x05value",
             },
             TestCase {
                 name: "large value",
@@ -325,8 +314,6 @@ mod tests {
                 create_ts: None,
                 expire_ts: None,
                 first_key: b"bigvalue".to_vec(),
-                expected_key: b"bibig".to_vec(),
-                expected_encoded: b"\x00\x02\x00\x03\x62\x69\x67\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x64\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78\x78",
             },
             TestCase {
                 name: "long key suffix",
@@ -337,8 +324,6 @@ mod tests {
                 create_ts: None,
                 expire_ts: None,
                 first_key: b"longkey".to_vec(),
-                expected_key: b"lokkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk".to_vec(),
-                expected_encoded: b"\x00\x02\x00\x64\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x6b\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x05\x76\x61\x6c\x75\x65",
             },
             TestCase {
                 name: "unicode key suffix",
@@ -349,8 +334,6 @@ mod tests {
                 create_ts: None,
                 expire_ts: None,
                 first_key: b"unicode".to_vec(),
-                expected_key: b"uni\xe4\xbd\xa0\xe5\xa5\xbd\xe4\xb8\x96\xe7\x95\x8c".to_vec(),
-                expected_encoded: b"\x00\x03\x00\x0c\xe4\xbd\xa0\xe5\xa5\xbd\xe4\xb8\x96\xe7\x95\x8c\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x05\x76\x61\x6c\x75\x65",
             },
         ];
 
@@ -381,32 +364,13 @@ mod tests {
 
             // Run assertions
             if !tc.first_key.is_empty() {
-                assert_eq!(
-                    decoded.restore_full_key(&Bytes::from(tc.first_key)),
-                    &Bytes::from(tc.expected_key),
-                    "test case: {}",
-                    tc.name
+                insta::assert_debug_snapshot!(
+                    format!("{}_full_key", tc.name),
+                    decoded.restore_full_key(&Bytes::from(tc.first_key))
                 );
             }
-            assert_eq!(
-                encoded_data,
-                tc.expected_encoded,
-                "test case: {} encoded: {:?}",
-                tc.name,
-                String::from_utf8_lossy(&encoded_data)
-            );
-            assert_eq!(decoded.value, value, "test case: {}", tc.name);
-
-            match value {
-                ValueDeletable::Tombstone => {
-                    assert_eq!(decoded.expire_ts, None, "test case: {}", tc.name);
-                    assert_eq!(decoded.create_ts, tc.create_ts, "test case: {}", tc.name);
-                }
-                ValueDeletable::Value(_) => {
-                    assert_eq!(decoded.expire_ts, tc.expire_ts, "test case: {}", tc.name);
-                    assert_eq!(decoded.create_ts, tc.create_ts, "test case: {}", tc.name);
-                }
-            }
+            insta::assert_debug_snapshot!(format!("{}_encoded", tc.name), encoded_data);
+            insta::assert_debug_snapshot!(format!("{}_decoded", tc.name), decoded);
         }
     }
 

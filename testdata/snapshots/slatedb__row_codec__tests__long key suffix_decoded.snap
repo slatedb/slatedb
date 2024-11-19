@@ -1,0 +1,15 @@
+---
+source: src/row_codec.rs
+expression: decoded
+snapshot_kind: text
+---
+SstRowEntry {
+    key_prefix_len: 2,
+    key_suffix: b"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+    seq: 1,
+    expire_ts: None,
+    create_ts: None,
+    value: Value(
+        b"value",
+    ),
+}

@@ -1,0 +1,6 @@
+---
+source: src/row_codec.rs
+expression: "decoded.restore_full_key(&Bytes::from(tc.first_key))"
+snapshot_kind: text
+---
+b"bigseq"

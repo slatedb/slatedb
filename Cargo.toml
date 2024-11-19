@@ -58,6 +58,7 @@ fail-parallel = { version = "0.5.1", features = ["failpoints"] }
 tempfile = "3.3"
 filetime = "0.2"
 figment = { version = "0.10.19", features = ["test"] }
+insta = "1.39.0"
 
 [features]
 default = ["aws", "moka"]
