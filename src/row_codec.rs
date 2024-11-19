@@ -215,13 +215,12 @@ impl SstRowCodecV0 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::init_insta_settings;
     use crate::types::ValueDeletable;
 
     #[test]
     fn test_encode_decode() {
-        let mut settings = insta::Settings::clone_current();
-        settings.set_snapshot_path("../testdata/snapshots");
-        let _guard = settings.bind_to_scope();
+        let _g = init_insta_settings().bind_to_scope();
 
         struct TestCase {
             name: &'static str,

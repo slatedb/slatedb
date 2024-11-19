@@ -140,6 +140,12 @@ impl OrderedBytesGenerator {
     }
 }
 
+pub(crate) fn init_insta_settings() -> insta::Settings {
+    let mut settings = insta::Settings::clone_current();
+    settings.set_snapshot_path("../testdata/snapshots");
+    settings
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::{BufMut, Bytes};
