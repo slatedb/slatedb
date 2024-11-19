@@ -1,7 +1,0 @@
----
-source: src/row_codec.rs
-assertion_line: 367
-expression: "decoded.restore_full_key(&Bytes::from(tc.first_key))"
-snapshot_kind: text
----
-b"prekey"
