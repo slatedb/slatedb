@@ -358,7 +358,7 @@ mod tests {
         let decoded = codec.decode(&mut data).expect("decoding failed");
         let output = (
             test_case.name,
-            encoded_data,
+            String::from_utf8_lossy(&encoded_data),
             decoded.clone(),
             decoded.restore_full_key(&Bytes::from(test_case.first_key)),
         );
