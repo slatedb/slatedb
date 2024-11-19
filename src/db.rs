@@ -58,6 +58,7 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::{RowAttributes, ValueDeletable};
+use slatedb::config::ScanOptions;
 use std::rc::Rc;
 
 pub(crate) struct DbInner {
@@ -946,9 +947,36 @@ impl Db {
         self.inner.get_with_options(key, options).await
     }
 
-    /// Scan a range of keys with the provided options.
+    /// Scan a range of keys using the default options [`DEFAULT_SCAN_OPTIONS`].
     ///
     /// returns a `DbIterator`
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error scanning the range of keys
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"a", b"a_value").await?;
+    ///     db.put(b"b", b"b_value").await?;
+    ///
+    ///     let mut iter = db.scan(..).await?;
+    ///     assert_eq!(Some((b"a", b"a_value").into()) , iter.next().await?);
+    ///     assert_eq!(Some((b"b", b"b_value").into()) , iter.next().await?);
+    ///     assert_eq!(None , iter.next().await?);
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
     pub async fn scan<T: RangeBounds<Bytes>>(&self, range: T) -> Result<DbIterator, SlateDBError> {
         self.inner
             .scan_with_options(range.into(), DEFAULT_SCAN_OPTIONS)
@@ -958,6 +986,36 @@ impl Db {
     /// Scan a range of keys with the provided options.
     ///
     /// returns a `DbIterator`
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error scanning the range of keys
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use slatedb::{db::Db, config::ScanOptions, config::ReadLevel, error::SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"a", b"a_value").await?;
+    ///     db.put(b"b", b"b_value").await?;
+    ///
+    ///     let mut iter = db.scan_with_options(.., &ScanOptions {
+    ///         read_level: ReadLevel::Uncommitted,
+    ///         ..ScanOptions::default()
+    ///     }).await?;
+    ///     assert_eq!(Some((b"a", b"a_value").into()) , iter.next().await?);
+    ///     assert_eq!(Some((b"b", b"b_value").into()) , iter.next().await?);
+    ///     assert_eq!(None , iter.next().await?);
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
     pub async fn scan_with_options<T: RangeBounds<Bytes>>(
         &self,
         range: T,

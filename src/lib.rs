@@ -21,7 +21,7 @@ pub mod config;
 pub mod db;
 pub mod db_cache;
 mod db_common;
-mod db_iter;
+pub mod db_iter;
 mod db_state;
 pub mod error;
 mod filter;
