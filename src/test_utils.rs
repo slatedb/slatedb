@@ -141,6 +141,7 @@ impl OrderedBytesGenerator {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn gen_rand_bytes(n: usize) -> Bytes {
     let mut rng = rand::thread_rng();
     let random_bytes: Vec<u8> = (0..n).map(|_| rng.gen()).collect();
