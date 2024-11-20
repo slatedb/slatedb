@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
+pub mod fs_cache_storage;
 
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
@@ -6,11 +6,10 @@ use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 use object_store::{Attribute, Attributes, GetRange, GetResultPayload, PutResult};
 use object_store::{ListResult, MultipartUpload, PutMultipartOpts, PutOptions, PutPayload};
 use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, fmt::Display, ops::Range, sync::Arc};
 
 use crate::error::SlateDBError;
 use crate::metrics::DbStats;
-
-pub(crate) mod fs_cache_storage;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {
