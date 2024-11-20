@@ -2,7 +2,7 @@ use crate::args::{parse_args, CliArgs, CliCommands};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use slatedb::admin;
-use slatedb::admin::{list_checkpoints, list_manifests, read_manifest};
+use slatedb::admin::{list_checkpoints, list_manifests, read_manifest_string};
 use slatedb::config::{CheckpointOptions, CheckpointScope};
 use slatedb::db::Db;
 use std::error::Error;
@@ -44,7 +44,7 @@ async fn exec_read_manifest(
     object_store: Arc<dyn ObjectStore>,
     id: Option<u64>,
 ) -> Result<(), Box<dyn Error>> {
-    match read_manifest(path, object_store, id).await? {
+    match read_manifest_string(path, object_store, id).await? {
         None => {
             println!("No manifest file found.")
         }

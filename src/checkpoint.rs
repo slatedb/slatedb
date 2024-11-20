@@ -20,7 +20,7 @@ pub struct Checkpoint {
 #[derive(Debug)]
 pub struct CheckpointCreateResult {
     /// The id of the created checkpoint.
-    pub id: uuid::Uuid,
+    pub id: Uuid,
     /// The manifest id referenced by the created checkpoint.
     pub manifest_id: u64,
 }
@@ -38,7 +38,7 @@ impl Db {
         let Some(mut stored_manifest) = StoredManifest::load(manifest_store).await? else {
             return Err(SlateDBError::ManifestMissing);
         };
-        let id = uuid::Uuid::new_v4();
+        let id = Uuid::new_v4();
         apply_db_state_update(&mut stored_manifest, |stored_manifest| {
             let expire_time = options.lifetime.map(|l| SystemTime::now() + l);
             let db_state = stored_manifest.db_state();

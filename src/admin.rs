@@ -9,22 +9,33 @@ use std::env;
 use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
+use crate::manifest::Manifest;
+
+async fn read_manifest(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    maybe_id: Option<u64>,
+) -> Result<Option<Manifest>, SlateDBError> {
+    let manifest_store = ManifestStore::new(path, object_store);
+    if let Some(id) = maybe_id {
+        manifest_store.read_manifest(id).await
+    } else {
+        let latest_manifest = manifest_store.read_latest_manifest().await?
+            .map(|(_, m)| m);
+        Ok(latest_manifest)
+    }
+}
 
 /// read-only access to the latest manifest file
-pub async fn read_manifest(
+pub async fn read_manifest_string(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
     maybe_id: Option<u64>,
 ) -> Result<Option<String>, Box<dyn Error>> {
-    let manifest_store = ManifestStore::new(path, object_store);
-    let id_manifest = match maybe_id {
-        None => manifest_store.read_latest_manifest().await?,
-        Some(id) => manifest_store.read_manifest(id).await?,
-    };
-
-    match id_manifest {
-        None => Ok(None),
-        Some(result) => Ok(Some(serde_json::to_string(&result)?)),
+    if let Some(manifest) = read_manifest(path, object_store, maybe_id).await? {
+        Ok(Some(serde_json::to_string(&manifest)?))
+    } else {
+        Ok(None)
     }
 }
 

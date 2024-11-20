@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -30,8 +31,24 @@ pub(crate) async fn apply_db_state_update<F>(
 where
     F: Fn(&StoredManifest) -> Result<CoreDbState, SlateDBError>,
 {
+    maybe_apply_db_state_update(manifest, |stored_manifest| {
+        let mutated_state = mutator(stored_manifest)?;
+        Ok(Some(mutated_state))
+    }).await
+}
+
+pub(crate) async fn maybe_apply_db_state_update<F>(
+    manifest: &mut StoredManifest,
+    mutator: F,
+) -> Result<(), SlateDBError>
+where
+    F: Fn(&StoredManifest) -> Result<Option<CoreDbState>, SlateDBError>,
+{
     loop {
-        let mutated_db_state = mutator(manifest)?;
+        let Some(mutated_db_state) = mutator(manifest)? else {
+            return Ok(())
+        };
+
         return match manifest.update_db_state(mutated_db_state).await {
             Err(SlateDBError::ManifestVersionExists) => {
                 manifest.refresh().await?;
@@ -199,7 +216,7 @@ impl StoredManifest {
 }
 
 /// Represents the metadata of a manifest file stored in the object store.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub(crate) struct ManifestFileMetadata {
     pub(crate) id: u64,
     #[serde(serialize_with = "serialize_path")]
@@ -304,35 +321,61 @@ impl ManifestStore {
         Ok(manifests)
     }
 
+    /// Active manifests include the latest manifest and all manifests referenced
+    /// by checkpoints in the latest manifest.
+    pub(crate) async fn read_active_manifests(
+        &self
+    ) -> Result<BTreeMap<u64, Manifest>, SlateDBError> {
+        let (latest_manifest_id, latest_manifest) = self.read_latest_manifest()
+            .await?
+            .ok_or_else(|| SlateDBError::ManifestMissing)?;
+
+        let mut active_manifests = BTreeMap::new();
+        active_manifests.insert(latest_manifest_id, latest_manifest.clone());
+
+        for checkpoint in &latest_manifest.core.checkpoints {
+            if !active_manifests.contains_key(&checkpoint.manifest_id) {
+                let checkpoint_manifest = self.read_manifest(checkpoint.manifest_id)
+                    .await?
+                    .ok_or_else(|| SlateDBError::ManifestMissing)?;
+                active_manifests.insert(checkpoint.manifest_id, checkpoint_manifest);
+            }
+        }
+
+        Ok(active_manifests)
+    }
+
     pub(crate) async fn read_latest_manifest(
         &self,
     ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
         let manifest_metadatas_list = self.list_manifests(..).await?;
-        match manifest_metadatas_list.last() {
-            None => Ok(None),
-            Some(metadata) => Ok(self.read_manifest(metadata.id).await?),
-        }
+        let latest_manifest = if let Some(metadata) = manifest_metadatas_list.last() {
+            let manifest = self.read_manifest(metadata.id).await?;
+            manifest.map(|manifest| (metadata.id, manifest))
+        } else {
+            None
+        };
+        Ok(latest_manifest)
     }
 
     pub(crate) async fn read_manifest(
         &self,
         id: u64,
-    ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
+    ) -> Result<Option<Manifest>, SlateDBError> {
         let manifest_path = &self.get_manifest_path(id);
-        let manifest_bytes = match self.object_store.get(manifest_path).await {
+        match self.object_store.get(manifest_path).await {
             Ok(manifest) => match manifest.bytes().await {
-                Ok(bytes) => bytes,
-                Err(e) => return Err(SlateDBError::from(e)),
+                Ok(bytes) => {
+                    let manifest = self.codec.decode(&bytes)?;
+                    Ok(Some(manifest))
+                },
+                Err(e) => Err(SlateDBError::from(e)),
             },
-            Err(e) => {
-                return match e {
-                    Error::NotFound { .. } => Ok(None),
-                    _ => Err(SlateDBError::from(e)),
-                }
-            }
-        };
-
-        self.codec.decode(&manifest_bytes).map(|m| Some((id, m)))
+            Err(e) => match e {
+                Error::NotFound { .. } => Ok(None),
+                _ => Err(SlateDBError::from(e)),
+            },
+        }
     }
 
     fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {
@@ -357,10 +400,11 @@ impl ManifestStore {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-
+    use std::time::SystemTime;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-
+    use uuid::Uuid;
+    use crate::checkpoint::Checkpoint;
     use crate::db_state::CoreDbState;
     use crate::error;
     use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -518,13 +562,57 @@ mod tests {
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        sm.update_db_state(state.clone()).await.unwrap();
+
+        let mut updated_state = state.clone();
+        updated_state.checkpoints.push(new_checkpoint(sm.id));
+        sm.update_db_state(updated_state).await.unwrap();
 
         // When
-        let (id, _) = ms.read_manifest(2).await.unwrap().unwrap();
+        let manifest = ms.read_manifest(2).await.unwrap().unwrap();
 
         // Then:
-        assert_eq!(id, 2);
+        assert_eq!(1, manifest.core.checkpoints.len());
+    }
+
+    #[tokio::test]
+    async fn test_read_active_checkpoints() {
+        let os = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        // Add a checkpoint with a reference to the initial manifest
+        let mut updated_state = state.clone();
+        updated_state.checkpoints.push(new_checkpoint(sm.id));
+        sm.update_db_state(updated_state).await.unwrap();
+
+        let active_manifests = ms.read_active_manifests().await.unwrap();
+        assert_eq!(2, active_manifests.len());
+        assert!(active_manifests.contains_key(&1));
+        assert!(active_manifests.contains_key(&2));
+
+        // Add a checkpoint to the latest manifest and remove the old checkpoint.
+        let mut updated_state = state.clone();
+        updated_state.checkpoints.clear();
+        updated_state.checkpoints.push(new_checkpoint(sm.id));
+        sm.update_db_state(updated_state).await.unwrap();
+
+        // The returned map drops the initial manifest which is no longer referenced.
+        let active_manifests = ms.read_active_manifests().await.unwrap();
+        assert_eq!(2, active_manifests.len());
+        assert!(active_manifests.contains_key(&2));
+        assert!(active_manifests.contains_key(&3));
+    }
+
+    fn new_checkpoint(manifest_id: u64) -> Checkpoint {
+        Checkpoint {
+            id: Uuid::new_v4(),
+            manifest_id,
+            expire_time: None,
+            create_time: SystemTime::now(),
+        }
     }
 
     #[tokio::test]
