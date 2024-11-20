@@ -33,8 +33,8 @@ use tracing::warn;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
-use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
 use crate::cached_object_store::CachedObjectStore;
+use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
@@ -1123,7 +1123,7 @@ mod tests {
     use tracing::info;
 
     use super::*;
-    use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
+    use crate::cached_object_store::FsCacheStorage;
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
         DEFAULT_PUT_OPTIONS,

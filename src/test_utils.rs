@@ -2,6 +2,7 @@ use crate::config::Clock;
 use crate::iter::KeyValueIterator;
 use crate::types::{KeyValue, RowAttributes, ValueDeletable};
 use bytes::{BufMut, Bytes, BytesMut};
+use rand::Rng;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 // this complains because we include these in the bencher feature but they are only
@@ -138,6 +139,12 @@ impl OrderedBytesGenerator {
         }
         self.bytes[pos] += 1;
     }
+}
+
+pub(crate) fn gen_rand_bytes(n: usize) -> Bytes {
+    let mut rng = rand::thread_rng();
+    let random_bytes: Vec<u8> = (0..n).map(|_| rng.gen()).collect();
+    Bytes::from(random_bytes)
 }
 
 #[cfg(test)]

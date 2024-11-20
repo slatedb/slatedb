@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt::Display, ops::Range};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct LocalCacheHead {
+pub struct LocalCacheHead {
     pub location: String,
     pub last_modified: String,
     pub size: usize,
@@ -97,4 +97,4 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
     async fn read_head(&self) -> object_store::Result<Option<(ObjectMeta, Attributes)>>;
 }
 
-pub(crate) type PartID = usize;
+pub type PartID = usize;

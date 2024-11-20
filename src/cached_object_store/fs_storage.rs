@@ -20,11 +20,11 @@ use tokio::{
 use tracing::{debug, warn};
 use walkdir::WalkDir;
 
-use crate::cached_object_store::{LocalCacheEntry, LocalCacheHead, LocalCacheStorage};
+use crate::cached_object_store::storage::{LocalCacheEntry, LocalCacheHead, LocalCacheStorage};
 use crate::metrics::DbStats;
 
 #[derive(Debug)]
-pub(crate) struct FsCacheStorage {
+pub struct FsCacheStorage {
     root_folder: std::path::PathBuf,
     evictor: Option<Arc<FsCacheEvictor>>,
 }
@@ -207,7 +207,9 @@ impl LocalCacheEntry for FsCacheEntry {
     }
 
     #[cfg(test)]
-    async fn cached_parts(&self) -> object_store::Result<Vec<crate::cached_object_store::PartID>> {
+    async fn cached_parts(
+        &self,
+    ) -> object_store::Result<Vec<crate::cached_object_store::storage::PartID>> {
         let head_path = Self::make_head_path(self.root_folder.clone(), &self.location);
         let directory_path = match head_path.parent() {
             Some(directory_path) => directory_path,
@@ -644,7 +646,7 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cached_object_store::tests::gen_rand_bytes;
+    use crate::test_utils::gen_rand_bytes;
     use filetime::FileTime;
     use std::{io::Write, sync::atomic::Ordering, time::SystemTime};
 
