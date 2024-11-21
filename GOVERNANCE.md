@@ -29,7 +29,8 @@ A __SlateDB Committer__ is able to merge pull requests into the SlateDB reposito
 that is released to production. Committers are also able to publish SlateDB releases and
 approve RFCs. Approval requirements for these activities depends on the nature of the change:
 
-- RFCs and release proposals must be approved by two committers.
+- RFCs and release proposals must be approved by two committers other than the author of the
+  request.
 - Committers may merge small, low-risk, uncontroversial PRs without any approval.
 - All other PRs must be approved by a SlateDB committer other than the author of the request.
 
