@@ -60,8 +60,8 @@ generate_plot() {
     '$input_file' skip $warmup using 1:3 with linespoints linewidth 2 title 'Gets/s';"
 }
 
-for put_percentage in 20 ; do
-  for concurrency in 1; do
+for put_percentage in 20 40 60 80 100; do
+  for concurrency in 1 4; do
     log_file="$OUT/logs/${put_percentage}_${concurrency}.log"
     dat_file="$OUT/dats/${put_percentage}_${concurrency}.dat"
     svg_file="$OUT/plots/${put_percentage}_${concurrency}.svg"
