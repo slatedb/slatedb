@@ -78,7 +78,10 @@ impl GarbageCollector {
                 break;
             }
 
-            self.shutdown_rx.changed().await.expect("Shutdown rx disconnected.");
+            self.shutdown_rx
+                .changed()
+                .await
+                .expect("Shutdown rx disconnected.");
         }
     }
 
