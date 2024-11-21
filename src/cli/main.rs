@@ -1,13 +1,18 @@
-use crate::args::{parse_args, CliArgs, CliCommands};
+use crate::args::{parse_args, CliArgs, CliCommands, GcResource, GcSchedule};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use slatedb::admin;
-use slatedb::admin::{list_checkpoints, list_manifests, read_manifest};
-use slatedb::config::{CheckpointOptions, CheckpointScope};
+use slatedb::admin::{list_checkpoints, list_manifests, read_manifest, run_gc_instance};
+use slatedb::config::GcExecutionMode::{Once, Periodic};
+use slatedb::config::{
+    CheckpointOptions, CheckpointScope, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+};
 use slatedb::db::Db;
 use std::error::Error;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::info;
 use uuid::Uuid;
 
 mod args;
@@ -34,6 +39,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             exec_delete_checkpoint(&path, object_store, id).await?
         }
         CliCommands::ListCheckpoints {} => exec_list_checkpoints(&path, object_store).await?,
+        CliCommands::RunGarbageCollection { resource, min_age } => {
+            exec_gc_once(&path, object_store, resource, min_age).await?
+        }
+        CliCommands::ScheduleGarbageCollection {
+            manifest,
+            wal,
+            compacted,
+        } => schedule_gc(&path, object_store, manifest, wal, compacted).await?,
     }
 
     Ok(())
@@ -123,4 +136,95 @@ async fn exec_list_checkpoints(
     let checkpoint = list_checkpoints(path, object_store).await?;
     let checkpoint_json = serde_json::to_string(&checkpoint)?;
     Ok(println!("{}", checkpoint_json))
+}
+
+async fn exec_gc_once(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    resource: GcResource,
+    min_age: Duration,
+) -> Result<(), Box<dyn Error>> {
+    fn create_gc_dir_opts(min_age: Duration) -> Option<GarbageCollectorDirectoryOptions> {
+        Some(GarbageCollectorDirectoryOptions {
+            execution_mode: Once,
+            min_age,
+        })
+    }
+    let gc_opts = match resource {
+        GcResource::Manifest => GarbageCollectorOptions {
+            manifest_options: create_gc_dir_opts(min_age),
+            wal_options: None,
+            compacted_options: None,
+            ..GarbageCollectorOptions::default()
+        },
+        GcResource::Wal => GarbageCollectorOptions {
+            manifest_options: None,
+            wal_options: create_gc_dir_opts(min_age),
+            compacted_options: None,
+            ..GarbageCollectorOptions::default()
+        },
+        GcResource::Compacted => GarbageCollectorOptions {
+            manifest_options: None,
+            wal_options: None,
+            compacted_options: create_gc_dir_opts(min_age),
+            ..GarbageCollectorOptions::default()
+        },
+    };
+    let (stats, _collector) = run_gc_instance(path, object_store, gc_opts).await?;
+
+    match resource {
+        GcResource::Manifest => {
+            println!(
+                "Collected {} manifests",
+                stats.gc_manifest_count.value.load(Ordering::SeqCst)
+            );
+        }
+        GcResource::Wal => {
+            println!(
+                "Collected {} wals",
+                stats.gc_wal_count.value.load(Ordering::SeqCst)
+            );
+        }
+        GcResource::Compacted => {
+            println!(
+                "Collected {} compacted SSTs",
+                stats.gc_compacted_count.value.load(Ordering::SeqCst)
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn schedule_gc(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    manifest_schedule: Option<GcSchedule>,
+    wal_schedule: Option<GcSchedule>,
+    compacted_schedule: Option<GcSchedule>,
+) -> Result<(), Box<dyn Error>> {
+    fn create_gc_dir_opts(schedule: GcSchedule) -> Option<GarbageCollectorDirectoryOptions> {
+        Some(GarbageCollectorDirectoryOptions {
+            execution_mode: Periodic(schedule.period),
+            min_age: schedule.min_age,
+        })
+    }
+    let gc_opts = GarbageCollectorOptions {
+        manifest_options: manifest_schedule.map_or(None, |sched| create_gc_dir_opts(sched)),
+        wal_options: wal_schedule.map_or(None, |sched| create_gc_dir_opts(sched)),
+        compacted_options: compacted_schedule.map_or(None, |sched| create_gc_dir_opts(sched)),
+        ..GarbageCollectorOptions::default()
+    };
+    let (stats, _collector) = run_gc_instance(path, object_store, gc_opts).await?;
+
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        info!(
+            "Collected {:?} Manifests, {:?} WALs, {:?} Compacted SSTs",
+            stats.gc_manifest_count.value.load(Ordering::SeqCst),
+            stats.gc_wal_count.value.load(Ordering::SeqCst),
+            stats.gc_compacted_count.value.load(Ordering::SeqCst)
+        );
+    }
 }
