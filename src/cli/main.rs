@@ -9,10 +9,8 @@ use slatedb::config::{
 };
 use slatedb::db::Db;
 use std::error::Error;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::info;
 use uuid::Uuid;
 
 mod args;
@@ -170,29 +168,7 @@ async fn exec_gc_once(
             ..GarbageCollectorOptions::default()
         },
     };
-    let (stats, _collector) = run_gc_instance(path, object_store, gc_opts).await?;
-
-    match resource {
-        GcResource::Manifest => {
-            println!(
-                "Collected {} manifests",
-                stats.gc_manifest_count.value.load(Ordering::SeqCst)
-            );
-        }
-        GcResource::Wal => {
-            println!(
-                "Collected {} wals",
-                stats.gc_wal_count.value.load(Ordering::SeqCst)
-            );
-        }
-        GcResource::Compacted => {
-            println!(
-                "Collected {} compacted SSTs",
-                stats.gc_compacted_count.value.load(Ordering::SeqCst)
-            );
-        }
-    }
-
+    run_gc_instance(path, object_store, gc_opts).await?;
     Ok(())
 }
 
@@ -215,16 +191,6 @@ async fn schedule_gc(
         compacted_options: compacted_schedule.and_then(create_gc_dir_opts),
         ..GarbageCollectorOptions::default()
     };
-    let (stats, _collector) = run_gc_instance(path, object_store, gc_opts).await?;
-
-    let mut interval = tokio::time::interval(Duration::from_secs(30));
-    loop {
-        interval.tick().await;
-        info!(
-            "Collected {:?} Manifests, {:?} WALs, {:?} Compacted SSTs",
-            stats.gc_manifest_count.value.load(Ordering::SeqCst),
-            stats.gc_wal_count.value.load(Ordering::SeqCst),
-            stats.gc_compacted_count.value.load(Ordering::SeqCst)
-        );
-    }
+    run_gc_instance(path, object_store, gc_opts).await?;
+    Ok(())
 }

@@ -1,10 +1,12 @@
 use chrono::Utc;
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::{fmt, thread};
 use tokio::runtime::Handle;
+use tokio::sync::watch;
 use tracing::{debug, error, info};
 
 use crate::config::GcExecutionMode::Periodic;
@@ -23,9 +25,10 @@ enum GarbageCollectorMessage {
     Shutdown,
 }
 
-pub struct GarbageCollector {
+pub(crate) struct GarbageCollector {
     main_tx: crossbeam_channel::Sender<GarbageCollectorMessage>,
     main_thread: Option<JoinHandle<()>>,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 /// Garbage collector for the database. This will periodically check for old
@@ -50,6 +53,7 @@ impl GarbageCollector {
     ) -> Self {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let tokio_handle = options.gc_runtime.clone().unwrap_or(tokio_handle);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let main_thread = thread::spawn(move || {
             let orchestrator = GarbageCollectorOrchestrator {
                 manifest_store,
@@ -58,11 +62,23 @@ impl GarbageCollector {
                 external_rx,
                 db_stats,
             };
-            tokio_handle.block_on(orchestrator.run());
+            tokio_handle.block_on(orchestrator.run(shutdown_tx));
         });
         Self {
             main_thread: Some(main_thread),
             main_tx: external_tx,
+            shutdown_rx,
+        }
+    }
+
+    /// Waits for the Garbage Collector to complete its GC loops
+    pub(crate) async fn shutdown_notified(mut self) {
+        loop {
+            if *self.shutdown_rx.borrow() {
+                break;
+            }
+
+            self.shutdown_rx.changed().await.expect("Shutdown rx disconnected.");
         }
     }
 
@@ -230,7 +246,8 @@ impl GarbageCollectorOrchestrator {
     }
 
     /// Run the garbage collector
-    pub async fn run(&self) {
+    pub async fn run(&self, shutdown_tx: watch::Sender<bool>) {
+        let log_ticker = crossbeam_channel::tick(Duration::from_secs(60));
         let (manifest_ticker, mut manifest_status) =
             Self::options_to_ticker(self.options.manifest_options.as_ref());
         let (wal_ticker, mut wal_status) =
@@ -245,6 +262,13 @@ impl GarbageCollectorOrchestrator {
 
         loop {
             crossbeam_channel::select! {
+                recv(log_ticker) -> _ => {
+                   info!("GC has collected {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
+                        self.db_stats.gc_manifest_count.value.load(Ordering::SeqCst),
+                        self.db_stats.gc_wal_count.value.load(Ordering::SeqCst),
+                        self.db_stats.gc_compacted_count.value.load(Ordering::SeqCst)
+                    );
+                },
                 recv(manifest_ticker) -> _ => {
                     debug!("Scheduled garbage collection attempt for Manifests.");
                     if let Err(e) = self.collect_garbage_manifests().await {
@@ -285,6 +309,19 @@ impl GarbageCollectorOrchestrator {
                 break;
             }
         }
+
+        info!(
+            "GC shutdown after collecting {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
+            self.db_stats.gc_manifest_count.value.load(Ordering::SeqCst),
+            self.db_stats.gc_wal_count.value.load(Ordering::SeqCst),
+            self.db_stats
+                .gc_compacted_count
+                .value
+                .load(Ordering::SeqCst)
+        );
+
+        shutdown_tx.send(true)
+            .expect("failed to send shutdown complete signal, shutdown_rx was likely dropped or disconnected.");
     }
 
     fn options_to_ticker(

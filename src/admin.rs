@@ -87,7 +87,7 @@ pub async fn run_gc_instance(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
     gc_opts: GarbageCollectorOptions,
-) -> Result<(Arc<DbStats>, GarbageCollector), Box<dyn Error>> {
+) -> Result<(), Box<dyn Error>> {
     let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
     let sst_format = SsTableFormat::default(); // read only SSTs, can use default
     let fp_registry = Arc::new(FailPointRegistry::new());
@@ -110,7 +110,8 @@ pub async fn run_gc_instance(
     )
     .await;
 
-    Ok((stats, collector))
+    collector.shutdown_notified().await;
+    Ok(())
 }
 
 /// Loads a local object store instance.
