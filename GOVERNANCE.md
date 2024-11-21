@@ -18,15 +18,15 @@ _This document does not apply to https://github.com/slatedb/slatedb-go._
 
 There are two formal roles in SlateDB:
 
-* __SlateDB Committers__ have the right to merge pull requests into the SlateDB repo,
+* __SlateDB Committers__ have the right to merge pull requests into SlateDB repositories,
   publish releases, and approve requests for comments (RFCs).
 * __The SlateDB Board__ has final authority over all decisions made on the project.
 
 # SlateDB Committers
 
-A __SlateDB Committer__ is able to merge pull requests into the SlateDB repositories under
-[https://github.com/slatedb](https://github.com/slatedb), including into the master branch
-that is released to production. Committers are also able to publish SlateDB releases and
+A __SlateDB Committer__ is able to merge pull requests into SlateDB repositories under
+[https://github.com/slatedb](https://github.com/slatedb), including into the main branches
+that are released to production. Committers are also able to publish SlateDB releases and
 approve RFCs. Approval requirements for these activities depends on the nature of the change:
 
 - RFCs and release proposals must be approved by two committers other than the author of the
@@ -59,7 +59,7 @@ SlateDB's board members are:
 * Chris Riccomini (criccomini) - leader
 * Li Yazhou (flaneur2020)
 
-Board votes must be conducted on a Github issue or Github pull request. Votes are represented
-as -1 and +1, with '-1' meaning 'no' and '+1' meaning 'yes.' Voting must be open for at least
-1 week or until all members have voted, whichever comes first. A vote passes if a majority of
-the votes placed are in favor. On a tie, the leader of the board has a double vote.
+Board votes must be conducted on a Github issue, Github pull request, or Discord post. Votes
+are represented as -1 and +1, with '-1' meaning 'no' and '+1' meaning 'yes.' Voting must be open
+for at least 1 week or until all members have voted, whichever comes first. A vote passes if a
+majority of the votes placed are in favor. On a tie, the leader of the board has a double vote.
