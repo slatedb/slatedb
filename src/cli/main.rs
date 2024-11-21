@@ -210,9 +210,9 @@ async fn schedule_gc(
         })
     }
     let gc_opts = GarbageCollectorOptions {
-        manifest_options: manifest_schedule.map_or(None, |sched| create_gc_dir_opts(sched)),
-        wal_options: wal_schedule.map_or(None, |sched| create_gc_dir_opts(sched)),
-        compacted_options: compacted_schedule.map_or(None, |sched| create_gc_dir_opts(sched)),
+        manifest_options: manifest_schedule.and_then(create_gc_dir_opts),
+        wal_options: wal_schedule.and_then(create_gc_dir_opts),
+        compacted_options: compacted_schedule.and_then(create_gc_dir_opts),
         ..GarbageCollectorOptions::default()
     };
     let (stats, _collector) = run_gc_instance(path, object_store, gc_opts).await?;
