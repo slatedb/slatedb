@@ -2,6 +2,7 @@ use crate::checkpoint::Checkpoint;
 use crate::config::GarbageCollectorOptions;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
+use crate::garbage_collector::GarbageCollectorMessage::Shutdown;
 use crate::manifest_store::ManifestStore;
 use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
@@ -16,7 +17,6 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tracing::debug;
-use crate::garbage_collector::GarbageCollectorMessage::Shutdown;
 
 /// read-only access to the latest manifest file
 pub async fn read_manifest(
@@ -111,7 +111,9 @@ pub async fn run_gc_instance(
 
     let gc_tx = collector.main_tx.clone();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.expect("Failed to install CTRL+C signal handler");
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install CTRL+C signal handler");
         debug!("Intercepted SIGINT ... shutting down garbage collector");
         // if we cant send a shutdown message it's probably because it's already closed
         let _ignored_error = gc_tx.send(Shutdown);

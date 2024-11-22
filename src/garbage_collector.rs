@@ -67,7 +67,7 @@ impl GarbageCollector {
             // !important: make sure that this is always the last thing that this
             // thread does, otherwise we risk notifying waiters and leaving this
             // thread around after shutdown
-            if let Err(_) = shutdown_tx.send(true) {
+            if shutdown_tx.send(true).is_err() {
                 error!("Could not send shutdown signal to threads blocked on await_shutdown");
             }
         });
@@ -91,7 +91,7 @@ impl GarbageCollector {
 
     /// Triggers the main garbage collection thread to terminate
     fn trigger_shutdown(&self) {
-        if let Err(_) = self.main_tx.send(Shutdown) {
+        if self.main_tx.send(Shutdown).is_err() {
             error!("Could not send shutdown signal to threads blocked on await_shutdown");
         }
     }
