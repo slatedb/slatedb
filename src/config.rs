@@ -467,6 +467,35 @@ pub struct DbOptions {
     pub default_ttl: Option<u64>,
 }
 
+// Implement Debug manually for DbOptions.
+// This is needed because DbOptions contains several boxed trait objects
+// which doesn't implement Debug.
+impl std::fmt::Debug for DbOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut data = f.debug_struct("DbOptions");
+        data.field("flush_interval", &self.flush_interval);
+        #[cfg(feature = "wal_disable")]
+        {
+            data.field("wal_enabled", &self.wal_enabled);
+        }
+        data.field("manifest_poll_interval", &self.manifest_poll_interval)
+            .field("min_filter_keys", &self.min_filter_keys)
+            .field("max_unflushed_bytes", &self.max_unflushed_bytes)
+            .field("l0_sst_size_bytes", &self.l0_sst_size_bytes)
+            .field("l0_max_ssts", &self.l0_max_ssts)
+            .field("compactor_options", &self.compactor_options)
+            .field("compression_codec", &self.compression_codec)
+            .field(
+                "object_store_cache_options",
+                &self.object_store_cache_options,
+            )
+            .field("garbage_collector_options", &self.garbage_collector_options)
+            .field("filter_bits_per_key", &self.filter_bits_per_key)
+            .field("default_ttl", &self.default_ttl)
+            .finish()
+    }
+}
+
 impl DbOptions {
     /// Converts the DbOptions to a JSON string representation
     pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
@@ -722,6 +751,22 @@ impl Default for CompactorOptions {
     }
 }
 
+// Implement Debug manually for CompactorOptions.
+// This is needed because CompactorOptions contains a boxed trait object
+// (`Arc<dyn CompactionSchedulerSupplier>`), which doesn't implement Debug.
+impl std::fmt::Debug for CompactorOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompactorOptions")
+            .field("poll_interval", &self.poll_interval)
+            .field("max_sst_size", &self.max_sst_size)
+            .field(
+                "max_concurrent_compactions",
+                &self.max_concurrent_compactions,
+            )
+            .finish()
+    }
+}
+
 /// Returns the default compaction scheduler supplier.
 ///
 /// This function creates and returns an `Arc<dyn CompactionSchedulerSupplier>` containing
@@ -762,7 +807,7 @@ impl Default for SizeTieredCompactionSchedulerOptions {
 }
 
 /// Garbage collector options.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GarbageCollectorOptions {
     /// Garbage collection options for the manifest directory.
     pub manifest_options: Option<GarbageCollectorDirectoryOptions>,
@@ -789,7 +834,7 @@ impl Default for GarbageCollectorDirectoryOptions {
 }
 
 /// Garbage collector options for a directory.
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct GarbageCollectorDirectoryOptions {
     /// The interval at which the garbage collector checks for files to garbage collect.
     #[serde(deserialize_with = "deserialize_duration")]
