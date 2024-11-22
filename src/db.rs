@@ -29,7 +29,6 @@ use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::warn;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
@@ -582,7 +581,7 @@ impl Db {
         let path = path.into();
         tracing::info!("Opening database at path: {:?}", path);
         if let Ok(options_json) = options.to_json_string() {
-            tracing::warn!("Using options: {}", options_json);
+            tracing::info!("Using options: {}", options_json);
         }
         let db_stats = Arc::new(DbStats::new());
         let sst_format = SsTableFormat {
