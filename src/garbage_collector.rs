@@ -2,12 +2,10 @@ use chrono::Utc;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::{fmt, thread};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
-use tokio::task::spawn_blocking;
 use tracing::{debug, error, info};
 
 use crate::config::GcExecutionMode::Periodic;
@@ -22,13 +20,13 @@ use crate::tablestore::TableStore;
 const DEFAULT_MIN_AGE: Duration = Duration::from_secs(86400);
 
 #[derive(Debug)]
-enum GarbageCollectorMessage {
+pub(crate) enum GarbageCollectorMessage {
     Shutdown,
 }
 
+#[derive(Clone)]
 pub(crate) struct GarbageCollector {
-    main_tx: crossbeam_channel::Sender<GarbageCollectorMessage>,
-    main_thread: Option<JoinHandle<()>>,
+    pub(crate) main_tx: Arc<crossbeam_channel::Sender<GarbageCollectorMessage>>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -55,7 +53,8 @@ impl GarbageCollector {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let tokio_handle = options.gc_runtime.clone().unwrap_or(tokio_handle);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let main_thread = thread::spawn(move || {
+
+        thread::spawn(move || {
             let orchestrator = GarbageCollectorOrchestrator {
                 manifest_store,
                 table_store,
@@ -63,22 +62,26 @@ impl GarbageCollector {
                 external_rx,
                 db_stats,
             };
-            tokio_handle.block_on(orchestrator.run(shutdown_tx));
+            tokio_handle.block_on(orchestrator.run());
+
+            // !important: make sure that this is always the last thing that this
+            // thread does, otherwise we risk notifying waiters and leaving this
+            // thread around after shutdown
+            if let Err(_) = shutdown_tx.send(true) {
+                error!("Could not send shutdown signal to threads blocked on await_shutdown");
+            }
         });
         Self {
-            main_thread: Some(main_thread),
-            main_tx: external_tx,
+            main_tx: Arc::new(external_tx),
             shutdown_rx,
         }
     }
 
-    /// Waits for the Garbage Collector to complete its GC loops
-    pub(crate) async fn shutdown_notified(mut self) {
-        loop {
-            if *self.shutdown_rx.borrow() {
-                break;
-            }
-
+    /// Waits for the main garbage collection thread to complete. This does
+    /// not cause the thread to shut down, use [trigger_shutdown] or [close]
+    /// instead to signal the thread to terminate
+    pub(crate) async fn await_shutdown(mut self) {
+        while !*self.shutdown_rx.borrow() {
             self.shutdown_rx
                 .changed()
                 .await
@@ -86,18 +89,17 @@ impl GarbageCollector {
         }
     }
 
-    /// Close the garbage collector
-    pub(crate) async fn close(mut self) {
-        if let Some(main_thread) = self.main_thread.take() {
-            if !main_thread.is_finished() {
-                self.main_tx.send(Shutdown).expect("main tx disconnected");
-            }
-            spawn_blocking(move || {
-                main_thread
-                    .join()
-                    .expect("failed to stop main compactor thread")
-            });
+    /// Triggers the main garbage collection thread to terminate
+    fn trigger_shutdown(&self) {
+        if let Err(_) = self.main_tx.send(Shutdown) {
+            error!("Could not send shutdown signal to threads blocked on await_shutdown");
         }
+    }
+
+    /// Close the garbage collector and await clean termination
+    pub(crate) async fn close(self) {
+        self.trigger_shutdown();
+        self.await_shutdown().await;
     }
 }
 
@@ -252,7 +254,7 @@ impl GarbageCollectorOrchestrator {
     }
 
     /// Run the garbage collector
-    pub async fn run(&self, shutdown_tx: watch::Sender<bool>) {
+    pub async fn run(&self) {
         let log_ticker = crossbeam_channel::tick(Duration::from_secs(60));
         let (manifest_ticker, mut manifest_status) =
             Self::options_to_ticker(self.options.manifest_options.as_ref());
@@ -269,7 +271,7 @@ impl GarbageCollectorOrchestrator {
         loop {
             crossbeam_channel::select! {
                 recv(log_ticker) -> _ => {
-                   info!("GC has collected {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
+                   debug!("GC has collected {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
                         self.db_stats.gc_manifest_count.value.load(Ordering::SeqCst),
                         self.db_stats.gc_wal_count.value.load(Ordering::SeqCst),
                         self.db_stats.gc_compacted_count.value.load(Ordering::SeqCst)
@@ -325,9 +327,6 @@ impl GarbageCollectorOrchestrator {
                 .value
                 .load(Ordering::SeqCst)
         );
-
-        shutdown_tx.send(true)
-            .expect("failed to send shutdown complete signal, shutdown_rx was likely dropped or disconnected.");
     }
 
     fn options_to_ticker(

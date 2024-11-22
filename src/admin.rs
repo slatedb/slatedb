@@ -6,7 +6,6 @@ use crate::manifest_store::ManifestStore;
 use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
-use fail_parallel::FailPointRegistry;
 #[cfg(feature = "aws")]
 use log::warn;
 use object_store::path::Path;
@@ -16,6 +15,8 @@ use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use tokio::runtime::Handle;
+use tracing::debug;
+use crate::garbage_collector::GarbageCollectorMessage::Shutdown;
 
 /// read-only access to the latest manifest file
 pub async fn read_manifest(
@@ -90,12 +91,10 @@ pub async fn run_gc_instance(
 ) -> Result<(), Box<dyn Error>> {
     let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
     let sst_format = SsTableFormat::default(); // read only SSTs, can use default
-    let fp_registry = Arc::new(FailPointRegistry::new());
-    let table_store = Arc::new(TableStore::new_with_fp_registry(
+    let table_store = Arc::new(TableStore::new(
         object_store.clone(),
         sst_format.clone(),
         path.clone(),
-        fp_registry.clone(),
         None, // no need for cache in GC
     ));
 
@@ -110,7 +109,15 @@ pub async fn run_gc_instance(
     )
     .await;
 
-    collector.shutdown_notified().await;
+    let gc_tx = collector.main_tx.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.expect("Failed to install CTRL+C signal handler");
+        debug!("Intercepted SIGINT ... shutting down garbage collector");
+        // if we cant send a shutdown message it's probably because it's already closed
+        let _ignored_error = gc_tx.send(Shutdown);
+    });
+
+    collector.await_shutdown().await;
     Ok(())
 }
 
