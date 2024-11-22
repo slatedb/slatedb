@@ -287,7 +287,7 @@ impl DbInner {
                         guard.state().imm_memtable.back().cloned(),
                     )
                 };
-                warn!(
+                tracing::warn!(
                     "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
                     mem_size_bytes, self.options.max_unflushed_bytes,
                 );
@@ -582,6 +582,8 @@ impl Db {
         tracing::info!("Opening database at path: {:?}", path);
         if let Ok(options_json) = options.to_json_string() {
             tracing::info!("Using options: {}", options_json);
+        } else {
+            tracing::warn!("Unable to encode options as JSON: {:?}", options);
         }
         let db_stats = Arc::new(DbStats::new());
         let sst_format = SsTableFormat {
