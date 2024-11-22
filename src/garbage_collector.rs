@@ -390,17 +390,16 @@ mod tests {
     use std::{fs::File, sync::Arc, time::SystemTime};
 
     use chrono::{DateTime, Utc};
-    use log::info;
     use object_store::{local::LocalFileSystem, path::Path};
     use ulid::Ulid;
 
-    use crate::config::GcExecutionMode::Periodic;
+    use crate::config::GcExecutionMode::Once;
     use crate::types::RowEntry;
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
         garbage_collector::GarbageCollector,
         manifest_store::{ManifestStore, StoredManifest},
-        metrics::{Counter, DbStats},
+        metrics::DbStats,
         sst::SsTableFormat,
         tablestore::TableStore,
     };
@@ -443,11 +442,7 @@ mod tests {
             db_stats.clone(),
         )
         .await;
-
-        // Wait for the garbage collector to run
-        wait_for_gc(db_stats.gc_manifest_count.clone());
-
-        garbage_collector.close().await;
+        garbage_collector.await_shutdown().await;
 
         // Verify that the first manifest was deleted
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -485,12 +480,7 @@ mod tests {
             db_stats.clone(),
         )
         .await;
-
-        // Wait for the garbage collector to run
-        // Use `gc_count` since the manifest counter won't increment
-        wait_for_gc(db_stats.gc_count.clone());
-
-        garbage_collector.close().await;
+        garbage_collector.await_shutdown().await;
 
         // Verify that no manifests were deleted
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -543,11 +533,7 @@ mod tests {
             db_stats.clone(),
         )
         .await;
-
-        // Wait for the garbage collector to run
-        wait_for_gc(db_stats.gc_manifest_count.clone());
-
-        garbage_collector.close().await;
+        garbage_collector.await_shutdown().await;
 
         // Verify that the first manifest was deleted, but the second is still safe
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -626,11 +612,7 @@ mod tests {
             db_stats.clone(),
         )
         .await;
-
-        // Wait for the garbage collector to run
-        wait_for_gc(db_stats.gc_wal_count.clone());
-
-        garbage_collector.close().await;
+        garbage_collector.await_shutdown().await;
 
         // Verify that the first WAL was deleted and the second is kept
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
@@ -716,11 +698,7 @@ mod tests {
             db_stats.clone(),
         )
         .await;
-
-        // Wait for the garbage collector to run
-        wait_for_gc(db_stats.gc_wal_count.clone());
-
-        garbage_collector.close().await;
+        garbage_collector.await_shutdown().await;
 
         // Verify that the first WAL was deleted and the second is kept even though it's expired
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
@@ -849,11 +827,7 @@ mod tests {
             db_stats.clone(),
         )
         .await;
-
-        // Wait for the garbage collector to run
-        wait_for_gc(db_stats.gc_compacted_count.clone());
-
-        garbage_collector.close().await;
+        garbage_collector.await_shutdown().await;
 
         // Verify that the first WAL was deleted and the second is kept
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
@@ -923,15 +897,15 @@ mod tests {
             crate::config::GarbageCollectorOptions {
                 manifest_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                     min_age: std::time::Duration::from_secs(3600),
-                    execution_mode: Periodic(std::time::Duration::from_secs(0)),
+                    execution_mode: Once,
                 }),
                 wal_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                     min_age: std::time::Duration::from_secs(3600),
-                    execution_mode: Periodic(std::time::Duration::from_secs(0)),
+                    execution_mode: Once,
                 }),
                 compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                     min_age: std::time::Duration::from_secs(3600),
-                    execution_mode: Periodic(std::time::Duration::from_secs(0)),
+                    execution_mode: Once,
                 }),
                 gc_runtime: None,
             },
@@ -985,17 +959,5 @@ mod tests {
             .unwrap();
         file.set_modified(now_minus_24h).unwrap();
         DateTime::<Utc>::from(now_minus_24h)
-    }
-
-    /// Wait for the garbage collector to run at least once.
-    /// # Arguments
-    /// * `counter` - The counter to wait for. Could be the manifest, WAL, or
-    ///   compacted counter.
-    fn wait_for_gc(counter: Counter) {
-        let current = counter.get();
-        while counter.get() == current {
-            info!("Waiting for garbage collector to run");
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
     }
 }
