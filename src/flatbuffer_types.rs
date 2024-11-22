@@ -1,4 +1,6 @@
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -163,6 +165,7 @@ impl FlatBufferManifestCodec {
             last_compacted_wal_sst_id: manifest.wal_id_last_compacted(),
             last_clock_tick: manifest.last_clock_tick(),
             checkpoints,
+            last_seq: Arc::new(AtomicU64::new(manifest.last_seq())),
         };
         Manifest {
             core,
@@ -341,6 +344,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 compacted: Some(compacted),
                 last_clock_tick: core.last_clock_tick,
                 checkpoints: Some(checkpoints),
+                last_seq: core.last_seq.load(std::sync::atomic::Ordering::Relaxed),
             },
         );
         self.builder.finish(manifest, None);

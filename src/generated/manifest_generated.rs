@@ -959,6 +959,7 @@ impl<'a> ManifestV1<'a> {
   pub const VT_COMPACTED: flatbuffers::VOffsetT = 20;
   pub const VT_LAST_CLOCK_TICK: flatbuffers::VOffsetT = 22;
   pub const VT_CHECKPOINTS: flatbuffers::VOffsetT = 24;
+  pub const VT_LAST_SEQ: flatbuffers::VOffsetT = 26;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -970,6 +971,7 @@ impl<'a> ManifestV1<'a> {
     args: &'args ManifestV1Args<'args>
   ) -> flatbuffers::WIPOffset<ManifestV1<'bldr>> {
     let mut builder = ManifestV1Builder::new(_fbb);
+    builder.add_last_seq(args.last_seq);
     builder.add_last_clock_tick(args.last_clock_tick);
     builder.add_wal_id_last_seen(args.wal_id_last_seen);
     builder.add_wal_id_last_compacted(args.wal_id_last_compacted);
@@ -1062,6 +1064,13 @@ impl<'a> ManifestV1<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Checkpoint>>>>(ManifestV1::VT_CHECKPOINTS, None).unwrap()}
   }
+  #[inline]
+  pub fn last_seq(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ManifestV1::VT_LAST_SEQ, Some(0)).unwrap()}
+  }
 }
 
 impl flatbuffers::Verifiable for ManifestV1<'_> {
@@ -1082,6 +1091,7 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRun>>>>("compacted", Self::VT_COMPACTED, true)?
      .visit_field::<i64>("last_clock_tick", Self::VT_LAST_CLOCK_TICK, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Checkpoint>>>>("checkpoints", Self::VT_CHECKPOINTS, true)?
+     .visit_field::<u64>("last_seq", Self::VT_LAST_SEQ, false)?
      .finish();
     Ok(())
   }
@@ -1098,6 +1108,7 @@ pub struct ManifestV1Args<'a> {
     pub compacted: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRun<'a>>>>>,
     pub last_clock_tick: i64,
     pub checkpoints: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Checkpoint<'a>>>>>,
+    pub last_seq: u64,
 }
 impl<'a> Default for ManifestV1Args<'a> {
   #[inline]
@@ -1114,6 +1125,7 @@ impl<'a> Default for ManifestV1Args<'a> {
       compacted: None, // required field
       last_clock_tick: 0,
       checkpoints: None, // required field
+      last_seq: 0,
     }
   }
 }
@@ -1168,6 +1180,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_CHECKPOINTS, checkpoints);
   }
   #[inline]
+  pub fn add_last_seq(&mut self, last_seq: u64) {
+    self.fbb_.push_slot::<u64>(ManifestV1::VT_LAST_SEQ, last_seq, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> ManifestV1Builder<'a, 'b, A> {
     let start = _fbb.start_table();
     ManifestV1Builder {
@@ -1199,6 +1215,7 @@ impl core::fmt::Debug for ManifestV1<'_> {
       ds.field("compacted", &self.compacted());
       ds.field("last_clock_tick", &self.last_clock_tick());
       ds.field("checkpoints", &self.checkpoints());
+      ds.field("last_seq", &self.last_seq());
       ds.finish()
   }
 }

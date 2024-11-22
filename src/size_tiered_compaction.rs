@@ -332,6 +332,8 @@ impl CompactionSchedulerSupplier for SizeTieredCompactionSchedulerSupplier {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
 
     use crate::compactor::CompactionScheduler;
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
@@ -661,6 +663,7 @@ mod tests {
             last_compacted_wal_sst_id: 0,
             last_clock_tick: 0,
             checkpoints: vec![],
+            last_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 

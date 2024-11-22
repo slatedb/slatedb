@@ -1,5 +1,5 @@
 use std::ops::Bound;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -16,6 +16,7 @@ pub(crate) struct KVTable {
     is_durable_tx: watch::Sender<bool>,
     is_durable_rx: watch::Receiver<bool>,
     size: AtomicUsize,
+    last_seq: Arc<AtomicU64>,
 }
 
 pub(crate) struct WritableKVTable {
@@ -36,7 +37,10 @@ pub(crate) struct ImmutableWal {
 
 type MemTableRange<'a> = Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, ValueWithAttributes>;
 
-pub struct MemTableIterator<'a>(MemTableRange<'a>);
+pub struct MemTableIterator<'a> {
+    range: MemTableRange<'a>,
+    last_seq: Arc<AtomicU64>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ValueWithAttributes {
@@ -52,10 +56,10 @@ impl<'a> KeyValueIterator for MemTableIterator<'a> {
 
 impl<'a> MemTableIterator<'a> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
-        self.0.next().map(|entry| RowEntry {
+        self.range.next().map(|entry| RowEntry {
             key: entry.key().clone(),
             value: entry.value().value.clone(),
-            seq: 0,
+            seq: self.last_seq.fetch_add(1, Ordering::Relaxed),
             create_ts: entry.value().attrs.ts,
             expire_ts: entry.value().attrs.expire_ts,
         })
@@ -111,9 +115,9 @@ impl ImmutableWal {
 }
 
 impl WritableKVTable {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(last_seq: Arc<AtomicU64>) -> Self {
         Self {
-            table: Arc::new(KVTable::new()),
+            table: Arc::new(KVTable::new(last_seq)),
         }
     }
 
@@ -135,13 +139,14 @@ impl WritableKVTable {
 }
 
 impl KVTable {
-    fn new() -> Self {
+    fn new(last_seq: Arc<AtomicU64>) -> Self {
         let (is_durable_tx, is_durable_rx) = watch::channel(false);
         Self {
             map: SkipMap::new(),
             size: AtomicUsize::new(0),
             is_durable_tx,
             is_durable_rx,
+            last_seq,
         }
     }
 
@@ -163,13 +168,19 @@ impl KVTable {
 
     pub(crate) fn iter(&self) -> MemTableIterator {
         let bounds = (Bound::Unbounded, Bound::Unbounded);
-        MemTableIterator(self.map.range(bounds))
+        MemTableIterator {
+            range: self.map.range(bounds),
+            last_seq: self.last_seq.clone(),
+        }
     }
 
     #[allow(dead_code)] // will be used in #8
     pub(crate) fn range_from(&self, start: Bytes) -> MemTableIterator {
         let bounds = (Bound::Included(start), Bound::Unbounded);
-        MemTableIterator(self.map.range(bounds))
+        MemTableIterator {
+            range: self.map.range(bounds),
+            last_seq: self.last_seq.clone(),
+        }
     }
 
     /// Puts a value, returning as soon as the value is written to the memtable but before
@@ -236,7 +247,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_iter() {
-        let mut table = WritableKVTable::new();
+        let last_seq = Arc::new(AtomicU64::new(0));
+        let mut table = WritableKVTable::new(last_seq);
         table.put(
             Bytes::from_static(b"abc333"),
             Bytes::from_static(b"value3"),
@@ -284,7 +296,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_iter_entry_attrs() {
-        let mut table = WritableKVTable::new();
+        let last_seq = Arc::new(AtomicU64::new(0));
+        let mut table = WritableKVTable::new(last_seq);
         table.put(
             Bytes::from_static(b"abc333"),
             Bytes::from_static(b"value3"),
@@ -306,7 +319,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_range_from_existing_key() {
-        let mut table = WritableKVTable::new();
+        let last_seq = Arc::new(AtomicU64::new(0));
+        let mut table = WritableKVTable::new(last_seq);
         table.put(
             Bytes::from_static(b"abc333"),
             Bytes::from_static(b"value3"),
@@ -348,7 +362,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_range_from_nonexisting_key() {
-        let mut table = WritableKVTable::new();
+        let last_seq = Arc::new(AtomicU64::new(0));
+        let mut table = WritableKVTable::new(last_seq);
         table.put(
             Bytes::from_static(b"abc333"),
             Bytes::from_static(b"value3"),
@@ -387,7 +402,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_iter_delete() {
-        let mut table = WritableKVTable::new();
+        let last_seq = Arc::new(AtomicU64::new(0));
+        let mut table = WritableKVTable::new(last_seq);
         table.put(
             Bytes::from_static(b"abc333"),
             Bytes::from_static(b"value3"),
@@ -401,7 +417,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_track_sz() {
-        let mut table = WritableKVTable::new();
+        let last_seq = Arc::new(AtomicU64::new(0));
+        let mut table = WritableKVTable::new(last_seq);
 
         table.put(
             Bytes::from_static(b"abc333"),
