@@ -468,6 +468,11 @@ pub struct DbOptions {
 }
 
 impl DbOptions {
+    /// Converts the DbOptions to a JSON string representation
+    pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
     /// Loads DbOptions from a file.
     ///
     /// This function attempts to read and parse a configuration file to create a DbOptions instance.

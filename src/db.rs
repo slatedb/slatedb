@@ -29,7 +29,6 @@ use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::warn;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
@@ -288,7 +287,7 @@ impl DbInner {
                         guard.state().imm_memtable.back().cloned(),
                     )
                 };
-                warn!(
+                tracing::warn!(
                     "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
                     mem_size_bytes, self.options.max_unflushed_bytes,
                 );
@@ -580,6 +579,12 @@ impl Db {
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         let path = path.into();
+        tracing::info!("Opening database at path: {:?}", path);
+        if let Ok(options_json) = options.to_json_string() {
+            tracing::info!("Using options: {}", options_json);
+        } else {
+            tracing::warn!("Unable to encode options as JSON for logging purposes");
+        }
         let db_stats = Arc::new(DbStats::new());
         let sst_format = SsTableFormat {
             min_filter_keys: options.min_filter_keys,
