@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use std::{fmt, thread};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
+use tokio::task::spawn_blocking;
 use tracing::{debug, error, info};
 
 use crate::config::GcExecutionMode::Periodic;
@@ -91,9 +92,11 @@ impl GarbageCollector {
             if !main_thread.is_finished() {
                 self.main_tx.send(Shutdown).expect("main tx disconnected");
             }
-            main_thread
-                .join()
-                .expect("failed to stop main compactor thread");
+            spawn_blocking(move || {
+                main_thread
+                    .join()
+                    .expect("failed to stop main compactor thread")
+            });
         }
     }
 }
@@ -277,21 +280,21 @@ impl GarbageCollectorOrchestrator {
                     if let Err(e) = self.collect_garbage_manifests().await {
                         error!("Error collecting manifest garbage: {}", e);
                     }
-                    if manifest_status == DirGcStatus::OneMore { manifest_status = DirGcStatus::Done }
+                    manifest_status.advance();
                 },
                 recv(wal_ticker) -> _ => {
                     debug!("Scheduled garbage collection attempt for WALs.");
                     if let Err(e) = self.collect_garbage_wal_ssts().await {
                         error!("Error collecting WAL garbage: {}", e);
                     }
-                    if wal_status == DirGcStatus::OneMore { wal_status = DirGcStatus::Done }
+                    wal_status.advance();
                 },
                 recv(compacted_ticker) -> _ => {
                     debug!("Scheduled garbage collection attempt for Compacted SSTs.");
                     if let Err(e) = self.collect_garbage_compacted_ssts().await {
                         error!("Error collecting compacted garbage: {}", e);
                     }
-                    if compacted_status == DirGcStatus::OneMore { compacted_status = DirGcStatus::Done }
+                    compacted_status.advance();
                 },
                 recv(self.external_rx) -> msg => {
                     match msg {
@@ -355,6 +358,15 @@ enum DirGcStatus {
 impl DirGcStatus {
     fn is_done(&self) -> bool {
         self == &DirGcStatus::Done
+    }
+
+    fn advance(&mut self) {
+        let next = match self {
+            DirGcStatus::Indefinite(_) => return,
+            DirGcStatus::OneMore => DirGcStatus::Done,
+            DirGcStatus::Done => DirGcStatus::Done,
+        };
+        *self = next;
     }
 }
 

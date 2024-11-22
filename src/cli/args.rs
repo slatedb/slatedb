@@ -97,11 +97,11 @@ pub(crate) enum CliCommands {
 
     /// Runs a garbage collection for a specific resource type once
     RunGarbageCollection {
-        /// If specified, the minimum age of manifests to collect
+        /// the type of resource to clean up (manifest, wal, compacted)
         #[arg(short, long)]
         resource: GcResource,
 
-        /// If specified, the minimum age of manifests to collect
+        /// the minimum age of the resource before considering it for GC
         #[arg(short, long)]
         #[clap(value_parser = humantime::parse_duration)]
         min_age: Duration,
