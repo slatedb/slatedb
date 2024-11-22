@@ -579,12 +579,12 @@ impl Db {
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         let path = path.into();
-        tracing::info!("Opening database at path: {:?}", path);
         if let Ok(options_json) = options.to_json_string() {
-            tracing::info!("Using options: {}", options_json);
+            tracing::info!(?path, options = options_json, "Opening SlateDB database");
         } else {
-            tracing::warn!("Unable to encode options as JSON for logging purposes");
+            tracing::info!(?path, ?options, "Opening SlateDB database");
         }
+
         let db_stats = Arc::new(DbStats::new());
         let sst_format = SsTableFormat {
             min_filter_keys: options.min_filter_keys,
