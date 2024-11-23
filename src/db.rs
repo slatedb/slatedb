@@ -1117,22 +1117,23 @@ impl Db {
     }
 
     /// Only used for test cases in slateDB internal, please don't use it as a normal operation
+    #[allow(unused)]
     async fn force_flush(&self) -> Result<(), SlateDBError> {
         if self.inner.wal_enabled() {
             // DBInner::flush() will frozen the active WAL and flush all imm_wals to memtable
             self.inner.flush().await?;
-            let mut guard = self.inner.state.write();
-            let wal_id = guard.last_written_wal_id() + 1;
-            guard.freeze_memtable(wal_id);
-            // Drop write guard because flush_memtables() will take a read guard
-            drop(guard);
+            {
+                let mut guard = self.inner.state.write();
+                let wal_id = guard.last_written_wal_id() + 1;
+                guard.freeze_memtable(wal_id);
+            }
             self.inner.flush_memtables().await
         } else {
-            let mut guard = self.inner.state.write();
-            let wal_id = guard.last_written_wal_id() + 1;
-            guard.freeze_memtable(wal_id);
-            // Drop write guard because flush_memtables() will take a read guard
-            drop(guard);
+            {
+                let mut guard = self.inner.state.write();
+                let wal_id = guard.last_written_wal_id() + 1;
+                guard.freeze_memtable(wal_id);
+            }
             self.inner.flush_memtables().await
         }
     }
@@ -2368,8 +2369,14 @@ mod tests {
         assert!(snapshot.state.imm_memtable.is_empty());
         assert!(!snapshot.state.core.l0.is_empty());
 
-        assert_eq!(db.get(b"a").await.unwrap(), Some(Bytes::from_static(b"114514")));
-        assert_eq!(db.get(b"b").await.unwrap(), Some(Bytes::from_static(b"810810")));
+        assert_eq!(
+            db.get(b"a").await.unwrap(),
+            Some(Bytes::from_static(b"114514"))
+        );
+        assert_eq!(
+            db.get(b"b").await.unwrap(),
+            Some(Bytes::from_static(b"810810"))
+        );
     }
 
     #[tokio::test]
