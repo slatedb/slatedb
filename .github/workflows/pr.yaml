@@ -29,6 +29,8 @@ jobs:
         run: cargo +stable install cargo-hack --locked
       - name: cargo clippy
         run: cargo hack clippy --each-feature --no-dev-deps
+      - name: cargo clippy tests
+        run: cargo hack clippy --lib --each-feature --tests
 
   style:
     runs-on: ubuntu-latest
