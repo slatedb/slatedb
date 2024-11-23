@@ -1115,6 +1115,27 @@ impl Db {
     pub fn metrics(&self) -> Arc<DbStats> {
         self.inner.db_stats.clone()
     }
+
+    /// Only used for test cases in slateDB internal, please don't use it as a normal operation
+    async fn force_flush(&self) -> Result<(), SlateDBError> {
+        if self.inner.wal_enabled() {
+            // DBInner::flush() will frozen the active WAL and flush all imm_wals to memtable
+            self.inner.flush().await?;
+            let mut guard = self.inner.state.write();
+            let wal_id = guard.last_written_wal_id() + 1;
+            guard.freeze_memtable(wal_id);
+            // Drop write guard because flush_memtables() will take a read guard
+            drop(guard);
+            self.inner.flush_memtables().await
+        } else {
+            let mut guard = self.inner.state.write();
+            let wal_id = guard.last_written_wal_id() + 1;
+            guard.freeze_memtable(wal_id);
+            // Drop write guard because flush_memtables() will take a read guard
+            drop(guard);
+            self.inner.flush_memtables().await
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2315,6 +2336,40 @@ mod tests {
         .unwrap();
         db2.flush().await.unwrap();
         assert_eq!(db2.inner.state.read().state().core.next_wal_sst_id, 5);
+    }
+
+    #[tokio::test]
+    async fn test_force_flush() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+
+        // open db1 and assert that it can write.
+        let db = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Data size less than flush threshold.
+        db.put(b"a", b"114514").await.unwrap();
+        db.put(b"b", b"810810").await.unwrap();
+        db.force_flush().await.unwrap();
+
+        let snapshot = db.inner.state.read().snapshot();
+        if db.inner.wal_enabled() {
+            // Because DbStateSnapshot::wal() returns a mutable reference to the wal, we acquire write lock
+            assert!(snapshot.wal.is_empty());
+            assert!(snapshot.state.imm_wal.is_empty());
+        }
+
+        assert!(snapshot.memtable.is_empty());
+        assert!(snapshot.state.imm_memtable.is_empty());
+        assert!(!snapshot.state.core.l0.is_empty());
+
+        assert_eq!(db.get(b"a").await.unwrap(), Some(Bytes::from_static(b"114514")));
+        assert_eq!(db.get(b"b").await.unwrap(), Some(Bytes::from_static(b"810810")));
     }
 
     #[tokio::test]
