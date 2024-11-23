@@ -1,10 +1,3 @@
-use chrono::{DateTime, Utc};
-use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
-use std::thread;
-use std::thread::JoinHandle;
-use tokio::runtime::Handle;
-use tracing::error;
 use crate::checkpoint::Checkpoint;
 use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
 use crate::db_state::{CoreDbState, SsTableId};
@@ -14,6 +7,13 @@ use crate::manifest::Manifest;
 use crate::manifest_store::{maybe_apply_db_state_update, ManifestStore, StoredManifest};
 use crate::metrics::DbStats;
 use crate::tablestore::{SstFileMetadata, TableStore};
+use chrono::{DateTime, Utc};
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
+use std::thread;
+use std::thread::JoinHandle;
+use tokio::runtime::Handle;
+use tracing::error;
 
 const DEFAULT_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(86400);
 
@@ -89,10 +89,8 @@ impl GarbageCollectorOrchestrator {
             .options
             .manifest_options
             .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
-        chrono::Duration::from_std(min_age)
-            .expect("invalid duration")
+        chrono::Duration::from_std(min_age).expect("invalid duration")
     }
-
 
     /// Collect garbage from the manifest store. This will delete any manifests
     /// that are older than the minimum age specified in the options.
@@ -105,17 +103,22 @@ impl GarbageCollectorOrchestrator {
 
         // Remove the last element so we never delete the latest manifest
         let latest_manifest = if let Some(manifest_metadata) = manifest_metadata_list.pop() {
-            self.manifest_store.read_manifest(manifest_metadata.id).await?
+            self.manifest_store
+                .read_manifest(manifest_metadata.id)
+                .await?
         } else {
             None
-        }.ok_or_else(|| SlateDBError::ManifestMissing)?;
+        }
+        .ok_or_else(|| SlateDBError::ManifestMissing)?;
 
         // Do not delete manifests which are still referenced by active checkpoints
-        let active_manifest_ids: HashSet<_> = latest_manifest.core
+        let active_manifest_ids: HashSet<_> = latest_manifest
+            .core
             .checkpoints
             .iter()
             .map(|checkpoint| checkpoint.manifest_id)
-            .into_iter().collect();
+            .into_iter()
+            .collect();
 
         // Delete manifests older than min_age
         for manifest_metadata in manifest_metadata_list {
@@ -140,21 +143,25 @@ impl GarbageCollectorOrchestrator {
     }
 
     async fn load_stored_manifest(&self) -> Result<StoredManifest, SlateDBError> {
-        StoredManifest::load(Arc::clone(&self.manifest_store)).await?
+        StoredManifest::load(Arc::clone(&self.manifest_store))
+            .await?
             .ok_or_else(|| SlateDBError::ManifestMissing)
     }
 
     fn filter_expired_checkpoints(
-        manifest: &StoredManifest
+        manifest: &StoredManifest,
     ) -> Result<Option<CoreDbState>, SlateDBError> {
         let utc_now = Utc::now();
         let mut db_state = manifest.db_state().clone();
-        let retained_checkpoints: Vec<Checkpoint> = db_state.checkpoints
+        let retained_checkpoints: Vec<Checkpoint> = db_state
+            .checkpoints
             .iter()
             .filter(|checkpoint| match checkpoint.expire_time {
                 Some(expire_time) => DateTime::<Utc>::from(expire_time) > utc_now,
                 None => true,
-            }).cloned().collect();
+            })
+            .cloned()
+            .collect();
 
         let updated_state = if db_state.checkpoints.len() != retained_checkpoints.len() {
             db_state.checkpoints = retained_checkpoints;
@@ -167,10 +174,7 @@ impl GarbageCollectorOrchestrator {
 
     async fn remove_expired_checkpoints(&self) -> Result<(), SlateDBError> {
         let mut stored_manifest = self.load_stored_manifest().await?;
-        maybe_apply_db_state_update(
-            &mut stored_manifest,
-            Self::filter_expired_checkpoints
-        ).await
+        maybe_apply_db_state_update(&mut stored_manifest, Self::filter_expired_checkpoints).await
     }
 
     fn is_wal_sst_eligible_for_deletion(
@@ -184,9 +188,9 @@ impl GarbageCollectorOrchestrator {
         }
 
         let wal_sst_id = wal_sst.id.unwrap_wal_id();
-        !active_manifests.values().any(|manifest| {
-            manifest.has_wal_sst_reference(wal_sst_id)
-        })
+        !active_manifests
+            .values()
+            .any(|manifest| manifest.has_wal_sst_reference(wal_sst_id))
     }
 
     fn wal_sst_min_age(&self) -> chrono::Duration {
@@ -194,8 +198,7 @@ impl GarbageCollectorOrchestrator {
             .options
             .wal_options
             .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
-        chrono::Duration::from_std(min_age)
-            .expect("invalid duration")
+        chrono::Duration::from_std(min_age).expect("invalid duration")
     }
 
     /// Collect garbage from the WAL SSTs. This will delete any WAL SSTs that are
@@ -205,25 +208,27 @@ impl GarbageCollectorOrchestrator {
         self.remove_expired_checkpoints().await?;
 
         let active_manifests = self.manifest_store.read_active_manifests().await?;
-        let latest_manifest = active_manifests.last_key_value()
-            .ok_or_else(|| SlateDBError::ManifestMissing)?.1;
+        let latest_manifest = active_manifests
+            .last_key_value()
+            .ok_or_else(|| SlateDBError::ManifestMissing)?
+            .1;
 
         let utc_now = Utc::now();
-        let last_compacted_wal_sst_id = latest_manifest
-            .core
-            .last_compacted_wal_sst_id;
+        let last_compacted_wal_sst_id = latest_manifest.core.last_compacted_wal_sst_id;
         let min_age = self.wal_sst_min_age();
         let sst_ids_to_delete = self
             .table_store
             .list_wal_ssts(..last_compacted_wal_sst_id)
             .await?
             .into_iter()
-            .filter(|wal_sst| Self::is_wal_sst_eligible_for_deletion(
-                &utc_now,
-                wal_sst,
-                &min_age,
-                &active_manifests
-            ))
+            .filter(|wal_sst| {
+                Self::is_wal_sst_eligible_for_deletion(
+                    &utc_now,
+                    wal_sst,
+                    &min_age,
+                    &active_manifests,
+                )
+            })
             .map(|wal_sst| wal_sst.id)
             .collect::<Vec<_>>();
 
@@ -243,8 +248,7 @@ impl GarbageCollectorOrchestrator {
             .options
             .compacted_options
             .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
-        chrono::Duration::from_std(min_age)
-            .expect("invalid duration")
+        chrono::Duration::from_std(min_age).expect("invalid duration")
     }
 
     async fn list_active_l0_and_compacted_ssts(&self) -> Result<HashSet<SsTableId>, SlateDBError> {
@@ -277,9 +281,7 @@ impl GarbageCollectorOrchestrator {
             .await?
             .into_iter()
             // Filter out the ones that are too young to be collected
-            .filter(|sst| {
-                utc_now.signed_duration_since(sst.last_modified) > min_age
-            })
+            .filter(|sst| utc_now.signed_duration_since(sst.last_modified) > min_age)
             .map(|sst| sst.id)
             // Filter out the ones that are active in the manifest
             .filter(|id| !active_ssts.contains(id))
@@ -336,13 +338,8 @@ impl GarbageCollectorOrchestrator {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, sync::Arc, time::SystemTime};
-    use std::collections::HashSet;
-    use chrono::{DateTime, Utc};
-    use log::info;
-    use object_store::{local::LocalFileSystem, path::Path};
-    use ulid::Ulid;
-    use uuid::Uuid;
+    use crate::checkpoint::Checkpoint;
+    use crate::error::SlateDBError;
     use crate::types::RowEntry;
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
@@ -352,8 +349,13 @@ mod tests {
         sst::SsTableFormat,
         tablestore::TableStore,
     };
-    use crate::checkpoint::Checkpoint;
-    use crate::error::SlateDBError;
+    use chrono::{DateTime, Utc};
+    use log::info;
+    use object_store::{local::LocalFileSystem, path::Path};
+    use std::collections::HashSet;
+    use std::{fs::File, sync::Arc, time::SystemTime};
+    use ulid::Ulid;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_collect_garbage_manifest() {
@@ -387,7 +389,12 @@ mod tests {
         assert_eq!(manifests[0].last_modified, now_minus_24h);
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), db_stats.clone()).await;
+        run_gc_once(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
 
         // Verify that the first manifest was deleted
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -419,7 +426,12 @@ mod tests {
         assert_eq!(manifests[1].id, 2);
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), db_stats.clone()).await;
+        run_gc_once(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
 
         // Verify that no manifests were deleted
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -428,10 +440,7 @@ mod tests {
         assert_eq!(manifests[1].id, 2);
     }
 
-    fn new_checkpoint(
-        manifest_id: u64,
-        expire_time: Option<SystemTime>
-    ) -> Checkpoint {
+    fn new_checkpoint(manifest_id: u64, expire_time: Option<SystemTime>) -> Checkpoint {
         Checkpoint {
             id: Uuid::new_v4(),
             manifest_id,
@@ -454,12 +463,15 @@ mod tests {
 
     async fn remove_checkpoint(
         checkpoint_id: Uuid,
-        stored_manifest: &mut StoredManifest
+        stored_manifest: &mut StoredManifest,
     ) -> Result<(), SlateDBError> {
         let mut updated_state = stored_manifest.db_state().clone();
-        let updated_checkpoints = updated_state.checkpoints.iter().filter(|checkpoint|
-            checkpoint.id != checkpoint_id
-        ).cloned().collect();
+        let updated_checkpoints = updated_state
+            .checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.id != checkpoint_id)
+            .cloned()
+            .collect();
         updated_state.checkpoints = updated_checkpoints;
         stored_manifest.update_db_state(updated_state).await?;
         Ok(())
@@ -480,18 +492,18 @@ mod tests {
         let one_day_ago = SystemTime::now()
             .checked_sub(std::time::Duration::from_secs(86400))
             .unwrap();
-        let _expired_checkpoint_id = checkpoint_current_manifest(
-            &mut stored_manifest,
-            Some(one_day_ago),
-        ).await.unwrap();
+        let _expired_checkpoint_id =
+            checkpoint_current_manifest(&mut stored_manifest, Some(one_day_ago))
+                .await
+                .unwrap();
         // Manifest 3 (expired_checkpoint_id -> 1, unexpired_checkpoint_id -> 2)
         let one_day_ahead = SystemTime::now()
             .checked_add(std::time::Duration::from_secs(86400))
             .unwrap();
-        let unexpired_checkpoint_id = checkpoint_current_manifest(
-            &mut stored_manifest,
-            Some(one_day_ahead),
-        ).await.unwrap();
+        let unexpired_checkpoint_id =
+            checkpoint_current_manifest(&mut stored_manifest, Some(one_day_ahead))
+                .await
+                .unwrap();
 
         // Make all manifests eligible for deletion
         for i in 1..=3 {
@@ -503,15 +515,26 @@ mod tests {
         }
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), db_stats.clone()).await;
+        run_gc_once(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
 
         // The GC should create a new manifest version 4 with the expired
         // checkpoint removed.
-        let (latest_manifest_id, latest_manifest) = manifest_store.read_latest_manifest()
-            .await.unwrap().unwrap();
+        let (latest_manifest_id, latest_manifest) = manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(4, latest_manifest_id);
         assert_eq!(1, latest_manifest.core.checkpoints.len());
-        assert_eq!(unexpired_checkpoint_id, latest_manifest.core.checkpoints[0].id);
+        assert_eq!(
+            unexpired_checkpoint_id,
+            latest_manifest.core.checkpoints[0].id
+        );
         assert_eq!(2, latest_manifest.core.checkpoints[0].manifest_id);
 
         // Only the latest manifest and the one referenced by the unexpired checkpoint
@@ -534,13 +557,16 @@ mod tests {
                 .unwrap();
         // Manifest 2 (active_checkpoint_id -> 1)
         let active_checkpoint_id = checkpoint_current_manifest(&mut stored_manifest, None)
-            .await.unwrap();
+            .await
+            .unwrap();
         // Manifest 3 (active_checkpoint_id -> 1, inactive_checkpoint_id -> 2)
         let inactive_checkpoint_id = checkpoint_current_manifest(&mut stored_manifest, None)
-            .await.unwrap();
+            .await
+            .unwrap();
         // Manifest 4 (active_checkpoint_id -> 1)
         remove_checkpoint(inactive_checkpoint_id, &mut stored_manifest)
-            .await.unwrap();
+            .await
+            .unwrap();
 
         // Set the older manifests to be a day old to make them eligible for deletion
         for i in 1..4 {
@@ -556,10 +582,16 @@ mod tests {
         assert_eq!(manifests.len(), 4);
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), db_stats.clone()).await;
+        run_gc_once(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
 
         // Verify that the latest manifest version is still 4 with the active checkpoint
-        let (latest_manifest_id, latest_manifest) = manifest_store.read_latest_manifest()
+        let (latest_manifest_id, latest_manifest) = manifest_store
+            .read_latest_manifest()
             .await
             .unwrap()
             .unwrap();
@@ -614,7 +646,12 @@ mod tests {
         assert_eq!(manifests[1].last_modified, now_minus_24h_2);
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), db_stats.clone()).await;
+        run_gc_once(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
 
         // Verify that the first manifest was deleted, but the second is still safe
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -684,7 +721,12 @@ mod tests {
         );
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), db_stats.clone()).await;
+        run_gc_once(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
 
         // Verify that the first WAL was deleted and the second is kept
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
@@ -709,10 +751,10 @@ mod tests {
         let mut state = CoreDbState::new();
         state.last_compacted_wal_sst_id = 1;
         state.next_wal_sst_id = 4;
-        let mut stored_manifest = StoredManifest::init_new_db(
-            manifest_store.clone(),
-            state.clone()
-        ).await.unwrap();
+        let mut stored_manifest =
+            StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+                .await
+                .unwrap();
         assert_eq!(1, stored_manifest.id());
 
         // Manifest 2 with checkpoint referencing Manifest 1
@@ -720,7 +762,10 @@ mod tests {
         updated_state.last_compacted_wal_sst_id = 3;
         updated_state.next_wal_sst_id = 4;
         updated_state.checkpoints.push(new_checkpoint(1, None));
-        stored_manifest.update_db_state(updated_state).await.unwrap();
+        stored_manifest
+            .update_db_state(updated_state)
+            .await
+            .unwrap();
         assert_eq!(2, stored_manifest.id());
 
         // All tables are eligible for deletion
@@ -733,7 +778,12 @@ mod tests {
         }
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), db_stats.clone()).await;
+        run_gc_once(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
 
         // Only the first table is deleted. The second is eligible,
         // but the reference in the checkpoint is still active.
@@ -815,7 +865,12 @@ mod tests {
         );
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), db_stats.clone()).await;
+        run_gc_once(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
 
         // Verify that the first WAL was deleted and the second is kept even though it's expired
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
@@ -938,7 +993,12 @@ mod tests {
         assert_eq!(current_manifest.core.compacted[0].ssts.len(), 2);
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), db_stats.clone()).await;
+        run_gc_once(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
 
         // Verify that the first WAL was deleted and the second is kept
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
@@ -1006,20 +1066,20 @@ mod tests {
         state.l0.push_back(active_checkpoint_l0_sst_handle.clone());
         state.compacted.push(SortedRun {
             id: 1,
-            ssts: vec![active_sst_handle.clone()]
+            ssts: vec![active_sst_handle.clone()],
         });
         state.compacted.push(SortedRun {
             id: 2,
-            ssts: vec![active_checkpoint_sst_handle.clone()]
+            ssts: vec![active_checkpoint_sst_handle.clone()],
         });
-        let mut stored_manifest = StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+        let mut stored_manifest =
+            StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+                .await
+                .unwrap();
+
+        let checkpoint_id = checkpoint_current_manifest(&mut stored_manifest, None)
             .await
             .unwrap();
-
-        let checkpoint_id = checkpoint_current_manifest(
-            &mut stored_manifest,
-            None,
-        ).await.unwrap();
 
         // Now drop the active tables from the checkpoint
         let mut state = stored_manifest.db_state().clone();
@@ -1028,7 +1088,12 @@ mod tests {
         stored_manifest.update_db_state(state).await.unwrap();
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), db_stats.clone()).await;
+        run_gc_once(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
 
         // Verify that the first WAL was deleted and the second is kept
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
@@ -1039,10 +1104,17 @@ mod tests {
         assert_eq!(compacted_ssts[3].id, active_checkpoint_sst_handle.id);
 
         // Drop the checkpoint and run the GC one more time
-        remove_checkpoint(checkpoint_id, &mut stored_manifest).await.unwrap();
+        remove_checkpoint(checkpoint_id, &mut stored_manifest)
+            .await
+            .unwrap();
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), db_stats.clone()).await;
+        run_gc_once(
+            manifest_store.clone(),
+            table_store.clone(),
+            db_stats.clone(),
+        )
+        .await;
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
         assert_eq!(compacted_ssts.len(), 2);
         assert_eq!(compacted_ssts[0].id, active_l0_sst_handle.id);
@@ -1177,9 +1249,7 @@ mod tests {
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
     ) {
-        let manifests = manifest_store.read_active_manifests()
-            .await
-            .unwrap();
+        let manifests = manifest_store.read_active_manifests().await.unwrap();
 
         let wal_ssts = table_store
             .list_wal_ssts(..)
@@ -1225,13 +1295,14 @@ mod tests {
             manifest_store.clone(),
             table_store.clone(),
             db_stats.clone(),
-        ).await;
+        )
+        .await;
 
         // Wait for the garbage collector to run
         wait_for_gc(db_stats.gc_count.clone());
         garbage_collector.close().await;
 
         // Verify reference integrity
-        assert_no_dangling_references(manifest_store, table_store, ).await;
+        assert_no_dangling_references(manifest_store, table_store).await;
     }
 }

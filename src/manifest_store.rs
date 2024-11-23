@@ -34,7 +34,8 @@ where
     maybe_apply_db_state_update(manifest, |stored_manifest| {
         let mutated_state = mutator(stored_manifest)?;
         Ok(Some(mutated_state))
-    }).await
+    })
+    .await
 }
 
 pub(crate) async fn maybe_apply_db_state_update<F>(
@@ -46,7 +47,7 @@ where
 {
     loop {
         let Some(mutated_db_state) = mutator(manifest)? else {
-            return Ok(())
+            return Ok(());
         };
 
         return match manifest.update_db_state(mutated_db_state).await {
@@ -324,9 +325,10 @@ impl ManifestStore {
     /// Active manifests include the latest manifest and all manifests referenced
     /// by checkpoints in the latest manifest.
     pub(crate) async fn read_active_manifests(
-        &self
+        &self,
     ) -> Result<BTreeMap<u64, Manifest>, SlateDBError> {
-        let (latest_manifest_id, latest_manifest) = self.read_latest_manifest()
+        let (latest_manifest_id, latest_manifest) = self
+            .read_latest_manifest()
             .await?
             .ok_or_else(|| SlateDBError::ManifestMissing)?;
 
@@ -335,7 +337,8 @@ impl ManifestStore {
 
         for checkpoint in &latest_manifest.core.checkpoints {
             if !active_manifests.contains_key(&checkpoint.manifest_id) {
-                let checkpoint_manifest = self.read_manifest(checkpoint.manifest_id)
+                let checkpoint_manifest = self
+                    .read_manifest(checkpoint.manifest_id)
                     .await?
                     .ok_or_else(|| SlateDBError::ManifestMissing)?;
                 active_manifests.insert(checkpoint.manifest_id, checkpoint_manifest);
@@ -358,17 +361,14 @@ impl ManifestStore {
         Ok(latest_manifest)
     }
 
-    pub(crate) async fn read_manifest(
-        &self,
-        id: u64,
-    ) -> Result<Option<Manifest>, SlateDBError> {
+    pub(crate) async fn read_manifest(&self, id: u64) -> Result<Option<Manifest>, SlateDBError> {
         let manifest_path = &self.get_manifest_path(id);
         match self.object_store.get(manifest_path).await {
             Ok(manifest) => match manifest.bytes().await {
                 Ok(bytes) => {
                     let manifest = self.codec.decode(&bytes)?;
                     Ok(Some(manifest))
-                },
+                }
                 Err(e) => Err(SlateDBError::from(e)),
             },
             Err(e) => match e {
@@ -399,15 +399,15 @@ impl ManifestStore {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::time::SystemTime;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use uuid::Uuid;
     use crate::checkpoint::Checkpoint;
     use crate::db_state::CoreDbState;
     use crate::error;
     use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+    use uuid::Uuid;
 
     const ROOT: &str = "/root/path";
 

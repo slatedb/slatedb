@@ -1,5 +1,6 @@
 use crate::checkpoint::Checkpoint;
 use crate::error::SlateDBError;
+use crate::manifest::Manifest;
 use crate::manifest_store::ManifestStore;
 #[cfg(feature = "aws")]
 use log::warn;
@@ -9,7 +10,6 @@ use std::env;
 use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
-use crate::manifest::Manifest;
 
 async fn read_manifest(
     path: &Path,
@@ -20,8 +20,7 @@ async fn read_manifest(
     if let Some(id) = maybe_id {
         manifest_store.read_manifest(id).await
     } else {
-        let latest_manifest = manifest_store.read_latest_manifest().await?
-            .map(|(_, m)| m);
+        let latest_manifest = manifest_store.read_latest_manifest().await?.map(|(_, m)| m);
         Ok(latest_manifest)
     }
 }
