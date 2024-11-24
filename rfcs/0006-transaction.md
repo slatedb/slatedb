@@ -98,7 +98,7 @@ let path = "_path_for_rocksdb_storage1";
 }
 ```
 
-You may notice that the `WriteBatch` API is very similar to the `Transaction` API we proposed above, the write operation from `WriteBatch` is also considered as atomic. The only differences are:
+You may notice that the `WriteBatch` API is very similar to the `Transaction` API we proposed below, the write operation from `WriteBatch` is also considered as atomic. The only differences are:
 
 1. the `WriteBatch` is committed by `db.write(batch)`, while the `Transaction` is committed by `txn.commit()`
 2. beside the write operations, the `Transaction` should also support the read operations, and if one key is updated in the `Transaction`, the read operation should return the updated value during the transaction.
