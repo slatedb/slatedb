@@ -240,19 +240,15 @@ struct Oracle {
     recent_committed_txns: Deque<Arc<TransactionState>>,
 }
 
-type KeyFingerPrint = u32;
-
 struct TransactionState {
     started_seq: u64,
-    write_keys: HashSet<KingFingerPrint>,
-    read_keys: HashSet<KeyFingerPrint>,
+    write_keys: HashSet<Bytes>,
+    read_keys: Vec<Range<Bytes>>,
     committed_seq: Option<u64>
 }
 ```
 
 `Oracle` is considered a global singleton in the DB, and it tracks the recent committed transactions in the `recent_committed_txns` deque. When a transaction commits, it should push itself into the `recent_committed_txns` deque, and the entries in `recent_committed_txns` can be GCed after they are no longer needed. Also, when a `TransactionState` is tracked in the `recent_committed_txns`, only the write keys need to be tracked, while `read_keys` should always be empty.
-
-To avoid the memory usage of tracking the full keys, we could just store the integer hash `KeyFingerPrint` of each key. There might introduce some unnecessary conflicts when different keys happens to got the same hash value, but the probability is considered as extremely low.
 
 Besides the started sequence number of the transaction, we also need to track the sequence number of the transaction committed. During the execution of a transaction, some other transactions might commit, and the current transaction should check the conflicts with these committed transactions.
 
@@ -271,9 +267,11 @@ Let's say the current transaction is `txn4`, it should check conflicts with `txn
 
 It does not need to check conflicts with `txn1`, because `txn1` is committed before `txn4` started. This could tell us when to GC the entry in the `recent_committed_txns` deque: when ALL the running transactions' sequence number are bigger than the committed sequence number of the entry, then the entry could be GCed.
 
-The potential risk of this SSI approach is that ALL the read keys in the running transactions should be tracked in the `read_keys` of the `TransactionState` before commit. If I scanned 1 million rows in a transaction and finally only updated 1 row, all the keys of the 1 million rows scanned should be tracked inside it. This issue could be mitigated by `KeyFingerPrint` mechanism, let's say each finger print is 32 bytes, then the 1 million keys would cost roughly 32MB memory, which might be acceptable in most cases.
+Please note that `read_keys` are represented as a set of `Range<Bytes>`. This allows us to efficiently track ranges of keys that were read during the transaction, and ensure Serializable Snapshot Isolation (SSI) on range conflicts. For example, if transaction A reads a range `["key01", "key10"]` and transaction B writes to `"key05"` which falls within that range, we can detect this conflict and abort one of the transactions to maintain serializability.
 
-This approach can be adjusted to support SI as well by only tracking the keys that are being written to. When user set the isolation level to SI, the `read_keys` could always be set as None. The GC mechanism to release inactive transactions is still the same as the SSI.
+This requires we track the original write keys in the `TransactionState`, instead of the key fingerprints like Badger does. We could reuse the buffers of the original keys in WriteBatch to reference the write keys with slices of `Bytes`.
+
+This approach can be adjusted to support SI as well by only tracking the keys that are being written to. When user set the isolation level to SI, the `read_keys` could always be set as empty. The GC mechanism to release inactive transactions is still the same as the SSI.
 
 ### How to Test
 
