@@ -250,7 +250,7 @@ struct TransactionState {
 }
 ```
 
-`Oracle` is considered as a global singleton in the DB, and it tracks the recent committed transactions in the `recent_committed_txns` deque. When a transaction commits, it should push itself into the `recent_committed_txns` deque, and the entries in `recent_committed_txns` can be GCed after they are not needed, we'll cover the details on GC later.
+`Oracle` is considered a global singleton in the DB, and it tracks the recent committed transactions in the `recent_committed_txns` deque. When a transaction commits, it should push itself into the `recent_committed_txns` deque, and the entries in `recent_committed_txns` can be GCed after they are no longer needed. Also, when a `TransactionState` is tracked in the `recent_committed_txns`, only the write keys need to be tracked, while `read_keys` should always be empty.
 
 To avoid the memory usage of tracking the full keys, we could just store the integer hash `KeyFingerPrint` of each key. There might introduce some unnecessary conflicts when different keys happens to got the same hash value, but the probability is considered as extremely low.
 
