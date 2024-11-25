@@ -312,6 +312,7 @@ impl SizeTieredCompactionScheduler {
     }
 }
 
+#[derive(Default)]
 pub struct SizeTieredCompactionSchedulerSupplier {
     options: SizeTieredCompactionSchedulerOptions,
 }
@@ -652,11 +653,14 @@ mod tests {
 
     fn create_db_state(l0: VecDeque<SsTableHandle>, srs: Vec<SortedRun>) -> CoreDbState {
         CoreDbState {
+            initialized: true,
             l0_last_compacted: None,
             l0,
             compacted: srs,
             next_wal_sst_id: 0,
             last_compacted_wal_sst_id: 0,
+            last_clock_tick: 0,
+            checkpoints: vec![],
         }
     }
 

@@ -2,14 +2,22 @@ use std::sync::Arc;
 
 use tokio::runtime::Handle;
 use tokio::select;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tracing::error;
 
-use crate::db::DbInner;
+use crate::db::{DbInner, FlushMsg};
 use crate::db_state;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
-use crate::types::ValueDeletable;
+use crate::types::{RowAttributes, ValueDeletable};
+
+#[derive(Debug)]
+pub(crate) enum WalFlushThreadMsg {
+    Shutdown,
+    FlushImmutableWals,
+}
 
 impl DbInner {
     pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
@@ -25,15 +33,8 @@ impl DbInner {
     ) -> Result<SsTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = imm_table.iter();
-        while let Some(kv) = iter.next_entry().await? {
-            match kv.value {
-                ValueDeletable::Value(v) => {
-                    sst_builder.add(&kv.key, Some(&v))?;
-                }
-                ValueDeletable::Tombstone => {
-                    sst_builder.add(&kv.key, None)?;
-                }
-            }
+        while let Some(entry) = iter.next_entry().await? {
+            sst_builder.add(entry)?;
         }
 
         let encoded_sst = sst_builder.build()?;
@@ -51,10 +52,23 @@ impl DbInner {
         while let Some(kv) = iter.next_entry_sync() {
             match kv.value {
                 ValueDeletable::Value(v) => {
-                    mem_table.put(&kv.key, &v);
+                    mem_table.put(
+                        kv.key,
+                        v,
+                        RowAttributes {
+                            ts: kv.create_ts,
+                            expire_ts: kv.expire_ts,
+                        },
+                    );
                 }
                 ValueDeletable::Tombstone => {
-                    mem_table.delete(&kv.key);
+                    mem_table.delete(
+                        kv.key,
+                        RowAttributes {
+                            ts: kv.create_ts,
+                            expire_ts: kv.expire_ts,
+                        },
+                    );
                 }
             }
         }
@@ -70,7 +84,7 @@ impl DbInner {
             wguard.pop_imm_wal();
             // flush to the memtable before notifying so that data is available for reads
             self.flush_imm_wal_to_memtable(wguard.memtable(), imm.table());
-            self.maybe_freeze_memtable(&mut wguard, imm.id());
+            self.maybe_freeze_memtable(&mut wguard, imm.id())?;
             imm.table().notify_durable();
         }
         Ok(())
@@ -78,7 +92,7 @@ impl DbInner {
 
     pub(crate) fn spawn_flush_task(
         self: &Arc<Self>,
-        mut rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+        mut rx: UnboundedReceiver<FlushMsg<WalFlushThreadMsg>>,
         tokio_handle: &Handle,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let this = Arc::clone(self);
@@ -86,15 +100,39 @@ impl DbInner {
             let mut ticker = tokio::time::interval(this.options.flush_interval);
             loop {
                 select! {
-                  // Tick to freeze and flush the memtable
-                  _ = ticker.tick() => {
-                    _ = this.flush().await;
-                  }
-                  // Stop the thread.
-                  _ = rx.recv() => {
-                        _ = this.flush().await;
-                        return
-                  }
+                    // Tick to freeze and flush the memtable
+                    _ = ticker.tick() => {
+                        let result = this.flush().await;
+                        if let Err(err) = result {
+                            error!("error from wal flush: {err}");
+                            this.set_error_if_none(err);
+                        }
+                    }
+                    msg = rx.recv() => {
+                        let (rsp_sender, msg) = msg.expect("channel unexpectedly closed");
+                        match msg {
+                            WalFlushThreadMsg::Shutdown => {
+                                // Stop the thread.
+                                _ = this.flush().await;
+                                return
+                            },
+                            WalFlushThreadMsg::FlushImmutableWals => {
+                                let result = this.flush().await;
+                                if let Err(err) = &result {
+                                    error!("error from wal flush: {err}");
+                                    this.set_error_if_none(err.clone());
+                                }
+
+                                if let Some(rsp_sender) = rsp_sender {
+                                    let res = rsp_sender.send(result);
+                                    if let Err(Err(err)) = res {
+                                        error!("error sending flush response: {err}");
+                                        this.set_error_if_none(err);
+                                    }
+                                }
+                            },
+                        }
+                    }
                 }
             }
         }))

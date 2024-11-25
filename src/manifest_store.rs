@@ -18,6 +18,31 @@ use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
 
+/// Helper function that applies an update to a stored manifest, and retries the update
+/// if the write fails due to a manifest version conflict caused by another client
+/// updating the manifest at the same time. The update to be applied is specified by
+/// the mutator parameter, which is a function that takes a &StoredManifest and returns
+/// the updated CoreDbState.
+pub(crate) async fn apply_db_state_update<F>(
+    manifest: &mut StoredManifest,
+    mutator: F,
+) -> Result<(), SlateDBError>
+where
+    F: Fn(&StoredManifest) -> Result<CoreDbState, SlateDBError>,
+{
+    loop {
+        let mutated_db_state = mutator(manifest)?;
+        return match manifest.update_db_state(mutated_db_state).await {
+            Err(SlateDBError::ManifestVersionExists) => {
+                manifest.refresh().await?;
+                continue;
+            }
+            Err(e) => Err(e),
+            Ok(()) => Ok(()),
+        };
+    }
+}
+
 pub(crate) struct FenceableManifest {
     stored_manifest: StoredManifest,
     local_epoch: u64,
@@ -122,6 +147,9 @@ impl StoredManifest {
         })
     }
 
+    /// Load the current manifest from the supplied manifest store. If there is no db at the
+    /// manifest store's path then this fn returns None. Otherwise, on success it returns a
+    /// Result with an instance of StoredManifest.
     pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Option<Self>, SlateDBError> {
         let Some((id, manifest)) = store.read_latest_manifest().await? else {
             return Ok(None);
@@ -131,6 +159,10 @@ impl StoredManifest {
             manifest,
             manifest_store: store,
         }))
+    }
+
+    pub(crate) fn id(&self) -> u64 {
+        self.id
     }
 
     pub(crate) fn db_state(&self) -> &CoreDbState {
@@ -216,7 +248,7 @@ impl ManifestStore {
                 if let AlreadyExists { path: _, source: _ } = err {
                     SlateDBError::ManifestVersionExists
                 } else {
-                    SlateDBError::ObjectStoreError(err)
+                    SlateDBError::from(err)
                 }
             })?;
 
@@ -252,7 +284,7 @@ impl ManifestStore {
 
         while let Some(file) = match files_stream.next().await.transpose() {
             Ok(file) => file,
-            Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
+            Err(e) => return Err(SlateDBError::from(e)),
         } {
             match self.parse_id(&file.location, "manifest") {
                 Ok(id) if id_range.contains(&id) => {
@@ -290,12 +322,12 @@ impl ManifestStore {
         let manifest_bytes = match self.object_store.get(manifest_path).await {
             Ok(manifest) => match manifest.bytes().await {
                 Ok(bytes) => bytes,
-                Err(e) => return Err(SlateDBError::ObjectStoreError(e)),
+                Err(e) => return Err(SlateDBError::from(e)),
             },
             Err(e) => {
                 return match e {
                     Error::NotFound { .. } => Ok(None),
-                    _ => Err(SlateDBError::ObjectStoreError(e)),
+                    _ => Err(SlateDBError::from(e)),
                 }
             }
         };

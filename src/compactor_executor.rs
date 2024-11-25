@@ -19,12 +19,16 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 
+use crate::metrics::DbStats;
+use crate::types::RowEntry;
+use crate::types::ValueDeletable::Tombstone;
 use tracing::error;
 
 pub(crate) struct CompactionJob {
     pub(crate) destination: u32,
     pub(crate) ssts: Vec<SsTableHandle>,
     pub(crate) sorted_runs: Vec<SortedRun>,
+    pub(crate) compaction_ts: i64,
 }
 
 pub(crate) trait CompactionExecutor {
@@ -43,6 +47,7 @@ impl TokioCompactionExecutor {
         options: Arc<CompactorOptions>,
         worker_tx: crossbeam_channel::Sender<WorkerToOrchestratorMsg>,
         table_store: Arc<TableStore>,
+        db_stats: Arc<DbStats>,
     ) -> Self {
         Self {
             inner: Arc::new(TokioCompactionExecutorInner {
@@ -51,6 +56,7 @@ impl TokioCompactionExecutor {
                 worker_tx,
                 table_store,
                 tasks: Arc::new(Mutex::new(HashMap::new())),
+                db_stats,
                 is_stopped: AtomicBool::new(false),
             }),
         }
@@ -81,6 +87,7 @@ pub(crate) struct TokioCompactionExecutorInner {
     worker_tx: crossbeam_channel::Sender<WorkerToOrchestratorMsg>,
     table_store: Arc<TableStore>,
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
+    db_stats: Arc<DbStats>,
     is_stopped: AtomicBool,
 }
 
@@ -119,13 +126,33 @@ impl TokioCompactionExecutorInner {
             .table_store
             .table_writer(SsTableId::Compacted(Ulid::new()));
         let mut current_size = 0usize;
-        while let Some(kv) = all_iter.next_entry().await? {
+
+        while let Some(raw_kv) = all_iter.next_entry().await? {
+            // filter out any expired entries -- eventually we can consider
+            // abstracting this away into generic, pluggable compaction filters
+            // but for now we do it inline
+            let kv = match raw_kv.expire_ts {
+                Some(expire_ts) if expire_ts <= compaction.compaction_ts => {
+                    // insert a tombstone instead of just filtering out the
+                    // value in the iterator because this may otherwise "revive"
+                    // an older version of the KV pair that has a larger TTL in
+                    // a lower level of the LSM tree
+                    RowEntry {
+                        key: raw_kv.key,
+                        value: Tombstone,
+                        seq: raw_kv.seq,
+                        expire_ts: None,
+                        create_ts: raw_kv.create_ts,
+                    }
+                }
+                _ => raw_kv,
+            };
+
             // Add to SST
-            let value = kv.value.into_option();
-            current_writer
-                .add(kv.key.as_ref(), value.as_ref().map(|b| b.as_ref()))
-                .await?;
-            current_size += kv.key.len() + value.map_or(0, |b| b.len());
+            let value = kv.value.as_option().cloned();
+            let key_len = kv.key.len();
+            current_writer.add(kv).await?;
+            current_size += key_len + value.map_or(0, |b| b.len());
             if current_size > self.options.max_sst_size {
                 current_size = 0;
                 let finished_writer = mem::replace(
@@ -134,10 +161,12 @@ impl TokioCompactionExecutorInner {
                         .table_writer(SsTableId::Compacted(Ulid::new())),
                 );
                 output_ssts.push(finished_writer.close().await?);
+                self.db_stats.bytes_compacted.add(current_size as u64);
             }
         }
         if current_size > 0 {
             output_ssts.push(current_writer.close().await?);
+            self.db_stats.bytes_compacted.add(current_size as u64);
         }
         Ok(SortedRun {
             id: compaction.destination,
@@ -151,6 +180,7 @@ impl TokioCompactionExecutorInner {
             return;
         }
         let dst = compaction.destination;
+        self.db_stats.running_compactions.inc();
         assert!(!tasks.contains_key(&dst));
         let this = self.clone();
         let task = self.handle.spawn(async move {
@@ -161,6 +191,7 @@ impl TokioCompactionExecutorInner {
                 .expect("failed to send compaction finished msg");
             let mut tasks = this.tasks.lock();
             tasks.remove(&dst);
+            this.db_stats.running_compactions.dec();
         });
         tasks.insert(dst, TokioCompactionTask { task });
     }

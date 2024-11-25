@@ -1,8 +1,10 @@
+use crate::checkpoint::Checkpoint;
 use bytes::Bytes;
 use serde::Serialize;
 use std::collections::VecDeque;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use tracing::info;
+use tracing::debug;
 use ulid::Ulid;
 use SsTableId::{Compacted, Wal};
 
@@ -14,6 +16,12 @@ use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable
 pub(crate) struct SsTableHandle {
     pub id: SsTableId,
     pub info: SsTableInfo,
+}
+
+impl Debug for SsTableHandle {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("SsTableHandle({:?})", self.id))
+    }
 }
 
 impl SsTableHandle {
@@ -94,7 +102,7 @@ impl Clone for Box<dyn SsTableInfoCodec> {
     }
 }
 
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Debug)]
 pub(crate) struct SortedRun {
     pub(crate) id: u32,
     pub(crate) ssts: Vec<SsTableHandle>,
@@ -142,23 +150,29 @@ pub(crate) struct COWDbState {
 }
 
 // represents the core db state that we persist in the manifest
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Debug)]
 pub(crate) struct CoreDbState {
+    pub(crate) initialized: bool,
     pub(crate) l0_last_compacted: Option<Ulid>,
     pub(crate) l0: VecDeque<SsTableHandle>,
     pub(crate) compacted: Vec<SortedRun>,
     pub(crate) next_wal_sst_id: u64,
     pub(crate) last_compacted_wal_sst_id: u64,
+    pub(crate) last_clock_tick: i64,
+    pub(crate) checkpoints: Vec<Checkpoint>,
 }
 
 impl CoreDbState {
     pub(crate) fn new() -> Self {
         Self {
+            initialized: true,
             l0_last_compacted: None,
             l0: VecDeque::new(),
             compacted: vec![],
             next_wal_sst_id: 1,
             last_compacted_wal_sst_id: 0,
+            last_clock_tick: i64::MIN,
+            checkpoints: vec![],
         }
     }
 
@@ -169,11 +183,11 @@ impl CoreDbState {
             .iter()
             .map(|sr| (sr.id, sr.estimate_size()))
             .collect();
-        info!("DB Levels:");
-        info!("-----------------");
-        info!("{:?}", l0s);
-        info!("{:?}", compacted);
-        info!("-----------------");
+        debug!("DB Levels:");
+        debug!("-----------------");
+        debug!("{:?}", l0s);
+        debug!("{:?}", compacted);
+        debug!("-----------------");
     }
 }
 
@@ -282,6 +296,20 @@ impl DbState {
         let mut state = self.state_copy();
         state.core.next_wal_sst_id += 1;
         self.update_state(state);
+    }
+
+    pub fn update_clock_tick(&mut self, tick: i64) -> Result<i64, SlateDBError> {
+        if self.state.core.last_clock_tick > tick {
+            return Err(SlateDBError::InvalidClockTick {
+                last_tick: self.state.core.last_clock_tick,
+                next_tick: tick,
+            });
+        }
+
+        let mut state = self.state_copy();
+        state.core.last_clock_tick = tick;
+        self.update_state(state);
+        Ok(tick)
     }
 
     pub fn refresh_db_state(&mut self, compactor_state: &CoreDbState) {

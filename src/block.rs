@@ -1,12 +1,9 @@
+use crate::error::SlateDBError;
+use crate::row_codec::{SstRowCodecV0, SstRowEntry};
+use crate::types::RowEntry;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crate::error::SlateDBError;
-
 pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
-pub(crate) const SIZEOF_U32: usize = std::mem::size_of::<u32>();
-
-/// "None" values are encoded by using the maximum u32 value as the value length.
-pub(crate) const TOMBSTONE: u32 = u32::MAX;
 
 pub(crate) struct Block {
     pub(crate) data: Bytes,
@@ -95,40 +92,53 @@ impl BlockBuilder {
     }
 
     #[must_use]
-    pub fn add(&mut self, key: &[u8], value: Option<&[u8]>) -> bool {
-        assert!(!key.is_empty(), "key must not be empty");
-        let overlap_len = compute_prefix(&self.first_key, key);
-        let rest_key = &key[overlap_len..];
+    pub fn add(&mut self, entry: RowEntry) -> bool {
+        assert!(!entry.key.is_empty(), "key must not be empty");
+        let key_prefix_len = compute_prefix(&self.first_key, &entry.key);
+        let key_suffix = entry.key.slice(key_prefix_len..);
+
+        let sst_row_entry = &SstRowEntry::new(
+            key_prefix_len,
+            key_suffix,
+            entry.seq,
+            entry.value,
+            entry.create_ts,
+            entry.expire_ts,
+        );
 
         // If adding the key-value pair would exceed the block size limit, don't add it.
         // (Unless the block is empty, in which case, allow the block to exceed the limit.)
-        if self.estimated_size()
-                + rest_key.len()
-                + value.map(|v| v.len()).unwrap_or_default() // None takes no space (besides u32)
-                + SIZEOF_U16 * 3 // overlap key size + rest key size + offset size
-                + SIZEOF_U32 // value size
-                > self.block_size
-            && !self.is_empty()
-        {
+        if self.estimated_size() + sst_row_entry.size() > self.block_size && !self.is_empty() {
             return false;
         }
 
         self.offsets.push(self.data.len() as u16);
-        self.data.put_u16(overlap_len as u16);
-        self.data.put_u16(rest_key.len() as u16);
-        self.data.put(rest_key);
-        if let Some(value) = value {
-            self.data.put_u32(value.len() as u32);
-            self.data.put(value);
-        } else {
-            self.data.put_u32(TOMBSTONE);
-        }
+        let codec = SstRowCodecV0::new();
+        let key = entry.key.clone();
+        codec.encode(&mut self.data, sst_row_entry);
 
         if self.first_key.is_empty() {
-            self.first_key = Bytes::copy_from_slice(key);
+            self.first_key = Bytes::copy_from_slice(&key);
         }
 
         true
+    }
+
+    #[cfg(test)]
+    pub fn add_kv(
+        &mut self,
+        key: &[u8],
+        value: Option<&[u8]>,
+        attrs: crate::types::RowAttributes,
+    ) -> bool {
+        let entry = RowEntry::new(
+            key.to_vec().into(),
+            value.map(|v| v.to_vec().into()),
+            0,
+            attrs.ts,
+            attrs.expire_ts,
+        );
+        self.add(entry)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -149,12 +159,14 @@ impl BlockBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{gen_attrs, gen_empty_attrs};
 
     #[test]
     fn test_block() {
         let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add(b"key1", Some(b"value1")));
-        assert!(builder.add(b"key2", Some(b"value2")));
+        assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
+        assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
+        assert!(builder.add_kv(b"key2", Some(b"value2"), gen_empty_attrs()));
         let block = builder.build().unwrap();
         let encoded = block.encode();
         let decoded = Block::decode(encoded);
@@ -165,9 +177,9 @@ mod tests {
     #[test]
     fn test_block_with_tombstone() {
         let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add(b"key1", Some(b"value1")));
-        assert!(builder.add(b"key2", None));
-        assert!(builder.add(b"key3", Some(b"value3")));
+        assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
+        assert!(builder.add_kv(b"key2", None, gen_empty_attrs()));
+        assert!(builder.add_kv(b"key3", Some(b"value3"), gen_empty_attrs()));
         let block = builder.build().unwrap();
         let encoded = block.encode();
         let _decoded = Block::decode(encoded);
@@ -176,10 +188,16 @@ mod tests {
     #[test]
     fn test_block_size() {
         let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add(b"key1", Some(b"value1")));
-        assert!(builder.add(b"key2", Some(b"value2")));
+        assert!(builder.add_kv(b"key1", Some(b"value1"), gen_attrs(1)));
+        assert!(builder.add_kv(b"key2", Some(b"value2"), gen_attrs(1)));
         let block = builder.build().unwrap();
-        assert_eq!(39, block.size());
+        assert_eq!(73, block.size());
+
+        let mut builder = BlockBuilder::new(4096);
+        assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
+        assert!(builder.add_kv(b"key2", Some(b"value2"), gen_empty_attrs()));
+        let block = builder.build().unwrap();
+        assert_eq!(57, block.size());
     }
 
     #[test]

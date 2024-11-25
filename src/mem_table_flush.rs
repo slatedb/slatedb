@@ -1,17 +1,19 @@
 use std::sync::Arc;
 
 use tokio::runtime::Handle;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{error, warn};
 use ulid::Ulid;
 
-use crate::db::DbInner;
+use crate::db::{DbInner, FlushMsg};
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::manifest_store::FenceableManifest;
 
-pub(crate) enum MemtableFlushThreadMsg {
+#[derive(Debug)]
+pub enum MemtableFlushThreadMsg {
     Shutdown,
-    FlushImmutableMemtables(Option<tokio::sync::oneshot::Sender<Result<(), SlateDBError>>>),
+    FlushImmutableMemtables,
 }
 
 pub(crate) struct MemtableFlusher {
@@ -84,7 +86,7 @@ impl DbInner {
     pub(crate) fn spawn_memtable_flush_task(
         self: &Arc<Self>,
         manifest: FenceableManifest,
-        mut rx: tokio::sync::mpsc::UnboundedReceiver<MemtableFlushThreadMsg>,
+        mut rx: UnboundedReceiver<FlushMsg<MemtableFlushThreadMsg>>,
         tokio_handle: &Handle,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let this = Arc::clone(self);
@@ -104,34 +106,44 @@ impl DbInner {
                     _ = manifest_poll_interval.tick() => {
                         if !is_stopped {
                             if let Err(err) = flusher.load_manifest().await {
-                                error!("error loading manifest: {}", err);
+                                error!("error loading manifest: {err}");
+                                this.set_error_if_none(err);
                             }
                             match flusher.flush_imm_memtables_to_l0().await {
                                 Ok(_) => {
                                     this.db_stats.immutable_memtable_flushes.inc();
                                 }
-                                Err(err) => error!("error from memtable flush: {}", err),
+                                Err(err) => {
+                                    error!("error from memtable flush: {err}");
+                                    this.set_error_if_none(err);
+                                }
                             }
                         }
                     }
                     msg = rx.recv() => {
-                        let msg = msg.expect("channel unexpectedly closed");
+                        let (rsp_sender, msg) = msg.expect("channel unexpectedly closed");
                         match msg {
                             MemtableFlushThreadMsg::Shutdown => {
                                 is_stopped = true
                             },
-                            MemtableFlushThreadMsg::FlushImmutableMemtables(rsp) => {
+                            MemtableFlushThreadMsg::FlushImmutableMemtables => {
                                 let result = flusher.flush_imm_memtables_to_l0().await;
                                 match &result {
                                     Ok(_) => {
                                         this.db_stats.immutable_memtable_flushes.inc();
                                     }
-                                    Err(err) => error!("error from memtable flush: {}", err),
+                                    Err(err) => {
+                                        error!("error from memtable flush: {err}");
+                                        this.set_error_if_none(err.clone());
+                                    }
                                 }
-                                match rsp {
-                                    None => {}
-                                    Some(rsp) => _ = rsp.send(result)
-                                };
+                                if let Some(rsp_sender) = rsp_sender {
+                                    let res = rsp_sender.send(result);
+                                    if let Err(Err(err)) = res {
+                                        error!("error sending flush response: {err}");
+                                        this.set_error_if_none(err);
+                                    }
+                                }
                             }
                         }
                     }
