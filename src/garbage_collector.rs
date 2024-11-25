@@ -117,7 +117,6 @@ impl GarbageCollectorOrchestrator {
             .checkpoints
             .iter()
             .map(|checkpoint| checkpoint.manifest_id)
-            .into_iter()
             .collect();
 
         // Delete manifests older than min_age

@@ -336,12 +336,12 @@ impl ManifestStore {
         active_manifests.insert(latest_manifest_id, latest_manifest.clone());
 
         for checkpoint in &latest_manifest.core.checkpoints {
-            if !active_manifests.contains_key(&checkpoint.manifest_id) {
+            if let std::collections::btree_map::Entry::Vacant(entry) = active_manifests.entry(checkpoint.manifest_id) {
                 let checkpoint_manifest = self
                     .read_manifest(checkpoint.manifest_id)
                     .await?
                     .ok_or_else(|| SlateDBError::ManifestMissing)?;
-                active_manifests.insert(checkpoint.manifest_id, checkpoint_manifest);
+                entry.insert(checkpoint_manifest);
             }
         }
 
