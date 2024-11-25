@@ -1,6 +1,12 @@
 use crate::checkpoint::Checkpoint;
+use crate::config::GarbageCollectorOptions;
 use crate::error::SlateDBError;
+use crate::garbage_collector::GarbageCollector;
+use crate::garbage_collector::GarbageCollectorMessage::Shutdown;
 use crate::manifest_store::ManifestStore;
+use crate::metrics::DbStats;
+use crate::sst::SsTableFormat;
+use crate::tablestore::TableStore;
 #[cfg(feature = "aws")]
 use log::warn;
 use object_store::path::Path;
@@ -9,6 +15,8 @@ use std::env;
 use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
+use tokio::runtime::Handle;
+use tracing::debug;
 
 /// read-only access to the latest manifest file
 pub async fn read_manifest(
@@ -74,6 +82,45 @@ pub fn load_object_store_from_env(
         "azure" => load_azure(),
         _ => Err(format!("Unknown CLOUD_PROVIDER: '{}'", provider).into()),
     }
+}
+
+pub async fn run_gc_instance(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    gc_opts: GarbageCollectorOptions,
+) -> Result<(), Box<dyn Error>> {
+    let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
+    let sst_format = SsTableFormat::default(); // read only SSTs, can use default
+    let table_store = Arc::new(TableStore::new(
+        object_store.clone(),
+        sst_format.clone(),
+        path.clone(),
+        None, // no need for cache in GC
+    ));
+
+    let tokio_handle = Handle::current();
+    let stats = Arc::new(DbStats::new());
+    let collector = GarbageCollector::new(
+        manifest_store,
+        table_store,
+        gc_opts,
+        tokio_handle,
+        stats.clone(),
+    )
+    .await;
+
+    let gc_tx = collector.main_tx.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install CTRL+C signal handler");
+        debug!("Intercepted SIGINT ... shutting down garbage collector");
+        // if we cant send a shutdown message it's probably because it's already closed
+        let _ignored_error = gc_tx.send(Shutdown);
+    });
+
+    collector.await_shutdown().await;
+    Ok(())
 }
 
 /// Loads a local object store instance.
