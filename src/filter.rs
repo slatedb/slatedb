@@ -3,26 +3,26 @@ use std::mem::size_of;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use siphasher::sip::SipHasher13;
 
-pub(crate) struct BloomFilterBuilder {
+pub struct BloomFilterBuilder {
     bits_per_key: u32,
     key_hashes: Vec<u64>,
 }
 
 #[derive(PartialEq, Eq)]
-pub(crate) struct BloomFilter {
+pub struct BloomFilter {
     num_probes: u16,
     buffer: Bytes,
 }
 
 impl BloomFilterBuilder {
-    pub(crate) fn new(bits_per_key: u32) -> Self {
+    pub fn new(bits_per_key: u32) -> Self {
         Self {
             bits_per_key,
             key_hashes: Vec::new(),
         }
     }
 
-    pub(crate) fn add_key(&mut self, key: &[u8]) {
+    pub fn add_key(&mut self, key: &[u8]) {
         self.key_hashes.push(filter_hash(key))
     }
 
@@ -34,7 +34,7 @@ impl BloomFilterBuilder {
         ((filter_bits + 7) / 8) as usize
     }
 
-    pub(crate) fn build(&self) -> BloomFilter {
+    pub fn build(&self) -> BloomFilter {
         let num_probes = optimal_num_probes(self.bits_per_key);
         let filter_bytes = self.filter_size_bytes();
         let filter_bits = (filter_bytes * 8) as u32;
@@ -72,7 +72,7 @@ impl BloomFilter {
         (self.buffer.len() * 8) as u32
     }
 
-    pub(crate) fn might_contain(&self, hash: u64) -> bool {
+    pub fn might_contain(&self, hash: u64) -> bool {
         for p in probes_for_key(hash, self.num_probes, self.filter_bits()) {
             if !check_bit(p as usize, &self.buffer) {
                 return false;
