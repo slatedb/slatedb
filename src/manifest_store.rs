@@ -404,19 +404,20 @@ mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::db_state::CoreDbState;
     use crate::error;
-    use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
+    use crate::manifest_store::{
+        maybe_apply_db_state_update, FenceableManifest, ManifestStore, StoredManifest,
+    };
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use std::sync::Arc;
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime};
     use uuid::Uuid;
 
     const ROOT: &str = "/root/path";
 
     #[tokio::test]
     async fn test_should_fail_write_on_version_conflict() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -434,8 +435,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_write_with_new_version() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -449,8 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_update_local_state_on_write() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let mut state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -463,8 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_refresh() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let mut state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -481,8 +479,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_bump_writer_epoch() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -497,8 +494,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_fail_on_writer_fenced() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let mut state = CoreDbState::new();
         let sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -519,8 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_bump_compactor_epoch() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -535,8 +530,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_fail_on_compactor_fenced() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let mut state = CoreDbState::new();
         let sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -578,8 +572,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_active_checkpoints() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -619,8 +612,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_manifests_unbounded() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -651,8 +643,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_manifest() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -671,8 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_active_manifest_should_fail() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -685,5 +675,80 @@ mod tests {
 
         let result = ms.delete_manifest(2).await;
         assert!(matches!(result, Err(error::SlateDBError::InvalidDeletion)));
+    }
+
+    fn new_memory_manifest_store() -> Arc<ManifestStore> {
+        let os = Arc::new(InMemory::new());
+        Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()))
+    }
+
+    fn now_rounded_to_nearest_sec() -> SystemTime {
+        let now_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs)
+    }
+
+    #[tokio::test]
+    async fn test_read_active_manifests_should_consider_checkpoints() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let initial_manifest = sm.manifest.clone();
+        let initial_manifest_id = sm.id;
+        let active_manifests = ms.read_active_manifests().await.unwrap();
+        assert_eq!(1, active_manifests.len());
+        assert_eq!(
+            Some(&initial_manifest),
+            active_manifests.get(&initial_manifest_id)
+        );
+
+        // Add a checkpoint referencing the latest manifest
+        let mut updated_state = state.clone();
+        updated_state.checkpoints.push(Checkpoint {
+            id: Uuid::new_v4(),
+            manifest_id: sm.id,
+            expire_time: None,
+            create_time: now_rounded_to_nearest_sec(),
+        });
+        sm.update_db_state(updated_state).await.unwrap();
+        let active_manifests = ms.read_active_manifests().await.unwrap();
+        assert_eq!(2, active_manifests.len());
+        assert_eq!(
+            Some(&initial_manifest),
+            active_manifests.get(&initial_manifest_id)
+        );
+        assert_eq!(Some(&sm.manifest), active_manifests.get(&sm.id));
+
+        // Remove the checkpoint and verify that only the latest manifest is active
+        let mut updated_state = state.clone();
+        updated_state.checkpoints.clear();
+        sm.update_db_state(updated_state).await.unwrap();
+        let active_manifests = ms.read_active_manifests().await.unwrap();
+        assert_eq!(Some(&sm.manifest), active_manifests.get(&sm.id));
+    }
+
+    #[tokio::test]
+    async fn test_maybe_apply_state_update() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let initial_id = sm.id;
+        maybe_apply_db_state_update(&mut sm, |_| Ok(None))
+            .await
+            .unwrap();
+        assert_eq!(initial_id, sm.id);
+
+        maybe_apply_db_state_update(&mut sm, |sm| Ok(Some(sm.db_state().clone())))
+            .await
+            .unwrap();
+        assert_eq!(initial_id + 1, sm.id);
     }
 }
