@@ -336,7 +336,9 @@ impl ManifestStore {
         active_manifests.insert(latest_manifest_id, latest_manifest.clone());
 
         for checkpoint in &latest_manifest.core.checkpoints {
-            if let std::collections::btree_map::Entry::Vacant(entry) = active_manifests.entry(checkpoint.manifest_id) {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                active_manifests.entry(checkpoint.manifest_id)
+            {
                 let checkpoint_manifest = self
                     .read_manifest(checkpoint.manifest_id)
                     .await?
