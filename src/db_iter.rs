@@ -14,8 +14,8 @@ use std::sync::Arc;
 type ScanIterator<'a> = TwoMergeIterator<
     VecDequeKeyValueIterator,
     TwoMergeIterator<
-        MergeIterator<SstIterator<'a, Arc<SsTableHandle>>>,
-        MergeIterator<SortedRunIterator<'a, Arc<SsTableHandle>>>,
+        MergeIterator<SstIterator<'a, Box<SsTableHandle>>>,
+        MergeIterator<SortedRunIterator<'a, Box<SsTableHandle>>>,
     >,
 >;
 
@@ -33,12 +33,12 @@ impl<'a> DbIterator<'a> {
         snapshot: Arc<DbStateSnapshot>,
         range: BytesRange,
         mem_iter: VecDequeKeyValueIterator,
-        l0_iters: VecDeque<SstIterator<'a, Arc<SsTableHandle>>>,
-        sr_iters: VecDeque<SortedRunIterator<'a, Arc<SsTableHandle>>>,
+        l0_iters: VecDeque<SstIterator<'a, Box<SsTableHandle>>>,
+        sr_iters: VecDeque<SortedRunIterator<'a, Box<SsTableHandle>>>,
     ) -> Result<Self, SlateDBError> {
-        let l0_iter = MergeIterator::new(l0_iters).await?;
-        let sr_iter = MergeIterator::new(sr_iters).await?;
-        let sst_iter = TwoMergeIterator::new(l0_iter, sr_iter).await?;
+        let (l0_iter, sr_iter) =
+            tokio::join!(MergeIterator::new(l0_iters), MergeIterator::new(sr_iters),);
+        let sst_iter = TwoMergeIterator::new(l0_iter?, sr_iter?).await?;
         let iter = TwoMergeIterator::new(mem_iter, sst_iter).await?;
         Ok(DbIterator {
             snapshot,
@@ -51,8 +51,9 @@ impl<'a> DbIterator<'a> {
 
     /// Get the next record in the scan.
     ///
-    /// returns Ok(None) when the scan is complete
-    /// returns Err(InvalidatedIterator) if the iterator has been invalidated
+    /// # Errors
+    ///
+    /// Returns [`SlateDBError::InvalidatedIterator`] if the iterator has been invalidated
     ///  due to an underlying error
     pub async fn next(&mut self) -> Result<Option<DbRecord>, SlateDBError> {
         if self.invalidated {
@@ -68,17 +69,23 @@ impl<'a> DbIterator<'a> {
         }
     }
 
-    /// Seek to a key ahead of the last key returned from the iterator or
-    /// the lower range bound if no records have yet been returned.
+    /// Seek ahead to the next key. The next key must be larger than the
+    /// last key returned by the iterator and less than the end bound specified
+    /// in the `scan` arguments.
     ///
-    /// returns Ok(()) if the position is successfully advanced
-    /// returns SlateDbError::InvalidArgument if `lower_bound` is `Unbounded`
-    /// returns SlateDbError::InvalidArgument if the key is comes before the
-    ///  current iterator position
-    /// returns SlateDbError::InvalidArgument if `lower_bound` is beyond the
-    ///  upper bound specified in the original `scan` parameters
-    /// returns Err(InvalidatedIterator) if the iterator has been invalidated
-    ///  in order to reclaim resources
+    /// After a successful seek, the iterator will return the next record
+    /// with a key greater than or equal to `next_key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SlateDBError::InvalidArgument`] in the following cases:
+    ///
+    /// - if `next_key` comes before the current iterator position
+    /// - if `next_key` is beyond the upper bound specified in the original
+    ///   [`crate::db::Db::scan`] parameters
+    ///
+    /// Returns [`SlateDBError::InvalidatedIterator`] if the iterator has been
+    //  invalidated in order to reclaim resources.
     #[allow(dead_code)]
     pub async fn seek(&mut self, next_key: Bytes) -> Result<(), SlateDBError> {
         if self.invalidated {
@@ -102,5 +109,6 @@ impl<'a> DbIterator<'a> {
 }
 
 pub(crate) trait SeekToKey {
+    /// Seek to the next (inclusive) key
     async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError>;
 }

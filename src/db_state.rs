@@ -157,9 +157,9 @@ impl SortedRun {
     pub(crate) fn into_tables_covering_range(
         self,
         range: &BytesRange,
-    ) -> VecDeque<Arc<SsTableHandle>> {
+    ) -> VecDeque<Box<SsTableHandle>> {
         let mut covering_ssts = VecDeque::new();
-        let ssts: Vec<Arc<SsTableHandle>> = self.ssts.into_iter().map(Arc::new).collect();
+        let ssts: Vec<_> = self.ssts.into_iter().map(Box::new).collect();
 
         for idx in 0..ssts.len() {
             let current_sst = &ssts[idx];

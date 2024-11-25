@@ -136,7 +136,7 @@ pub struct ScanOptions {
     /// The read commit level for read operations
     pub read_level: ReadLevel,
     /// The number of bytes to read ahead
-    pub read_ahead_size: usize,
+    pub read_ahead_bytes: usize,
     /// Whether or not fetched blocks should be cached
     pub cache_blocks: bool
 }

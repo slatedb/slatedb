@@ -27,25 +27,36 @@ pub(crate) async fn assert_iterator<T: KeyValueIterator>(
     // 5. Performance: While Vec<u8> has a slight overhead compared to &[u8], the difference is
     //    negligible for most use cases, especially in tests where convenience and clarity are prioritized.
 
-    for (expected_k, expected_v, expected_attr) in entries.iter() {
-        let kv = iterator
-            .next_entry()
-            .await
-            .expect("iterator next_entry failed")
-            .expect("expected iterator to return a value");
-        assert_eq!(kv.key, Bytes::from(expected_k.clone()));
-        assert_eq!(kv.value, *expected_v);
-        assert_eq!(
-            kv.expire_ts, expected_attr.expire_ts,
-            "Attribute expire_ts mismatch at key {:?}",
-            kv.key
-        );
+    for expected in entries.iter() {
+        assert_next_entry(iterator, expected).await;
     }
     assert!(iterator
         .next_entry()
         .await
         .expect("iterator next_entry failed")
         .is_none());
+}
+
+// this complains because we include these in the bencher feature but they are only
+// used for cfg(test)
+#[allow(dead_code)]
+pub(crate) async fn assert_next_entry<T: KeyValueIterator>(
+    iterator: &mut T,
+    expected: &(Vec<u8>, ValueDeletable, RowAttributes)
+) {
+    let (expected_k, expected_v, expected_attr) = expected;
+    let kv = iterator
+        .next_entry()
+        .await
+        .expect("iterator next_entry failed")
+        .expect("expected iterator to return a value");
+    assert_eq!(kv.key, Bytes::from(expected_k.clone()));
+    assert_eq!(kv.value, *expected_v);
+    assert_eq!(
+        kv.expire_ts, expected_attr.expire_ts,
+        "Attribute expire_ts mismatch at key {:?}",
+        kv.key
+    );
 }
 
 // this complains because we include these in the bencher feature but they are only

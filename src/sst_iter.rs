@@ -235,6 +235,7 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
     fn end_iteration(&mut self) {
         let num_blocks = self.index.borrow().block_meta().len();
         self.next_block_idx_to_fetch = num_blocks;
+        self.current_iter = None
     }
 }
 

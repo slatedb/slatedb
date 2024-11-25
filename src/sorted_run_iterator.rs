@@ -38,7 +38,7 @@ impl<'a, H: AsRef<SsTableHandle>> SsTableHandleIter<'a, H> {
     }
 }
 
-impl<'a> SortedRunIterator<'a, Arc<SsTableHandle>> {
+impl<'a> SortedRunIterator<'a, Box<SsTableHandle>> {
     pub(crate) async fn new_from_range(
         sorted_run: SortedRun,
         range: BytesRange,

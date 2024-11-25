@@ -211,18 +211,20 @@ impl ReadOptions {
 pub struct ScanOptions {
     /// The read commit level for read operations
     pub read_level: ReadLevel,
-    /// The number of bytes to read ahead
-    pub read_ahead_size: usize,
+    /// The number of bytes to read ahead. The value is rounded up to the nearest
+    /// block size when fetching from object storage. The default is 1, which
+    /// rounds up to one block.
+    pub read_ahead_bytes: usize,
     /// Whether or not fetched blocks should be cached
     pub cache_blocks: bool,
 }
 
 impl ScanOptions {
-    /// Create a new ScanOptions with `read_level` set to `Commited`.
+    /// Create a new ScanOptions with `read_level` set to [`ReadLevel::Commited`].
     pub const fn default() -> Self {
         Self {
             read_level: ReadLevel::Commited,
-            read_ahead_size: 0, // FIXME
+            read_ahead_bytes: 1,
             cache_blocks: false,
         }
     }

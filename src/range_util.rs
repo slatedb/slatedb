@@ -19,7 +19,7 @@ fn is_prefix_increment(prefix: &Bytes, b: &Bytes) -> bool {
     }
 
     for i in 0..prefix.len() {
-        if i >= b.len() || b[i] != prefix[i] {
+        if b[i] != prefix[i] {
             return false;
         }
     }
@@ -127,7 +127,6 @@ impl BytesRange {
 
     pub(crate) fn intersection(&self, other: &BytesRange) -> BytesRange {
         let start_bound = Self::max_start_bound(self.start_bound(), other.start_bound());
-
         let end_bound = Self::min_end_bound(self.end_bound(), other.end_bound());
 
         BytesRange {
@@ -143,6 +142,12 @@ impl<T: RangeBounds<Bytes>> From<T> for BytesRange {
             start_bound: value.start_bound().cloned(),
             end_bound: value.end_bound().cloned(),
         }
+    }
+}
+
+impl From<BytesRange> for (Bound<Bytes>, Bound<Bytes>) {
+    fn from(value: BytesRange) -> Self {
+        (value.start_bound, value.end_bound)
     }
 }
 

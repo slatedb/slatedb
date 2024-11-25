@@ -187,17 +187,16 @@ impl DbInner {
             memtables.push_back(memtable.table());
         }
 
-        let mem_iter = VecDequeKeyValueIterator::from_range(memtables, range.clone()).await?;
+        let mem_iter =
+            VecDequeKeyValueIterator::materialize_range(memtables, range.clone()).await?;
 
         let state = snapshot.state.as_ref().clone();
         let mut l0_iters = VecDeque::new();
-        let blocks_to_fetch = self
-            .table_store
-            .convert_bytes_to_blocks(options.read_ahead_size);
+        let blocks_to_fetch = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
         for sst in state.core.l0 {
             let iter = SstIterator::new_opts(
-                Arc::new(sst),
+                Box::new(sst),
                 range.clone(),
                 self.table_store.clone(),
                 1,
@@ -209,7 +208,7 @@ impl DbInner {
             l0_iters.push_back(iter);
         }
 
-        let mut sr_iters: VecDeque<SortedRunIterator<Arc<SsTableHandle>>> = VecDeque::new();
+        let mut sr_iters: VecDeque<SortedRunIterator<Box<SsTableHandle>>> = VecDeque::new();
         for sr in state.core.compacted {
             let sorted_run_iter = SortedRunIterator::new_from_range(
                 sr,
@@ -1280,7 +1279,6 @@ mod tests {
 
     use super::*;
     use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
-    use crate::config::ReadLevel::Commited;
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
         DEFAULT_PUT_OPTIONS,
