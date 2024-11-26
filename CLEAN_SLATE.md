@@ -47,7 +47,7 @@ Clean Slate manifests itself in many ways. Here are a few examples:
 - **We will hard-code some configurations** to keep the number of user-facing options low.
 - **We default to copying RocksDB, LevelDB, Badger, or Pebble** whenever possible. They are excellent databases that work empirically well.
 - **Our governance model and release process are simple** and can be changed as we see fit.
-- **We have a separate Go project** where Go developers are building a Go implementation of SlateDB. This project is part of SlateDB but not goverened by SlateDB's [GOVERNANCE.md] and [CLEAN_SLATE.md].
+- **We have a separate Go project** where Go developers are building a Go implementation of SlateDB. This project is part of SlateDB but not goverened by SlateDB's [GOVERNANCE.md](GOVERNANCE.md) and [CLEAN_SLATE.md](CLEAN_SLATE.md).
 
 ## References
 
