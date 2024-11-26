@@ -37,7 +37,7 @@ We have deliberately chosen to avoid the following features:
 
 ## Style
 
-Clean Slate lives in service of our vision. SlateDB is a transactional database, so consistency and durability are paramount. To achieve this, Clean Slate is simple, incremental, and empirical. We make changes incrementally. Changes that add complexity must justify the change with empirical evidence.
+Clean Slate lives in service of our vision. SlateDB is a transactional database, ACID semantics are paramount. To build an ACID-compliant database comfortably, Clean Slate is simple, incremental, and empirical. We make changes incrementally. Changes that add complexity must justify the change with empirical evidence.
 
 Clean Slate manifests itself in many ways. Here are a few examples:
 
