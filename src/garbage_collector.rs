@@ -1,12 +1,3 @@
-use chrono::{DateTime, Utc};
-use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use std::{fmt, thread};
-use tokio::runtime::Handle;
-use tokio::sync::watch;
-use tracing::{debug, error, info};
 use crate::checkpoint::Checkpoint;
 use crate::config::GcExecutionMode::Periodic;
 use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions, GcExecutionMode};
@@ -17,6 +8,15 @@ use crate::manifest::Manifest;
 use crate::manifest_store::{maybe_apply_db_state_update, ManifestStore, StoredManifest};
 use crate::metrics::DbStats;
 use crate::tablestore::{SstFileMetadata, TableStore};
+use chrono::{DateTime, Utc};
+use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use std::{fmt, thread};
+use tokio::runtime::Handle;
+use tokio::sync::watch;
+use tracing::{debug, error, info};
 
 const DEFAULT_MIN_AGE: Duration = Duration::from_secs(86400);
 

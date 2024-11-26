@@ -26,7 +26,10 @@ pub async fn read_manifest(
 ) -> Result<Option<String>, Box<dyn Error>> {
     let manifest_store = ManifestStore::new(path, object_store);
     let id_manifest = if let Some(id) = maybe_id {
-        manifest_store.read_manifest(id).await?.map(|manifest| (id, manifest))
+        manifest_store
+            .read_manifest(id)
+            .await?
+            .map(|manifest| (id, manifest))
     } else {
         manifest_store.read_latest_manifest().await?
     };
