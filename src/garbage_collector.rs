@@ -21,13 +21,12 @@ use tracing::{debug, error, info};
 const DEFAULT_MIN_AGE: Duration = Duration::from_secs(86400);
 
 #[derive(Debug)]
-pub(crate) enum GarbageCollectorMessage {
+enum GarbageCollectorMessage {
     Shutdown,
 }
 
-#[derive(Clone)]
 pub(crate) struct GarbageCollector {
-    pub(crate) main_tx: Arc<crossbeam_channel::Sender<GarbageCollectorMessage>>,
+    main_tx: Arc<crossbeam_channel::Sender<GarbageCollectorMessage>>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -88,6 +87,18 @@ impl GarbageCollector {
                 .await
                 .expect("Shutdown rx disconnected.");
         }
+    }
+
+    pub(crate) fn register_interrupt_handler(&self) {
+        let main_tx = self.main_tx.clone();
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to install CTRL+C signal handler");
+            debug!("Intercepted SIGINT ... shutting down garbage collector");
+            // if we cant send a shutdown message it's probably because it's already closed
+            let _ignored_error = main_tx.send(Shutdown);
+        });
     }
 
     /// Triggers the main garbage collection thread to terminate
