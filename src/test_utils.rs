@@ -42,7 +42,7 @@ pub(crate) async fn assert_iterator<T: KeyValueIterator>(
 #[allow(dead_code)]
 pub(crate) async fn assert_next_entry<T: KeyValueIterator>(
     iterator: &mut T,
-    expected: &(Vec<u8>, ValueDeletable, RowAttributes)
+    expected: &(Vec<u8>, ValueDeletable, RowAttributes),
 ) {
     let (expected_k, expected_v, expected_attr) = expected;
     let kv = iterator

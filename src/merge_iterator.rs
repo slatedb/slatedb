@@ -511,11 +511,15 @@ mod tests {
         );
 
         let mut merge_iter = MergeIterator::new(iters).await.unwrap();
-        assert_next_entry(&mut merge_iter, &(
-            "aa".into(),
-            ValueDeletable::Value(Bytes::from("aa1")),
-            gen_attrs(0),
-        )).await;
+        assert_next_entry(
+            &mut merge_iter,
+            &(
+                "aa".into(),
+                ValueDeletable::Value(Bytes::from("aa1")),
+                gen_attrs(0),
+            ),
+        )
+        .await;
 
         merge_iter.seek(&Bytes::from_static(b"bb")).await.unwrap();
 
@@ -534,7 +538,50 @@ mod tests {
                 ),
             ],
         )
-            .await;
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_two_merge_seek() {
+        let iter1 = TestIterator::new()
+            .with_entry(b"aa", b"aa1")
+            .with_entry(b"bb", b"bb1")
+            .with_entry(b"dd", b"dd1");
+        let iter2 = TestIterator::new()
+            .with_entry(b"aa", b"aa2")
+            .with_entry(b"bb", b"bb2")
+            .with_entry(b"cc", b"cc2")
+            .with_entry(b"ee", b"ee2");
+
+        let mut merge_iter = TwoMergeIterator::new(iter1, iter2).await.unwrap();
+        merge_iter.seek(&Bytes::from_static(b"b")).await.unwrap();
+
+        assert_iterator(
+            &mut merge_iter,
+            &[
+                (
+                    "bb".into(),
+                    ValueDeletable::Value(Bytes::from("bb1")),
+                    gen_attrs(1),
+                ),
+                (
+                    "cc".into(),
+                    ValueDeletable::Value(Bytes::from("cc2")),
+                    gen_attrs(5),
+                ),
+                (
+                    "dd".into(),
+                    ValueDeletable::Value(Bytes::from("dd1")),
+                    gen_attrs(2),
+                ),
+                (
+                    "ee".into(),
+                    ValueDeletable::Value(Bytes::from("ee2")),
+                    gen_attrs(6),
+                ),
+            ],
+        )
+        .await;
     }
 
     struct TestIterator {

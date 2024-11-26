@@ -155,9 +155,12 @@ impl<B: BlockLike> BlockIterator<B> {
 mod tests {
     use crate::block::BlockBuilder;
     use crate::block_iterator::BlockIterator;
+    use crate::db_iter::SeekToKey;
     use crate::iter::KeyValueIterator;
     use crate::test_utils;
-    use crate::test_utils::gen_attrs;
+    use crate::test_utils::{assert_iterator, assert_next_entry, gen_attrs};
+    use crate::types::ValueDeletable;
+    use bytes::Bytes;
 
     #[tokio::test]
     async fn test_iterator() {
@@ -215,5 +218,82 @@ mod tests {
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_key(&block, b"zzz".as_ref());
         assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_seek_to_key_skips_records_prior_to_next_key() {
+        let mut block_builder = BlockBuilder::new(1024);
+        assert!(block_builder.add_kv("donkey".as_ref(), Some("kong".as_ref()), gen_attrs(1)));
+        assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
+        assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
+        let block = block_builder.build().unwrap();
+        let mut iter = BlockIterator::from_first_key(block);
+        assert_next_entry(
+            &mut iter,
+            &(
+                "donkey".into(),
+                ValueDeletable::Value(Bytes::from("kong")),
+                gen_attrs(1),
+            ),
+        )
+        .await;
+        iter.seek(&Bytes::from_static(b"s")).await.unwrap();
+        assert_iterator(
+            &mut iter,
+            &[(
+                "super".into(),
+                ValueDeletable::Value(Bytes::from("mario")),
+                gen_attrs(3),
+            )],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_seek_to_key_with_iterator_at_seek_point() {
+        let mut block_builder = BlockBuilder::new(1024);
+        assert!(block_builder.add_kv("donkey".as_ref(), Some("kong".as_ref()), gen_attrs(1)));
+        assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
+        assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
+        let block = block_builder.build().unwrap();
+        let mut iter = BlockIterator::from_first_key(block);
+        assert_next_entry(
+            &mut iter,
+            &(
+                "donkey".into(),
+                ValueDeletable::Value(Bytes::from("kong")),
+                gen_attrs(1),
+            ),
+        )
+        .await;
+        iter.seek(&Bytes::from_static(b"kratos")).await.unwrap();
+        assert_iterator(
+            &mut iter,
+            &[
+                (
+                    "kratos".into(),
+                    ValueDeletable::Value(Bytes::from("atreus")),
+                    gen_attrs(2),
+                ),
+                (
+                    "super".into(),
+                    ValueDeletable::Value(Bytes::from("mario")),
+                    gen_attrs(3),
+                ),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_seek_to_key_beyond_last_key_in_block() {
+        let mut block_builder = BlockBuilder::new(1024);
+        assert!(block_builder.add_kv("donkey".as_ref(), Some("kong".as_ref()), gen_attrs(1)));
+        assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
+        assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
+        let block = block_builder.build().unwrap();
+        let mut iter = BlockIterator::from_first_key(block);
+        iter.seek(&Bytes::from_static(b"zelda")).await.unwrap();
+        assert_iterator(&mut iter, &[]).await;
     }
 }
