@@ -1,12 +1,15 @@
 use chrono::Utc;
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::thread;
-use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+use std::{fmt, thread};
 use tokio::runtime::Handle;
-use tracing::error;
+use tokio::sync::watch;
+use tracing::{debug, error, info};
 
-use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
+use crate::config::GcExecutionMode::Periodic;
+use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions, GcExecutionMode};
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollectorMessage::*;
@@ -14,15 +17,16 @@ use crate::manifest_store::ManifestStore;
 use crate::metrics::DbStats;
 use crate::tablestore::TableStore;
 
-const DEFAULT_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(86400);
+const DEFAULT_MIN_AGE: Duration = Duration::from_secs(86400);
 
+#[derive(Debug)]
 enum GarbageCollectorMessage {
     Shutdown,
 }
 
 pub(crate) struct GarbageCollector {
-    main_tx: crossbeam_channel::Sender<GarbageCollectorMessage>,
-    main_thread: Option<JoinHandle<()>>,
+    main_tx: Arc<crossbeam_channel::Sender<GarbageCollectorMessage>>,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 /// Garbage collector for the database. This will periodically check for old
@@ -47,7 +51,9 @@ impl GarbageCollector {
     ) -> Self {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let tokio_handle = options.gc_runtime.clone().unwrap_or(tokio_handle);
-        let main_thread = thread::spawn(move || {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        thread::spawn(move || {
             let orchestrator = GarbageCollectorOrchestrator {
                 manifest_store,
                 table_store,
@@ -56,21 +62,61 @@ impl GarbageCollector {
                 db_stats,
             };
             tokio_handle.block_on(orchestrator.run());
+
+            // !important: make sure that this is always the last thing that this
+            // thread does, otherwise we risk notifying waiters and leaving this
+            // thread around after shutdown
+            if shutdown_tx.send(true).is_err() {
+                error!("Could not send shutdown signal to threads blocked on await_shutdown");
+            }
         });
         Self {
-            main_thread: Some(main_thread),
-            main_tx: external_tx,
+            main_tx: Arc::new(external_tx),
+            shutdown_rx,
         }
     }
 
-    /// Close the garbage collector
-    pub(crate) async fn close(mut self) {
-        if let Some(main_thread) = self.main_thread.take() {
-            self.main_tx.send(Shutdown).expect("main tx disconnected");
-            main_thread
-                .join()
-                .expect("failed to stop main compactor thread");
+    /// Waits for the main garbage collection thread to complete. This does
+    /// not cause the thread to shut down, use [trigger_shutdown] or [close]
+    /// instead to signal the thread to terminate
+    pub(crate) async fn await_shutdown(mut self) {
+        while !*self.shutdown_rx.borrow() {
+            self.shutdown_rx
+                .changed()
+                .await
+                .expect("Shutdown rx disconnected.");
         }
+    }
+
+    pub(crate) fn register_interrupt_handler(&self) {
+        let main_tx = self.main_tx.clone();
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to install CTRL+C signal handler");
+            debug!("Intercepted SIGINT ... shutting down garbage collector");
+            // if we cant send a shutdown message it's probably because it's already closed
+            let _ignored_error = main_tx.send(Shutdown);
+        });
+    }
+
+    /// Triggers the main garbage collection thread to terminate
+    fn trigger_shutdown(&self) {
+        if self.main_tx.send(Shutdown).is_err() {
+            error!("Could not send shutdown signal to threads blocked on await_shutdown");
+        }
+    }
+
+    /// Close the garbage collector and await clean termination
+    pub(crate) async fn close(self) {
+        self.trigger_shutdown();
+        self.await_shutdown().await;
+    }
+}
+
+impl Drop for GarbageCollector {
+    fn drop(&mut self) {
+        debug!("Garbage collector dropped - external_tx will be disconnected.");
     }
 }
 
@@ -220,39 +266,133 @@ impl GarbageCollectorOrchestrator {
 
     /// Run the garbage collector
     pub async fn run(&self) {
-        let manifest_ticker = Self::options_to_ticker(self.options.manifest_options.as_ref());
-        let wal_ticker = Self::options_to_ticker(self.options.wal_options.as_ref());
-        let compacted_ticker = Self::options_to_ticker(self.options.compacted_options.as_ref());
+        let log_ticker = crossbeam_channel::tick(Duration::from_secs(60));
+        let (manifest_ticker, mut manifest_status) =
+            Self::options_to_ticker(self.options.manifest_options.as_ref());
+        let (wal_ticker, mut wal_status) =
+            Self::options_to_ticker(self.options.wal_options.as_ref());
+        let (compacted_ticker, mut compacted_status) =
+            Self::options_to_ticker(self.options.compacted_options.as_ref());
+
+        info!(
+            "Starting Garbage Collector with [manifest: {}], [wal: {}], [compacted: {}]",
+            manifest_status, wal_status, compacted_status
+        );
 
         loop {
             crossbeam_channel::select! {
+                recv(log_ticker) -> _ => {
+                   debug!("GC has collected {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
+                        self.db_stats.gc_manifest_count.value.load(Ordering::SeqCst),
+                        self.db_stats.gc_wal_count.value.load(Ordering::SeqCst),
+                        self.db_stats.gc_compacted_count.value.load(Ordering::SeqCst)
+                    );
+                },
                 recv(manifest_ticker) -> _ => {
+                    debug!("Scheduled garbage collection attempt for Manifests.");
                     if let Err(e) = self.collect_garbage_manifests().await {
                         error!("Error collecting manifest garbage: {}", e);
                     }
-                }
+                    manifest_status.advance();
+                },
                 recv(wal_ticker) -> _ => {
+                    debug!("Scheduled garbage collection attempt for WALs.");
                     if let Err(e) = self.collect_garbage_wal_ssts().await {
                         error!("Error collecting WAL garbage: {}", e);
                     }
-                }
+                    wal_status.advance();
+                },
                 recv(compacted_ticker) -> _ => {
+                    debug!("Scheduled garbage collection attempt for Compacted SSTs.");
                     if let Err(e) = self.collect_garbage_compacted_ssts().await {
                         error!("Error collecting compacted garbage: {}", e);
                     }
-                }
-                recv(self.external_rx) -> _ => break, // Shutdown
+                    compacted_status.advance();
+                },
+                recv(self.external_rx) -> msg => {
+                    match msg {
+                        Ok(_) => {
+                            info!("Garbage collector received shutdown signal... shutting down");
+                            break
+                        }
+                        Err(e) => {
+                            error!("Garbage collector received error message {}. Shutting down", e);
+                            break;
+                        }
+                    }
+                },
             }
             self.db_stats.gc_count.inc();
+            if manifest_status.is_done() && wal_status.is_done() && compacted_status.is_done() {
+                info!("Garbage Collector is done - exiting main thread.");
+                break;
+            }
         }
+
+        info!(
+            "GC shutdown after collecting {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
+            self.db_stats.gc_manifest_count.value.load(Ordering::SeqCst),
+            self.db_stats.gc_wal_count.value.load(Ordering::SeqCst),
+            self.db_stats
+                .gc_compacted_count
+                .value
+                .load(Ordering::SeqCst)
+        );
     }
 
     fn options_to_ticker(
         options: Option<&GarbageCollectorDirectoryOptions>,
-    ) -> crossbeam_channel::Receiver<std::time::Instant> {
-        options.map_or(crossbeam_channel::never(), |opts| {
-            crossbeam_channel::tick(opts.poll_interval)
-        })
+    ) -> (crossbeam_channel::Receiver<Instant>, DirGcStatus) {
+        options.map_or(
+            (crossbeam_channel::never(), DirGcStatus::Done),
+            |opts| match opts.execution_mode {
+                GcExecutionMode::Once => {
+                    (crossbeam_channel::at(Instant::now()), DirGcStatus::OneMore)
+                }
+                Periodic(duration) => (
+                    crossbeam_channel::tick(duration),
+                    DirGcStatus::Indefinite(duration),
+                ),
+            },
+        )
+    }
+}
+
+#[derive(Eq, PartialEq)]
+enum DirGcStatus {
+    Indefinite(Duration),
+    OneMore,
+    Done,
+}
+
+impl DirGcStatus {
+    fn is_done(&self) -> bool {
+        self == &DirGcStatus::Done
+    }
+
+    fn advance(&mut self) {
+        let next = match self {
+            DirGcStatus::Indefinite(_) => return,
+            DirGcStatus::OneMore => DirGcStatus::Done,
+            DirGcStatus::Done => DirGcStatus::Done,
+        };
+        *self = next;
+    }
+}
+
+impl fmt::Display for DirGcStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DirGcStatus::Indefinite(duration) => {
+                write!(f, "Run Every {:?}", duration)
+            }
+            DirGcStatus::OneMore => {
+                write!(f, "Run Once")
+            }
+            DirGcStatus::Done => {
+                write!(f, "Done")
+            }
+        }
     }
 }
 
@@ -261,16 +401,16 @@ mod tests {
     use std::{fs::File, sync::Arc, time::SystemTime};
 
     use chrono::{DateTime, Utc};
-    use log::info;
     use object_store::{local::LocalFileSystem, path::Path};
     use ulid::Ulid;
 
+    use crate::config::GcExecutionMode::Once;
     use crate::types::RowEntry;
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
         garbage_collector::GarbageCollector,
         manifest_store::{ManifestStore, StoredManifest},
-        metrics::{Counter, DbStats},
+        metrics::DbStats,
         sst::SsTableFormat,
         tablestore::TableStore,
     };
@@ -313,11 +453,7 @@ mod tests {
             db_stats.clone(),
         )
         .await;
-
-        // Wait for the garbage collector to run
-        wait_for_gc(db_stats.gc_manifest_count.clone());
-
-        garbage_collector.close().await;
+        garbage_collector.await_shutdown().await;
 
         // Verify that the first manifest was deleted
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -355,12 +491,7 @@ mod tests {
             db_stats.clone(),
         )
         .await;
-
-        // Wait for the garbage collector to run
-        // Use `gc_count` since the manifest counter won't increment
-        wait_for_gc(db_stats.gc_count.clone());
-
-        garbage_collector.close().await;
+        garbage_collector.await_shutdown().await;
 
         // Verify that no manifests were deleted
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -413,11 +544,7 @@ mod tests {
             db_stats.clone(),
         )
         .await;
-
-        // Wait for the garbage collector to run
-        wait_for_gc(db_stats.gc_manifest_count.clone());
-
-        garbage_collector.close().await;
+        garbage_collector.await_shutdown().await;
 
         // Verify that the first manifest was deleted, but the second is still safe
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -496,11 +623,7 @@ mod tests {
             db_stats.clone(),
         )
         .await;
-
-        // Wait for the garbage collector to run
-        wait_for_gc(db_stats.gc_wal_count.clone());
-
-        garbage_collector.close().await;
+        garbage_collector.await_shutdown().await;
 
         // Verify that the first WAL was deleted and the second is kept
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
@@ -586,11 +709,7 @@ mod tests {
             db_stats.clone(),
         )
         .await;
-
-        // Wait for the garbage collector to run
-        wait_for_gc(db_stats.gc_wal_count.clone());
-
-        garbage_collector.close().await;
+        garbage_collector.await_shutdown().await;
 
         // Verify that the first WAL was deleted and the second is kept even though it's expired
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
@@ -719,11 +838,7 @@ mod tests {
             db_stats.clone(),
         )
         .await;
-
-        // Wait for the garbage collector to run
-        wait_for_gc(db_stats.gc_compacted_count.clone());
-
-        garbage_collector.close().await;
+        garbage_collector.await_shutdown().await;
 
         // Verify that the first WAL was deleted and the second is kept
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
@@ -793,15 +908,15 @@ mod tests {
             crate::config::GarbageCollectorOptions {
                 manifest_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                     min_age: std::time::Duration::from_secs(3600),
-                    poll_interval: std::time::Duration::from_secs(0),
+                    execution_mode: Once,
                 }),
                 wal_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                     min_age: std::time::Duration::from_secs(3600),
-                    poll_interval: std::time::Duration::from_secs(0),
+                    execution_mode: Once,
                 }),
                 compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                     min_age: std::time::Duration::from_secs(3600),
-                    poll_interval: std::time::Duration::from_secs(0),
+                    execution_mode: Once,
                 }),
                 gc_runtime: None,
             },
@@ -855,17 +970,5 @@ mod tests {
             .unwrap();
         file.set_modified(now_minus_24h).unwrap();
         DateTime::<Utc>::from(now_minus_24h)
-    }
-
-    /// Wait for the garbage collector to run at least once.
-    /// # Arguments
-    /// * `counter` - The counter to wait for. Could be the manifest, WAL, or
-    ///   compacted counter.
-    fn wait_for_gc(counter: Counter) {
-        let current = counter.get();
-        while counter.get() == current {
-            info!("Waiting for garbage collector to run");
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
     }
 }
