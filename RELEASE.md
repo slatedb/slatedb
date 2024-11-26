@@ -1,5 +1,19 @@
 # Releasing SlateDB
 
+## Cadence
+
+We aim to release a new version of SlateDB every 2 months. This is a guideline, not a strict rule. The actual cadence may vary based on the amount of work that has been completed.
+
+## Proposal
+
+Anyone may propose a new SlateDB release by opening a Github issue.
+
+## Approval
+
+[GOVERNANCE.md](GOVERNANCE.md) defines how a release is approved.
+
+## Publication
+
 SlateDB releases are published using a Github release action defined in `.github/workflows/release.yml`. To create a new release:
 
 1. Go to the [release action page](https://github.com/slatedb/slatedb/actions/workflows/release.yaml)
