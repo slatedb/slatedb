@@ -34,10 +34,9 @@ pub async fn read_manifest(
         manifest_store.read_latest_manifest().await?
     };
 
-    if let Some(manifest) = id_manifest {
-        Ok(Some(serde_json::to_string(&manifest)?))
-    } else {
-        Ok(None)
+    match id_manifest {
+        None => Ok(None),
+        Some(result) => Ok(Some(serde_json::to_string(&result)?)),
     }
 }
 
