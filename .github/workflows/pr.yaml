@@ -62,5 +62,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.84
       - name: Run Tests
-        run: cargo test --all-features --verbose
+        run: cargo nextest run --all-features --profile ci
+
