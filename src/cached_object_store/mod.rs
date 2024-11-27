@@ -1,8 +1,8 @@
-mod fs_storage;
+mod object_store;
 mod storage;
-mod store;
+mod storage_fs;
 
-pub use fs_storage::FsCacheStorage;
+pub(crate) use object_store::CachedObjectStore;
 #[allow(unused_imports)]
 pub use storage::{LocalCacheEntry, LocalCacheHead, LocalCacheStorage, PartID};
-pub(crate) use store::CachedObjectStore;
+pub use storage_fs::FsCacheStorage;

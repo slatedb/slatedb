@@ -437,8 +437,8 @@ mod tests {
     use rand::Rng;
 
     use super::CachedObjectStore;
-    use crate::cached_object_store::fs_storage::FsCacheStorage;
-    use crate::cached_object_store::{fs_storage::FsCacheEntry, storage::PartID};
+    use crate::cached_object_store::storage_fs::FsCacheStorage;
+    use crate::cached_object_store::{storage::PartID, storage_fs::FsCacheEntry};
     use crate::metrics::DbStats;
     use crate::test_utils::gen_rand_bytes;
 
