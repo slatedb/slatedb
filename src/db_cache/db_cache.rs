@@ -22,11 +22,6 @@ use crate::{
 /// The default max capacity for the cache. (64MB)
 pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 
-#[cfg(feature = "foyer")]
-pub mod foyer;
-#[cfg(feature = "moka")]
-pub mod moka;
-
 /// A trait for in-memory caches.
 ///
 /// This trait defines the interface for an in-memory cache,
