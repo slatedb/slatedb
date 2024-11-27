@@ -191,7 +191,8 @@ impl KVTable {
 
     fn delete(&self, key: Bytes, attrs: RowAttributes) {
         self.maybe_subtract_old_val_from_size(key.clone());
-        self.size.fetch_add(key.len(), Ordering::Relaxed);
+        self.size
+            .fetch_add(key.len() + sizeof_attributes(&attrs), Ordering::Relaxed);
         self.map.insert(
             key,
             ValueWithAttributes {
@@ -403,12 +404,26 @@ mod tests {
     async fn test_memtable_track_sz() {
         let mut table = WritableKVTable::new();
 
+        assert_eq!(table.table.size(), 0);
+        table.put(
+            Bytes::from_static(b"first"),
+            Bytes::from_static(b"foo"),
+            gen_attrs(1),
+        );
+        assert_eq!(table.table.size(), 16); // first(5) + foo(3) + attrs(8)
+
+        // ensure that multiple deletes keep the table size stable
+        for ts in 2..5 {
+            table.delete(Bytes::from_static(b"first"), gen_attrs(ts));
+            assert_eq!(table.table.size(), 13); // first(5) + attrs(8)
+        }
+
         table.put(
             Bytes::from_static(b"abc333"),
             Bytes::from_static(b"val1"),
             gen_attrs(1),
         );
-        assert_eq!(table.table.size(), 18);
+        assert_eq!(table.table.size(), 31); // 13 + abc333(6) + val1(4) + attrs(8)
 
         table.put(
             Bytes::from_static(b"def456"),
@@ -418,16 +433,16 @@ mod tests {
                 expire_ts: None,
             },
         );
-        assert_eq!(table.table.size(), 33);
+        assert_eq!(table.table.size(), 46); // 31 + def456(6) + blablabla(9) + attrs(0)
 
         table.put(
             Bytes::from_static(b"def456"),
             Bytes::from_static(b"blabla"),
             gen_attrs(3),
         );
-        assert_eq!(table.table.size(), 38);
+        assert_eq!(table.table.size(), 51); // 46 - blablabla(9) + blabla(6) - attrs(0) + attrs(8)
 
         table.delete(Bytes::from_static(b"abc333"), gen_attrs(4));
-        assert_eq!(table.table.size(), 26)
+        assert_eq!(table.table.size(), 47) // 51 - val1(4)
     }
 }
