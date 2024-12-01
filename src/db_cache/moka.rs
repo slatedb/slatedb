@@ -30,7 +30,7 @@
 //! }
 //! ```
 //!
-use crate::db_cache::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
+use crate::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
 use async_trait::async_trait;
 use std::time::Duration;
 

@@ -5,4 +5,4 @@ pub mod moka;
 
 mod db_cache;
 
-pub use db_cache::{CachedEntry, CachedKey, DbCache};
+pub use db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
