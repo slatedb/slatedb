@@ -168,7 +168,9 @@ impl GarbageCollectorOrchestrator {
         // Delete manifests older than min_age
         for manifest_metadata in manifest_metadata_list {
             let is_active = active_manifest_ids.contains(&manifest_metadata.id);
-            if !is_active && utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age {
+            if !is_active
+                && utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
+            {
                 if let Err(e) = self
                     .manifest_store
                     .delete_manifest(manifest_metadata.id)
@@ -216,7 +218,9 @@ impl GarbageCollectorOrchestrator {
 
     async fn remove_expired_checkpoints(&self) -> Result<(), SlateDBError> {
         let mut stored_manifest = self.load_stored_manifest().await?;
-        stored_manifest.maybe_apply_db_state_update(Self::filter_expired_checkpoints).await
+        stored_manifest
+            .maybe_apply_db_state_update(Self::filter_expired_checkpoints)
+            .await
     }
 
     fn is_wal_sst_eligible_for_deletion(

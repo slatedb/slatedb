@@ -39,38 +39,39 @@ impl Db {
             return Err(SlateDBError::ManifestMissing);
         };
         let id = Uuid::new_v4();
-        stored_manifest.maybe_apply_db_state_update(|stored_manifest| {
-            let expire_time = options.lifetime.map(|l| SystemTime::now() + l);
-            let db_state = stored_manifest.db_state();
-            let manifest_id = match options.source {
-                Some(source_checkpoint_id) => {
-                    let Some(source_checkpoint) = db_state
-                        .checkpoints
-                        .iter()
-                        .find(|c| c.id == source_checkpoint_id)
-                    else {
-                        return Err(SlateDBError::InvalidDBState);
-                    };
-                    source_checkpoint.manifest_id
-                }
-                None => {
-                    if !db_state.initialized {
-                        return Err(SlateDBError::InvalidDBState);
+        stored_manifest
+            .maybe_apply_db_state_update(|stored_manifest| {
+                let expire_time = options.lifetime.map(|l| SystemTime::now() + l);
+                let db_state = stored_manifest.db_state();
+                let manifest_id = match options.source {
+                    Some(source_checkpoint_id) => {
+                        let Some(source_checkpoint) = db_state
+                            .checkpoints
+                            .iter()
+                            .find(|c| c.id == source_checkpoint_id)
+                        else {
+                            return Err(SlateDBError::InvalidDBState);
+                        };
+                        source_checkpoint.manifest_id
                     }
-                    stored_manifest.id()
-                }
-            };
-            let checkpoint = Checkpoint {
-                id,
-                manifest_id,
-                expire_time,
-                create_time: SystemTime::now(),
-            };
-            let mut updated_db_state = db_state.clone();
-            updated_db_state.checkpoints.push(checkpoint);
-            Ok(Some(updated_db_state))
-        })
-        .await?;
+                    None => {
+                        if !db_state.initialized {
+                            return Err(SlateDBError::InvalidDBState);
+                        }
+                        stored_manifest.id()
+                    }
+                };
+                let checkpoint = Checkpoint {
+                    id,
+                    manifest_id,
+                    expire_time,
+                    create_time: SystemTime::now(),
+                };
+                let mut updated_db_state = db_state.clone();
+                updated_db_state.checkpoints.push(checkpoint);
+                Ok(Some(updated_db_state))
+            })
+            .await?;
         let checkpoint = stored_manifest
             .db_state()
             .checkpoints
@@ -97,21 +98,22 @@ impl Db {
         let Some(mut stored_manifest) = StoredManifest::load(manifest_store).await? else {
             return Err(SlateDBError::ManifestMissing);
         };
-        stored_manifest.maybe_apply_db_state_update(|stored_manifest| {
-            let mut db_state = stored_manifest.db_state().clone();
-            let expire_time = lifetime.map(|l| SystemTime::now() + l);
-            let Some(_) = db_state.checkpoints.iter_mut().find_map(|c| {
-                if c.id == id {
-                    c.expire_time = expire_time;
-                    return Some(());
-                }
-                None
-            }) else {
-                return Err(SlateDBError::InvalidDBState);
-            };
-            Ok(Some(db_state))
-        })
-        .await
+        stored_manifest
+            .maybe_apply_db_state_update(|stored_manifest| {
+                let mut db_state = stored_manifest.db_state().clone();
+                let expire_time = lifetime.map(|l| SystemTime::now() + l);
+                let Some(_) = db_state.checkpoints.iter_mut().find_map(|c| {
+                    if c.id == id {
+                        c.expire_time = expire_time;
+                        return Some(());
+                    }
+                    None
+                }) else {
+                    return Err(SlateDBError::InvalidDBState);
+                };
+                Ok(Some(db_state))
+            })
+            .await
     }
 
     /// Deletes the checkpoint with the specified id.
@@ -124,18 +126,19 @@ impl Db {
         let Some(mut stored_manifest) = StoredManifest::load(manifest_store).await? else {
             return Err(SlateDBError::ManifestMissing);
         };
-        stored_manifest.maybe_apply_db_state_update(|stored_manifest| {
-            let mut db_state = stored_manifest.db_state().clone();
-            let checkpoints: Vec<Checkpoint> = db_state
-                .checkpoints
-                .iter()
-                .filter(|c| c.id != id)
-                .cloned()
-                .collect();
-            db_state.checkpoints = checkpoints;
-            Ok(Some(db_state))
-        })
-        .await
+        stored_manifest
+            .maybe_apply_db_state_update(|stored_manifest| {
+                let mut db_state = stored_manifest.db_state().clone();
+                let checkpoints: Vec<Checkpoint> = db_state
+                    .checkpoints
+                    .iter()
+                    .filter(|c| c.id != id)
+                    .cloned()
+                    .collect();
+                db_state.checkpoints = checkpoints;
+                Ok(Some(db_state))
+            })
+            .await
     }
 }
 

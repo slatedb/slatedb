@@ -391,9 +391,7 @@ mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::db_state::CoreDbState;
     use crate::error;
-    use crate::manifest_store::{
-        FenceableManifest, ManifestStore, StoredManifest,
-    };
+    use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use std::sync::Arc;
@@ -693,9 +691,7 @@ mod tests {
             .unwrap();
 
         let initial_id = sm.id;
-        sm.maybe_apply_db_state_update(|_| Ok(None))
-            .await
-            .unwrap();
+        sm.maybe_apply_db_state_update(|_| Ok(None)).await.unwrap();
         assert_eq!(initial_id, sm.id);
 
         sm.maybe_apply_db_state_update(|sm| Ok(Some(sm.db_state().clone())))
