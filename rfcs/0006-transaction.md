@@ -291,8 +291,7 @@ We could consider to port the test cases from [RocksDB](https://github.com/faceb
 
 1. Implement the WriteBatch API (related with https://github.com/slatedb/slatedb/pull/264).
 2. Add sequence to each key in the storage, and implement the Snapshot API.
-3. Add the conflict checking in the transaction, implement the SI transaction.
-4. Add the global Oracle to track the recent committed transactions, implement the SSI transaction.
+3. Add the global Oracle to track the recent committed transactions for conflict checking, implement the SI transaction, then implement the SSI transaction.
 
 ## Updates
 
