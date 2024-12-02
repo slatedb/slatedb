@@ -367,7 +367,7 @@ mod tests {
 
     const ROOT: &str = "/root/path";
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_should_fail_write_on_version_conflict() {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
@@ -386,7 +386,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_should_write_with_new_version() {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(version, 2);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_should_update_local_state_on_write() {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
@@ -415,7 +415,7 @@ mod tests {
         assert_eq!(sm.db_state().next_wal_sst_id, 123);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_should_refresh() {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(sm2.db_state().next_wal_sst_id, 123);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_should_bump_writer_epoch() {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
@@ -449,7 +449,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_should_fail_on_writer_fenced() {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
@@ -471,7 +471,7 @@ mod tests {
         assert_eq!(refreshed.next_wal_sst_id, 1);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_should_bump_compactor_epoch() {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
@@ -487,7 +487,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_should_fail_on_compactor_fenced() {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
@@ -509,7 +509,7 @@ mod tests {
         assert_eq!(refreshed.next_wal_sst_id, 1);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_should_read_specific_manifest() {
         // Given
         let os = Arc::new(InMemory::new());
@@ -527,7 +527,7 @@ mod tests {
         assert_eq!(id, 2);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_list_manifests_unbounded() {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
@@ -559,7 +559,7 @@ mod tests {
         assert_eq!(manifests[0].id, 1);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_delete_manifest() {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
@@ -579,7 +579,7 @@ mod tests {
         assert_eq!(manifests[0].id, 2);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_delete_active_manifest_should_fail() {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));

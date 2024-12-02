@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 name = "slatedb"
 version = "0.3.0"
@@ -60,6 +62,7 @@ filetime = "0.2"
 figment = { version = "0.10.19", features = ["test"] }
 rstest = "0.23.0"
 insta = "1.39.0"
+slatedb-test-macros = { path = "slatedb-test-macros" }
 
 [features]
 default = ["aws", "moka"]

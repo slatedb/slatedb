@@ -1139,7 +1139,7 @@ mod tests {
     use crate::test_utils::assert_iterator;
     use crate::test_utils::{gen_attrs, TestClock};
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_put_get_delete() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::open_with_opts(
@@ -1163,7 +1163,7 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_get_with_object_store_cache_metrics() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut opts = test_db_options(0, 1024, None);
@@ -1196,7 +1196,7 @@ mod tests {
         assert!(kv_store.metrics().object_store_cache_part_hits.get() >= 1);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_get_with_object_store_cache_stored_files() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut opts = test_db_options(0, 1024, None);
@@ -1287,7 +1287,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_write_batch() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::open_with_opts(
@@ -1318,7 +1318,7 @@ mod tests {
     }
 
     #[cfg(feature = "wal_disable")]
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_write_batch_without_wal() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         // Use a very small l0 size to force flushes so await is notified
@@ -1354,7 +1354,7 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_write_batch_with_empty_key() {
         let mut batch = WriteBatch::new();
         let result = std::panic::catch_unwind(move || {
@@ -1386,7 +1386,7 @@ mod tests {
     ///
     /// _Note: This test is non-deterministic because it depends on the async
     /// runtime to schedule the tasks in a way that the writes are concurrent._
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_concurrent_batch_writes_consistency() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Arc::new(
@@ -1470,7 +1470,7 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     #[cfg(feature = "wal_disable")]
     async fn test_disable_wal_after_wal_enabled() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -1512,7 +1512,7 @@ mod tests {
     }
 
     #[cfg(feature = "wal_disable")]
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_wal_disabled() {
         use crate::test_utils::gen_empty_attrs;
 
@@ -1595,7 +1595,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_put_flushes_memtable() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -1704,7 +1704,7 @@ mod tests {
         assert_eq!(snapshot.state.imm_wal.len(), 1);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_apply_backpressure_to_memtable_flush() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut options = test_db_options(0, 1, None);
@@ -1724,7 +1724,7 @@ mod tests {
         assert_eq!(snapshot.state.imm_memtable.len(), 1);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_put_empty_value() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::open_with_opts(
@@ -1745,7 +1745,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_flush_while_iterating() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::open_with_opts(
@@ -1789,7 +1789,7 @@ mod tests {
         assert_eq!(kv.key, b"abc3333".as_slice());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_basic_restore() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -1956,7 +1956,7 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_should_delete_without_awaiting_flush() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -2198,7 +2198,7 @@ mod tests {
         assert!(neg_lookup.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_should_read_from_compacted_db() {
         do_test_should_read_compacted_db(test_db_options(
             0,
@@ -2216,7 +2216,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_should_read_from_compacted_db_no_filters() {
         do_test_should_read_compacted_db(test_db_options(
             u32::MAX,
@@ -2234,7 +2234,7 @@ mod tests {
         .await
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_db_open_should_write_empty_wal() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -2259,7 +2259,7 @@ mod tests {
         assert_eq!(db.inner.state.read().state().core.next_wal_sst_id, 4);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_empty_wal_should_fence_old_writer() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -2317,7 +2317,7 @@ mod tests {
         assert_eq!(db2.inner.state.read().state().core.next_wal_sst_id, 5);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_invalid_clock_progression() {
         // Given:
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -2353,7 +2353,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_invalid_clock_progression_across_db_instances() {
         // Given:
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());

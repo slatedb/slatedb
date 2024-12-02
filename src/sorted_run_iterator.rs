@@ -165,7 +165,7 @@ mod tests {
     use object_store::{memory::InMemory, ObjectStore};
     use ulid::Ulid;
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_one_sst_sr_iter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -214,7 +214,7 @@ mod tests {
         assert!(kv.is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_many_sst_sr_iter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -267,7 +267,7 @@ mod tests {
         assert!(kv.is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_sr_iter_from_key() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -313,7 +313,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_sr_iter_from_key_lower_than_range() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -348,7 +348,7 @@ mod tests {
         assert!(iter.next().await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_sr_iter_from_key_higher_than_range() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());

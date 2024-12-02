@@ -253,7 +253,7 @@ mod tests {
     use object_store::{memory::InMemory, ObjectStore};
     use std::sync::Arc;
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_one_block_sst_iter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -308,7 +308,7 @@ mod tests {
         assert!(kv.is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_many_block_sst_iter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -356,7 +356,7 @@ mod tests {
         assert!(next.is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_iter_from_key() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -407,7 +407,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_iter_from_key_smaller_than_first() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -446,7 +446,7 @@ mod tests {
         assert!(iter.next().await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_iter_from_key_larger_than_last() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());

@@ -153,7 +153,7 @@ mod tests {
     use bytes::Bytes;
     use std::collections::VecDeque;
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_merge_iterator_should_include_entries_in_order() {
         let mut iters = VecDeque::new();
         iters.push_back(
@@ -230,7 +230,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_merge_iterator_should_write_one_entry_with_given_key() {
         let mut iters = VecDeque::new();
         iters.push_back(
@@ -280,7 +280,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_two_iterator_should_include_entries_in_order() {
         let iter1 = TestIterator::new()
             .with_entry(b"aaaa", b"1111")
@@ -331,7 +331,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_two_iterator_should_write_one_entry_with_given_key() {
         let iter1 = TestIterator::new()
             .with_entry(b"aaaa", b"1111")

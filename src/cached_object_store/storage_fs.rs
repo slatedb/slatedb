@@ -662,7 +662,7 @@ mod tests {
         file_path
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_evictor() {
         let temp_dir = tempfile::Builder::new()
             .prefix("objstore_cache_test_evictor_")
@@ -701,7 +701,7 @@ mod tests {
         assert_eq!(file_paths.len(), 2); // the folder file "." is also counted
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_evictor_pick() {
         let temp_dir = tempfile::Builder::new()
             .prefix("objstore_cache_test_evictor_")
@@ -727,7 +727,7 @@ mod tests {
         assert_eq!(size, 1024);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_evictor_rescan() {
         let temp_dir = tempfile::Builder::new()
             .prefix("objstore_cache_test_evictor_")

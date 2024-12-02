@@ -2399,6 +2399,7 @@ dependencies = [
  "serde",
  "serde_json",
  "siphasher",
+ "slatedb-test-macros",
  "snap",
  "tempfile",
  "thiserror",
@@ -2409,6 +2410,14 @@ dependencies = [
  "uuid",
  "walkdir",
  "zstd",
+]
+
+[[package]]
+name = "slatedb-test-macros"
+version = "0.0.0"
+dependencies = [
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]

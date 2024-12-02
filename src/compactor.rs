@@ -322,7 +322,7 @@ mod tests {
 
     const PATH: &str = "/test/db";
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_compactor_compacts_l0() {
         // given:
         let clock = Arc::new(TestClock::new());
@@ -364,7 +364,7 @@ mod tests {
         // todo: test that the db can read the k/vs (once we implement reading from compacted)
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_should_compact_expired_entries() {
         // given:
         let insert_clock = Arc::new(TestClock::new());

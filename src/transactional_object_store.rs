@@ -118,7 +118,7 @@ mod tests {
 
     const ROOT_PATH: &str = "/root/path";
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_delegating_should_fail_put_if_exists() {
         // given:
         let os = Arc::new(InMemory::new());
@@ -152,7 +152,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_delegating_should_get_put() {
         // given:
         let os = Arc::new(InMemory::new());
@@ -175,7 +175,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_delegating_should_list() {
         // given:
         let os = Arc::new(InMemory::new());
@@ -208,7 +208,7 @@ mod tests {
         assert!(listing.next().await.is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_delegating_should_put_with_prefix() {
         // given:
         let os = Arc::new(InMemory::new());
@@ -231,7 +231,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_delegating_object_store_delete() {
         // given:
         let os = Arc::new(InMemory::new());

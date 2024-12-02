@@ -415,7 +415,7 @@ mod tests {
         tablestore::TableStore,
     };
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_collect_garbage_manifest() {
         let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
 
@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(manifests[0].id, 2);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_collect_garbage_only_recent_manifests() {
         let (manifest_store, table_store, _, db_stats) = build_objects();
 
@@ -500,7 +500,7 @@ mod tests {
         assert_eq!(manifests[1].id, 2);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_collect_garbage_old_active_manifest() {
         let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
 
@@ -552,7 +552,7 @@ mod tests {
         assert_eq!(manifests[0].id, 2);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_collect_garbage_wal_ssts() {
         let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
 
@@ -631,7 +631,7 @@ mod tests {
         assert_eq!(wal_ssts[0].id, id2);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_collect_garbage_wal_ssts_and_keep_expired_last_compacted() {
         let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
 
@@ -728,7 +728,7 @@ mod tests {
     /// - One inactive unexpired SST
     /// The test then runs the compactor to verify that only the inactive expired SSTs
     /// are deleted.
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_collect_garbage_compacted_ssts() {
         let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
         let l0_sst_handle = create_sst(table_store.clone()).await;

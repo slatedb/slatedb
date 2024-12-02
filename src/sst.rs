@@ -192,6 +192,7 @@ impl SsTableFormat {
         let range = self.block_range(blocks.clone(), info, &index);
         let start_offset = range.start;
         let bytes: Bytes = obj.read_range(range).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(900)).await;
         let mut decoded_blocks = VecDeque::new();
         let compression_codec = info.compression_codec;
         for block in blocks {
@@ -546,7 +547,7 @@ mod tests {
         BlockIterator::from_first_key(block)
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_builder_should_make_blocks_available() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -604,7 +605,7 @@ mod tests {
         assert!(builder.next_block().is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_builder_should_return_unconsumed_blocks() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -676,7 +677,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_sstable() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -726,7 +727,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_sstable_no_filter() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -753,7 +754,7 @@ mod tests {
         assert_eq!(sst_handle.info.filter_len, 0);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_sstable_builds_filter_with_correct_bits_per_key() {
         async fn test_inner(filter_bits_per_key: u32) {
             let root_path = Path::from("");
@@ -780,7 +781,7 @@ mod tests {
         test_inner(20).await;
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_sstable_with_compression() {
         #[allow(unused)]
         async fn test_compression_inner(compression: CompressionCodec) {
@@ -889,7 +890,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_read_blocks() {
         // given:
         let root_path = Path::from("");
@@ -961,7 +962,7 @@ mod tests {
         assert!(blocks.is_empty())
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_read_all_blocks() {
         // given:
         let root_path = Path::from("");
@@ -1043,7 +1044,7 @@ mod tests {
         assert!(blocks.is_empty())
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_sstable_index_size() {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());

@@ -452,7 +452,7 @@ mod tests {
         std::path::PathBuf::from(path)
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_save_result_not_aligned() -> object_store::Result<()> {
         let payload = gen_rand_bytes(1024 * 3 + 32);
         let object_store = Arc::new(object_store::memory::InMemory::new());
@@ -521,7 +521,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_save_result_aligned() -> object_store::Result<()> {
         let payload = gen_rand_bytes(1024 * 3);
         let object_store = Arc::new(object_store::memory::InMemory::new());
@@ -709,7 +709,7 @@ mod tests {
         assert_eq!(aligned, GetRange::Offset(0));
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_cached_object_store_impl_object_store() -> object_store::Result<()> {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();

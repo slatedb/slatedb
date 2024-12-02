@@ -235,7 +235,7 @@ mod tests {
     use super::*;
     use crate::test_utils::gen_attrs;
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_memtable_iter() {
         let mut table = WritableKVTable::new();
         table.put(
@@ -283,7 +283,7 @@ mod tests {
         assert!(iter.next().await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_memtable_iter_entry_attrs() {
         let mut table = WritableKVTable::new();
         table.put(
@@ -305,7 +305,7 @@ mod tests {
         assert!(iter.next().await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_memtable_range_from_existing_key() {
         let mut table = WritableKVTable::new();
         table.put(
@@ -347,7 +347,7 @@ mod tests {
         assert!(iter.next().await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_memtable_range_from_nonexisting_key() {
         let mut table = WritableKVTable::new();
         table.put(
@@ -386,7 +386,7 @@ mod tests {
         assert!(iter.next().await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_memtable_iter_delete() {
         let mut table = WritableKVTable::new();
         table.put(
@@ -400,7 +400,7 @@ mod tests {
         assert!(iter.next().await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_memtable_track_sz() {
         let mut table = WritableKVTable::new();
 

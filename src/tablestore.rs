@@ -619,7 +619,7 @@ mod tests {
         assert_eq!(id, None);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_sst_writer_should_write_sst() {
         // given:
         let os = Arc::new(object_store::memory::InMemory::new());
@@ -704,7 +704,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_wal_write_should_fail_when_fenced() {
         let os = Arc::new(object_store::memory::InMemory::new());
         let format = SsTableFormat {
@@ -744,7 +744,7 @@ mod tests {
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     #[cfg(feature = "moka")]
     async fn test_tablestore_sst_and_partial_cache_hits() {
         use crate::db_cache::moka::MokaCache;
@@ -896,7 +896,7 @@ mod tests {
         assert!(expected_iter.next().is_none());
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_list_compacted_ssts() {
         let os = Arc::new(InMemory::new());
         let format = SsTableFormat {
@@ -955,7 +955,7 @@ mod tests {
         assert_eq!(ssts[1].id, id2);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_list_wal_ssts() {
         let os = Arc::new(InMemory::new());
         let format = SsTableFormat {
@@ -1001,7 +1001,7 @@ mod tests {
         assert_eq!(ssts[1].id, id2);
     }
 
-    #[tokio::test]
+    #[slatedb_test_macros::test]
     async fn test_delete_sst() {
         let os = Arc::new(InMemory::new());
         let format = SsTableFormat {
