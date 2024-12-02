@@ -121,10 +121,10 @@ In this case, if the two transactions are executed concurrently, the total amoun
 
 To mitigate this anomaly, we could choose:
 
-1. use Serializable Snapshot Isolation (SSI) level: increase the isolation level, and no longer allow the write skew anomaly to occur.
+1. use Serializable Snapshot Isolation (SSI) level: increase the isolation level with stricter conflict checking between read and write operations, thus no longer allow the write skew anomaly to occur. For more details about conflict checking, please refer to the [Conflict Checking](#conflict-checking) section.
 2. use `get_for_update()` to synchronize the critical read operations and write operations in the SI transaction.
 
-In my understanding, the pros of the (2) approach is mostly easy to implement and efficient, and free of floating garbage requires to be VACUUMed (when compares with innodb's UNDO logs approach and the Postgres's multi version rows approach). Also, in most of the time, users can make the decision by themselves about when to use `GetForUpdate()` to make the critical concurrency control correct.
+In my understanding, the pros of the (2) approach is easy to implement and efficient, and free of floating garbage requires to be VACUUMed (when compares with innodb's UNDO logs approach and the Postgres's multi version rows approach). Also, in most of the time, users can make the decision by themselves about when to use `GetForUpdate()` to make the critical concurrency control correct.
 
 However, it may produce massive writes on read intensive workloads when you hope to keep the read & write operations consistent, because `GetForUpdate()` simply transforms an read operation into a write operation, rewriting the key/value pair into WAL again. Also, some researches found that manual `GetForUpdate()` often introduces unexpected hard to diagnosis bugs, as described in the "2.2 Why Serializability" section of the [Serializable Snapshot Isolation in PostgreSQL](https://arxiv.org/pdf/1208.4179) paper:
 
