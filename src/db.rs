@@ -33,6 +33,7 @@ use tracing::warn;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
+use crate::bytes_range::BytesRange;
 use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
 use crate::cached_object_store::CachedObjectStore;
 use crate::compactor::Compactor;
@@ -52,7 +53,6 @@ use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::{VecDequeKeyValueIterator, WritableKVTable};
 use crate::mem_table_flush::MemtableFlushThreadMsg;
 use crate::metrics::DbStats;
-use crate::range_util::BytesRange;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
@@ -968,8 +968,8 @@ impl Db {
     ///     db.put(b"b", b"b_value").await?;
     ///
     ///     let mut iter = db.scan(..).await?;
-    ///     assert_eq!(Some((b"a", b"a_value").into()) , iter.next().await?);
-    ///     assert_eq!(Some((b"b", b"b_value").into()) , iter.next().await?);
+    ///     assert_eq!(Some((b"a" as &[u8], b"a_value" as &[u8]).into()) , iter.next().await?);
+    ///     assert_eq!(Some((b"b" as &[u8], b"b_value" as &[u8]).into()) , iter.next().await?);
     ///     assert_eq!(None , iter.next().await?);
     ///     Ok(())
     /// }
@@ -1007,8 +1007,8 @@ impl Db {
     ///         read_level: ReadLevel::Uncommitted,
     ///         ..ScanOptions::default()
     ///     }).await?;
-    ///     assert_eq!(Some((b"a", b"a_value").into()) , iter.next().await?);
-    ///     assert_eq!(Some((b"b", b"b_value").into()) , iter.next().await?);
+    ///     assert_eq!(Some((b"a" as &[u8], b"a_value" as &[u8]).into()) , iter.next().await?);
+    ///     assert_eq!(Some((b"b" as &[u8], b"b_value" as &[u8]).into()) , iter.next().await?);
     ///     assert_eq!(None , iter.next().await?);
     ///     Ok(())
     /// }
@@ -1270,28 +1270,26 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
-    use futures::{future::join_all, StreamExt};
-    use object_store::memory::InMemory;
-    use object_store::ObjectStore;
-    use proptest::strategy::{Strategy, ValueTree};
-    use proptest::test_runner::{Config, TestRunner};
-    use tracing::info;
-
     use super::*;
     use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
     use crate::config::{
-        CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
+        CompactorOptions, DbRecord, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
         DEFAULT_PUT_OPTIONS,
     };
-    use crate::range_util::tests::{
-        arbitrary_bytes_in_range, arbitrary_empty_range, arbitrary_nonempty_bytes,
-        arbitrary_nonempty_range, arbitrary_records,
-    };
+    use crate::proptest_util::sample;
+    use crate::proptest_util::{arbitrary, rng};
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
     #[cfg(feature = "wal_disable")]
     use crate::test_utils::assert_iterator;
     use crate::test_utils::{gen_attrs, TestClock};
+
+    use futures::{future::join_all, StreamExt};
+    use object_store::memory::InMemory;
+    use object_store::ObjectStore;
+    use proptest::test_runner::{Config, TestRng, TestRunner};
+    use tokio::runtime::Runtime;
+    use tracing::info;
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -1463,163 +1461,173 @@ mod tests {
         }
     }
 
-    async fn seed_arbitrary_records(
-        db: &Db,
-        runner: &mut TestRunner,
-        num_records: u32,
-        record_size_upto: usize,
-        await_durable: bool,
-    ) -> BTreeMap<Bytes, Bytes> {
-        let mut records = BTreeMap::new();
-        for _ in 0..num_records {
-            let record = arbitrary_records(record_size_upto)
-                .new_tree(runner)
-                .unwrap()
-                .current();
+    async fn seed_database(db: &Db, table: &BTreeMap<Bytes, Bytes>, await_durable: bool) {
+        let put_options = PutOptions::default();
+        let write_options = &WriteOptions {
+            await_durable,
+            ..WriteOptions::default()
+        };
 
-            db.put_with_options(
-                &record.key,
-                &record.value,
-                &PutOptions::default(),
-                &WriteOptions { await_durable },
-            )
+        for (key, value) in table.iter() {
+            db.put_with_options(key, value, &put_options, &write_options)
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn build_database_from_table(table: &BTreeMap<Bytes, Bytes>, await_durable: bool) -> Db {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options(0, 1024, None),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        seed_database(&db, &table, false).await;
+
+        if await_durable {
+            db.flush().await.unwrap();
+        }
+
+        db
+    }
+
+    async fn assert_empty_scan(db: &Db, range: BytesRange) {
+        let mut iter = db
+            .inner
+            .scan_with_options(range.clone(), &ScanOptions::default())
             .await
             .unwrap();
-            records.insert(record.key, record.value);
-        }
-        records
+        assert_eq!(None, iter.next().await.unwrap());
     }
 
-    #[tokio::test]
-    async fn test_empty_scan_range_returns_empty_iterator() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            test_db_options(0, 1024, None),
-            object_store,
-        )
-        .await
-        .unwrap();
-
+    #[test]
+    fn test_empty_scan_range_returns_empty_iterator() {
         let mut runner = TestRunner::new(Config::default());
-        seed_arbitrary_records(&db, &mut runner, 5000, 5, false).await;
-        db.flush().await.unwrap();
+        let table = sample::table(runner.rng(), 1000, 5);
 
-        for _ in 0..1000 {
-            let range = arbitrary_empty_range(4)
-                .new_tree(&mut runner)
-                .unwrap()
-                .current();
+        let runtime = Runtime::new().unwrap();
+        let db = runtime.block_on(build_database_from_table(&table, true));
+
+        runner
+            .run(&arbitrary::empty_range(10), |range| {
+                runtime.block_on(assert_empty_scan(&db, range));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    async fn assert_records_in_range(
+        table: &BTreeMap<Bytes, Bytes>,
+        db: &Db,
+        scan_options: &ScanOptions,
+        range: BytesRange,
+    ) {
+        let mut iter = db
+            .inner
+            .scan_with_options(range.clone(), scan_options)
+            .await
+            .unwrap();
+        assert_ordered_scan_in_range(&table, &range, &mut iter).await;
+    }
+
+    #[test]
+    fn test_scan_returns_records_in_range() {
+        let _record: DbRecord = (b"hi" as &[u8], b"there" as &[u8]).into();
+        let mut runner = new_proptest_runner(None);
+        let table = sample::table(runner.rng(), 1000, 5);
+
+        let runtime = Runtime::new().unwrap();
+        let db = runtime.block_on(build_database_from_table(&table, true));
+
+        runner
+            .run(&arbitrary::nonempty_range(10), |range| {
+                runtime.block_on(assert_records_in_range(
+                    &table,
+                    &db,
+                    &ScanOptions::default(),
+                    range,
+                ));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn new_proptest_runner(rng_seed: Option<[u8; 32]>) -> TestRunner {
+        let rng = rng::new_test_rng(rng_seed);
+        let mut config = proptest::test_runner::contextualize_config(Config::default().clone());
+        config.source_file = Some(file!().into());
+        TestRunner::new_with_rng(config, rng)
+    }
+
+    #[test]
+    fn test_scan_returns_uncommitted_records_if_read_level_uncommitted() {
+        let mut runner = new_proptest_runner(None);
+        let table = sample::table(runner.rng(), 1000, 5);
+
+        let runtime = Runtime::new().unwrap();
+        let db = runtime.block_on(build_database_from_table(&table, false));
+
+        runner
+            .run(&arbitrary::nonempty_range(10), |range| {
+                let scan_options = ScanOptions {
+                    read_level: Uncommitted,
+                    ..ScanOptions::default()
+                };
+                runtime.block_on(assert_records_in_range(&table, &db, &scan_options, range));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_seek_outside_of_range_returns_invalid_argument() {
+        let mut runner = new_proptest_runner(None);
+        let table = sample::table(runner.rng(), 1000, 10);
+
+        let runtime = Runtime::new().unwrap();
+        let db = runtime.block_on(build_database_from_table(&table, true));
+
+        runner
+            .run(
+                &(arbitrary::nonempty_bytes(10), arbitrary::rng()),
+                |(arbitrary_key, mut rng)| {
+                    runtime.block_on(assert_out_of_bound_seek_returns_invalid_argument(
+                        &db,
+                        &mut rng,
+                        arbitrary_key,
+                    ));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        async fn assert_out_of_bound_seek_returns_invalid_argument(
+            db: &Db,
+            rng: &mut TestRng,
+            arbitrary_key: Bytes,
+        ) {
             let mut iter = db
-                .inner
-                .scan_with_options(range.clone(), &ScanOptions::default())
+                .scan_with_options(..arbitrary_key.clone(), &ScanOptions::default())
                 .await
                 .unwrap();
 
-            assert_eq!(None, iter.next().await.unwrap());
-        }
-    }
-
-    #[tokio::test]
-    async fn test_scan_returns_records_in_range() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            test_db_options(0, 1024, None),
-            object_store,
-        )
-        .await
-        .unwrap();
-
-        let mut runner = TestRunner::new(Config::default());
-        let records = seed_arbitrary_records(&db, &mut runner, 5000, 5, false).await;
-        db.flush().await.unwrap();
-
-        for _ in 0..1000 {
-            let range = arbitrary_nonempty_range(4)
-                .new_tree(&mut runner)
-                .unwrap()
-                .current();
-            let mut iter = db
-                .inner
-                .scan_with_options(range.clone(), &ScanOptions::default())
-                .await
-                .unwrap();
-
-            assert_ordered_scan_in_range(&records, &range, &mut iter).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn test_scan_returns_uncommitted_records_if_read_level_uncommitted() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            test_db_options(0, 1024, None),
-            object_store,
-        )
-        .await
-        .unwrap();
-
-        let mut runner = TestRunner::new(Config::default());
-        let records = seed_arbitrary_records(&db, &mut runner, 5000, 5, false).await;
-
-        for _ in 0..1000 {
-            let range = arbitrary_nonempty_range(4)
-                .new_tree(&mut runner)
-                .unwrap()
-                .current();
-            let mut iter = db
-                .inner
-                .scan_with_options(
-                    range.clone(),
-                    &ScanOptions {
-                        read_level: Uncommitted,
-                        ..ScanOptions::default()
-                    },
-                )
-                .await
-                .unwrap();
-            assert_ordered_scan_in_range(&records, &range, &mut iter).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn test_seek_outside_of_range_returns_invalid_argument() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            test_db_options(0, 1024, None),
-            object_store,
-        )
-        .await
-        .unwrap();
-
-        let mut runner = TestRunner::new(Config::default());
-        for _ in 0..100 {
-            let end = arbitrary_nonempty_bytes(5)
-                .new_tree(&mut runner)
-                .unwrap()
-                .current();
-            let mut iter = db
-                .scan_with_options(..end.clone(), &ScanOptions::default())
-                .await
-                .unwrap();
-
-            let lower_bounded_range = BytesRange::from(end.clone()..);
-            let value = arbitrary_bytes_in_range(&lower_bounded_range);
+            let lower_bounded_range = BytesRange::from(arbitrary_key.clone()..);
+            let value = sample::bytes_in_range(rng, &lower_bounded_range);
             assert!(matches!(
                 iter.seek(value).await,
                 Err(SlateDBError::InvalidArgument { msg: _ })
             ));
 
             let mut iter = db
-                .scan_with_options(end.clone().., &ScanOptions::default())
+                .scan_with_options(arbitrary_key.clone().., &ScanOptions::default())
                 .await
                 .unwrap();
 
-            let upper_bounded_range = BytesRange::from(..end.clone());
-            let value = arbitrary_bytes_in_range(&upper_bounded_range.into());
+            let upper_bounded_range = BytesRange::from(..arbitrary_key.clone());
+            let value = sample::bytes_in_range(rng, &upper_bounded_range.into());
             assert!(matches!(
                 iter.seek(value).await,
                 Err(SlateDBError::InvalidArgument { msg: _ })
@@ -1627,39 +1635,43 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_seek_to_fast_forwards_iterator() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            test_db_options(0, 1024, None),
-            object_store,
-        )
-        .await
-        .unwrap();
+    #[test]
+    fn test_seek_fast_forwards_iterator() {
+        let mut runner = new_proptest_runner(None);
+        let table = sample::table(runner.rng(), 1000, 10);
 
-        let mut runner = TestRunner::new(Config::default());
-        let records = seed_arbitrary_records(&db, &mut runner, 10, 3, false).await;
-        db.flush().await.unwrap();
+        let runtime = Runtime::new().unwrap();
+        let db = runtime.block_on(build_database_from_table(&table, true));
 
-        for _ in 0..1000 {
-            let range = arbitrary_nonempty_range(5)
-                .new_tree(&mut runner)
-                .unwrap()
-                .current();
+        runner
+            .run(
+                &(arbitrary::nonempty_range(5), arbitrary::rng()),
+                |(range, mut rng)| {
+                    runtime.block_on(assert_seek_fast_forwards_iterator(
+                        &table, &db, &range, &mut rng,
+                    ));
+                    Ok(())
+                },
+            )
+            .unwrap();
 
+        async fn assert_seek_fast_forwards_iterator(
+            table: &BTreeMap<Bytes, Bytes>,
+            db: &Db,
+            scan_range: &BytesRange,
+            rng: &mut TestRng,
+        ) {
             let mut iter = db
                 .inner
-                .scan_with_options(range.clone(), &ScanOptions::default())
+                .scan_with_options(scan_range.clone(), &ScanOptions::default())
                 .await
                 .unwrap();
 
-            let seek_key = arbitrary_bytes_in_range(&range);
+            let seek_key = sample::bytes_in_range(rng, &scan_range);
             iter.seek(seek_key.clone()).await.unwrap();
 
-            let seek_range = BytesRange::new(Included(seek_key), range.end_bound().cloned());
-
-            assert_ordered_scan_in_range(&records, &seek_range, &mut iter).await;
+            let seek_range = BytesRange::new(Included(seek_key), scan_range.end_bound().cloned());
+            assert_ordered_scan_in_range(&table, &seek_range, &mut iter).await;
         }
     }
 

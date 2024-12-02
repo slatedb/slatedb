@@ -10,6 +10,7 @@ mod batch_write;
 mod blob;
 mod block;
 mod block_iterator;
+mod bytes_range;
 mod cached_object_store;
 pub mod checkpoint;
 #[cfg(feature = "bencher")]
@@ -35,7 +36,7 @@ mod mem_table;
 mod mem_table_flush;
 mod merge_iterator;
 mod metrics;
-mod range_util;
+mod proptest_util;
 mod row_codec;
 pub mod size_tiered_compaction;
 mod sorted_run_iterator;

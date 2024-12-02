@@ -9,10 +9,10 @@ use tracing::debug;
 use ulid::Ulid;
 use SsTableId::{Compacted, Wal};
 
+use crate::bytes_range::BytesRange;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
-use crate::range_util::BytesRange;
 
 #[derive(Clone, PartialEq, Serialize)]
 pub(crate) struct SsTableHandle {
