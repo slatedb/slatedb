@@ -165,6 +165,8 @@ RocksDB assumes each transaction is short-lived, and only checks the conflicts w
 
 However, since the size of MemTable is limited and might be flushed & rotated at any time, it cannot buffer ALL the changes since the earliest running transaction. To deal with this limitation, RocksDB's solution is simply abort the transaction as 'Expired' if the MemTable's earliest sequence number is bigger than the transaction's sequence number.
 
+Also, RocksDB's Optimistic Transaction does not support Serializable Snapshot Isolation (SSI), because the read keys are not tracked in the transaction state.
+
 The good part of this approach is that it's very efficient and simple, and it's free of floating garbage. The bad part is that it may abort the transaction when it's not necessary, and tends to encourage users to set a bigger MemTable size to reduce the probability of the expired transaction.
 
 ### Badger
