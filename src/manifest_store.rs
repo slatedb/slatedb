@@ -678,7 +678,7 @@ mod tests {
         updated_state.checkpoints.clear();
         sm.update_db_state(updated_state).await.unwrap();
         let active_manifests = ms.read_active_manifests().await.unwrap();
-        assert_eq!(1g, active_manifests.len());
+        assert_eq!(1, active_manifests.len());
         assert_eq!(Some(&sm.manifest), active_manifests.get(&sm.id));
     }
 
