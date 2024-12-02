@@ -20,6 +20,7 @@
 //! }
 //! ```
 use std::collections::VecDeque;
+use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -37,7 +38,7 @@ use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
-    DbOptions, PutOptions, ReadOptions, WriteOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS,
+    DbOptions, DEFAULT_READ_OPTIONS, DEFAULT_WRITE_OPTIONS, PutOptions, ReadOptions, WriteOptions,
 };
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -55,6 +56,7 @@ use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::{RowAttributes, ValueDeletable};
 use std::rc::Rc;
+use crate::utils::WriteOnceRegister;
 
 pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
 pub(crate) type FlushMsg<T> = (Option<FlushSender>, T);
@@ -67,7 +69,7 @@ pub(crate) struct DbInner {
     pub(crate) memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: Arc<DbStats>,
-    pub(crate) error: RwLock<Option<SlateDBError>>,
+    pub(crate) error: WriteOnceRegister<SlateDBError>,
 }
 
 impl DbInner {
@@ -89,7 +91,7 @@ impl DbInner {
             memtable_flush_notifier,
             write_notifier,
             db_stats,
-            error: RwLock::new(None),
+            error: WriteOnceRegister::new(),
         };
         Ok(db_inner)
     }
@@ -255,7 +257,7 @@ impl DbInner {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
 
-        self.maybe_apply_backpressure().await;
+        self.maybe_apply_backpressure().await?;
         self.write_notifier
             .send(batch_msg)
             .expect("write notifier closed");
@@ -263,14 +265,14 @@ impl DbInner {
         let current_table = rx.await??;
 
         if options.await_durable {
-            current_table.await_durable().await;
+            self.await_or_error(current_table.await_durable()).await?;
         }
 
         Ok(())
     }
 
     #[inline]
-    pub(crate) async fn maybe_apply_backpressure(&self) {
+    pub(crate) async fn maybe_apply_backpressure(&self) -> Result<(), SlateDBError> {
         loop {
             let mem_size_bytes = {
                 let guard = self.state.read();
@@ -306,13 +308,16 @@ impl DbInner {
                         tokio::select! {
                             _ = wal_table.await_durable() => {}
                             _ = mem_table.await_flush_to_l0() => {}
+                            err = self.error.await_value() => {
+                                return Err(err)
+                            }
                         }
                     }
                     (Some(wal_table), None) => {
-                        wal_table.await_durable().await;
+                        self.await_or_error(wal_table.await_durable()).await?;
                     }
                     (None, Some(mem_table)) => {
-                        mem_table.await_flush_to_l0().await;
+                        self.await_or_error(mem_table.await_flush_to_l0()).await?;
                     }
                     _ => {
                         // No tables to flush, so backpressure is no longer needed.
@@ -321,6 +326,18 @@ impl DbInner {
                 }
             } else {
                 break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn await_or_error<T, Fut>(&self, future: Fut) -> Result<T, SlateDBError> where Fut: Future<Output = T> {
+        tokio::select! {
+            v = future => {
+                return Ok(v);
+            },
+            err = self.error.await_value() => {
+                return Err(err);
             }
         }
     }
@@ -449,12 +466,10 @@ impl DbInner {
     /// Return an error if the state has encountered
     /// an unrecoverable error.
     pub(crate) fn check_error(&self) -> Result<(), SlateDBError> {
-        let error = self.error.read();
-        if let Some(err) = error.as_ref() {
-            Err(err.clone())
-        } else {
-            Ok(())
+        if let Some(error) = self.error.read() {
+            return Err(error);
         }
+        Ok(())
     }
 
     /// Set the state error if it is not already set.
@@ -463,10 +478,7 @@ impl DbInner {
     /// subsequent errors are likely to be the result of
     /// the first error.
     pub(crate) fn set_error_if_none(&self, new_error: SlateDBError) {
-        let mut error = self.error.write();
-        if error.is_none() {
-            *error = Some(new_error);
-        }
+        self.error.write(new_error);
     }
 }
 
@@ -1143,8 +1155,8 @@ mod tests {
     use super::*;
     use crate::cached_object_store::FsCacheStorage;
     use crate::config::{
-        CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
-        DEFAULT_PUT_OPTIONS,
+        CompactorOptions, DEFAULT_PUT_OPTIONS, ObjectStoreCacheOptions,
+        SizeTieredCompactionSchedulerOptions,
     };
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
@@ -2277,11 +2289,10 @@ mod tests {
                 val,
                 DEFAULT_PUT_OPTIONS,
                 &WriteOptions {
-                    await_durable: false,
+                    await_durable: true,
                 },
             )
-            .await?;
-            db.flush().await
+            .await
         }
 
         // open db1 and assert that it can write.
