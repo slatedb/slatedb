@@ -213,7 +213,8 @@ let kv_store = Db::open_with_opts(
 .unwrap();
 
 // start transaction and write some data
-let txn = kv_store.transaction();
+let txn_opts = TransactionOptions::new().with_isolation_level(IsolationLevel::Serializable); // or IsolationLevel::Snapshot
+let txn = kv_store.transaction_with_opts(txn_opts).await.unwrap();
 let val1 = txn.get("key1").await;
 
 // could batch the write operations
