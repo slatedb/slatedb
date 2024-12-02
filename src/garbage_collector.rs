@@ -5,7 +5,7 @@ use crate::db_state::{CoreDbState, SsTableId};
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollectorMessage::*;
 use crate::manifest::Manifest;
-use crate::manifest_store::{maybe_apply_db_state_update, ManifestStore, StoredManifest};
+use crate::manifest_store::{ManifestStore, StoredManifest};
 use crate::metrics::DbStats;
 use crate::tablestore::{SstFileMetadata, TableStore};
 use chrono::{DateTime, Utc};
@@ -167,11 +167,8 @@ impl GarbageCollectorOrchestrator {
 
         // Delete manifests older than min_age
         for manifest_metadata in manifest_metadata_list {
-            if active_manifest_ids.contains(&manifest_metadata.id) {
-                continue;
-            }
-
-            if utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age {
+            let is_active = active_manifest_ids.contains(&manifest_metadata.id);
+            if !is_active && utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age {
                 if let Err(e) = self
                     .manifest_store
                     .delete_manifest(manifest_metadata.id)
@@ -219,7 +216,7 @@ impl GarbageCollectorOrchestrator {
 
     async fn remove_expired_checkpoints(&self) -> Result<(), SlateDBError> {
         let mut stored_manifest = self.load_stored_manifest().await?;
-        maybe_apply_db_state_update(&mut stored_manifest, Self::filter_expired_checkpoints).await
+        stored_manifest.maybe_apply_db_state_update(Self::filter_expired_checkpoints).await
     }
 
     fn is_wal_sst_eligible_for_deletion(
@@ -246,9 +243,11 @@ impl GarbageCollectorOrchestrator {
         chrono::Duration::from_std(min_age).expect("invalid duration")
     }
 
-    /// Collect garbage from the WAL SSTs. This will delete any WAL SSTs that are
-    /// older than the minimum age specified in the options and are also older than
-    /// the last compacted WAL SST.
+    /// Collect garbage from the WAL SSTs. This will delete any WAL SSTs that meet
+    /// the following conditions:
+    ///  - not referenced by an active checkpoint
+    ///  - older than the minimum age specified in the options
+    ///  - older than the last compacted WAL SST.
     async fn collect_garbage_wal_ssts(&self) -> Result<(), SlateDBError> {
         self.remove_expired_checkpoints().await?;
 

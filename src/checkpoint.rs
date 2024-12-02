@@ -1,7 +1,7 @@
 use crate::config::CheckpointOptions;
 use crate::db::Db;
 use crate::error::SlateDBError;
-use crate::manifest_store::{apply_db_state_update, ManifestStore, StoredManifest};
+use crate::manifest_store::{ManifestStore, StoredManifest};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
@@ -39,7 +39,7 @@ impl Db {
             return Err(SlateDBError::ManifestMissing);
         };
         let id = Uuid::new_v4();
-        apply_db_state_update(&mut stored_manifest, |stored_manifest| {
+        stored_manifest.maybe_apply_db_state_update(|stored_manifest| {
             let expire_time = options.lifetime.map(|l| SystemTime::now() + l);
             let db_state = stored_manifest.db_state();
             let manifest_id = match options.source {
@@ -68,7 +68,7 @@ impl Db {
             };
             let mut updated_db_state = db_state.clone();
             updated_db_state.checkpoints.push(checkpoint);
-            Ok(updated_db_state)
+            Ok(Some(updated_db_state))
         })
         .await?;
         let checkpoint = stored_manifest
@@ -97,7 +97,7 @@ impl Db {
         let Some(mut stored_manifest) = StoredManifest::load(manifest_store).await? else {
             return Err(SlateDBError::ManifestMissing);
         };
-        apply_db_state_update(&mut stored_manifest, |stored_manifest| {
+        stored_manifest.maybe_apply_db_state_update(|stored_manifest| {
             let mut db_state = stored_manifest.db_state().clone();
             let expire_time = lifetime.map(|l| SystemTime::now() + l);
             let Some(_) = db_state.checkpoints.iter_mut().find_map(|c| {
@@ -109,7 +109,7 @@ impl Db {
             }) else {
                 return Err(SlateDBError::InvalidDBState);
             };
-            Ok(db_state)
+            Ok(Some(db_state))
         })
         .await
     }
@@ -124,7 +124,7 @@ impl Db {
         let Some(mut stored_manifest) = StoredManifest::load(manifest_store).await? else {
             return Err(SlateDBError::ManifestMissing);
         };
-        apply_db_state_update(&mut stored_manifest, |stored_manifest| {
+        stored_manifest.maybe_apply_db_state_update(|stored_manifest| {
             let mut db_state = stored_manifest.db_state().clone();
             let checkpoints: Vec<Checkpoint> = db_state
                 .checkpoints
@@ -133,7 +133,7 @@ impl Db {
                 .cloned()
                 .collect();
             db_state.checkpoints = checkpoints;
-            Ok(db_state)
+            Ok(Some(db_state))
         })
         .await
     }

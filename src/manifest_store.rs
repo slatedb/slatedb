@@ -19,48 +19,6 @@ use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
 
-/// Helper function that applies an update to a stored manifest, and retries the update
-/// if the write fails due to a manifest version conflict caused by another client
-/// updating the manifest at the same time. The update to be applied is specified by
-/// the mutator parameter, which is a function that takes a &StoredManifest and returns
-/// the updated CoreDbState.
-pub(crate) async fn apply_db_state_update<F>(
-    manifest: &mut StoredManifest,
-    mutator: F,
-) -> Result<(), SlateDBError>
-where
-    F: Fn(&StoredManifest) -> Result<CoreDbState, SlateDBError>,
-{
-    maybe_apply_db_state_update(manifest, |stored_manifest| {
-        let mutated_state = mutator(stored_manifest)?;
-        Ok(Some(mutated_state))
-    })
-    .await
-}
-
-pub(crate) async fn maybe_apply_db_state_update<F>(
-    manifest: &mut StoredManifest,
-    mutator: F,
-) -> Result<(), SlateDBError>
-where
-    F: Fn(&StoredManifest) -> Result<Option<CoreDbState>, SlateDBError>,
-{
-    loop {
-        let Some(mutated_db_state) = mutator(manifest)? else {
-            return Ok(());
-        };
-
-        return match manifest.update_db_state(mutated_db_state).await {
-            Err(SlateDBError::ManifestVersionExists) => {
-                manifest.refresh().await?;
-                continue;
-            }
-            Err(e) => Err(e),
-            Ok(()) => Ok(()),
-        };
-    }
-}
-
 pub(crate) struct FenceableManifest {
     stored_manifest: StoredManifest,
     local_epoch: u64,
@@ -213,6 +171,35 @@ impl StoredManifest {
         self.manifest = manifest;
         self.id = new_id;
         Ok(())
+    }
+
+    /// Apply an update to a stored manifest repeatedly retrying the update
+    /// if the write fails due to a manifest version conflict caused by another client
+    /// updating the manifest at the same time. The update to be applied is specified by
+    /// the mutator parameter, which is a function that takes a &StoredManifest and returns
+    /// an optional [`CoreDbState`]. If the mutator returns `None`, then no update will
+    /// be applied.
+    pub(crate) async fn maybe_apply_db_state_update<F>(
+        &mut self,
+        mutator: F,
+    ) -> Result<(), SlateDBError>
+    where
+        F: Fn(&StoredManifest) -> Result<Option<CoreDbState>, SlateDBError>,
+    {
+        loop {
+            let Some(mutated_db_state) = mutator(self)? else {
+                return Ok(());
+            };
+
+            return match self.update_db_state(mutated_db_state).await {
+                Err(SlateDBError::ManifestVersionExists) => {
+                    self.refresh().await?;
+                    continue;
+                }
+                Err(e) => Err(e),
+                Ok(()) => Ok(()),
+            };
+        }
     }
 }
 
@@ -405,7 +392,7 @@ mod tests {
     use crate::db_state::CoreDbState;
     use crate::error;
     use crate::manifest_store::{
-        maybe_apply_db_state_update, FenceableManifest, ManifestStore, StoredManifest,
+        FenceableManifest, ManifestStore, StoredManifest,
     };
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -571,46 +558,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_active_checkpoints() {
-        let ms = new_memory_manifest_store();
-        let state = CoreDbState::new();
-        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
-            .await
-            .unwrap();
-
-        // Add a checkpoint with a reference to the initial manifest
-        let mut updated_state = state.clone();
-        updated_state.checkpoints.push(new_checkpoint(sm.id));
-        sm.update_db_state(updated_state).await.unwrap();
-
-        let active_manifests = ms.read_active_manifests().await.unwrap();
-        assert_eq!(2, active_manifests.len());
-        assert!(active_manifests.contains_key(&1));
-        assert!(active_manifests.contains_key(&2));
-
-        // Add a checkpoint to the latest manifest and remove the old checkpoint.
-        let mut updated_state = state.clone();
-        updated_state.checkpoints.clear();
-        updated_state.checkpoints.push(new_checkpoint(sm.id));
-        sm.update_db_state(updated_state).await.unwrap();
-
-        // The returned map drops the initial manifest which is no longer referenced.
-        let active_manifests = ms.read_active_manifests().await.unwrap();
-        assert_eq!(2, active_manifests.len());
-        assert!(active_manifests.contains_key(&2));
-        assert!(active_manifests.contains_key(&3));
-    }
-
-    fn new_checkpoint(manifest_id: u64) -> Checkpoint {
-        Checkpoint {
-            id: Uuid::new_v4(),
-            manifest_id,
-            expire_time: None,
-            create_time: SystemTime::now(),
-        }
-    }
-
-    #[tokio::test]
     async fn test_list_manifests_unbounded() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
@@ -690,6 +637,15 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs)
     }
 
+    fn new_checkpoint(manifest_id: u64) -> Checkpoint {
+        Checkpoint {
+            id: Uuid::new_v4(),
+            manifest_id,
+            expire_time: None,
+            create_time: now_rounded_to_nearest_sec(),
+        }
+    }
+
     #[tokio::test]
     async fn test_read_active_manifests_should_consider_checkpoints() {
         let ms = new_memory_manifest_store();
@@ -709,12 +665,7 @@ mod tests {
 
         // Add a checkpoint referencing the latest manifest
         let mut updated_state = state.clone();
-        updated_state.checkpoints.push(Checkpoint {
-            id: Uuid::new_v4(),
-            manifest_id: sm.id,
-            expire_time: None,
-            create_time: now_rounded_to_nearest_sec(),
-        });
+        updated_state.checkpoints.push(new_checkpoint(sm.id));
         sm.update_db_state(updated_state).await.unwrap();
         let active_manifests = ms.read_active_manifests().await.unwrap();
         assert_eq!(2, active_manifests.len());
@@ -729,6 +680,7 @@ mod tests {
         updated_state.checkpoints.clear();
         sm.update_db_state(updated_state).await.unwrap();
         let active_manifests = ms.read_active_manifests().await.unwrap();
+        assert_eq!(1g, active_manifests.len());
         assert_eq!(Some(&sm.manifest), active_manifests.get(&sm.id));
     }
 
@@ -741,12 +693,12 @@ mod tests {
             .unwrap();
 
         let initial_id = sm.id;
-        maybe_apply_db_state_update(&mut sm, |_| Ok(None))
+        sm.maybe_apply_db_state_update(|_| Ok(None))
             .await
             .unwrap();
         assert_eq!(initial_id, sm.id);
 
-        maybe_apply_db_state_update(&mut sm, |sm| Ok(Some(sm.db_state().clone())))
+        sm.maybe_apply_db_state_update(|sm| Ok(Some(sm.db_state().clone())))
             .await
             .unwrap();
         assert_eq!(initial_id + 1, sm.id);
