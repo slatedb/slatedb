@@ -268,6 +268,8 @@ Please note that `read_keys` are represented as a set of `Range<Bytes>`. This al
 
 This requires we track the original write keys in the `TransactionState`, instead of the key fingerprints like Badger does. We could reuse the buffers of the original keys in WriteBatch to reference the write keys with slices of `Bytes`.
 
+The non-transactioned writes operations should also be tracked in the `TransactionState` and `recent_committed_txns` for conflict checking. They could be regarded as a transaction that only contains a single write operation, and the start sequence number of this transaction is same as the committed sequence number.
+
 This approach can be adjusted to support SI as well by only tracking the keys that are being written to. When user set the isolation level to SI, the `read_keys` could always be set as empty. The GC mechanism to release inactive transactions is still the same as the SSI.
 
 ### How to Test
