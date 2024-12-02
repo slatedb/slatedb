@@ -82,23 +82,20 @@ At the moment of writing, adding sequence number to each key is still WIP in Sla
 
 ### Write Batch
 
-This is a sample [code snippet](https://rust.velas.com/rocksdb/struct.WriteBatch.html) of `WriteBatch` in the `rocksdb` crate:
+This is a sample code of using `WriteBatch`:
 
-```
-use rocksdb::{DB, Options, WriteBatch};
+```rust
+use slatedb::{Db, WriteBatch};
 
-let path = "_path_for_rocksdb_storage1";
-{
-    let db = DB::open_default(path).unwrap();
-    let mut batch = WriteBatch::default();
-    batch.put(b"my key", b"my value");
-    batch.put(b"key2", b"value2");
-    batch.put(b"key3", b"value3");
-    db.write(batch); // Atomically commits the batch
-}
+let db = DB::open_with_opts(...);
+let mut batch = WriteBatch::new();
+batch.put(b"my key", b"my value");
+batch.delete(b"key2");
+batch.put(b"key3", b"value3");
+db.write(batch); // Atomically commits the batch
 ```
 
-You may notice that the `WriteBatch` API is very similar to the `Transaction` API we proposed below, the write operation from `WriteBatch` is also considered as atomic. The only differences are:
+You'll notice that the `WriteBatch` API is very similar to the `Transaction` API we'll propose below. The write operation from `WriteBatch` is also considered atomic. The only differences are:
 
 1. the `WriteBatch` is committed by `db.write(batch)`, while the `Transaction` is committed by `txn.commit()`
 2. beside the write operations, the `Transaction` should also support the read operations, and if one key is updated in the `Transaction`, the read operation should return the updated value during the transaction.
