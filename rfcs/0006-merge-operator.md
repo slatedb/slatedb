@@ -150,7 +150,7 @@ It's **user's responsibility to ensure** that the merge operator is correctly im
 
 ### Merge Operator Configuration
 
-User can provide their onw merge operator implementation via `DbOptions`. If not provided, the database will not support merge operations.
+User can provide their own merge operator implementation via `DbOptions`. If not provided, the database will not support merge operations.
 
 ```rust
 impl DbOptions {
@@ -392,7 +392,7 @@ We support two main TTL behaviors for merge operations:
 
 ### Ordering Guarantees
 
-If there are multiple merge operands available for the same key, they will be order by their corresponding sequence numbers.
+If there are multiple merge operands available for the same key, they will be ordered by their corresponding sequence numbers.
 
 ### Error Handling
 
@@ -425,7 +425,7 @@ We plan to validate the merge operator implementation with the following benchma
 ### Aggregation Workload  
 - Increment counters using merge operations vs read-modify-write
 - Compare performance for different value sizes
-- Expectation: Merge operations should faster than read-modify-write against cached records and should show significant improvements over read-modify-write for uncached records.
+- Expectation: Merge operations should be faster than read-modify-write against cached records and should show significant improvements over read-modify-write for uncached records.
 
 The benchmarks will be implemented and maintained as part of the existing benchmark suite to validate the merge operator performance characteristics. No benchmark results are available yet as the feature is still under development.
 
