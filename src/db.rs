@@ -1505,7 +1505,7 @@ mod tests {
 
     #[test]
     fn test_empty_scan_range_returns_empty_iterator() {
-        let mut runner = TestRunner::new(Config::default());
+        let mut runner = new_proptest_runner(None);
         let table = sample::table(runner.rng(), 1000, 5);
 
         let runtime = Runtime::new().unwrap();
