@@ -129,21 +129,42 @@ struct GarbageCollectorOrchestrator {
     db_stats: Arc<DbStats>,
 }
 
-impl GarbageCollectorOrchestrator {
+trait GcTask {
+    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError>;
+    fn status(&mut self) -> &mut DirGcStatus;
+    fn ticker(&self) -> crossbeam_channel::Receiver<Instant>;
+    fn resource(&self) -> &str;
+}
+
+struct ManifestGcTask {
+    manifest_store: Arc<ManifestStore>,
+    db_stats: Arc<DbStats>,
+    manifest_options: Option<GarbageCollectorDirectoryOptions>,
+    status: DirGcStatus,
+}
+
+impl ManifestGcTask {
+    fn new(orchestrator: &GarbageCollectorOrchestrator) -> Self {
+        ManifestGcTask {
+            manifest_store: orchestrator.manifest_store.clone(),
+            db_stats: orchestrator.db_stats.clone(),
+            manifest_options: orchestrator.options.manifest_options,
+            status: DirGcStatus::new(orchestrator.options.manifest_options.as_ref()),
+        }
+    }
+
     fn manifest_min_age(&self) -> chrono::Duration {
         let min_age = self
-            .options
             .manifest_options
             .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
         chrono::Duration::from_std(min_age).expect("invalid duration")
     }
+}
 
+impl GcTask for ManifestGcTask {
     /// Collect garbage from the manifest store. This will delete any manifests
     /// that are older than the minimum age specified in the options.
-    async fn collect_garbage_manifests(&self) -> Result<(), SlateDBError> {
-        self.remove_expired_checkpoints().await?;
-
-        let utc_now = Utc::now();
+    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
         let min_age = self.manifest_min_age();
         let mut manifest_metadata_list = self.manifest_store.list_manifests(..).await?;
 
@@ -185,6 +206,204 @@ impl GarbageCollectorOrchestrator {
         Ok(())
     }
 
+    fn status(&mut self) -> &mut DirGcStatus {
+        &mut self.status
+    }
+
+    fn ticker(&self) -> crossbeam_channel::Receiver<Instant> {
+        self.status.ticker()
+    }
+
+    fn resource(&self) -> &str {
+        "Manifest"
+    }
+}
+
+struct WalGcTask {
+    manifest_store: Arc<ManifestStore>,
+    table_store: Arc<TableStore>,
+    db_stats: Arc<DbStats>,
+    wal_options: Option<GarbageCollectorDirectoryOptions>,
+    status: DirGcStatus,
+}
+
+impl WalGcTask {
+    fn new(orchestrator: &GarbageCollectorOrchestrator) -> Self {
+        WalGcTask {
+            manifest_store: orchestrator.manifest_store.clone(),
+            table_store: orchestrator.table_store.clone(),
+            db_stats: orchestrator.db_stats.clone(),
+            wal_options: orchestrator.options.wal_options,
+            status: DirGcStatus::new(orchestrator.options.wal_options.as_ref()),
+        }
+    }
+
+    fn is_wal_sst_eligible_for_deletion(
+        utc_now: &DateTime<Utc>,
+        wal_sst: &SstFileMetadata,
+        min_age: &chrono::Duration,
+        active_manifests: &BTreeMap<u64, Manifest>,
+    ) -> bool {
+        if utc_now.signed_duration_since(wal_sst.last_modified) <= *min_age {
+            return false;
+        }
+
+        let wal_sst_id = wal_sst.id.unwrap_wal_id();
+        !active_manifests
+            .values()
+            .any(|manifest| manifest.has_wal_sst_reference(wal_sst_id))
+    }
+
+    fn wal_sst_min_age(&self) -> chrono::Duration {
+        let min_age = self
+            .wal_options
+            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
+        chrono::Duration::from_std(min_age).expect("invalid duration")
+    }
+}
+
+impl GcTask for WalGcTask {
+    /// Collect garbage from the WAL SSTs. This will delete any WAL SSTs that meet
+    /// the following conditions:
+    ///  - not referenced by an active checkpoint
+    ///  - older than the minimum age specified in the options
+    ///  - older than the last compacted WAL SST.
+    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+        let active_manifests = self.manifest_store.read_active_manifests().await?;
+        let latest_manifest = active_manifests
+            .last_key_value()
+            .ok_or(SlateDBError::LatestManifestMissing)?
+            .1;
+
+        let last_compacted_wal_sst_id = latest_manifest.core.last_compacted_wal_sst_id;
+        let min_age = self.wal_sst_min_age();
+        let sst_ids_to_delete = self
+            .table_store
+            .list_wal_ssts(..last_compacted_wal_sst_id)
+            .await?
+            .into_iter()
+            .filter(|wal_sst| {
+                Self::is_wal_sst_eligible_for_deletion(
+                    &utc_now,
+                    wal_sst,
+                    &min_age,
+                    &active_manifests,
+                )
+            })
+            .map(|wal_sst| wal_sst.id)
+            .collect::<Vec<_>>();
+
+        for id in sst_ids_to_delete {
+            if let Err(e) = self.table_store.delete_sst(&id).await {
+                error!("Error deleting WAL SST: {}", e);
+            } else {
+                self.db_stats.gc_wal_count.inc();
+            }
+        }
+
+        Ok(())
+    }
+
+    fn status(&mut self) -> &mut DirGcStatus {
+        &mut self.status
+    }
+
+    fn ticker(&self) -> crossbeam_channel::Receiver<Instant> {
+        self.status.ticker()
+    }
+
+    fn resource(&self) -> &str {
+        "WAL"
+    }
+}
+
+struct CompactedGcTask {
+    manifest_store: Arc<ManifestStore>,
+    table_store: Arc<TableStore>,
+    db_stats: Arc<DbStats>,
+    compacted_options: Option<GarbageCollectorDirectoryOptions>,
+    status: DirGcStatus,
+}
+
+impl CompactedGcTask {
+    fn new(orchestrator: &GarbageCollectorOrchestrator) -> Self {
+        CompactedGcTask {
+            manifest_store: orchestrator.manifest_store.clone(),
+            table_store: orchestrator.table_store.clone(),
+            db_stats: orchestrator.db_stats.clone(),
+            compacted_options: orchestrator.options.compacted_options,
+            status: DirGcStatus::new(orchestrator.options.compacted_options.as_ref()),
+        }
+    }
+
+    fn compacted_sst_min_age(&self) -> chrono::Duration {
+        let min_age = self
+            .compacted_options
+            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
+        chrono::Duration::from_std(min_age).expect("invalid duration")
+    }
+
+    async fn list_active_l0_and_compacted_ssts(&self) -> Result<HashSet<SsTableId>, SlateDBError> {
+        let active_manifests = self.manifest_store.read_active_manifests().await?;
+        let mut active_ssts = HashSet::new();
+        for manifest in active_manifests.values() {
+            for sr in manifest.core.compacted.iter() {
+                for sst in sr.ssts.iter() {
+                    active_ssts.insert(sst.id);
+                }
+            }
+            for sst in manifest.core.l0.iter() {
+                active_ssts.insert(sst.id);
+            }
+        }
+        Ok(active_ssts)
+    }
+}
+
+impl GcTask for CompactedGcTask {
+    /// Collect garbage from the compacted SSTs. This will delete any compacted SSTs that are
+    /// older than the minimum age specified in the options and are not active in the manifest.
+    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+        let active_ssts = self.list_active_l0_and_compacted_ssts().await?;
+        let min_age = self.compacted_sst_min_age();
+        let sst_ids_to_delete = self
+            .table_store
+            // List all SSTs in the table store
+            .list_compacted_ssts(..)
+            .await?
+            .into_iter()
+            // Filter out the ones that are too young to be collected
+            .filter(|sst| utc_now.signed_duration_since(sst.last_modified) > min_age)
+            .map(|sst| sst.id)
+            // Filter out the ones that are active in the manifest
+            .filter(|id| !active_ssts.contains(id))
+            .collect::<Vec<_>>();
+
+        for id in sst_ids_to_delete {
+            if let Err(e) = self.table_store.delete_sst(&id).await {
+                error!("Error deleting SST: {}", e);
+            } else {
+                self.db_stats.gc_compacted_count.inc();
+            }
+        }
+
+        Ok(())
+    }
+
+    fn status(&mut self) -> &mut DirGcStatus {
+        &mut self.status
+    }
+
+    fn ticker(&self) -> crossbeam_channel::Receiver<Instant> {
+        self.status.ticker()
+    }
+
+    fn resource(&self) -> &str {
+        "Compacted SSTs"
+    }
+}
+
+impl GarbageCollectorOrchestrator {
     async fn load_stored_manifest(&self) -> Result<StoredManifest, SlateDBError> {
         StoredManifest::load(Arc::clone(&self.manifest_store)).await
     }
@@ -220,142 +439,23 @@ impl GarbageCollectorOrchestrator {
             .await
     }
 
-    fn is_wal_sst_eligible_for_deletion(
-        utc_now: &DateTime<Utc>,
-        wal_sst: &SstFileMetadata,
-        min_age: &chrono::Duration,
-        active_manifests: &BTreeMap<u64, Manifest>,
-    ) -> bool {
-        if utc_now.signed_duration_since(wal_sst.last_modified) <= *min_age {
-            return false;
-        }
-
-        let wal_sst_id = wal_sst.id.unwrap_wal_id();
-        !active_manifests
-            .values()
-            .any(|manifest| manifest.has_wal_sst_reference(wal_sst_id))
-    }
-
-    fn wal_sst_min_age(&self) -> chrono::Duration {
-        let min_age = self
-            .options
-            .wal_options
-            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
-        chrono::Duration::from_std(min_age).expect("invalid duration")
-    }
-
-    /// Collect garbage from the WAL SSTs. This will delete any WAL SSTs that meet
-    /// the following conditions:
-    ///  - not referenced by an active checkpoint
-    ///  - older than the minimum age specified in the options
-    ///  - older than the last compacted WAL SST.
-    async fn collect_garbage_wal_ssts(&self) -> Result<(), SlateDBError> {
-        self.remove_expired_checkpoints().await?;
-
-        let active_manifests = self.manifest_store.read_active_manifests().await?;
-        let latest_manifest = active_manifests
-            .last_key_value()
-            .ok_or(SlateDBError::LatestManifestMissing)?
-            .1;
-
-        let utc_now = Utc::now();
-        let last_compacted_wal_sst_id = latest_manifest.core.last_compacted_wal_sst_id;
-        let min_age = self.wal_sst_min_age();
-        let sst_ids_to_delete = self
-            .table_store
-            .list_wal_ssts(..last_compacted_wal_sst_id)
-            .await?
-            .into_iter()
-            .filter(|wal_sst| {
-                Self::is_wal_sst_eligible_for_deletion(
-                    &utc_now,
-                    wal_sst,
-                    &min_age,
-                    &active_manifests,
-                )
-            })
-            .map(|wal_sst| wal_sst.id)
-            .collect::<Vec<_>>();
-
-        for id in sst_ids_to_delete {
-            if let Err(e) = self.table_store.delete_sst(&id).await {
-                error!("Error deleting WAL SST: {}", e);
-            } else {
-                self.db_stats.gc_wal_count.inc();
-            }
-        }
-
-        Ok(())
-    }
-
-    fn compacted_sst_min_age(&self) -> chrono::Duration {
-        let min_age = self
-            .options
-            .compacted_options
-            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
-        chrono::Duration::from_std(min_age).expect("invalid duration")
-    }
-
-    async fn list_active_l0_and_compacted_ssts(&self) -> Result<HashSet<SsTableId>, SlateDBError> {
-        let active_manifests = self.manifest_store.read_active_manifests().await?;
-        let mut active_ssts = HashSet::new();
-        for manifest in active_manifests.values() {
-            for sr in manifest.core.compacted.iter() {
-                for sst in sr.ssts.iter() {
-                    active_ssts.insert(sst.id);
-                }
-            }
-            for sst in manifest.core.l0.iter() {
-                active_ssts.insert(sst.id);
-            }
-        }
-        Ok(active_ssts)
-    }
-
-    /// Collect garbage from the compacted SSTs. This will delete any compacted SSTs that are
-    /// older than the minimum age specified in the options and are not active in the manifest.
-    async fn collect_garbage_compacted_ssts(&self) -> Result<(), SlateDBError> {
-        self.remove_expired_checkpoints().await?;
-        let active_ssts = self.list_active_l0_and_compacted_ssts().await?;
-        let utc_now = Utc::now();
-        let min_age = self.compacted_sst_min_age();
-        let sst_ids_to_delete = self
-            .table_store
-            // List all SSTs in the table store
-            .list_compacted_ssts(..)
-            .await?
-            .into_iter()
-            // Filter out the ones that are too young to be collected
-            .filter(|sst| utc_now.signed_duration_since(sst.last_modified) > min_age)
-            .map(|sst| sst.id)
-            // Filter out the ones that are active in the manifest
-            .filter(|id| !active_ssts.contains(id))
-            .collect::<Vec<_>>();
-
-        for id in sst_ids_to_delete {
-            if let Err(e) = self.table_store.delete_sst(&id).await {
-                error!("Error deleting SST: {}", e);
-            } else {
-                self.db_stats.gc_compacted_count.inc();
-            }
-        }
-
-        Ok(())
-    }
-
     /// Run the garbage collector
     pub async fn run(&self) {
         let log_ticker = crossbeam_channel::tick(Duration::from_secs(60));
-        let (manifest_ticker, mut manifest_status) =
-            Self::options_to_ticker(self.options.manifest_options.as_ref());
-        let (wal_ticker, mut wal_status) =
-            Self::options_to_ticker(self.options.wal_options.as_ref());
-        let (compacted_ticker, mut compacted_status) =
-            Self::options_to_ticker(self.options.compacted_options.as_ref());
+
+        let mut wal_gc_task = WalGcTask::new(self);
+        let mut compacted_gc_task = CompactedGcTask::new(self);
+        let mut manifest_gc_task = ManifestGcTask::new(self);
+
+        let manifest_ticker = manifest_gc_task.ticker();
+        let wal_ticker = wal_gc_task.ticker();
+        let compacted_ticker = compacted_gc_task.ticker();
 
         info!(
             "Starting Garbage Collector with [manifest: {}], [wal: {}], [compacted: {}]",
-            manifest_status, wal_status, compacted_status
+            manifest_gc_task.status(),
+            wal_gc_task.status(),
+            compacted_gc_task.status()
         );
 
         loop {
@@ -367,30 +467,12 @@ impl GarbageCollectorOrchestrator {
                         self.db_stats.gc_compacted_count.value.load(Ordering::SeqCst)
                     );
                 },
-                recv(manifest_ticker) -> _ => {
-                    debug!("Scheduled garbage collection attempt for Manifests.");
-                    if let Err(e) = self.collect_garbage_manifests().await {
-                        error!("Error collecting manifest garbage: {}", e);
-                    }
-                    manifest_status.advance();
-                },
-                recv(wal_ticker) -> _ => {
-                    debug!("Scheduled garbage collection attempt for WALs.");
-                    if let Err(e) = self.collect_garbage_wal_ssts().await {
-                        error!("Error collecting WAL garbage: {}", e);
-                    }
-                    wal_status.advance();
-                },
-                recv(compacted_ticker) -> _ => {
-                    debug!("Scheduled garbage collection attempt for Compacted SSTs.");
-                    if let Err(e) = self.collect_garbage_compacted_ssts().await {
-                        error!("Error collecting compacted garbage: {}", e);
-                    }
-                    compacted_status.advance();
-                },
+                recv(manifest_ticker) -> _ => { self.run_gc_task(&mut manifest_gc_task).await; },
+                recv(wal_ticker) -> _ => { self.run_gc_task(&mut wal_gc_task).await; },
+                recv(compacted_ticker) -> _ => { self.run_gc_task(&mut compacted_gc_task).await; },
                 recv(self.external_rx) -> msg => {
                     match msg {
-                        Ok(_) => {
+                        Ok(Shutdown) => {
                             info!("Garbage collector received shutdown signal... shutting down");
                             break
                         }
@@ -402,7 +484,10 @@ impl GarbageCollectorOrchestrator {
                 },
             }
             self.db_stats.gc_count.inc();
-            if manifest_status.is_done() && wal_status.is_done() && compacted_status.is_done() {
+            if manifest_gc_task.status().is_done()
+                && wal_gc_task.status().is_done()
+                && compacted_gc_task.status().is_done()
+            {
                 info!("Garbage Collector is done - exiting main thread.");
                 break;
             }
@@ -419,21 +504,17 @@ impl GarbageCollectorOrchestrator {
         );
     }
 
-    fn options_to_ticker(
-        options: Option<&GarbageCollectorDirectoryOptions>,
-    ) -> (crossbeam_channel::Receiver<Instant>, DirGcStatus) {
-        options.map_or(
-            (crossbeam_channel::never(), DirGcStatus::Done),
-            |opts| match opts.execution_mode {
-                GcExecutionMode::Once => {
-                    (crossbeam_channel::at(Instant::now()), DirGcStatus::OneMore)
-                }
-                Periodic(duration) => (
-                    crossbeam_channel::tick(duration),
-                    DirGcStatus::Indefinite(duration),
-                ),
-            },
-        )
+    async fn run_gc_task<T: GcTask>(&self, task: &mut T) {
+        debug!(
+            "Scheduled garbage collection attempt for {}.",
+            task.resource()
+        );
+        if let Err(e) = self.remove_expired_checkpoints().await {
+            error!("Error removing expired checkpoints: {}", e);
+        } else if let Err(e) = task.collect(Utc::now()).await {
+            error!("Error collecting compacted garbage: {}", e);
+        }
+        task.status().advance();
     }
 }
 
@@ -445,8 +526,23 @@ enum DirGcStatus {
 }
 
 impl DirGcStatus {
+    fn new(options: Option<&GarbageCollectorDirectoryOptions>) -> Self {
+        options.map_or(DirGcStatus::Done, |opts| match opts.execution_mode {
+            GcExecutionMode::Once => DirGcStatus::OneMore,
+            Periodic(duration) => DirGcStatus::Indefinite(duration),
+        })
+    }
+
     fn is_done(&self) -> bool {
         self == &DirGcStatus::Done
+    }
+
+    fn ticker(&self) -> crossbeam_channel::Receiver<Instant> {
+        match self {
+            DirGcStatus::Indefinite(duration) => crossbeam_channel::tick(*duration),
+            DirGcStatus::OneMore => crossbeam_channel::at(Instant::now()),
+            DirGcStatus::Done => crossbeam_channel::never(),
+        }
     }
 
     fn advance(&mut self) {
