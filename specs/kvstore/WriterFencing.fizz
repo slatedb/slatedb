@@ -1,7 +1,12 @@
+---
+action_options:
+    SlateDBWriter.FlushWal:
+        max_actions: 3
+---
+
 # Model to validate that there can only be one writer and that old writers can be fenced.
 SUCCESS = "success"
 CONFLICT = "conflict"
-MAX_FLUSH_COUNT = 3
 NUM_WRITERS = 2
 
 role ObjectStore:
@@ -27,7 +32,7 @@ symmetric role SlateDBWriter:
         self.was_ever_open = 0
     
     atomic action FlushWal:
-        if self.state != "opened" or self.flush_count > MAX_FLUSH_COUNT:
+        if self.state != "opened":
             return
         self.WriteWal()
         self.flush_count += 1
@@ -46,7 +51,7 @@ symmetric role SlateDBWriter:
                 result = self.WriteManifest(record(id = 1, writer_epoch = 1))        
         return result
 
-    atomic func WriteManifest(new_manifest):
+    func WriteManifest(new_manifest):
         write_status = manifest_store.ConditionalWrite(new_manifest.id, new_manifest)
         if write_status == SUCCESS:
             atomic:
@@ -67,7 +72,7 @@ symmetric role SlateDBWriter:
         self.WriteFencingWal()
 
     #flush.rs\DbInner\flush() is the only method that increments next_wal on write.
-    atomic func WriteWal():
+    func WriteWal():
         write_status = wal_store.ConditionalWrite(self.next_wal, self.manifest.writer_epoch)
         if write_status == SUCCESS:
             self.next_wal = self.next_wal + 1
