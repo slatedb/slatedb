@@ -15,7 +15,7 @@ impl DbInner {
         if guard.memtable().size() < self.options.l0_sst_size_bytes {
             return Ok(());
         }
-        guard.freeze_memtable(wal_id);
+        guard.freeze_memtable(wal_id)?;
         self.memtable_flush_notifier
             .send((None, MemtableFlushThreadMsg::FlushImmutableMemtables))
             .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
@@ -33,7 +33,7 @@ impl DbInner {
         if guard.wal().size() < self.options.l0_sst_size_bytes {
             return Ok(());
         }
-        guard.freeze_wal();
+        guard.freeze_wal()?;
         self.wal_flush_notifier
             .send((None, WalFlushThreadMsg::FlushImmutableWals))
             .map_err(|_| SlateDBError::WalFlushChannelError)?;
