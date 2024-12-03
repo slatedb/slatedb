@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use ulid::Ulid;
 
 use crate::db::{DbInner, FlushMsg};
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::manifest_store::FenceableManifest;
+use crate::utils::{map_stopped_task_result, spawn_bg_task};
 
 #[derive(Debug)]
 pub enum MemtableFlushThreadMsg {
@@ -74,9 +75,9 @@ impl MemtableFlusher {
                 let mut guard = self.db_inner.state.write();
                 guard.move_imm_memtable_to_l0(imm_memtable.clone(), sst_handle);
             }
-            imm_memtable.notify_flush_to_l0();
+            imm_memtable.notify_flush_to_l0(Ok(()));
             self.write_manifest_safely().await?;
-            imm_memtable.table().notify_durable();
+            imm_memtable.table().notify_durable(Ok(()));
         }
         Ok(())
     }
@@ -88,35 +89,36 @@ impl DbInner {
         manifest: FenceableManifest,
         mut rx: UnboundedReceiver<FlushMsg<MemtableFlushThreadMsg>>,
         tokio_handle: &Handle,
-    ) -> Option<tokio::task::JoinHandle<()>> {
+    ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
         let this = Arc::clone(self);
-        let mut is_stopped = false;
-        Some(tokio_handle.spawn(async move {
+        let fut = async move {
             let mut flusher = MemtableFlusher {
                 db_inner: this.clone(),
                 manifest,
             };
             let mut manifest_poll_interval =
                 tokio::time::interval(this.options.manifest_poll_interval);
+            let mut err_reader = this.state.read().error_reader();
 
             // Stop the loop when the shut down has been received *and* all
             // remaining `rx` flushes have been drained.
-            while !(is_stopped && rx.is_empty()) {
+            let result = loop {
                 tokio::select! {
+                    err = err_reader.await_value() => {
+                        break Err(err);
+                    }
                     _ = manifest_poll_interval.tick() => {
-                        if !is_stopped {
-                            if let Err(err) = flusher.load_manifest().await {
-                                error!("error loading manifest: {err}");
-                                this.set_error_if_none(err);
+                        if let Err(err) = flusher.load_manifest().await {
+                            error!("error loading manifest: {err}");
+                            break Err(err);
+                        }
+                        match flusher.flush_imm_memtables_to_l0().await {
+                            Ok(_) => {
+                                this.db_stats.immutable_memtable_flushes.inc();
                             }
-                            match flusher.flush_imm_memtables_to_l0().await {
-                                Ok(_) => {
-                                    this.db_stats.immutable_memtable_flushes.inc();
-                                }
-                                Err(err) => {
-                                    error!("error from memtable flush: {err}");
-                                    this.set_error_if_none(err);
-                                }
+                            Err(err) => {
+                                error!("error from memtable flush: {err}");
+                                break Err(err);
                             }
                         }
                     }
@@ -124,35 +126,68 @@ impl DbInner {
                         let (rsp_sender, msg) = msg.expect("channel unexpectedly closed");
                         match msg {
                             MemtableFlushThreadMsg::Shutdown => {
-                                is_stopped = true
+                                break Ok(());
                             },
                             MemtableFlushThreadMsg::FlushImmutableMemtables => {
                                 let result = flusher.flush_imm_memtables_to_l0().await;
-                                match &result {
+                                if let Some(rsp_sender) = rsp_sender {
+                                    let res = rsp_sender.send(result.clone());
+                                    if let Err(Err(err)) = res {
+                                        error!("error sending flush response: {err}");
+                                    }
+                                }
+                                match result {
                                     Ok(_) => {
                                         this.db_stats.immutable_memtable_flushes.inc();
                                     }
                                     Err(err) => {
                                         error!("error from memtable flush: {err}");
-                                        this.set_error_if_none(err.clone());
-                                    }
-                                }
-                                if let Some(rsp_sender) = rsp_sender {
-                                    let res = rsp_sender.send(result);
-                                    if let Err(Err(err)) = res {
-                                        error!("error sending flush response: {err}");
-                                        this.set_error_if_none(err);
+                                        break Err(err);
                                     }
                                 }
                             }
                         }
                     }
                 }
+            };
+
+            // respond to any pending msgs
+            let pending_result = map_stopped_task_result(&result);
+            while !rx.is_empty() {
+                let (rsp_sender, _) = rx.recv().await.expect("channel unexpectedly closed");
+                if let Some(rsp_sender) = rsp_sender {
+                    let _ = rsp_sender.send(pending_result.clone());
+                }
             }
 
             if let Err(err) = flusher.write_manifest_safely().await {
                 error!("error writing manifest on shutdown: {}", err);
             }
-        }))
+
+            info!("memtable flush thread exiting with {:?}", result);
+            result
+        };
+
+        let this = Arc::clone(self);
+        Some(spawn_bg_task(
+            tokio_handle,
+            move |err| {
+                info!("memtable flush task existed with {:?}", err);
+                // notify any waiters that the task has exited
+                let mut state = this.state.write();
+                state.record_fatal_error(err.clone());
+                info!("notifying in-memory memtable of error");
+                state.memtable().table().notify_durable(Err(err.clone()));
+                for imm_table in state.state().imm_memtable.iter() {
+                    info!(
+                        "notifying imm memtable (last_wal_id={}) of error",
+                        imm_table.last_wal_id()
+                    );
+                    imm_table.notify_flush_to_l0(Err(err.clone()));
+                    imm_table.table().notify_durable(Err(err.clone()));
+                }
+            },
+            fut,
+        ))
     }
 }

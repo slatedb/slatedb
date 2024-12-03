@@ -6,16 +6,15 @@ use std::sync::Arc;
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
-use tokio::sync::watch;
 
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::{RowAttributes, RowEntry, ValueDeletable};
+use crate::utils::WriteOnceRegister;
 
 pub(crate) struct KVTable {
     map: SkipMap<Bytes, ValueWithAttributes>,
-    is_durable_tx: watch::Sender<bool>,
-    is_durable_rx: watch::Receiver<bool>,
+    durable: WriteOnceRegister<Result<(), SlateDBError>>,
     size: AtomicUsize,
 }
 
@@ -26,8 +25,7 @@ pub(crate) struct WritableKVTable {
 pub(crate) struct ImmutableMemtable {
     last_wal_id: u64,
     table: Arc<KVTable>,
-    is_flushed_tx: watch::Sender<bool>,
-    is_flushed_rx: watch::Receiver<bool>,
+    flushed: WriteOnceRegister<Result<(), SlateDBError>>,
 }
 
 pub(crate) struct ImmutableWal {
@@ -65,12 +63,10 @@ impl MemTableIterator<'_> {
 
 impl ImmutableMemtable {
     pub(crate) fn new(table: WritableKVTable, last_wal_id: u64) -> Self {
-        let (is_flushed_tx, is_flushed_rx) = watch::channel(false);
         Self {
             table: table.table,
             last_wal_id,
-            is_flushed_tx,
-            is_flushed_rx,
+            flushed: WriteOnceRegister::new(),
         }
     }
 
@@ -82,15 +78,12 @@ impl ImmutableMemtable {
         self.last_wal_id
     }
 
-    pub(crate) async fn await_flush_to_l0(&self) {
-        let mut rx = self.is_flushed_rx.clone();
-        while !*rx.borrow_and_update() {
-            rx.changed().await.expect("watch channel closed");
-        }
+    pub(crate) async fn await_flush_to_l0(&self) -> Result<(), SlateDBError> {
+        self.flushed.reader().await_value().await
     }
 
-    pub(crate) fn notify_flush_to_l0(&self) {
-        self.is_flushed_tx.send(true).expect("watch channel closed");
+    pub(crate) fn notify_flush_to_l0(&self, result: Result<(), SlateDBError>) {
+        self.flushed.write(result);
     }
 }
 
@@ -139,12 +132,10 @@ impl WritableKVTable {
 
 impl KVTable {
     fn new() -> Self {
-        let (is_durable_tx, is_durable_rx) = watch::channel(false);
         Self {
             map: SkipMap::new(),
             size: AtomicUsize::new(0),
-            is_durable_tx,
-            is_durable_rx,
+            durable: WriteOnceRegister::new(),
         }
     }
 
@@ -204,15 +195,12 @@ impl KVTable {
         }
     }
 
-    pub(crate) async fn await_durable(&self) {
-        let mut rx = self.is_durable_rx.clone();
-        while !*rx.borrow_and_update() {
-            rx.changed().await.expect("watch channel closed");
-        }
+    pub(crate) async fn await_durable(&self) -> Result<(), SlateDBError> {
+        self.durable.reader().await_value().await
     }
 
-    pub(crate) fn notify_durable(&self) {
-        self.is_durable_tx.send(true).expect("watch channel closed");
+    pub(crate) fn notify_durable(&self, result: Result<(), SlateDBError>) {
+        self.durable.write(result);
     }
 }
 
