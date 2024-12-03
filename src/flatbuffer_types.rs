@@ -1,10 +1,12 @@
 use std::collections::VecDeque;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
 use ulid::Ulid;
 
-use crate::db_state::{self, RowAttribute, SsTableInfo, SsTableInfoCodec};
+use crate::checkpoint;
+use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SsTableHandle};
 
 #[path = "./generated/manifest_generated.rs"]
@@ -21,8 +23,9 @@ use crate::db_state::SsTableId;
 use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::manifest_generated::{
-    CompactedSsTable, CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat,
-    SortedRun, SortedRunArgs, SstRowAttribute,
+    Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable, CompactedSsTableArgs,
+    CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun, SortedRunArgs, Uuid,
+    UuidArgs,
 };
 use crate::manifest::{Manifest, ManifestCodec};
 
@@ -72,11 +75,6 @@ impl FlatBufferSsTableInfoCodec {
             .first_key()
             .map(|key| Bytes::copy_from_slice(key.bytes()));
 
-        let row_attributes: Vec<RowAttribute> = match info.row_attributes() {
-            Some(vec) => vec.into_iter().map(|attr| attr.into()).collect(),
-            None => Vec::new(),
-        };
-
         SsTableInfo {
             first_key,
             index_offset: info.index_offset(),
@@ -84,7 +82,6 @@ impl FlatBufferSsTableInfoCodec {
             filter_offset: info.filter_offset(),
             filter_len: info.filter_len(),
             compression_codec: info.compression_format().into(),
-            row_attributes,
         }
     }
 
@@ -109,6 +106,18 @@ impl ManifestCodec for FlatBufferManifestCodec {
 }
 
 impl FlatBufferManifestCodec {
+    fn unix_ts_to_time(unix_ts: u32) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(unix_ts as u64)
+    }
+
+    fn maybe_unix_ts_to_time(unix_ts: u32) -> Option<SystemTime> {
+        if unix_ts == 0 {
+            None
+        } else {
+            Some(Self::unix_ts_to_time(unix_ts))
+        }
+    }
+
     pub fn manifest(manifest: &ManifestV1) -> Manifest {
         let l0_last_compacted = manifest
             .l0_last_compacted()
@@ -135,12 +144,25 @@ impl FlatBufferManifestCodec {
                 ssts,
             })
         }
+        let checkpoints: Vec<checkpoint::Checkpoint> = manifest
+            .checkpoints()
+            .iter()
+            .map(|cp| checkpoint::Checkpoint {
+                id: uuid::Uuid::from_u64_pair(cp.id().high(), cp.id().low()),
+                manifest_id: cp.manifest_id(),
+                expire_time: Self::maybe_unix_ts_to_time(cp.checkpoint_expire_time_s()),
+                create_time: Self::unix_ts_to_time(cp.checkpoint_create_time_s()),
+            })
+            .collect();
         let core = CoreDbState {
+            initialized: manifest.initialized(),
             l0_last_compacted,
             l0,
             compacted,
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
             last_compacted_wal_sst_id: manifest.wal_id_last_compacted(),
+            last_clock_tick: manifest.last_clock_tick(),
+            checkpoints,
         };
         Manifest {
             core,
@@ -177,14 +199,6 @@ impl<'b> DbFlatBufferBuilder<'b> {
             Some(first_key_vector) => Some(self.builder.create_vector(first_key_vector)),
         };
 
-        let sst_row_attributes: Vec<SstRowAttribute> = info
-            .row_attributes
-            .clone()
-            .into_iter()
-            .map(|attr| attr.into())
-            .collect();
-        let row_attributes = Some(self.builder.create_vector(&sst_row_attributes));
-
         FbSsTableInfo::create(
             &mut self.builder,
             &SsTableInfoArgs {
@@ -194,7 +208,6 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 filter_offset: info.filter_offset,
                 filter_len: info.filter_len,
                 compression_format: info.compression_codec.into(),
-                row_attributes,
             },
         )
     }
@@ -264,6 +277,47 @@ impl<'b> DbFlatBufferBuilder<'b> {
         self.builder.create_vector(sorted_runs_fbs.as_ref())
     }
 
+    fn add_uuid(&mut self, uuid: uuid::Uuid) -> WIPOffset<Uuid<'b>> {
+        let (high, low) = uuid.as_u64_pair();
+        Uuid::create(&mut self.builder, &UuidArgs { high, low })
+    }
+
+    fn time_to_unix_ts(time: &SystemTime) -> u32 {
+        time.duration_since(UNIX_EPOCH)
+            .expect("manifest expire time cannot be earlier than epoch")
+            .as_secs() as u32 // TODO: check bounds
+    }
+
+    fn maybe_time_to_unix_ts(time: Option<&SystemTime>) -> u32 {
+        time.map(Self::time_to_unix_ts).unwrap_or(0)
+    }
+
+    fn add_checkpoint(&mut self, checkpoint: &checkpoint::Checkpoint) -> WIPOffset<Checkpoint<'b>> {
+        let id = self.add_uuid(checkpoint.id);
+        let checkpoint_expire_time_s = Self::maybe_time_to_unix_ts(checkpoint.expire_time.as_ref());
+        let checkpoint_create_time_s = Self::time_to_unix_ts(&checkpoint.create_time);
+        Checkpoint::create(
+            &mut self.builder,
+            &CheckpointArgs {
+                id: Some(id),
+                manifest_id: checkpoint.manifest_id,
+                checkpoint_expire_time_s,
+                checkpoint_create_time_s,
+                metadata: None,
+                metadata_type: CheckpointMetadata::NONE,
+            },
+        )
+    }
+
+    fn add_checkpoints(
+        &mut self,
+        checkpoints: &[checkpoint::Checkpoint],
+    ) -> WIPOffset<Vector<'b, ForwardsUOffset<Checkpoint<'b>>>> {
+        let checkpoints_fb_vec: Vec<WIPOffset<Checkpoint>> =
+            checkpoints.iter().map(|c| self.add_checkpoint(c)).collect();
+        self.builder.create_vector(checkpoints_fb_vec.as_ref())
+    }
+
     fn create_manifest(&mut self, manifest: &Manifest) -> Bytes {
         let core = &manifest.core;
         let l0 = self.add_compacted_ssts(core.l0.iter());
@@ -272,10 +326,12 @@ impl<'b> DbFlatBufferBuilder<'b> {
             l0_last_compacted = Some(self.add_compacted_sst_id(ulid))
         }
         let compacted = self.add_sorted_runs(&core.compacted);
+        let checkpoints = self.add_checkpoints(&core.checkpoints);
         let manifest = ManifestV1::create(
             &mut self.builder,
             &ManifestV1Args {
                 manifest_id: 0, // todo: get rid of me
+                initialized: core.initialized,
                 writer_epoch: manifest.writer_epoch,
                 compactor_epoch: manifest.compactor_epoch,
                 wal_id_last_compacted: core.last_compacted_wal_sst_id,
@@ -283,7 +339,8 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 l0_last_compacted,
                 l0: Some(l0),
                 compacted: Some(compacted),
-                snapshots: None,
+                last_clock_tick: core.last_clock_tick,
+                checkpoints: Some(checkpoints),
             },
         );
         self.builder.finish(manifest, None);
@@ -331,23 +388,44 @@ impl From<CompressionFormat> for Option<CompressionCodec> {
     }
 }
 
-impl From<RowAttribute> for SstRowAttribute {
-    fn from(value: RowAttribute) -> Self {
-        match value {
-            RowAttribute::Flags => SstRowAttribute::Flags,
-        }
-    }
-}
+#[cfg(test)]
+mod tests {
+    use crate::checkpoint;
+    use crate::db_state::CoreDbState;
+    use crate::flatbuffer_types::FlatBufferManifestCodec;
+    use crate::manifest::{Manifest, ManifestCodec};
+    use std::time::{Duration, SystemTime};
 
-#[allow(clippy::panic)]
-impl From<SstRowAttribute> for RowAttribute {
-    fn from(value: SstRowAttribute) -> Self {
-        match value {
-            SstRowAttribute::Flags => RowAttribute::Flags,
-            _ => panic!(
-                "Attempted to read SST written with unknown SstRowAttribute. Are you \
-            running an older version of SlateDB than was used to write the SST?"
-            ),
-        }
+    #[test]
+    fn test_should_encode_decode_manifest_checkpoints() {
+        // given:
+        let mut core = CoreDbState::new();
+        core.checkpoints = vec![
+            checkpoint::Checkpoint {
+                id: uuid::Uuid::new_v4(),
+                manifest_id: 1,
+                expire_time: None,
+                create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(100),
+            },
+            checkpoint::Checkpoint {
+                id: uuid::Uuid::new_v4(),
+                manifest_id: 2,
+                expire_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)),
+                create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
+            },
+        ];
+        let manifest = Manifest {
+            core,
+            writer_epoch: 0,
+            compactor_epoch: 0,
+        };
+        let codec = FlatBufferManifestCodec {};
+
+        // when:
+        let bytes = codec.encode(&manifest);
+        let decoded = codec.decode(&bytes).expect("failed to decode manifest");
+
+        // then:
+        assert_eq!(manifest, decoded);
     }
 }

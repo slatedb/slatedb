@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args: BenchmarkDbArgs) {
-    let config = args.db_args.config();
+    let config = args.db_args.config().unwrap();
     let write_options = WriteOptions {
         await_durable: args.await_durable,
     };
@@ -54,9 +54,10 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
         args.num_rows,
         args.duration.map(|d| Duration::from_secs(d as u64)),
         args.put_percentage,
-        db,
+        db.clone(),
     );
     bencher.run().await;
+    db.close().await.expect("Failed to close db");
 }
 
 async fn exec_benchmark_compaction(

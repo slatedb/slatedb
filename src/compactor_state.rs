@@ -168,6 +168,7 @@ impl CompactorState {
         merged.l0 = merged_l0s;
         merged.last_compacted_wal_sst_id = writer_state.last_compacted_wal_sst_id;
         merged.next_wal_sst_id = writer_state.next_wal_sst_id;
+        merged.last_clock_tick = writer_state.last_clock_tick;
         self.db_state = merged;
     }
 
@@ -350,8 +351,8 @@ mod tests {
         let (os, mut sm, mut state) = build_test_state(rt.handle());
         // open a new db and write another l0
         let db = build_db(os.clone(), rt.handle());
-        rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48]));
-        rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48]));
+        rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48])).unwrap();
+        rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48])).unwrap();
         let writer_db_state =
             wait_for_manifest_with_l0_len(&mut sm, rt.handle(), state.db_state().l0.len() + 1);
 
@@ -393,8 +394,8 @@ mod tests {
         });
         // open a new db and write another l0
         let db = build_db(os.clone(), rt.handle());
-        rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48]));
-        rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48]));
+        rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48])).unwrap();
+        rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48])).unwrap();
         let writer_db_state =
             wait_for_manifest_with_l0_len(&mut sm, rt.handle(), original_l0s.len() + 1);
         let db_state_before_merge = state.db_state().clone();
@@ -451,8 +452,8 @@ mod tests {
         assert_eq!(state.db_state().l0.len(), 0);
         // open a new db and write another l0
         let db = build_db(os.clone(), rt.handle());
-        rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48]));
-        rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48]));
+        rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48])).unwrap();
+        rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48])).unwrap();
         let writer_db_state =
             wait_for_manifest_with_l0_len(&mut sm, rt.handle(), original_l0s.len() + 1);
 
@@ -553,8 +554,12 @@ mod tests {
         let db = build_db(os.clone(), tokio_handle);
         let l0_count: u64 = 5;
         for i in 0..l0_count {
-            tokio_handle.block_on(db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48]));
-            tokio_handle.block_on(db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48]));
+            tokio_handle
+                .block_on(db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48]))
+                .unwrap();
+            tokio_handle
+                .block_on(db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48]))
+                .unwrap();
         }
         tokio_handle.block_on(db.close()).unwrap();
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));

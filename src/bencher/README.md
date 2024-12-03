@@ -13,24 +13,18 @@ arguments:
 Usage: bencher db [OPTIONS]
 
 Options:
-      --disable-wal
-          Whether to disable the write-ahead log.
-      --flush-ms <FLUSH_MS>
-          The interval in milliseconds to flush the write-ahead log.
-      --l0-sst-size-bytes <L0_SST_SIZE_BYTES>
-          The size in bytes of the L0 SSTables.
+      --db-options-path <FILE_PATH>
+          Options path to a file with options for DbOptions, `SlateDb.toml` is used if this flag is not set.
       --block-cache-size <BLOCK_CACHE_SIZE>
           The size in bytes of the block cache.
-      --object-cache-path <OBJECT_CACHE_PATH>
-          The path where object store cache part files are stored.
-      --object-cache-part-size <OBJECT_CACHE_PART_SIZE>
-          The size in bytes of the object store cache part files.
       --duration <DURATION>
           The duration in seconds to run the benchmark for.
       --key-generator <KEY_GENERATOR>
-          The key generator to use. [default: Random] [possible values: Random]
+          The key generator to use. [default: Random] [possible values: Random, FixedSet]
       --key-len <KEY_LEN>
-          The length of the keys to generate. [default: 16]
+          The length of the keys to generate in bytes. [default: 16]
+      --key-count <KEY_COUNT>
+          The number of keys to use for FixedSet key generator. [default: 100_000]
       --await-durable
           Whether to await durable writes.
       --concurrency <CONCURRENCY>
@@ -38,10 +32,10 @@ Options:
       --num-rows <NUM_ROWS>
           The number of rows to write.
       --val-len <VAL_LEN>
-          The length of the values to generate. [default: 1024]
+          The length of the values to generate in bytes. [default: 1024]
       --put-percentage <PUT_PERCENTAGE>
           The percentage of writes to perform in each task. [default: 20]
-  -h, --help
+      -h, --help
           Print help
 ```
 

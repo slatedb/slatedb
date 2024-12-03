@@ -16,10 +16,6 @@ enum CompressionFormat: byte {
     Zstd
 }
 
-enum SstRowAttribute: byte {
-    Flags
-}
-
 // Has metadata about a SST file.
 table SsTableInfo {
     // First key in the SST file.
@@ -39,9 +35,6 @@ table SsTableInfo {
 
     // Type of compression algorithm used.
     compression_format: CompressionFormat;
-
-    // The row level attributes enabled for this SST
-    row_attributes: [SstRowAttribute];
 }
 
 table BlockMeta {

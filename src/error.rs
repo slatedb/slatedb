@@ -1,7 +1,10 @@
-#[derive(thiserror::Error, Debug)]
+use std::{path::PathBuf, sync::Arc};
+use thiserror::Error;
+
+#[derive(Clone, Debug, Error)]
 pub enum SlateDBError {
-    #[error("IO error")]
-    IoError(#[from] std::io::Error),
+    #[error("IO error: {0}")]
+    IoError(#[from] Arc<std::io::Error>),
 
     #[error("Checksum mismatch")]
     ChecksumMismatch,
@@ -15,8 +18,8 @@ pub enum SlateDBError {
     #[error("Empty block")]
     EmptyBlock,
 
-    #[error("Object store error")]
-    ObjectStoreError(#[from] object_store::Error),
+    #[error("Object store error: {0}")]
+    ObjectStoreError(#[from] Arc<object_store::Error>),
 
     #[error("Manifest file already exists")]
     ManifestVersionExists,
@@ -27,7 +30,7 @@ pub enum SlateDBError {
     #[error("Invalid deletion")]
     InvalidDeletion,
 
-    #[error("Invalid sst error")]
+    #[error("Invalid sst error: {0}")]
     InvalidFlatbuffer(#[from] flatbuffers::InvalidFlatbuffer),
 
     #[error("Invalid DB state error")]
@@ -35,6 +38,13 @@ pub enum SlateDBError {
 
     #[error("Invalid Compaction")]
     InvalidCompaction,
+
+    #[error(
+        "Invalid clock tick, most be monotonic. Last tick: {}, Next tick: {}",
+        last_tick,
+        next_tick
+    )]
+    InvalidClockTick { last_tick: i64, next_tick: i64 },
 
     #[error("Detected newer DB client")]
     Fenced,
@@ -53,4 +63,38 @@ pub enum SlateDBError {
 
     #[error("Unknown RowFlags -- this may be caused by reading data encoded with a newer codec")]
     InvalidRowFlags,
+
+    #[error("Error flushing immutable wals: channel closed")]
+    WalFlushChannelError,
+
+    #[error("Error flushing memtables: channel closed")]
+    MemtableFlushChannelError,
+
+    #[error("Read channel error: {0}")]
+    ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
+}
+
+impl From<std::io::Error> for SlateDBError {
+    fn from(value: std::io::Error) -> Self {
+        Self::IoError(Arc::new(value))
+    }
+}
+
+impl From<object_store::Error> for SlateDBError {
+    fn from(value: object_store::Error) -> Self {
+        Self::ObjectStoreError(Arc::new(value))
+    }
+}
+
+/// Represents errors that can occur during the database configuration.
+///
+/// This enum encapsulates various error conditions that may arise
+/// when parsing or processing database configuration options.
+#[derive(thiserror::Error, Debug)]
+pub enum DbOptionsError {
+    #[error("Unknown configuration file format: {0}")]
+    UnknownFormat(PathBuf),
+
+    #[error("Invalid configuration format: {0}")]
+    InvalidFormat(#[from] figment::Error),
 }

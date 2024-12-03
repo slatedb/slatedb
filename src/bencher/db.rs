@@ -42,7 +42,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use slatedb::config::WriteOptions;
+use slatedb::config::{PutOptions, WriteOptions};
 use slatedb::db::Db;
 use tokio::time::Instant;
 use tracing::info;
@@ -85,6 +85,32 @@ impl KeyGenerator for RandomKeyGenerator {
         let mut bytes = vec![0u8; self.key_len_bytes];
         self.rng.fill_bytes(bytes.as_mut_slice());
         Bytes::copy_from_slice(bytes.as_slice())
+    }
+}
+
+pub struct FixedSetKeyGenerator {
+    keys: Vec<Bytes>,
+    rng: XorShiftRng,
+}
+
+impl FixedSetKeyGenerator {
+    pub fn new(key_bytes: usize, key_count: u64) -> Self {
+        let mut random_key_generator = RandomKeyGenerator::new(key_bytes);
+        let mut keys = Vec::new();
+        for _ in 0..key_count {
+            keys.push(random_key_generator.next_key());
+        }
+        Self {
+            keys,
+            rng: rand_xorshift::XorShiftRng::from_entropy(),
+        }
+    }
+}
+
+impl KeyGenerator for FixedSetKeyGenerator {
+    fn next_key(&mut self) -> Bytes {
+        let index = self.rng.gen_range(0..self.keys.len());
+        self.keys[index].clone()
     }
 }
 
@@ -206,8 +232,14 @@ impl Task {
                 let mut value = vec![0; self.val_len];
                 random.fill_bytes(value.as_mut_slice());
                 self.db
-                    .put_with_options(key, value.as_ref(), &self.write_options)
-                    .await;
+                    .put_with_options(
+                        key,
+                        value.as_ref(),
+                        &PutOptions::default(),
+                        &self.write_options,
+                    )
+                    .await
+                    .unwrap();
                 puts += 1;
             } else {
                 self.db.get(key).await.unwrap();

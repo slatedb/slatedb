@@ -6,7 +6,7 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
-use crate::types::KeyValueDeletable;
+use crate::types::RowEntry;
 
 pub(crate) struct SortedRunIterator<'a> {
     current_iter: Option<SstIterator<'a>>,
@@ -127,7 +127,7 @@ impl<'a> SortedRunIterator<'a> {
 }
 
 impl<'a> KeyValueIterator for SortedRunIterator<'a> {
-    async fn next_entry(&mut self) -> Result<Option<KeyValueDeletable>, SlateDBError> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         loop {
             if let Some(iter) = &mut self.current_iter {
                 if let Some(kv) = iter.next_entry().await? {
@@ -157,14 +157,13 @@ impl<'a> KeyValueIterator for SortedRunIterator<'a> {
 mod tests {
     use std::sync::Arc;
 
-    use object_store::path::Path;
-    use object_store::{memory::InMemory, ObjectStore};
-    use ulid::Ulid;
-
     use super::*;
     use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
-    use crate::test_utils::{assert_kv, OrderedBytesGenerator};
+    use crate::test_utils::{assert_kv, gen_attrs, OrderedBytesGenerator};
+    use object_store::path::Path;
+    use object_store::{memory::InMemory, ObjectStore};
+    use ulid::Ulid;
 
     #[tokio::test]
     async fn test_one_sst_sr_iter() {
@@ -181,9 +180,15 @@ mod tests {
             None,
         ));
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", Some(b"value1")).unwrap();
-        builder.add(b"key2", Some(b"value2")).unwrap();
-        builder.add(b"key3", Some(b"value3")).unwrap();
+        builder
+            .add_kv(b"key1", Some(b"value1"), gen_attrs(1))
+            .unwrap();
+        builder
+            .add_kv(b"key2", Some(b"value2"), gen_attrs(2))
+            .unwrap();
+        builder
+            .add_kv(b"key3", Some(b"value3"), gen_attrs(3))
+            .unwrap();
         let encoded = builder.build().unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let handle = table_store.write_sst(&id, encoded).await.unwrap();
@@ -224,13 +229,19 @@ mod tests {
             None,
         ));
         let mut builder = table_store.table_builder();
-        builder.add(b"key1", Some(b"value1")).unwrap();
-        builder.add(b"key2", Some(b"value2")).unwrap();
+        builder
+            .add_kv(b"key1", Some(b"value1"), gen_attrs(1))
+            .unwrap();
+        builder
+            .add_kv(b"key2", Some(b"value2"), gen_attrs(2))
+            .unwrap();
         let encoded = builder.build().unwrap();
         let id1 = SsTableId::Compacted(Ulid::new());
         let handle1 = table_store.write_sst(&id1, encoded).await.unwrap();
         let mut builder = table_store.table_builder();
-        builder.add(b"key3", Some(b"value3")).unwrap();
+        builder
+            .add_kv(b"key3", Some(b"value3"), gen_attrs(3))
+            .unwrap();
         let encoded = builder.build().unwrap();
         let id2 = SsTableId::Compacted(Ulid::new());
         let handle2 = table_store.write_sst(&id2, encoded).await.unwrap();
@@ -374,10 +385,8 @@ mod tests {
         for _ in 0..n {
             let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
             for _ in 0..keys_per_sst {
-                writer
-                    .add(key_gen.next().as_ref(), Some(val_gen.next().as_ref()))
-                    .await
-                    .unwrap();
+                let entry = RowEntry::new(key_gen.next(), Some(val_gen.next()), 0, None, None);
+                writer.add(entry).await.unwrap();
             }
             ssts.push(writer.close().await.unwrap());
         }

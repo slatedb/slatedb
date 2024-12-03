@@ -14,16 +14,18 @@ use tokio::task::JoinHandle;
 use tracing::{error, info};
 use ulid::Ulid;
 
+use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, SourceId};
-use crate::config::CompactorOptions;
+use crate::config::{CompactorOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::manifest_store::{ManifestStore, StoredManifest};
+use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 use crate::test_utils::OrderedBytesGenerator;
-use crate::{compactor::WorkerToOrchestratorMsg, config::CompressionCodec};
+use crate::types::RowEntry;
 
 pub struct CompactionExecuteBench {
     path: Path,
@@ -57,7 +59,6 @@ impl CompactionExecuteBench {
             self.path.clone(),
             None,
         ));
-
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
         let mut rng = rand_xorshift::XorShiftRng::from_entropy();
@@ -142,7 +143,8 @@ impl CompactionExecuteBench {
             let mut val = vec![0u8; val_bytes];
             rng.fill_bytes(val.as_mut_slice());
             let key = key_gen.next();
-            sst_writer.add(key.as_ref(), Some(val.as_ref())).await?;
+            let row_entry = RowEntry::new(key, Some(val.into()), 0, None, None);
+            sst_writer.add(row_entry).await?;
         }
         let encoded = sst_writer.close().await?;
         info!("wrote sst with id: {:?} {:?}", &encoded.id, start.elapsed());
@@ -173,6 +175,7 @@ impl CompactionExecuteBench {
     }
 
     async fn load_compaction_job(
+        manifest: &StoredManifest,
         num_ssts: usize,
         table_store: &Arc<TableStore>,
     ) -> Result<CompactionJob, SlateDBError> {
@@ -214,10 +217,11 @@ impl CompactionExecuteBench {
             destination: 0,
             ssts,
             sorted_runs: vec![],
+            compaction_ts: manifest.db_state().last_clock_tick,
         })
     }
 
-    fn load_compaction_as_job(manifest: StoredManifest, compaction: &Compaction) -> CompactionJob {
+    fn load_compaction_as_job(manifest: &StoredManifest, compaction: &Compaction) -> CompactionJob {
         let state = manifest.db_state();
         let srs_by_id: HashMap<_, _> = state
             .compacted
@@ -239,6 +243,7 @@ impl CompactionExecuteBench {
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,
+            compaction_ts: state.last_clock_tick,
         }
     }
 
@@ -267,24 +272,29 @@ impl CompactionExecuteBench {
         });
         let (tx, rx) = crossbeam_channel::unbounded();
         let compactor_options = CompactorOptions::default();
+        let db_stats = Arc::new(DbStats::new());
         let executor = TokioCompactionExecutor::new(
             Handle::current(),
             Arc::new(compactor_options),
             tx,
             table_store.clone(),
+            db_stats.clone(),
         );
         let os = self.object_store.clone();
         info!("load compaction job");
+        let manifest_store = Arc::new(ManifestStore::new(&self.path, os.clone()));
+        let manifest = StoredManifest::load(manifest_store)
+            .await?
+            .expect("expected manifest");
         let job = match &compaction {
             Some(compaction) => {
                 info!("load job from existing compaction");
-                let manifest_store = Arc::new(ManifestStore::new(&self.path, os.clone()));
-                let manifest = StoredManifest::load(manifest_store)
-                    .await?
-                    .expect("expected manifest");
-                CompactionExecuteBench::load_compaction_as_job(manifest, compaction)
+                CompactionExecuteBench::load_compaction_as_job(&manifest, compaction)
             }
-            None => CompactionExecuteBench::load_compaction_job(num_ssts, &table_store).await?,
+            None => {
+                CompactionExecuteBench::load_compaction_job(&manifest, num_ssts, &table_store)
+                    .await?
+            }
         };
         let start = std::time::Instant::now();
         info!("start compaction job");

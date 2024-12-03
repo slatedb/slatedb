@@ -1,12 +1,14 @@
-use crate::db_state::RowAttribute;
 use crate::error::SlateDBError;
-use crate::types::{KeyValueDeletable, ValueDeletable};
+use crate::types::ValueDeletable;
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 bitflags! {
+    #[derive(Debug, Clone, PartialEq, Default)]
     pub(crate) struct RowFlags: u8 {
-        const Tombstone = 0b00000001;
+        const TOMBSTONE = 0b00000001;
+        const HAS_EXPIRE_TS = 0b00000010;
+        const HAS_CREATE_TS = 0b00000100;
     }
 }
 
@@ -16,197 +18,352 @@ bitflags! {
 /// The `v0` codec for the key is (for non-tombstones):
 ///
 /// ```txt
-///  |--------------------------------------------------------------------------|
-///  |       u16      |      u16       |  var        | var  |    u32    |  var  |
-///  |----------------|----------------|-------------|------|-----------|-------|
-///  | key_prefix_len | key_suffix_len |  key_suffix | meta | value_len | value |
-///  |--------------------------------------------------------------------------|
+///  |---------------------------------------------------------------------------------------------------------------------|
+///  |       u16      |      u16       |  var        | u64     | u8        | i64       | i64       | u32       |  var      |
+///  |----------------|----------------|-------------|---------|-----------|-----------|-----------|-----------|-----------|
+///  | key_prefix_len | key_suffix_len |  key_suffix | seq     | flags     | expire_ts | create_ts | value_len | value     |
+///  |---------------------------------------------------------------------------------------------------------------------|
 /// ```
 ///
-/// And for tombstones (with `meta[row_flags] & 0x01 == 1`):
+/// And for tombstones (flags & Tombstone == 1):
+///
 ///  ```txt
-///  |------------------------------------------------------|
-///  |       u16      |      u16       |  var        | var  |
-///  |----------------|----------------|-------------|------|
-///  | key_prefix_len | key_suffix_len |  key_suffix | meta |
-///  |------------------------------------------------------|
+///  |----------------------------------------------------------|-----------|-----------|
+///  |       u16      |      u16       |  var        | u64      | u8        | i64       |
+///  |----------------|----------------|-------------|----------|-----------|-----------|
+///  | key_prefix_len | key_suffix_len |  key_suffix | seq      | flags     | create_ts |
+///  |----------------------------------------------------------------------------------|
 ///  ```
 ///
-/// | Field            | Type | Description                                   |
-/// |------------------|------|-----------------------------------------------|
-/// | `key_prefix_len` | `u16` | Length of the key prefix                     |
-/// | `key_suffix_len` | `u16` | Length of the key suffix                     |
-/// | `key_suffix`     | `var` | Suffix of the key                            |
-/// | `meta`           | `var` | Metadata                                     |
-/// | `value_len`      | `u32` | Length of the value                          |
-/// | `value`          | `var` | Value bytes                                  |
-pub(crate) fn encode_row_v0(
-    data: &mut Vec<u8>,
-    key_prefix_len: usize,
-    key_suffix: &[u8],
-    value: Option<&[u8]>,
-    row_attributes: &Vec<RowAttribute>,
-) {
-    data.put_u16(key_prefix_len as u16);
-    data.put_u16(key_suffix.len() as u16);
-    data.put(key_suffix);
+/// | Field            | Type  | Description                                            |
+/// |------------------|-------|--------------------------------------------------------|
+/// | `key_prefix_len` | `u16` | Length of the key prefix                               |
+/// | `key_suffix_len` | `u16` | Length of the key suffix                               |
+/// | `key_suffix`     | `var` | Suffix of the key                                      |
+/// | `seq`            | `u64` | Sequence Number                                        |
+/// | `flags`          | `u8`  | Flags of the row                                       |
+/// | `expire_ts`      | `u64` | Optional, only has value when flags & HAS_EXPIRE_TS    |
+/// | `create_ts`      | `u64` | Optional, only has value when flags & HAS_CREATE_TS    |
+/// | `value_len`      | `u32` | Length of the value                                    |
+/// | `value`          | `var` | Value bytes                                            |
 
-    data.put(encode_meta(row_attributes, value.is_none()));
-
-    if let Some(value) = value {
-        data.put_u32(value.len() as u32);
-        data.put(value);
-    }
+#[derive(Debug, Clone)]
+pub(crate) struct SstRowEntry {
+    pub key_prefix_len: usize,
+    pub key_suffix: Bytes,
+    pub seq: u64,
+    pub expire_ts: Option<i64>,
+    pub create_ts: Option<i64>,
+    pub value: ValueDeletable,
 }
 
-fn encode_meta(row_attributes: &Vec<RowAttribute>, is_tombstone: bool) -> Bytes {
-    let mut meta = BytesMut::new();
-
-    for attr in row_attributes {
-        match attr {
-            RowAttribute::Flags => meta.put_u8(encode_row_flags(is_tombstone)),
+impl SstRowEntry {
+    pub fn new(
+        key_prefix_len: usize,
+        key_suffix: Bytes,
+        seq: u64,
+        value: ValueDeletable,
+        create_ts: Option<i64>,
+        expire_ts: Option<i64>,
+    ) -> Self {
+        Self {
+            key_prefix_len,
+            key_suffix,
+            seq,
+            create_ts,
+            expire_ts,
+            value,
         }
     }
 
-    meta.freeze()
-}
-
-fn encode_row_flags(is_tombstone: bool) -> u8 {
-    let mut flags = RowFlags::empty();
-
-    if is_tombstone {
-        flags |= RowFlags::Tombstone;
+    pub fn flags(&self) -> RowFlags {
+        let mut flags = match &self.value {
+            ValueDeletable::Value(_) => RowFlags::default(),
+            ValueDeletable::Tombstone => RowFlags::TOMBSTONE,
+        };
+        if self.expire_ts.is_some() {
+            flags |= RowFlags::HAS_EXPIRE_TS;
+        }
+        if self.create_ts.is_some() {
+            flags |= RowFlags::HAS_CREATE_TS;
+        }
+        flags
     }
 
-    flags.bits()
+    pub fn size(&self) -> usize {
+        let mut size = 2  // u16 key_prefix_len
+        + 2 // u16 key_suffix_len
+        + self.key_suffix.len() // key_suffix
+        + 8  // u64 seq
+        + 1; // u8 flags
+        if self.expire_ts.is_some() {
+            size += 8; // i64 expire_ts
+        }
+        if self.create_ts.is_some() {
+            size += 8; // i64 create_ts
+        }
+        if let Some(value) = self.value.as_option() {
+            size += 4; // u32 value_len
+            size += value.len(); // value
+        }
+        size
+    }
+
+    /// Keys in a Block are stored with prefix stripped off to compress the storage size. This function
+    /// restores the full key by prepending the prefix to the key suffix.
+    pub fn restore_full_key(&self, prefix: &Bytes) -> Bytes {
+        let mut full_key = BytesMut::with_capacity(self.key_prefix_len + self.key_suffix.len());
+        full_key.extend_from_slice(&prefix[..self.key_prefix_len]);
+        full_key.extend_from_slice(&self.key_suffix);
+        full_key.freeze()
+    }
 }
 
-/// Decodes a row based on the encoding specified in [`encode_row_v0`]. If the
-/// `data` passed in was not encoded using `encode_row_v0`, or if there are any
-/// unknown row attributes, this method will return an error.
-pub(crate) fn decode_row_v0(
-    first_key: &Bytes,
-    row_attributes: &Vec<RowAttribute>,
-    data: &mut Bytes,
-) -> Result<KeyValueDeletable, SlateDBError> {
-    let key_prefix_len = data.get_u16() as usize;
-    let key_suffix_len = data.get_u16() as usize;
-    let key_suffix = data.slice(..key_suffix_len);
-    data.advance(key_suffix_len);
+pub(crate) struct SstRowCodecV0 {}
 
-    let meta = decode_meta(row_attributes, data)?;
-    let value = if !(meta.flags & RowFlags::Tombstone).is_empty() {
-        ValueDeletable::Tombstone
-    } else {
+impl SstRowCodecV0 {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    pub fn encode(&self, output: &mut Vec<u8>, row: &SstRowEntry) {
+        output.put_u16(row.key_prefix_len as u16);
+        output.put_u16(row.key_suffix.len() as u16);
+        output.put(row.key_suffix.as_ref());
+
+        // encode seq & flags
+        let flags = row.flags();
+        output.put_u64(row.seq);
+        output.put_u8(flags.bits());
+
+        // encode expire & create ts
+        if flags.contains(RowFlags::HAS_EXPIRE_TS) {
+            output.put_i64(
+                row.expire_ts
+                    .expect("expire_ts should be set with HAS_EXPIRE_TS"),
+            );
+        }
+        if flags.contains(RowFlags::HAS_CREATE_TS) {
+            output.put_i64(
+                row.create_ts
+                    .expect("create_ts should be set with HAS_CREATE_TS"),
+            );
+        }
+
+        // skip encoding value for tombstone
+        if flags.contains(RowFlags::TOMBSTONE) {
+            return;
+        }
+
+        // encode value
+        let val = row
+            .value
+            .as_option()
+            .expect("value is not set with no tombstone");
+        output.put_u32(val.len() as u32);
+        output.put(val.as_ref());
+    }
+
+    pub fn decode(&self, data: &mut Bytes) -> Result<SstRowEntry, SlateDBError> {
+        let key_prefix_len = data.get_u16() as usize;
+        let key_suffix_len = data.get_u16() as usize;
+        let key_suffix = data.slice(..key_suffix_len);
+        data.advance(key_suffix_len);
+
+        // decode seq & flags
+        let seq = data.get_u64();
+        let flags = RowFlags::from_bits(data.get_u8()).ok_or(SlateDBError::InvalidRowFlags)?;
+
+        // decode expire_ts & create_ts
+        let (expire_ts, create_ts) =
+            if flags.contains(RowFlags::HAS_EXPIRE_TS | RowFlags::HAS_CREATE_TS) {
+                (Some(data.get_i64()), Some(data.get_i64()))
+            } else if flags.contains(RowFlags::HAS_EXPIRE_TS) {
+                (Some(data.get_i64()), None)
+            } else if flags.contains(RowFlags::HAS_CREATE_TS) {
+                (None, Some(data.get_i64()))
+            } else {
+                (None, None)
+            };
+
+        // skip decoding value for tombstone.
+        if flags.contains(RowFlags::TOMBSTONE) {
+            return Ok(SstRowEntry {
+                key_prefix_len,
+                key_suffix,
+                seq,
+                expire_ts: None, // it does not make sense to have expire_ts for tombstone
+                create_ts,
+                value: ValueDeletable::Tombstone,
+            });
+        }
+
+        // decode value
         let value_len = data.get_u32() as usize;
-        ValueDeletable::Value(data.slice(..value_len))
-    };
-
-    let mut key = BytesMut::with_capacity(key_prefix_len + key_suffix_len);
-    key.extend_from_slice(&first_key[..key_prefix_len]);
-    key.extend_from_slice(&key_suffix);
-
-    Ok(KeyValueDeletable {
-        key: key.into(),
-        value,
-    })
-}
-
-struct RowMetadata {
-    flags: RowFlags,
-}
-
-fn decode_meta(
-    row_attributes: &Vec<RowAttribute>,
-    data: &mut Bytes,
-) -> Result<RowMetadata, SlateDBError> {
-    let mut meta = RowMetadata {
-        flags: RowFlags::empty(),
-    };
-    for attr in row_attributes {
-        match attr {
-            RowAttribute::Flags => match decode_row_flags(data.get_u8()) {
-                Ok(flags) => {
-                    meta.flags = flags;
-                }
-                Err(e) => return Err(e),
-            },
-        }
-    }
-    Ok(meta)
-}
-
-fn decode_row_flags(flags: u8) -> Result<RowFlags, SlateDBError> {
-    match RowFlags::from_bits(flags) {
-        None => Err(SlateDBError::InvalidRowFlags),
-        Some(flags) => Ok(flags),
+        let value = data.slice(..value_len);
+        Ok(SstRowEntry {
+            key_prefix_len,
+            key_suffix,
+            seq,
+            expire_ts,
+            create_ts,
+            value: ValueDeletable::Value(value),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db_state::RowAttribute;
+    use crate::test_utils::assert_debug_snapshot;
     use crate::types::ValueDeletable;
+    use rstest::rstest;
 
-    #[test]
-    fn test_encode_decode_normal_row() {
-        let mut encoded_data = Vec::new();
-        let key_prefix_len = 3;
-        let key_suffix = b"key";
-        let value = Some(b"value".as_slice());
-        let row_attributes = vec![RowAttribute::Flags];
-
-        // Encode the row
-        encode_row_v0(
-            &mut encoded_data,
-            key_prefix_len,
-            key_suffix,
-            value,
-            &row_attributes,
-        );
-
-        let first_key = Bytes::from(b"prefixdata".as_ref());
-        let mut data = Bytes::from(encoded_data);
-        let decoded =
-            decode_row_v0(&first_key, &row_attributes, &mut data).expect("Decoding failed");
-
-        // Expected key: first_key[..3] + "key" = "prekey"
-        let expected_key = Bytes::from(b"prekey" as &[u8]);
-        let expected_value = ValueDeletable::Value(Bytes::from(b"value" as &[u8]));
-
-        assert_eq!(decoded.key, expected_key);
-        assert_eq!(decoded.value, expected_value);
+    #[derive(Debug)]
+    struct CodecTestCase {
+        name: &'static str,
+        key_prefix_len: usize,
+        key_suffix: Vec<u8>,
+        seq: u64,
+        value: Option<Vec<u8>>,
+        create_ts: Option<i64>,
+        expire_ts: Option<i64>,
+        first_key: Vec<u8>,
     }
 
-    #[test]
-    fn test_encode_decode_tombstone_row() {
+    #[rstest]
+    #[case(CodecTestCase {
+        name: "normal row with expire_ts",
+        key_prefix_len: 3,
+        key_suffix: b"key".to_vec(),
+        seq: 1,
+        value: Some(b"value".to_vec()),
+        create_ts: None,
+        expire_ts: Some(10),
+        first_key: b"prefixdata".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "normal row without expire_ts",
+        key_prefix_len: 0,
+        key_suffix: b"key".to_vec(),
+        seq: 1,
+        value: Some(b"value".to_vec()),
+        create_ts: None,
+        expire_ts: None,
+        first_key: b"".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "row with both timestamps",
+        key_prefix_len: 5,
+        key_suffix: b"both".to_vec(),
+        seq: 100,
+        value: Some(b"value".to_vec()),
+        create_ts: Some(1234567890),
+        expire_ts: Some(9876543210),
+        first_key: b"test_both".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "row with only create_ts",
+        key_prefix_len: 4,
+        key_suffix: b"create".to_vec(),
+        seq: 50,
+        value: Some(b"test_value".to_vec()),
+        create_ts: Some(1234567890),
+        expire_ts: None,
+        first_key: b"timecreate".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "tombstone row",
+        key_prefix_len: 4,
+        key_suffix: b"tomb".to_vec(),
+        seq: 1,
+        value: None,
+        create_ts: Some(2),
+        expire_ts: Some(1),
+        first_key: b"deadbeefdata".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "empty key suffix",
+        key_prefix_len: 4,
+        key_suffix: b"".to_vec(),
+        seq: 1,
+        value: Some(b"value".to_vec()),
+        create_ts: None,
+        expire_ts: None,
+        first_key: b"keyprefixdata".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "large sequence number",
+        key_prefix_len: 3,
+        key_suffix: b"seq".to_vec(),
+        seq: u64::MAX,
+        value: Some(b"value".to_vec()),
+        create_ts: None,
+        expire_ts: None,
+        first_key: b"bigseq".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "large value",
+        key_prefix_len: 2,
+        key_suffix: b"big".to_vec(),
+        seq: 1,
+        value: Some(vec![b'x'; 100]),
+        create_ts: None,
+        expire_ts: None,
+        first_key: b"bigvalue".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "long key suffix",
+        key_prefix_len: 2,
+        key_suffix: vec![b'k'; 100],
+        seq: 1,
+        value: Some(b"value".to_vec()),
+        create_ts: None,
+        expire_ts: None,
+        first_key: b"longkey".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "unicode key suffix",
+        key_prefix_len: 3,
+        key_suffix: "你好世界".as_bytes().to_vec(),
+        seq: 1,
+        value: Some(b"value".to_vec()),
+        create_ts: None,
+        expire_ts: None,
+        first_key: b"unicode".to_vec(),
+    })]
+    fn test_encode_decode(#[case] test_case: CodecTestCase) {
         let mut encoded_data = Vec::new();
-        let key_prefix_len = 4;
-        let key_suffix = b"tomb";
-        let value = None; // Indicates tombstone
-        let row_attributes = vec![RowAttribute::Flags];
+        let codec = SstRowCodecV0 {};
 
-        // Encode the tombstone row
-        encode_row_v0(
+        // Encode the row
+        let value = match test_case.value {
+            Some(v) => ValueDeletable::Value(Bytes::from(v)),
+            None => ValueDeletable::Tombstone,
+        };
+
+        codec.encode(
             &mut encoded_data,
-            key_prefix_len,
-            key_suffix,
-            value,
-            &row_attributes,
+            &SstRowEntry::new(
+                test_case.key_prefix_len,
+                Bytes::from(test_case.key_suffix),
+                test_case.seq,
+                value.clone(),
+                test_case.create_ts,
+                test_case.expire_ts,
+            ),
         );
 
-        let first_key = Bytes::from(b"deadbeefdata".as_ref());
-        let mut data = Bytes::from(encoded_data);
-        let decoded =
-            decode_row_v0(&first_key, &row_attributes, &mut data).expect("Decoding failed");
+        let mut data = Bytes::from(encoded_data.clone());
+        let decoded = codec.decode(&mut data).expect("decoding failed");
+        let output = (
+            test_case.name,
+            String::from_utf8_lossy(&encoded_data),
+            decoded.clone(),
+            decoded.restore_full_key(&Bytes::from(test_case.first_key)),
+        );
 
-        // Expected key: first_key[..4] + "tomb" = "deadtomb"
-        let expected_key = Bytes::from(b"deadtomb" as &[u8]);
-        let expected_value = ValueDeletable::Tombstone;
-
-        assert_eq!(decoded.key, expected_key);
-        assert_eq!(decoded.value, expected_value);
+        assert_debug_snapshot!(test_case.name, output);
     }
 
     #[test]
@@ -214,56 +371,26 @@ mod tests {
         let mut encoded_data = Vec::new();
         let key_prefix_len = 3;
         let key_suffix = b"bad".as_slice();
-        let row_attributes = vec![RowAttribute::Flags];
 
         // Manually encode invalid flags
         encoded_data.put_u16(key_prefix_len as u16);
         encoded_data.put_u16(key_suffix.len() as u16);
         encoded_data.put(key_suffix);
+        encoded_data.put_u64(100);
         encoded_data.put_u8(0xFF); // Invalid flag
         encoded_data.put_u32(4);
         encoded_data.put(b"data".as_slice());
 
-        let first_key = Bytes::from(b"prefixdata".as_ref());
         let mut data = Bytes::from(encoded_data);
 
         // Attempt to decode the row
-        let result = decode_row_v0(&first_key, &row_attributes, &mut data);
+        let codec = SstRowCodecV0 {};
+        let result = codec.decode(&mut data);
 
         assert!(result.is_err());
         match result {
             Err(SlateDBError::InvalidRowFlags) => (),
             _ => panic!("Expected InvalidRowFlags"),
         }
-    }
-
-    #[test]
-    fn test_encode_decode_empty_key_suffix() {
-        let mut encoded_data = Vec::new();
-        let key_prefix_len = 4;
-        let key_suffix = b""; // Empty key suffix
-        let value = Some(b"value".as_slice());
-        let row_attributes = vec![RowAttribute::Flags];
-
-        // Encode the row
-        encode_row_v0(
-            &mut encoded_data,
-            key_prefix_len,
-            key_suffix,
-            value,
-            &row_attributes,
-        );
-
-        let first_key = Bytes::from(b"keyprefixdata".as_slice());
-        let mut data = Bytes::from(encoded_data);
-        let decoded =
-            decode_row_v0(&first_key, &row_attributes, &mut data).expect("Decoding failed");
-
-        // Expected key: first_key[..4] + "" = "keyp"
-        let expected_key = Bytes::from(b"keyp" as &[u8]);
-        let expected_value = ValueDeletable::Value(Bytes::from(b"value" as &[u8]));
-
-        assert_eq!(decoded.key, expected_key);
-        assert_eq!(decoded.value, expected_value);
     }
 }

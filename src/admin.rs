@@ -1,4 +1,11 @@
+use crate::checkpoint::Checkpoint;
+use crate::config::GarbageCollectorOptions;
+use crate::error::SlateDBError;
+use crate::garbage_collector::GarbageCollector;
 use crate::manifest_store::ManifestStore;
+use crate::metrics::DbStats;
+use crate::sst::SsTableFormat;
+use crate::tablestore::TableStore;
 #[cfg(feature = "aws")]
 use log::warn;
 use object_store::path::Path;
@@ -7,6 +14,7 @@ use std::env;
 use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
+use tokio::runtime::Handle;
 
 /// read-only access to the latest manifest file
 pub async fn read_manifest(
@@ -15,9 +23,13 @@ pub async fn read_manifest(
     maybe_id: Option<u64>,
 ) -> Result<Option<String>, Box<dyn Error>> {
     let manifest_store = ManifestStore::new(path, object_store);
-    let id_manifest = match maybe_id {
-        None => manifest_store.read_latest_manifest().await?,
-        Some(id) => manifest_store.read_manifest(id).await?,
+    let id_manifest = if let Some(id) = maybe_id {
+        manifest_store
+            .read_manifest(id)
+            .await?
+            .map(|manifest| (id, manifest))
+    } else {
+        manifest_store.read_latest_manifest().await?
     };
 
     match id_manifest {
@@ -34,6 +46,17 @@ pub async fn list_manifests<R: RangeBounds<u64>>(
     let manifest_store = ManifestStore::new(path, object_store);
     let manifests = manifest_store.list_manifests(range).await?;
     Ok(serde_json::to_string(&manifests)?)
+}
+
+pub async fn list_checkpoints(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
+    let manifest_store = ManifestStore::new(path, object_store);
+    let Some((_, manifest)) = manifest_store.read_latest_manifest().await? else {
+        return Err(Box::new(SlateDBError::ManifestMissing));
+    };
+    Ok(manifest.core.checkpoints)
 }
 
 /// Loads an object store from configured environment variables.
@@ -57,8 +80,40 @@ pub fn load_object_store_from_env(
         "local" => load_local(),
         #[cfg(feature = "aws")]
         "aws" => load_aws(),
+        #[cfg(feature = "azure")]
+        "azure" => load_azure(),
         _ => Err(format!("Unknown CLOUD_PROVIDER: '{}'", provider).into()),
     }
+}
+
+pub async fn run_gc_instance(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    gc_opts: GarbageCollectorOptions,
+) -> Result<(), Box<dyn Error>> {
+    let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
+    let sst_format = SsTableFormat::default(); // read only SSTs, can use default
+    let table_store = Arc::new(TableStore::new(
+        object_store.clone(),
+        sst_format.clone(),
+        path.clone(),
+        None, // no need for cache in GC
+    ));
+
+    let tokio_handle = Handle::current();
+    let stats = Arc::new(DbStats::new());
+    let collector = GarbageCollector::new(
+        manifest_store,
+        table_store,
+        gc_opts,
+        tokio_handle,
+        stats.clone(),
+    )
+    .await;
+
+    collector.register_interrupt_handler();
+    collector.await_shutdown().await;
+    Ok(())
 }
 
 /// Loads a local object store instance.
@@ -123,5 +178,24 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
         builder
     };
 
+    Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
+}
+
+/// Loads an Azure Object store instance.
+///
+/// | Env Variable | Doc | Required |
+/// |--------------|-----|----------|
+/// | AZURE_ACCOUNT | The azure storage account name | Yes |
+/// | AZURE_KEY | The azure storage account key| Yes |
+/// | AZURE_CONTAINER | The storage container name| Yes |
+#[cfg(feature = "azure")]
+pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+    let account = env::var("AZURE_ACCOUNT").expect("AZURE_ACCOUNT must be set");
+    let key = env::var("AZURE_KEY").expect("AZURE_KEY must be set");
+    let container = env::var("AZURE_CONTAINER").expect("AZURE_CONTAINER must be set");
+    let builder = object_store::azure::MicrosoftAzureBuilder::new()
+        .with_account(account)
+        .with_access_key(key)
+        .with_container_name(container);
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
 }

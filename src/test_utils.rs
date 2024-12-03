@@ -1,14 +1,16 @@
-use bytes::{BufMut, Bytes, BytesMut};
-
+use crate::config::Clock;
 use crate::iter::KeyValueIterator;
-use crate::types::{KeyValue, ValueDeletable};
+use crate::types::{KeyValue, RowAttributes, ValueDeletable};
+use bytes::{BufMut, Bytes, BytesMut};
+use rand::Rng;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 // this complains because we include these in the bencher feature but they are only
 // used for cfg(test)
 #[allow(dead_code)]
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(
     iterator: &mut T,
-    entries: &[(Vec<u8>, ValueDeletable)],
+    entries: &[(Vec<u8>, ValueDeletable, RowAttributes)],
 ) {
     // We use Vec<u8> instead of &[u8] for the keys in the entries for several reasons:
     // 1. Ownership and Lifetime: Vec<u8> owns its data, while &[u8] is a borrowed slice.
@@ -26,7 +28,7 @@ pub(crate) async fn assert_iterator<T: KeyValueIterator>(
     // 5. Performance: While Vec<u8> has a slight overhead compared to &[u8], the difference is
     //    negligible for most use cases, especially in tests where convenience and clarity are prioritized.
 
-    for (expected_k, expected_v) in entries.iter() {
+    for (expected_k, expected_v, expected_attr) in entries.iter() {
         let kv = iterator
             .next_entry()
             .await
@@ -34,6 +36,11 @@ pub(crate) async fn assert_iterator<T: KeyValueIterator>(
             .expect("expected iterator to return a value");
         assert_eq!(kv.key, Bytes::from(expected_k.clone()));
         assert_eq!(kv.value, *expected_v);
+        assert_eq!(
+            kv.expire_ts, expected_attr.expire_ts,
+            "Attribute expire_ts mismatch at key {:?}",
+            kv.key
+        );
     }
     assert!(iterator
         .next_entry()
@@ -48,6 +55,41 @@ pub(crate) async fn assert_iterator<T: KeyValueIterator>(
 pub fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
     assert_eq!(kv.key, key);
     assert_eq!(kv.value, val);
+}
+
+#[allow(dead_code)]
+pub(crate) fn gen_attrs(ts: i64) -> RowAttributes {
+    RowAttributes {
+        ts: Some(ts),
+        expire_ts: None,
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn gen_empty_attrs() -> RowAttributes {
+    RowAttributes {
+        ts: None,
+        expire_ts: None,
+    }
+}
+
+pub(crate) struct TestClock {
+    pub(crate) ticker: AtomicI64,
+}
+
+#[allow(dead_code)]
+impl TestClock {
+    pub(crate) fn new() -> TestClock {
+        TestClock {
+            ticker: AtomicI64::new(0),
+        }
+    }
+}
+
+impl Clock for TestClock {
+    fn now(&self) -> i64 {
+        self.ticker.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Clone)]
@@ -98,6 +140,28 @@ impl OrderedBytesGenerator {
         self.bytes[pos] += 1;
     }
 }
+
+#[allow(dead_code)]
+pub(crate) fn gen_rand_bytes(n: usize) -> Bytes {
+    let mut rng = rand::thread_rng();
+    let random_bytes: Vec<u8> = (0..n).map(|_| rng.gen()).collect();
+    Bytes::from(random_bytes)
+}
+
+// it seems that insta still does not allow to customize the snapshot path in insta.yaml,
+// we can remove this macro once insta supports it.
+#[cfg(test)]
+macro_rules! assert_debug_snapshot {
+    ($name:expr, $output:expr) => {
+        let mut settings = insta::Settings::clone_current();
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/snapshots");
+        settings.set_snapshot_path(path);
+        settings.bind(|| insta::assert_debug_snapshot!($name, $output));
+    };
+}
+
+#[cfg(test)]
+pub(crate) use assert_debug_snapshot;
 
 #[cfg(test)]
 mod tests {
