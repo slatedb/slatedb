@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 
 use crate::db_iter::SeekToKey;
 use crate::row_codec::SstRowCodecV0;
@@ -93,25 +93,11 @@ impl<B: BlockLike> BlockIterator<B> {
 
     /// Construct a BlockIterator that starts at the given key, or at the first
     /// key greater than the given key if the exact key given is not in the block.
-    pub fn from_key(block: B, key: &[u8]) -> BlockIterator<B> {
-        let first_key = BlockIterator::decode_first_key(&block);
-
-        let idx = block.offsets().partition_point(|offset| {
-            let mut cursor = &block.data()[*offset as usize..];
-            let overlap_len = cursor.get_u16() as usize;
-            let rest_len = cursor.get_u16() as usize;
-            let rest_key = &cursor[..rest_len];
-            let mut cursor_key = BytesMut::with_capacity(overlap_len + rest_len);
-            cursor_key.extend_from_slice(&first_key[..overlap_len]);
-            cursor_key.extend_from_slice(rest_key);
-            cursor_key < key
-        });
-
-        BlockIterator {
-            block,
-            off_off: idx,
-            first_key,
-        }
+    pub async fn from_key(block: B, key: &[u8]) -> BlockIterator<B> {
+        let mut iter = Self::from_first_key(block);
+        let seek_key = Bytes::copy_from_slice(key);
+        iter.seek(&seek_key).await.unwrap();
+        iter
     }
 
     fn advance(&mut self) {
@@ -186,7 +172,7 @@ mod tests {
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"kratos".as_ref());
+        let mut iter = BlockIterator::from_key(&block, b"kratos".as_ref()).await;
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
@@ -201,7 +187,7 @@ mod tests {
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"ka".as_ref());
+        let mut iter = BlockIterator::from_key(&block, b"ka".as_ref()).await;
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
@@ -216,7 +202,7 @@ mod tests {
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"zzz".as_ref());
+        let mut iter = BlockIterator::from_key(&block, b"zzz".as_ref()).await;
         assert!(iter.next().await.unwrap().is_none());
     }
 

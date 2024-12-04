@@ -206,12 +206,13 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
                     FetchTask::Finished(blocks) => {
                         if let Some(block) = blocks.pop_front() {
                             let start_bound = self.range.start_bound();
-                            return match start_bound {
-                                Unbounded => Ok(Some(BlockIterator::from_first_key(block))),
+                            let iter = match start_bound {
+                                Unbounded => BlockIterator::from_first_key(block),
                                 Included(key) | Excluded(key) => {
-                                    Ok(Some(BlockIterator::from_key(block, key)))
+                                    BlockIterator::from_key(block, key).await
                                 }
                             };
+                            return Ok(Some(iter))
                         } else {
                             self.fetch_tasks.pop_front();
                         }
