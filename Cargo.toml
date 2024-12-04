@@ -63,7 +63,6 @@ duration-str = { version = "0.11.2", features = [
 ], default-features = false }
 
 [dev-dependencies]
-criterion = { version = "0.5.1", features = ["async_tokio"] }
 tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
 fail-parallel = { version = "0.5.1", features = ["failpoints"] }
 tempfile = "3.3"
@@ -71,6 +70,7 @@ filetime = "0.2"
 figment = { version = "0.10.19", features = ["test"] }
 rstest = "0.23.0"
 insta = "1.39.0"
+criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
 
 [features]
 default = ["aws", "moka"]
@@ -104,6 +104,10 @@ required-features = ["bencher"]
 name = "slatedb"
 path = "src/cli/main.rs"
 required-features = ["cli"]
+
+[[bench]]
+name = "db_operations"
+harness = false
 
 [[bench]]
 name = "bloom_bench"
