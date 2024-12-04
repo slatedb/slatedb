@@ -479,8 +479,7 @@ mod tests {
         let rt = build_runtime();
         let (os, manifest_store, table_store, db) = rt.block_on(build_test_db(options.clone()));
         let mut stored_manifest = rt
-            .block_on(StoredManifest::try_load(manifest_store.clone()))
-            .unwrap()
+            .block_on(StoredManifest::load(manifest_store.clone()))
             .unwrap();
         rt.block_on(db.put(&[b'a'; 32], &[b'b'; 96])).unwrap();
         rt.block_on(db.close()).unwrap();
@@ -594,10 +593,7 @@ mod tests {
 
     async fn await_compaction(manifest_store: Arc<ManifestStore>) -> Option<CoreDbState> {
         run_for(Duration::from_secs(10), || async {
-            let stored_manifest = StoredManifest::try_load(manifest_store.clone())
-                .await
-                .unwrap()
-                .unwrap();
+            let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
             let db_state = stored_manifest.db_state();
             if db_state.l0_last_compacted.is_some() {
                 return Some(db_state.clone());
