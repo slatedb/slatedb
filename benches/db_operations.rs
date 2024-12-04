@@ -25,6 +25,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                 },
             )
             .await
+            .expect("put failed");
         })
     });
 }
