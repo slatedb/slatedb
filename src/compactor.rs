@@ -106,10 +106,7 @@ impl CompactorOrchestrator {
     ) -> Result<Self, SlateDBError> {
         let options = Arc::new(options);
         let stored_manifest =
-            tokio_handle.block_on(StoredManifest::try_load(manifest_store.clone()))?;
-        let Some(stored_manifest) = stored_manifest else {
-            return Err(SlateDBError::InvalidDBState);
-        };
+            tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;
         let manifest = tokio_handle.block_on(FenceableManifest::init_compactor(stored_manifest))?;
         let state = Self::load_state(&manifest)?;
         let scheduler = Self::load_compaction_scheduler(options.as_ref());

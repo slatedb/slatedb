@@ -137,6 +137,9 @@ impl StoredManifest {
         }))
     }
 
+    /// Load the current manifest from the supplied manifest store. If successful,
+    /// this method returns a [`Result`] with an instance of [`StoredManifest`].
+    /// If no manifests could be found, the error [`LatestManifestMissing`] is returned.
     pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Self, SlateDBError> {
         Self::try_load(store).await?.ok_or(LatestManifestMissing)
     }
