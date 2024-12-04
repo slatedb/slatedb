@@ -50,7 +50,7 @@ impl<'a> KeyValueIterator for MemTableIterator<'a> {
     }
 }
 
-impl<'a> MemTableIterator<'a> {
+impl MemTableIterator<'_> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
         self.0.next().map(|entry| RowEntry {
             key: entry.key().clone(),
