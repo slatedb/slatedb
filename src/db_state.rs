@@ -43,17 +43,20 @@ impl SsTableHandle {
         end_bound_key: Option<Bytes>,
         range: &BytesRange,
     ) -> bool {
-        if let Some(first_key) = self.info.first_key.clone() {
-            let end_bound = match end_bound_key {
-                Some(end_bound_key) => Excluded(end_bound_key),
-                None => Unbounded,
-            };
-            let this_range = BytesRange::new(Included(first_key), end_bound);
-            let intersection = this_range.intersection(range);
-            intersection.non_empty()
-        } else {
-            false
+        let start_bound = match &self.info.first_key {
+            None => Unbounded,
+            Some(key) => Included(key),
         }
+        .cloned();
+
+        let end_bound = match end_bound_key {
+            Some(end_bound_key) => Excluded(end_bound_key),
+            None => Unbounded,
+        };
+
+        let this_range = BytesRange::new(start_bound, end_bound);
+        let intersection = this_range.intersection(range);
+        intersection.non_empty()
     }
 
     pub(crate) fn estimate_size(&self) -> u64 {
@@ -154,17 +157,14 @@ impl SortedRun {
             .map(|idx| &self.ssts[idx])
     }
 
-    pub(crate) fn into_tables_covering_range(
-        self,
-        range: &BytesRange,
-    ) -> VecDeque<Box<SsTableHandle>> {
+    pub(crate) fn tables_covering_range(self, range: &BytesRange) -> VecDeque<Box<SsTableHandle>> {
         let mut covering_ssts = VecDeque::new();
         let ssts: Vec<_> = self.ssts.into_iter().map(Box::new).collect();
 
         for idx in 0..ssts.len() {
             let current_sst = &ssts[idx];
 
-            let upper_bound_key = if idx < ssts.len() {
+            let upper_bound_key = if idx + 1 < ssts.len() {
                 let next_sst = &ssts[idx + 1];
                 next_sst.info.first_key.clone()
             } else {
@@ -379,9 +379,13 @@ impl DbState {
 
 #[cfg(test)]
 mod tests {
+    use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::proptest_util::arbitrary;
+    use bytes::Bytes;
+    use proptest::collection::vec;
+    use proptest::proptest;
+    use std::collections::BTreeSet;
     use ulid::Ulid;
-
-    use crate::db_state::{CoreDbState, DbState, SsTableHandle, SsTableId, SsTableInfo};
 
     #[test]
     fn test_should_refresh_db_state_with_l0s_up_to_last_compacted() {
@@ -419,7 +423,7 @@ mod tests {
     }
 
     fn add_l0s_to_dbstate(db_state: &mut DbState, n: u32) {
-        let dummy_info = create_sst_info();
+        let dummy_info = create_sst_info(None);
         for i in 0..n {
             db_state.freeze_memtable(i as u64);
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
@@ -428,9 +432,56 @@ mod tests {
         }
     }
 
-    fn create_sst_info() -> SsTableInfo {
+    #[test]
+    fn test_sorted_run_collect_tables_in_range() {
+        let max_bytes_len = 5;
+        proptest!(|(
+            table_first_keys in vec(arbitrary::nonempty_bytes(max_bytes_len), 0..10),
+            range in arbitrary::nonempty_range(max_bytes_len)
+        )| {
+            let sorted_first_keys: BTreeSet<Bytes> = table_first_keys.into_iter().collect();
+            let sorted_run = create_sorted_run(0, sorted_first_keys);
+            let covering_tables = sorted_run.clone().tables_covering_range(&range);
+
+            assert!(covering_tables.len() > 0);
+
+            let first_covering_table = covering_tables.front().unwrap();
+            let range_start_key = range.start_bound_opt().unwrap_or(Bytes::new());
+            if let Some(first_key) = &first_covering_table.info.first_key {
+                assert!(*first_key <= range_start_key);
+            } else if sorted_run.ssts.len() > 1 {
+                let second_table = sorted_run.ssts[1].clone();
+                assert!(second_table.info.first_key.unwrap() > range_start_key);
+            }
+
+            let last_match_table = covering_tables.iter().last().unwrap();
+            let range_end_key: Bytes = range.end_bound_opt().unwrap_or(vec![u8::MAX; 2].into());
+            if let Some(first_key) = &last_match_table.info.first_key {
+                assert!(*first_key <= range_end_key);
+            } else if sorted_run.ssts.len() > 1 {
+                let second_table = sorted_run.ssts[1].clone();
+                assert!(second_table.info.first_key.unwrap() > range_end_key);
+            }
+        });
+    }
+
+    fn create_sorted_run(id: u32, first_keys: BTreeSet<Bytes>) -> SortedRun {
+        let mut ssts = vec![create_compacted_sst_handle(None)];
+        for first_key in first_keys {
+            ssts.push(create_compacted_sst_handle(Some(first_key)));
+        }
+        SortedRun { id, ssts }
+    }
+
+    fn create_compacted_sst_handle(first_key: Option<Bytes>) -> SsTableHandle {
+        let sst_info = create_sst_info(first_key);
+        let sst_id = SsTableId::Compacted(Ulid::new());
+        SsTableHandle::new(sst_id, sst_info.clone())
+    }
+
+    fn create_sst_info(first_key: Option<Bytes>) -> SsTableInfo {
         SsTableInfo {
-            first_key: None,
+            first_key,
             index_offset: 0,
             index_len: 0,
             filter_offset: 0,

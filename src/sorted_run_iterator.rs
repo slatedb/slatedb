@@ -48,7 +48,7 @@ impl<'a> SortedRunIterator<'a, Box<SsTableHandle>> {
         cache_blocks: bool,
     ) -> Result<Self, SlateDBError> {
         assert!(!sorted_run.ssts.is_empty());
-        let ssts = sorted_run.into_tables_covering_range(&range);
+        let ssts = sorted_run.tables_covering_range(&range);
         let sorted_run_iter = SsTableHandleIter::new(ssts);
         let start_key = range.start_bound_opt();
 

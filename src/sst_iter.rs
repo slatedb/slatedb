@@ -212,7 +212,7 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
                                     BlockIterator::from_key(block, key).await
                                 }
                             };
-                            return Ok(Some(iter))
+                            return Ok(Some(iter));
                         } else {
                             self.fetch_tasks.pop_front();
                         }
