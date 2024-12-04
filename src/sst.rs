@@ -317,7 +317,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     compression_codec: Option<CompressionCodec>,
 }
 
-impl<'a> EncodedSsTableBuilder<'a> {
+impl EncodedSsTableBuilder<'_> {
     /// Create a builder based on target block size.
     fn new(
         block_size: usize,
