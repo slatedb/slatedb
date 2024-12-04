@@ -47,6 +47,7 @@ bitflags! {
 /// | `value_len`      | `u32` | Length of the value                                    |
 /// | `value`          | `var` | Value bytes                                            |
 
+#[derive(Debug, Clone)]
 pub(crate) struct SstRowEntry {
     pub key_prefix_len: usize,
     pub key_suffix: Bytes,
@@ -214,106 +215,155 @@ impl SstRowCodecV0 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::assert_debug_snapshot;
     use crate::types::ValueDeletable;
+    use rstest::rstest;
 
-    #[test]
-    fn test_encode_decode_normal_row() {
-        let mut encoded_data = Vec::new();
-        let key_prefix_len = 3;
-        let key_suffix = b"key";
-        let value = Some(b"value".as_slice());
-
-        // Encode the row
-        let codec = SstRowCodecV0 {};
-        codec.encode(
-            &mut encoded_data,
-            &SstRowEntry::new(
-                key_prefix_len,
-                Bytes::from(key_suffix.to_vec()),
-                1,
-                ValueDeletable::Value(Bytes::from(value.unwrap().to_vec())),
-                None,
-                Some(10),
-            ),
-        );
-
-        let first_key = Bytes::from(b"prefixdata".as_ref());
-        let mut data = Bytes::from(encoded_data);
-
-        let decoded = codec.decode(&mut data).expect("decoding failed");
-
-        // Expected key: first_key[..3] + "key" = "prekey"
-        let expected_key = Bytes::from(b"prekey" as &[u8]);
-        let expected_value = ValueDeletable::Value(Bytes::from(b"value" as &[u8]));
-
-        assert_eq!(decoded.restore_full_key(&first_key), &expected_key);
-        assert_eq!(decoded.size(), 33);
-        assert_eq!(decoded.value, expected_value);
-        assert_eq!(decoded.create_ts, None);
-        assert_eq!(decoded.expire_ts, Some(10));
+    #[derive(Debug)]
+    struct CodecTestCase {
+        name: &'static str,
+        key_prefix_len: usize,
+        key_suffix: Vec<u8>,
+        seq: u64,
+        value: Option<Vec<u8>>,
+        create_ts: Option<i64>,
+        expire_ts: Option<i64>,
+        first_key: Vec<u8>,
     }
 
-    #[test]
-    fn test_encode_decode_normal_row_no_expire_ts() {
+    #[rstest]
+    #[case(CodecTestCase {
+        name: "normal row with expire_ts",
+        key_prefix_len: 3,
+        key_suffix: b"key".to_vec(),
+        seq: 1,
+        value: Some(b"value".to_vec()),
+        create_ts: None,
+        expire_ts: Some(10),
+        first_key: b"prefixdata".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "normal row without expire_ts",
+        key_prefix_len: 0,
+        key_suffix: b"key".to_vec(),
+        seq: 1,
+        value: Some(b"value".to_vec()),
+        create_ts: None,
+        expire_ts: None,
+        first_key: b"".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "row with both timestamps",
+        key_prefix_len: 5,
+        key_suffix: b"both".to_vec(),
+        seq: 100,
+        value: Some(b"value".to_vec()),
+        create_ts: Some(1234567890),
+        expire_ts: Some(9876543210),
+        first_key: b"test_both".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "row with only create_ts",
+        key_prefix_len: 4,
+        key_suffix: b"create".to_vec(),
+        seq: 50,
+        value: Some(b"test_value".to_vec()),
+        create_ts: Some(1234567890),
+        expire_ts: None,
+        first_key: b"timecreate".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "tombstone row",
+        key_prefix_len: 4,
+        key_suffix: b"tomb".to_vec(),
+        seq: 1,
+        value: None,
+        create_ts: Some(2),
+        expire_ts: Some(1),
+        first_key: b"deadbeefdata".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "empty key suffix",
+        key_prefix_len: 4,
+        key_suffix: b"".to_vec(),
+        seq: 1,
+        value: Some(b"value".to_vec()),
+        create_ts: None,
+        expire_ts: None,
+        first_key: b"keyprefixdata".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "large sequence number",
+        key_prefix_len: 3,
+        key_suffix: b"seq".to_vec(),
+        seq: u64::MAX,
+        value: Some(b"value".to_vec()),
+        create_ts: None,
+        expire_ts: None,
+        first_key: b"bigseq".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "large value",
+        key_prefix_len: 2,
+        key_suffix: b"big".to_vec(),
+        seq: 1,
+        value: Some(vec![b'x'; 100]),
+        create_ts: None,
+        expire_ts: None,
+        first_key: b"bigvalue".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "long key suffix",
+        key_prefix_len: 2,
+        key_suffix: vec![b'k'; 100],
+        seq: 1,
+        value: Some(b"value".to_vec()),
+        create_ts: None,
+        expire_ts: None,
+        first_key: b"longkey".to_vec(),
+    })]
+    #[case(CodecTestCase {
+        name: "unicode key suffix",
+        key_prefix_len: 3,
+        key_suffix: "你好世界".as_bytes().to_vec(),
+        seq: 1,
+        value: Some(b"value".to_vec()),
+        create_ts: None,
+        expire_ts: None,
+        first_key: b"unicode".to_vec(),
+    })]
+    fn test_encode_decode(#[case] test_case: CodecTestCase) {
         let mut encoded_data = Vec::new();
-        let key_prefix_len = 3;
-        let key_suffix = b"key";
-        let value = Some(b"value".as_slice());
+        let codec = SstRowCodecV0 {};
 
         // Encode the row
-        let codec = SstRowCodecV0 {};
+        let value = match test_case.value {
+            Some(v) => ValueDeletable::Value(Bytes::from(v)),
+            None => ValueDeletable::Tombstone,
+        };
+
         codec.encode(
             &mut encoded_data,
             &SstRowEntry::new(
-                key_prefix_len,
-                Bytes::from(key_suffix.to_vec()),
-                1,
-                ValueDeletable::Value(Bytes::from(value.unwrap().to_vec())),
-                None,
-                None,
+                test_case.key_prefix_len,
+                Bytes::from(test_case.key_suffix),
+                test_case.seq,
+                value.clone(),
+                test_case.create_ts,
+                test_case.expire_ts,
             ),
         );
 
-        let mut data = Bytes::from(encoded_data);
+        let mut data = Bytes::from(encoded_data.clone());
         let decoded = codec.decode(&mut data).expect("decoding failed");
-
-        assert_eq!(decoded.expire_ts, None);
-        assert_eq!(decoded.size(), 25);
-    }
-
-    #[test]
-    fn test_encode_decode_tombstone_row() {
-        let mut encoded_data = Vec::new();
-        let key_prefix_len = 4;
-        let key_suffix = b"tomb";
-
-        // Encode the row
-        let codec = SstRowCodecV0 {};
-        codec.encode(
-            &mut encoded_data,
-            &SstRowEntry::new(
-                key_prefix_len,
-                Bytes::from(key_suffix.to_vec()),
-                1,
-                ValueDeletable::Tombstone,
-                Some(2),
-                Some(1),
-            ),
+        let output = (
+            test_case.name,
+            String::from_utf8_lossy(&encoded_data),
+            decoded.clone(),
+            decoded.restore_full_key(&Bytes::from(test_case.first_key)),
         );
 
-        let first_key = Bytes::from(b"deadbeefdata".as_ref());
-        let mut data = Bytes::from(encoded_data);
-        let decoded = codec.decode(&mut data).expect("decoding failed");
-
-        // Expected key: first_key[..4] + "tomb" = "deadtomb"
-        let expected_key = Bytes::from(b"deadtomb" as &[u8]);
-        let expected_value = ValueDeletable::Tombstone;
-
-        assert_eq!(decoded.restore_full_key(&first_key), &expected_key);
-        assert_eq!(decoded.value, expected_value);
-        assert_eq!(decoded.expire_ts, None);
-        assert_eq!(decoded.create_ts, Some(2));
-        assert_eq!(decoded.size(), 25);
+        assert_debug_snapshot!(test_case.name, output);
     }
 
     #[test]
@@ -342,38 +392,5 @@ mod tests {
             Err(SlateDBError::InvalidRowFlags) => (),
             _ => panic!("Expected InvalidRowFlags"),
         }
-    }
-
-    #[test]
-    fn test_encode_decode_empty_key_suffix() {
-        let mut encoded_data = Vec::new();
-        let key_prefix_len = 4;
-        let key_suffix = b""; // Empty key suffix
-
-        // Encode the row
-        let codec = SstRowCodecV0 {};
-        codec.encode(
-            &mut encoded_data,
-            &SstRowEntry::new(
-                key_prefix_len,
-                Bytes::from(key_suffix.to_vec()),
-                1,
-                ValueDeletable::Value(Bytes::from(b"value".to_vec())),
-                None,
-                None,
-            ),
-        );
-
-        let first_key = Bytes::from(b"keyprefixdata".as_slice());
-        let mut data = Bytes::from(encoded_data);
-        let decoded = codec.decode(&mut data).expect("decoding failed");
-
-        // Expected key: first_key[..4] + "" = "keyp"
-        let expected_key = Bytes::from(b"keyp" as &[u8]);
-        let expected_value = ValueDeletable::Value(Bytes::from(b"value" as &[u8]));
-
-        assert_eq!(decoded.restore_full_key(&first_key), &expected_key);
-        assert_eq!(decoded.size(), 22);
-        assert_eq!(decoded.value, expected_value);
     }
 }

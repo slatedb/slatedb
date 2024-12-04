@@ -546,13 +546,7 @@ mod tests {
         let mut writer = ts.table_writer(SsTableId::Wal(0));
         let mut nkeys = 0usize;
         while writer.blocks_written() < n {
-            let entry = RowEntry::new(
-                key_gen.next().into(),
-                Some(val_gen.next().into()),
-                0,
-                None,
-                None,
-            );
+            let entry = RowEntry::new(key_gen.next(), Some(val_gen.next()), 0, None, None);
             writer.add(entry).await.unwrap();
             nkeys += 1;
         }

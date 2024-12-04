@@ -29,13 +29,13 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Handle;
-use tracing::warn;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
-use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
 use crate::cached_object_store::CachedObjectStore;
+use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
@@ -60,13 +60,16 @@ use crate::tablestore::TableStore;
 use crate::types::{RowAttributes, ValueDeletable};
 use std::rc::Rc;
 
+pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
+pub(crate) type FlushMsg<T> = (Option<FlushSender>, T);
+
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
-    pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
-    pub(crate) write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
+    pub(crate) wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
+    pub(crate) memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
+    pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: Arc<DbStats>,
     pub(crate) error: RwLock<Option<SlateDBError>>,
 }
@@ -76,9 +79,9 @@ impl DbInner {
         options: DbOptions,
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
-        wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
-        memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
-        write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
+        wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
+        memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
+        write_notifier: UnboundedSender<WriteBatchMsg>,
         db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let state = DbState::new(core_db_state);
@@ -362,7 +365,7 @@ impl DbInner {
                         guard.state().imm_memtable.back().cloned(),
                     )
                 };
-                warn!(
+                tracing::warn!(
                     "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
                     mem_size_bytes, self.options.max_unflushed_bytes,
                 );
@@ -393,7 +396,7 @@ impl DbInner {
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
-            .send(WalFlushThreadMsg::FlushImmutableWals(Some(tx)))
+            .send((Some(tx), WalFlushThreadMsg::FlushImmutableWals))
             .map_err(|_| SlateDBError::WalFlushChannelError)?;
         rx.await?
     }
@@ -402,7 +405,7 @@ impl DbInner {
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
-            .send(MemtableFlushThreadMsg::FlushImmutableMemtables(Some(tx)))
+            .send((Some(tx), MemtableFlushThreadMsg::FlushImmutableMemtables))
             .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         rx.await?
     }
@@ -654,6 +657,12 @@ impl Db {
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         let path = path.into();
+        if let Ok(options_json) = options.to_json_string() {
+            tracing::info!(?path, options = options_json, "Opening SlateDB database");
+        } else {
+            tracing::info!(?path, ?options, "Opening SlateDB database");
+        }
+
         let db_stats = Arc::new(DbStats::new());
         let sst_format = SsTableFormat {
             min_filter_keys: options.min_filter_keys,
@@ -834,7 +843,7 @@ impl Db {
         // Shutdown the WAL flush thread.
         self.inner
             .wal_flush_notifier
-            .send(WalFlushThreadMsg::Shutdown)
+            .send((None, WalFlushThreadMsg::Shutdown))
             .ok();
 
         if let Some(flush_task) = {
@@ -847,7 +856,7 @@ impl Db {
         // Shutdown the memtable flush thread.
         self.inner
             .memtable_flush_notifier
-            .send(MemtableFlushThreadMsg::Shutdown)
+            .send((None, MemtableFlushThreadMsg::Shutdown))
             .ok();
 
         if let Some(memtable_flush_task) = {
@@ -1271,7 +1280,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
+    use crate::cached_object_store::FsCacheStorage;
     use crate::config::{
         CompactorOptions, DbRecord, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
         DEFAULT_PUT_OPTIONS,

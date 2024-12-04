@@ -867,22 +867,22 @@ mod tests {
             );
         }
 
-        #[cfg(feature = "snappy")]
+        #[cfg(all(feature = "snappy", feature = "zlib"))]
         {
             test_compression_inner(CompressionCodec::Snappy).await;
             test_compression_using_sst_info(CompressionCodec::Snappy, CompressionCodec::Zlib).await;
         }
-        #[cfg(feature = "zlib")]
+        #[cfg(all(feature = "zlib", feature = "lz4"))]
         {
             test_compression_inner(CompressionCodec::Zlib).await;
             test_compression_using_sst_info(CompressionCodec::Zlib, CompressionCodec::Lz4).await;
         }
-        #[cfg(feature = "lz4")]
+        #[cfg(all(feature = "lz4", feature = "zstd"))]
         {
             test_compression_inner(CompressionCodec::Lz4).await;
             test_compression_using_sst_info(CompressionCodec::Lz4, CompressionCodec::Zstd).await;
         }
-        #[cfg(feature = "zstd")]
+        #[cfg(all(feature = "zstd", feature = "snappy"))]
         {
             test_compression_inner(CompressionCodec::Zstd).await;
             test_compression_using_sst_info(CompressionCodec::Zstd, CompressionCodec::Snappy).await;

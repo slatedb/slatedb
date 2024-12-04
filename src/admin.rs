@@ -1,6 +1,11 @@
 use crate::checkpoint::Checkpoint;
+use crate::config::GarbageCollectorOptions;
 use crate::error::SlateDBError;
+use crate::garbage_collector::GarbageCollector;
 use crate::manifest_store::ManifestStore;
+use crate::metrics::DbStats;
+use crate::sst::SsTableFormat;
+use crate::tablestore::TableStore;
 #[cfg(feature = "aws")]
 use log::warn;
 use object_store::path::Path;
@@ -9,6 +14,7 @@ use std::env;
 use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
+use tokio::runtime::Handle;
 
 /// read-only access to the latest manifest file
 pub async fn read_manifest(
@@ -17,9 +23,13 @@ pub async fn read_manifest(
     maybe_id: Option<u64>,
 ) -> Result<Option<String>, Box<dyn Error>> {
     let manifest_store = ManifestStore::new(path, object_store);
-    let id_manifest = match maybe_id {
-        None => manifest_store.read_latest_manifest().await?,
-        Some(id) => manifest_store.read_manifest(id).await?,
+    let id_manifest = if let Some(id) = maybe_id {
+        manifest_store
+            .read_manifest(id)
+            .await?
+            .map(|manifest| (id, manifest))
+    } else {
+        manifest_store.read_latest_manifest().await?
     };
 
     match id_manifest {
@@ -74,6 +84,36 @@ pub fn load_object_store_from_env(
         "azure" => load_azure(),
         _ => Err(format!("Unknown CLOUD_PROVIDER: '{}'", provider).into()),
     }
+}
+
+pub async fn run_gc_instance(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    gc_opts: GarbageCollectorOptions,
+) -> Result<(), Box<dyn Error>> {
+    let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
+    let sst_format = SsTableFormat::default(); // read only SSTs, can use default
+    let table_store = Arc::new(TableStore::new(
+        object_store.clone(),
+        sst_format.clone(),
+        path.clone(),
+        None, // no need for cache in GC
+    ));
+
+    let tokio_handle = Handle::current();
+    let stats = Arc::new(DbStats::new());
+    let collector = GarbageCollector::new(
+        manifest_store,
+        table_store,
+        gc_opts,
+        tokio_handle,
+        stats.clone(),
+    )
+    .await;
+
+    collector.register_interrupt_handler();
+    collector.await_shutdown().await;
+    Ok(())
 }
 
 /// Loads a local object store instance.
