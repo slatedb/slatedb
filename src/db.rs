@@ -622,7 +622,7 @@ impl Db {
         ));
 
         let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
-        let latest_manifest = StoredManifest::load(manifest_store.clone()).await?;
+        let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
 
         // get the next wal id before writing manifest.
         let wal_id_last_compacted = match &latest_manifest {
@@ -1532,7 +1532,7 @@ mod tests {
             .await
             .unwrap();
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone())
+        let mut stored_manifest = StoredManifest::try_load(manifest_store.clone())
             .await
             .unwrap()
             .unwrap();
@@ -1608,7 +1608,7 @@ mod tests {
         .unwrap();
 
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone())
+        let mut stored_manifest = StoredManifest::try_load(manifest_store.clone())
             .await
             .unwrap()
             .unwrap();
@@ -1856,7 +1856,10 @@ mod tests {
 
         // validate that the manifest file exists.
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap().unwrap();
+        let stored_manifest = StoredManifest::try_load(manifest_store)
+            .await
+            .unwrap()
+            .unwrap();
         let db_state = stored_manifest.db_state();
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
     }
@@ -2134,7 +2137,10 @@ mod tests {
             .await
             .unwrap();
         let ms = ManifestStore::new(&path, object_store.clone());
-        let mut sm = StoredManifest::load(Arc::new(ms)).await.unwrap().unwrap();
+        let mut sm = StoredManifest::try_load(Arc::new(ms))
+            .await
+            .unwrap()
+            .unwrap();
 
         // write enough to fill up a few l0 SSTs
         for i in 0..4 {

@@ -564,7 +564,7 @@ mod tests {
         tokio_handle.block_on(db.close()).unwrap();
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let stored_manifest = tokio_handle
-            .block_on(StoredManifest::load(manifest_store))
+            .block_on(StoredManifest::try_load(manifest_store))
             .unwrap()
             .unwrap();
         let state = CompactorState::new(stored_manifest.db_state().clone());

@@ -283,7 +283,7 @@ impl CompactionExecuteBench {
         let os = self.object_store.clone();
         info!("load compaction job");
         let manifest_store = Arc::new(ManifestStore::new(&self.path, os.clone()));
-        let manifest = StoredManifest::load(manifest_store)
+        let manifest = StoredManifest::try_load(manifest_store)
             .await?
             .expect("expected manifest");
         let job = match &compaction {

@@ -12,7 +12,7 @@ use tracing::warn;
 
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::InvalidDBState;
+use crate::error::SlateDBError::{InvalidDBState, LatestManifestMissing, ManifestMissing};
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::{Manifest, ManifestCodec};
 use crate::transactional_object_store::{
@@ -126,8 +126,8 @@ impl StoredManifest {
     /// Load the current manifest from the supplied manifest store. If there is no db at the
     /// manifest store's path then this fn returns None. Otherwise, on success it returns a
     /// Result with an instance of StoredManifest.
-    pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Option<Self>, SlateDBError> {
-        let Some((id, manifest)) = store.read_latest_manifest().await? else {
+    pub(crate) async fn try_load(store: Arc<ManifestStore>) -> Result<Option<Self>, SlateDBError> {
+        let Some((id, manifest)) = store.try_read_latest_manifest().await? else {
             return Ok(None);
         };
         Ok(Some(Self {
@@ -135,6 +135,10 @@ impl StoredManifest {
             manifest,
             manifest_store: store,
         }))
+    }
+
+    pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Self, SlateDBError> {
+        Self::try_load(store).await?.ok_or(LatestManifestMissing)
     }
 
     pub(crate) fn id(&self) -> u64 {
@@ -146,7 +150,7 @@ impl StoredManifest {
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<&CoreDbState, SlateDBError> {
-        let Some((id, manifest)) = self.manifest_store.read_latest_manifest().await? else {
+        let Some((id, manifest)) = self.manifest_store.try_read_latest_manifest().await? else {
             return Err(InvalidDBState);
         };
         self.manifest = manifest;
@@ -263,10 +267,7 @@ impl ManifestStore {
     /// Delete a manifest from the object store.
     pub(crate) async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError> {
         // TODO Once we implement snapshots, we should check if the manifest is snapshotted as well
-        let (active_id, _) = self
-            .read_latest_manifest()
-            .await?
-            .ok_or(SlateDBError::ManifestMissing)?;
+        let (active_id, _) = self.read_latest_manifest().await?;
         if active_id == id {
             return Err(SlateDBError::InvalidDeletion);
         }
@@ -314,10 +315,7 @@ impl ManifestStore {
     pub(crate) async fn read_active_manifests(
         &self,
     ) -> Result<BTreeMap<u64, Manifest>, SlateDBError> {
-        let (latest_manifest_id, latest_manifest) = self
-            .read_latest_manifest()
-            .await?
-            .ok_or_else(|| SlateDBError::ManifestMissing)?;
+        let (latest_manifest_id, latest_manifest) = self.read_latest_manifest().await?;
 
         let mut active_manifests = BTreeMap::new();
         active_manifests.insert(latest_manifest_id, latest_manifest.clone());
@@ -326,10 +324,7 @@ impl ManifestStore {
             if let std::collections::btree_map::Entry::Vacant(entry) =
                 active_manifests.entry(checkpoint.manifest_id)
             {
-                let checkpoint_manifest = self
-                    .read_manifest(checkpoint.manifest_id)
-                    .await?
-                    .ok_or_else(|| SlateDBError::ManifestMissing)?;
+                let checkpoint_manifest = self.read_manifest(checkpoint.manifest_id).await?;
                 entry.insert(checkpoint_manifest);
             }
         }
@@ -337,12 +332,12 @@ impl ManifestStore {
         Ok(active_manifests)
     }
 
-    pub(crate) async fn read_latest_manifest(
+    pub(crate) async fn try_read_latest_manifest(
         &self,
     ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
         let manifest_metadatas_list = self.list_manifests(..).await?;
         let latest_manifest = if let Some(metadata) = manifest_metadatas_list.last() {
-            let manifest = self.read_manifest(metadata.id).await?;
+            let manifest = self.try_read_manifest(metadata.id).await?;
             manifest.map(|manifest| (metadata.id, manifest))
         } else {
             None
@@ -350,7 +345,16 @@ impl ManifestStore {
         Ok(latest_manifest)
     }
 
-    pub(crate) async fn read_manifest(&self, id: u64) -> Result<Option<Manifest>, SlateDBError> {
+    pub(crate) async fn read_latest_manifest(&self) -> Result<(u64, Manifest), SlateDBError> {
+        self.try_read_latest_manifest()
+            .await?
+            .ok_or(LatestManifestMissing)
+    }
+
+    pub(crate) async fn try_read_manifest(
+        &self,
+        id: u64,
+    ) -> Result<Option<Manifest>, SlateDBError> {
         let manifest_path = &self.get_manifest_path(id);
         match self.object_store.get(manifest_path).await {
             Ok(manifest) => match manifest.bytes().await {
@@ -365,6 +369,10 @@ impl ManifestStore {
                 _ => Err(SlateDBError::from(e)),
             },
         }
+    }
+
+    pub(crate) async fn read_manifest(&self, id: u64) -> Result<Manifest, SlateDBError> {
+        self.try_read_manifest(id).await?.ok_or(ManifestMissing(id))
     }
 
     fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {
@@ -407,7 +415,7 @@ mod tests {
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap().unwrap();
+        let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
         sm.update_db_state(state.clone()).await.unwrap();
 
         let result = sm2.update_db_state(state.clone()).await;
@@ -427,7 +435,7 @@ mod tests {
             .unwrap();
         sm.update_db_state(state.clone()).await.unwrap();
 
-        let (version, _) = ms.read_latest_manifest().await.unwrap().unwrap();
+        let (version, _) = ms.read_latest_manifest().await.unwrap();
 
         assert_eq!(version, 2);
     }
@@ -452,7 +460,7 @@ mod tests {
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap().unwrap();
+        let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
         state.next_wal_sst_id = 123;
         sm.update_db_state(state.clone()).await.unwrap();
 
@@ -470,9 +478,9 @@ mod tests {
             .await
             .unwrap();
         for i in 1..5 {
-            let sm = StoredManifest::load(ms.clone()).await.unwrap().unwrap();
+            let sm = StoredManifest::load(ms.clone()).await.unwrap();
             FenceableManifest::init_writer(sm).await.unwrap();
-            let (_, manifest) = ms.read_latest_manifest().await.unwrap().unwrap();
+            let (_, manifest) = ms.read_latest_manifest().await.unwrap();
             assert_eq!(manifest.writer_epoch, i);
         }
     }
@@ -485,7 +493,7 @@ mod tests {
             .await
             .unwrap();
         let mut writer1 = FenceableManifest::init_writer(sm).await.unwrap();
-        let sm2 = StoredManifest::load(ms.clone()).await.unwrap().unwrap();
+        let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
 
         let mut writer2 = FenceableManifest::init_writer(sm2).await.unwrap();
 
@@ -506,9 +514,9 @@ mod tests {
             .await
             .unwrap();
         for i in 1..5 {
-            let sm = StoredManifest::load(ms.clone()).await.unwrap().unwrap();
+            let sm = StoredManifest::load(ms.clone()).await.unwrap();
             FenceableManifest::init_compactor(sm).await.unwrap();
-            let (_, manifest) = ms.read_latest_manifest().await.unwrap().unwrap();
+            let (_, manifest) = ms.read_latest_manifest().await.unwrap();
             assert_eq!(manifest.compactor_epoch, i);
         }
     }
@@ -521,7 +529,7 @@ mod tests {
             .await
             .unwrap();
         let mut compactor1 = FenceableManifest::init_compactor(sm).await.unwrap();
-        let sm2 = StoredManifest::load(ms.clone()).await.unwrap().unwrap();
+        let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
 
         let mut compactor2 = FenceableManifest::init_compactor(sm2).await.unwrap();
 
@@ -549,7 +557,7 @@ mod tests {
         sm.update_db_state(updated_state).await.unwrap();
 
         // When
-        let manifest = ms.read_manifest(2).await.unwrap().unwrap();
+        let manifest = ms.try_read_manifest(2).await.unwrap().unwrap();
 
         // Then:
         assert_eq!(1, manifest.core.checkpoints.len());

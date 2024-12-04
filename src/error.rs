@@ -24,8 +24,11 @@ pub enum SlateDBError {
     #[error("Manifest file already exists")]
     ManifestVersionExists,
 
-    #[error("Manifest missing")]
-    ManifestMissing,
+    #[error("Failed to find manifest with id {0}")]
+    ManifestMissing(u64),
+
+    #[error("Failed to find latest manifest")]
+    LatestManifestMissing,
 
     #[error("Invalid deletion")]
     InvalidDeletion,
@@ -90,7 +93,7 @@ impl From<object_store::Error> for SlateDBError {
 ///
 /// This enum encapsulates various error conditions that may arise
 /// when parsing or processing database configuration options.
-#[derive(thiserror::Error, Debug)]
+#[derive(Error, Debug)]
 pub enum DbOptionsError {
     #[error("Unknown configuration file format: {0}")]
     UnknownFormat(PathBuf),

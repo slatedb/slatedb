@@ -106,7 +106,7 @@ impl CompactorOrchestrator {
     ) -> Result<Self, SlateDBError> {
         let options = Arc::new(options);
         let stored_manifest =
-            tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;
+            tokio_handle.block_on(StoredManifest::try_load(manifest_store.clone()))?;
         let Some(stored_manifest) = stored_manifest else {
             return Err(SlateDBError::InvalidDBState);
         };
@@ -479,7 +479,7 @@ mod tests {
         let rt = build_runtime();
         let (os, manifest_store, table_store, db) = rt.block_on(build_test_db(options.clone()));
         let mut stored_manifest = rt
-            .block_on(StoredManifest::load(manifest_store.clone()))
+            .block_on(StoredManifest::try_load(manifest_store.clone()))
             .unwrap()
             .unwrap();
         rt.block_on(db.put(&[b'a'; 32], &[b'b'; 96])).unwrap();
@@ -594,7 +594,7 @@ mod tests {
 
     async fn await_compaction(manifest_store: Arc<ManifestStore>) -> Option<CoreDbState> {
         run_for(Duration::from_secs(10), || async {
-            let stored_manifest = StoredManifest::load(manifest_store.clone())
+            let stored_manifest = StoredManifest::try_load(manifest_store.clone())
                 .await
                 .unwrap()
                 .unwrap();
