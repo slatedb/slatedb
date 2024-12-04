@@ -55,6 +55,7 @@ use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::{RowAttributes, ValueDeletable};
 use std::rc::Rc;
+use tracing::info;
 
 pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
 pub(crate) type FlushMsg<T> = (Option<FlushSender>, T);
@@ -67,7 +68,6 @@ pub(crate) struct DbInner {
     pub(crate) memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: Arc<DbStats>,
-    pub(crate) error: RwLock<Option<SlateDBError>>,
 }
 
 impl DbInner {
@@ -89,7 +89,6 @@ impl DbInner {
             memtable_flush_notifier,
             write_notifier,
             db_stats,
-            error: RwLock::new(None),
         };
         Ok(db_inner)
     }
@@ -245,22 +244,23 @@ impl DbInner {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
 
-        self.maybe_apply_backpressure().await;
+        self.maybe_apply_backpressure().await?;
         self.write_notifier
             .send(batch_msg)
             .expect("write notifier closed");
 
+        // if the write pipeline task exits then this call to rx.await will fail because tx is dropped
         let current_table = rx.await??;
 
         if options.await_durable {
-            current_table.await_durable().await;
+            current_table.await_durable().await?;
         }
 
         Ok(())
     }
 
     #[inline]
-    pub(crate) async fn maybe_apply_backpressure(&self) {
+    pub(crate) async fn maybe_apply_backpressure(&self) -> Result<(), SlateDBError> {
         loop {
             let mem_size_bytes = {
                 let guard = self.state.read();
@@ -291,18 +291,23 @@ impl DbInner {
                     "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
                     mem_size_bytes, self.options.max_unflushed_bytes,
                 );
+
                 match (wal_table, mem_table) {
                     (Some(wal_table), Some(mem_table)) => {
                         tokio::select! {
-                            _ = wal_table.await_durable() => {}
-                            _ = mem_table.await_flush_to_l0() => {}
+                            result = wal_table.await_durable() => {
+                                result?;
+                            }
+                            result = mem_table.await_flush_to_l0() => {
+                                result?;
+                            }
                         }
                     }
                     (Some(wal_table), None) => {
-                        wal_table.await_durable().await;
+                        wal_table.await_durable().await?;
                     }
                     (None, Some(mem_table)) => {
-                        mem_table.await_flush_to_l0().await;
+                        mem_table.await_flush_to_l0().await?;
                     }
                     _ => {
                         // No tables to flush, so backpressure is no longer needed.
@@ -313,6 +318,7 @@ impl DbInner {
                 break;
             }
         }
+        Ok(())
     }
 
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
@@ -436,32 +442,22 @@ impl DbInner {
     /// Return an error if the state has encountered
     /// an unrecoverable error.
     pub(crate) fn check_error(&self) -> Result<(), SlateDBError> {
-        let error = self.error.read();
-        if let Some(err) = error.as_ref() {
-            Err(err.clone())
-        } else {
-            Ok(())
+        let error_reader = {
+            let state = self.state.read();
+            state.error_reader()
+        };
+        if let Some(error) = error_reader.read() {
+            return Err(error.clone());
         }
-    }
-
-    /// Set the state error if it is not already set.
-    ///
-    /// We only care about the first error because
-    /// subsequent errors are likely to be the result of
-    /// the first error.
-    pub(crate) fn set_error_if_none(&self, new_error: SlateDBError) {
-        let mut error = self.error.write();
-        if error.is_none() {
-            *error = Some(new_error);
-        }
+        Ok(())
     }
 }
 
 pub struct Db {
     inner: Arc<DbInner>,
     /// The handle for the flush thread.
-    wal_flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    wal_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
+    memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     write_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     compactor: Mutex<Option<Compactor>>,
     garbage_collector: Mutex<Option<GarbageCollector>>,
@@ -654,7 +650,7 @@ impl Db {
         }
         inner.replay_wal().await?;
         let tokio_handle = Handle::current();
-        let flush_thread = if inner.wal_enabled() {
+        let flush_task = if inner.wal_enabled() {
             inner.spawn_flush_task(wal_flush_rx, &tokio_handle)
         } else {
             None
@@ -672,6 +668,7 @@ impl Db {
                 fp_registry.clone(),
                 None,
             ));
+            let cleanup_inner = inner.clone();
             compactor = Some(
                 Compactor::new(
                     manifest_store.clone(),
@@ -679,6 +676,10 @@ impl Db {
                     compactor_options.clone(),
                     Handle::current(),
                     inner.db_stats.clone(),
+                    move |err: &SlateDBError| {
+                        let mut state = cleanup_inner.state.write();
+                        state.record_fatal_error(err.clone())
+                    },
                 )
                 .await?,
             )
@@ -698,7 +699,7 @@ impl Db {
         };
         Ok(Self {
             inner,
-            wal_flush_task: Mutex::new(flush_thread),
+            wal_flush_task: Mutex::new(flush_task),
             memtable_flush_task: Mutex::new(memtable_flush_task),
             write_task: Mutex::new(write_task),
             compactor: Mutex::new(compactor),
@@ -772,7 +773,8 @@ impl Db {
             let mut flush_task = self.wal_flush_task.lock();
             flush_task.take()
         } {
-            flush_task.await.expect("Failed to join flush thread");
+            let result = flush_task.await.expect("Failed to join flush thread");
+            info!("flush task exited with {:?}", result);
         }
 
         // Shutdown the memtable flush thread.
@@ -785,9 +787,10 @@ impl Db {
             let mut memtable_flush_task = self.memtable_flush_task.lock();
             memtable_flush_task.take()
         } {
-            memtable_flush_task
+            let result = memtable_flush_task
                 .await
                 .expect("Failed to join memtable flush thread");
+            info!("mem table flush task exited with: {:?}", result);
         }
 
         Ok(())
@@ -883,7 +886,7 @@ impl Db {
     /// - `value`: the value to write
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error writing the value
+    /// - `SlateDBError`: if there was an error writing the value.
     ///
     /// ## Examples
     ///
@@ -915,7 +918,7 @@ impl Db {
     /// - `write_opts`: the write options to use
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error writing the value
+    /// - `SlateDBError`: if there was an error writing the value.
     ///
     /// ## Examples
     ///
@@ -950,7 +953,7 @@ impl Db {
     /// - `key`: the key to delete
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error deleting the key
+    /// - `SlateDBError`: if there was an error deleting the key.
     ///
     /// ## Examples
     ///
@@ -980,7 +983,7 @@ impl Db {
     /// - `options`: the write options to use
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error deleting the key
+    /// - `SlateDBError`: if there was an error deleting the key.
     ///
     /// ## Examples
     ///
@@ -1015,7 +1018,7 @@ impl Db {
     /// - `batch`: the batch of put/delete operations to write
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error writing the batch
+    /// - `SlateDBError`: if there was an error writing the batch.
     ///
     /// ## Examples
     ///
@@ -1051,7 +1054,7 @@ impl Db {
     /// - `options`: the write options to use
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error writing the batch
+    /// - `SlateDBError`: if there was an error writing the batch.
     ///
     /// ## Examples
     ///
@@ -2127,6 +2130,27 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_should_fail_write_if_wal_flush_task_panics() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let db = Arc::new(
+            Db::open_with_fp_registry(
+                path.clone(),
+                test_db_options(0, 128, None),
+                object_store.clone(),
+                fp_registry.clone(),
+            )
+            .await
+            .unwrap(),
+        );
+
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
+        let result = db.put(b"foo", b"bar").await;
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskFailed)));
+    }
+
     async fn do_test_should_read_compacted_db(options: DbOptions) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -2264,6 +2288,18 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
 
+        async fn do_put(db: &Db, key: &[u8], val: &[u8]) -> Result<(), SlateDBError> {
+            db.put_with_options(
+                key,
+                val,
+                DEFAULT_PUT_OPTIONS,
+                &WriteOptions {
+                    await_durable: true,
+                },
+            )
+            .await
+        }
+
         // open db1 and assert that it can write.
         let db1 = Db::open_with_opts(
             path.clone(),
@@ -2272,17 +2308,8 @@ mod tests {
         )
         .await
         .unwrap();
-        db1.put_with_options(
-            b"1",
-            b"1",
-            DEFAULT_PUT_OPTIONS,
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await
-        .unwrap();
-        db1.flush().await.unwrap();
+        do_put(&db1, b"1", b"1").await.unwrap();
+
         // open db2, causing it to write an empty wal and fence db1.
         let db2 = Db::open_with_opts(
             path.clone(),
@@ -2291,29 +2318,12 @@ mod tests {
         )
         .await
         .unwrap();
+
         // assert that db1 can no longer write.
-        db1.put_with_options(
-            b"1",
-            b"1",
-            DEFAULT_PUT_OPTIONS,
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(db1.flush().await, Err(SlateDBError::Fenced)));
-        db2.put_with_options(
-            b"2",
-            b"2",
-            DEFAULT_PUT_OPTIONS,
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await
-        .unwrap();
-        db2.flush().await.unwrap();
+        let err = do_put(&db1, b"1", b"1").await;
+        assert!(matches!(err, Err(SlateDBError::Fenced)));
+
+        do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.state.read().state().core.next_wal_sst_id, 5);
     }
 
