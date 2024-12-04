@@ -325,7 +325,7 @@ impl CachedObjectStore {
 
     fn align_range(&self, range: &Range<usize>, alignment: usize) -> Range<usize> {
         let start_aligned = range.start - range.start % alignment;
-        let end_aligned = ((range.end + alignment - 1) / alignment) * alignment;
+        let end_aligned = range.end.div_ceil(alignment) * alignment;
         Range {
             start: start_aligned,
             end: end_aligned,
