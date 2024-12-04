@@ -175,6 +175,7 @@ impl DbInner {
         range: BytesRange,
         options: &ScanOptions,
     ) -> Result<DbIterator<'a>, SlateDBError> {
+        self.check_error()?;
         let snapshot = Arc::new(self.state.read().snapshot());
         let mut memtables = VecDeque::new();
 
@@ -983,7 +984,6 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    ///
     pub async fn scan<T: RangeBounds<Bytes>>(&self, range: T) -> Result<DbIterator, SlateDBError> {
         self.inner
             .scan_with_options(range.into(), DEFAULT_SCAN_OPTIONS)
@@ -1022,7 +1022,6 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    ///
     pub async fn scan_with_options<T: RangeBounds<Bytes>>(
         &self,
         range: T,
