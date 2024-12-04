@@ -60,6 +60,7 @@ filetime = "0.2"
 figment = { version = "0.10.19", features = ["test"] }
 rstest = "0.23.0"
 insta = "1.39.0"
+criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
 
 [features]
 default = ["aws", "moka"]
@@ -86,3 +87,6 @@ name = "slatedb"
 path = "src/cli/main.rs"
 required-features = ["cli"]
 
+[[bench]]
+name = "db_operations"
+harness = false
