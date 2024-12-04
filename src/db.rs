@@ -2264,6 +2264,19 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
 
+        async fn do_put(db: &Db, key: &[u8], val: &[u8]) -> Result<(), SlateDBError> {
+            db.put_with_options(
+                key,
+                val,
+                DEFAULT_PUT_OPTIONS,
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await?;
+            db.flush().await
+        }
+
         // open db1 and assert that it can write.
         let db1 = Db::open_with_opts(
             path.clone(),
@@ -2272,17 +2285,8 @@ mod tests {
         )
         .await
         .unwrap();
-        db1.put_with_options(
-            b"1",
-            b"1",
-            DEFAULT_PUT_OPTIONS,
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await
-        .unwrap();
-        db1.flush().await.unwrap();
+        do_put(&db1, b"1", b"1").await.unwrap();
+
         // open db2, causing it to write an empty wal and fence db1.
         let db2 = Db::open_with_opts(
             path.clone(),
@@ -2291,29 +2295,12 @@ mod tests {
         )
         .await
         .unwrap();
+
         // assert that db1 can no longer write.
-        db1.put_with_options(
-            b"1",
-            b"1",
-            DEFAULT_PUT_OPTIONS,
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(db1.flush().await, Err(SlateDBError::Fenced)));
-        db2.put_with_options(
-            b"2",
-            b"2",
-            DEFAULT_PUT_OPTIONS,
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await
-        .unwrap();
-        db2.flush().await.unwrap();
+        let err = do_put(&db1, b"1", b"1").await;
+        assert!(matches!(err, Err(SlateDBError::Fenced)));
+
+        do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.state.read().state().core.next_wal_sst_id, 5);
     }
 
