@@ -209,7 +209,7 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
                             let iter = match start_bound {
                                 Unbounded => BlockIterator::from_first_key(block),
                                 Included(key) | Excluded(key) => {
-                                    BlockIterator::from_key(block, key).await
+                                    BlockIterator::from_key(block, key).await?
                                 }
                             };
                             return Ok(Some(iter));

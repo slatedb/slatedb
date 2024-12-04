@@ -93,11 +93,11 @@ impl<B: BlockLike> BlockIterator<B> {
 
     /// Construct a BlockIterator that starts at the given key, or at the first
     /// key greater than the given key if the exact key given is not in the block.
-    pub async fn from_key(block: B, key: &[u8]) -> BlockIterator<B> {
+    pub async fn from_key(block: B, key: &[u8]) -> Result<BlockIterator<B>, SlateDBError> {
         let mut iter = Self::from_first_key(block);
         let seek_key = Bytes::copy_from_slice(key);
-        iter.seek(&seek_key).await.unwrap();
-        iter
+        iter.seek(&seek_key).await?;
+        Ok(iter)
     }
 
     fn advance(&mut self) {
@@ -172,7 +172,7 @@ mod tests {
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"kratos".as_ref()).await;
+        let mut iter = BlockIterator::from_key(&block, b"kratos".as_ref()).await.unwrap();
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
@@ -187,7 +187,7 @@ mod tests {
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"ka".as_ref()).await;
+        let mut iter = BlockIterator::from_key(&block, b"ka".as_ref()).await.unwrap();
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
@@ -202,7 +202,7 @@ mod tests {
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"zzz".as_ref()).await;
+        let mut iter = BlockIterator::from_key(&block, b"zzz".as_ref()).await.unwrap();
         assert!(iter.next().await.unwrap().is_none());
     }
 
