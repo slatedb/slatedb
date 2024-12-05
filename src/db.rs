@@ -986,7 +986,7 @@ impl Db {
     /// ```
     pub async fn scan<T: RangeBounds<Bytes>>(&self, range: T) -> Result<DbIterator, SlateDBError> {
         self.inner
-            .scan_with_options(range.into(), DEFAULT_SCAN_OPTIONS)
+            .scan_with_options(BytesRange::from(range), DEFAULT_SCAN_OPTIONS)
             .await
     }
 
@@ -1027,7 +1027,7 @@ impl Db {
         range: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
-        self.inner.scan_with_options(range.into(), options).await
+        self.inner.scan_with_options(BytesRange::from(range), options).await
     }
 
     /// Write a value into the database with default `WriteOptions`.

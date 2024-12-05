@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::ops::{Bound, RangeBounds, RangeFull};
+use std::ops::{RangeBounds, RangeFull};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -53,7 +53,7 @@ impl VecDequeKeyValueIterator {
     ) -> Result<Self, SlateDBError> {
         let memtable_iters = tables
             .iter()
-            .map(|t| t.range::<(Bound<Bytes>, Bound<Bytes>)>(range.clone().into()))
+            .map(|t| t.range(range.clone()))
             .collect();
         let mut merge_iter = MergeIterator::new(memtable_iters).await?;
         let mut records = VecDeque::new();

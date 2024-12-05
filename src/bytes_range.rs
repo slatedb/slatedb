@@ -27,12 +27,26 @@ pub(crate) fn is_prefix_increment(prefix: &Bytes, b: &Bytes) -> bool {
     b[b.len() - 1] == u8::MIN
 }
 
+impl RangeBounds<Bytes> for BytesRange {
+    fn start_bound(&self) -> Bound<&Bytes> {
+        self.start_bound.as_ref()
+    }
+
+    fn end_bound(&self) -> Bound<&Bytes> {
+        self.end_bound.as_ref()
+    }
+}
+
 impl BytesRange {
     pub(crate) fn new(start_bound: Bound<Bytes>, end_bound: Bound<Bytes>) -> Self {
         Self {
             start_bound,
             end_bound,
         }
+    }
+
+    pub(crate) fn from<T: RangeBounds<Bytes>>(range: T) -> Self {
+        Self::new(range.start_bound().cloned(), range.end_bound().cloned())
     }
 
     pub(crate) fn with_start_key(start_key: Option<Bytes>) -> Self {
@@ -133,21 +147,6 @@ impl BytesRange {
             start_bound: start_bound.cloned(),
             end_bound: end_bound.cloned(),
         }
-    }
-}
-
-impl<T: RangeBounds<Bytes>> From<T> for BytesRange {
-    fn from(value: T) -> Self {
-        BytesRange {
-            start_bound: value.start_bound().cloned(),
-            end_bound: value.end_bound().cloned(),
-        }
-    }
-}
-
-impl From<BytesRange> for (Bound<Bytes>, Bound<Bytes>) {
-    fn from(value: BytesRange) -> Self {
-        (value.start_bound, value.end_bound)
     }
 }
 

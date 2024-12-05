@@ -150,7 +150,6 @@
 //!     min_age: '86400s'
 //! ```
 //!
-use bytes::Bytes;
 use duration_str::{deserialize_duration, deserialize_option_duration};
 use figment::providers::{Env, Format, Json, Toml, Yaml};
 use figment::{Figment, Metadata, Provider};
@@ -170,7 +169,6 @@ use crate::error::{DbOptionsError, SlateDBError};
 
 use crate::db_cache::DbCache;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
-use crate::types::KeyValue;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
 pub const DEFAULT_SCAN_OPTIONS: &ScanOptions = &ScanOptions::default();
