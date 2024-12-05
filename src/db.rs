@@ -233,6 +233,7 @@ impl DbInner {
 
     pub async fn write_with_options(
         &self,
+        db: &Db,
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
@@ -242,15 +243,16 @@ impl DbInner {
             return Ok(());
         }
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
+        let current_table = db.inner.write_batch(batch).await?;
+        // let (tx, rx) = tokio::sync::oneshot::channel();
+        // let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
 
         self.maybe_apply_backpressure().await;
-        self.write_notifier
-            .send(batch_msg)
-            .expect("write notifier closed");
+        // self.write_notifier
+        //     .send(batch_msg)
+        //     .expect("write notifier closed");
 
-        let current_table = rx.await??;
+        // // let current_table = rx.await??;
 
         if options.await_durable {
             current_table.await_durable().await;
@@ -1079,7 +1081,7 @@ impl Db {
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
-        self.inner.write_with_options(batch, options).await
+        self.inner.write_with_options(self, batch, options).await
     }
 
     /// Flush the database to disk.
