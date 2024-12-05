@@ -144,12 +144,16 @@ struct ManifestGcTask {
 }
 
 impl ManifestGcTask {
-    fn new(orchestrator: &GarbageCollectorOrchestrator) -> Self {
+    fn new(
+        manifest_store: Arc<ManifestStore>,
+        db_stats: Arc<DbStats>,
+        manifest_options: Option<GarbageCollectorDirectoryOptions>,
+    ) -> Self {
         ManifestGcTask {
-            manifest_store: orchestrator.manifest_store.clone(),
-            db_stats: orchestrator.db_stats.clone(),
-            manifest_options: orchestrator.options.manifest_options,
-            status: DirGcStatus::new(orchestrator.options.manifest_options.as_ref()),
+            manifest_store,
+            db_stats,
+            manifest_options,
+            status: DirGcStatus::new(manifest_options.as_ref()),
         }
     }
 
@@ -228,13 +232,18 @@ struct WalGcTask {
 }
 
 impl WalGcTask {
-    fn new(orchestrator: &GarbageCollectorOrchestrator) -> Self {
+    fn new(
+        manifest_store: Arc<ManifestStore>,
+        table_store: Arc<TableStore>,
+        db_stats: Arc<DbStats>,
+        wal_options: Option<GarbageCollectorDirectoryOptions>,
+    ) -> Self {
         WalGcTask {
-            manifest_store: orchestrator.manifest_store.clone(),
-            table_store: orchestrator.table_store.clone(),
-            db_stats: orchestrator.db_stats.clone(),
-            wal_options: orchestrator.options.wal_options,
-            status: DirGcStatus::new(orchestrator.options.wal_options.as_ref()),
+            manifest_store,
+            table_store,
+            db_stats,
+            wal_options,
+            status: DirGcStatus::new(wal_options.as_ref()),
         }
     }
 
@@ -326,13 +335,18 @@ struct CompactedGcTask {
 }
 
 impl CompactedGcTask {
-    fn new(orchestrator: &GarbageCollectorOrchestrator) -> Self {
+    fn new(
+        manifest_store: Arc<ManifestStore>,
+        table_store: Arc<TableStore>,
+        db_stats: Arc<DbStats>,
+        compacted_options: Option<GarbageCollectorDirectoryOptions>,
+    ) -> Self {
         CompactedGcTask {
-            manifest_store: orchestrator.manifest_store.clone(),
-            table_store: orchestrator.table_store.clone(),
-            db_stats: orchestrator.db_stats.clone(),
-            compacted_options: orchestrator.options.compacted_options,
-            status: DirGcStatus::new(orchestrator.options.compacted_options.as_ref()),
+            manifest_store,
+            table_store,
+            db_stats,
+            compacted_options,
+            status: DirGcStatus::new(compacted_options.as_ref()),
         }
     }
 
@@ -443,9 +457,23 @@ impl GarbageCollectorOrchestrator {
     pub async fn run(&self) {
         let log_ticker = crossbeam_channel::tick(Duration::from_secs(60));
 
-        let mut wal_gc_task = WalGcTask::new(self);
-        let mut compacted_gc_task = CompactedGcTask::new(self);
-        let mut manifest_gc_task = ManifestGcTask::new(self);
+        let mut wal_gc_task = WalGcTask::new(
+            self.manifest_store.clone(),
+            self.table_store.clone(),
+            self.db_stats.clone(),
+            self.options.wal_options,
+        );
+        let mut compacted_gc_task = CompactedGcTask::new(
+            self.manifest_store.clone(),
+            self.table_store.clone(),
+            self.db_stats.clone(),
+            self.options.compacted_options,
+        );
+        let mut manifest_gc_task = ManifestGcTask::new(
+            self.manifest_store.clone(),
+            self.db_stats.clone(),
+            self.options.manifest_options,
+        );
 
         let manifest_ticker = manifest_gc_task.ticker();
         let wal_ticker = wal_gc_task.ticker();
@@ -1308,7 +1336,8 @@ mod tests {
         )
         .await;
 
-        // Verify that the first WAL was deleted and the second is kept
+        // Only the first table is deleted. The second is eligible,
+        // but the reference in the checkpoint is still active.
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
         assert_eq!(compacted_ssts.len(), 4);
         assert_eq!(compacted_ssts[0].id, active_l0_sst_handle.id);
