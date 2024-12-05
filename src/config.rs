@@ -231,32 +231,6 @@ impl ScanOptions {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct DbRecord {
-    pub key: Bytes,
-    pub value: Bytes,
-}
-
-impl DbRecord {
-    pub fn new(key: Bytes, value: Bytes) -> Self {
-        Self { key, value }
-    }
-}
-
-impl From<(&[u8], &[u8])> for DbRecord {
-    fn from(record: (&[u8], &[u8])) -> Self {
-        let key = Bytes::copy_from_slice(record.0);
-        let value = Bytes::copy_from_slice(record.1);
-        Self::new(key, value)
-    }
-}
-
-impl From<KeyValue> for DbRecord {
-    fn from(kv: KeyValue) -> Self {
-        Self::new(kv.key, kv.value)
-    }
-}
-
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
 #[derive(Clone, Default)]

@@ -1281,7 +1281,7 @@ mod tests {
     use super::*;
     use crate::cached_object_store::FsCacheStorage;
     use crate::config::{
-        CompactorOptions, DbRecord, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
+        CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
         DEFAULT_PUT_OPTIONS,
     };
     use crate::proptest_util::sample;
@@ -1543,7 +1543,6 @@ mod tests {
 
     #[test]
     fn test_scan_returns_records_in_range() {
-        let _record: DbRecord = (b"hi" as &[u8], b"there" as &[u8]).into();
         let mut runner = new_proptest_runner(None);
         let table = sample::table(runner.rng(), 1000, 5);
 

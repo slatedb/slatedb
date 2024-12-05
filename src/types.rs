@@ -1,12 +1,20 @@
 use bytes::Bytes;
 
 /// Represents a key-value pair known not to be a tombstone.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeyValue {
     #[allow(dead_code)]
     pub key: Bytes,
     #[allow(dead_code)]
     pub value: Bytes,
+}
+
+impl From<(&[u8], &[u8])> for KeyValue {
+    fn from(record: (&[u8], &[u8])) -> Self {
+        let key = Bytes::copy_from_slice(record.0);
+        let value = Bytes::copy_from_slice(record.1);
+        KeyValue { key, value }
+    }
 }
 
 /// Represents a key-value pair that may be a tombstone.

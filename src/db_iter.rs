@@ -1,5 +1,4 @@
 use crate::bytes_range::BytesRange;
-use crate::config::DbRecord;
 use crate::db_state::{DbStateSnapshot, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
@@ -7,6 +6,8 @@ use crate::mem_table::VecDequeKeyValueIterator;
 use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
+use crate::types::KeyValue;
+
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -55,17 +56,11 @@ impl<'a> DbIterator<'a> {
     ///
     /// Returns [`SlateDBError::InvalidatedIterator`] if the iterator has been invalidated
     ///  due to an underlying error
-    pub async fn next(&mut self) -> Result<Option<DbRecord>, SlateDBError> {
+    pub async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
         if self.invalidated {
             Err(SlateDBError::InvalidatedIterator)
         } else {
-            let next_opt = self.iter.next().await?;
-            if let Some(kv) = next_opt {
-                // TODO: Should we just expose KeyValue instead of DbRecord?
-                Ok(Some(kv.into()))
-            } else {
-                Ok(None)
-            }
+            self.iter.next().await
         }
     }
 

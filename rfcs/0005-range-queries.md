@@ -76,7 +76,7 @@ impl DbIterator {
     ///  due to an underlying error
     pub async fn next(
         &mut self,
-    ) -> Result<Option<DbRecord>, SlateDbError> {
+    ) -> Result<Option<KeyValue>, SlateDbError> {
         ...
     }
 
@@ -100,9 +100,9 @@ impl DbIterator {
 
 }
 
-struct DbRecord {
-    key: Bytes,
-    value: Bytes,
+pub struct KeyValue {
+    pub key: Bytes,
+    pub value: Bytes,
 }
 ```
 
