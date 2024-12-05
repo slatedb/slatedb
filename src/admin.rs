@@ -1,6 +1,5 @@
 use crate::checkpoint::Checkpoint;
 use crate::config::GarbageCollectorOptions;
-use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
 use crate::manifest_store::ManifestStore;
 use crate::metrics::DbStats;
@@ -25,11 +24,11 @@ pub async fn read_manifest(
     let manifest_store = ManifestStore::new(path, object_store);
     let id_manifest = if let Some(id) = maybe_id {
         manifest_store
-            .read_manifest(id)
+            .try_read_manifest(id)
             .await?
             .map(|manifest| (id, manifest))
     } else {
-        manifest_store.read_latest_manifest().await?
+        manifest_store.try_read_latest_manifest().await?
     };
 
     match id_manifest {
@@ -53,9 +52,7 @@ pub async fn list_checkpoints(
     object_store: Arc<dyn ObjectStore>,
 ) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
     let manifest_store = ManifestStore::new(path, object_store);
-    let Some((_, manifest)) = manifest_store.read_latest_manifest().await? else {
-        return Err(Box::new(SlateDBError::ManifestMissing));
-    };
+    let (_, manifest) = manifest_store.read_latest_manifest().await?;
     Ok(manifest.core.checkpoints)
 }
 

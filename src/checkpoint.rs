@@ -35,9 +35,7 @@ impl Db {
         options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
-        let Some(mut stored_manifest) = StoredManifest::load(manifest_store).await? else {
-            return Err(SlateDBError::ManifestMissing);
-        };
+        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         let id = Uuid::new_v4();
         stored_manifest
             .maybe_apply_db_state_update(|stored_manifest| {
@@ -95,9 +93,7 @@ impl Db {
         lifetime: Option<Duration>,
     ) -> Result<(), SlateDBError> {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
-        let Some(mut stored_manifest) = StoredManifest::load(manifest_store).await? else {
-            return Err(SlateDBError::ManifestMissing);
-        };
+        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
             .maybe_apply_db_state_update(|stored_manifest| {
                 let mut db_state = stored_manifest.db_state().clone();
@@ -123,9 +119,7 @@ impl Db {
         id: Uuid,
     ) -> Result<(), SlateDBError> {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
-        let Some(mut stored_manifest) = StoredManifest::load(manifest_store).await? else {
-            return Err(SlateDBError::ManifestMissing);
-        };
+        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
             .maybe_apply_db_state_update(|stored_manifest| {
                 let mut db_state = stored_manifest.db_state().clone();
@@ -166,11 +160,7 @@ mod tests {
             .unwrap();
         db.close().await.unwrap();
         let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let (manifest_id, before_checkpoint) = manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap();
+        let (manifest_id, before_checkpoint) = manifest_store.read_latest_manifest().await.unwrap();
 
         let CheckpointCreateResult {
             id: checkpoint_id,
@@ -179,11 +169,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, manifest) = manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap();
+        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         assert_eq!(manifest_id, checkpoint_manifest_id);
         let checkpoints = &manifest.core.checkpoints;
         assert_eq!(
@@ -221,11 +207,7 @@ mod tests {
         .await
         .unwrap();
 
-        let (_, manifest) = manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap();
+        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         let checkpoints = &manifest.core.checkpoints;
         let checkpoint = checkpoints.iter().find(|c| c.id == checkpoint_id).unwrap();
         assert!(checkpoint.expire_time.is_some());
@@ -303,7 +285,10 @@ mod tests {
             Db::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default()).await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SlateDBError::ManifestMissing));
+        assert!(matches!(
+            result.unwrap_err(),
+            SlateDBError::LatestManifestMissing
+        ));
     }
 
     #[tokio::test]
@@ -324,11 +309,7 @@ mod tests {
         .await
         .unwrap();
         let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let (_, manifest) = manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap();
+        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         let checkpoint = manifest
             .core
             .checkpoints
@@ -346,11 +327,7 @@ mod tests {
         .await
         .unwrap();
 
-        let (_, manifest) = manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap();
+        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         let found: Vec<&Checkpoint> = manifest
             .core
             .checkpoints
@@ -398,11 +375,7 @@ mod tests {
             .unwrap();
 
         let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let (_, manifest) = manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap();
+        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         assert!(!manifest.core.checkpoints.iter().any(|c| c.id == id));
     }
 }

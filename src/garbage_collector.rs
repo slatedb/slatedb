@@ -153,9 +153,8 @@ impl GarbageCollectorOrchestrator {
                 .read_manifest(manifest_metadata.id)
                 .await?
         } else {
-            None
-        }
-        .ok_or_else(|| SlateDBError::ManifestMissing)?;
+            return Err(SlateDBError::LatestManifestMissing);
+        };
 
         // Do not delete manifests which are still referenced by active checkpoints
         let active_manifest_ids: HashSet<_> = latest_manifest
@@ -187,9 +186,7 @@ impl GarbageCollectorOrchestrator {
     }
 
     async fn load_stored_manifest(&self) -> Result<StoredManifest, SlateDBError> {
-        StoredManifest::load(Arc::clone(&self.manifest_store))
-            .await?
-            .ok_or_else(|| SlateDBError::ManifestMissing)
+        StoredManifest::load(Arc::clone(&self.manifest_store)).await
     }
 
     fn filter_expired_checkpoints(
@@ -258,7 +255,7 @@ impl GarbageCollectorOrchestrator {
         let active_manifests = self.manifest_store.read_active_manifests().await?;
         let latest_manifest = active_manifests
             .last_key_value()
-            .ok_or_else(|| SlateDBError::ManifestMissing)?
+            .ok_or(SlateDBError::LatestManifestMissing)?
             .1;
 
         let utc_now = Utc::now();
@@ -670,11 +667,8 @@ mod tests {
 
         // The GC should create a new manifest version 4 with the expired
         // checkpoint removed.
-        let (latest_manifest_id, latest_manifest) = manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap();
+        let (latest_manifest_id, latest_manifest) =
+            manifest_store.read_latest_manifest().await.unwrap();
         assert_eq!(4, latest_manifest_id);
         assert_eq!(1, latest_manifest.core.checkpoints.len());
         assert_eq!(
@@ -736,11 +730,8 @@ mod tests {
         .await;
 
         // Verify that the latest manifest version is still 4 with the active checkpoint
-        let (latest_manifest_id, latest_manifest) = manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap();
+        let (latest_manifest_id, latest_manifest) =
+            manifest_store.read_latest_manifest().await.unwrap();
         assert_eq!(4, latest_manifest_id);
         assert_eq!(1, latest_manifest.core.checkpoints.len());
         assert_eq!(active_checkpoint_id, latest_manifest.core.checkpoints[0].id);
@@ -855,12 +846,7 @@ mod tests {
         assert_eq!(wal_ssts[0].last_modified, now_minus_24h);
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        let current_manifest = manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap()
-            .1;
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
         assert_eq!(
             current_manifest.core.last_compacted_wal_sst_id,
             id2.unwrap_wal_id()
@@ -999,12 +985,7 @@ mod tests {
         assert_eq!(wal_ssts[1].last_modified, now_minus_24h_2);
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        let current_manifest = manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap()
-            .1;
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
         assert_eq!(
             current_manifest.core.last_compacted_wal_sst_id,
             id2.unwrap_wal_id()
@@ -1128,12 +1109,7 @@ mod tests {
         );
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        let current_manifest = manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap()
-            .1;
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
         assert_eq!(current_manifest.core.l0.len(), 2);
         assert_eq!(current_manifest.core.compacted.len(), 1);
         assert_eq!(current_manifest.core.compacted[0].ssts.len(), 2);
@@ -1155,12 +1131,7 @@ mod tests {
         assert_eq!(compacted_ssts[3].id, active_sst_handle.id);
         assert_eq!(compacted_ssts[4].id, active_expired_sst_handle.id);
         assert_eq!(compacted_ssts[5].id, inactive_unexpired_sst_handle.id);
-        let current_manifest = manifest_store
-            .read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap()
-            .1;
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
         assert_eq!(current_manifest.core.l0.len(), 2);
         assert_eq!(current_manifest.core.compacted.len(), 1);
         assert_eq!(current_manifest.core.compacted[0].ssts.len(), 2);
