@@ -96,6 +96,7 @@ jobs:
           name: cargo bench --bench db_operations
           tool: 'cargo'
           output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           external-data-json-path: ./microbenchmarks-cache/benchmark-data.json
           comment-on-alert: true
           summary-always: true
