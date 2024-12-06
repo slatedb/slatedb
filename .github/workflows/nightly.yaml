@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  benchmark:
+  benchmarks:
     name: Nightly Benchmark Run
     runs-on: ubuntu-latest
     steps:

@@ -74,7 +74,7 @@ jobs:
       - name: Run Tests
         run: cargo nextest run --all-features --profile ci
 
-  benchmark:
+  microbenchmarks:
     name: Performance Regression Check
     runs-on: ubuntu-latest
     steps:
@@ -82,13 +82,13 @@ jobs:
 
       - name: Run benchmark
         # Hardcode microbenchmarks because `libtest` runs otherwise. See:
-        # https://bheisler.github.io/criterion.rs/book/faq.html#cargo-bench-gives-unrecognized-option-errors-for-valid-command-line-options
+        # https://bheisler.github.io/criterion.rs/book/faq.html
         run: cargo bench --bench db_operations -- --output-format bencher | tee output.txt
 
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
-          name: Rust Benchmark
+          name: cargo bench --bench db_operations
           tool: 'cargo'
           output-file-path: output.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -97,3 +97,4 @@ jobs:
           summary-always: true
           max-items-in-chart: 30
           skip-fetch-gh-pages: true
+          auto-push: false
