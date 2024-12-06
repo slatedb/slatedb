@@ -32,3 +32,4 @@ jobs:
           summary-always: true
           max-items-in-chart: 30
           auto-push: true
+          skip-fetch-gh-pages: true
