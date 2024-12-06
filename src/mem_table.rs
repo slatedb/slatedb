@@ -48,19 +48,23 @@ pub(crate) struct VecDequeKeyValueIterator {
 }
 
 impl VecDequeKeyValueIterator {
+    pub(crate) fn new(rows: VecDeque<RowEntry>) -> Self {
+        Self { rows }
+    }
+
     pub(crate) async fn materialize_range(
         tables: VecDeque<Arc<KVTable>>,
         range: BytesRange,
     ) -> Result<Self, SlateDBError> {
         let memtable_iters = tables.iter().map(|t| t.range(range.clone())).collect();
         let mut merge_iter = MergeIterator::new(memtable_iters).await?;
-        let mut records = VecDeque::new();
+        let mut rows = VecDeque::new();
 
-        while let Some(entry) = merge_iter.next_entry().await? {
-            records.push_back(entry.clone());
+        while let Some(row_entry) = merge_iter.next_entry().await? {
+            rows.push_back(row_entry.clone());
         }
 
-        Ok(VecDequeKeyValueIterator { rows: records })
+        Ok(VecDequeKeyValueIterator::new(rows))
     }
 }
 
