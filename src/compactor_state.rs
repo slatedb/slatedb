@@ -30,7 +30,6 @@ impl Display for SourceId {
 }
 
 impl SourceId {
-    #[allow(dead_code)]
     pub(crate) fn unwrap_sorted_run(&self) -> u32 {
         self.maybe_unwrap_sorted_run()
             .expect("tried to unwrap Sst as Sorted Run")
@@ -41,12 +40,6 @@ impl SourceId {
             SourceId::SortedRun(id) => Some(*id),
             SourceId::Sst(_) => None,
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn unwrap_sst(&self) -> Ulid {
-        self.maybe_unwrap_sst()
-            .expect("tried to unwrap Sst as Sorted Run")
     }
 
     pub(crate) fn maybe_unwrap_sst(&self) -> Option<Ulid> {

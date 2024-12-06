@@ -100,7 +100,7 @@ impl SsTableFormat {
         self.decode_index(index_bytes, compression_codec)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn read_index_raw(
         &self,
         info: &SsTableInfo,
@@ -244,7 +244,7 @@ impl SsTableFormat {
         Ok(blocks.pop_front().expect("expected a block to be returned"))
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn read_block_raw(
         &self,
         info: &SsTableInfo,
@@ -426,11 +426,6 @@ impl EncodedSsTableBuilder<'_> {
 
     pub fn next_block(&mut self) -> Option<Bytes> {
         self.blocks.pop_front()
-    }
-
-    #[allow(dead_code)]
-    pub fn estimated_size(&self) -> usize {
-        self.current_len
     }
 
     fn finish_block(&mut self) -> Result<Option<Vec<u8>>, SlateDBError> {
