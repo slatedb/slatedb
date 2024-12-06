@@ -68,3 +68,23 @@ jobs:
       - name: Run Tests
         run: cargo nextest run --all-features --profile ci
 
+  benchmark:
+    name: Performance Regression Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run benchmark
+        run: cargo bench | tee output.txt
+
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Rust Benchmark
+          tool: 'cargo'
+          output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          alert-threshold: '200%'
+          comment-on-alert: true
+          summary-always: true
+          max-items-in-chart: 30
