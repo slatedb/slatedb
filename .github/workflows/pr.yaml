@@ -84,7 +84,7 @@ jobs:
         # https://bheisler.github.io/criterion.rs/book/faq.html
         run: cargo bench --bench db_operations -- --output-format bencher | tee output.txt
 
-      - name: Download previous benchmark data
+      - name: Download nightly benchmark data
         uses: actions/cache@v4
         with:
           path: ./microbenchmarks-cache
@@ -96,12 +96,7 @@ jobs:
           name: cargo bench --bench db_operations
           tool: 'cargo'
           output-file-path: output.txt
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           external-data-json-path: ./microbenchmarks-cache/benchmark-data.json
-          alert-threshold: '200%'
           comment-on-alert: true
           summary-always: true
           max-items-in-chart: 30
-          skip-fetch-gh-pages: true
-          auto-push: false
-          save-data-file: false
