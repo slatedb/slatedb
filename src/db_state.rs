@@ -460,7 +460,7 @@ mod tests {
                 assert!(*first_key <= range_end_key);
             } else if sorted_run.ssts.len() > 1 {
                 let second_table = sorted_run.ssts[1].clone();
-                assert!(second_table.info.first_key.unwrap() > range_end_key);
+                assert!(!range.contains(&second_table.info.first_key.unwrap()));
             }
         });
     }

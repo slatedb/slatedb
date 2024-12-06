@@ -1027,7 +1027,9 @@ impl Db {
         range: T,
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
-        self.inner.scan_with_options(BytesRange::from(range), options).await
+        self.inner
+            .scan_with_options(BytesRange::from(range), options)
+            .await
     }
 
     /// Write a value into the database with default `WriteOptions`.

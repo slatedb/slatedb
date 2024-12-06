@@ -60,7 +60,10 @@ impl<'a> DbIterator<'a> {
         }
     }
 
-    fn maybe_invalidate<T: Clone>(&mut self, result: Result<T, SlateDBError>) -> Result<T, SlateDBError> {
+    fn maybe_invalidate<T: Clone>(
+        &mut self,
+        result: Result<T, SlateDBError>,
+    ) -> Result<T, SlateDBError> {
         if let Err(error) = result.clone() {
             self.invalidated_error = Some(error);
         }
@@ -118,8 +121,8 @@ mod tests {
     use crate::db_iter::DbIterator;
     use crate::error::SlateDBError;
     use crate::mem_table::VecDequeKeyValueIterator;
-    use std::collections::VecDeque;
     use bytes::Bytes;
+    use std::collections::VecDeque;
 
     #[tokio::test]
     async fn test_invalidated_iterator() {
@@ -128,7 +131,9 @@ mod tests {
             VecDequeKeyValueIterator::new(VecDeque::new()),
             VecDeque::new(),
             VecDeque::new(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         iter.invalidated_error = Some(SlateDBError::ChecksumMismatch);
 
