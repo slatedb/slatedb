@@ -12,7 +12,6 @@ permissions:
 
 jobs:
   benchmarks:
-    name: Nightly Benchmark Run
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,7 +22,7 @@ jobs:
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
-          name: Nightly Benchmarks
+          name: cargo run --release --bin bencher
           tool: 'cargo'
           output-file-path: output.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -31,3 +30,28 @@ jobs:
           comment-on-alert: true
           summary-always: true
           max-items-in-chart: 30
+
+  microbenchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run benchmark
+        # Hardcode microbenchmarks because `libtest` runs otherwise. See:
+        # https://bheisler.github.io/criterion.rs/book/faq.html
+        run: cargo bench --bench db_operations -- --output-format bencher | tee output.txt
+
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: cargo bench --bench db_operations
+          tool: 'cargo'
+          output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          alert-threshold: '200%'
+          comment-on-alert: true
+          summary-always: true
+          max-items-in-chart: 30
+          skip-fetch-gh-pages: true
+          auto-push: false
+          save-data-file: false
