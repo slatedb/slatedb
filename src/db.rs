@@ -226,7 +226,7 @@ impl DbInner {
             sr_iters.push_back(sorted_run_iter);
         }
 
-        DbIterator::new(snapshot, range.clone(), mem_iter, l0_iters, sr_iters).await
+        DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters).await
     }
 
     async fn fence_writers(

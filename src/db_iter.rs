@@ -1,5 +1,5 @@
 use crate::bytes_range::BytesRange;
-use crate::db_state::{DbStateSnapshot, SsTableHandle};
+use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::VecDequeKeyValueIterator;
@@ -10,7 +10,6 @@ use crate::types::KeyValue;
 
 use bytes::Bytes;
 use std::collections::VecDeque;
-use std::sync::Arc;
 
 type ScanIterator<'a> = TwoMergeIterator<
     VecDequeKeyValueIterator,
@@ -21,17 +20,14 @@ type ScanIterator<'a> = TwoMergeIterator<
 >;
 
 pub struct DbIterator<'a> {
-    #[allow(dead_code)]
-    snapshot: Arc<DbStateSnapshot>,
     range: BytesRange,
     iter: ScanIterator<'a>,
-    invalidated: bool,
+    invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
 }
 
 impl<'a> DbIterator<'a> {
     pub(crate) async fn new(
-        snapshot: Arc<DbStateSnapshot>,
         range: BytesRange,
         mem_iter: VecDequeKeyValueIterator,
         l0_iters: VecDeque<SstIterator<'a, Box<SsTableHandle>>>,
@@ -42,10 +38,9 @@ impl<'a> DbIterator<'a> {
         let sst_iter = TwoMergeIterator::new(l0_iter?, sr_iter?).await?;
         let iter = TwoMergeIterator::new(mem_iter, sst_iter).await?;
         Ok(DbIterator {
-            snapshot,
             range,
             iter,
-            invalidated: false,
+            invalidated_error: None,
             last_key: None,
         })
     }
@@ -57,11 +52,19 @@ impl<'a> DbIterator<'a> {
     /// Returns [`SlateDBError::InvalidatedIterator`] if the iterator has been invalidated
     ///  due to an underlying error
     pub async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
-        if self.invalidated {
-            Err(SlateDBError::InvalidatedIterator)
+        if let Some(error) = self.invalidated_error.clone() {
+            Err(SlateDBError::InvalidatedIterator(Box::new(error)))
         } else {
-            self.iter.next().await
+            let result = self.iter.next().await;
+            self.maybe_invalidate(result)
         }
+    }
+
+    fn maybe_invalidate<T: Clone>(&mut self, result: Result<T, SlateDBError>) -> Result<T, SlateDBError> {
+        if let Err(error) = result.clone() {
+            self.invalidated_error = Some(error);
+        }
+        result
     }
 
     /// Seek ahead to the next key. The next key must be larger than the
@@ -83,8 +86,8 @@ impl<'a> DbIterator<'a> {
     //  invalidated in order to reclaim resources.
     #[allow(dead_code)]
     pub async fn seek(&mut self, next_key: Bytes) -> Result<(), SlateDBError> {
-        if self.invalidated {
-            Err(SlateDBError::InvalidatedIterator)
+        if let Some(error) = self.invalidated_error.clone() {
+            Err(SlateDBError::InvalidatedIterator(Box::new(error)))
         } else if !self.range.contains(&next_key) {
             Err(SlateDBError::InvalidArgument {
                 msg: "Next key must be contained in the original range".to_string(),
@@ -98,7 +101,8 @@ impl<'a> DbIterator<'a> {
                 msg: "Cannot seek to a key less than the last returned key".to_string(),
             })
         } else {
-            self.iter.seek(&next_key).await
+            let result = self.iter.seek(&next_key).await;
+            self.maybe_invalidate(result)
         }
     }
 }
@@ -106,4 +110,41 @@ impl<'a> DbIterator<'a> {
 pub(crate) trait SeekToKey {
     /// Seek to the next (inclusive) key
     async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::bytes_range::BytesRange;
+    use crate::db_iter::DbIterator;
+    use crate::error::SlateDBError;
+    use crate::mem_table::VecDequeKeyValueIterator;
+    use std::collections::VecDeque;
+    use bytes::Bytes;
+
+    #[tokio::test]
+    async fn test_invalidated_iterator() {
+        let mut iter = DbIterator::new(
+            BytesRange::from(..),
+            VecDequeKeyValueIterator::new(VecDeque::new()),
+            VecDeque::new(),
+            VecDeque::new(),
+        ).await.unwrap();
+
+        iter.invalidated_error = Some(SlateDBError::ChecksumMismatch);
+
+        let result = iter.next().await;
+        let err = result.expect_err("Failed to return invalidated iterator");
+        assert_invalidated_iterator_error(err);
+
+        let result = iter.seek(Bytes::new()).await;
+        let err = result.expect_err("Failed to return invalidated iterator");
+        assert_invalidated_iterator_error(err);
+    }
+
+    fn assert_invalidated_iterator_error(err: SlateDBError) {
+        let SlateDBError::InvalidatedIterator(from_err) = err else {
+            panic!("Unexpected error")
+        };
+        assert!(matches!(*from_err, SlateDBError::ChecksumMismatch));
+    }
 }

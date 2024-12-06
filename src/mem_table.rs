@@ -43,10 +43,14 @@ type MemTableRange<'a, T> = Range<'a, Bytes, T, Bytes, ValueWithAttributes>;
 pub(crate) struct MemTableIterator<'a, T: RangeBounds<Bytes>>(MemTableRange<'a, T>);
 
 pub(crate) struct VecDequeKeyValueIterator {
-    records: VecDeque<RowEntry>,
+    rows: VecDeque<RowEntry>,
 }
 
 impl VecDequeKeyValueIterator {
+    pub(crate) fn new(rows: VecDeque<RowEntry>) -> Self {
+        Self { rows }
+    }
+
     pub(crate) async fn materialize_range(
         tables: VecDeque<Arc<KVTable>>,
         range: BytesRange,
@@ -62,22 +66,22 @@ impl VecDequeKeyValueIterator {
             records.push_back(entry.clone());
         }
 
-        Ok(VecDequeKeyValueIterator { records })
+        Ok(VecDequeKeyValueIterator { rows: records })
     }
 }
 
 impl KeyValueIterator for VecDequeKeyValueIterator {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        Ok(self.records.pop_front())
+        Ok(self.rows.pop_front())
     }
 }
 
 impl SeekToKey for VecDequeKeyValueIterator {
     async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
         loop {
-            let front = self.records.front();
+            let front = self.rows.front();
             if front.map_or(false, |record| record.key < next_key) {
-                self.records.pop_front();
+                self.rows.pop_front();
             } else {
                 return Ok(());
             }
