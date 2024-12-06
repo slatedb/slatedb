@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 use std::ops::{RangeBounds, RangeFull};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::Arc;g
 
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
@@ -101,7 +102,7 @@ impl<'a, T: RangeBounds<Bytes>> KeyValueIterator for MemTableIterator<'a, T> {
     }
 }
 
-impl<'a, T: RangeBounds<Bytes>> MemTableIterator<'a, T> {
+impl<T: RangeBounds<Bytes>> MemTableIterator<'_, T> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
         self.0.next().map(|entry| RowEntry {
             key: entry.key().clone(),
@@ -173,11 +174,13 @@ impl WritableKVTable {
     }
 
     pub(crate) fn put(&mut self, key: Bytes, value: Bytes, attrs: RowAttributes) {
-        self.table.put(key, value, attrs)
+        self.table
+            .put_or_delete(key, ValueDeletable::Value(value), attrs)
     }
 
     pub(crate) fn delete(&mut self, key: Bytes, attrs: RowAttributes) {
-        self.table.delete(key, attrs);
+        self.table
+            .put_or_delete(key, ValueDeletable::Tombstone, attrs);
     }
 
     pub(crate) fn size(&self) -> usize {
@@ -220,45 +223,40 @@ impl KVTable {
         MemTableIterator(self.map.range(range))
     }
 
-    /// Puts a value, returning as soon as the value is written to the memtable but before
+    /// Inserts a value, returning as soon as the value is written to the memtable but before
     /// it is flushed to durable storage.
-    fn put(&self, key: Bytes, value: Bytes, attrs: RowAttributes) {
-        self.maybe_subtract_old_val_from_size(key.clone());
+    fn put_or_delete(&self, key: Bytes, value: ValueDeletable, attrs: RowAttributes) {
+        let key_len = key.len();
+        let value_len = match &value {
+            ValueDeletable::Tombstone => 0,
+            ValueDeletable::Value(v) => v.len(),
+        };
         self.size.fetch_add(
-            key.len() + value.len() + sizeof_attributes(&attrs),
+            key_len + value_len + sizeof_attributes(&attrs),
             Ordering::Relaxed,
         );
-        self.map.insert(
+
+        let previous_size = Cell::new(None);
+        self.map.compare_insert(
             key,
-            ValueWithAttributes {
-                value: ValueDeletable::Value(value),
-                attrs,
+            ValueWithAttributes { value, attrs },
+            |previous_value| {
+                // Optimistically calculate the size of the previous value.
+                let size = key_len
+                    + match &previous_value.value {
+                        ValueDeletable::Tombstone => 0,
+                        ValueDeletable::Value(old) => old.len(),
+                    }
+                    + sizeof_attributes(&previous_value.attrs);
+                // `compare_fn` might be called multiple times in case of concurrent
+                // writes to the same key, so we use `Cell` to avoid substracting
+                // the size multiple times. The last call will set the correct size.
+                previous_size.set(Some(size));
+                true
             },
         );
-    }
-
-    fn delete(&self, key: Bytes, attrs: RowAttributes) {
-        self.maybe_subtract_old_val_from_size(key.clone());
-        self.size
-            .fetch_add(key.len() + sizeof_attributes(&attrs), Ordering::Relaxed);
-        self.map.insert(
-            key,
-            ValueWithAttributes {
-                value: ValueDeletable::Tombstone,
-                attrs,
-            },
-        );
-    }
-
-    fn maybe_subtract_old_val_from_size(&self, key: Bytes) {
-        if let Some(old_deletable) = self.get(&key) {
-            let old_size = key.len()
-                + match old_deletable.value {
-                    ValueDeletable::Tombstone => 0,
-                    ValueDeletable::Value(old) => old.len(),
-                }
-                + sizeof_attributes(&old_deletable.attrs);
-            self.size.fetch_sub(old_size, Ordering::Relaxed);
+        if let Some(size) = previous_size.take() {
+            self.size.fetch_sub(size, Ordering::Relaxed);
         }
     }
 
