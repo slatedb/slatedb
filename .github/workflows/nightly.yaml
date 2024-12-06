@@ -1,0 +1,34 @@
+name: Nightly Benchmarks
+
+on:
+  schedule:
+    # Run at midnight Pacific (8 AM UTC)
+    - cron: '0 8 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+permissions:
+  # Required for storing benchmark results
+  contents: write
+
+jobs:
+  benchmark:
+    name: Nightly Benchmark Run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run bencher
+        run: cargo run --release --bin bencher | tee output.txt
+
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Nightly Benchmarks
+          tool: 'cargo'
+          output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          alert-threshold: '200%'
+          comment-on-alert: true
+          summary-always: true
+          max-items-in-chart: 30
+          auto-push: true
