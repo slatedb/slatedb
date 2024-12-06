@@ -77,6 +77,9 @@ wal_disable = []
 moka = ["dep:moka"]
 foyer = ["dep:foyer"]
 
+[profile.bench]
+lto = true
+
 [[bin]]
 name = "bencher"
 path = "src/bencher/main.rs"
