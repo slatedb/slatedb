@@ -45,13 +45,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ./microbenchmarks-cache
-          key: ${{ runner.os }}-benchmark
+          key: ${{ runner.os }}-microbenchmarks
 
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: cargo bench --bench db_operations
           tool: 'cargo'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           output-file-path: output.txt
           external-data-json-path: ./microbenchmarks-cache/benchmark-data.json
           comment-on-alert: true

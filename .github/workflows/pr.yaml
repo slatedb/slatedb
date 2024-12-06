@@ -88,7 +88,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ./microbenchmarks-cache
-          key: ${{ runner.os }}-benchmark
+          key: ${{ runner.os }}-microbenchmarks
 
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
