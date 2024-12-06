@@ -387,8 +387,10 @@ We support two main TTL behaviors for merge operations:
 
 3. **Fixed Expiration Time**
    - Key expires at a specific time regardless of updates
-   - Requires new `Ttl::ExpireAt(ts)` variant
-   - All merges for a key must use the same expiration time
+   - While not supported natively by SlateDB, users can achieve this behavior by consistently setting the same expiration timestamp for all merge operands of a key.
+   - Requires new `Ttl::ExpireAt(ts)` variant to allow users to align expiration times of merge operands
+
+Users can combine approaches 2) and 3) at the application level to implement their desired TTL semantics.
 
 ### Ordering Guarantees
 
