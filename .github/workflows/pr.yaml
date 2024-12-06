@@ -11,6 +11,12 @@ on:
 env:
   RUSTFLAGS: "-Dwarnings"
 
+permissions:
+  # Required for PR comments
+  pull-requests: write
+  # Required for storing benchmark results
+  contents: write
+
 jobs:
   check:
     runs-on: ubuntu-latest
