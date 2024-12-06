@@ -158,9 +158,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::bytes::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
-    use crate::test_utils::{assert_kv, gen_attrs, OrderedBytesGenerator};
+    use crate::test_utils::{assert_kv, gen_attrs};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use ulid::Ulid;

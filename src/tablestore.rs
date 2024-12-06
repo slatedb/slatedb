@@ -72,7 +72,6 @@ pub(crate) struct SstFileMetadata {
 }
 
 impl TableStore {
-    #[allow(dead_code)]
     pub fn new<P: Into<Path>>(
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
@@ -277,8 +276,6 @@ impl TableStore {
         Ok(sst_list)
     }
 
-    // todo: clean up the warning suppression when we start using open_sst outside tests
-    #[allow(dead_code)]
     pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
         let path = self.path(id);
         let obj = ReadOnlyObject {
