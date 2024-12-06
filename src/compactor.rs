@@ -534,7 +534,10 @@ mod tests {
         assert!(!compacted_l0s.contains(&l0_id));
         assert_eq!(
             db_state.l0_last_compacted.unwrap(),
-            l0_ids_to_compact.first().unwrap().unwrap_sst()
+            l0_ids_to_compact
+                .first()
+                .and_then(|id| id.maybe_unwrap_sst())
+                .unwrap()
         );
     }
 

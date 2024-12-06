@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info};
 use ulid::Ulid;
 
+use crate::bytes::OrderedBytesGenerator;
 use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, SourceId};
@@ -24,7 +25,6 @@ use crate::manifest_store::{ManifestStore, StoredManifest};
 use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
-use crate::test_utils::OrderedBytesGenerator;
 use crate::types::RowEntry;
 
 pub struct CompactionExecuteBench {
