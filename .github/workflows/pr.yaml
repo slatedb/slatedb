@@ -98,3 +98,4 @@ jobs:
           max-items-in-chart: 30
           skip-fetch-gh-pages: true
           auto-push: false
+          save-data-file: false
