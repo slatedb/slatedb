@@ -30,8 +30,8 @@ jobs:
         with:
           name: cargo bench
           tool: 'cargo'
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           external-data-json-path: ./microbenchmarks-cache/benchmark-data.json
           comment-on-alert: true
           summary-always: true
