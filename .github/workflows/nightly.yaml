@@ -16,16 +16,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run benchmark
+      - name: Run microbenchmark
         run: cargo bench -- --output-format bencher | tee output.txt
 
-      - name: Download nightly benchmark data
+      - name: Download nightly microbenchmark data
         uses: actions/cache/restore@v4
         with:
           path: ./microbenchmarks-cache
           key: ${{ runner.os }}-microbenchmarks
 
-      - name: Update benchmark result
+      - name: Update microbenchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: cargo bench
@@ -37,8 +37,41 @@ jobs:
           summary-always: true
           max-items-in-chart: 30
 
-      - name: Save nightly benchmark data
+      - name: Save nightly microbenchmark data
         uses: actions/cache/save@v4
         with:
           path: ./microbenchmarks-cache
           key: ${{ runner.os }}-microbenchmarks
+
+  benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run benchmark
+        run: src/bencher/benchmark-db.sh
+
+      - name: Download nightly benchmark data
+        uses: actions/cache/restore@v4
+        with:
+          path: ./benchmarks-cache
+          key: ${{ runner.os }}-benchmarks
+
+      - name: Update benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: src/bencher/benchmark-db.sh
+          tool: 'customBiggerIsBetter'
+          output-file-path: target/bencher/results/benchmark-data.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          external-data-json-path: ./benchmarks-cache/benchmark-data.json
+          fail-on-alert: true
+          summary-always: true
+          max-items-in-chart: 30
+          auto-push: true
+
+      - name: Save nightly benchmark data
+        uses: actions/cache/save@v4
+        with:
+          path: ./benchmarks-cache
+          key: ${{ runner.os }}-benchmarks
