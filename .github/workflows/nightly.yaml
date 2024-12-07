@@ -11,26 +11,6 @@ permissions:
   contents: write
 
 jobs:
-  # benchmarks:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-
-  #     - name: Run bencher
-  #       run: cargo run --release --bin bencher | tee output.txt
-
-  #     - name: Store benchmark result
-  #       uses: benchmark-action/github-action-benchmark@v1
-  #       with:
-  #         name: cargo run --release --bin bencher
-  #         tool: 'cargo'
-  #         output-file-path: output.txt
-  #         github-token: ${{ secrets.GITHUB_TOKEN }}
-  #         alert-threshold: '200%'
-  #         comment-on-alert: true
-  #         summary-always: true
-  #         max-items-in-chart: 30
-
   microbenchmarks:
     runs-on: ubuntu-latest
     steps:
