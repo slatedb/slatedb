@@ -26,6 +26,8 @@ fn criterion_benchmark(c: &mut Criterion) {
             )
             .await
             .expect("put failed");
+            // Sleep for 1 ms to trigger a perf degredation
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         })
     });
 }
