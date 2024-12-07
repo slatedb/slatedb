@@ -63,7 +63,7 @@ jobs:
           name: src/bencher/benchmark-db.sh
           tool: 'customBiggerIsBetter'
           output-file-path: target/bencher/results/benchmark-data.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
           external-data-json-path: ./benchmarks-cache/benchmark-data.json
           fail-on-alert: true
           summary-always: true
