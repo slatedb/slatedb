@@ -1,0 +1,44 @@
+name: Nightly Benchmarks
+
+on:
+  schedule:
+    # Run at midnight Pacific (8 AM UTC)
+    - cron: '0 8 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+permissions:
+  # Required for storing benchmark results
+  contents: write
+
+jobs:
+  microbenchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run benchmark
+        run: cargo bench -- --output-format bencher | tee output.txt
+
+      - name: Download nightly benchmark data
+        uses: actions/cache/restore@v4
+        with:
+          path: ./microbenchmarks-cache
+          key: ${{ runner.os }}-microbenchmarks
+
+      - name: Update benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: cargo bench
+          tool: 'cargo'
+          output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          external-data-json-path: ./microbenchmarks-cache/benchmark-data.json
+          fail-on-alert: true
+          summary-always: true
+          max-items-in-chart: 30
+
+      - name: Save nightly benchmark data
+        uses: actions/cache/save@v4
+        with:
+          path: ./microbenchmarks-cache
+          key: ${{ runner.os }}-microbenchmarks

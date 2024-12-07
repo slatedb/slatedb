@@ -88,22 +88,28 @@ moka = ["dep:moka"]
 foyer = ["dep:foyer"]
 
 [profile.bench]
-debug = true
+lto = true
 
-[[bin]]
-name = "compaction-execute-bench"
-path = "src/compaction_execute_bench/compaction_execute_bench.rs"
-required-features = ["bencher"]
+[lib]
+# Disable `libtest` harness because it fights with Criterion's `--output-format bencher`
+# See https://bheisler.github.io/criterion.rs/book/faq.html
+bench = false
 
 [[bin]]
 name = "bencher"
 path = "src/bencher/main.rs"
 required-features = ["bencher"]
+# Disable `libtest` harness because it fights with Criterion's `--output-format bencher`
+# See https://bheisler.github.io/criterion.rs/book/faq.html
+bench = false
 
 [[bin]]
 name = "slatedb"
 path = "src/cli/main.rs"
 required-features = ["cli"]
+# Disable `libtest` harness because it fights with Criterion's `--output-format bencher`
+# See https://bheisler.github.io/criterion.rs/book/faq.html
+bench = false
 
 [[bench]]
 name = "db_operations"
