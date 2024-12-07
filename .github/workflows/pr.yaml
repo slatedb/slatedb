@@ -88,7 +88,7 @@ jobs:
           path: ./microbenchmarks-cache
           key: ${{ runner.os }}-microbenchmarks
 
-      - name: Store benchmark result
+      - name: Update benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: cargo bench

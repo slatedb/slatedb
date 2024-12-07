@@ -20,12 +20,12 @@ jobs:
         run: cargo bench -- --output-format bencher | tee output.txt
 
       - name: Download nightly benchmark data
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ./microbenchmarks-cache
           key: ${{ runner.os }}-microbenchmarks
 
-      - name: Store benchmark result
+      - name: Update benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: cargo bench
@@ -36,3 +36,9 @@ jobs:
           comment-on-alert: true
           summary-always: true
           max-items-in-chart: 30
+
+      - name: Save nightly benchmark data
+        uses: actions/cache/save@v4
+        with:
+          path: ./microbenchmarks-cache
+          key: ${{ runner.os }}-microbenchmarks
