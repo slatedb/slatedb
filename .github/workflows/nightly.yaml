@@ -48,11 +48,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: System information
+        run: |
+          echo "=== CPU ==="
+          lscpu
+          echo -e "\n=== Memory ==="
+          free -h
+          echo -e "\n=== Disk Space ==="
+          df -h
+          echo -e "\n=== Workspace Directory ==="
+          du -sh ${{ github.workspace }}
+
       - name: Run benchmark
         env:
           CLOUD_PROVIDER: local
-          LOCAL_PATH: /tmp/slatedb-lfs
-        run: mkdir -p /tmp/slatedb-lfs && ./src/bencher/benchmark-db.sh
+          LOCAL_PATH: ${{ github.workspace }}/benchmark-data
+        run: mkdir -p ${{ github.workspace }}/benchmark-data && ./src/bencher/benchmark-db.sh
 
       - name: Download nightly benchmark data
         uses: actions/cache/restore@v4
