@@ -73,12 +73,10 @@ generate_json() {
 
         # Read the last line of the dat file for final stats
         local stats=$(tail -n 1 "$dat_file")
-        local elapsed=$(echo "$stats" | awk '{print $1}')
         local puts=$(echo "$stats" | awk '{print $2}')
         local gets=$(echo "$stats" | awk '{print $3}')
 
         # Assert that all required values are non-empty
-        [ -n "$elapsed" ] || { echo "Error: elapsed time is empty in $dat_file"; exit 1; }
         [ -n "$puts" ] || { echo "Error: puts/s is empty in $dat_file"; exit 1; }
         [ -n "$gets" ] || { echo "Error: gets/s is empty in $dat_file"; exit 1; }
 
@@ -100,11 +98,6 @@ generate_json() {
         "name": "SlateDB ${put_percentage}% Puts ${concurrency} Threads - Gets/s",
         "unit": "ops/sec",
         "value": $gets
-    },
-    {
-        "name": "SlateDB ${put_percentage}% Puts ${concurrency} Threads - Duration",
-        "unit": "seconds",
-        "value": $elapsed
     }
 EOF
     done
