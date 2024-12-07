@@ -65,7 +65,8 @@ generate_json() {
     echo "[" > "$output_file"
     local first_entry=true
 
-    for dat_file in "$OUT"/dats/*.dat; do
+    # Use find to get a sorted list of dat files
+    for dat_file in $(find "$OUT/dats" -name "*.dat" | sort -Vr); do
         # Extract put_percentage and concurrency from filename
         local filename=$(basename "$dat_file")
         local put_percentage=$(echo "$filename" | cut -d'_' -f1)
