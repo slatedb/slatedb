@@ -9,7 +9,15 @@ OUT="target/bencher/results"
 mkdir -p $OUT/plots
 mkdir -p $OUT/dats
 mkdir -p $OUT/logs
-gnuplot -V # just to make sure gnuplot is present
+
+# Check if gnuplot is available
+has_gnuplot() {
+    if command -v gnuplot >/dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
 
 run_bench() {
   local put_percentage="$1"
@@ -116,7 +124,11 @@ for put_percentage in 20 40 60 80 100; do
 
     run_bench "$put_percentage" "$concurrency" "$log_file"
     generate_dat "$log_file" "$dat_file"
-    generate_plot "$dat_file" "$svg_file"
+    if has_gnuplot; then
+      generate_plot "$dat_file" "$svg_file"
+    else
+      echo "gnuplot is missing, so skipping plot generation"
+    fi
   done
 done
 
