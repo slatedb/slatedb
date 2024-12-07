@@ -44,7 +44,7 @@ jobs:
           key: ${{ runner.os }}-microbenchmarks
 
   benchmarks:
-    runs-on: buildjet-8vcpu-ubuntu-2204
+    runs-on: warp-custom-slatedb-x64-32vCPU-128GB-RAM-300GB-DISK
     steps:
       - uses: actions/checkout@v4
 
