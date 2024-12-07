@@ -52,7 +52,7 @@ jobs:
         env:
           CLOUD_PROVIDER: local
           LOCAL_PATH: /tmp/slatedb-lfs
-        run: src/bencher/benchmark-db.sh
+        run: mkdir -p /tmp/slatedb-lfs && ./src/bencher/benchmark-db.sh
 
       - name: Download nightly benchmark data
         uses: actions/cache/restore@v4
