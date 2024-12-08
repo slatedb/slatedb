@@ -1497,6 +1497,7 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
     async fn test_wal_disabled() {
+        use crate::test_utils::gen_attrs;
         use crate::test_utils::gen_empty_attrs;
 
         let clock = Arc::new(TestClock::new());
