@@ -3,6 +3,7 @@ use bytes::Bytes;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tracing::debug;
 use ulid::Ulid;
@@ -150,7 +151,7 @@ pub(crate) struct COWDbState {
 }
 
 // represents the core db state that we persist in the manifest
-#[derive(Clone, PartialEq, Serialize, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct CoreDbState {
     pub(crate) initialized: bool,
     pub(crate) l0_last_compacted: Option<Ulid>,
@@ -160,6 +161,8 @@ pub(crate) struct CoreDbState {
     pub(crate) last_compacted_wal_sst_id: u64,
     pub(crate) last_clock_tick: i64,
     pub(crate) checkpoints: Vec<Checkpoint>,
+    #[serde(serialize_with = "serialize_atomic_u64")]
+    pub(crate) last_seq: Arc<AtomicU64>,
 }
 
 impl CoreDbState {
@@ -173,6 +176,7 @@ impl CoreDbState {
             last_compacted_wal_sst_id: 0,
             last_clock_tick: i64::MIN,
             checkpoints: vec![],
+            last_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -191,6 +195,28 @@ impl CoreDbState {
     }
 }
 
+impl PartialEq for CoreDbState {
+    fn eq(&self, other: &Self) -> bool {
+        self.initialized == other.initialized
+            && self.l0_last_compacted == other.l0_last_compacted
+            && self.l0 == other.l0
+            && self.compacted == other.compacted
+            && self.next_wal_sst_id == other.next_wal_sst_id
+            && self.last_compacted_wal_sst_id == other.last_compacted_wal_sst_id
+            && self.last_clock_tick == other.last_clock_tick
+            && self.checkpoints == other.checkpoints
+            && self.last_seq.load(std::sync::atomic::Ordering::Relaxed)
+                == other.last_seq.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+fn serialize_atomic_u64<S>(atomic: &Arc<AtomicU64>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_u64(atomic.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 // represents a read-snapshot of the current db state
 #[derive(Clone)]
 pub(crate) struct DbStateSnapshot {
@@ -202,8 +228,8 @@ pub(crate) struct DbStateSnapshot {
 impl DbState {
     pub fn new(core_db_state: CoreDbState) -> Self {
         Self {
-            memtable: WritableKVTable::new(),
-            wal: WritableKVTable::new(),
+            memtable: WritableKVTable::new(core_db_state.last_seq.clone()),
+            wal: WritableKVTable::new(core_db_state.last_seq.clone()),
             state: Arc::new(COWDbState {
                 imm_memtable: VecDeque::new(),
                 imm_wal: VecDeque::new(),
@@ -248,7 +274,10 @@ impl DbState {
     }
 
     pub fn freeze_memtable(&mut self, wal_id: u64) {
-        let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
+        let old_memtable = std::mem::replace(
+            &mut self.memtable,
+            WritableKVTable::new(self.state.core.last_seq.clone()),
+        );
         let mut state = self.state_copy();
         state
             .imm_memtable
@@ -260,7 +289,10 @@ impl DbState {
         if self.wal.table().is_empty() {
             return None;
         }
-        let old_wal = std::mem::replace(&mut self.wal, WritableKVTable::new());
+        let old_wal = std::mem::replace(
+            &mut self.wal,
+            WritableKVTable::new(self.state.core.last_seq.clone()),
+        );
         let mut state = self.state_copy();
         let imm_wal = Arc::new(ImmutableWal::new(state.core.next_wal_sst_id, old_wal));
         let id = imm_wal.id();

@@ -42,6 +42,9 @@ table ManifestV1 {
 
     // A list of checkpoints that are currently open.
     checkpoints: [Checkpoint] (required);
+
+    // The last Snapshot sequence number written.
+    last_seq: ulong;
 }
 
 table SortedRun {

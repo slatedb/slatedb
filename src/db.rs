@@ -158,7 +158,7 @@ impl DbInner {
         let mut empty_wal_id = next_wal_id;
 
         loop {
-            let empty_wal = WritableKVTable::new();
+            let empty_wal = WritableKVTable::new(self.state.read().state().core.last_seq.clone());
             match self
                 .flush_imm_table(&SsTableId::Wal(empty_wal_id), empty_wal.table().clone())
                 .await
