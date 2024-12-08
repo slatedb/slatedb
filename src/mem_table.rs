@@ -3,7 +3,7 @@ use std::ops::Bound;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
 use tokio::sync::watch;
@@ -46,7 +46,7 @@ impl PartialOrd for LookupKey {
 }
 
 pub(crate) struct KVTable {
-    map: SkipMap<Bytes, ValueWithAttributes>,
+    map: SkipMap<LookupKey, ValueWithAttributes>,
     is_durable_tx: watch::Sender<bool>,
     is_durable_rx: watch::Receiver<bool>,
     size: AtomicUsize,
@@ -68,9 +68,10 @@ pub(crate) struct ImmutableWal {
     table: Arc<KVTable>,
 }
 
-type MemTableRange<'a> = Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, ValueWithAttributes>;
+type MemTableIterInner<'a> =
+    Range<'a, LookupKey, (Bound<LookupKey>, Bound<LookupKey>), LookupKey, ValueWithAttributes>;
 
-pub struct MemTableIterator<'a>(MemTableRange<'a>);
+pub struct MemTableIterator<'a>(MemTableIterInner<'a>);
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ValueWithAttributes {
@@ -87,9 +88,9 @@ impl<'a> KeyValueIterator for MemTableIterator<'a> {
 impl MemTableIterator<'_> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
         self.0.next().map(|entry| RowEntry {
-            key: entry.key().clone(),
+            key: entry.key().user_key.clone(),
             value: entry.value().value.clone(),
-            seq: 0,
+            seq: entry.key().seq,
             create_ts: entry.value().attrs.ts,
             expire_ts: entry.value().attrs.expire_ts,
         })
@@ -155,12 +156,14 @@ impl WritableKVTable {
         &self.table
     }
 
-    pub(crate) fn put(&mut self, key: Bytes, value: Bytes, attrs: RowAttributes) {
+    // TODO: replace put() with RowEntry
+    pub(crate) fn put(&mut self, key: LookupKey, value: Bytes, attrs: RowAttributes) {
         self.table
             .put_or_delete(key, ValueDeletable::Value(value), attrs)
     }
 
-    pub(crate) fn delete(&mut self, key: Bytes, attrs: RowAttributes) {
+    // TODO: remove it
+    pub(crate) fn delete(&mut self, key: LookupKey, attrs: RowAttributes) {
         self.table
             .put_or_delete(key, ValueDeletable::Tombstone, attrs);
     }
@@ -194,7 +197,14 @@ impl KVTable {
     /// Some(None) if the key is in the memtable but has a tombstone value,
     /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
     pub(crate) fn get(&self, key: &[u8]) -> Option<ValueWithAttributes> {
-        self.map.get(key).map(|entry| entry.value().clone())
+        // TODO: get the last element is not considered as efficient in the current SkipMap's code.
+        let start_key = LookupKey::new(Bytes::from(key.to_vec()), 0);
+        let end_key = LookupKey::new(Bytes::from(key.to_vec()), u64::MAX);
+        let bounds = (Bound::Included(&start_key), Bound::Included(&end_key));
+        self.map
+            .range(bounds)
+            .last()
+            .map(|entry| entry.value().clone())
     }
 
     pub(crate) fn iter(&self) -> MemTableIterator {
@@ -204,14 +214,14 @@ impl KVTable {
 
     #[allow(dead_code)] // will be used in #8
     pub(crate) fn range_from(&self, start: Bytes) -> MemTableIterator {
-        let bounds = (Bound::Included(start), Bound::Unbounded);
+        let bounds = (Bound::Included(LookupKey::new(start, 0)), Bound::Unbounded);
         MemTableIterator(self.map.range(bounds))
     }
 
     /// Inserts a value, returning as soon as the value is written to the memtable but before
     /// it is flushed to durable storage.
-    fn put_or_delete(&self, key: Bytes, value: ValueDeletable, attrs: RowAttributes) {
-        let key_len = key.len();
+    fn put_or_delete(&self, key: LookupKey, value: ValueDeletable, attrs: RowAttributes) {
+        let key_len = key.user_key.len();
         let value_len = match &value {
             ValueDeletable::Tombstone => 0,
             ValueDeletable::Value(v) => v.len(),
