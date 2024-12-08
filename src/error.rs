@@ -1,6 +1,8 @@
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 
+use crate::merge_operator::MergeOperatorError;
+
 #[derive(Clone, Debug, Error)]
 pub enum SlateDBError {
     #[error("IO error: {0}")]
@@ -82,6 +84,9 @@ pub enum SlateDBError {
 
     #[error("Merge Operator is not fully implemented")]
     MergeUnsupported,
+
+    #[error("Merge Operator error: {0}")]
+    MergeOperatorError(#[from] MergeOperatorError),
 }
 
 impl From<std::io::Error> for SlateDBError {
