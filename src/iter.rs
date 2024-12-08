@@ -1,6 +1,5 @@
 use crate::error::SlateDBError;
 use crate::types::RowEntry;
-#[cfg(test)]
 use crate::types::{KeyValue, ValueDeletable};
 
 /// Note: this is intentionally its own trait instead of an Iterator<Item=KeyValue>,
@@ -9,7 +8,6 @@ use crate::types::{KeyValue, ValueDeletable};
 /// See: https://github.com/slatedb/slatedb/issues/12
 pub trait KeyValueIterator {
     /// Returns the next non-deleted key-value pair in the iterator.
-    #[cfg(test)]
     async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
         loop {
             let entry = self.next_entry().await?;
