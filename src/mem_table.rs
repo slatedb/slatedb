@@ -3,7 +3,7 @@ use std::ops::Bound;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
 use tokio::sync::watch;
@@ -11,6 +11,39 @@ use tokio::sync::watch;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::{RowAttributes, RowEntry, ValueDeletable};
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct LookupKey {
+    user_key: Bytes,
+    seq: u64,
+}
+
+impl LookupKey {
+    pub fn new(user_key: Bytes, seq: u64) -> Self {
+        Self { user_key, seq }
+    }
+
+    pub fn key(&self) -> &[u8] {
+        &self.user_key
+    }
+
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+}
+
+impl Ord for LookupKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // TODO: should we put the higher seq number first?
+        (&self.user_key, self.seq).cmp(&(&other.user_key, other.seq))
+    }
+}
+
+impl PartialOrd for LookupKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 pub(crate) struct KVTable {
     map: SkipMap<Bytes, ValueWithAttributes>,
