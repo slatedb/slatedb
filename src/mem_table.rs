@@ -10,8 +10,9 @@ use tokio::sync::watch;
 
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
-use crate::types::{RowAttributes, RowEntry, ValueDeletable};
+use crate::types::RowEntry;
 
+/// Memtable may contains multiple versions of a single user key, with a monotonically increasing sequence number.
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct LookupKey {
     user_key: Bytes,
@@ -21,14 +22,6 @@ struct LookupKey {
 impl LookupKey {
     pub fn new(user_key: Bytes, seq: u64) -> Self {
         Self { user_key, seq }
-    }
-
-    pub fn key(&self) -> &[u8] {
-        &self.user_key
-    }
-
-    pub fn seq(&self) -> u64 {
-        self.seq
     }
 }
 
@@ -72,12 +65,6 @@ type MemTableIterInner<'a> =
     Range<'a, LookupKey, (Bound<LookupKey>, Bound<LookupKey>), LookupKey, RowEntry>;
 
 pub struct MemTableIterator<'a>(MemTableIterInner<'a>);
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ValueWithAttributes {
-    pub(crate) value: ValueDeletable,
-    pub(crate) attrs: RowAttributes,
-}
 
 impl<'a> KeyValueIterator for MemTableIterator<'a> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
@@ -183,20 +170,15 @@ impl KVTable {
     /// Returns None if the key is not in the memtable at all,
     /// Some(None) if the key is in the memtable but has a tombstone value,
     /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
-    pub(crate) fn get(&self, key: &[u8]) -> Option<Option<RowEntry>> {
+    pub(crate) fn get(&self, key: &[u8]) -> Option<RowEntry> {
         // TODO: get the last element is not considered as efficient in the current SkipMap's code.
         let start_key = LookupKey::new(Bytes::from(key.to_vec()), 0);
         let end_key = LookupKey::new(Bytes::from(key.to_vec()), u64::MAX);
         let bounds = (Bound::Included(&start_key), Bound::Included(&end_key));
-        let result = self
-            .map
+        self.map
             .range(bounds)
             .last()
-            .map(|entry| entry.value().clone())?;
-        match &result.value {
-            ValueDeletable::Tombstone => Some(None),
-            ValueDeletable::Value(_) => Some(Some(result)),
-        }
+            .map(|entry| entry.value().clone())
     }
 
     pub(crate) fn iter(&self) -> MemTableIterator {
@@ -216,6 +198,7 @@ impl KVTable {
         self.size.fetch_add(row.estimated_size(), Ordering::Relaxed);
         let lookup_key = LookupKey::new(row.key.clone(), row.seq);
         let previous_size = Cell::new(None);
+        // TODO: memtable is considered as append only, so i suppose we do not need consider removing the previous row here
         self.map.compare_insert(lookup_key, row, |previous_row| {
             // Optimistically calculate the size of the previous value.
             // `compare_fn` might be called multiple times in case of concurrent
@@ -243,8 +226,9 @@ impl KVTable {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::ValueDeletable;
+
     use super::*;
-    use crate::test_utils::gen_attrs;
 
     #[tokio::test]
     async fn test_memtable_iter() {
@@ -450,7 +434,7 @@ mod tests {
         });
 
         let value = table.table().get(b"abc333");
-        assert_eq!(value, Some(None));
+        assert_eq!(value, None);
     }
 
     #[tokio::test]

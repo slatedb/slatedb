@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use tokio::runtime::Handle;
 
-use crate::types::RowAttributes;
+use crate::types::{RowEntry, ValueDeletable};
 use crate::{
     batch::{WriteBatch, WriteOp},
     db::DbInner,
@@ -61,23 +61,22 @@ impl DbInner {
             for op in batch.ops {
                 match op {
                     WriteOp::Put(key, value, opts) => {
-                        current_wal.put(
+                        current_wal.put(RowEntry {
                             key,
-                            value,
-                            RowAttributes {
-                                ts: Some(now),
-                                expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
-                            },
-                        );
+                            value: ValueDeletable::Value(value),
+                            create_ts: Some(now),
+                            expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
+                            seq: 0, // TODO: assign sequence number
+                        });
                     }
                     WriteOp::Delete(key) => {
-                        current_wal.delete(
+                        current_wal.put(RowEntry {
                             key,
-                            RowAttributes {
-                                ts: Some(now),
-                                expire_ts: None,
-                            },
-                        );
+                            value: ValueDeletable::Tombstone,
+                            create_ts: Some(now),
+                            expire_ts: None,
+                            seq: 0, // TODO: assign sequence number
+                        });
                     }
                 }
             }
@@ -94,23 +93,22 @@ impl DbInner {
             for op in batch.ops {
                 match op {
                     WriteOp::Put(key, value, opts) => {
-                        current_memtable.put(
+                        current_memtable.put(RowEntry {
                             key,
-                            value,
-                            RowAttributes {
-                                ts: Some(now),
-                                expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
-                            },
-                        );
+                            value: ValueDeletable::Value(value),
+                            create_ts: Some(now),
+                            expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
+                            seq: 0, // TODO: assign sequence number
+                        });
                     }
                     WriteOp::Delete(key) => {
-                        current_memtable.delete(
+                        current_memtable.put(RowEntry {
                             key,
-                            RowAttributes {
-                                ts: Some(now),
-                                expire_ts: None,
-                            },
-                        );
+                            value: ValueDeletable::Tombstone,
+                            create_ts: Some(now),
+                            expire_ts: None,
+                            seq: 0, // TODO: assign sequence number
+                        });
                     }
                 }
             }
