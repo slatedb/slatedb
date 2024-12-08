@@ -53,7 +53,6 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
-use crate::types::{RowAttributes, ValueDeletable};
 use std::rc::Rc;
 
 pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
@@ -103,6 +102,7 @@ impl DbInner {
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
 
+        // TODO: merge the iterators to get the latest value
         if matches!(options.read_level, Uncommitted) {
             let maybe_val = std::iter::once(snapshot.wal)
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
@@ -392,25 +392,7 @@ impl DbInner {
                         guard.update_clock_tick(ts)?;
                     }
 
-                    match &kv.value {
-                        ValueDeletable::Value(value) => {
-                            guard.memtable().put(
-                                kv.key.clone(),
-                                value.clone(),
-                                RowAttributes {
-                                    ts: kv.create_ts,
-                                    expire_ts: kv.expire_ts,
-                                },
-                            );
-                        }
-                        ValueDeletable::Tombstone => guard.memtable().delete(
-                            kv.key.clone(),
-                            RowAttributes {
-                                ts: kv.create_ts,
-                                expire_ts: kv.expire_ts,
-                            },
-                        ),
-                    }
+                    guard.memtable().put(kv.clone());
                 }
                 self.maybe_freeze_memtable(&mut guard, sst_id)?;
                 if guard.state().core.next_wal_sst_id == sst_id {
@@ -1137,7 +1119,8 @@ mod tests {
     use crate::sst_iter::SstIterator;
     #[cfg(feature = "wal_disable")]
     use crate::test_utils::assert_iterator;
-    use crate::test_utils::{gen_attrs, TestClock};
+    use crate::test_utils::TestClock;
+    use crate::types::{RowEntry, ValueDeletable};
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -1514,6 +1497,7 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
     async fn test_wal_disabled() {
+        use crate::test_utils::gen_attrs;
         use crate::test_utils::gen_empty_attrs;
 
         let clock = Arc::new(TestClock::new());
@@ -1752,21 +1736,27 @@ mod tests {
 
         let memtable = {
             let mut lock = kv_store.inner.state.write();
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc1111"),
-                Bytes::copy_from_slice(b"value1111"),
-                gen_attrs(1),
-            );
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc2222"),
-                Bytes::copy_from_slice(b"value2222"),
-                gen_attrs(2),
-            );
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc3333"),
-                Bytes::copy_from_slice(b"value3333"),
-                gen_attrs(3),
-            );
+            lock.wal().put(RowEntry {
+                key: Bytes::copy_from_slice(b"abc1111"),
+                value: ValueDeletable::Value(Bytes::copy_from_slice(b"value1111")),
+                seq: 1,
+                create_ts: None,
+                expire_ts: None,
+            });
+            lock.wal().put(RowEntry {
+                key: Bytes::copy_from_slice(b"abc2222"),
+                value: ValueDeletable::Value(Bytes::copy_from_slice(b"value2222")),
+                seq: 2,
+                create_ts: None,
+                expire_ts: None,
+            });
+            lock.wal().put(RowEntry {
+                key: Bytes::copy_from_slice(b"abc3333"),
+                value: ValueDeletable::Value(Bytes::copy_from_slice(b"value3333")),
+                seq: 3,
+                create_ts: None,
+                expire_ts: None,
+            });
             lock.wal().table().clone()
         };
 
