@@ -53,7 +53,6 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
-use crate::types::{RowAttributes, ValueDeletable};
 use std::rc::Rc;
 
 pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
@@ -1120,8 +1119,8 @@ mod tests {
     use crate::sst_iter::SstIterator;
     #[cfg(feature = "wal_disable")]
     use crate::test_utils::assert_iterator;
-    use crate::test_utils::{gen_attrs, TestClock};
-    use crate::types::RowEntry;
+    use crate::test_utils::TestClock;
+    use crate::types::{RowEntry, ValueDeletable};
 
     #[tokio::test]
     async fn test_put_get_delete() {

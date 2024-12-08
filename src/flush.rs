@@ -11,7 +11,6 @@ use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
-use crate::types::{RowAttributes, ValueDeletable};
 
 #[derive(Debug)]
 pub(crate) enum WalFlushThreadMsg {
