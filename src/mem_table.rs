@@ -46,7 +46,7 @@ impl PartialOrd for LookupKey {
 }
 
 pub(crate) struct KVTable {
-    map: SkipMap<LookupKey, ValueWithAttributes>,
+    map: SkipMap<LookupKey, RowEntry>,
     is_durable_tx: watch::Sender<bool>,
     is_durable_rx: watch::Receiver<bool>,
     size: AtomicUsize,
@@ -69,7 +69,7 @@ pub(crate) struct ImmutableWal {
 }
 
 type MemTableIterInner<'a> =
-    Range<'a, LookupKey, (Bound<LookupKey>, Bound<LookupKey>), LookupKey, ValueWithAttributes>;
+    Range<'a, LookupKey, (Bound<LookupKey>, Bound<LookupKey>), LookupKey, RowEntry>;
 
 pub struct MemTableIterator<'a>(MemTableIterInner<'a>);
 
@@ -87,13 +87,7 @@ impl<'a> KeyValueIterator for MemTableIterator<'a> {
 
 impl MemTableIterator<'_> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
-        self.0.next().map(|entry| RowEntry {
-            key: entry.key().user_key.clone(),
-            value: entry.value().value.clone(),
-            seq: entry.key().seq,
-            create_ts: entry.value().attrs.ts,
-            expire_ts: entry.value().attrs.expire_ts,
-        })
+        self.0.next().map(|entry| entry.value().clone())
     }
 }
 
@@ -157,15 +151,8 @@ impl WritableKVTable {
     }
 
     // TODO: replace put() with RowEntry
-    pub(crate) fn put(&mut self, key: LookupKey, value: Bytes, attrs: RowAttributes) {
-        self.table
-            .put_or_delete(key, ValueDeletable::Value(value), attrs)
-    }
-
-    // TODO: remove it
-    pub(crate) fn delete(&mut self, key: LookupKey, attrs: RowAttributes) {
-        self.table
-            .put_or_delete(key, ValueDeletable::Tombstone, attrs);
+    pub(crate) fn put(&mut self, row: RowEntry) {
+        self.table.put(row)
     }
 
     pub(crate) fn size(&self) -> usize {
@@ -196,7 +183,7 @@ impl KVTable {
     /// Returns None if the key is not in the memtable at all,
     /// Some(None) if the key is in the memtable but has a tombstone value,
     /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
-    pub(crate) fn get(&self, key: &[u8]) -> Option<ValueWithAttributes> {
+    pub(crate) fn get(&self, key: &[u8]) -> Option<RowEntry> {
         // TODO: get the last element is not considered as efficient in the current SkipMap's code.
         let start_key = LookupKey::new(Bytes::from(key.to_vec()), 0);
         let end_key = LookupKey::new(Bytes::from(key.to_vec()), u64::MAX);
@@ -220,36 +207,18 @@ impl KVTable {
 
     /// Inserts a value, returning as soon as the value is written to the memtable but before
     /// it is flushed to durable storage.
-    fn put_or_delete(&self, key: LookupKey, value: ValueDeletable, attrs: RowAttributes) {
-        let key_len = key.user_key.len();
-        let value_len = match &value {
-            ValueDeletable::Tombstone => 0,
-            ValueDeletable::Value(v) => v.len(),
-        };
-        self.size.fetch_add(
-            key_len + value_len + sizeof_attributes(&attrs),
-            Ordering::Relaxed,
-        );
-
+    fn put(&self, row: RowEntry) {
+        self.size.fetch_add(row.estimated_size(), Ordering::Relaxed);
+        let lookup_key = LookupKey::new(row.key.clone(), row.seq);
         let previous_size = Cell::new(None);
-        self.map.compare_insert(
-            key,
-            ValueWithAttributes { value, attrs },
-            |previous_value| {
-                // Optimistically calculate the size of the previous value.
-                let size = key_len
-                    + match &previous_value.value {
-                        ValueDeletable::Tombstone => 0,
-                        ValueDeletable::Value(old) => old.len(),
-                    }
-                    + sizeof_attributes(&previous_value.attrs);
-                // `compare_fn` might be called multiple times in case of concurrent
-                // writes to the same key, so we use `Cell` to avoid substracting
-                // the size multiple times. The last call will set the correct size.
-                previous_size.set(Some(size));
-                true
-            },
-        );
+        self.map.compare_insert(lookup_key, row, |previous_row| {
+            // Optimistically calculate the size of the previous value.
+            // `compare_fn` might be called multiple times in case of concurrent
+            // writes to the same key, so we use `Cell` to avoid substracting
+            // the size multiple times. The last call will set the correct size.
+            previous_size.set(Some(previous_row.estimated_size()));
+            true
+        });
         if let Some(size) = previous_size.take() {
             self.size.fetch_sub(size, Ordering::Relaxed);
         }
@@ -267,10 +236,6 @@ impl KVTable {
     }
 }
 
-fn sizeof_attributes(attrs: &RowAttributes) -> usize {
-    attrs.ts.map(|_| 8).unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,31 +244,41 @@ mod tests {
     #[tokio::test]
     async fn test_memtable_iter() {
         let mut table = WritableKVTable::new();
-        table.put(
-            Bytes::from_static(b"abc333"),
-            Bytes::from_static(b"value3"),
-            gen_attrs(1),
-        );
-        table.put(
-            Bytes::from_static(b"abc111"),
-            Bytes::from_static(b"value1"),
-            gen_attrs(2),
-        );
-        table.put(
-            Bytes::from_static(b"abc555"),
-            Bytes::from_static(b"value5"),
-            gen_attrs(3),
-        );
-        table.put(
-            Bytes::from_static(b"abc444"),
-            Bytes::from_static(b"value4"),
-            gen_attrs(4),
-        );
-        table.put(
-            Bytes::from_static(b"abc222"),
-            Bytes::from_static(b"value2"),
-            gen_attrs(5),
-        );
+        table.put(RowEntry {
+            key: Bytes::from_static(b"abc333"),
+            value: ValueDeletable::Value(Bytes::from_static(b"value3")),
+            create_ts: None,
+            expire_ts: None,
+            seq: 1,
+        });
+        table.put(RowEntry {
+            key: Bytes::from_static(b"abc111"),
+            value: ValueDeletable::Value(Bytes::from_static(b"value1")),
+            create_ts: None,
+            expire_ts: None,
+            seq: 2,
+        });
+        table.put(RowEntry {
+            key: Bytes::from_static(b"abc555"),
+            value: ValueDeletable::Value(Bytes::from_static(b"value5")),
+            create_ts: None,
+            expire_ts: None,
+            seq: 3,
+        });
+        table.put(RowEntry {
+            key: Bytes::from_static(b"abc444"),
+            value: ValueDeletable::Value(Bytes::from_static(b"value4")),
+            create_ts: None,
+            expire_ts: None,
+            seq: 4,
+        });
+        table.put(RowEntry {
+            key: Bytes::from_static(b"abc222"),
+            value: ValueDeletable::Value(Bytes::from_static(b"value2")),
+            create_ts: None,
+            expire_ts: None,
+            seq: 5,
+        });
 
         let mut iter = table.table().iter();
         let kv = iter.next().await.unwrap().unwrap();
