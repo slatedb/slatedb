@@ -5,6 +5,7 @@ use args::{BencherCommands, BenchmarkCompactionArgs, BenchmarkDbArgs, Compaction
 use bytes::Bytes;
 use clap::Parser;
 use db::DbBench;
+use futures::StreamExt;
 use object_store::path::Path;
 use object_store::Error as ObjectStoreError;
 use object_store::ObjectStore;
@@ -33,7 +34,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let object_store = admin::load_object_store_from_env(args.env_file)?;
 
     if args.clean {
-        create_temp_file(object_store.clone(), &path).await?;
+        create_cleanup_lock(object_store.clone(), &path).await?;
     }
 
     match args.command {
@@ -116,11 +117,22 @@ async fn exec_benchmark_compaction(
     }
 }
 
-/// Creates a temporary lock file that's used as a signal to clean up test data.
-async fn create_temp_file(
+/// Creates a lock file that's used as a signal to clean up test data.
+async fn create_cleanup_lock(
     object_store: Arc<dyn ObjectStore>,
     path: &Path,
 ) -> Result<PutResult, ObjectStoreError> {
+    if (object_store.list(Some(path)).next().await.transpose()?).is_some() {
+        warn!("Path {} is not empty but `--clean` is set. Failing since cleanup could cause data loss.", path);
+        return Err(ObjectStoreError::Generic {
+            store: "local",
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("Path {} is not empty", path),
+            )),
+        });
+    }
+
     let temp_path = path.child(CLEANUP_NAME);
     info!("Creating cleanup lock file at: {}", temp_path);
     object_store
