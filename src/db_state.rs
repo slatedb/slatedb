@@ -157,22 +157,20 @@ impl SortedRun {
             .map(|idx| &self.ssts[idx])
     }
 
-    pub(crate) fn tables_covering_range(self, range: &BytesRange) -> VecDeque<Box<SsTableHandle>> {
+    pub(crate) fn tables_covering_range(&self, range: &BytesRange) -> VecDeque<&SsTableHandle> {
         let mut covering_ssts = VecDeque::new();
-        let ssts: Vec<_> = self.ssts.into_iter().map(Box::new).collect();
+        for idx in 0..self.ssts.len() {
+            let current_sst = &self.ssts[idx];
 
-        for idx in 0..ssts.len() {
-            let current_sst = &ssts[idx];
-
-            let upper_bound_key = if idx + 1 < ssts.len() {
-                let next_sst = &ssts[idx + 1];
+            let upper_bound_key = if idx + 1 < self.ssts.len() {
+                let next_sst = &self.ssts[idx + 1];
                 next_sst.info.first_key.clone()
             } else {
                 None
             };
 
             if current_sst.intersects_range(upper_bound_key, range) {
-                covering_ssts.push_back(ssts[idx].clone());
+                covering_ssts.push_back(&self.ssts[idx]);
             }
         }
         covering_ssts
@@ -433,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sorted_runq_collect_tables_in_range() {
+    fn test_sorted_run_collect_tables_in_range() {
         let max_bytes_len = 5;
         proptest!(|(
             table_first_keys in vec(arbitrary::nonempty_bytes(max_bytes_len), 1..10),
@@ -441,7 +439,7 @@ mod tests {
         )| {
             let sorted_first_keys: BTreeSet<Bytes> = table_first_keys.into_iter().collect();
             let sorted_run = create_sorted_run(0, &sorted_first_keys);
-            let covering_tables = sorted_run.clone().tables_covering_range(&range);
+            let covering_tables = sorted_run.tables_covering_range(&range);
             let first_key = sorted_first_keys.first().unwrap().clone();
 
             if covering_tables.is_empty() {
