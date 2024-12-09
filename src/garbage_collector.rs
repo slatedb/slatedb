@@ -925,13 +925,7 @@ mod tests {
         table_id: &SsTableId,
     ) -> Result<(), SlateDBError> {
         let mut sst = table_store.table_builder();
-        sst.add(RowEntry::new(
-            "key".into(),
-            Some("value".into()),
-            0,
-            None,
-            None,
-        ))?;
+        sst.add(RowEntry::new_value(b"key", b"value", 0))?;
         let table1 = sst.build()?;
         table_store.write_sst(table_id, table1).await?;
         Ok(())
@@ -1056,28 +1050,14 @@ mod tests {
         // write a wal sst
         let id1 = SsTableId::Wal(1);
         let mut sst1 = table_store.table_builder();
-        sst1.add(RowEntry::new(
-            "key".into(),
-            Some("value".into()),
-            0,
-            None,
-            None,
-        ))
-        .unwrap();
+        sst1.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
 
         let table1 = sst1.build().unwrap();
         table_store.write_sst(&id1, table1).await.unwrap();
 
         let id2 = SsTableId::Wal(2);
         let mut sst2 = table_store.table_builder();
-        sst2.add(RowEntry::new(
-            "key".into(),
-            Some("value".into()),
-            0,
-            None,
-            None,
-        ))
-        .unwrap();
+        sst2.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
         let table2 = sst2.build().unwrap();
         table_store.write_sst(&id2, table2).await.unwrap();
 
@@ -1442,14 +1422,7 @@ mod tests {
 
         let sst_id = SsTableId::Compacted(Ulid::new());
         let mut sst = table_store.table_builder();
-        sst.add(RowEntry::new(
-            "key".into(),
-            Some("value".into()),
-            0,
-            None,
-            None,
-        ))
-        .unwrap();
+        sst.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
         let table = sst.build().unwrap();
         table_store.write_sst(&sst_id, table).await.unwrap()
     }
