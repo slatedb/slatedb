@@ -223,3 +223,69 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
         .with_container_name(container);
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use object_store::{memory::InMemory, path::Path};
+
+    #[tokio::test]
+    async fn test_delete_objects_with_prefix_empty() {
+        let store = Arc::new(InMemory::new());
+        let result = delete_objects_with_prefix(store, &Path::from("test/prefix")).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_with_prefix_single_object() {
+        let store = Arc::new(InMemory::new());
+
+        // Put an object
+        store
+            .put(&Path::from("test/prefix/object1"), vec![1, 2, 3].into())
+            .await
+            .unwrap();
+
+        // Delete objects with prefix
+        let result = delete_objects_with_prefix(store.clone(), &Path::from("test/prefix")).await;
+        assert!(result.is_ok());
+
+        // Verify object is deleted
+        let list_result = store
+            .list(Some(&Path::from("test/prefix")))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(list_result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_with_prefix_multiple_objects() {
+        let store = Arc::new(InMemory::new());
+
+        // Put multiple objects with same prefix
+        store
+            .put(&Path::from("test/prefix/object1"), vec![1, 2, 3].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("test/prefix/object2"), vec![4, 5, 6].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("test/other/object3"), vec![7, 8, 9].into())
+            .await
+            .unwrap();
+
+        // Delete objects with prefix
+        let result = delete_objects_with_prefix(store.clone(), &Path::from("test/prefix")).await;
+        assert!(result.is_ok());
+
+        // Verify only objects with prefix are deleted
+        let list_result = store.list(None).collect::<Vec<_>>().await;
+        assert_eq!(list_result.len(), 1);
+        assert_eq!(
+            list_result[0].as_ref().unwrap().location,
+            Path::from("test/other/object3")
+        );
+    }
+}
