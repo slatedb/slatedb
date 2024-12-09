@@ -95,7 +95,7 @@ impl<B: BlockLike> BlockIterator<B> {
     /// key greater than the given key if the exact key given is not in the block.
     pub async fn from_key(block: B, key: &Bytes) -> Result<BlockIterator<B>, SlateDBError> {
         let mut iter = Self::from_first_key(block);
-        iter.seek(&key).await?;
+        iter.seek(key).await?;
         Ok(iter)
     }
 
