@@ -36,7 +36,7 @@ run_bench() {
     --val-len 8192 \
     --block-cache-size 134217728 \
     --put-percentage $put_percentage \
-    --concurrency $concurrency
+    --concurrency $concurrency \
   "
 
   $bench_cmd | tee "$log_file"
