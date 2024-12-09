@@ -48,6 +48,7 @@ use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushThreadMsg;
+use crate::merge_operator::MergeOperatorIterator;
 use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
@@ -137,12 +138,20 @@ impl DbInner {
             if self.sst_might_include_key(sst, key, key_hash).await? {
                 let mut iter =
                     SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1, true)
-                        .await?; // cache blocks that are being read
-                if let Some(entry) = iter.next_entry().await? {
+                        .await?;
+                let next_entry = match self.options.merge_operator.clone() {
+                    Some(merge_operator) => {
+                        MergeOperatorIterator::new(merge_operator, iter)
+                            .next_entry()
+                            .await
+                    }
+                    None => iter.next_entry().await,
+                };
+                if let Some(entry) = next_entry? {
                     if entry.key == key {
                         return as_result!(entry.value);
                     }
-                }
+                };
             }
         }
         for sr in &snapshot.state.core.compacted {
@@ -150,11 +159,19 @@ impl DbInner {
                 let mut iter =
                     SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1, true) // cache blocks
                         .await?;
-                if let Some(entry) = iter.next_entry().await? {
+                let next_entry = match self.options.merge_operator.clone() {
+                    Some(merge_operator) => {
+                        MergeOperatorIterator::new(merge_operator, iter)
+                            .next_entry()
+                            .await
+                    }
+                    None => iter.next_entry().await,
+                };
+                if let Some(entry) = next_entry? {
                     if entry.key == key {
                         return as_result!(entry.value);
                     }
-                }
+                };
             }
         }
         Ok(None)
