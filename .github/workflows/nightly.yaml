@@ -67,12 +67,6 @@ jobs:
           SLATEDB_BENCH_CLEAN: true
         run: mkdir -p ${{ github.workspace }}/benchmark-data && ./src/bencher/benchmark-db.sh
 
-      - name: Download nightly benchmark data
-        uses: actions/cache/restore@v4
-        with:
-          path: ./benchmarks-cache
-          key: ${{ runner.os }}-benchmarks
-
       - name: Update benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
@@ -80,16 +74,9 @@ jobs:
           tool: 'customBiggerIsBetter'
           output-file-path: target/bencher/results/benchmark-data.json
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
-          external-data-json-path: ./benchmarks-cache/benchmark-data.json
           fail-on-alert: true
           summary-always: true
           max-items-in-chart: 30
           auto-push: true
           gh-repository: github.com/slatedb/slatedb-website
           benchmark-data-dir-path: performance/benchmarks/main
-
-      - name: Save nightly benchmark data
-        uses: actions/cache/save@v4
-        with:
-          path: ./benchmarks-cache
-          key: ${{ runner.os }}-benchmarks
