@@ -42,7 +42,7 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
         await_durable: args.await_durable,
     };
     let db = Arc::new(
-        Db::open_with_opts(path, config, object_store)
+        Db::open_with_opts(path.clone(), config, object_store.clone())
             .await
             .unwrap(),
     );
@@ -57,7 +57,16 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
         db.clone(),
     );
     bencher.run().await;
+
     db.close().await.expect("Failed to close db");
+
+    if args.clean {
+        tracing::info!("Cleaning up test data");
+        let result = admin::delete_objects_with_prefix(object_store, &path).await;
+        if let Err(e) = result {
+            tracing::error!("Error cleaning up test data: {}", e);
+        }
+    }
 }
 
 async fn exec_benchmark_compaction(

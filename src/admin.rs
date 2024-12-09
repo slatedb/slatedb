@@ -5,6 +5,7 @@ use crate::manifest_store::ManifestStore;
 use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
+use futures::StreamExt;
 #[cfg(feature = "aws")]
 use log::warn;
 use object_store::path::Path;
@@ -54,6 +55,32 @@ pub async fn list_checkpoints(
     let manifest_store = ManifestStore::new(path, object_store);
     let (_, manifest) = manifest_store.read_latest_manifest().await?;
     Ok(manifest.core.checkpoints)
+}
+
+/// Deletes all objects with the specified prefix. This includes all
+/// "subdirectories" objects, since object stores are not hierarchical.
+pub async fn delete_objects_with_prefix(
+    object_store: Arc<dyn ObjectStore>,
+    prefix: &Path,
+) -> Result<(), Box<dyn Error>> {
+    // Obtain the stream of objects with the specified prefix
+    let mut stream = object_store.list(Some(prefix));
+
+    // Consume the stream
+    while let Some(object_meta_result) = stream.next().await {
+        match object_meta_result {
+            Ok(object_meta) => {
+                // Delete the object
+                object_store.delete(&object_meta.location).await?;
+            }
+            Err(err) => {
+                // Handle any errors from the stream
+                return Err(Box::new(err));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Loads an object store from configured environment variables.
