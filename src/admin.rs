@@ -5,7 +5,7 @@ use crate::manifest_store::ManifestStore;
 use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 #[cfg(feature = "aws")]
 use log::warn;
 use object_store::path::Path;
@@ -63,16 +63,16 @@ pub async fn delete_objects_with_prefix(
     object_store: Arc<dyn ObjectStore>,
     prefix: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let mut stream = object_store.list(Some(prefix));
-
-    while let Some(object_meta_result) = stream.next().await {
-        match object_meta_result {
-            Ok(object_meta) => object_store.delete(&object_meta.location).await?,
-            Err(err) => return Err(Box::new(err)),
-        }
-    }
-
-    Ok(())
+    let stream = object_store
+        .list(Some(prefix))
+        .map_ok(|m| m.location)
+        .boxed();
+    object_store
+        .delete_stream(stream)
+        .try_collect::<Vec<Path>>()
+        .await
+        .map(|_| ())
+        .map_err(|e| e.into())
 }
 
 /// Loads an object store from configured environment variables.
