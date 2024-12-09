@@ -1,6 +1,5 @@
-use crate::db_iter::SeekToKey;
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::types::RowEntry;
 use bytes::Bytes;
 use std::cmp::{Ordering, Reverse};
@@ -238,9 +237,8 @@ impl<T: KeyValueIterator + SeekToKey> SeekToKey for MergeIterator<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::db_iter::SeekToKey;
     use crate::error::SlateDBError;
-    use crate::iter::KeyValueIterator;
+    use crate::iter::{KeyValueIterator, SeekToKey};
     use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
     use crate::test_utils::{assert_iterator, assert_next_entry, gen_attrs};
     use crate::types::{RowEntry, ValueDeletable};

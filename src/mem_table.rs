@@ -10,9 +10,8 @@ use crossbeam_skiplist::SkipMap;
 use tokio::sync::watch;
 
 use crate::bytes_range::BytesRange;
-use crate::db_iter::SeekToKey;
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::merge_iterator::MergeIterator;
 use crate::types::{RowAttributes, RowEntry, ValueDeletable};
 

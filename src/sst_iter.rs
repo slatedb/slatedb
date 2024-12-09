@@ -7,10 +7,10 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 use crate::bytes_range::BytesRange;
-use crate::db_iter::SeekToKey;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
+use crate::iter::SeekToKey;
 use crate::{
     block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, tablestore::TableStore,
     types::RowEntry,

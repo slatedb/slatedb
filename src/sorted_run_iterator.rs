@@ -1,8 +1,7 @@
 use crate::bytes_range::BytesRange;
-use crate::db_iter::SeekToKey;
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;

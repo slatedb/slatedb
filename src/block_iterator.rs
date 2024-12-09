@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::{Buf, Bytes};
 
-use crate::db_iter::SeekToKey;
+use crate::iter::SeekToKey;
 use crate::row_codec::SstRowCodecV0;
 use crate::{block::Block, error::SlateDBError, iter::KeyValueIterator, types::RowEntry};
 
@@ -140,8 +140,7 @@ impl<B: BlockLike> BlockIterator<B> {
 mod tests {
     use crate::block::BlockBuilder;
     use crate::block_iterator::BlockIterator;
-    use crate::db_iter::SeekToKey;
-    use crate::iter::KeyValueIterator;
+    use crate::iter::{KeyValueIterator, SeekToKey};
     use crate::test_utils;
     use crate::test_utils::{assert_iterator, assert_next_entry, gen_attrs};
     use crate::types::ValueDeletable;
