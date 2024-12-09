@@ -61,10 +61,10 @@ pub async fn list_checkpoints(
 /// "subdirectories" objects, since object stores are not hierarchical.
 pub async fn delete_objects_with_prefix(
     object_store: Arc<dyn ObjectStore>,
-    prefix: &Path,
+    maybe_prefix: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
     let stream = object_store
-        .list(Some(prefix))
+        .list(maybe_prefix)
         .map_ok(|m| m.location)
         .boxed();
     object_store
@@ -224,7 +224,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_objects_with_prefix_empty() {
         let store = Arc::new(InMemory::new());
-        let result = delete_objects_with_prefix(store, &Path::from("test/prefix")).await;
+        let result = delete_objects_with_prefix(store, Some(&Path::from("test/prefix"))).await;
         assert!(result.is_ok());
     }
 
@@ -239,7 +239,8 @@ mod tests {
             .unwrap();
 
         // Delete objects with prefix
-        let result = delete_objects_with_prefix(store.clone(), &Path::from("test/prefix")).await;
+        let result =
+            delete_objects_with_prefix(store.clone(), Some(&Path::from("test/prefix"))).await;
         assert!(result.is_ok());
 
         // Verify object is deleted
@@ -269,7 +270,8 @@ mod tests {
             .unwrap();
 
         // Delete objects with prefix
-        let result = delete_objects_with_prefix(store.clone(), &Path::from("test/prefix")).await;
+        let result =
+            delete_objects_with_prefix(store.clone(), Some(&Path::from("test/prefix"))).await;
         assert!(result.is_ok());
 
         // Verify only objects with prefix are deleted
@@ -278,6 +280,96 @@ mod tests {
         assert_eq!(
             list_result[0].as_ref().unwrap().location,
             Path::from("test/other/object3")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_with_empty_prefix() {
+        let store = Arc::new(InMemory::new());
+
+        // Put multiple objects at different paths
+        store
+            .put(&Path::from("test/prefix/object1"), vec![1, 2, 3].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("other/path/object2"), vec![4, 5, 6].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("root_object"), vec![7, 8, 9].into())
+            .await
+            .unwrap();
+
+        // Test with empty string prefix
+        let result = delete_objects_with_prefix(store.clone(), Some(&Path::from(""))).await;
+        assert!(result.is_ok());
+
+        // Verify all objects are deleted
+        let list_result = store.list(None).collect::<Vec<_>>().await;
+        assert!(
+            list_result.is_empty(),
+            "Expected all objects to be deleted with empty prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_with_root_prefix() {
+        let store = Arc::new(InMemory::new());
+
+        // Put multiple objects at different paths
+        store
+            .put(&Path::from("test/prefix/object1"), vec![1, 2, 3].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("other/path/object2"), vec![4, 5, 6].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("root_object"), vec![7, 8, 9].into())
+            .await
+            .unwrap();
+
+        // Test with "/" prefix
+        let result = delete_objects_with_prefix(store.clone(), Some(&Path::from("/"))).await;
+        assert!(result.is_ok());
+
+        // Verify all objects are deleted
+        let list_result = store.list(None).collect::<Vec<_>>().await;
+        assert!(
+            list_result.is_empty(),
+            "Expected all objects to be deleted with '/' prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_with_none_prefix() {
+        let store = Arc::new(InMemory::new());
+
+        // Put multiple objects at different paths
+        store
+            .put(&Path::from("test/prefix/object1"), vec![1, 2, 3].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("other/path/object2"), vec![4, 5, 6].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("root_object"), vec![7, 8, 9].into())
+            .await
+            .unwrap();
+
+        // Test with None prefix
+        let result = delete_objects_with_prefix(store.clone(), None).await;
+        assert!(result.is_ok());
+
+        // Verify all objects are deleted
+        let list_result = store.list(None).collect::<Vec<_>>().await;
+        assert!(
+            list_result.is_empty(),
+            "Expected all objects to be deleted with None prefix"
         );
     }
 }
