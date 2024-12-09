@@ -69,7 +69,14 @@ the repository root:
 ./src/bencher/benchmark-db.sh
 ```
 
-The command above will produce results at `target/bencher/results` directory. 
+The command above will produce results at `target/bencher/results` directory. The results include:
+
+- `plots`: Plots for each benchmark
+- `dats`: Data files for each benchmark
+- `logs`: Log files for each benchmark
+- `benchmark-data.json`: A JSON file containing all the benchmark results in [github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark) format.
+
+The script also has a `SLATEDB_BENCH_CLEAN` environment variable which can be set to `true` to clean up the test data in object storage after each benchmark.
 
 ## `compaction` Subcommand
 
