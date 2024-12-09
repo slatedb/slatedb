@@ -25,14 +25,13 @@ run_bench() {
   local log_file="$3"
 
   local bench_cmd="cargo run -r --bin bencher --features=bencher -- \
-    --path /slatedb-bencher_${put_percentage}_${concurrency} db \
+    --path /slatedb-bencher_${put_percentage}_${concurrency} --clean db \
     --db-options-path $DIR/Slatedb.toml \
     --duration 60 \
     --val-len 8192 \
     --block-cache-size 134217728 \
     --put-percentage $put_percentage \
-    --concurrency $concurrency \
-    --clean
+    --concurrency $concurrency
   "
 
   $bench_cmd | tee "$log_file"

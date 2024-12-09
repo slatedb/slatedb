@@ -63,20 +63,12 @@ pub async fn delete_objects_with_prefix(
     object_store: Arc<dyn ObjectStore>,
     prefix: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    // Obtain the stream of objects with the specified prefix
     let mut stream = object_store.list(Some(prefix));
 
-    // Consume the stream
     while let Some(object_meta_result) = stream.next().await {
         match object_meta_result {
-            Ok(object_meta) => {
-                // Delete the object
-                object_store.delete(&object_meta.location).await?;
-            }
-            Err(err) => {
-                // Handle any errors from the stream
-                return Err(Box::new(err));
-            }
+            Ok(object_meta) => object_store.delete(&object_meta.location).await?,
+            Err(err) => return Err(Box::new(err)),
         }
     }
 
