@@ -139,7 +139,7 @@ async fn cleanup_data(
     let temp_path = path.child(CLEANUP_NAME);
     if object_store.head(&temp_path).await.is_ok() {
         info!("Cleaning up test data in: {}", path);
-        if let Err(e) = admin::delete_objects_with_prefix(object_store.clone(), Some(&path)).await {
+        if let Err(e) = admin::delete_objects_with_prefix(object_store.clone(), Some(path)).await {
             error!("Error cleaning up test data: {}", e);
         }
     } else {
