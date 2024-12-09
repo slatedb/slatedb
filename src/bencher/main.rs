@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if args.clean {
-        tracing::info!("Cleaning up test data");
+        tracing::info!("Cleaning up test data in {}", path);
         let result = admin::delete_objects_with_prefix(object_store, &path).await;
         if let Err(e) = result {
             tracing::error!("Error cleaning up test data: {}", e);
