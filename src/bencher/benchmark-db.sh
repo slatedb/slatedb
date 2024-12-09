@@ -24,8 +24,13 @@ run_bench() {
   local concurrency="$2"
   local log_file="$3"
 
+  local clean_flag=""
+  if [ -n "${SLATEDB_BENCH_CLEAN:-}" ]; then
+    clean_flag="--clean"
+  fi
+
   local bench_cmd="cargo run -r --bin bencher --features=bencher -- \
-    --path /slatedb-bencher_${put_percentage}_${concurrency} db \
+    --path /slatedb-bencher_${put_percentage}_${concurrency} $clean_flag db \
     --db-options-path $DIR/Slatedb.toml \
     --duration 60 \
     --val-len 8192 \

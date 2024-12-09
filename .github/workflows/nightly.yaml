@@ -64,6 +64,7 @@ jobs:
         env:
           CLOUD_PROVIDER: local
           LOCAL_PATH: ${{ github.workspace }}/benchmark-data
+          SLATEDB_BENCH_CLEAN: true
         run: mkdir -p ${{ github.workspace }}/benchmark-data && ./src/bencher/benchmark-db.sh
 
       - name: Download nightly benchmark data
