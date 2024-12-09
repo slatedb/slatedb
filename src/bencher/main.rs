@@ -5,6 +5,7 @@ use args::{BencherCommands, BenchmarkCompactionArgs, BenchmarkDbArgs, Compaction
 use clap::Parser;
 use db::DbBench;
 use object_store::path::Path;
+use object_store::Error as ObjectStoreError;
 use object_store::ObjectStore;
 use slatedb::admin;
 use slatedb::compaction_execute_bench::CompactionExecuteBench;
@@ -13,9 +14,12 @@ use slatedb::db::Db;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::{error, info, warn};
 
 mod args;
 mod db;
+
+const CLEANUP_NAME: &str = ".clean_benchmark_data";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -24,6 +28,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args = BencherArgs::parse();
     let path = Path::from(args.path);
     let object_store = admin::load_object_store_from_env(args.env_file)?;
+
+    if args.clean {
+        create_temp_file(object_store.clone(), &path).await?;
+    }
+
     match args.command {
         BencherCommands::Db(subcommand_args) => {
             exec_benchmark_db(path.clone(), object_store.clone(), subcommand_args).await;
@@ -34,11 +43,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if args.clean {
-        tracing::info!("Cleaning up test data in {}", path);
-        let result = admin::delete_objects_with_prefix(object_store, &path).await;
-        if let Err(e) = result {
-            tracing::error!("Error cleaning up test data: {}", e);
-        }
+        cleanup_data(object_store, &path).await?;
     }
 
     Ok(())
@@ -106,4 +111,37 @@ async fn exec_benchmark_compaction(
                 .expect("Failed to run clear");
         }
     }
+}
+
+/// Creates a temporary lock file that's used as a signal to clean up test data.
+async fn create_temp_file(
+    object_store: Arc<dyn ObjectStore>,
+    path: &Path,
+) -> Result<_, ObjectStoreError> {
+    let temp_path = path.child(CLEANUP_NAME);
+    object_store.put(&temp_path, bytes::Bytes::from("")).await
+}
+
+async fn check_temp_file(object_store: Arc<dyn ObjectStore>, path: &Path) -> bool {
+    let temp_path = path.child(CLEANUP_NAME);
+    object_store.head(&temp_path).await.is_ok()
+}
+
+async fn cleanup_data(
+    object_store: Arc<dyn ObjectStore>,
+    path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let temp_path = path.child(CLEANUP_NAME);
+    if check_temp_file(object_store.clone(), &temp_path).await {
+        info!("Cleaning up test data in: {}", path);
+        if let Err(e) = admin::delete_objects_with_prefix(object_store.clone(), &path).await {
+            error!("Error cleaning up test data: {}", e);
+        }
+    } else {
+        warn!(
+            "Cleanup lock file not found at {}. Skipping cleanup to prevent data corruption.",
+            temp_path
+        );
+    }
+    Ok(())
 }
