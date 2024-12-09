@@ -64,7 +64,7 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
 }
 
 impl<B: BlockLike> SeekToKey for BlockIterator<B> {
-    async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
             let result = self.load_at_current_off();
             match result {
@@ -93,7 +93,7 @@ impl<B: BlockLike> BlockIterator<B> {
 
     /// Construct a BlockIterator that starts at the given key, or at the first
     /// key greater than the given key if the exact key given is not in the block.
-    pub async fn from_key(block: B, key: &Bytes) -> Result<BlockIterator<B>, SlateDBError> {
+    pub async fn from_key(block: B, key: &[u8]) -> Result<BlockIterator<B>, SlateDBError> {
         let mut iter = Self::from_first_key(block);
         iter.seek(key).await?;
         Ok(iter)
@@ -170,7 +170,7 @@ mod tests {
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, &Bytes::from_static(b"kratos"))
+        let mut iter = BlockIterator::from_key(&block, b"kratos".as_ref())
             .await
             .unwrap();
         let kv = iter.next().await.unwrap().unwrap();
@@ -187,7 +187,7 @@ mod tests {
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, &Bytes::from_static(b"ka"))
+        let mut iter = BlockIterator::from_key(&block, b"ka".as_ref())
             .await
             .unwrap();
         let kv = iter.next().await.unwrap().unwrap();
@@ -204,7 +204,7 @@ mod tests {
         assert!(block_builder.add_kv("kratos".as_ref(), Some("atreus".as_ref()), gen_attrs(2)));
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, &Bytes::from_static(b"zzz"))
+        let mut iter = BlockIterator::from_key(&block, b"zzz".as_ref())
             .await
             .unwrap();
         assert!(iter.next().await.unwrap().is_none());
@@ -227,7 +227,7 @@ mod tests {
             ),
         )
         .await;
-        iter.seek(&Bytes::from_static(b"s")).await.unwrap();
+        iter.seek(b"s".as_ref()).await.unwrap();
         assert_iterator(
             &mut iter,
             &[(
@@ -256,7 +256,7 @@ mod tests {
             ),
         )
         .await;
-        iter.seek(&Bytes::from_static(b"kratos")).await.unwrap();
+        iter.seek(b"kratos".as_ref()).await.unwrap();
         assert_iterator(
             &mut iter,
             &[
@@ -283,7 +283,7 @@ mod tests {
         assert!(block_builder.add_kv("super".as_ref(), Some("mario".as_ref()), gen_attrs(3)));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_first_key(block);
-        iter.seek(&Bytes::from_static(b"zelda")).await.unwrap();
+        iter.seek(b"zelda".as_ref()).await.unwrap();
         assert_iterator(&mut iter, &[]).await;
     }
 }

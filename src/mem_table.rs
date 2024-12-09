@@ -74,7 +74,7 @@ impl KeyValueIterator for VecDequeKeyValueIterator {
 }
 
 impl SeekToKey for VecDequeKeyValueIterator {
-    async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
             let front = self.rows.front();
             if front.map_or(false, |record| record.key < next_key) {

@@ -234,7 +234,7 @@ impl<'a, H: AsRef<SsTableHandle>> KeyValueIterator for SortedRunIterator<'a, H> 
 }
 
 impl<'a, H: AsRef<SsTableHandle>> SeekToKey for SortedRunIterator<'a, H> {
-    async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
             if let Some(iter) = &mut self.current_iter {
                 if iter.range_covers_key(next_key) {

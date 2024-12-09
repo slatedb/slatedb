@@ -1,7 +1,6 @@
 use crate::error::SlateDBError;
 use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::types::RowEntry;
-use bytes::Bytes;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
 
@@ -46,7 +45,7 @@ where
     T1: KeyValueIterator + SeekToKey,
     T2: KeyValueIterator + SeekToKey,
 {
-    async fn seek1(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
+    async fn seek1(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         match &self.iterator1.1 {
             None => Ok(()),
             Some(val) => {
@@ -61,7 +60,7 @@ where
         }
     }
 
-    async fn seek2(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
+    async fn seek2(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         match &self.iterator2.1 {
             None => Ok(()),
             Some(val) => {
@@ -82,7 +81,7 @@ where
     T1: KeyValueIterator + SeekToKey,
     T2: KeyValueIterator + SeekToKey,
 {
-    async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         self.seek1(next_key).await?;
         self.seek2(next_key).await
     }
@@ -116,7 +115,7 @@ impl<T: KeyValueIterator + SeekToKey> MergeIteratorHeapEntry<T> {
     /// Seek the iterator and return a new heap entry
     async fn seek(
         mut self,
-        next_key: &Bytes,
+        next_key: &[u8],
     ) -> Result<Option<MergeIteratorHeapEntry<T>>, SlateDBError> {
         if self.next_kv.key >= next_key {
             Ok(Some(self))
@@ -214,7 +213,7 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
 }
 
 impl<T: KeyValueIterator + SeekToKey> SeekToKey for MergeIterator<T> {
-    async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         let mut seek_futures = VecDeque::new();
         if let Some(iterator) = self.current.take() {
             seek_futures.push_back(iterator.seek(next_key))
@@ -473,7 +472,7 @@ mod tests {
         );
 
         let mut merge_iter = MergeIterator::new(iters).await.unwrap();
-        merge_iter.seek(&Bytes::from_static(b"bb")).await.unwrap();
+        merge_iter.seek(b"bb".as_ref()).await.unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -519,7 +518,7 @@ mod tests {
         )
         .await;
 
-        merge_iter.seek(&Bytes::from_static(b"bb")).await.unwrap();
+        merge_iter.seek(b"bb".as_ref()).await.unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -552,7 +551,7 @@ mod tests {
             .with_entry(b"ee", b"ee2");
 
         let mut merge_iter = TwoMergeIterator::new(iter1, iter2).await.unwrap();
-        merge_iter.seek(&Bytes::from_static(b"b")).await.unwrap();
+        merge_iter.seek(b"b".as_ref()).await.unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -610,7 +609,7 @@ mod tests {
     }
 
     impl SeekToKey for TestIterator {
-        async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
+        async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
             while let Some(entry_result) = self.entries.front() {
                 let entry = entry_result.clone()?;
                 if entry.key < next_key {

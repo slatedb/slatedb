@@ -229,7 +229,7 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
         }
     }
 
-    pub(crate) fn range_covers_key(&self, key: &Bytes) -> bool {
+    pub(crate) fn range_covers_key(&self, key: &[u8]) -> bool {
         self.table.as_ref().range_covers_key(key)
     }
 
@@ -276,7 +276,7 @@ impl<'a, H: AsRef<SsTableHandle>> KeyValueIterator for SstIterator<'a, H> {
 }
 
 impl<'a, H: AsRef<SsTableHandle>> SeekToKey for SstIterator<'a, H> {
-    async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
             let current_iter = if let Some(current_iter) = self.current_iter.as_mut() {
                 current_iter
