@@ -123,7 +123,12 @@ async fn create_temp_file(
 ) -> Result<PutResult, ObjectStoreError> {
     let temp_path = path.child(CLEANUP_NAME);
     info!("Creating cleanup lock file at: {}", temp_path);
-    object_store.put(&temp_path, PutPayload::from_bytes(Bytes::from(format!("{}", chrono::Utc::now())))).await
+    object_store
+        .put(
+            &temp_path,
+            PutPayload::from_bytes(Bytes::from(format!("{}", chrono::Utc::now()))),
+        )
+        .await
 }
 
 /// Cleans up test data if a temporary lock file exists.
