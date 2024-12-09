@@ -25,7 +25,7 @@ run_bench() {
   local log_file="$3"
 
   local clean_flag=""
-  if [ -n "$SLATEDB_BENCH_CLEAN" ]; then
+  if [ -n "${SLATEDB_BENCH_CLEAN:-}" ]; then
     clean_flag="--clean"
   fi
 

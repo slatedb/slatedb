@@ -2,11 +2,14 @@
 
 use crate::args::BencherArgs;
 use args::{BencherCommands, BenchmarkCompactionArgs, BenchmarkDbArgs, CompactionSubcommands};
+use bytes::Bytes;
 use clap::Parser;
 use db::DbBench;
 use object_store::path::Path;
 use object_store::Error as ObjectStoreError;
 use object_store::ObjectStore;
+use object_store::PutPayload;
+use object_store::PutResult;
 use slatedb::admin;
 use slatedb::compaction_execute_bench::CompactionExecuteBench;
 use slatedb::config::WriteOptions;
@@ -117,24 +120,21 @@ async fn exec_benchmark_compaction(
 async fn create_temp_file(
     object_store: Arc<dyn ObjectStore>,
     path: &Path,
-) -> Result<_, ObjectStoreError> {
+) -> Result<PutResult, ObjectStoreError> {
     let temp_path = path.child(CLEANUP_NAME);
-    object_store.put(&temp_path, bytes::Bytes::from("")).await
+    info!("Creating cleanup lock file at: {}", temp_path);
+    object_store.put(&temp_path, PutPayload::from_bytes(Bytes::from(format!("{}", chrono::Utc::now())))).await
 }
 
-async fn check_temp_file(object_store: Arc<dyn ObjectStore>, path: &Path) -> bool {
-    let temp_path = path.child(CLEANUP_NAME);
-    object_store.head(&temp_path).await.is_ok()
-}
-
+/// Cleans up test data if a temporary lock file exists.
 async fn cleanup_data(
     object_store: Arc<dyn ObjectStore>,
     path: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let temp_path = path.child(CLEANUP_NAME);
-    if check_temp_file(object_store.clone(), &temp_path).await {
+    if object_store.head(&temp_path).await.is_ok() {
         info!("Cleaning up test data in: {}", path);
-        if let Err(e) = admin::delete_objects_with_prefix(object_store.clone(), &path).await {
+        if let Err(e) = admin::delete_objects_with_prefix(object_store.clone(), Some(&path)).await {
             error!("Error cleaning up test data: {}", e);
         }
     } else {
