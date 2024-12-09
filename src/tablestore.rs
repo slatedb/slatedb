@@ -112,7 +112,7 @@ impl TableStore {
     /// Get the number of blocks for a size specified in bytes.
     /// The returned value will be rounded down to the nearest block.
     pub(crate) fn bytes_to_blocks(&self, bytes: usize) -> usize {
-        (bytes + self.sst_format.block_size - 1) / self.sst_format.block_size
+        bytes.div_ceil(self.sst_format.block_size)
     }
 
     pub(crate) async fn list_wal_ssts<R: RangeBounds<u64>>(

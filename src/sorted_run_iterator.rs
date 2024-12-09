@@ -25,7 +25,7 @@ pub(crate) struct SsTableHandleIter<'a, H: AsRef<SsTableHandle> = &'a SsTableHan
     _marker: PhantomData<&'a H>,
 }
 
-impl<'a, H: AsRef<SsTableHandle>> SsTableHandleIter<'a, H> {
+impl<H: AsRef<SsTableHandle>> SsTableHandleIter<'_, H> {
     fn new(vec: VecDeque<H>) -> Self {
         Self {
             vec,

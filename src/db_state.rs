@@ -50,8 +50,8 @@ impl SsTableHandle {
         .cloned();
 
         let end_bound = match end_bound_key {
-            Some(end_bound_key) => Excluded(end_bound_key),
             None => Unbounded,
+            Some(end_bound_key) => Excluded(end_bound_key),
         };
 
         let this_range = BytesRange::new(start_bound, end_bound);
@@ -379,12 +379,14 @@ impl DbState {
 
 #[cfg(test)]
 mod tests {
+    use crate::bytes_range::BytesRange;
     use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::proptest_util::arbitrary;
     use bytes::Bytes;
     use proptest::collection::vec;
     use proptest::proptest;
     use std::collections::BTreeSet;
+    use std::ops::Bound::Included;
     use ulid::Ulid;
 
     #[test]
@@ -436,39 +438,42 @@ mod tests {
     fn test_sorted_run_collect_tables_in_range() {
         let max_bytes_len = 5;
         proptest!(|(
-            table_first_keys in vec(arbitrary::nonempty_bytes(max_bytes_len), 0..10),
-            range in arbitrary::nonempty_range(max_bytes_len)
+            table_first_keys in vec(arbitrary::nonempty_bytes(max_bytes_len), 1..10),
+            range in arbitrary::nonempty_range(max_bytes_len),
         )| {
             let sorted_first_keys: BTreeSet<Bytes> = table_first_keys.into_iter().collect();
-            let sorted_run = create_sorted_run(0, sorted_first_keys);
+            let sorted_run = create_sorted_run(0, &sorted_first_keys);
             let covering_tables = sorted_run.clone().tables_covering_range(&range);
+            let first_key = sorted_first_keys.first().unwrap().clone();
 
-            assert!(covering_tables.len() > 0);
+            if covering_tables.is_empty() {
+                let end_bound =  range.end_bound_opt().unwrap();
+                assert!(end_bound <= first_key);
+            } else {
+                let range_start_key = range.start_bound_opt().unwrap_or(Bytes::new());
+                let covering_first_key = covering_tables.front()
+                .and_then(|t| t.info.first_key.clone())
+                .unwrap();
 
-            let first_covering_table = covering_tables.front().unwrap();
-            let range_start_key = range.start_bound_opt().unwrap_or(Bytes::new());
-            if let Some(first_key) = &first_covering_table.info.first_key {
-                assert!(*first_key <= range_start_key);
-            } else if sorted_run.ssts.len() > 1 {
-                let second_table = sorted_run.ssts[1].clone();
-                assert!(second_table.info.first_key.unwrap() > range_start_key);
-            }
+                if range_start_key < covering_first_key {
+                    assert_eq!(covering_first_key, first_key)
+                }
 
-            let last_match_table = covering_tables.iter().last().unwrap();
-            let range_end_key: Bytes = range.end_bound_opt().unwrap_or(vec![u8::MAX; 2].into());
-            if let Some(first_key) = &last_match_table.info.first_key {
-                assert!(*first_key <= range_end_key);
-            } else if sorted_run.ssts.len() > 1 {
-                let second_table = sorted_run.ssts[1].clone();
-                assert!(!range.contains(&second_table.info.first_key.unwrap()));
+                let range_end_key: Bytes = range.end_bound_opt()
+                .unwrap_or(vec![u8::MAX; max_bytes_len + 1].into());
+
+                let covering_last_key = covering_tables.iter().last()
+                .and_then(|t| t.info.first_key.clone())
+                .unwrap();
+                assert!(covering_last_key < range_end_key);
             }
         });
     }
 
-    fn create_sorted_run(id: u32, first_keys: BTreeSet<Bytes>) -> SortedRun {
-        let mut ssts = vec![create_compacted_sst_handle(None)];
+    fn create_sorted_run(id: u32, first_keys: &BTreeSet<Bytes>) -> SortedRun {
+        let mut ssts = Vec::new();
         for first_key in first_keys {
-            ssts.push(create_compacted_sst_handle(Some(first_key)));
+            ssts.push(create_compacted_sst_handle(Some(first_key.clone())));
         }
         SortedRun { id, ssts }
     }
