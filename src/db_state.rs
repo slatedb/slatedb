@@ -379,14 +379,12 @@ impl DbState {
 
 #[cfg(test)]
 mod tests {
-    use crate::bytes_range::BytesRange;
     use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::proptest_util::arbitrary;
     use bytes::Bytes;
     use proptest::collection::vec;
     use proptest::proptest;
     use std::collections::BTreeSet;
-    use std::ops::Bound::Included;
     use ulid::Ulid;
 
     #[test]
@@ -435,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sorted_run_collect_tables_in_range() {
+    fn test_sorted_runq_collect_tables_in_range() {
         let max_bytes_len = 5;
         proptest!(|(
             table_first_keys in vec(arbitrary::nonempty_bytes(max_bytes_len), 1..10),

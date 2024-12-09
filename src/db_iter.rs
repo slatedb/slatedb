@@ -64,8 +64,8 @@ impl<'a> DbIterator<'a> {
         &mut self,
         result: Result<T, SlateDBError>,
     ) -> Result<T, SlateDBError> {
-        if let Err(error) = result.clone() {
-            self.invalidated_error = Some(error);
+        if let Err(error) = &result {
+            self.invalidated_error = Some(error.clone());
         }
         result
     }
@@ -86,7 +86,7 @@ impl<'a> DbIterator<'a> {
     ///   [`crate::db::Db::scan`] parameters
     ///
     /// Returns [`SlateDBError::InvalidatedIterator`] if the iterator has been
-    //  invalidated in order to reclaim resources.
+    ///  invalidated in order to reclaim resources.
     #[allow(dead_code)]
     pub async fn seek(&mut self, next_key: Bytes) -> Result<(), SlateDBError> {
         if let Some(error) = self.invalidated_error.clone() {

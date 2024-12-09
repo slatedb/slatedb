@@ -196,7 +196,7 @@ impl DbInner {
 
         let state = snapshot.state.as_ref().clone();
         let mut l0_iters = VecDeque::new();
-        let blocks_to_fetch = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
+        let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
         for sst in state.core.l0 {
             let iter = SstIterator::new_opts(
@@ -204,7 +204,7 @@ impl DbInner {
                 range.clone(),
                 self.table_store.clone(),
                 1,
-                blocks_to_fetch,
+                read_ahead_blocks,
                 true,
                 options.cache_blocks,
             )
@@ -219,7 +219,7 @@ impl DbInner {
                 range.clone(),
                 self.table_store.clone(),
                 1,
-                blocks_to_fetch,
+                read_ahead_blocks,
                 options.cache_blocks,
             )
             .await?;
@@ -1567,7 +1567,7 @@ mod tests {
     fn new_proptest_runner(rng_seed: Option<[u8; 32]>) -> TestRunner {
         let rng = rng::new_test_rng(rng_seed);
         let mut config = proptest::test_runner::contextualize_config(Config::default().clone());
-        config.source_file = Some(file!().into());
+        config.source_file = Some(file!());
         TestRunner::new_with_rng(config, rng)
     }
 
