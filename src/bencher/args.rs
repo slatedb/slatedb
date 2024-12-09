@@ -36,6 +36,13 @@ pub(crate) struct BencherArgs {
     )]
     pub(crate) path: String,
 
+    #[arg(
+        long,
+        help = "Clean up object storage files after the benchmark run completes",
+        default_value_t = false
+    )]
+    pub(crate) clean: bool,
+
     #[command(subcommand)]
     pub(crate) command: BencherCommands,
 }
@@ -134,13 +141,6 @@ pub(crate) struct BenchmarkDbArgs {
         default_value_t = 20
     )]
     pub(crate) put_percentage: u32,
-
-    #[arg(
-        long,
-        help = "Clean up object storage files after the benchmark run completes",
-        default_value_t = false
-    )]
-    pub(crate) clean: bool,
 }
 
 impl BenchmarkDbArgs {

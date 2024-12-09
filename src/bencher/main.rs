@@ -26,10 +26,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let object_store = admin::load_object_store_from_env(args.env_file)?;
     match args.command {
         BencherCommands::Db(subcommand_args) => {
-            exec_benchmark_db(path, object_store, subcommand_args).await;
+            exec_benchmark_db(path.clone(), object_store.clone(), subcommand_args).await;
         }
         BencherCommands::Compaction(subcommand_args) => {
-            exec_benchmark_compaction(path, object_store, subcommand_args).await;
+            exec_benchmark_compaction(path.clone(), object_store.clone(), subcommand_args).await;
+        }
+    }
+
+    if args.clean {
+        tracing::info!("Cleaning up test data");
+        let result = admin::delete_objects_with_prefix(object_store, &path).await;
+        if let Err(e) = result {
+            tracing::error!("Error cleaning up test data: {}", e);
         }
     }
 
@@ -59,14 +67,6 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
     bencher.run().await;
 
     db.close().await.expect("Failed to close db");
-
-    if args.clean {
-        tracing::info!("Cleaning up test data");
-        let result = admin::delete_objects_with_prefix(object_store, &path).await;
-        if let Err(e) = result {
-            tracing::error!("Error cleaning up test data: {}", e);
-        }
-    }
 }
 
 async fn exec_benchmark_compaction(
