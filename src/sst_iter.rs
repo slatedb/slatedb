@@ -277,11 +277,6 @@ impl<'a, H: AsRef<SsTableHandle>> KeyValueIterator for SstIterator<'a, H> {
 
 impl<'a, H: AsRef<SsTableHandle>> SeekToKey for SstIterator<'a, H> {
     async fn seek(&mut self, next_key: &Bytes) -> Result<(), SlateDBError> {
-        if !self.range_covers_key(next_key) {
-            self.end_iteration();
-            return Ok(());
-        }
-
         loop {
             let current_iter = if let Some(current_iter) = self.current_iter.as_mut() {
                 current_iter
