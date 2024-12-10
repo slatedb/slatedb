@@ -1286,18 +1286,19 @@ mod tests {
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
         DEFAULT_PUT_OPTIONS,
     };
+    use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
-    use crate::proptest_util::{arbitrary, rng};
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
     #[cfg(feature = "wal_disable")]
     use crate::test_utils::assert_iterator;
     use crate::test_utils::{gen_attrs, TestClock};
 
+    use crate::proptest_util;
     use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
-    use proptest::test_runner::{Config, TestRng, TestRunner};
+    use proptest::test_runner::{TestRng, TestRunner};
     use tokio::runtime::Runtime;
     use tracing::info;
 
@@ -1491,13 +1492,9 @@ mod tests {
         await_durable: bool,
     ) -> Db {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            db_options,
-            object_store,
-        )
-        .await
-        .unwrap();
+        let db = Db::open_with_opts(Path::from("/tmp/test_kv_store"), db_options, object_store)
+            .await
+            .unwrap();
 
         seed_database(&db, &table, false).await;
 
@@ -1571,14 +1568,11 @@ mod tests {
     }
 
     fn new_proptest_runner(rng_seed: Option<[u8; 32]>) -> TestRunner {
-        let rng = rng::new_test_rng(rng_seed);
-        let mut config = proptest::test_runner::contextualize_config(Config::default().clone());
-        config.source_file = Some(file!());
-        TestRunner::new_with_rng(config, rng)
+        proptest_util::runner::new(file!(), rng_seed)
     }
 
     #[test]
-    fn test_scan_returns_uncommitted_recorgds_if_read_level_uncommitted() {
+    fn test_scan_returns_uncommitted_records_if_read_level_uncommitted() {
         let mut runner = new_proptest_runner(None);
         let table = sample::table(runner.rng(), 1000, 5);
 
@@ -1660,7 +1654,7 @@ mod tests {
 
         let runtime = Runtime::new().unwrap();
         let db_options = test_db_options(0, 1024, None);
-        let db = runtime.block_on(build_database_from_table(&table, db_options,true));
+        let db = runtime.block_on(build_database_from_table(&table, db_options, true));
 
         runner
             .run(

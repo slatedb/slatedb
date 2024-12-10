@@ -1,3 +1,16 @@
+#[cfg(test)]
+pub(crate) mod runner {
+    use crate::proptest_util::rng;
+    use proptest::test_runner::{Config, TestRunner};
+
+    pub(crate) fn new(source_file: &'static str, rng_seed: Option<[u8; 32]>) -> TestRunner {
+        let rng = rng::new_test_rng(rng_seed);
+        let mut config = proptest::test_runner::contextualize_config(Config::default().clone());
+        config.source_file = Some(source_file);
+        TestRunner::new_with_rng(config, rng)
+    }
+}
+
 /// A convenient place to put strategies for generating common value types.
 /// See tests below for example usage.
 #[cfg(test)]
@@ -210,12 +223,12 @@ pub(crate) mod sample {
     use bytes::{BufMut, Bytes, BytesMut};
     use proptest::test_runner::TestRng;
     use rand::distributions::uniform::SampleRange;
+    use rand::prelude::SliceRandom;
     use rand::Rng;
     use std::cmp::max;
     use std::collections::BTreeMap;
     use std::ops::Bound::{Excluded, Included, Unbounded};
     use std::ops::{Bound, RangeBounds};
-    use rand::prelude::SliceRandom;
 
     pub(crate) fn bytes<T: SampleRange<usize>>(rng: &mut TestRng, len_range: T) -> Bytes {
         let len = rng.gen_range(len_range);
@@ -401,7 +414,7 @@ pub(crate) mod sample {
                 let start = range.start_bound_opt().unwrap_or(Bytes::new());
                 if bytes_range::is_prefix_increment(&start, &end) {
                     let mut tmp = Vec::new();
-                    if matches!(range.start_bound(), Included(_)|Unbounded) {
+                    if matches!(range.start_bound(), Included(_) | Unbounded) {
                         tmp.push(start);
                     }
                     if matches!(range.end_bound(), Included(_)) {

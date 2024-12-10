@@ -35,6 +35,10 @@ impl<H: AsRef<SsTableHandle>> SsTableHandleIter<'_, H> {
     pub(crate) fn next(&mut self) -> Option<H> {
         self.vec.pop_front()
     }
+
+    pub(crate) fn peek(&self) -> Option<&H> {
+        self.vec.front()
+    }
 }
 
 impl<'a> SortedRunIterator<'a, Box<SsTableHandle>> {
@@ -199,6 +203,10 @@ impl<'a, H: AsRef<SsTableHandle>> SortedRunIterator<'a, H> {
         })
     }
 
+    fn peek_next_table(&self) -> Option<&H> {
+        self.sorted_run_iter.peek()
+    }
+
     async fn advance_current_iter(&mut self) -> Result<(), SlateDBError> {
         self.current_iter = match self.sorted_run_iter.next() {
             None => None,
@@ -235,32 +243,38 @@ impl<'a, H: AsRef<SsTableHandle>> KeyValueIterator for SortedRunIterator<'a, H> 
 
 impl<'a, H: AsRef<SsTableHandle>> SeekToKey for SortedRunIterator<'a, H> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        loop {
-            if let Some(iter) = &mut self.current_iter {
-                if iter.range_covers_key(next_key) {
-                    iter.seek(next_key).await?;
-                    return Ok(());
-                } else {
-                    self.advance_current_iter().await?;
-                }
-            } else {
-                return Ok(());
+        while let Some(next_table) = self.peek_next_table() {
+            let next_table_first_key = next_table.as_ref().info.first_key.as_ref();
+            match next_table_first_key {
+                Some(key) if key < next_key => self.advance_current_iter().await?,
+                _ => break,
             }
         }
+        if let Some(iter) = &mut self.current_iter {
+            iter.seek(next_key).await?;
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
     use crate::bytes::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
+    use crate::proptest_util;
+    use crate::proptest_util::sample;
     use crate::sst::SsTableFormat;
     use crate::test_utils::{assert_kv, gen_attrs};
+
+    use bytes::{BufMut, BytesMut};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
+    use proptest::test_runner::TestRng;
+    use rand::distributions::uniform::SampleRange;
+    use rand::Rng;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
     use ulid::Ulid;
 
     #[tokio::test]
@@ -476,6 +490,83 @@ mod tests {
         .unwrap();
 
         assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_seek_through_sorted_run() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            SsTableFormat::default(),
+            root_path.clone(),
+            None,
+        ));
+
+        let mut rng = proptest_util::rng::new_test_rng(None);
+        let table = sample::table(&mut rng, 400, 10);
+        let max_entries_per_sst = 20;
+        let entries_per_sst = 1..max_entries_per_sst;
+        let sr =
+            build_sorted_run_from_table(&table, table_store.clone(), entries_per_sst, &mut rng)
+                .await;
+        let mut sr_iter = SortedRunIterator::new(&sr, table_store.clone(), 1, 1, false)
+            .await
+            .unwrap();
+
+        let mut table_iter = table.iter();
+        loop {
+            let skip = rng.gen::<usize>() % (max_entries_per_sst * 2);
+            let run = rng.gen::<usize>() % (max_entries_per_sst * 2);
+
+            let Some((k, _)) = table_iter.nth(skip) else {
+                break;
+            };
+            let seek_key = increment_length(k);
+            sr_iter.seek(&seek_key).await.unwrap();
+
+            for (key, value) in table_iter.by_ref().take(run) {
+                let kv = sr_iter.next().await.unwrap().unwrap();
+                assert_eq!(*key, kv.key);
+                assert_eq!(*value, kv.value);
+            }
+        }
+    }
+
+    fn increment_length(b: &[u8]) -> Bytes {
+        let mut buf = BytesMut::from(b);
+        buf.put_u8(u8::MIN);
+        buf.freeze()
+    }
+
+    async fn build_sorted_run_from_table<R: SampleRange<usize> + Clone>(
+        table: &BTreeMap<Bytes, Bytes>,
+        table_store: Arc<TableStore>,
+        entries_per_sst: R,
+        rng: &mut TestRng,
+    ) -> SortedRun {
+        let mut ssts = Vec::new();
+        let mut entries = table.iter();
+        loop {
+            let sst_len = rng.gen_range(entries_per_sst.clone());
+            let mut builder = table_store.table_builder();
+
+            let sst_kvs: Vec<(&Bytes, &Bytes)> = entries.by_ref().take(sst_len).collect();
+            if sst_kvs.is_empty() {
+                break;
+            }
+
+            for (key, value) in sst_kvs {
+                builder.add_kv(key, Some(value), gen_attrs(0)).unwrap();
+            }
+
+            let encoded = builder.build().unwrap();
+            let id = SsTableId::Compacted(Ulid::new());
+            let handle = table_store.write_sst(&id, encoded).await.unwrap();
+            ssts.push(handle);
+        }
+
+        SortedRun { id: 0, ssts }
     }
 
     async fn build_sr_with_ssts(

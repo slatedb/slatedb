@@ -230,10 +230,6 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
         }
     }
 
-    pub(crate) fn range_covers_key(&self, key: &[u8]) -> bool {
-        self.table.as_ref().range_covers_key(key)
-    }
-
     fn end_iteration(&mut self) {
         let num_blocks = self.index.borrow().block_meta().len();
         self.next_block_idx_to_fetch = num_blocks;
