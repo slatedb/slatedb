@@ -18,13 +18,11 @@ pub(crate) fn is_prefix_increment(prefix: &Bytes, b: &Bytes) -> bool {
         return false;
     }
 
-    for i in 0..prefix.len() {
-        if b[i] != prefix[i] {
-            return false;
-        }
+    if !b.starts_with(prefix.as_ref()) {
+        return false;
     }
 
-    b[b.len() - 1] == u8::MIN
+    &b[prefix.len()..] == &[u8::MIN]
 }
 
 impl RangeBounds<Bytes> for BytesRange {
@@ -93,24 +91,23 @@ impl BytesRange {
         }
     }
 
-    pub(crate) fn start_bound(&self) -> Bound<&Bytes> {
-        self.start_bound.as_ref()
-    }
 
+    /// Get the start bound as an [`Option`]. Returns `None` if unbounded. Otherwise, it
+    /// returns `Some(bytes)` if the bound is either `Included(bytes)` or `Excluded(bytes)`.
     pub(crate) fn start_bound_opt(&self) -> Option<Bytes> {
         as_option(self.start_bound()).cloned()
     }
 
-    pub(crate) fn end_bound(&self) -> Bound<&Bytes> {
-        self.end_bound.as_ref()
-    }
-
+    /// Get the end bound as an [`Option`]. Returns `None` if unbounded. Otherwise, it
+    /// returns `Some(bytes)` if the bound is either `Included(bytes)` or `Excluded(bytes)`.
     #[cfg(test)]
     pub(crate) fn end_bound_opt(&self) -> Option<Bytes> {
         as_option(self.end_bound()).cloned()
     }
 
-    fn compare_bound<'a>(
+    /// Helper to get the larger or small bound depending on a
+    /// comparison function (which is assumed to just be `<` or `>`).
+    fn clamp_bound<'a>(
         a: Bound<&'a Bytes>,
         b: Bound<&'a Bytes>,
         cmp: fn(&Bytes, &Bytes) -> bool,
@@ -132,21 +129,17 @@ impl BytesRange {
     }
 
     fn min_end_bound<'a>(a: Bound<&'a Bytes>, b: Bound<&'a Bytes>) -> Bound<&'a Bytes> {
-        Self::compare_bound(a, b, |a, b| a < b)
+        Self::clamp_bound(a, b, |a, b| a < b)
     }
 
     fn max_start_bound<'a>(a: Bound<&'a Bytes>, b: Bound<&'a Bytes>) -> Bound<&'a Bytes> {
-        Self::compare_bound(a, b, |a, b| a > b)
+        Self::clamp_bound(a, b, |a, b| a > b)
     }
 
     pub(crate) fn intersection(&self, other: &BytesRange) -> BytesRange {
         let start_bound = Self::max_start_bound(self.start_bound(), other.start_bound());
         let end_bound = Self::min_end_bound(self.end_bound(), other.end_bound());
-
-        BytesRange {
-            start_bound: start_bound.cloned(),
-            end_bound: end_bound.cloned(),
-        }
+        BytesRange::new(start_bound.cloned(), end_bound.cloned())
     }
 }
 

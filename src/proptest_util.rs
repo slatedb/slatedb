@@ -181,7 +181,7 @@ pub(crate) mod sample {
     use rand::Rng;
     use std::cmp::max;
     use std::collections::BTreeMap;
-    use std::ops::Bound;
+    use std::ops::{Bound, RangeBounds};
     use std::ops::Bound::{Excluded, Included, Unbounded};
 
     pub(crate) fn bytes<T: SampleRange<usize>>(rng: &mut TestRng, len_range: T) -> Bytes {
