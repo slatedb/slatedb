@@ -75,6 +75,12 @@ pub enum SlateDBError {
 
     #[error("Read channel error: {0}")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
+
+    #[error("Iterator invalidated after unexpected error {0}")]
+    InvalidatedIterator(#[from] Box<SlateDBError>),
+
+    #[error("Invalid Argument")]
+    InvalidArgument { msg: String },
 }
 
 impl From<std::io::Error> for SlateDBError {
