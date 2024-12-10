@@ -22,7 +22,7 @@ pub(crate) fn is_prefix_increment(prefix: &Bytes, b: &Bytes) -> bool {
         return false;
     }
 
-    &b[prefix.len()..] == &[u8::MIN]
+    b[prefix.len()..] == [u8::MIN]
 }
 
 impl RangeBounds<Bytes> for BytesRange {
@@ -211,14 +211,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_both_ranges_contain_values_chosen_from_intersection() {
-        proptest!(|(non_empty_1 in arbitrary::nonempty_range(10), non_empty_2 in arbitrary::nonempty_range(10), mut rng in arbitrary::rng())| {
+    fn test_both_ranges_contaicn_values_chosen_from_intersection() {
+        proptest!(|(
+            (non_empty_1, non_empty_2) in arbitrary::nonempty_intersecting_ranges(10),
+            mut rng in arbitrary::rng()
+        )| {
             let intersection = non_empty_1.intersection(&non_empty_2);
-            if intersection.non_empty() {
-                let bytes = sample::bytes_in_range(&mut rng, &intersection);
-                assert!(non_empty_1.contains(&bytes));
-                assert!(non_empty_2.contains(&bytes));
-            };
+            assert!(intersection.non_empty());
+            let bytes = sample::bytes_in_range(&mut rng, &intersection);
+            assert!(non_empty_1.contains(&bytes));
+            assert!(non_empty_2.contains(&bytes));
         });
     }
 }

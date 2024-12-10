@@ -4,7 +4,7 @@
 pub(crate) mod arbitrary {
     use crate::bytes_range;
     use crate::bytes_range::BytesRange;
-    use crate::proptest_util::rng;
+    use crate::proptest_util::{rng, sample};
     use bytes::{BufMut, Bytes, BytesMut};
     use proptest::arbitrary::any;
     use proptest::collection::vec;
@@ -21,8 +21,9 @@ pub(crate) mod arbitrary {
         vec(any::<u8>(), 1..size).prop_map(|v| Bytes::from(v))
     }
 
-    /// Get a deterministic RNG which can be used to generate random samples
-    /// in a property test case.  
+    /// Get a deterministic RNG which has a seed derived from proptest,
+    /// which means all values generated from the RNG can be reproduced
+    /// using the proptest seed.
     pub(crate) fn rng() -> impl Strategy<Value = TestRng> {
         vec(any::<u8>(), 32).prop_map(|seed| {
             let mut s: [u8; 32] = Default::default();
@@ -145,6 +146,37 @@ pub(crate) mod arbitrary {
             nonempty_bounded_range(size),
             nonempty_range_edge_cases()
         ]
+    }
+
+    pub(crate) fn nonempty_intersecting_ranges(
+        size: usize,
+    ) -> impl Strategy<Value = (BytesRange, BytesRange)> {
+        (rng(), nonempty_range(size)).prop_flat_map(|(mut rng, range1)| {
+            let start = sample::bytes_in_range(&mut rng, &range1);
+            let end_range = BytesRange::new(Included(start.clone()), Unbounded);
+            let end = sample::bytes_in_range(&mut rng, &end_range);
+            prop_oneof![
+                (
+                    Just(range1.clone()),
+                    Just(BytesRange::new(
+                        Included(start.clone()),
+                        Included(end.clone())
+                    ))
+                ),
+                (
+                    Just(range1.clone()),
+                    Just(BytesRange::new(Unbounded, Included(end.clone())))
+                ),
+                (
+                    Just(range1.clone()),
+                    Just(BytesRange::new(Included(start.clone()), Unbounded))
+                ),
+                (
+                    Just(range1.clone()),
+                    Just(BytesRange::new(Unbounded, Unbounded))
+                ),
+            ]
+        })
     }
 }
 

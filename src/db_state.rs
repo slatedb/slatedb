@@ -383,6 +383,8 @@ mod tests {
     use proptest::collection::vec;
     use proptest::proptest;
     use std::collections::BTreeSet;
+    use std::collections::Bound::Included;
+    use std::ops::RangeBounds;
     use ulid::Ulid;
 
     #[test]
@@ -461,7 +463,11 @@ mod tests {
                 let covering_last_key = covering_tables.iter().last()
                 .and_then(|t| t.info.first_key.clone())
                 .unwrap();
-                assert!(covering_last_key < range_end_key);
+                if covering_last_key == range_end_key {
+                    assert_eq!(Included(range_end_key), range.end_bound().cloned());
+                } else {
+                    assert!(covering_last_key < range_end_key);
+                }
             }
         });
     }
