@@ -1,0 +1,82 @@
+name: Nightly Benchmarks
+
+on:
+  schedule:
+    # Run at midnight Pacific (8 AM UTC)
+    - cron: '0 8 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+permissions:
+  # Required for storing benchmark results
+  contents: write
+
+jobs:
+  microbenchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run microbenchmark
+        run: cargo bench -- --output-format bencher | tee output.txt
+
+      - name: Download nightly microbenchmark data
+        uses: actions/cache/restore@v4
+        with:
+          path: ./microbenchmarks-cache
+          key: ${{ runner.os }}-microbenchmarks
+
+      - name: Update microbenchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: cargo bench
+          tool: 'cargo'
+          output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          external-data-json-path: ./microbenchmarks-cache/benchmark-data.json
+          fail-on-alert: true
+          summary-always: true
+          max-items-in-chart: 30
+
+      - name: Save nightly microbenchmark data
+        uses: actions/cache/save@v4
+        with:
+          path: ./microbenchmarks-cache
+          key: ${{ runner.os }}-microbenchmarks
+
+  benchmarks:
+    runs-on: warp-ubuntu-latest-x64-16x
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System information
+        run: |
+          echo "=== CPU ==="
+          lscpu
+          echo -e "\n=== Memory ==="
+          free -h
+          echo -e "\n=== Disk Space ==="
+          df -h
+          echo -e "\n=== Workspace Directory ==="
+          du -sh ${{ github.workspace }}
+
+      - name: Run benchmark
+        env:
+          CLOUD_PROVIDER: local
+          LOCAL_PATH: ${{ github.workspace }}/benchmark-data
+          SLATEDB_BENCH_CLEAN: true
+        run: mkdir -p ${{ github.workspace }}/benchmark-data && ./src/bencher/benchmark-db.sh
+
+      - name: Update benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: src/bencher/benchmark-db.sh
+          tool: 'customBiggerIsBetter'
+          output-file-path: target/bencher/results/benchmark-data.json
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          fail-on-alert: true
+          summary-always: true
+          max-items-in-chart: 30
+          auto-push: true
+          gh-repository: github.com/slatedb/slatedb-website
+          benchmark-data-dir-path: performance/benchmarks/main

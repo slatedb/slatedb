@@ -362,35 +362,27 @@ K:               3           +7                           5
 
 ### TTL Handling with Merge Operations
 
-Merge operations introduce some complexity around TTL handling. Here we outline how TTLs interact with merge operations and the different TTL behaviors we support.
+#### Supported TTL Behaviors 
+
+SlateDB supports two TTL approaches:
+
+1. **Operation-Level TTL**
+   - Each operation (put/merge) has its own independent TTL, specified via:
+     - `Ttl::ExpireAfter(duration)`: Expires after specified duration (interally this is implemented as `ExpireAt(Instant::now() + duration)`)
+     - `Ttl::ExpireAt(timestamp)`: Expires at specified timestamp
+   - Enables per-element expiration in collections
+
+2. **TTL Renewal (NOT SUPPORTED NATIVELY)**
+   - Refreshing TTL for entire key would require READ + MODIFY + UPDATE
+   - Use standard `PUT` API if this behavior is needed
 
 #### TTL Storage and Expiration
 
-When merging values with different TTLs, the merge operation only combines the values during reads - the individual entries remain separate in storage. This allows each entry to expire independently according to its own TTL.
+When merging values with different TTLs, the merge operation only combines values during reads while keeping entries separate in storage, allowing independent expiration per TTL.
 
-Unlike regular values which become tombstones upon expiration, expired merge entries are simply removed. This enables use cases like per-element expiration in list-like data structures.
+Unlike regular values which become tombstones upon expiration, expired merge entries are simply removed, enabling per-element expiration in collections.
 
-#### Supported TTL Behaviors 
-
-We support two main TTL behaviors for merge operations:
-
-1. **TTL Renewal on Update (NOT SUPPORTED)**
-   - Each merge operation resetting the TTL for the entire key is not supported
-   - Would require READ + MODIFY + UPDATE to handle compaction correctly
-   - Introduces significant complexity with merges split across SSTs having different expiration times
-   - Users should use standard `PUT` API if they need this behavior
-
-2. **Per-Element TTL**
-   - Each merge operation has its own independent TTL
-   - Useful for expiring individual elements in collections
-   - Supported via `Ttl::ExpireAfter(duration)` in `MergeOptions`
-
-3. **Fixed Expiration Time**
-   - Key expires at a specific time regardless of updates
-   - While not supported natively by SlateDB, users can achieve this behavior by consistently setting the same expiration timestamp for all merge operands of a key.
-   - Requires new `Ttl::ExpireAt(ts)` variant to allow users to align expiration times of merge operands
-
-Users can combine approaches 2) and 3) at the application level to implement their desired TTL semantics.
+Users can implement custom TTL patterns by consistently using either `ExpireAt` or `ExpireAfter` across operations.
 
 ### Ordering Guarantees
 
