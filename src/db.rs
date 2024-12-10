@@ -1485,11 +1485,15 @@ mod tests {
         }
     }
 
-    async fn build_database_from_table(table: &BTreeMap<Bytes, Bytes>, await_durable: bool) -> Db {
+    async fn build_database_from_table(
+        table: &BTreeMap<Bytes, Bytes>,
+        db_options: DbOptions,
+        await_durable: bool,
+    ) -> Db {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let db = Db::open_with_opts(
             Path::from("/tmp/test_kv_store"),
-            test_db_options(0, 1024, None),
+            db_options,
             object_store,
         )
         .await
@@ -1519,7 +1523,8 @@ mod tests {
         let table = sample::table(runner.rng(), 1000, 5);
 
         let runtime = Runtime::new().unwrap();
-        let db = runtime.block_on(build_database_from_table(&table, true));
+        let db_options = test_db_options(0, 1024, None);
+        let db = runtime.block_on(build_database_from_table(&table, db_options, true));
 
         runner
             .run(&arbitrary::empty_range(10), |range| {
@@ -1549,7 +1554,8 @@ mod tests {
         let table = sample::table(runner.rng(), 1000, 5);
 
         let runtime = Runtime::new().unwrap();
-        let db = runtime.block_on(build_database_from_table(&table, true));
+        let db_options = test_db_options(0, 1024, None);
+        let db = runtime.block_on(build_database_from_table(&table, db_options, true));
 
         runner
             .run(&arbitrary::nonempty_range(10), |range| {
@@ -1572,12 +1578,14 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_returns_uncommitted_records_if_read_level_uncommitted() {
+    fn test_scan_returns_uncommitted_recorgds_if_read_level_uncommitted() {
         let mut runner = new_proptest_runner(None);
         let table = sample::table(runner.rng(), 1000, 5);
 
         let runtime = Runtime::new().unwrap();
-        let db = runtime.block_on(build_database_from_table(&table, false));
+        let mut db_options = test_db_options(0, 1024, None);
+        db_options.flush_interval = Duration::from_secs(5);
+        let db = runtime.block_on(build_database_from_table(&table, db_options, false));
 
         runner
             .run(&arbitrary::nonempty_range(10), |range| {
@@ -1597,7 +1605,8 @@ mod tests {
         let table = sample::table(runner.rng(), 1000, 10);
 
         let runtime = Runtime::new().unwrap();
-        let db = runtime.block_on(build_database_from_table(&table, true));
+        let db_options = test_db_options(0, 1024, None);
+        let db = runtime.block_on(build_database_from_table(&table, db_options, true));
 
         runner
             .run(
@@ -1650,7 +1659,8 @@ mod tests {
         let table = sample::table(runner.rng(), 1000, 10);
 
         let runtime = Runtime::new().unwrap();
-        let db = runtime.block_on(build_database_from_table(&table, true));
+        let db_options = test_db_options(0, 1024, None);
+        let db = runtime.block_on(build_database_from_table(&table, db_options,true));
 
         runner
             .run(
