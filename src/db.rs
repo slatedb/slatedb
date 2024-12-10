@@ -1474,9 +1474,7 @@ mod tests {
 
     async fn seed_database(db: &Db, table: &BTreeMap<Bytes, Bytes>, await_durable: bool) {
         let put_options = PutOptions::default();
-        let write_options = &WriteOptions {
-            await_durable,
-        };
+        let write_options = &WriteOptions { await_durable };
 
         for (key, value) in table.iter() {
             db.put_with_options(key, value, &put_options, write_options)
