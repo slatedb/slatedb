@@ -58,7 +58,7 @@ following environment variables before benchmarking:
 - `AWS_ENDPOINT` (optional), if you are using a custom S3 endpoint.
 - `AWS_SESSION_TOKEN` (optional), if you are using temporary credentials. 
 
-### Plotting Results
+## `benchmark-db.sh`
 
 There is also a shell script which runs a series of benchmarks and then draws
 the plots using `gnuplot`. Think of it as a template to start with to create
@@ -77,6 +77,10 @@ The command above will produce results at `target/bencher/results` directory. Th
 - `benchmark-data.json`: A JSON file containing all the benchmark results in [github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark) format.
 
 The script also has a `SLATEDB_BENCH_CLEAN` environment variable which can be set to `true` to clean up the test data in object storage after each benchmark.
+
+### `nightly.yaml`
+
+`benchmark-db.sh` is also used in `.github/workflows/nightly.yaml` to benchmark the nightly build and generate plots for the [SlateDB website](https://slatedb.io/performance/benchmarks/main/). The tests are run using [WarpBuild](https://warpbuild.com) and the results are uploaded using [github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark). The job will also fail if the results are not within 200% of the previous results.
 
 ## `compaction` Subcommand
 
