@@ -621,6 +621,7 @@ mod tests {
             garbage_collector_options: None,
             clock,
             default_ttl: None,
+            merge_operator: None,
         }
     }
 

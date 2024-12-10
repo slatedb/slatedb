@@ -35,6 +35,7 @@ mod manifest_store;
 mod mem_table;
 mod mem_table_flush;
 mod merge_iterator;
+mod merge_operator;
 mod metrics;
 mod row_codec;
 pub mod size_tiered_compaction;

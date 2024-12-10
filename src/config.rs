@@ -168,6 +168,7 @@ use crate::config::GcExecutionMode::Periodic;
 use crate::error::{DbOptionsError, SlateDBError};
 
 use crate::db_cache::DbCache;
+use crate::merge_operator::MergeOperator;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
@@ -466,6 +467,10 @@ pub struct DbOptions {
     ///
     /// Default: no TTL (insertions will remain until deleted)
     pub default_ttl: Option<u64>,
+
+    /// The merge operator to use for merge operations.
+    #[serde(skip)]
+    pub merge_operator: Option<Arc<dyn MergeOperator + Send + Sync>>,
 }
 
 // Implement Debug manually for DbOptions.
@@ -651,6 +656,7 @@ impl Default for DbOptions {
             filter_bits_per_key: 10,
             clock: default_clock(),
             default_ttl: None,
+            merge_operator: None,
         }
     }
 }

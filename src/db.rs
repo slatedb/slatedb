@@ -48,6 +48,7 @@ use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushThreadMsg;
+use crate::merge_operator::MergeOperatorIterator;
 use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
@@ -103,12 +104,22 @@ impl DbInner {
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
 
+        macro_rules! as_result {
+            ($deletable:expr) => {
+                match $deletable {
+                    ValueDeletable::Value(v) => Ok(Some(v)),
+                    ValueDeletable::Merge(_) => Err(SlateDBError::MergeUnsupported),
+                    ValueDeletable::Tombstone => Ok(None),
+                }
+            };
+        }
+
         if matches!(options.read_level, Uncommitted) {
             let maybe_val = std::iter::once(snapshot.wal)
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
             if let Some(val) = maybe_val {
-                return Ok(val.value.into_option());
+                return as_result!(val.value);
             }
         }
 
@@ -116,7 +127,7 @@ impl DbInner {
             .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
         if let Some(val) = maybe_val {
-            return Ok(val.value.into_option());
+            return as_result!(val.value);
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -127,12 +138,20 @@ impl DbInner {
             if self.sst_might_include_key(sst, key, key_hash).await? {
                 let mut iter =
                     SstIterator::new_from_key(sst, self.table_store.clone(), key, 1, 1, true)
-                        .await?; // cache blocks that are being read
-                if let Some(entry) = iter.next_entry().await? {
-                    if entry.key == key {
-                        return Ok(entry.value.into_option());
+                        .await?;
+                let next_entry = match self.options.merge_operator.clone() {
+                    Some(merge_operator) => {
+                        MergeOperatorIterator::new(merge_operator, iter)
+                            .next_entry()
+                            .await
                     }
-                }
+                    None => iter.next_entry().await,
+                };
+                if let Some(entry) = next_entry? {
+                    if entry.key == key {
+                        return as_result!(entry.value);
+                    }
+                };
             }
         }
         for sr in &snapshot.state.core.compacted {
@@ -140,11 +159,19 @@ impl DbInner {
                 let mut iter =
                     SortedRunIterator::new_from_key(sr, key, self.table_store.clone(), 1, 1, true) // cache blocks
                         .await?;
-                if let Some(entry) = iter.next_entry().await? {
-                    if entry.key == key {
-                        return Ok(entry.value.into_option());
+                let next_entry = match self.options.merge_operator.clone() {
+                    Some(merge_operator) => {
+                        MergeOperatorIterator::new(merge_operator, iter)
+                            .next_entry()
+                            .await
                     }
-                }
+                    None => iter.next_entry().await,
+                };
+                if let Some(entry) = next_entry? {
+                    if entry.key == key {
+                        return as_result!(entry.value);
+                    }
+                };
             }
         }
         Ok(None)
@@ -402,6 +429,9 @@ impl DbInner {
                                     expire_ts: kv.expire_ts,
                                 },
                             );
+                        }
+                        ValueDeletable::Merge(_) => {
+                            todo!()
                         }
                         ValueDeletable::Tombstone => guard.memtable().delete(
                             kv.key.clone(),
@@ -2431,6 +2461,7 @@ mod tests {
             garbage_collector_options: None,
             clock,
             default_ttl: None,
+            merge_operator: None,
         }
     }
 }
