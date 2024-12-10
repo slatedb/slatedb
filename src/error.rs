@@ -64,8 +64,12 @@ pub enum SlateDBError {
     #[error("Error Compressing Block")]
     BlockCompressionError,
 
-    #[error("Unknown RowFlags -- this may be caused by reading data encoded with a newer codec")]
-    InvalidRowFlags,
+    #[error("Invalid RowFlags (encoded_bits: {encoded_bits:#b}, known_bits: {known_bits:#b}): {message}")]
+    InvalidRowFlags {
+        encoded_bits: u8,
+        known_bits: u8,
+        message: String,
+    },
 
     #[error("Error flushing immutable wals: channel closed")]
     WalFlushChannelError,
@@ -75,6 +79,9 @@ pub enum SlateDBError {
 
     #[error("Read channel error: {0}")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
+
+    #[error("Merge Operator is not fully implemented")]
+    MergeUnsupported,
 }
 
 impl From<std::io::Error> for SlateDBError {

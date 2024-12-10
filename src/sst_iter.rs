@@ -269,18 +269,10 @@ mod tests {
             None,
         ));
         let mut builder = table_store.table_builder();
-        builder
-            .add_kv(b"key1", Some(b"value1"), gen_attrs(1))
-            .unwrap();
-        builder
-            .add_kv(b"key2", Some(b"value2"), gen_attrs(2))
-            .unwrap();
-        builder
-            .add_kv(b"key3", Some(b"value3"), gen_attrs(3))
-            .unwrap();
-        builder
-            .add_kv(b"key4", Some(b"value4"), gen_attrs(4))
-            .unwrap();
+        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
+        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
+        builder.add_value(b"key3", b"value3", gen_attrs(3)).unwrap();
+        builder.add_value(b"key4", b"value4", gen_attrs(4)).unwrap();
         let encoded = builder.build().unwrap();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded)
@@ -327,9 +319,9 @@ mod tests {
 
         for i in 0..1000 {
             builder
-                .add_kv(
+                .add_value(
                     format!("key{}", i).as_bytes(),
-                    Some(format!("value{}", i).as_bytes()),
+                    format!("value{}", i).as_bytes(),
                     gen_attrs(i),
                 )
                 .unwrap();
@@ -485,7 +477,7 @@ mod tests {
         let mut writer = ts.table_writer(SsTableId::Wal(0));
         let mut nkeys = 0usize;
         while writer.blocks_written() < n {
-            let entry = RowEntry::new(key_gen.next(), Some(val_gen.next()), 0, None, None);
+            let entry = RowEntry::new_value(key_gen.next().as_ref(), val_gen.next().as_ref(), 0);
             writer.add(entry).await.unwrap();
             nkeys += 1;
         }
