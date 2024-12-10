@@ -1476,11 +1476,10 @@ mod tests {
         let put_options = PutOptions::default();
         let write_options = &WriteOptions {
             await_durable,
-            ..WriteOptions::default()
         };
 
         for (key, value) in table.iter() {
-            db.put_with_options(key, value, &put_options, &write_options)
+            db.put_with_options(key, value, &put_options, write_options)
                 .await
                 .unwrap();
         }
@@ -1496,7 +1495,7 @@ mod tests {
             .await
             .unwrap();
 
-        seed_database(&db, &table, false).await;
+        seed_database(&db, table, false).await;
 
         if await_durable {
             db.flush().await.unwrap();
@@ -1542,7 +1541,7 @@ mod tests {
             .scan_with_options(range.clone(), scan_options)
             .await
             .unwrap();
-        assert_ordered_scan_in_range(&table, &range, &mut iter).await;
+        assert_ordered_scan_in_range(table, &range, &mut iter).await;
     }
 
     #[test]
@@ -1639,7 +1638,7 @@ mod tests {
                 .unwrap();
 
             let upper_bounded_range = BytesRange::from(..arbitrary_key.clone());
-            let value = sample::bytes_in_range(rng, &upper_bounded_range.into());
+            let value = sample::bytes_in_range(rng, &upper_bounded_range);
             assert!(matches!(
                 iter.seek(value).await,
                 Err(SlateDBError::InvalidArgument { msg: _ })
@@ -1680,11 +1679,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            let seek_key = sample::bytes_in_range(rng, &scan_range);
+            let seek_key = sample::bytes_in_range(rng, scan_range);
             iter.seek(seek_key.clone()).await.unwrap();
 
             let seek_range = BytesRange::new(Included(seek_key), scan_range.end_bound().cloned());
-            assert_ordered_scan_in_range(&table, &seek_range, &mut iter).await;
+            assert_ordered_scan_in_range(table, &seek_range, &mut iter).await;
         }
     }
 

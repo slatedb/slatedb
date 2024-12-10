@@ -27,11 +27,11 @@ pub(crate) mod arbitrary {
     use std::ops::Bound::{Excluded, Included, Unbounded};
 
     pub(crate) fn bytes(size: usize) -> impl Strategy<Value = Bytes> {
-        vec(any::<u8>(), 0..size).prop_map(|v| Bytes::from(v))
+        vec(any::<u8>(), 0..size).prop_map(Bytes::from)
     }
 
     pub(crate) fn nonempty_bytes(size: usize) -> impl Strategy<Value = Bytes> {
-        vec(any::<u8>(), 1..size).prop_map(|v| Bytes::from(v))
+        vec(any::<u8>(), 1..size).prop_map(Bytes::from)
     }
 
     /// Get a deterministic RNG which has a seed derived from proptest,
@@ -372,7 +372,7 @@ pub(crate) mod sample {
         match range.end_bound() {
             Unbounded => padded_bytes(&Bytes::new(), u8::MAX, len),
             Included(b) | Excluded(b) => {
-                let b = padded_bytes(&b, u8::MIN, len);
+                let b = padded_bytes(b, u8::MIN, len);
                 decrement_lex(&b)
             }
         }
@@ -381,9 +381,9 @@ pub(crate) mod sample {
     fn inclusive_start_bound(range: &BytesRange, len: usize) -> Bytes {
         match range.start_bound() {
             Unbounded => padded_bytes(&Bytes::new(), u8::MIN, len),
-            Included(b) => padded_bytes(&b, u8::MIN, len),
+            Included(b) => padded_bytes(b, u8::MIN, len),
             Excluded(b) => {
-                let padded = padded_bytes(&b, u8::MIN, len);
+                let padded = padded_bytes(b, u8::MIN, len);
                 if b.len() < len {
                     padded
                 } else {
@@ -411,7 +411,7 @@ pub(crate) mod sample {
             } else if range.start_bound() == Included(&end) {
                 return end.clone();
             } else {
-                let start = range.start_bound_opt().unwrap_or(Bytes::new());
+                let start = range.start_bound_opt().unwrap_or_default();
                 if bytes_range::is_prefix_increment(&start, &end) {
                     let mut tmp = Vec::new();
                     if matches!(range.start_bound(), Included(_) | Unbounded) {
@@ -427,8 +427,8 @@ pub(crate) mod sample {
         }
 
         let len = max(bound_len(range.start_bound()), bound_len(range.end_bound())) + 3;
-        let start_bound = inclusive_start_bound(&range, len);
-        let end_bound = inclusive_end_bound(&range, len);
+        let start_bound = inclusive_start_bound(range, len);
+        let end_bound = inclusive_end_bound(range, len);
         bytes_between(rng, &start_bound, &end_bound)
     }
 }
@@ -446,7 +446,7 @@ mod tests {
         });
 
         proptest!(|(bytes in arbitrary::nonempty_bytes(10))| {
-            assert!(bytes.len() > 0);
+            assert!(!bytes.is_empty());
             assert!(bytes.len() <= 10);
         });
     }
@@ -459,7 +459,7 @@ mod tests {
         assert_eq!(table.len(), num_records);
 
         for (key, value) in table {
-            assert!(key.len() > 0);
+            assert!(!key.is_empty());
             assert!(key.len() <= 10);
             assert!(value.len() <= 10);
         }
