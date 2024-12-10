@@ -1529,9 +1529,13 @@ mod tests {
         )
         .await
         .unwrap();
-        db.delete_with_options(&[b'b'; 32], &write_options)
+        db.delete_with_options(&[b'b'; 31], &write_options)
             .await
             .unwrap();
+
+        // ensure the memtable's size is greater than l0_sst_size_bytes, or
+        // the memtable will not be flushed to l0, and the test will hang
+        // at this put_with_options call.
         let write_options = WriteOptions {
             await_durable: true,
         };
@@ -1565,7 +1569,7 @@ mod tests {
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
                     gen_attrs(0),
                 ),
-                (vec![b'b'; 32], ValueDeletable::Tombstone, gen_empty_attrs()),
+                (vec![b'b'; 31], ValueDeletable::Tombstone, gen_empty_attrs()),
                 (
                     vec![b'c'; 32],
                     ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
