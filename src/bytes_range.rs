@@ -91,7 +91,6 @@ impl BytesRange {
         }
     }
 
-
     /// Get the start bound as an [`Option`]. Returns `None` if unbounded. Otherwise, it
     /// returns `Some(bytes)` if the bound is either `Included(bytes)` or `Excluded(bytes)`.
     pub(crate) fn start_bound_opt(&self) -> Option<Bytes> {
@@ -163,6 +162,17 @@ pub(crate) mod tests {
     use std::ops::Bound::Unbounded;
 
     #[test]
+    fn test_arbitrary_range() {
+        proptest!(|(range in arbitrary::nonempty_range(10))| {
+            assert!(range.non_empty());
+        });
+
+        proptest!(|(range in arbitrary::empty_range(10))| {
+            assert!(range.is_empty());
+        });
+    }
+
+    #[test]
     fn test_intersection_of_empty_range_is_empty() {
         proptest!(|(
             empty_range in arbitrary::empty_range(10),
@@ -190,6 +200,13 @@ pub(crate) mod tests {
         proptest!(|(range in arbitrary::nonempty_range(10), mut rng in arbitrary::rng())| {
             let sample = sample::bytes_in_range(&mut rng, &range);
             assert!(range.contains(&sample), "Expected value {sample:?} is not in range {range:?}");
+        });
+    }
+
+    #[test]
+    fn test_contains_with_empty_range() {
+        proptest!(|(range in arbitrary::empty_range(10), sample in arbitrary::bytes(10))| {
+            assert!(!range.contains(&sample), "Expected value {sample:?} to not be in empty range {range:?}");
         });
     }
 

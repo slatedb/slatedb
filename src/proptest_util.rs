@@ -181,8 +181,8 @@ pub(crate) mod sample {
     use rand::Rng;
     use std::cmp::max;
     use std::collections::BTreeMap;
-    use std::ops::{Bound, RangeBounds};
     use std::ops::Bound::{Excluded, Included, Unbounded};
+    use std::ops::{Bound, RangeBounds};
 
     pub(crate) fn bytes<T: SampleRange<usize>>(rng: &mut TestRng, len_range: T) -> Bytes {
         let len = rng.gen_range(len_range);
@@ -316,8 +316,8 @@ pub(crate) mod sample {
         }
     }
 
-    fn padded_bytes(b: &Bytes, value: u8, len: usize) -> Bytes {
-        let mut padded = BytesMut::from(b.as_ref());
+    fn padded_bytes(b: &[u8], value: u8, len: usize) -> Bytes {
+        let mut padded = BytesMut::from(b);
         while padded.len() < len {
             padded.put_u8(value);
         }
@@ -400,22 +400,11 @@ mod tests {
     }
 
     #[test]
-    fn test_arbitrary_range() {
-        proptest!(|(range in arbitrary::nonempty_range(10))| {
-            assert!(range.non_empty());
-        });
-
-        proptest!(|(range in arbitrary::empty_range(10))| {
-            assert!(range.is_empty());
-        });
-    }
-
-    #[test]
     fn test_sample_table() {
         let mut rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
         let num_records = 50;
         let table = sample::table(&mut rng, num_records, 10);
-        assert!(table.len() == num_records);
+        assert_eq!(table.len(), num_records);
 
         for (key, value) in table {
             assert!(key.len() > 0);
