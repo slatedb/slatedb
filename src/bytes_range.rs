@@ -211,7 +211,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_both_ranges_contaicn_values_chosen_from_intersection() {
+    fn test_both_ranges_contain_values_chosen_from_intersection() {
         proptest!(|(
             (non_empty_1, non_empty_2) in arbitrary::nonempty_intersecting_ranges(10),
             mut rng in arbitrary::rng()

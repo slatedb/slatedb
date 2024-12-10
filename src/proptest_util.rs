@@ -315,6 +315,9 @@ pub(crate) mod sample {
         panic!("Overflow when decrementing bytes {b:?}")
     }
 
+    /// Get a random byte array which has [`u8::MIN`] at each index and is
+    /// between the min and max bounds (which are assumed to also be arrays
+    /// of [`u8::MIN`]).
     fn minvalue_bytes(
         rng: &mut TestRng,
         min_bound: Bound<usize>,
@@ -328,16 +331,11 @@ pub(crate) mod sample {
 
         let max_len = match max_bound {
             Unbounded => min_len + 10,
-            Included(len) => len + 1,
-            Excluded(len) => len,
+            Included(len) => len,
+            Excluded(len) => len - 1,
         };
 
-        let len = if min_len == max_len {
-            min_len
-        } else {
-            min_len + (rng.gen::<usize>() % (max_len - min_len))
-        };
-
+        let len = rng.gen_range(min_len..=max_len);
         Bytes::from(vec![u8::MIN; len])
     }
 
@@ -371,8 +369,12 @@ pub(crate) mod sample {
             Unbounded => padded_bytes(&Bytes::new(), u8::MIN, len),
             Included(b) => padded_bytes(&b, u8::MIN, len),
             Excluded(b) => {
-                let b = padded_bytes(&b, u8::MIN, len);
-                increment_lex(&b)
+                let padded = padded_bytes(&b, u8::MIN, len);
+                if b.len() < len {
+                    padded
+                } else {
+                    increment_lex(&padded)
+                }
             }
         }
     }
