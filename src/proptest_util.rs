@@ -215,6 +215,7 @@ pub(crate) mod sample {
     use std::collections::BTreeMap;
     use std::ops::Bound::{Excluded, Included, Unbounded};
     use std::ops::{Bound, RangeBounds};
+    use rand::prelude::SliceRandom;
 
     pub(crate) fn bytes<T: SampleRange<usize>>(rng: &mut TestRng, len_range: T) -> Bytes {
         let len = rng.gen_range(len_range);
@@ -249,6 +250,7 @@ pub(crate) mod sample {
         let mut res = BytesMut::new();
         let mut start_bound_satisfied = false;
         let mut end_bound_satisfied = false;
+        let min_len = rng.gen_range(0..=start.len());
 
         for i in 0..start.len() {
             let next_val_lb = if !start_bound_satisfied {
@@ -278,8 +280,7 @@ pub(crate) mod sample {
                 end_bound_satisfied = true;
             }
 
-            let coin_flip: bool = rng.gen();
-            if start_bound_satisfied && end_bound_satisfied && coin_flip {
+            if start_bound_satisfied && end_bound_satisfied && res.len() >= min_len {
                 break;
             }
         }
@@ -397,13 +398,17 @@ pub(crate) mod sample {
             } else if range.start_bound() == Included(&end) {
                 return end.clone();
             } else {
-                let start = range.start_bound_opt().unwrap_or_else(|| Bytes::new());
+                let start = range.start_bound_opt().unwrap_or(Bytes::new());
                 if bytes_range::is_prefix_increment(&start, &end) {
-                    return if range.start_bound() == Included(&start) {
-                        start.clone()
-                    } else {
-                        end.clone()
-                    };
+                    let mut tmp = Vec::new();
+                    if matches!(range.start_bound(), Included(_)|Unbounded) {
+                        tmp.push(start);
+                    }
+                    if matches!(range.end_bound(), Included(_)) {
+                        tmp.push(end.clone());
+                    }
+                    tmp.shuffle(rng);
+                    return tmp.pop().unwrap();
                 }
             }
         }
