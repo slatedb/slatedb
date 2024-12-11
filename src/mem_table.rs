@@ -10,11 +10,11 @@ use crossbeam_skiplist::SkipMap;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::{RowAttributes, RowEntry, ValueDeletable};
-use crate::utils::WriteOnceRegister;
+use crate::utils::WatchableOnceCell;
 
 pub(crate) struct KVTable {
     map: SkipMap<Bytes, ValueWithAttributes>,
-    durable: WriteOnceRegister<Result<(), SlateDBError>>,
+    durable: WatchableOnceCell<Result<(), SlateDBError>>,
     size: AtomicUsize,
 }
 
@@ -25,7 +25,7 @@ pub(crate) struct WritableKVTable {
 pub(crate) struct ImmutableMemtable {
     last_wal_id: u64,
     table: Arc<KVTable>,
-    flushed: WriteOnceRegister<Result<(), SlateDBError>>,
+    flushed: WatchableOnceCell<Result<(), SlateDBError>>,
 }
 
 pub(crate) struct ImmutableWal {
@@ -66,7 +66,7 @@ impl ImmutableMemtable {
         Self {
             table: table.table,
             last_wal_id,
-            flushed: WriteOnceRegister::new(),
+            flushed: WatchableOnceCell::new(),
         }
     }
 
@@ -135,7 +135,7 @@ impl KVTable {
         Self {
             map: SkipMap::new(),
             size: AtomicUsize::new(0),
-            durable: WriteOnceRegister::new(),
+            durable: WatchableOnceCell::new(),
         }
     }
 

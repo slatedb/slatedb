@@ -1,17 +1,18 @@
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::{BackgroundTaskFailed, BackgroundTaskShutdown};
+use crate::error::SlateDBError::{BackgroundTaskPanic, BackgroundTaskShutdown};
 use std::future::Future;
+use std::sync::{Arc, Mutex};
 
-pub(crate) struct WriteOnceRegister<T: Clone> {
+pub(crate) struct WatchableOnceCell<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
     tx: tokio::sync::watch::Sender<Option<T>>,
 }
 
-pub(crate) struct WriteOnceRegisterReader<T: Clone> {
+pub(crate) struct WatchableOnceCellReader<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
 }
 
-impl<T: Clone> WriteOnceRegister<T> {
+impl<T: Clone> WatchableOnceCell<T> {
     pub(crate) fn new() -> Self {
         let (tx, rx) = tokio::sync::watch::channel(None);
         Self { rx, tx }
@@ -27,37 +28,33 @@ impl<T: Clone> WriteOnceRegister<T> {
         });
     }
 
-    pub(crate) fn reader(&self) -> WriteOnceRegisterReader<T> {
-        WriteOnceRegisterReader {
+    pub(crate) fn reader(&self) -> WatchableOnceCellReader<T> {
+        WatchableOnceCellReader {
             rx: self.rx.clone(),
         }
     }
 }
 
-impl<T: Clone> WriteOnceRegisterReader<T> {
+impl<T: Clone> WatchableOnceCellReader<T> {
     pub(crate) fn read(&self) -> Option<T> {
         self.rx.borrow().clone()
     }
 
     pub(crate) async fn await_value(&mut self) -> T {
-        loop {
-            if let Some(maybe_value) = self.rx.borrow().as_ref() {
-                return maybe_value.clone();
-            }
-            self.rx.changed().await.expect("watch channel closed")
-        }
+        self.rx
+            .wait_for(|v| v.is_some())
+            .await
+            .expect("watch channel closed")
+            .clone()
+            .expect("no value found")
     }
 }
 
-pub(crate) fn map_stopped_task_result<T>(
-    result: &Result<T, SlateDBError>,
-) -> Result<(), SlateDBError> {
-    match result {
-        Ok(_) => Err(BackgroundTaskShutdown),
-        Err(err) => Err(err.clone()),
-    }
-}
-
+/// Spawn a monitored background tokio task. The task must return a Result<T, SlateDBError>.
+/// The task is spawned by a monitor task. When the task exits, the monitor task
+/// calls a provided cleanup fn with the returned error, or Err(BackgroundTaskShutdown)
+/// if the task exited with Ok. If the spawned task panics, the cleanup fn is called with
+/// Err(BackgroundTaskFailed).
 pub(crate) fn spawn_bg_task<F, T, C>(
     handle: &tokio::runtime::Handle,
     cleanup_fn: C,
@@ -81,15 +78,25 @@ where
                 cleanup_fn(&BackgroundTaskShutdown);
                 result
             }
-            Err(_) => {
+            Err(join_err) => {
                 // task panic'd or was cancelled
-                cleanup_fn(&BackgroundTaskFailed);
-                Err(BackgroundTaskFailed)
+                let err = BackgroundTaskPanic(Arc::new(Mutex::new(
+                    join_err
+                        .try_into_panic()
+                        .unwrap_or_else(|_| Box::new("background task was aborted")),
+                )));
+                cleanup_fn(&err);
+                Err(err)
             }
         }
     })
 }
 
+/// Spawn a monitored background os thread. The thread must return a Result<T, SlateDBError>.
+/// The thread is spawned by a monitor thread. When the thread exits, the monitor thread
+/// calls a provided cleanup fn with the returned error, or Err(BackgroundTaskShutdown)
+/// if the thread exited with Ok. If the spawned thread panics, the cleanup fn is called with
+/// Err(BackgroundTaskFailed).
 pub(crate) fn spawn_bg_thread<F, T, C>(
     name: &str,
     cleanup_fn: C,
@@ -111,10 +118,11 @@ where
                 .expect("failed to create monitored thread");
             let result = inner.join();
             match result {
-                Err(_) => {
+                Err(err) => {
                     // the thread panic'd
-                    cleanup_fn(&BackgroundTaskFailed);
-                    Err(BackgroundTaskFailed)
+                    let err = BackgroundTaskPanic(Arc::new(Mutex::new(err)));
+                    cleanup_fn(&err);
+                    Err(err)
                 }
                 Ok(Err(err)) => {
                     // thread exited with an error
@@ -133,7 +141,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::error::SlateDBError;
-    use crate::utils::{spawn_bg_task, spawn_bg_thread, WriteOnceRegister};
+    use crate::utils::{spawn_bg_task, spawn_bg_thread, WatchableOnceCell};
     use parking_lot::Mutex;
     use std::sync::Arc;
 
@@ -186,10 +194,10 @@ mod tests {
         let task = spawn_bg_task(&handle, move |err| captor2.capture(err), monitored);
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskFailed)));
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
         assert!(matches!(
             captor.captured(),
-            Some(SlateDBError::BackgroundTaskFailed)
+            Some(SlateDBError::BackgroundTaskPanic(_))
         ));
     }
 
@@ -233,10 +241,10 @@ mod tests {
         let thread = spawn_bg_thread("test", move |err| captor2.capture(err), || panic!("oops"));
 
         let result: Result<(), SlateDBError> = thread.join().expect("join failure");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskFailed)));
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
         assert!(matches!(
             captor.captured(),
-            Some(SlateDBError::BackgroundTaskFailed)
+            Some(SlateDBError::BackgroundTaskPanic(_))
         ));
     }
 
@@ -257,7 +265,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_only_write_register_once() {
-        let register = WriteOnceRegister::new();
+        let register = WatchableOnceCell::new();
         let reader = register.reader();
         assert_eq!(reader.read(), None);
         register.write(123);
@@ -268,7 +276,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_return_on_await_written_register() {
-        let register = WriteOnceRegister::new();
+        let register = WatchableOnceCell::new();
         let mut reader = register.reader();
         let h = tokio::spawn(async move {
             assert_eq!(reader.await_value().await, 123);

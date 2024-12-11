@@ -2155,7 +2155,7 @@ mod tests {
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
         let result = db.put(b"foo", b"bar").await;
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskFailed)));
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
     }
 
     async fn do_test_should_read_compacted_db(options: DbOptions) {

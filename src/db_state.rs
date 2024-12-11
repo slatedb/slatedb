@@ -11,7 +11,7 @@ use SsTableId::{Compacted, Wal};
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
-use crate::utils::{WriteOnceRegister, WriteOnceRegisterReader};
+use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 
 #[derive(Clone, PartialEq, Serialize)]
 pub(crate) struct SsTableHandle {
@@ -140,7 +140,7 @@ pub(crate) struct DbState {
     memtable: WritableKVTable,
     wal: WritableKVTable,
     state: Arc<COWDbState>,
-    error: WriteOnceRegister<SlateDBError>,
+    error: WatchableOnceCell<SlateDBError>,
 }
 
 // represents the state that is mutated by creating a new copy with the mutations
@@ -211,7 +211,7 @@ impl DbState {
                 imm_wal: VecDeque::new(),
                 core: core_db_state,
             }),
-            error: WriteOnceRegister::new(),
+            error: WatchableOnceCell::new(),
         }
     }
 
@@ -232,7 +232,7 @@ impl DbState {
         self.state.core.next_wal_sst_id - 1
     }
 
-    pub fn error_reader(&self) -> WriteOnceRegisterReader<SlateDBError> {
+    pub fn error_reader(&self) -> WatchableOnceCellReader<SlateDBError> {
         self.error.reader()
     }
 

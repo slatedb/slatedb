@@ -9,10 +9,11 @@ use crate::db::{DbInner, FlushMsg};
 use crate::db_state;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
+use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
 use crate::types::{RowAttributes, ValueDeletable};
-use crate::utils::{map_stopped_task_result, spawn_bg_task};
+use crate::utils::spawn_bg_task;
 
 #[derive(Debug)]
 pub(crate) enum WalFlushThreadMsg {
@@ -143,7 +144,7 @@ impl DbInner {
                 }
             };
 
-            let pending_result = map_stopped_task_result(&result);
+            let pending_result = result.clone().and_then(|_| Err(BackgroundTaskShutdown));
             while !rx.is_empty() {
                 let (rsp_sender, _) = rx.recv().await.expect("channel unexpectedly closed");
                 if let Some(rsp_sender) = rsp_sender {

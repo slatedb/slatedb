@@ -8,8 +8,9 @@ use ulid::Ulid;
 use crate::db::{DbInner, FlushMsg};
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
+use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::manifest_store::FenceableManifest;
-use crate::utils::{map_stopped_task_result, spawn_bg_task};
+use crate::utils::spawn_bg_task;
 
 #[derive(Debug)]
 pub enum MemtableFlushThreadMsg {
@@ -152,7 +153,7 @@ impl DbInner {
             };
 
             // respond to any pending msgs
-            let pending_result = map_stopped_task_result(&result);
+            let pending_result = result.clone().and_then(|_| Err(BackgroundTaskShutdown));
             while !rx.is_empty() {
                 let (rsp_sender, _) = rx.recv().await.expect("channel unexpectedly closed");
                 if let Some(rsp_sender) = rsp_sender {
@@ -172,7 +173,7 @@ impl DbInner {
         Some(spawn_bg_task(
             tokio_handle,
             move |err| {
-                info!("memtable flush task existed with {:?}", err);
+                info!("memtable flush task exited with {:?}", err);
                 // notify any waiters that the task has exited
                 let mut state = this.state.write();
                 state.record_fatal_error(err.clone());
