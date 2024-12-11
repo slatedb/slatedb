@@ -61,6 +61,9 @@ impl DbInner {
                         },
                     );
                 }
+                ValueDeletable::Merge(_) => {
+                    todo!()
+                }
                 ValueDeletable::Tombstone => {
                     mem_table.delete(
                         kv.key,
