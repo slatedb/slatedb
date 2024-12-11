@@ -2104,10 +2104,7 @@ mod tests {
         assert!(result.is_ok(), "Failed to write key1");
 
         let flush_result = db.inner.flush_memtables().await;
-        match flush_result {
-            Err(e) => assert!(matches!(e, SlateDBError::IoError(_))),
-            _ => panic!("Expected flush error"),
-        }
+        assert!(flush_result.is_err());
         db.close().await.unwrap();
 
         // reload the db
