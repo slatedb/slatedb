@@ -21,6 +21,7 @@ pub trait KeyValueIterator {
                             value: v,
                         }))
                     }
+                    ValueDeletable::Merge(_) => todo!(),
                     ValueDeletable::Tombstone => continue,
                 }
             } else {

@@ -377,7 +377,7 @@ mod tests {
         }
 
         fn with_entry(mut self, key: &'static [u8], val: &'static [u8]) -> Self {
-            let entry = RowEntry::new(key.into(), Some(val.to_vec().into()), 0, None, None);
+            let entry = RowEntry::new_value(key, val, 0);
             self.entries.push_back(Ok(entry));
             self
         }
