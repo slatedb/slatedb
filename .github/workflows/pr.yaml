@@ -118,12 +118,15 @@ jobs:
 
       - name: Generate flamegraphs
         run: |
+          # Create directory for flamegraphs
+          mkdir -p flamegraphs
+
           # Get list of benchmarks
           BENCHMARKS=$(cargo bench --no-run --message-format=json | jq -r 'select(.profile.test == true) | .target.name' | sort -u)
 
           # Create flamegraphs for each benchmark
           for bench in $BENCHMARKS; do
-            cargo flamegraph --bench $bench -o "$bench-flamegraph.svg" -- --bench > /dev/null 2>&1
+            cargo flamegraph --bench $bench -o "flamegraphs/$bench-flamegraph.svg" -- --bench > /dev/null 2>&1
           done
 
       - name: Checkout website repository
@@ -136,7 +139,8 @@ jobs:
       - name: Copy Flamegraphs
         run: |
           rm -rf slatedb-website/performance/microbenchmark-flamegraphs/main
-          cp -r flamegraphs/* slatedb-website/performance/microbenchmark-flamegraphs/main
+          mkdir -p slatedb-website/performance/microbenchmark-flamegraphs/main
+          cp flamegraphs/* slatedb-website/performance/microbenchmark-flamegraphs/main/
 
       - name: Commit and Push
         uses: ad-m/github-push-action@v0.8.0
