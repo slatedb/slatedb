@@ -107,12 +107,22 @@ impl DbInner {
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
 
+        // Temporary function to convert ValueDeletable to Option<Bytes> until
+        // we add proper support for merges.
+        let unwrap_result = |v| match v {
+            ValueDeletable::Value(v) => Ok(Some(v)),
+            ValueDeletable::Merge(_) => {
+                unimplemented!("MergeOperator is not yet fully implemented")
+            }
+            ValueDeletable::Tombstone => Ok(None),
+        };
+
         if matches!(options.read_level, Uncommitted) {
             let maybe_val = std::iter::once(snapshot.wal)
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
             if let Some(val) = maybe_val {
-                return Ok(val.value.into_option());
+                return unwrap_result(val.value);
             }
         }
 
@@ -120,7 +130,7 @@ impl DbInner {
             .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
         if let Some(val) = maybe_val {
-            return Ok(val.value.into_option());
+            return unwrap_result(val.value);
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -144,7 +154,7 @@ impl DbInner {
                 .await?; // cache blocks that are being read
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return Ok(entry.value.into_option());
+                        return unwrap_result(entry.value);
                     }
                 }
             }
@@ -162,7 +172,7 @@ impl DbInner {
                 .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return Ok(entry.value.into_option());
+                        return unwrap_result(entry.value);
                     }
                 }
             }
@@ -481,6 +491,9 @@ impl DbInner {
                                     expire_ts: kv.expire_ts,
                                 },
                             );
+                        }
+                        ValueDeletable::Merge(_) => {
+                            todo!()
                         }
                         ValueDeletable::Tombstone => guard.memtable().delete(
                             kv.key.clone(),
@@ -1290,8 +1303,6 @@ mod tests {
     use crate::proptest_util::sample;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
-    #[cfg(feature = "wal_disable")]
-    use crate::test_utils::assert_iterator;
     use crate::test_utils::{gen_attrs, TestClock};
 
     use crate::proptest_util;
@@ -1912,7 +1923,7 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
     async fn test_wal_disabled() {
-        use crate::test_utils::gen_empty_attrs;
+        use crate::{test_utils::assert_iterator, types::RowEntry};
 
         let clock = Arc::new(TestClock::new());
         let mut options = test_db_options_with_clock(0, 128, None, clock.clone());
@@ -1973,18 +1984,10 @@ mod tests {
             .unwrap();
         assert_iterator(
             &mut iter,
-            &[
-                (
-                    vec![b'a'; 32],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
-                    gen_attrs(0),
-                ),
-                (vec![b'b'; 32], ValueDeletable::Tombstone, gen_empty_attrs()),
-                (
-                    vec![b'c'; 32],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
-                    gen_attrs(10),
-                ),
+            vec![
+                RowEntry::new_value(&[b'a'; 32], &[b'j'; 32], 0).with_create_ts(0),
+                RowEntry::new_tombstone(&[b'b'; 32], 0).with_create_ts(0),
+                RowEntry::new_value(&[b'c'; 32], &[b'l'; 32], 0).with_create_ts(10),
             ],
         )
         .await;

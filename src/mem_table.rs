@@ -223,12 +223,8 @@ impl KVTable {
     /// it is flushed to durable storage.
     fn put_or_delete(&self, key: Bytes, value: ValueDeletable, attrs: RowAttributes) {
         let key_len = key.len();
-        let value_len = match &value {
-            ValueDeletable::Tombstone => 0,
-            ValueDeletable::Value(v) => v.len(),
-        };
         self.size.fetch_add(
-            key_len + value_len + sizeof_attributes(&attrs),
+            key_len + value.len() + sizeof_attributes(&attrs),
             Ordering::Relaxed,
         );
 
@@ -238,12 +234,8 @@ impl KVTable {
             ValueWithAttributes { value, attrs },
             |previous_value| {
                 // Optimistically calculate the size of the previous value.
-                let size = key_len
-                    + match &previous_value.value {
-                        ValueDeletable::Tombstone => 0,
-                        ValueDeletable::Value(old) => old.len(),
-                    }
-                    + sizeof_attributes(&previous_value.attrs);
+                let size =
+                    key_len + previous_value.value.len() + sizeof_attributes(&previous_value.attrs);
                 // `compare_fn` might be called multiple times in case of concurrent
                 // writes to the same key, so we use `Cell` to avoid substracting
                 // the size multiple times. The last call will set the correct size.

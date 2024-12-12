@@ -1,32 +1,14 @@
 use crate::config::Clock;
 use crate::iter::KeyValueIterator;
-use crate::types::{KeyValue, RowAttributes, ValueDeletable};
+use crate::types::{KeyValue, RowAttributes, RowEntry};
 use bytes::Bytes;
 use rand::Rng;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-pub(crate) async fn assert_iterator<T: KeyValueIterator>(
-    iterator: &mut T,
-    entries: &[(Vec<u8>, ValueDeletable, RowAttributes)],
-) {
-    // We use Vec<u8> instead of &[u8] for the keys in the entries for several reasons:
-    // 1. Ownership and Lifetime: Vec<u8> owns its data, while &[u8] is a borrowed slice.
-    //    Using Vec<u8> allows us to store and manipulate the data without worrying about lifetimes.
-
-    // 2. Flexibility: Vec<u8> can be easily cloned, extended, or modified if needed.
-    //    This is particularly useful when working with keys that might need to be adjusted or compared.
-
-    // 3. Consistency with Bytes: The iterator returns keys as Bytes, which is similar to Vec<u8> in that
-    //    it owns its data. Using Vec<u8> in our test data maintains this consistency.
-
-    // 4. Avoid Slice Referencing Issues: Using &[u8] could lead to complicated lifetime issues,
-    //    especially if the original data the slice refers to goes out of scope.
-
-    // 5. Performance: While Vec<u8> has a slight overhead compared to &[u8], the difference is
-    //    negligible for most use cases, especially in tests where convenience and clarity are prioritized.
-
-    for expected in entries.iter() {
-        assert_next_entry(iterator, expected).await;
+/// Asserts that the iterator returns the exact set of expected values in correct order.
+pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
+    for expected_entry in entries.iter() {
+        assert_next_entry(iterator, expected_entry).await;
     }
     assert!(iterator
         .next_entry()
@@ -37,21 +19,14 @@ pub(crate) async fn assert_iterator<T: KeyValueIterator>(
 
 pub(crate) async fn assert_next_entry<T: KeyValueIterator>(
     iterator: &mut T,
-    expected: &(Vec<u8>, ValueDeletable, RowAttributes),
+    expected_entry: &RowEntry,
 ) {
-    let (expected_k, expected_v, expected_attr) = expected;
-    let kv = iterator
+    let actual_entry = iterator
         .next_entry()
         .await
         .expect("iterator next_entry failed")
         .expect("expected iterator to return a value");
-    assert_eq!(kv.key, Bytes::from(expected_k.clone()));
-    assert_eq!(kv.value, *expected_v);
-    assert_eq!(
-        kv.expire_ts, expected_attr.expire_ts,
-        "Attribute expire_ts mismatch at key {:?}",
-        kv.key
-    );
+    assert_eq!(actual_entry, expected_entry.clone())
 }
 
 pub fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
