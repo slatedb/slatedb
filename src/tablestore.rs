@@ -587,7 +587,7 @@ mod tests {
     #[cfg(feature = "moka")]
     use crate::tablestore::DbCache;
     use crate::tablestore::TableStore;
-    use crate::test_utils::{assert_iterator, gen_attrs, gen_empty_attrs};
+    use crate::test_utils::assert_iterator;
     use crate::types::{RowEntry, ValueDeletable};
     use crate::{
         block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
@@ -654,23 +654,11 @@ mod tests {
             .unwrap();
         assert_iterator(
             &mut iter,
-            &[
-                (
-                    vec![b'a'; 16],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 16])),
-                    gen_attrs(1),
-                ),
-                (
-                    vec![b'b'; 16],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 16])),
-                    gen_attrs(2),
-                ),
-                (vec![b'c'; 16], ValueDeletable::Tombstone, gen_empty_attrs()),
-                (
-                    vec![b'd'; 16],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[4u8; 16])),
-                    gen_attrs(4),
-                ),
+            vec![
+                RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0),
+                RowEntry::new_value(&[b'b'; 16], &[2u8; 16], 0),
+                RowEntry::new_tombstone(&[b'c'; 16], 0),
+                RowEntry::new_value(&[b'd'; 16], &[4u8; 16], 0),
             ],
         )
         .await;
