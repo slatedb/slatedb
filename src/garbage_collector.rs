@@ -74,7 +74,7 @@ impl GarbageCollector {
             }
             Ok(())
         };
-        spawn_bg_thread("gc", cleanup_fn, gc_main);
+        spawn_bg_thread("slatedb-gc", cleanup_fn, gc_main);
         Self {
             main_tx: Arc::new(external_tx),
             shutdown_rx,
