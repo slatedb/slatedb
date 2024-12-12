@@ -55,7 +55,7 @@ use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::{RowAttributes, ValueDeletable};
 use std::rc::Rc;
-use tracing::info;
+use tracing::{info, warn};
 
 pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
 pub(crate) type FlushMsg<T> = (Option<FlushSender>, T);
@@ -690,6 +690,7 @@ impl Db {
                     Handle::current(),
                     inner.db_stats.clone(),
                     move |err: &SlateDBError| {
+                        warn!("compactor thread exited with {:?}", err);
                         let mut state = cleanup_inner.state.write();
                         state.record_fatal_error(err.clone())
                     },
@@ -699,6 +700,7 @@ impl Db {
         }
         let mut garbage_collector = None;
         if let Some(gc_options) = &inner.options.garbage_collector_options {
+            let cleanup_inner = inner.clone();
             garbage_collector = Some(
                 GarbageCollector::new(
                     manifest_store.clone(),
@@ -706,6 +708,11 @@ impl Db {
                     gc_options.clone(),
                     Handle::current(),
                     inner.db_stats.clone(),
+                    move |err| {
+                        warn!("GC thread exited with {:?}", err);
+                        let mut state = cleanup_inner.state.write();
+                        state.record_fatal_error(err.clone())
+                    },
                 )
                 .await,
             )
@@ -773,7 +780,8 @@ impl Db {
             let mut write_task = self.write_task.lock();
             write_task.take()
         } {
-            write_task.await.expect("Failed to join write thread");
+            let result = write_task.await.expect("Failed to join write thread");
+            info!("write task exited with {:?}", result);
         }
 
         // Shutdown the WAL flush thread.

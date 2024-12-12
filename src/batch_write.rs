@@ -26,19 +26,19 @@
 //! be contention between `get`s, which holds a lock, and the write loop._
 
 use core::panic;
-use std::sync::Arc;
 use log::warn;
+use std::sync::Arc;
 
 use tokio::runtime::Handle;
 
 use crate::types::RowAttributes;
+use crate::utils::spawn_bg_task;
 use crate::{
     batch::{WriteBatch, WriteOp},
     db::DbInner,
     error::SlateDBError,
     mem_table::KVTable,
 };
-use crate::utils::spawn_bg_task;
 
 pub(crate) enum WriteBatchMsg {
     Shutdown,
@@ -152,14 +152,14 @@ impl DbInner {
 
         let this = Arc::clone(self);
         Some(spawn_bg_task(
-            &tokio_handle,
+            tokio_handle,
             move |err| {
                 warn!("write task exited with {:?}", err);
                 // notify any waiters about the failure
                 let mut state = this.state.write();
                 state.record_fatal_error(err.clone());
             },
-            fut
+            fut,
         ))
     }
 }

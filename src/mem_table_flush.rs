@@ -96,7 +96,7 @@ impl DbInner {
         async fn core_flush_loop(
             this: &Arc<DbInner>,
             flusher: &mut MemtableFlusher,
-            rx: &mut UnboundedReceiver<FlushMsg<MemtableFlushThreadMsg>>
+            rx: &mut UnboundedReceiver<FlushMsg<MemtableFlushThreadMsg>>,
         ) -> Result<(), SlateDBError> {
             let mut manifest_poll_interval =
                 tokio::time::interval(this.options.manifest_poll_interval);
@@ -151,7 +151,7 @@ impl DbInner {
                         }
                     }
                 }
-            };
+            }
         }
 
         let fut = async move {

@@ -8,12 +8,13 @@ use crate::manifest::Manifest;
 use crate::manifest_store::{ManifestStore, StoredManifest};
 use crate::metrics::DbStats;
 use crate::tablestore::{SstFileMetadata, TableStore};
+use crate::utils::spawn_bg_thread;
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::{fmt, thread};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 use tracing::{debug, error, info};
@@ -49,12 +50,13 @@ impl GarbageCollector {
         options: GarbageCollectorOptions,
         tokio_handle: Handle,
         db_stats: Arc<DbStats>,
+        cleanup_fn: impl FnOnce(&SlateDBError) + Send + 'static,
     ) -> Self {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let tokio_handle = options.gc_runtime.clone().unwrap_or(tokio_handle);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        thread::spawn(move || {
+        let gc_main = move || {
             let orchestrator = GarbageCollectorOrchestrator {
                 manifest_store,
                 table_store,
@@ -70,7 +72,9 @@ impl GarbageCollector {
             if shutdown_tx.send(true).is_err() {
                 error!("Could not send shutdown signal to threads blocked on await_shutdown");
             }
-        });
+            Ok(())
+        };
+        spawn_bg_thread("gc", cleanup_fn, gc_main);
         Self {
             main_tx: Arc::new(external_tx),
             shutdown_rx,
@@ -1405,6 +1409,7 @@ mod tests {
             },
             tokio::runtime::Handle::current(),
             db_stats.clone(),
+            |_| {},
         )
         .await
     }

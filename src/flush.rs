@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use log::warn;
+use std::sync::Arc;
 
 use tokio::runtime::Handle;
 use tokio::select;
@@ -104,7 +104,7 @@ impl DbInner {
         let this = Arc::clone(self);
         async fn core_flush_loop(
             this: &Arc<DbInner>,
-            rx: &mut UnboundedReceiver<FlushMsg<WalFlushThreadMsg>>
+            rx: &mut UnboundedReceiver<FlushMsg<WalFlushThreadMsg>>,
         ) -> Result<(), SlateDBError> {
             let mut ticker = tokio::time::interval(this.options.flush_interval);
             let mut err_reader = this.state.read().error_reader();
