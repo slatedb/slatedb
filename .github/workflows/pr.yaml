@@ -135,6 +135,7 @@ jobs:
           repository: slatedb/slatedb-website
           token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
           path: slatedb-website
+          ref: gh-pages
 
       - name: Copy Flamegraphs
         run: |
