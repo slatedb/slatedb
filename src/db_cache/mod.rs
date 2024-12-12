@@ -10,7 +10,7 @@
 //! ## Usage
 //!
 //! To use the cache, you need to configure the [DbOptions](crate::config::DbOptions) with the desired cache implementation.
-//!
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -19,13 +19,13 @@ use crate::{
     block::Block, db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned,
 };
 
-/// The default max capacity for the cache. (64MB)
-pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
-
 #[cfg(feature = "foyer")]
 pub mod foyer;
 #[cfg(feature = "moka")]
 pub mod moka;
+
+/// The default max capacity for the cache. (64MB)
+pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 
 /// A trait for in-memory caches.
 ///

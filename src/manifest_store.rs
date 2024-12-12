@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -11,37 +12,12 @@ use tracing::warn;
 
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::InvalidDBState;
+use crate::error::SlateDBError::{InvalidDBState, LatestManifestMissing, ManifestMissing};
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::{Manifest, ManifestCodec};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
-
-/// Helper function that applies an update to a stored manifest, and retries the update
-/// if the write fails due to a manifest version conflict caused by another client
-/// updating the manifest at the same time. The update to be applied is specified by
-/// the mutator parameter, which is a function that takes a &StoredManifest and returns
-/// the updated CoreDbState.
-pub(crate) async fn apply_db_state_update<F>(
-    manifest: &mut StoredManifest,
-    mutator: F,
-) -> Result<(), SlateDBError>
-where
-    F: Fn(&StoredManifest) -> Result<CoreDbState, SlateDBError>,
-{
-    loop {
-        let mutated_db_state = mutator(manifest)?;
-        return match manifest.update_db_state(mutated_db_state).await {
-            Err(SlateDBError::ManifestVersionExists) => {
-                manifest.refresh().await?;
-                continue;
-            }
-            Err(e) => Err(e),
-            Ok(()) => Ok(()),
-        };
-    }
-}
 
 pub(crate) struct FenceableManifest {
     stored_manifest: StoredManifest,
@@ -150,8 +126,8 @@ impl StoredManifest {
     /// Load the current manifest from the supplied manifest store. If there is no db at the
     /// manifest store's path then this fn returns None. Otherwise, on success it returns a
     /// Result with an instance of StoredManifest.
-    pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Option<Self>, SlateDBError> {
-        let Some((id, manifest)) = store.read_latest_manifest().await? else {
+    pub(crate) async fn try_load(store: Arc<ManifestStore>) -> Result<Option<Self>, SlateDBError> {
+        let Some((id, manifest)) = store.try_read_latest_manifest().await? else {
             return Ok(None);
         };
         Ok(Some(Self {
@@ -159,6 +135,13 @@ impl StoredManifest {
             manifest,
             manifest_store: store,
         }))
+    }
+
+    /// Load the current manifest from the supplied manifest store. If successful,
+    /// this method returns a [`Result`] with an instance of [`StoredManifest`].
+    /// If no manifests could be found, the error [`LatestManifestMissing`] is returned.
+    pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Self, SlateDBError> {
+        Self::try_load(store).await?.ok_or(LatestManifestMissing)
     }
 
     pub(crate) fn id(&self) -> u64 {
@@ -170,7 +153,7 @@ impl StoredManifest {
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<&CoreDbState, SlateDBError> {
-        let Some((id, manifest)) = self.manifest_store.read_latest_manifest().await? else {
+        let Some((id, manifest)) = self.manifest_store.try_read_latest_manifest().await? else {
             return Err(InvalidDBState);
         };
         self.manifest = manifest;
@@ -196,10 +179,39 @@ impl StoredManifest {
         self.id = new_id;
         Ok(())
     }
+
+    /// Apply an update to a stored manifest repeatedly retrying the update
+    /// if the write fails due to a manifest version conflict caused by another client
+    /// updating the manifest at the same time. The update to be applied is specified by
+    /// the mutator parameter, which is a function that takes a &StoredManifest and returns
+    /// an optional [`CoreDbState`]. If the mutator returns `None`, then no update will
+    /// be applied.
+    pub(crate) async fn maybe_apply_db_state_update<F>(
+        &mut self,
+        mutator: F,
+    ) -> Result<(), SlateDBError>
+    where
+        F: Fn(&StoredManifest) -> Result<Option<CoreDbState>, SlateDBError>,
+    {
+        loop {
+            let Some(mutated_db_state) = mutator(self)? else {
+                return Ok(());
+            };
+
+            return match self.update_db_state(mutated_db_state).await {
+                Err(SlateDBError::ManifestVersionExists) => {
+                    self.refresh().await?;
+                    continue;
+                }
+                Err(e) => Err(e),
+                Ok(()) => Ok(()),
+            };
+        }
+    }
 }
 
 /// Represents the metadata of a manifest file stored in the object store.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub(crate) struct ManifestFileMetadata {
     pub(crate) id: u64,
     #[serde(serialize_with = "serialize_path")]
@@ -258,10 +270,7 @@ impl ManifestStore {
     /// Delete a manifest from the object store.
     pub(crate) async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError> {
         // TODO Once we implement snapshots, we should check if the manifest is snapshotted as well
-        let (active_id, _) = self
-            .read_latest_manifest()
-            .await?
-            .ok_or(SlateDBError::ManifestMissing)?;
+        let (active_id, _) = self.read_latest_manifest().await?;
         if active_id == id {
             return Err(SlateDBError::InvalidDeletion);
         }
@@ -304,35 +313,69 @@ impl ManifestStore {
         Ok(manifests)
     }
 
-    pub(crate) async fn read_latest_manifest(
+    /// Active manifests include the latest manifest and all manifests referenced
+    /// by checkpoints in the latest manifest.
+    pub(crate) async fn read_active_manifests(
+        &self,
+    ) -> Result<BTreeMap<u64, Manifest>, SlateDBError> {
+        let (latest_manifest_id, latest_manifest) = self.read_latest_manifest().await?;
+
+        let mut active_manifests = BTreeMap::new();
+        active_manifests.insert(latest_manifest_id, latest_manifest.clone());
+
+        for checkpoint in &latest_manifest.core.checkpoints {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                active_manifests.entry(checkpoint.manifest_id)
+            {
+                let checkpoint_manifest = self.read_manifest(checkpoint.manifest_id).await?;
+                entry.insert(checkpoint_manifest);
+            }
+        }
+
+        Ok(active_manifests)
+    }
+
+    pub(crate) async fn try_read_latest_manifest(
         &self,
     ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
         let manifest_metadatas_list = self.list_manifests(..).await?;
-        match manifest_metadatas_list.last() {
-            None => Ok(None),
-            Some(metadata) => Ok(self.read_manifest(metadata.id).await?),
+        let latest_manifest = if let Some(metadata) = manifest_metadatas_list.last() {
+            let manifest = self.try_read_manifest(metadata.id).await?;
+            manifest.map(|manifest| (metadata.id, manifest))
+        } else {
+            None
+        };
+        Ok(latest_manifest)
+    }
+
+    pub(crate) async fn read_latest_manifest(&self) -> Result<(u64, Manifest), SlateDBError> {
+        self.try_read_latest_manifest()
+            .await?
+            .ok_or(LatestManifestMissing)
+    }
+
+    pub(crate) async fn try_read_manifest(
+        &self,
+        id: u64,
+    ) -> Result<Option<Manifest>, SlateDBError> {
+        let manifest_path = &self.get_manifest_path(id);
+        match self.object_store.get(manifest_path).await {
+            Ok(manifest) => match manifest.bytes().await {
+                Ok(bytes) => {
+                    let manifest = self.codec.decode(&bytes)?;
+                    Ok(Some(manifest))
+                }
+                Err(e) => Err(SlateDBError::from(e)),
+            },
+            Err(e) => match e {
+                Error::NotFound { .. } => Ok(None),
+                _ => Err(SlateDBError::from(e)),
+            },
         }
     }
 
-    pub(crate) async fn read_manifest(
-        &self,
-        id: u64,
-    ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
-        let manifest_path = &self.get_manifest_path(id);
-        let manifest_bytes = match self.object_store.get(manifest_path).await {
-            Ok(manifest) => match manifest.bytes().await {
-                Ok(bytes) => bytes,
-                Err(e) => return Err(SlateDBError::from(e)),
-            },
-            Err(e) => {
-                return match e {
-                    Error::NotFound { .. } => Ok(None),
-                    _ => Err(SlateDBError::from(e)),
-                }
-            }
-        };
-
-        self.codec.decode(&manifest_bytes).map(|m| Some((id, m)))
+    pub(crate) async fn read_manifest(&self, id: u64) -> Result<Manifest, SlateDBError> {
+        self.try_read_manifest(id).await?.ok_or(ManifestMissing(id))
     }
 
     fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {
@@ -356,26 +399,26 @@ impl ManifestStore {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-
+    use crate::checkpoint::Checkpoint;
     use crate::db_state::CoreDbState;
     use crate::error;
     use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+    use uuid::Uuid;
 
     const ROOT: &str = "/root/path";
 
     #[tokio::test]
     async fn test_should_fail_write_on_version_conflict() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap().unwrap();
+        let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
         sm.update_db_state(state.clone()).await.unwrap();
 
         let result = sm2.update_db_state(state.clone()).await;
@@ -388,23 +431,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_write_with_new_version() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         sm.update_db_state(state.clone()).await.unwrap();
 
-        let (version, _) = ms.read_latest_manifest().await.unwrap().unwrap();
+        let (version, _) = ms.read_latest_manifest().await.unwrap();
 
         assert_eq!(version, 2);
     }
 
     #[tokio::test]
     async fn test_should_update_local_state_on_write() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let mut state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -417,13 +458,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_refresh() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let mut state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap().unwrap();
+        let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
         state.next_wal_sst_id = 123;
         sm.update_db_state(state.clone()).await.unwrap();
 
@@ -435,30 +475,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_bump_writer_epoch() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         for i in 1..5 {
-            let sm = StoredManifest::load(ms.clone()).await.unwrap().unwrap();
+            let sm = StoredManifest::load(ms.clone()).await.unwrap();
             FenceableManifest::init_writer(sm).await.unwrap();
-            let (_, manifest) = ms.read_latest_manifest().await.unwrap().unwrap();
+            let (_, manifest) = ms.read_latest_manifest().await.unwrap();
             assert_eq!(manifest.writer_epoch, i);
         }
     }
 
     #[tokio::test]
     async fn test_should_fail_on_writer_fenced() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let mut state = CoreDbState::new();
         let sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         let mut writer1 = FenceableManifest::init_writer(sm).await.unwrap();
-        let sm2 = StoredManifest::load(ms.clone()).await.unwrap().unwrap();
+        let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
 
         let mut writer2 = FenceableManifest::init_writer(sm2).await.unwrap();
 
@@ -473,30 +511,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_bump_compactor_epoch() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         for i in 1..5 {
-            let sm = StoredManifest::load(ms.clone()).await.unwrap().unwrap();
+            let sm = StoredManifest::load(ms.clone()).await.unwrap();
             FenceableManifest::init_compactor(sm).await.unwrap();
-            let (_, manifest) = ms.read_latest_manifest().await.unwrap().unwrap();
+            let (_, manifest) = ms.read_latest_manifest().await.unwrap();
             assert_eq!(manifest.compactor_epoch, i);
         }
     }
 
     #[tokio::test]
     async fn test_should_fail_on_compactor_fenced() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let mut state = CoreDbState::new();
         let sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         let mut compactor1 = FenceableManifest::init_compactor(sm).await.unwrap();
-        let sm2 = StoredManifest::load(ms.clone()).await.unwrap().unwrap();
+        let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
 
         let mut compactor2 = FenceableManifest::init_compactor(sm2).await.unwrap();
 
@@ -518,19 +554,21 @@ mod tests {
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        sm.update_db_state(state.clone()).await.unwrap();
+
+        let mut updated_state = state.clone();
+        updated_state.checkpoints.push(new_checkpoint(sm.id));
+        sm.update_db_state(updated_state).await.unwrap();
 
         // When
-        let (id, _) = ms.read_manifest(2).await.unwrap().unwrap();
+        let manifest = ms.try_read_manifest(2).await.unwrap().unwrap();
 
         // Then:
-        assert_eq!(id, 2);
+        assert_eq!(1, manifest.core.checkpoints.len());
     }
 
     #[tokio::test]
     async fn test_list_manifests_unbounded() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -561,8 +599,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_manifest() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -581,8 +618,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_active_manifest_should_fail() {
-        let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
             .await
@@ -595,5 +631,83 @@ mod tests {
 
         let result = ms.delete_manifest(2).await;
         assert!(matches!(result, Err(error::SlateDBError::InvalidDeletion)));
+    }
+
+    fn new_memory_manifest_store() -> Arc<ManifestStore> {
+        let os = Arc::new(InMemory::new());
+        Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()))
+    }
+
+    fn now_rounded_to_nearest_sec() -> SystemTime {
+        let now_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs)
+    }
+
+    fn new_checkpoint(manifest_id: u64) -> Checkpoint {
+        Checkpoint {
+            id: Uuid::new_v4(),
+            manifest_id,
+            expire_time: None,
+            create_time: now_rounded_to_nearest_sec(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_active_manifests_should_consider_checkpoints() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let initial_manifest = sm.manifest.clone();
+        let initial_manifest_id = sm.id;
+        let active_manifests = ms.read_active_manifests().await.unwrap();
+        assert_eq!(1, active_manifests.len());
+        assert_eq!(
+            Some(&initial_manifest),
+            active_manifests.get(&initial_manifest_id)
+        );
+
+        // Add a checkpoint referencing the latest manifest
+        let mut updated_state = state.clone();
+        updated_state.checkpoints.push(new_checkpoint(sm.id));
+        sm.update_db_state(updated_state).await.unwrap();
+        let active_manifests = ms.read_active_manifests().await.unwrap();
+        assert_eq!(2, active_manifests.len());
+        assert_eq!(
+            Some(&initial_manifest),
+            active_manifests.get(&initial_manifest_id)
+        );
+        assert_eq!(Some(&sm.manifest), active_manifests.get(&sm.id));
+
+        // Remove the checkpoint and verify that only the latest manifest is active
+        let mut updated_state = state.clone();
+        updated_state.checkpoints.clear();
+        sm.update_db_state(updated_state).await.unwrap();
+        let active_manifests = ms.read_active_manifests().await.unwrap();
+        assert_eq!(1, active_manifests.len());
+        assert_eq!(Some(&sm.manifest), active_manifests.get(&sm.id));
+    }
+
+    #[tokio::test]
+    async fn test_maybe_apply_state_update() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let initial_id = sm.id;
+        sm.maybe_apply_db_state_update(|_| Ok(None)).await.unwrap();
+        assert_eq!(initial_id, sm.id);
+
+        sm.maybe_apply_db_state_update(|sm| Ok(Some(sm.db_state().clone())))
+            .await
+            .unwrap();
+        assert_eq!(initial_id + 1, sm.id);
     }
 }

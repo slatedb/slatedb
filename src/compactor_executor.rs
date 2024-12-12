@@ -149,10 +149,10 @@ impl TokioCompactionExecutorInner {
             };
 
             // Add to SST
-            let value = kv.value.as_option().cloned();
             let key_len = kv.key.len();
+            let value_len = kv.value.len();
             current_writer.add(kv).await?;
-            current_size += key_len + value.map_or(0, |b| b.len());
+            current_size += key_len + value_len;
             if current_size > self.options.max_sst_size {
                 current_size = 0;
                 let finished_writer = mem::replace(

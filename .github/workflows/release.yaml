@@ -1,0 +1,61 @@
+name: Publish Release
+
+on:
+  # Allow manual triggering of the workflow
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The version of the release (e.g., 1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release SlateDB
+    runs-on: ubuntu-latest
+
+    steps:
+      # Verify the version is a valid SemVer version
+      - name: Verify version
+        id: semver
+        uses: matt-usurp/validate-semver@v2
+        with:
+          version: ${{ github.event.inputs.version }}
+
+      # Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ssh-key: ${{ secrets.RELEASE_SSH_KEY }}
+
+      # Set up Rust stable
+      - name: Install cargo-edit
+        run: cargo install cargo-edit
+
+      # Set Cargo.toml version using cargo-edit
+      - name: Set version
+        run: cargo set-version ${{ github.event.inputs.version }}
+
+      # Commit changes
+      - name: Commit version bump
+        uses: EndBug/add-and-commit@v9
+        with:
+          message: "Bump version to ${{ github.event.inputs.version }}"
+          push: true
+
+      # Publish a git release that creates a new "vX.Y.Z" release tag and includes generated notes
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: v${{ github.event.inputs.version }}
+          name: v${{ github.event.inputs.version }}
+          generateReleaseNotes: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish the crate to crates.io
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish

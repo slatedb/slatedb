@@ -10,6 +10,8 @@ mod batch_write;
 mod blob;
 mod block;
 mod block_iterator;
+#[cfg(any(test, feature = "bencher"))]
+mod bytes;
 mod cached_object_store;
 pub mod checkpoint;
 #[cfg(feature = "bencher")]
@@ -40,7 +42,7 @@ mod sorted_run_iterator;
 mod sst;
 mod sst_iter;
 mod tablestore;
-#[cfg(any(test, feature = "bencher"))]
+#[cfg(test)]
 mod test_utils;
 mod transactional_object_store;
 mod types;

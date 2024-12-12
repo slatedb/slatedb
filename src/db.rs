@@ -28,12 +28,12 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::runtime::Handle;
-use tracing::warn;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
-use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
 use crate::cached_object_store::CachedObjectStore;
+use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
@@ -56,13 +56,16 @@ use crate::tablestore::TableStore;
 use crate::types::{RowAttributes, ValueDeletable};
 use std::rc::Rc;
 
+pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
+pub(crate) type FlushMsg<T> = (Option<FlushSender>, T);
+
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
-    pub(crate) memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
-    pub(crate) write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
+    pub(crate) wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
+    pub(crate) memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
+    pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: Arc<DbStats>,
     pub(crate) error: RwLock<Option<SlateDBError>>,
 }
@@ -72,9 +75,9 @@ impl DbInner {
         options: DbOptions,
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
-        wal_flush_notifier: tokio::sync::mpsc::UnboundedSender<WalFlushThreadMsg>,
-        memtable_flush_notifier: tokio::sync::mpsc::UnboundedSender<MemtableFlushThreadMsg>,
-        write_notifier: tokio::sync::mpsc::UnboundedSender<WriteBatchMsg>,
+        wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
+        memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
+        write_notifier: UnboundedSender<WriteBatchMsg>,
         db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let state = DbState::new(core_db_state);
@@ -100,12 +103,22 @@ impl DbInner {
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
 
+        // Temporary function to convert ValueDeletable to Option<Bytes> until
+        // we add proper support for merges.
+        let unwrap_result = |v| match v {
+            ValueDeletable::Value(v) => Ok(Some(v)),
+            ValueDeletable::Merge(_) => {
+                unimplemented!("MergeOperator is not yet fully implemented")
+            }
+            ValueDeletable::Tombstone => Ok(None),
+        };
+
         if matches!(options.read_level, Uncommitted) {
             let maybe_val = std::iter::once(snapshot.wal)
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
             if let Some(val) = maybe_val {
-                return Ok(val.value.into_option());
+                return unwrap_result(val.value);
             }
         }
 
@@ -113,7 +126,7 @@ impl DbInner {
             .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
         if let Some(val) = maybe_val {
-            return Ok(val.value.into_option());
+            return unwrap_result(val.value);
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -127,7 +140,7 @@ impl DbInner {
                         .await?; // cache blocks that are being read
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return Ok(entry.value.into_option());
+                        return unwrap_result(entry.value);
                     }
                 }
             }
@@ -139,7 +152,7 @@ impl DbInner {
                         .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return Ok(entry.value.into_option());
+                        return unwrap_result(entry.value);
                     }
                 }
             }
@@ -284,7 +297,7 @@ impl DbInner {
                         guard.state().imm_memtable.back().cloned(),
                     )
                 };
-                warn!(
+                tracing::warn!(
                     "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
                     mem_size_bytes, self.options.max_unflushed_bytes,
                 );
@@ -315,7 +328,7 @@ impl DbInner {
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
-            .send(WalFlushThreadMsg::FlushImmutableWals(Some(tx)))
+            .send((Some(tx), WalFlushThreadMsg::FlushImmutableWals))
             .map_err(|_| SlateDBError::WalFlushChannelError)?;
         rx.await?
     }
@@ -324,7 +337,7 @@ impl DbInner {
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
-            .send(MemtableFlushThreadMsg::FlushImmutableMemtables(Some(tx)))
+            .send((Some(tx), MemtableFlushThreadMsg::FlushImmutableMemtables))
             .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         rx.await?
     }
@@ -399,6 +412,9 @@ impl DbInner {
                                     expire_ts: kv.expire_ts,
                                 },
                             );
+                        }
+                        ValueDeletable::Merge(_) => {
+                            todo!()
                         }
                         ValueDeletable::Tombstone => guard.memtable().delete(
                             kv.key.clone(),
@@ -576,6 +592,12 @@ impl Db {
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         let path = path.into();
+        if let Ok(options_json) = options.to_json_string() {
+            tracing::info!(?path, options = options_json, "Opening SlateDB database");
+        } else {
+            tracing::info!(?path, ?options, "Opening SlateDB database");
+        }
+
         let db_stats = Arc::new(DbStats::new());
         let sst_format = SsTableFormat {
             min_filter_keys: options.min_filter_keys,
@@ -613,7 +635,7 @@ impl Db {
         ));
 
         let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
-        let latest_manifest = StoredManifest::load(manifest_store.clone()).await?;
+        let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
 
         // get the next wal id before writing manifest.
         let wal_id_last_compacted = match &latest_manifest {
@@ -756,7 +778,7 @@ impl Db {
         // Shutdown the WAL flush thread.
         self.inner
             .wal_flush_notifier
-            .send(WalFlushThreadMsg::Shutdown)
+            .send((None, WalFlushThreadMsg::Shutdown))
             .ok();
 
         if let Some(flush_task) = {
@@ -769,7 +791,7 @@ impl Db {
         // Shutdown the memtable flush thread.
         self.inner
             .memtable_flush_notifier
-            .send(MemtableFlushThreadMsg::Shutdown)
+            .send((None, MemtableFlushThreadMsg::Shutdown))
             .ok();
 
         if let Some(memtable_flush_task) = {
@@ -1119,7 +1141,7 @@ mod tests {
     use tracing::info;
 
     use super::*;
-    use crate::cached_object_store::fs_cache_storage::FsCacheStorage;
+    use crate::cached_object_store::FsCacheStorage;
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
         DEFAULT_PUT_OPTIONS,
@@ -1523,10 +1545,7 @@ mod tests {
             .await
             .unwrap();
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone())
-            .await
-            .unwrap()
-            .unwrap();
+        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
         let write_options = WriteOptions {
             await_durable: false,
         };
@@ -1599,10 +1618,7 @@ mod tests {
         .unwrap();
 
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone())
-            .await
-            .unwrap()
-            .unwrap();
+        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
         let sst_format = SsTableFormat {
             min_filter_keys: 10,
             ..SsTableFormat::default()
@@ -1847,7 +1863,7 @@ mod tests {
 
         // validate that the manifest file exists.
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap().unwrap();
+        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
         let db_state = stored_manifest.db_state();
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
     }
@@ -2125,7 +2141,7 @@ mod tests {
             .await
             .unwrap();
         let ms = ManifestStore::new(&path, object_store.clone());
-        let mut sm = StoredManifest::load(Arc::new(ms)).await.unwrap().unwrap();
+        let mut sm = StoredManifest::load(Arc::new(ms)).await.unwrap();
 
         // write enough to fill up a few l0 SSTs
         for i in 0..4 {
@@ -2255,6 +2271,19 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
 
+        async fn do_put(db: &Db, key: &[u8], val: &[u8]) -> Result<(), SlateDBError> {
+            db.put_with_options(
+                key,
+                val,
+                DEFAULT_PUT_OPTIONS,
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await?;
+            db.flush().await
+        }
+
         // open db1 and assert that it can write.
         let db1 = Db::open_with_opts(
             path.clone(),
@@ -2263,17 +2292,8 @@ mod tests {
         )
         .await
         .unwrap();
-        db1.put_with_options(
-            b"1",
-            b"1",
-            DEFAULT_PUT_OPTIONS,
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await
-        .unwrap();
-        db1.flush().await.unwrap();
+        do_put(&db1, b"1", b"1").await.unwrap();
+
         // open db2, causing it to write an empty wal and fence db1.
         let db2 = Db::open_with_opts(
             path.clone(),
@@ -2282,29 +2302,12 @@ mod tests {
         )
         .await
         .unwrap();
+
         // assert that db1 can no longer write.
-        db1.put_with_options(
-            b"1",
-            b"1",
-            DEFAULT_PUT_OPTIONS,
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(db1.flush().await, Err(SlateDBError::Fenced)));
-        db2.put_with_options(
-            b"2",
-            b"2",
-            DEFAULT_PUT_OPTIONS,
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await
-        .unwrap();
-        db2.flush().await.unwrap();
+        let err = do_put(&db1, b"1", b"1").await;
+        assert!(matches!(err, Err(SlateDBError::Fenced)));
+
+        do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.state.read().state().core.next_wal_sst_id, 5);
     }
 

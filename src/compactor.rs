@@ -107,9 +107,6 @@ impl CompactorOrchestrator {
         let options = Arc::new(options);
         let stored_manifest =
             tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;
-        let Some(stored_manifest) = stored_manifest else {
-            return Err(SlateDBError::InvalidDBState);
-        };
         let manifest = tokio_handle.block_on(FenceableManifest::init_compactor(stored_manifest))?;
         let state = Self::load_state(&manifest)?;
         let scheduler = Self::load_compaction_scheduler(options.as_ref());
@@ -480,7 +477,6 @@ mod tests {
         let (os, manifest_store, table_store, db) = rt.block_on(build_test_db(options.clone()));
         let mut stored_manifest = rt
             .block_on(StoredManifest::load(manifest_store.clone()))
-            .unwrap()
             .unwrap();
         rt.block_on(db.put(&[b'a'; 32], &[b'b'; 96])).unwrap();
         rt.block_on(db.close()).unwrap();
@@ -538,7 +534,10 @@ mod tests {
         assert!(!compacted_l0s.contains(&l0_id));
         assert_eq!(
             db_state.l0_last_compacted.unwrap(),
-            l0_ids_to_compact.first().unwrap().unwrap_sst()
+            l0_ids_to_compact
+                .first()
+                .and_then(|id| id.maybe_unwrap_sst())
+                .unwrap()
         );
     }
 
@@ -594,10 +593,7 @@ mod tests {
 
     async fn await_compaction(manifest_store: Arc<ManifestStore>) -> Option<CoreDbState> {
         run_for(Duration::from_secs(10), || async {
-            let stored_manifest = StoredManifest::load(manifest_store.clone())
-                .await
-                .unwrap()
-                .unwrap();
+            let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
             let db_state = stored_manifest.db_state();
             if db_state.l0_last_compacted.is_some() {
                 return Some(db_state.clone());

@@ -178,7 +178,7 @@ impl FlatBufferManifestCodec {
     }
 }
 
-impl<'b> CompactedSstId<'b> {
+impl CompactedSstId<'_> {
     pub(crate) fn ulid(&self) -> Ulid {
         Ulid::from((self.high(), self.low()))
     }
