@@ -117,6 +117,9 @@ jobs:
           echo 0 | sudo tee /proc/sys/kernel/kptr_restrict
 
       - name: Generate flamegraphs
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: true
+          CARGO_PROFILE_RELEASE_STRIP: false
         run: |
           # Create directory for flamegraphs
           mkdir -p flamegraphs
@@ -126,7 +129,7 @@ jobs:
 
           # Create flamegraphs for each benchmark
           for bench in $BENCHMARKS; do
-            cargo flamegraph --bench $bench -o "flamegraphs/$bench-flamegraph.svg" -- --bench > /dev/null 2>&1
+            cargo flamegraph --bench $bench --image-width 2048 -o "flamegraphs/$bench-flamegraph.svg" -- --bench > /dev/null 2>&1
           done
 
           # Print all flamegraphs that were generated
