@@ -1148,8 +1148,6 @@ mod tests {
     };
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
-    #[cfg(feature = "wal_disable")]
-    use crate::test_utils::assert_iterator;
     use crate::test_utils::{gen_attrs, TestClock};
 
     #[tokio::test]
@@ -1527,7 +1525,7 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
     async fn test_wal_disabled() {
-        use crate::test_utils::gen_empty_attrs;
+        use crate::{test_utils::assert_iterator, types::RowEntry};
 
         let clock = Arc::new(TestClock::new());
         let mut options = test_db_options_with_clock(0, 128, None, clock.clone());
@@ -1588,18 +1586,10 @@ mod tests {
             .unwrap();
         assert_iterator(
             &mut iter,
-            &[
-                (
-                    vec![b'a'; 32],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
-                    gen_attrs(0),
-                ),
-                (vec![b'b'; 32], ValueDeletable::Tombstone, gen_empty_attrs()),
-                (
-                    vec![b'c'; 32],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
-                    gen_attrs(10),
-                ),
+            vec![
+                RowEntry::new_value(&[b'a'; 32], &[b'j'; 32], 0).with_create_ts(0),
+                RowEntry::new_tombstone(&[b'b'; 32], 0).with_create_ts(0),
+                RowEntry::new_value(&[b'c'; 32], &[b'l'; 32], 0).with_create_ts(10),
             ],
         )
         .await;

@@ -55,6 +55,17 @@ impl RowEntry {
             expire_ts: None,
         }
     }
+
+    #[cfg(test)]
+    pub fn with_create_ts(&self, create_ts: i64) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value.clone(),
+            seq: self.seq,
+            create_ts: Some(create_ts),
+            expire_ts: self.expire_ts,
+        }
+    }
 }
 
 /// The metadata associated with a `KeyValueDeletable`
