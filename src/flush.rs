@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use log::warn;
 
 use tokio::runtime::Handle;
 use tokio::select;
@@ -101,20 +102,23 @@ impl DbInner {
         tokio_handle: &Handle,
     ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
         let this = Arc::clone(self);
-        let fut = async move {
+        async fn core_flush_loop(
+            this: &Arc<DbInner>,
+            rx: &mut UnboundedReceiver<FlushMsg<WalFlushThreadMsg>>
+        ) -> Result<(), SlateDBError> {
             let mut ticker = tokio::time::interval(this.options.flush_interval);
             let mut err_reader = this.state.read().error_reader();
-            let result = loop {
+            loop {
                 select! {
                     err = err_reader.await_value() => {
-                        break Err(err);
+                        return Err(err);
                     }
                     // Tick to freeze and flush the memtable
                     _ = ticker.tick() => {
                         let result = this.flush().await;
                         if let Err(err) = result {
                             error!("error from wal flush: {err}");
-                            break Err(err);
+                            return Err(err);
                         }
                     }
                     msg = rx.recv() => {
@@ -123,13 +127,13 @@ impl DbInner {
                             WalFlushThreadMsg::Shutdown => {
                                 // Stop the thread.
                                 _ = this.flush().await;
-                                break Ok(())
+                                return Ok(())
                             },
                             WalFlushThreadMsg::FlushImmutableWals => {
                                 let result = this.flush().await;
                                 if let Err(err) = &result {
                                     error!("error from wal flush: {err}");
-                                    break Err(err.clone());
+                                    return Err(err.clone());
                                 }
 
                                 if let Some(rsp_sender) = rsp_sender {
@@ -142,7 +146,11 @@ impl DbInner {
                         }
                     }
                 }
-            };
+            }
+        }
+
+        let fut = async move {
+            let result = core_flush_loop(&this, &mut rx).await;
 
             let pending_result = result.clone().and_then(|_| Err(BackgroundTaskShutdown));
             while !rx.is_empty() {
@@ -160,7 +168,7 @@ impl DbInner {
         Some(spawn_bg_task(
             tokio_handle,
             move |err| {
-                info!("flush task exited with {:?}", err);
+                warn!("flush task exited with {:?}", err);
                 // notify any waiters about the failure
                 let mut state = this.state.write();
                 state.record_fatal_error(err.clone());

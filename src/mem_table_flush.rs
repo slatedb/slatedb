@@ -92,26 +92,27 @@ impl DbInner {
         tokio_handle: &Handle,
     ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
         let this = Arc::clone(self);
-        let fut = async move {
-            let mut flusher = MemtableFlusher {
-                db_inner: this.clone(),
-                manifest,
-            };
+
+        async fn core_flush_loop(
+            this: &Arc<DbInner>,
+            flusher: &mut MemtableFlusher,
+            rx: &mut UnboundedReceiver<FlushMsg<MemtableFlushThreadMsg>>
+        ) -> Result<(), SlateDBError> {
             let mut manifest_poll_interval =
                 tokio::time::interval(this.options.manifest_poll_interval);
             let mut err_reader = this.state.read().error_reader();
 
             // Stop the loop when the shut down has been received *and* all
             // remaining `rx` flushes have been drained.
-            let result = loop {
+            loop {
                 tokio::select! {
                     err = err_reader.await_value() => {
-                        break Err(err);
+                        return Err(err);
                     }
                     _ = manifest_poll_interval.tick() => {
                         if let Err(err) = flusher.load_manifest().await {
                             error!("error loading manifest: {err}");
-                            break Err(err);
+                            return Err(err);
                         }
                         match flusher.flush_imm_memtables_to_l0().await {
                             Ok(_) => {
@@ -119,7 +120,7 @@ impl DbInner {
                             }
                             Err(err) => {
                                 error!("error from memtable flush: {err}");
-                                break Err(err);
+                                return Err(err);
                             }
                         }
                     }
@@ -127,7 +128,7 @@ impl DbInner {
                         let (rsp_sender, msg) = msg.expect("channel unexpectedly closed");
                         match msg {
                             MemtableFlushThreadMsg::Shutdown => {
-                                break Ok(());
+                                return Ok(());
                             },
                             MemtableFlushThreadMsg::FlushImmutableMemtables => {
                                 let result = flusher.flush_imm_memtables_to_l0().await;
@@ -143,7 +144,7 @@ impl DbInner {
                                     }
                                     Err(err) => {
                                         error!("error from memtable flush: {err}");
-                                        break Err(err);
+                                        return Err(err);
                                     }
                                 }
                             }
@@ -151,6 +152,17 @@ impl DbInner {
                     }
                 }
             };
+        }
+
+        let fut = async move {
+            let mut flusher = MemtableFlusher {
+                db_inner: this.clone(),
+                manifest,
+            };
+
+            // Stop the loop when the shut down has been received *and* all
+            // remaining `rx` flushes have been drained.
+            let result = core_flush_loop(&this, &mut flusher, &mut rx).await;
 
             // respond to any pending msgs
             let pending_result = result.clone().and_then(|_| Err(BackgroundTaskShutdown));
@@ -173,7 +185,7 @@ impl DbInner {
         Some(spawn_bg_task(
             tokio_handle,
             move |err| {
-                info!("memtable flush task exited with {:?}", err);
+                warn!("memtable flush task exited with {:?}", err);
                 // notify any waiters that the task has exited
                 let mut state = this.state.write();
                 state.record_fatal_error(err.clone());
