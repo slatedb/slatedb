@@ -123,7 +123,7 @@ jobs:
 
           # Create flamegraphs for each benchmark
           for bench in $BENCHMARKS; do
-            cargo flamegraph --bench $bench -o "$bench-flamegraph.svg" -- --bench
+            cargo flamegraph --bench $bench -o "$bench-flamegraph.svg" -- --bench > /dev/null 2>&1
           done
 
       - name: Checkout website repository
