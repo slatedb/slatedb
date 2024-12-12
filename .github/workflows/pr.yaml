@@ -99,3 +99,50 @@ jobs:
           comment-on-alert: true
           summary-always: true
           max-items-in-chart: 30
+
+  microbenchmark-flamegraphs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-`uname -r`
+          cargo install cargo-flamegraph
+
+      - name: Configure perf
+        run: |
+          echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
+          echo 0 | sudo tee /proc/sys/kernel/kptr_restrict
+
+      - name: Generate flamegraphs
+        run: |
+          # Get list of benchmarks
+          BENCHMARKS=$(cargo bench --no-run --message-format=json | jq -r 'select(.profile.test == true) | .target.name' | sort -u)
+
+          # Create flamegraphs for each benchmark
+          for bench in $BENCHMARKS; do
+            cargo flamegraph --bench $bench -o "$bench-flamegraph.svg" -- --bench
+          done
+
+      - name: Checkout website repository
+        uses: actions/checkout@v4
+        with:
+          repository: slatedb/slatedb-website
+          token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          path: slatedb-website
+
+      - name: Copy Flamegraphs
+        run: |
+          rm -rf slatedb-website/performance/microbenchmark-flamegraphs/main
+          cp -r flamegraphs/* slatedb-website/performance/microbenchmark-flamegraphs/main
+
+      - name: Commit and Push
+        uses: ad-m/github-push-action@v1
+        with:
+          repository: slatedb/slatedb-website
+          branch: main
+          directory: slatedb-website
+          github_token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          message: "Add updated flamegraphs"
