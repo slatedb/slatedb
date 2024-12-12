@@ -14,10 +14,6 @@ pub(crate) struct BytesRange {
 // When both bounds are excluded, the range is empty even though
 // "prefix" < "prefix\0".
 pub(crate) fn is_prefix_increment(prefix: &Bytes, b: &Bytes) -> bool {
-    if b.len() != prefix.len() + 1 {
-        return false;
-    }
-
     if !b.starts_with(prefix.as_ref()) {
         return false;
     }
