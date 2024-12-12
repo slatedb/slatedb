@@ -471,7 +471,7 @@ pub struct Db {
     /// The handle for the flush thread.
     wal_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
-    write_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    write_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     compactor: Mutex<Option<Compactor>>,
     garbage_collector: Mutex<Option<GarbageCollector>>,
 }

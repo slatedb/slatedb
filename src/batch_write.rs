@@ -27,6 +27,7 @@
 
 use core::panic;
 use std::sync::Arc;
+use log::warn;
 
 use tokio::runtime::Handle;
 
@@ -37,6 +38,7 @@ use crate::{
     error::SlateDBError,
     mem_table::KVTable,
 };
+use crate::utils::spawn_bg_task;
 
 pub(crate) enum WriteBatchMsg {
     Shutdown,
@@ -51,6 +53,8 @@ pub(crate) struct WriteBatchRequest {
 impl DbInner {
     #[allow(clippy::panic)]
     async fn write_batch(&self, batch: WriteBatch) -> Result<Arc<KVTable>, SlateDBError> {
+        self.check_error()?;
+
         let now = self.options.clock.now();
 
         let current_table = if self.wal_enabled() {
@@ -127,10 +131,10 @@ impl DbInner {
         self: &Arc<Self>,
         mut rx: tokio::sync::mpsc::UnboundedReceiver<WriteBatchMsg>,
         tokio_handle: &Handle,
-    ) -> Option<tokio::task::JoinHandle<()>> {
+    ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
         let this = Arc::clone(self);
         let mut is_stopped = false;
-        Some(tokio_handle.spawn(async move {
+        let fut = async move {
             while !(is_stopped && rx.is_empty()) {
                 match rx.recv().await.expect("unexpected channel close") {
                     WriteBatchMsg::WriteBatch(write_batch_request) => {
@@ -143,6 +147,19 @@ impl DbInner {
                     }
                 }
             }
-        }))
+            Ok(())
+        };
+
+        let this = Arc::clone(self);
+        Some(spawn_bg_task(
+            &tokio_handle,
+            move |err| {
+                warn!("write task exited with {:?}", err);
+                // notify any waiters about the failure
+                let mut state = this.state.write();
+                state.record_fatal_error(err.clone());
+            },
+            fut
+        ))
     }
 }
