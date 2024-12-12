@@ -129,6 +129,9 @@ jobs:
             cargo flamegraph --bench $bench -o "flamegraphs/$bench-flamegraph.svg" -- --bench > /dev/null 2>&1
           done
 
+          # Print all flamegraphs that were generated
+          ls -lh flamegraphs
+
       - name: Checkout website repository
         uses: actions/checkout@v4
         with:
@@ -144,10 +147,9 @@ jobs:
           cp flamegraphs/* slatedb-website/performance/microbenchmark-flamegraphs/main/
 
       - name: Commit and Push
-        uses: ad-m/github-push-action@v0.8.0
+        uses: actions-x/commit@v6
         with:
-          repository: slatedb/slatedb-website
           branch: gh-pages
           directory: slatedb-website
-          github_token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
-          message: "Add updated flamegraphs"
+          token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          message: "Update microbenchmark flamegraphs for job id $GITHUB_RUN_ID"
