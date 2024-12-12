@@ -139,7 +139,7 @@ jobs:
           cp -r flamegraphs/* slatedb-website/performance/microbenchmark-flamegraphs/main
 
       - name: Commit and Push
-        uses: ad-m/github-push-action@v1
+        uses: ad-m/github-push-action@v0.8.0
         with:
           repository: slatedb/slatedb-website
           branch: main
