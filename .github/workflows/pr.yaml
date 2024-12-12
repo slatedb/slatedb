@@ -109,7 +109,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-`uname -r`
-          cargo install cargo-flamegraph
+          cargo install flamegraph
 
       - name: Configure perf
         run: |
