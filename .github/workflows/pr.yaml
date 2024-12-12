@@ -142,7 +142,7 @@ jobs:
         uses: ad-m/github-push-action@v0.8.0
         with:
           repository: slatedb/slatedb-website
-          branch: main
+          branch: gh-pages
           directory: slatedb-website
           github_token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
           message: "Add updated flamegraphs"
