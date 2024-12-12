@@ -169,9 +169,7 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"kratos")
-            .await
-            .unwrap();
+        let mut iter = BlockIterator::from_key(&block, b"kratos").await.unwrap();
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
@@ -217,17 +215,9 @@ mod tests {
         assert!(block_builder.add_value(b"super", b"mario", gen_empty_attrs()));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_first_key(block);
-        assert_next_entry(
-            &mut iter,
-            &RowEntry::new_value(b"donkey", b"kong", 0),
-        )
-        .await;
+        assert_next_entry(&mut iter, &RowEntry::new_value(b"donkey", b"kong", 0)).await;
         iter.seek(b"s".as_ref()).await.unwrap();
-        assert_iterator(
-            &mut iter,
-            vec![RowEntry::new_value(b"super", b"mario", 0)],
-        )
-        .await;
+        assert_iterator(&mut iter, vec![RowEntry::new_value(b"super", b"mario", 0)]).await;
     }
 
     #[tokio::test]
@@ -238,18 +228,14 @@ mod tests {
         assert!(block_builder.add_value(b"super", b"mario", gen_empty_attrs()));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::from_first_key(block);
-        assert_next_entry(
-            &mut iter,
-            &RowEntry::new_value(b"donkey", b"kong", 0)
-        )
-        .await;
+        assert_next_entry(&mut iter, &RowEntry::new_value(b"donkey", b"kong", 0)).await;
         iter.seek(b"kratos").await.unwrap();
         assert_iterator(
             &mut iter,
             vec![
                 RowEntry::new_value(b"kratos", b"atreus", 0),
                 RowEntry::new_value(b"super", b"mario", 0),
-            ]
+            ],
         )
         .await;
     }

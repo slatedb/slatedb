@@ -393,7 +393,7 @@ mod tests {
                 RowEntry::new_value(b"cc", b"cc2", 0),
             ],
         )
-            .await;
+        .await;
     }
 
     #[tokio::test]
@@ -412,11 +412,7 @@ mod tests {
         );
 
         let mut merge_iter = MergeIterator::new(iters).await.unwrap();
-        assert_next_entry(
-            &mut merge_iter,
-            &RowEntry::new_value(b"aa", b"aa1", 0),
-        )
-        .await;
+        assert_next_entry(&mut merge_iter, &RowEntry::new_value(b"aa", b"aa1", 0)).await;
 
         merge_iter.seek(b"bb".as_ref()).await.unwrap();
 
@@ -427,7 +423,7 @@ mod tests {
                 RowEntry::new_value(b"cc", b"cc2", 0),
             ],
         )
-            .await;
+        .await;
     }
 
     #[tokio::test]
@@ -454,7 +450,7 @@ mod tests {
                 RowEntry::new_value(b"ee", b"ee2", 0),
             ],
         )
-            .await;
+        .await;
     }
 
     struct TestIterator {
