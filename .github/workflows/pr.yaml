@@ -118,8 +118,8 @@ jobs:
 
       - name: Generate flamegraphs
         env:
-          CARGO_PROFILE_RELEASE_DEBUG: true
-          CARGO_PROFILE_RELEASE_STRIP: false
+          CARGO_PROFILE_BENCH_DEBUG: true
+          CARGO_PROFILE_BENCH_STRIP: false
         run: |
           # Create directory for flamegraphs
           mkdir -p flamegraphs
