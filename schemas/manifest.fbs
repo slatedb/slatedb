@@ -5,10 +5,21 @@ table Uuid {
    low: uint64;
 }
 
+table DbParent {
+   // Optional path to a parent database from which this database was cloned
+   parent_path: string (required);
+
+   // Optional parent checkpoint ID
+   parent_checkpoint: Uuid (required);
+}
+
 // Manifest to persist state of DB.
 table ManifestV1 {
     // Id of manifest. Manifest file name will be derived from this id.
     manifest_id: ulong;
+
+    // Optional details about the parent checkpoint for the database
+    parent: DbParent;
 
     // Flag to indicate whether initialization has finished. When creating the initial manifest for
     // a root db (one that is not a clone), this flag will be set to true. When creating the initial

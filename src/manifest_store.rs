@@ -1,23 +1,25 @@
-use std::collections::BTreeMap;
-use std::ops::RangeBounds;
-use std::sync::Arc;
-
+use crate::checkpoint::Checkpoint;
+use crate::config::CheckpointOptions;
+use crate::db_state::CoreDbState;
+use crate::error::SlateDBError;
+use crate::error::SlateDBError::{InvalidDBState, LatestManifestMissing, ManifestMissing};
+use crate::flatbuffer_types::FlatBufferManifestCodec;
+use crate::manifest::{DbLink, Manifest, ManifestCodec};
+use crate::transactional_object_store::{
+    DelegatingTransactionalObjectStore, TransactionalObjectStore,
+};
 use chrono::Utc;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
 use object_store::{Error, ObjectStore};
 use serde::Serialize;
+use std::collections::BTreeMap;
+use std::ops::RangeBounds;
+use std::sync::Arc;
+use std::time::SystemTime;
 use tracing::warn;
-
-use crate::db_state::CoreDbState;
-use crate::error::SlateDBError;
-use crate::error::SlateDBError::{InvalidDBState, LatestManifestMissing, ManifestMissing};
-use crate::flatbuffer_types::FlatBufferManifestCodec;
-use crate::manifest::{Manifest, ManifestCodec};
-use crate::transactional_object_store::{
-    DelegatingTransactionalObjectStore, TransactionalObjectStore,
-};
+use uuid::Uuid;
 
 pub(crate) struct FenceableManifest {
     stored_manifest: StoredManifest,
@@ -106,21 +108,34 @@ pub(crate) struct StoredManifest {
 }
 
 impl StoredManifest {
-    pub(crate) async fn init_new_db(
-        store: Arc<ManifestStore>,
-        core: CoreDbState,
-    ) -> Result<Self, SlateDBError> {
-        let manifest = Manifest {
-            core,
-            writer_epoch: 0,
-            compactor_epoch: 0,
-        };
+    async fn init(store: Arc<ManifestStore>, manifest: Manifest) -> Result<Self, SlateDBError> {
         store.write_manifest(1, &manifest).await?;
         Ok(Self {
             id: 1,
             manifest,
             manifest_store: store,
         })
+    }
+
+    /// Create the initial manifest for a new database.
+    pub(crate) async fn init_new_db(
+        store: Arc<ManifestStore>,
+        core: CoreDbState,
+    ) -> Result<Self, SlateDBError> {
+        let manifest = Manifest::init_new(core);
+        Self::init(store, manifest).await
+    }
+
+    /// Create a new manifest for a new cloned database. The initial manifest
+    /// will be written with the `initialized` field set to false in order to allow
+    /// for the rest of the clone state to be initialized
+    pub(crate) async fn load_uninitialized_clone(
+        clone_manifest_store: Arc<ManifestStore>,
+        parent_db: DbLink,
+        parent_manifest: &Manifest,
+    ) -> Result<Self, SlateDBError> {
+        let manifest = Manifest::init_clone(parent_db, parent_manifest);
+        Self::init(clone_manifest_store, manifest).await
     }
 
     /// Load the current manifest from the supplied manifest store. If there is no db at the
@@ -148,6 +163,10 @@ impl StoredManifest {
         self.id
     }
 
+    pub(crate) fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
     pub(crate) fn db_state(&self) -> &CoreDbState {
         &self.manifest.core
     }
@@ -161,8 +180,77 @@ impl StoredManifest {
         Ok(&self.manifest.core)
     }
 
+    /// Create a new checkpoint from the current state. This only creates the checkpoint
+    /// struct, but does not persist it in the manifest. The latter can be done with
+    /// [`Self::write_checkpoint`].
+    pub(crate) fn new_checkpoint(
+        &self,
+        checkpoint_id: Uuid,
+        options: &CheckpointOptions,
+    ) -> Result<Checkpoint, SlateDBError> {
+        let expire_time = options.lifetime.map(|l| SystemTime::now() + l);
+        let db_state = self.db_state();
+        let manifest_id = match options.source {
+            Some(source_checkpoint_id) => {
+                let Some(source_checkpoint) = db_state.find_checkpoint(&source_checkpoint_id)
+                else {
+                    return Err(InvalidDBState);
+                };
+                source_checkpoint.manifest_id
+            }
+            None => {
+                if !db_state.initialized {
+                    return Err(InvalidDBState);
+                }
+                self.id()
+            }
+        };
+        Ok(Checkpoint {
+            id: checkpoint_id,
+            manifest_id,
+            expire_time,
+            create_time: SystemTime::now(),
+        })
+    }
+
+    /// Write the given checkpoint to the manifest,
+    pub(crate) async fn write_checkpoint(
+        &mut self,
+        checkpoint: Checkpoint,
+    ) -> Result<(), SlateDBError> {
+        self.maybe_apply_db_state_update(|stored_manifest| {
+            // TODO: Do we need to verify that the manifest is still available
+            //       before writing?
+            let mut updated_db_state = stored_manifest.db_state().clone();
+            updated_db_state.checkpoints.push(checkpoint.clone());
+            Ok(Some(updated_db_state))
+        })
+        .await
+    }
+
+    pub(crate) async fn write_new_checkpoint(
+        &mut self,
+        checkpoint_id: Uuid,
+        options: &CheckpointOptions,
+    ) -> Result<Checkpoint, SlateDBError> {
+        self.maybe_apply_db_state_update(|stored_manifest| {
+            let checkpoint = stored_manifest.new_checkpoint(checkpoint_id, options)?;
+            let mut updated_db_state = stored_manifest.db_state().clone();
+            updated_db_state.checkpoints.push(checkpoint);
+            Ok(Some(updated_db_state))
+        })
+        .await?;
+        let checkpoint = self
+            .db_state()
+            .find_checkpoint(&checkpoint_id)
+            .expect("update applied but checkpoint not found")
+            .clone();
+        Ok(checkpoint)
+    }
+
     pub(crate) async fn update_db_state(&mut self, core: CoreDbState) -> Result<(), SlateDBError> {
         let manifest = Manifest {
+            parent: self.manifest.parent.clone(),
             core,
             writer_epoch: self.manifest.writer_epoch,
             compactor_epoch: self.manifest.compactor_epoch,

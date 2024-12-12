@@ -165,6 +165,7 @@ impl FlatBufferManifestCodec {
             checkpoints,
         };
         Manifest {
+            parent: None,
             core,
             writer_epoch: manifest.writer_epoch(),
             compactor_epoch: manifest.compactor_epoch(),
@@ -331,6 +332,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
             &mut self.builder,
             &ManifestV1Args {
                 manifest_id: 0, // todo: get rid of me
+                parent: None,
                 initialized: core.initialized,
                 writer_epoch: manifest.writer_epoch,
                 compactor_epoch: manifest.compactor_epoch,
@@ -414,11 +416,7 @@ mod tests {
                 create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
             },
         ];
-        let manifest = Manifest {
-            core,
-            writer_epoch: 0,
-            compactor_epoch: 0,
-        };
+        let manifest = Manifest::init_new(core);
         let codec = FlatBufferManifestCodec {};
 
         // when:

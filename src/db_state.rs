@@ -1,5 +1,6 @@
 use crate::checkpoint::Checkpoint;
 use bytes::Bytes;
+use object_store::path::Path;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
@@ -7,6 +8,7 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::Arc;
 use tracing::debug;
 use ulid::Ulid;
+use uuid::Uuid;
 use SsTableId::{Compacted, Wal};
 
 use crate::bytes_range::BytesRange;
@@ -95,6 +97,16 @@ impl SsTableId {
         match self {
             Wal(_) => panic!("found WAL id when unwrapping compacted ID"),
             Compacted(ulid) => *ulid,
+        }
+    }
+
+    pub(crate) fn path(&self, root_path: &Path) -> Path {
+        // TODO: Probably need to factor out the directory path
+        match self {
+            Wal(id) => Path::from(format!("{}/wal/{:020}.sst", root_path, id)),
+            Compacted(ulid) => {
+                Path::from(format!("{}/compacted/{}.sst", root_path, ulid.to_string()))
+            }
         }
     }
 }
@@ -232,6 +244,10 @@ impl CoreDbState {
         debug!("{:?}", l0s);
         debug!("{:?}", compacted);
         debug!("-----------------");
+    }
+
+    pub(crate) fn find_checkpoint(&self, checkpoint_id: &Uuid) -> Option<&Checkpoint> {
+        self.checkpoints.iter().find(|c| c.id == *checkpoint_id)
     }
 }
 
@@ -384,10 +400,12 @@ impl DbState {
             new_l0.push_back(sst.clone());
         }
         let compacted = compactor_state.compacted.clone();
+        let checkpoints = compactor_state.checkpoints.clone();
         let mut state = self.state_copy();
         state.core.l0_last_compacted.clone_from(l0_last_compacted);
         state.core.l0 = new_l0;
         state.core.compacted = compacted;
+        state.core.checkpoints = checkpoints;
         self.update_state(state);
     }
 }

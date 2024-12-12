@@ -37,45 +37,7 @@ impl Db {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         let id = Uuid::new_v4();
-        stored_manifest
-            .maybe_apply_db_state_update(|stored_manifest| {
-                let expire_time = options.lifetime.map(|l| SystemTime::now() + l);
-                let db_state = stored_manifest.db_state();
-                let manifest_id = match options.source {
-                    Some(source_checkpoint_id) => {
-                        let Some(source_checkpoint) = db_state
-                            .checkpoints
-                            .iter()
-                            .find(|c| c.id == source_checkpoint_id)
-                        else {
-                            return Err(SlateDBError::InvalidDBState);
-                        };
-                        source_checkpoint.manifest_id
-                    }
-                    None => {
-                        if !db_state.initialized {
-                            return Err(SlateDBError::InvalidDBState);
-                        }
-                        stored_manifest.id()
-                    }
-                };
-                let checkpoint = Checkpoint {
-                    id,
-                    manifest_id,
-                    expire_time,
-                    create_time: SystemTime::now(),
-                };
-                let mut updated_db_state = db_state.clone();
-                updated_db_state.checkpoints.push(checkpoint);
-                Ok(Some(updated_db_state))
-            })
-            .await?;
-        let checkpoint = stored_manifest
-            .db_state()
-            .checkpoints
-            .iter()
-            .find(|c| c.id == id)
-            .expect("update applied but checkpoint not found");
+        let checkpoint = stored_manifest.write_new_checkpoint(id, options).await?;
         Ok(CheckpointCreateResult {
             id,
             manifest_id: checkpoint.manifest_id,

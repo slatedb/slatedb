@@ -15,6 +15,7 @@ mod bytes;
 mod bytes_range;
 mod cached_object_store;
 pub mod checkpoint;
+mod clone;
 #[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;
 mod compactor;

@@ -1,10 +1,12 @@
-use crate::config::Clock;
+use crate::config::{Clock, PutOptions, WriteOptions};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::row_codec::SstRowCodecV0;
 use crate::types::{KeyValue, RowAttributes, RowEntry};
 use bytes::Bytes;
 use rand::Rng;
+use std::collections::BTreeMap;
+use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
@@ -85,6 +87,8 @@ macro_rules! assert_debug_snapshot {
     };
 }
 
+use crate::db::Db;
+use crate::db_iter::DbIterator;
 pub(crate) use assert_debug_snapshot;
 
 pub(crate) fn decode_codec_entries(
@@ -115,4 +119,37 @@ pub(crate) fn decode_codec_entries(
     }
 
     Ok(entries)
+}
+
+pub(crate) async fn seed_database(db: &Db, table: &BTreeMap<Bytes, Bytes>, await_durable: bool) {
+    let put_options = PutOptions::default();
+    let write_options = &WriteOptions { await_durable };
+
+    for (key, value) in table.iter() {
+        db.put_with_options(key, value, &put_options, write_options)
+            .await
+            .unwrap();
+    }
+}
+
+pub(crate) async fn assert_ordered_scan_in_range<T: RangeBounds<Bytes>>(
+    table: &BTreeMap<Bytes, Bytes>,
+    range: T,
+    iter: &mut DbIterator<'_>,
+) {
+    let mut expected = table.range(range);
+
+    loop {
+        match (expected.next(), iter.next().await.unwrap()) {
+            (None, None) => break,
+            (Some((expected_key, expected_value)), Some(actual)) => {
+                assert_eq!(expected_key, &actual.key);
+                assert_eq!(expected_value, &actual.value);
+            }
+            (Some(expected_record), None) => {
+                panic!("Expected record {expected_record:?} missing from scan result")
+            }
+            (None, Some(actual)) => panic!("Unexpected record {actual:?} in scan result"),
+        }
+    }
 }

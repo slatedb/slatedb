@@ -197,7 +197,7 @@ impl Db {
         path: Path,
         object_store: Arc<dyn ObjectStore>,
         parent_path: Path,
-        parent_checkpoint: Option<UUID>,
+        parent_checkpoint: Option<Uuid>,
     ) -> Result<Self, SlateDBError> {
         …
     }

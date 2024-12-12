@@ -1320,7 +1320,7 @@ mod tests {
     use crate::sst_iter::SstIterator;
     use crate::test_utils::{gen_attrs, TestClock};
 
-    use crate::proptest_util;
+    use crate::{proptest_util, test_utils};
     use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
@@ -1476,39 +1476,6 @@ mod tests {
         }
     }
 
-    async fn assert_ordered_scan_in_range(
-        table: &BTreeMap<Bytes, Bytes>,
-        range: &BytesRange,
-        iter: &mut DbIterator<'_>,
-    ) {
-        let mut expected = table.range((range.start_bound().cloned(), range.end_bound().cloned()));
-
-        loop {
-            match (expected.next(), iter.next().await.unwrap()) {
-                (None, None) => break,
-                (Some((expected_key, expected_value)), Some(actual)) => {
-                    assert_eq!(expected_key, &actual.key);
-                    assert_eq!(expected_value, &actual.value);
-                }
-                (Some(expected_record), None) => {
-                    panic!("Expected record {expected_record:?} missing from scan result")
-                }
-                (None, Some(actual)) => panic!("Unexpected record {actual:?} in scan result"),
-            }
-        }
-    }
-
-    async fn seed_database(db: &Db, table: &BTreeMap<Bytes, Bytes>, await_durable: bool) {
-        let put_options = PutOptions::default();
-        let write_options = &WriteOptions { await_durable };
-
-        for (key, value) in table.iter() {
-            db.put_with_options(key, value, &put_options, write_options)
-                .await
-                .unwrap();
-        }
-    }
-
     async fn build_database_from_table(
         table: &BTreeMap<Bytes, Bytes>,
         db_options: DbOptions,
@@ -1519,7 +1486,7 @@ mod tests {
             .await
             .unwrap();
 
-        seed_database(&db, table, false).await;
+        test_utils::seed_database(&db, table, false).await;
 
         if await_durable {
             db.flush().await.unwrap();
@@ -1565,7 +1532,7 @@ mod tests {
             .scan_with_options(range.clone(), scan_options)
             .await
             .unwrap();
-        assert_ordered_scan_in_range(table, &range, &mut iter).await;
+        test_utils::assert_ordered_scan_in_range(table, range, &mut iter).await;
     }
 
     #[test]
@@ -1707,7 +1674,7 @@ mod tests {
             iter.seek(seek_key.clone()).await.unwrap();
 
             let seek_range = BytesRange::new(Included(seek_key), scan_range.end_bound().cloned());
-            assert_ordered_scan_in_range(table, &seek_range, &mut iter).await;
+            test_utils::assert_ordered_scan_in_range(table, seek_range, &mut iter).await;
         }
     }
 
