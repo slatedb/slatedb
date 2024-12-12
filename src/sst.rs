@@ -519,6 +519,7 @@ impl EncodedSsTableBuilder<'_> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::vec;
 
     use bytes::BytesMut;
     use object_store::memory::InMemory;
@@ -531,7 +532,6 @@ mod tests {
     use crate::filter::filter_hash;
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, gen_attrs, gen_empty_attrs};
-    use crate::types::ValueDeletable;
 
     fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIterator<Block> {
         let block = builder.next_block();
@@ -565,21 +565,13 @@ mod tests {
         let mut iter = next_block_to_iter(&mut builder);
         assert_iterator(
             &mut iter,
-            &[(
-                [b'a'; 8].into(),
-                ValueDeletable::Value(Bytes::copy_from_slice(&[b'1'; 8])),
-                gen_attrs(1),
-            )],
+            vec![RowEntry::new_value(&[b'a'; 8], &[b'1'; 8], 0).with_create_ts(1)],
         )
         .await;
         let mut iter = next_block_to_iter(&mut builder);
         assert_iterator(
             &mut iter,
-            &[(
-                vec![b'b'; 8],
-                ValueDeletable::Value(Bytes::copy_from_slice(&[b'2'; 8])),
-                gen_attrs(2),
-            )],
+            vec![RowEntry::new_value(&[b'b'; 8], &[b'2'; 8], 0).with_create_ts(2)],
         )
         .await;
         assert!(builder.next_block().is_none());
@@ -589,11 +581,7 @@ mod tests {
         let mut iter = next_block_to_iter(&mut builder);
         assert_iterator(
             &mut iter,
-            &[(
-                vec![b'c'; 8],
-                ValueDeletable::Value(Bytes::copy_from_slice(&[b'3'; 8])),
-                gen_attrs(3),
-            )],
+            vec![RowEntry::new_value(&[b'c'; 8], &[b'3'; 8], 0).with_create_ts(3)],
         )
         .await;
         assert!(builder.next_block().is_none());
@@ -636,11 +624,7 @@ mod tests {
         let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
-            &[(
-                vec![b'a'; 8],
-                ValueDeletable::Value(Bytes::copy_from_slice(&[b'1'; 8])),
-                gen_attrs(1),
-            )],
+            vec![RowEntry::new_value(&[b'a'; 8], &[b'1'; 8], 0).with_create_ts(1)],
         )
         .await;
         let block = format
@@ -649,11 +633,7 @@ mod tests {
         let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
-            &[(
-                vec![b'b'; 8],
-                ValueDeletable::Value(Bytes::copy_from_slice(&[b'2'; 8])),
-                gen_attrs(2),
-            )],
+            vec![RowEntry::new_value(&[b'b'; 8], &[b'2'; 8], 0).with_create_ts(2)],
         )
         .await;
         let block = format
@@ -662,11 +642,7 @@ mod tests {
         let mut iter = BlockIterator::from_first_key(block);
         assert_iterator(
             &mut iter,
-            &[(
-                vec![b'c'; 8],
-                ValueDeletable::Value(Bytes::copy_from_slice(&[b'3'; 8])),
-                gen_attrs(3),
-            )],
+            vec![RowEntry::new_value(&[b'c'; 8], &[b'3'; 8], 0).with_create_ts(3)],
         )
         .await;
     }
@@ -913,28 +889,16 @@ mod tests {
         let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
-            &[
-                (
-                    vec![b'a'; 2],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 2])),
-                    gen_empty_attrs(),
-                ),
-                (
-                    vec![b'b'; 2],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 2])),
-                    gen_empty_attrs(),
-                ),
+            vec![
+                RowEntry::new_value(&[b'a'; 2], &[1u8; 2], 0),
+                RowEntry::new_value(&[b'b'; 2], &[2u8; 2], 0),
             ],
         )
         .await;
         let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
-            &[(
-                vec![b'c'; 20],
-                ValueDeletable::Value(Bytes::copy_from_slice(&[3u8; 20])),
-                gen_attrs(3),
-            )],
+            vec![RowEntry::new_value(&[b'c'; 20], &[3u8; 20], 0).with_create_ts(3)],
         )
         .await;
         assert!(blocks.is_empty())
@@ -985,38 +949,22 @@ mod tests {
         let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
-            &[
-                (
-                    vec![b'a'; 2],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 2])),
-                    gen_empty_attrs(),
-                ),
-                (
-                    vec![b'b'; 2],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 2])),
-                    gen_empty_attrs(),
-                ),
+            vec![
+                RowEntry::new_value(&[b'a'; 2], &[1u8; 2], 0),
+                RowEntry::new_value(&[b'b'; 2], &[2u8; 2], 0),
             ],
         )
         .await;
         let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
-            &[(
-                vec![b'c'; 20],
-                ValueDeletable::Value(Bytes::copy_from_slice(&[3u8; 20])),
-                gen_attrs(3),
-            )],
+            vec![RowEntry::new_value(&[b'c'; 20], &[3u8; 20], 0).with_create_ts(3)],
         )
         .await;
         let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
-            &[(
-                vec![b'd'; 20],
-                ValueDeletable::Value(Bytes::copy_from_slice(&[4u8; 20])),
-                gen_attrs(4),
-            )],
+            vec![RowEntry::new_value(&[b'd'; 20], &[4u8; 20], 0).with_create_ts(4)],
         )
         .await;
         assert!(blocks.is_empty())

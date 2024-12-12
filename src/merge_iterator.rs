@@ -148,10 +148,10 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
     use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
-    use crate::test_utils::{assert_iterator, gen_attrs};
-    use crate::types::{RowEntry, ValueDeletable};
-    use bytes::Bytes;
+    use crate::test_utils::assert_iterator;
+    use crate::types::RowEntry;
     use std::collections::VecDeque;
+    use std::vec;
 
     #[tokio::test]
     async fn test_merge_iterator_should_include_entries_in_order() {
@@ -179,52 +179,16 @@ mod tests {
 
         assert_iterator(
             &mut merge_iter,
-            &[
-                (
-                    "aaaa".into(),
-                    ValueDeletable::Value(Bytes::from("1111")),
-                    gen_attrs(0),
-                ),
-                (
-                    "bbbb".into(),
-                    ValueDeletable::Value(Bytes::from("2222")),
-                    gen_attrs(3),
-                ),
-                (
-                    "cccc".into(),
-                    ValueDeletable::Value(Bytes::from("3333")),
-                    gen_attrs(1),
-                ),
-                (
-                    "dddd".into(),
-                    ValueDeletable::Value(Bytes::from("4444")),
-                    gen_attrs(6),
-                ),
-                (
-                    "eeee".into(),
-                    ValueDeletable::Value(Bytes::from("5555")),
-                    gen_attrs(7),
-                ),
-                (
-                    "gggg".into(),
-                    ValueDeletable::Value(Bytes::from("7777")),
-                    gen_attrs(8),
-                ),
-                (
-                    "xxxx".into(),
-                    ValueDeletable::Value(Bytes::from("24242424")),
-                    gen_attrs(4),
-                ),
-                (
-                    "yyyy".into(),
-                    ValueDeletable::Value(Bytes::from("25252525")),
-                    gen_attrs(5),
-                ),
-                (
-                    "zzzz".into(),
-                    ValueDeletable::Value(Bytes::from("26262626")),
-                    gen_attrs(2),
-                ),
+            vec![
+                RowEntry::new_value(b"aaaa", b"1111", 0),
+                RowEntry::new_value(b"bbbb", b"2222", 0),
+                RowEntry::new_value(b"cccc", b"3333", 0),
+                RowEntry::new_value(b"dddd", b"4444", 0),
+                RowEntry::new_value(b"eeee", b"5555", 0),
+                RowEntry::new_value(b"gggg", b"7777", 0),
+                RowEntry::new_value(b"xxxx", b"24242424", 0),
+                RowEntry::new_value(b"yyyy", b"25252525", 0),
+                RowEntry::new_value(b"zzzz", b"26262626", 0),
             ],
         )
         .await;
@@ -254,27 +218,11 @@ mod tests {
 
         assert_iterator(
             &mut merge_iter,
-            &[
-                (
-                    "aaaa".into(),
-                    ValueDeletable::Value(Bytes::from("1111")),
-                    gen_attrs(0),
-                ),
-                (
-                    "bbbb".into(),
-                    ValueDeletable::Value(Bytes::from("2222")),
-                    gen_attrs(4),
-                ),
-                (
-                    "cccc".into(),
-                    ValueDeletable::Value(Bytes::from("use this one c")),
-                    gen_attrs(1),
-                ),
-                (
-                    "xxxx".into(),
-                    ValueDeletable::Value(Bytes::from("use this one x")),
-                    gen_attrs(3),
-                ),
+            vec![
+                RowEntry::new_value(b"aaaa", b"1111", 0),
+                RowEntry::new_value(b"bbbb", b"2222", 0),
+                RowEntry::new_value(b"cccc", b"use this one c", 0),
+                RowEntry::new_value(b"xxxx", b"use this one x", 0),
             ],
         )
         .await;
@@ -295,37 +243,13 @@ mod tests {
 
         assert_iterator(
             &mut merge_iter,
-            &[
-                (
-                    "aaaa".into(),
-                    ValueDeletable::Value(Bytes::from("1111")),
-                    gen_attrs(0),
-                ),
-                (
-                    "bbbb".into(),
-                    ValueDeletable::Value(Bytes::from("2222")),
-                    gen_attrs(3),
-                ),
-                (
-                    "cccc".into(),
-                    ValueDeletable::Value(Bytes::from("3333")),
-                    gen_attrs(1),
-                ),
-                (
-                    "xxxx".into(),
-                    ValueDeletable::Value(Bytes::from("24242424")),
-                    gen_attrs(4),
-                ),
-                (
-                    "yyyy".into(),
-                    ValueDeletable::Value(Bytes::from("25252525")),
-                    gen_attrs(5),
-                ),
-                (
-                    "zzzz".into(),
-                    ValueDeletable::Value(Bytes::from("26262626")),
-                    gen_attrs(2),
-                ),
+            vec![
+                RowEntry::new_value(b"aaaa", b"1111", 0),
+                RowEntry::new_value(b"bbbb", b"2222", 0),
+                RowEntry::new_value(b"cccc", b"3333", 0),
+                RowEntry::new_value(b"xxxx", b"24242424", 0),
+                RowEntry::new_value(b"yyyy", b"25252525", 0),
+                RowEntry::new_value(b"zzzz", b"26262626", 0),
             ],
         )
         .await;
@@ -344,22 +268,10 @@ mod tests {
 
         assert_iterator(
             &mut merge_iter,
-            &[
-                (
-                    "aaaa".into(),
-                    ValueDeletable::Value(Bytes::from("1111")),
-                    gen_attrs(0),
-                ),
-                (
-                    "cccc".into(),
-                    ValueDeletable::Value(Bytes::from("use this one c")),
-                    gen_attrs(1),
-                ),
-                (
-                    "xxxx".into(),
-                    ValueDeletable::Value(Bytes::from("24242424")),
-                    gen_attrs(3),
-                ),
+            vec![
+                RowEntry::new_value(b"aaaa", b"1111", 0),
+                RowEntry::new_value(b"cccc", b"use this one c", 0),
+                RowEntry::new_value(b"xxxx", b"24242424", 0),
             ],
         )
         .await;
