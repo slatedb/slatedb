@@ -127,7 +127,6 @@ jobs:
       - name: Generate flamegraphs
         env:
           CARGO_PROFILE_BENCH_DEBUG: true
-          RUSTFLAGS: "-C symbol-mangling-version=v0"
         run: |
           # Create directory for flamegraphs
           mkdir -p flamegraphs
