@@ -129,13 +129,15 @@ jobs:
             cargo bench --bench $bench -- --profile-time 10
           done
 
-      - name: Upload Flamegraphs
+      - name: Checkout website repository
         uses: actions/checkout@v4
         with:
           repository: slatedb/slatedb-website
           token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
           path: slatedb-website
           ref: gh-pages
+
+      - name: Update website with new flamegraphs
         env:
           FLAMEGRAPH_WEBSITE_DIR: performance/microbenchmark-flamegraphs/main
         run: |
