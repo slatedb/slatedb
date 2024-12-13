@@ -148,6 +148,9 @@ jobs:
           # Remove SVGs from entire git history to prevent bloat since we're re-committing every night
           git filter-repo --path "$FLAMEGRAPH_WEBSITE_DIR/*.svg" --invert-paths --force
 
+          # Re-add origin remote after filter-repo removes it
+          git remote add origin https://github.com/slatedb/slatedb-website.git
+
           # Copy flamegraph.svg to $FLAMEGRAPH_WEBSITE_DIR/<benchmark_name>.svg
           find ../target/criterion -name "flamegraph.svg" -exec sh -c 'cp "$1" "$FLAMEGRAPH_WEBSITE_DIR/$(basename $(dirname $(dirname "$1"))).svg"' sh {} \;
 
