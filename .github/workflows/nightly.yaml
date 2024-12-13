@@ -11,6 +11,7 @@ permissions:
   contents: write
 
 jobs:
+  # Run and save nightly microbenchmark data so PRs have a fresh baseline to compare against
   microbenchmarks:
     runs-on: ubuntu-latest
     steps:
