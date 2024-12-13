@@ -1,5 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use object_store::{memory::InMemory, path::Path};
+use pprof::criterion::{Output, PProfProfiler};
 use slatedb::config::{PutOptions, WriteOptions};
 use slatedb::{config::DbOptions, db::Db};
 use std::sync::Arc;
@@ -32,7 +33,13 @@ fn criterion_benchmark(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().sample_size(1_000);
+    config = {
+        let mut criterion = Criterion::default().sample_size(1_000);
+        if std::env::var("SLATE_BENCH_PROFILE").is_ok() {
+            criterion = criterion.with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+        }
+        criterion
+    };
     targets = criterion_benchmark
 }
 

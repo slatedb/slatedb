@@ -61,6 +61,7 @@ figment = { version = "0.10.19", features = ["test"] }
 rstest = "0.23.0"
 insta = "1.39.0"
 criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
+pprof = { version = "0.14.0", features = ["criterion", "flamegraph"] }
 
 [features]
 default = ["aws", "moka"]
