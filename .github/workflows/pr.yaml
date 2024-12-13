@@ -150,4 +150,4 @@ jobs:
           find ../target/criterion -name "profile.pb" -exec sh -c 'cp "$1" "$PPROF_WEBSITE_DIR/$(basename $(dirname $(dirname "$1"))).pb"' sh {} \;
           git add $PPROF_WEBSITE_DIR
           git commit -m "Update microbenchmark pprof for job id ${GITHUB_RUN_ID}"
-          git push origin gh-pages --force
+          git push
