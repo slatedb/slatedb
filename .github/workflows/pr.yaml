@@ -147,7 +147,7 @@ jobs:
           rm -rf $PPROF_WEBSITE_DIR
           mkdir -p $PPROF_WEBSITE_DIR
           # Copy pprof to $PPROF_WEBSITE_DIR/<benchmark_name>.pb
-          find ../target/criterion -name "pprof.pb" -exec sh -c 'cp "$1" "$PPROF_WEBSITE_DIR/$(basename $(dirname $(dirname "$1"))).pb"' sh {} \;
+          find ../target/criterion -name "profile.pb" -exec sh -c 'cp "$1" "$PPROF_WEBSITE_DIR/$(basename $(dirname $(dirname "$1"))).pb"' sh {} \;
           git add $PPROF_WEBSITE_DIR
           git commit -m "Update microbenchmark pprof for job id ${GITHUB_RUN_ID}"
           git push origin gh-pages --force
