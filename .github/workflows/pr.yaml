@@ -120,7 +120,6 @@ jobs:
           CARGO_PROFILE_BENCH_DEBUG: true
           SLATE_BENCH_PROFILE: true
         run: |
-        run: |
           # Get list of benchmarks
           BENCHMARKS=$(cargo bench --no-run --message-format=json | jq -r 'select(.profile.test == true) | .target.name' | sort -u)
 
