@@ -33,13 +33,10 @@ fn criterion_benchmark(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = {
-        let mut criterion = Criterion::default().sample_size(1_000);
-        if std::env::var("SLATE_BENCH_PROFILE").is_ok() {
-            criterion = criterion.with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
-        }
-        criterion
-    };
+    config = Criterion::default()
+        .sample_size(1_000)
+        // This only runs when `--profile-time <num_seconds>` is set
+        .with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
     targets = criterion_benchmark
 }
 
