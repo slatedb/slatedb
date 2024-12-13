@@ -100,7 +100,7 @@ jobs:
           summary-always: true
           max-items-in-chart: 30
 
-  microbenchmark-flamegraphs:
+  microbenchmark-pprofs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -116,7 +116,7 @@ jobs:
           echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo 0 | sudo tee /proc/sys/kernel/kptr_restrict
 
-      - name: Generate flamegraphs
+      - name: Generate pprofs
         env:
           CARGO_PROFILE_BENCH_DEBUG: true
           SLATE_BENCH_PROFILE: true
@@ -124,7 +124,7 @@ jobs:
           # Get list of benchmarks
           BENCHMARKS=$(cargo bench --no-run --message-format=json | jq -r 'select(.profile.test == true) | .target.name' | sort -u)
 
-          # Create flamegraphs for each benchmark
+          # Create pprofs for each benchmark
           for bench in $BENCHMARKS; do
             cargo bench --bench $bench -- --profile-time 10
           done
@@ -137,23 +137,17 @@ jobs:
           path: slatedb-website
           ref: gh-pages
 
-      - name: Update website with new flamegraphs
+      - name: Update website with new pprofs
         env:
-          FLAMEGRAPH_WEBSITE_DIR: performance/microbenchmark-flamegraphs/main
+          PPROF_WEBSITE_DIR: performance/microbenchmark-pprofs/main
         run: |
           cd slatedb-website
           git config --global user.name 'github-actions[bot]'
           git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
-
-          # Remove SVGs from entire git history to prevent bloat since we're re-committing every night
-          git filter-repo --path "$FLAMEGRAPH_WEBSITE_DIR/*.svg" --invert-paths --force
-
-          # Re-add origin remote after filter-repo removes it
-          git remote add origin https://github.com/slatedb/slatedb-website.git
-
-          # Copy flamegraph.svg to $FLAMEGRAPH_WEBSITE_DIR/<benchmark_name>.svg
-          find ../target/criterion -name "flamegraph.svg" -exec sh -c 'cp "$1" "$FLAMEGRAPH_WEBSITE_DIR/$(basename $(dirname $(dirname "$1"))).svg"' sh {} \;
-
-          git add $FLAMEGRAPH_WEBSITE_DIR
-          git commit -m "Update microbenchmark flamegraphs for job id ${GITHUB_RUN_ID}"
+          rm -rf $PPROF_WEBSITE_DIR
+          mkdir -p $PPROF_WEBSITE_DIR
+          # Copy pprof to $PPROF_WEBSITE_DIR/<benchmark_name>.pb
+          find ../target/criterion -name "pprof.pb" -exec sh -c 'cp "$1" "$PPROF_WEBSITE_DIR/$(basename $(dirname $(dirname "$1"))).pb"' sh {} \;
+          git add $PPROF_WEBSITE_DIR
+          git commit -m "Update microbenchmark pprof for job id ${GITHUB_RUN_ID}"
           git push origin gh-pages --force

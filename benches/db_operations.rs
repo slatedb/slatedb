@@ -36,7 +36,7 @@ criterion_group! {
     config = Criterion::default()
         .sample_size(1_000)
         // This only runs when `--profile-time <num_seconds>` is set
-        .with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+        .with_profiler(PProfProfiler::new(100, Output::Protobuf));
     targets = criterion_benchmark
 }
 
