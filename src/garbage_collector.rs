@@ -16,7 +16,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
+use tokio::time::Interval;
 use tracing::{debug, error, info};
 
 const DEFAULT_MIN_AGE: Duration = Duration::from_secs(86400);
@@ -27,7 +29,7 @@ enum GarbageCollectorMessage {
 }
 
 pub(crate) struct GarbageCollector {
-    main_tx: Arc<crossbeam_channel::Sender<GarbageCollectorMessage>>,
+    main_tx: Arc<mpsc::Sender<GarbageCollectorMessage>>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -52,12 +54,12 @@ impl GarbageCollector {
         db_stats: Arc<DbStats>,
         cleanup_fn: impl FnOnce(&SlateDBError) + Send + 'static,
     ) -> Self {
-        let (external_tx, external_rx) = crossbeam_channel::unbounded();
+        let (external_tx, external_rx) = mpsc::channel(100);
         let tokio_handle = options.gc_runtime.clone().unwrap_or(tokio_handle);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let gc_main = move || {
-            let orchestrator = GarbageCollectorOrchestrator {
+            let mut orchestrator = GarbageCollectorOrchestrator {
                 manifest_store,
                 table_store,
                 options,
@@ -101,13 +103,14 @@ impl GarbageCollector {
                 .expect("Failed to install CTRL+C signal handler");
             debug!("Intercepted SIGINT ... shutting down garbage collector");
             // if we cant send a shutdown message it's probably because it's already closed
-            let _ignored_error = main_tx.send(Shutdown);
+            // let _ignored_error = main_tx.send(Shutdown);
+            let _ignored_error = main_tx.try_send(Shutdown);
         });
     }
 
     /// Triggers the main garbage collection thread to terminate
     fn trigger_shutdown(&self) {
-        if self.main_tx.send(Shutdown).is_err() {
+        if self.main_tx.try_send(Shutdown).is_err() {
             error!("Could not send shutdown signal to threads blocked on await_shutdown");
         }
     }
@@ -129,14 +132,14 @@ struct GarbageCollectorOrchestrator {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
     options: GarbageCollectorOptions,
-    external_rx: crossbeam_channel::Receiver<GarbageCollectorMessage>,
+    external_rx: mpsc::Receiver<GarbageCollectorMessage>,
     db_stats: Arc<DbStats>,
 }
 
 trait GcTask {
     async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError>;
     fn status(&mut self) -> &mut DirGcStatus;
-    fn ticker(&self) -> crossbeam_channel::Receiver<Instant>;
+    fn ticker(&self) -> Interval;
     fn resource(&self) -> &str;
 }
 
@@ -218,7 +221,7 @@ impl GcTask for ManifestGcTask {
         &mut self.status
     }
 
-    fn ticker(&self) -> crossbeam_channel::Receiver<Instant> {
+    fn ticker(&self) -> Interval {
         self.status.ticker()
     }
 
@@ -321,7 +324,7 @@ impl GcTask for WalGcTask {
         &mut self.status
     }
 
-    fn ticker(&self) -> crossbeam_channel::Receiver<Instant> {
+    fn ticker(&self) -> Interval {
         self.status.ticker()
     }
 
@@ -412,7 +415,7 @@ impl GcTask for CompactedGcTask {
         &mut self.status
     }
 
-    fn ticker(&self) -> crossbeam_channel::Receiver<Instant> {
+    fn ticker(&self) -> Interval {
         self.status.ticker()
     }
 
@@ -458,8 +461,9 @@ impl GarbageCollectorOrchestrator {
     }
 
     /// Run the garbage collector
-    pub async fn run(&self) {
-        let log_ticker = crossbeam_channel::tick(Duration::from_secs(60));
+    pub async fn run(&mut self) {
+        // let log_ticker = crossbeam_channel::tick(Duration::from_secs(60));
+        let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
 
         let mut wal_gc_task = WalGcTask::new(
             self.manifest_store.clone(),
@@ -479,9 +483,11 @@ impl GarbageCollectorOrchestrator {
             self.options.manifest_options,
         );
 
-        let manifest_ticker = manifest_gc_task.ticker();
-        let wal_ticker = wal_gc_task.ticker();
-        let compacted_ticker = compacted_gc_task.ticker();
+        let mut manifest_ticker = manifest_gc_task.ticker();
+        let mut wal_ticker = wal_gc_task.ticker();
+        let mut compacted_ticker = compacted_gc_task.ticker();
+        // let external_rx = &self.external_rx;
+
 
         info!(
             "Starting Garbage Collector with [manifest: {}], [wal: {}], [compacted: {}]",
@@ -491,30 +497,53 @@ impl GarbageCollectorOrchestrator {
         );
 
         loop {
-            crossbeam_channel::select! {
-                recv(log_ticker) -> _ => {
-                   debug!("GC has collected {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
-                        self.db_stats.gc_manifest_count.value.load(Ordering::SeqCst),
-                        self.db_stats.gc_wal_count.value.load(Ordering::SeqCst),
-                        self.db_stats.gc_compacted_count.value.load(Ordering::SeqCst)
-                    );
-                },
-                recv(manifest_ticker) -> _ => { self.run_gc_task(&mut manifest_gc_task).await; },
-                recv(wal_ticker) -> _ => { self.run_gc_task(&mut wal_gc_task).await; },
-                recv(compacted_ticker) -> _ => { self.run_gc_task(&mut compacted_gc_task).await; },
-                recv(self.external_rx) -> msg => {
-                    match msg {
-                        Ok(Shutdown) => {
+            tokio::select! {
+                _ = log_ticker.tick() =>{
+                    debug!("GC has collected {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
+                         self.db_stats.gc_manifest_count.value.load(Ordering::SeqCst),
+                         self.db_stats.gc_wal_count.value.load(Ordering::SeqCst),
+                         self.db_stats.gc_compacted_count.value.load(Ordering::SeqCst)
+                     );
+                 },
+                _ = manifest_ticker.tick() =>  { self.run_gc_task(&mut manifest_gc_task).await; },
+                _ = wal_ticker.tick() => { self.run_gc_task(&mut wal_gc_task).await; },
+                _ = compacted_ticker.tick() =>  { self.run_gc_task(&mut compacted_gc_task).await; },
+                msg = self.external_rx.recv() => {
+                               match msg {
+                        Some(Shutdown) => {
                             info!("Garbage collector received shutdown signal... shutting down");
                             break
                         }
-                        Err(e) => {
-                            error!("Garbage collector received error message {}. Shutting down", e);
-                            break;
+                        None => {
+                            error!("Garbage collector channel closed. Shutting down");                            break;
                         }
                     }
-                },
+                }
             }
+            // crossbeam_channel::select! {
+            //     recv(log_ticker) -> _ => {
+            //        debug!("GC has collected {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
+            //             self.db_stats.gc_manifest_count.value.load(Ordering::SeqCst),
+            //             self.db_stats.gc_wal_count.value.load(Ordering::SeqCst),
+            //             self.db_stats.gc_compacted_count.value.load(Ordering::SeqCst)
+            //         );
+            //     },
+            //     recv(manifest_ticker) -> _ => { self.run_gc_task(&mut manifest_gc_task).await; },
+            //     recv(wal_ticker) -> _ => { self.run_gc_task(&mut wal_gc_task).await; },
+            //     recv(compacted_ticker) -> _ => { self.run_gc_task(&mut compacted_gc_task).await; },
+            //     recv(self.external_rx) -> msg => {
+            //         match msg {
+            //             Ok(Shutdown) => {
+            //                 info!("Garbage collector received shutdown signal... shutting down");
+            //                 break
+            //             }
+            //             Err(e) => {
+            //                 error!("Garbage collector received error message {}. Shutting down", e);
+            //                 break;
+            //             }
+            //         }
+            //     },
+            // }
             self.db_stats.gc_count.inc();
             if manifest_gc_task.status().is_done()
                 && wal_gc_task.status().is_done()
@@ -569,11 +598,16 @@ impl DirGcStatus {
         self == &DirGcStatus::Done
     }
 
-    fn ticker(&self) -> crossbeam_channel::Receiver<Instant> {
+    fn ticker(&self) -> Interval {
         match self {
-            DirGcStatus::Indefinite(duration) => crossbeam_channel::tick(*duration),
-            DirGcStatus::OneMore => crossbeam_channel::at(Instant::now()),
-            DirGcStatus::Done => crossbeam_channel::never(),
+            // DirGcStatus::Indefinite(duration) => crossbeam_channel::tick(*duration),
+            // DirGcStatus::OneMore => crossbeam_channel::at(Instant::now()),
+            // DirGcStatus::Done => crossbeam_channel::never(),
+            DirGcStatus::Indefinite(duration) => tokio::time::interval(*duration),
+            DirGcStatus::OneMore => {
+                tokio::time::interval_at(tokio::time::Instant::now(), Duration::from_secs(0))
+            },
+            DirGcStatus::Done => tokio::time::interval(Duration::from_secs(u64::MAX)),
         }
     }
 
