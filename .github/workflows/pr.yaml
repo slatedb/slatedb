@@ -143,12 +143,12 @@ jobs:
         run: |
           rm -rf $FLAMEGRAPH_WEBSITE_DIR
           mkdir -p $FLAMEGRAPH_WEBSITE_DIR
-          # Copy flamegraph.svg to slatedb-website/performance/microbenchmark-flamegraphs/main/<benchmark_name>.svg
+          # Copy flamegraph.svg to $FLAMEGRAPH_WEBSITE_DIR/<benchmark_name>.svg
           find target/criterion -name "flamegraph.svg" -exec sh -c 'cp "$1" "$FLAMEGRAPH_WEBSITE_DIR/$(basename $(dirname $(dirname "$1"))).svg"' sh {} \;
 
       - name: Commit and Push
         env:
-          FLAMEGRAPH_WEBSITE_DIR: slatedb-website/performance/microbenchmark-flamegraphs/main
+          FLAMEGRAPH_WEBSITE_DIR: performance/microbenchmark-flamegraphs/main
         run: |
           cd slatedb-website
           git config --global user.name 'github-actions[bot]'
