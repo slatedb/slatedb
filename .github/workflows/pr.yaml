@@ -138,18 +138,21 @@ jobs:
           ref: gh-pages
 
       - name: Copy Flamegraphs
+        env:
+          FLAMEGRAPH_WEBSITE_DIR: slatedb-website/performance/microbenchmark-flamegraphs/main
         run: |
-          FLAMEGRAPH_WEBSITE_DIR="slatedb-website/performance/microbenchmark-flamegraphs/main"
           rm -rf $FLAMEGRAPH_WEBSITE_DIR
           mkdir -p $FLAMEGRAPH_WEBSITE_DIR
           # Copy flamegraph.svg to slatedb-website/performance/microbenchmark-flamegraphs/main/<benchmark_name>.svg
           find target/criterion -name "flamegraph.svg" -exec sh -c 'cp "$1" "$FLAMEGRAPH_WEBSITE_DIR/$(basename $(dirname $(dirname "$1"))).svg"' sh {} \;
 
       - name: Commit and Push
+        env:
+          FLAMEGRAPH_WEBSITE_DIR: slatedb-website/performance/microbenchmark-flamegraphs/main
         run: |
           cd slatedb-website
           git config --global user.name 'github-actions[bot]'
           git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add performance/microbenchmark-flamegraphs/main
+          git add $FLAMEGRAPH_WEBSITE_DIR
           git commit -m "Update microbenchmark flamegraphs for job id ${GITHUB_RUN_ID}"
           git push origin gh-pages
