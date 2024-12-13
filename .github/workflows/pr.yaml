@@ -116,6 +116,7 @@ jobs:
           echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo 0 | sudo tee /proc/sys/kernel/kptr_restrict
 
+      # See https://github.com/flamegraph-rs/flamegraph?tab=readme-ov-file#use-custom-addr2line-binary-for-perf
       - name: Configure addr2line
         run: |
           git clone https://github.com/gimli-rs/addr2line
