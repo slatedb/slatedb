@@ -129,32 +129,26 @@ jobs:
             cargo bench --bench $bench -- --profile-time 10
           done
 
-      - name: Checkout website repository
+      - name: Upload Flamegraphs
         uses: actions/checkout@v4
         with:
           repository: slatedb/slatedb-website
           token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
           path: slatedb-website
           ref: gh-pages
-
-      - name: Copy Flamegraphs
-        env:
-          FLAMEGRAPH_WEBSITE_DIR: slatedb-website/performance/microbenchmark-flamegraphs/main
-        run: |
-          rm -rf $FLAMEGRAPH_WEBSITE_DIR
-          mkdir -p $FLAMEGRAPH_WEBSITE_DIR
-          # Copy flamegraph.svg to $FLAMEGRAPH_WEBSITE_DIR/<benchmark_name>.svg
-          find target/criterion -name "flamegraph.svg" -exec sh -c 'cp "$1" "$FLAMEGRAPH_WEBSITE_DIR/$(basename $(dirname $(dirname "$1"))).svg"' sh {} \;
-
-      - name: Commit and Push
         env:
           FLAMEGRAPH_WEBSITE_DIR: performance/microbenchmark-flamegraphs/main
         run: |
           cd slatedb-website
           git config --global user.name 'github-actions[bot]'
           git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
           # Remove SVGs from entire git history to prevent bloat since we're re-committing every night
           git filter-repo --path "$FLAMEGRAPH_WEBSITE_DIR/*.svg" --invert-paths --force
+
+          # Copy flamegraph.svg to $FLAMEGRAPH_WEBSITE_DIR/<benchmark_name>.svg
+          find ../target/criterion -name "flamegraph.svg" -exec sh -c 'cp "$1" "$FLAMEGRAPH_WEBSITE_DIR/$(basename $(dirname $(dirname "$1"))).svg"' sh {} \;
+
           git add $FLAMEGRAPH_WEBSITE_DIR
           git commit -m "Update microbenchmark flamegraphs for job id ${GITHUB_RUN_ID}"
           git push origin gh-pages --force
