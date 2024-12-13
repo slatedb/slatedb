@@ -109,37 +109,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-`uname -r`
-          cargo install flamegraph
 
       - name: Configure perf
         run: |
           echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo 0 | sudo tee /proc/sys/kernel/kptr_restrict
 
-      # See https://github.com/flamegraph-rs/flamegraph?tab=readme-ov-file#use-custom-addr2line-binary-for-perf
-      - name: Configure addr2line
-        run: |
-          git clone https://github.com/gimli-rs/addr2line
-          cd addr2line
-          cargo build --release --bin addr2line --features bin
-          # Add addr2line to PATH for future steps
-          echo "$PWD/target/release" >> $GITHUB_PATH
-
       - name: Generate flamegraphs
         env:
           CARGO_PROFILE_BENCH_DEBUG: true
           SLATE_BENCH_PROFILE: true
-        run: |
-          # Create directory for flamegraphs
-          mkdir -p flamegraphs
-
-          # Get list of benchmarks
-          BENCHMARKS=$(cargo bench --no-run --message-format=json | jq -r 'select(.profile.test == true) | .target.name' | sort -u)
-
-          # Create flamegraphs for each benchmark
-          for bench in $BENCHMARKS; do
-            cargo flamegraph --bench $bench --image-width 2048 --notes "$bench" -o "flamegraphs/$bench-flamegraph.svg" -- --bench > /dev/null 2>&1
-          done
+        run: cargo bench
 
       - name: Checkout website repository
         uses: actions/checkout@v4
@@ -153,7 +133,8 @@ jobs:
         run: |
           rm -rf slatedb-website/performance/microbenchmark-flamegraphs/main
           mkdir -p slatedb-website/performance/microbenchmark-flamegraphs/main
-          cp flamegraphs/* slatedb-website/performance/microbenchmark-flamegraphs/main/
+          # Copy flamegraph.svg to slatedb-website/performance/microbenchmark-flamegraphs/main/<benchmark_name>.svg
+          find target/criterion -name "flamegraph.svg" -exec sh -c 'cp "$1" "slatedb-website/performance/microbenchmark-flamegraphs/main/$(basename $(dirname $(dirname "$1"))).svg"' sh {} \;
 
       - name: Commit and Push
         run: |
