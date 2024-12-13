@@ -143,8 +143,8 @@ jobs:
           cd slatedb-website
           git config --global user.name 'github-actions[bot]'
           git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          rm -rf $PPROF_WEBSITE_DIR
-          mkdir -p $PPROF_WEBSITE_DIR
+          # Remove old .pb files
+          rm $PPROF_WEBSITE_DIR/*.pb
           # Copy pprof to $PPROF_WEBSITE_DIR/<benchmark_name>.pb
           find ../target/criterion -name "profile.pb" -exec sh -c 'cp "$1" "$PPROF_WEBSITE_DIR/$(basename $(dirname $(dirname "$1"))).pb"' sh {} \;
           git add $PPROF_WEBSITE_DIR
