@@ -18,6 +18,7 @@
   - [Proposal](#proposal)
     - [API](#api)
     - [Conflict Checking](#conflict-checking)
+      - [GC \& Expiration](#gc--expiration)
     - [How to Test](#how-to-test)
   - [Roadmap](#roadmap)
   - [Updates](#updates)
@@ -235,7 +236,7 @@ txn.rollback().await;
 
 The approach we choose on conflict checking is expected to be more similar to Badger's global `Oracle` approach, since we hope to provide SSI in the transaction feature, and it's less prone to unnecessarily abort the transaction with limited MemTable size.
 
-Below is the data structure of the global `Oracle` and the transaction state:
+Below is the simplified data structure of the global `Oracle` and the transaction state, with only the fields that are related to the conflict checking:
 
 ```rust
 struct Oracle {
@@ -277,6 +278,37 @@ This requires we track the original write keys in the `TransactionState`, instea
 The non-transactioned writes operations should also be tracked in the `TransactionState` and `recent_committed_txns` for conflict checking. They could be regarded as a transaction that only contains a single write operation, and the start sequence number of this transaction is same as the committed sequence number.
 
 This approach can be adjusted to support SI as well by only tracking the keys that are being written to. When user set the isolation level to SI, the `read_keys` could always be set as empty. The GC mechanism to release inactive transactions is still the same as the SSI.
+
+#### GC & Expiration
+
+As described above, the entries in `recent_committed_txns` could be released whenever ALL the running transactions' sequence number are bigger than the committed sequence number of the entry. 
+
+We have to track the running transactions's sequence number in the `Oracle`.
+
+Also, it's less make sense to allow a transaction to be running for 12 hours, the `recent_committed_txns` will also keep growing for such 12 hours, and the GC will not be able to release the entries. This is a potential problem that the memory usage of the `Oracle` will keep growing, and possible lead to OOM.
+
+To mitigate this, we could allow users to set a default expiration time for all of the transactions, and the transactions will be considered as expired if it's not committed within the expiration time.
+
+```rust
+struct Oracle {
+    running_txns: HashMap<u64, TransactionState>;
+    next_seq: u64,
+    recent_committed_txns: Deque<Arc<TransactionState>>,
+}
+
+struct TransactionState {
+    started_time: u64,
+    expired_time: u64,
+    started_seq: u64,
+    write_keys: HashSet<Bytes>,
+    read_keys: Vec<Range<Bytes>>,
+    committed_seq: Option<u64>
+}
+```
+
+We should let the `Oracle` to track the running transactions, and when the transaction is finished, whether it's committed or rolled back, the `Oracle` should remove the transaction from the `running_txns` map. Also, whenever we found it becomes expired, we should also remove it from `running_txns` immediately.
+
+With `running_txns`, we could find out the earliest running transaction's sequence number, and `Oracle` could use this sequence number to determine which entries in `recent_committed_txns` could be GCed. This could help us to ensure both `running_txns` and `recent_committed_txns` do not grow out of a time limit.
 
 ### How to Test
 
