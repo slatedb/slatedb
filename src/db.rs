@@ -41,7 +41,6 @@ use crate::config::{
 };
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
-use crate::filter;
 use crate::flush::WalFlushThreadMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
@@ -54,6 +53,7 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
+use crate::{db, filter};
 use std::rc::Rc;
 use tracing::{info, warn};
 
@@ -392,6 +392,10 @@ impl DbInner {
             sst_iterators.push_back(load_sst_iters(self, sst_id).await?);
         }
 
+        // load the last seq number from manifest, and use it as the starting seq number.
+        // there might have bigger seq number in the WALs, we'd update the last seq number
+        // to the max seq number while iterating over the WALs.
+        let mut last_seq = self.state.read().state().core.last_seq;
         while let Some((mut sst_iter, sst_id)) = sst_iterators.pop_front() {
             last_sst_id = sst_id;
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
@@ -408,6 +412,7 @@ impl DbInner {
                         guard.update_clock_tick(ts)?;
                     }
 
+                    last_seq = last_seq.max(kv.seq);
                     guard.memtable().put(kv.clone());
                 }
                 self.maybe_freeze_memtable(&mut guard, sst_id)?;
@@ -427,6 +432,9 @@ impl DbInner {
             last_sst_id + 1,
             self.state.read().state().core.next_wal_sst_id
         );
+
+        // restore the last seq number
+        self.state.write().update_last_seq(last_seq);
 
         Ok(())
     }

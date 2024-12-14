@@ -339,6 +339,12 @@ impl DbState {
         last_seq + 1
     }
 
+    pub fn update_last_seq(&mut self, seq: u64) {
+        let mut state = self.state_copy();
+        state.core.last_seq = seq;
+        self.update_state(state);
+    }
+
     pub fn refresh_db_state(&mut self, compactor_state: &CoreDbState) {
         // copy over L0 up to l0_last_compacted
         let l0_last_compacted = &compactor_state.l0_last_compacted;
