@@ -158,9 +158,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::bytes::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
-    use crate::test_utils::{assert_kv, gen_attrs, OrderedBytesGenerator};
+    use crate::test_utils::{assert_kv, gen_attrs};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use ulid::Ulid;
@@ -180,15 +181,9 @@ mod tests {
             None,
         ));
         let mut builder = table_store.table_builder();
-        builder
-            .add_kv(b"key1", Some(b"value1"), gen_attrs(1))
-            .unwrap();
-        builder
-            .add_kv(b"key2", Some(b"value2"), gen_attrs(2))
-            .unwrap();
-        builder
-            .add_kv(b"key3", Some(b"value3"), gen_attrs(3))
-            .unwrap();
+        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
+        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
+        builder.add_value(b"key3", b"value3", gen_attrs(3)).unwrap();
         let encoded = builder.build().unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let handle = table_store.write_sst(&id, encoded).await.unwrap();
@@ -229,19 +224,13 @@ mod tests {
             None,
         ));
         let mut builder = table_store.table_builder();
-        builder
-            .add_kv(b"key1", Some(b"value1"), gen_attrs(1))
-            .unwrap();
-        builder
-            .add_kv(b"key2", Some(b"value2"), gen_attrs(2))
-            .unwrap();
+        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
+        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
         let encoded = builder.build().unwrap();
         let id1 = SsTableId::Compacted(Ulid::new());
         let handle1 = table_store.write_sst(&id1, encoded).await.unwrap();
         let mut builder = table_store.table_builder();
-        builder
-            .add_kv(b"key3", Some(b"value3"), gen_attrs(3))
-            .unwrap();
+        builder.add_value(b"key3", b"value3", gen_attrs(3)).unwrap();
         let encoded = builder.build().unwrap();
         let id2 = SsTableId::Compacted(Ulid::new());
         let handle2 = table_store.write_sst(&id2, encoded).await.unwrap();
@@ -385,7 +374,8 @@ mod tests {
         for _ in 0..n {
             let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
             for _ in 0..keys_per_sst {
-                let entry = RowEntry::new(key_gen.next(), Some(val_gen.next()), 0, None, None);
+                let entry =
+                    RowEntry::new_value(key_gen.next().as_ref(), val_gen.next().as_ref(), 0);
                 writer.add(entry).await.unwrap();
             }
             ssts.push(writer.close().await.unwrap());

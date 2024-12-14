@@ -1,0 +1,134 @@
+name: Nightly Benchmarks
+
+on:
+  schedule:
+    # Run at midnight Pacific (8 AM UTC)
+    - cron: '0 8 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+permissions:
+  # Required for storing benchmark results
+  contents: write
+
+jobs:
+  # Run and save nightly microbenchmark data so PRs have a fresh baseline to compare against
+  microbenchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run microbenchmark
+        run: cargo bench -- --output-format bencher | tee output.txt
+
+      - name: Download nightly microbenchmark data
+        uses: actions/cache/restore@v4
+        with:
+          path: ./microbenchmarks-cache
+          key: ${{ runner.os }}-microbenchmarks
+
+      - name: Update microbenchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: cargo bench
+          tool: 'cargo'
+          output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          external-data-json-path: ./microbenchmarks-cache/benchmark-data.json
+          fail-on-alert: true
+          summary-always: true
+          max-items-in-chart: 30
+
+      - name: Save nightly microbenchmark data
+        uses: actions/cache/save@v4
+        with:
+          path: ./microbenchmarks-cache
+          key: ${{ runner.os }}-microbenchmarks
+
+  benchmarks:
+    runs-on: warp-ubuntu-latest-x64-16x
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System information
+        run: |
+          echo "=== CPU ==="
+          lscpu
+          echo -e "\n=== Memory ==="
+          free -h
+          echo -e "\n=== Disk Space ==="
+          df -h
+          echo -e "\n=== Workspace Directory ==="
+          du -sh ${{ github.workspace }}
+
+      - name: Run benchmark
+        env:
+          CLOUD_PROVIDER: local
+          LOCAL_PATH: ${{ github.workspace }}/benchmark-data
+          SLATEDB_BENCH_CLEAN: true
+        run: mkdir -p ${{ github.workspace }}/benchmark-data && ./src/bencher/benchmark-db.sh
+
+      - name: Update benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: src/bencher/benchmark-db.sh
+          tool: 'customBiggerIsBetter'
+          output-file-path: target/bencher/results/benchmark-data.json
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          fail-on-alert: true
+          summary-always: true
+          max-items-in-chart: 30
+          auto-push: true
+          gh-repository: github.com/slatedb/slatedb-website
+          benchmark-data-dir-path: performance/benchmarks/main
+
+  microbenchmark-pprofs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-`uname -r`
+
+      - name: Configure perf
+        run: |
+          echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
+          echo 0 | sudo tee /proc/sys/kernel/kptr_restrict
+
+      - name: Generate pprofs
+        env:
+          CARGO_PROFILE_BENCH_DEBUG: true
+          SLATE_BENCH_PROFILE: true
+        run: |
+          # Get list of benchmarks
+          BENCHMARKS=$(cargo bench --no-run --message-format=json | jq -r 'select(.profile.test == true) | .target.name' | sort -u)
+
+          # Create pprofs for each benchmark
+          for bench in $BENCHMARKS; do
+            cargo bench --bench $bench -- --profile-time 10
+          done
+
+      - name: Checkout website repository
+        uses: actions/checkout@v4
+        with:
+          repository: slatedb/slatedb-website
+          token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          path: slatedb-website
+          ref: gh-pages
+
+      - name: Update website with new pprofs
+        env:
+          PPROF_WEBSITE_DIR: performance/microbenchmark-pprofs/main
+        run: |
+          cd slatedb-website
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Remove old .pb files
+          rm -f $PPROF_WEBSITE_DIR/*.pb
+          # Copy pprof to $PPROF_WEBSITE_DIR/<benchmark_name>.pb
+          find ../target/criterion -name "profile.pb" -exec sh -c 'cp "$1" "$PPROF_WEBSITE_DIR/$(basename $(dirname $(dirname "$1"))).pb"' sh {} \;
+          git add $PPROF_WEBSITE_DIR
+          git commit -m "Update microbenchmark pprof for job id ${GITHUB_RUN_ID}"
+          git push

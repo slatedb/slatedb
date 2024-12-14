@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -5,16 +6,15 @@ use std::sync::Arc;
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
-use tokio::sync::watch;
 
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::{RowAttributes, RowEntry, ValueDeletable};
+use crate::utils::WatchableOnceCell;
 
 pub(crate) struct KVTable {
     map: SkipMap<Bytes, ValueWithAttributes>,
-    is_durable_tx: watch::Sender<bool>,
-    is_durable_rx: watch::Receiver<bool>,
+    durable: WatchableOnceCell<Result<(), SlateDBError>>,
     size: AtomicUsize,
 }
 
@@ -25,8 +25,7 @@ pub(crate) struct WritableKVTable {
 pub(crate) struct ImmutableMemtable {
     last_wal_id: u64,
     table: Arc<KVTable>,
-    is_flushed_tx: watch::Sender<bool>,
-    is_flushed_rx: watch::Receiver<bool>,
+    flushed: WatchableOnceCell<Result<(), SlateDBError>>,
 }
 
 pub(crate) struct ImmutableWal {
@@ -50,7 +49,7 @@ impl<'a> KeyValueIterator for MemTableIterator<'a> {
     }
 }
 
-impl<'a> MemTableIterator<'a> {
+impl MemTableIterator<'_> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
         self.0.next().map(|entry| RowEntry {
             key: entry.key().clone(),
@@ -64,12 +63,10 @@ impl<'a> MemTableIterator<'a> {
 
 impl ImmutableMemtable {
     pub(crate) fn new(table: WritableKVTable, last_wal_id: u64) -> Self {
-        let (is_flushed_tx, is_flushed_rx) = watch::channel(false);
         Self {
             table: table.table,
             last_wal_id,
-            is_flushed_tx,
-            is_flushed_rx,
+            flushed: WatchableOnceCell::new(),
         }
     }
 
@@ -81,15 +78,12 @@ impl ImmutableMemtable {
         self.last_wal_id
     }
 
-    pub(crate) async fn await_flush_to_l0(&self) {
-        let mut rx = self.is_flushed_rx.clone();
-        while !*rx.borrow_and_update() {
-            rx.changed().await.expect("watch channel closed");
-        }
+    pub(crate) async fn await_flush_to_l0(&self) -> Result<(), SlateDBError> {
+        self.flushed.reader().await_value().await
     }
 
-    pub(crate) fn notify_flush_to_l0(&self) {
-        self.is_flushed_tx.send(true).expect("watch channel closed");
+    pub(crate) fn notify_flush_to_l0(&self, result: Result<(), SlateDBError>) {
+        self.flushed.write(result);
     }
 }
 
@@ -122,11 +116,13 @@ impl WritableKVTable {
     }
 
     pub(crate) fn put(&mut self, key: Bytes, value: Bytes, attrs: RowAttributes) {
-        self.table.put(key, value, attrs)
+        self.table
+            .put_or_delete(key, ValueDeletable::Value(value), attrs)
     }
 
     pub(crate) fn delete(&mut self, key: Bytes, attrs: RowAttributes) {
-        self.table.delete(key, attrs);
+        self.table
+            .put_or_delete(key, ValueDeletable::Tombstone, attrs);
     }
 
     pub(crate) fn size(&self) -> usize {
@@ -136,12 +132,10 @@ impl WritableKVTable {
 
 impl KVTable {
     fn new() -> Self {
-        let (is_durable_tx, is_durable_rx) = watch::channel(false);
         Self {
             map: SkipMap::new(),
             size: AtomicUsize::new(0),
-            is_durable_tx,
-            is_durable_rx,
+            durable: WatchableOnceCell::new(),
         }
     }
 
@@ -172,56 +166,41 @@ impl KVTable {
         MemTableIterator(self.map.range(bounds))
     }
 
-    /// Puts a value, returning as soon as the value is written to the memtable but before
+    /// Inserts a value, returning as soon as the value is written to the memtable but before
     /// it is flushed to durable storage.
-    fn put(&self, key: Bytes, value: Bytes, attrs: RowAttributes) {
-        self.maybe_subtract_old_val_from_size(key.clone());
+    fn put_or_delete(&self, key: Bytes, value: ValueDeletable, attrs: RowAttributes) {
+        let key_len = key.len();
         self.size.fetch_add(
-            key.len() + value.len() + sizeof_attributes(&attrs),
+            key_len + value.len() + sizeof_attributes(&attrs),
             Ordering::Relaxed,
         );
-        self.map.insert(
+
+        let previous_size = Cell::new(None);
+        self.map.compare_insert(
             key,
-            ValueWithAttributes {
-                value: ValueDeletable::Value(value),
-                attrs,
+            ValueWithAttributes { value, attrs },
+            |previous_value| {
+                // Optimistically calculate the size of the previous value.
+                let size =
+                    key_len + previous_value.value.len() + sizeof_attributes(&previous_value.attrs);
+                // `compare_fn` might be called multiple times in case of concurrent
+                // writes to the same key, so we use `Cell` to avoid substracting
+                // the size multiple times. The last call will set the correct size.
+                previous_size.set(Some(size));
+                true
             },
         );
-    }
-
-    fn delete(&self, key: Bytes, attrs: RowAttributes) {
-        self.maybe_subtract_old_val_from_size(key.clone());
-        self.size.fetch_add(key.len(), Ordering::Relaxed);
-        self.map.insert(
-            key,
-            ValueWithAttributes {
-                value: ValueDeletable::Tombstone,
-                attrs,
-            },
-        );
-    }
-
-    fn maybe_subtract_old_val_from_size(&self, key: Bytes) {
-        if let Some(old_deletable) = self.get(&key) {
-            let old_size = key.len()
-                + match old_deletable.value {
-                    ValueDeletable::Tombstone => 0,
-                    ValueDeletable::Value(old) => old.len(),
-                }
-                + sizeof_attributes(&old_deletable.attrs);
-            self.size.fetch_sub(old_size, Ordering::Relaxed);
+        if let Some(size) = previous_size.take() {
+            self.size.fetch_sub(size, Ordering::Relaxed);
         }
     }
 
-    pub(crate) async fn await_durable(&self) {
-        let mut rx = self.is_durable_rx.clone();
-        while !*rx.borrow_and_update() {
-            rx.changed().await.expect("watch channel closed");
-        }
+    pub(crate) async fn await_durable(&self) -> Result<(), SlateDBError> {
+        self.durable.reader().await_value().await
     }
 
-    pub(crate) fn notify_durable(&self) {
-        self.is_durable_tx.send(true).expect("watch channel closed");
+    pub(crate) fn notify_durable(&self, result: Result<(), SlateDBError>) {
+        self.durable.write(result);
     }
 }
 
@@ -403,12 +382,26 @@ mod tests {
     async fn test_memtable_track_sz() {
         let mut table = WritableKVTable::new();
 
+        assert_eq!(table.table.size(), 0);
+        table.put(
+            Bytes::from_static(b"first"),
+            Bytes::from_static(b"foo"),
+            gen_attrs(1),
+        );
+        assert_eq!(table.table.size(), 16); // first(5) + foo(3) + attrs(8)
+
+        // ensure that multiple deletes keep the table size stable
+        for ts in 2..5 {
+            table.delete(Bytes::from_static(b"first"), gen_attrs(ts));
+            assert_eq!(table.table.size(), 13); // first(5) + attrs(8)
+        }
+
         table.put(
             Bytes::from_static(b"abc333"),
             Bytes::from_static(b"val1"),
             gen_attrs(1),
         );
-        assert_eq!(table.table.size(), 18);
+        assert_eq!(table.table.size(), 31); // 13 + abc333(6) + val1(4) + attrs(8)
 
         table.put(
             Bytes::from_static(b"def456"),
@@ -418,16 +411,16 @@ mod tests {
                 expire_ts: None,
             },
         );
-        assert_eq!(table.table.size(), 33);
+        assert_eq!(table.table.size(), 46); // 31 + def456(6) + blablabla(9) + attrs(0)
 
         table.put(
             Bytes::from_static(b"def456"),
             Bytes::from_static(b"blabla"),
             gen_attrs(3),
         );
-        assert_eq!(table.table.size(), 38);
+        assert_eq!(table.table.size(), 51); // 46 - blablabla(9) + blabla(6) - attrs(0) + attrs(8)
 
         table.delete(Bytes::from_static(b"abc333"), gen_attrs(4));
-        assert_eq!(table.table.size(), 26)
+        assert_eq!(table.table.size(), 47) // 51 - val1(4)
     }
 }
