@@ -226,6 +226,9 @@ assert_eq!(txn.get("key2").await, val1);
 
 // commit, might fail on conflict, when it fails, the transaction should be rolled back
 txn.commit().await?;
+
+// one could also rollback the transaction by calling `rollback()` or dropping it when it's out of scope.
+txn.rollback().await;
 ```
 
 ### Conflict Checking
