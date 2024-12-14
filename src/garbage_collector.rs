@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -605,7 +605,7 @@ impl DirGcStatus {
             // DirGcStatus::Done => crossbeam_channel::never(),
             DirGcStatus::Indefinite(duration) => tokio::time::interval(*duration),
             DirGcStatus::OneMore => {
-                tokio::time::interval_at(tokio::time::Instant::now(), Duration::from_secs(0))
+                tokio::time::interval_at(tokio::time::Instant::now(), Duration::from_millis(100))
             },
             DirGcStatus::Done => tokio::time::interval(Duration::from_secs(u64::MAX)),
         }
@@ -1158,7 +1158,7 @@ mod tests {
     /// - One inactive unexpired SST
     /// The test then runs the compactor to verify that only the inactive expired SSTs
     /// are deleted.
-    #[tokio::test]
+    #[test_log::test(tokio::test)]
     async fn test_collect_garbage_compacted_ssts() {
         let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
         let l0_sst_handle = create_sst(table_store.clone()).await;
