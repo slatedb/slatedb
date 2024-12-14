@@ -161,6 +161,7 @@ pub(crate) struct CoreDbState {
     pub(crate) next_wal_sst_id: u64,
     pub(crate) last_compacted_wal_sst_id: u64,
     pub(crate) last_clock_tick: i64,
+    pub(crate) last_seq: u64,
     pub(crate) checkpoints: Vec<Checkpoint>,
 }
 
@@ -174,6 +175,7 @@ impl CoreDbState {
             next_wal_sst_id: 1,
             last_compacted_wal_sst_id: 0,
             last_clock_tick: i64::MIN,
+            last_seq: 0,
             checkpoints: vec![],
         }
     }
@@ -327,6 +329,14 @@ impl DbState {
         state.core.last_clock_tick = tick;
         self.update_state(state);
         Ok(tick)
+    }
+
+    pub fn increment_seq(&mut self) -> u64 {
+        let mut state = self.state_copy();
+        let last_seq = state.core.last_seq;
+        state.core.last_seq += 1;
+        self.update_state(state);
+        last_seq + 1
     }
 
     pub fn refresh_db_state(&mut self, compactor_state: &CoreDbState) {
