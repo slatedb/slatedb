@@ -232,6 +232,32 @@ txn.commit().await?;
 txn.rollback().await;
 ```
 
+A list of the transaction API is looked like:
+
+```rust
+// it might not really be a trait, but a struct with the methods:
+trait Transaction {
+    async fn commit(&self) -> Result<()>;
+
+    // the rollback operation should not be async, we need to call it in Drop impl
+    fn rollback(&self) -> Result<()>;
+
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>>;
+
+    async fn get_with_options(&self, key: &[u8], options: GetOptions) -> Result<Option<Bytes>>;
+
+    async fn put(&self, key: &[u8], value: &[u8]) -> Result<()>;
+
+    async fn put_with_options(&self, key: &[u8], value: &[u8], options: PutOptions) -> Result<()>;
+
+    async fn delete(&self, key: &[u8]) -> Result<()>;
+
+    async fn scan(&self, range: Range<Bytes>) -> Result<Iterator>;
+}
+```
+
+The list of the transaction API is not final, and it's expected to be adjusted during the implementation. The rule of thumb is that the Transaction API should be as aligned as possible to the non-transactioned API in `DB` struct.
+
 ### Conflict Checking
 
 The approach we choose on conflict checking is expected to be more similar to Badger's global `Oracle` approach, since we hope to provide SSI in the transaction feature, and it's less prone to unnecessarily abort the transaction with limited MemTable size.
