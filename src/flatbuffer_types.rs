@@ -342,6 +342,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 compacted: Some(compacted),
                 last_clock_tick: core.last_clock_tick,
                 checkpoints: Some(checkpoints),
+                last_seq: core.last_seq,
             },
         );
         self.builder.finish(manifest, None);
