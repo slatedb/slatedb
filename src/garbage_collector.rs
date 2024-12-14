@@ -8,12 +8,13 @@ use crate::manifest::Manifest;
 use crate::manifest_store::{ManifestStore, StoredManifest};
 use crate::metrics::DbStats;
 use crate::tablestore::{SstFileMetadata, TableStore};
+use crate::utils::spawn_bg_thread;
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::{fmt, thread};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 use tracing::{debug, error, info};
@@ -49,12 +50,13 @@ impl GarbageCollector {
         options: GarbageCollectorOptions,
         tokio_handle: Handle,
         db_stats: Arc<DbStats>,
+        cleanup_fn: impl FnOnce(&SlateDBError) + Send + 'static,
     ) -> Self {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let tokio_handle = options.gc_runtime.clone().unwrap_or(tokio_handle);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        thread::spawn(move || {
+        let gc_main = move || {
             let orchestrator = GarbageCollectorOrchestrator {
                 manifest_store,
                 table_store,
@@ -70,7 +72,9 @@ impl GarbageCollector {
             if shutdown_tx.send(true).is_err() {
                 error!("Could not send shutdown signal to threads blocked on await_shutdown");
             }
-        });
+            Ok(())
+        };
+        spawn_bg_thread("slatedb-gc", cleanup_fn, gc_main);
         Self {
             main_tx: Arc::new(external_tx),
             shutdown_rx,
@@ -925,13 +929,7 @@ mod tests {
         table_id: &SsTableId,
     ) -> Result<(), SlateDBError> {
         let mut sst = table_store.table_builder();
-        sst.add(RowEntry::new(
-            "key".into(),
-            Some("value".into()),
-            0,
-            None,
-            None,
-        ))?;
+        sst.add(RowEntry::new_value(b"key", b"value", 0))?;
         let table1 = sst.build()?;
         table_store.write_sst(table_id, table1).await?;
         Ok(())
@@ -1056,28 +1054,14 @@ mod tests {
         // write a wal sst
         let id1 = SsTableId::Wal(1);
         let mut sst1 = table_store.table_builder();
-        sst1.add(RowEntry::new(
-            "key".into(),
-            Some("value".into()),
-            0,
-            None,
-            None,
-        ))
-        .unwrap();
+        sst1.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
 
         let table1 = sst1.build().unwrap();
         table_store.write_sst(&id1, table1).await.unwrap();
 
         let id2 = SsTableId::Wal(2);
         let mut sst2 = table_store.table_builder();
-        sst2.add(RowEntry::new(
-            "key".into(),
-            Some("value".into()),
-            0,
-            None,
-            None,
-        ))
-        .unwrap();
+        sst2.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
         let table2 = sst2.build().unwrap();
         table_store.write_sst(&id2, table2).await.unwrap();
 
@@ -1425,6 +1409,7 @@ mod tests {
             },
             tokio::runtime::Handle::current(),
             db_stats.clone(),
+            |_| {},
         )
         .await
     }
@@ -1442,14 +1427,7 @@ mod tests {
 
         let sst_id = SsTableId::Compacted(Ulid::new());
         let mut sst = table_store.table_builder();
-        sst.add(RowEntry::new(
-            "key".into(),
-            Some("value".into()),
-            0,
-            None,
-            None,
-        ))
-        .unwrap();
+        sst.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
         let table = sst.build().unwrap();
         table_store.write_sst(&sst_id, table).await.unwrap()
     }

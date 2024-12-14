@@ -1,3 +1,5 @@
+use std::any::Any;
+use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 
@@ -64,8 +66,12 @@ pub enum SlateDBError {
     #[error("Error Compressing Block")]
     BlockCompressionError,
 
-    #[error("Unknown RowFlags -- this may be caused by reading data encoded with a newer codec")]
-    InvalidRowFlags,
+    #[error("Invalid RowFlags (encoded_bits: {encoded_bits:#b}, known_bits: {known_bits:#b}): {message}")]
+    InvalidRowFlags {
+        encoded_bits: u8,
+        known_bits: u8,
+        message: String,
+    },
 
     #[error("Error flushing immutable wals: channel closed")]
     WalFlushChannelError,
@@ -75,6 +81,14 @@ pub enum SlateDBError {
 
     #[error("Read channel error: {0}")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
+
+    #[error("background task panic'd")]
+    // we need to wrap the panic args in an Arc so SlateDbError is Clone
+    // we need to wrap the panic args in a mutex so that SlateDbError is Sync
+    BackgroundTaskPanic(Arc<Mutex<Box<dyn Any + Send>>>),
+
+    #[error("background task shutdown")]
+    BackgroundTaskShutdown,
 }
 
 impl From<std::io::Error> for SlateDBError {

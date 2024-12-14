@@ -587,8 +587,8 @@ mod tests {
     #[cfg(feature = "moka")]
     use crate::tablestore::DbCache;
     use crate::tablestore::TableStore;
-    use crate::test_utils::{assert_iterator, gen_attrs};
-    use crate::types::{RowAttributes, RowEntry, ValueDeletable};
+    use crate::test_utils::assert_iterator;
+    use crate::types::{RowEntry, ValueDeletable};
     use crate::{
         block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
     };
@@ -631,37 +631,19 @@ mod tests {
         // when:
         let mut writer = ts.table_writer(id);
         writer
-            .add(RowEntry::new(
-                vec![b'a'; 16].into(),
-                Some(vec![1u8; 16].into()),
-                0,
-                None,
-                None,
-            ))
+            .add(RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0))
             .await
             .unwrap();
         writer
-            .add(RowEntry::new(
-                vec![b'b'; 16].into(),
-                Some(vec![2u8; 16].into()),
-                0,
-                None,
-                None,
-            ))
+            .add(RowEntry::new_value(&[b'b'; 16], &[2u8; 16], 0))
             .await
             .unwrap();
         writer
-            .add(RowEntry::new(vec![b'c'; 16].into(), None, 0, None, None))
+            .add(RowEntry::new_tombstone(&[b'c'; 16], 0))
             .await
             .unwrap();
         writer
-            .add(RowEntry::new(
-                vec![b'd'; 16].into(),
-                Some(vec![4u8; 16].into()),
-                0,
-                None,
-                None,
-            ))
+            .add(RowEntry::new_value(&[b'd'; 16], &[4u8; 16], 0))
             .await
             .unwrap();
         let sst = writer.close().await.unwrap();
@@ -672,30 +654,11 @@ mod tests {
             .unwrap();
         assert_iterator(
             &mut iter,
-            &[
-                (
-                    vec![b'a'; 16],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 16])),
-                    gen_attrs(1),
-                ),
-                (
-                    vec![b'b'; 16],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 16])),
-                    gen_attrs(2),
-                ),
-                (
-                    vec![b'c'; 16],
-                    ValueDeletable::Tombstone,
-                    RowAttributes {
-                        ts: None,
-                        expire_ts: None,
-                    },
-                ),
-                (
-                    vec![b'd'; 16],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[4u8; 16])),
-                    gen_attrs(4),
-                ),
+            vec![
+                RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0),
+                RowEntry::new_value(&[b'b'; 16], &[2u8; 16], 0),
+                RowEntry::new_tombstone(&[b'c'; 16], 0),
+                RowEntry::new_value(&[b'd'; 16], &[4u8; 16], 0),
             ],
         )
         .await;
@@ -714,26 +677,12 @@ mod tests {
 
         // write a wal sst
         let mut sst1 = ts.table_builder();
-        sst1.add(RowEntry::new(
-            "key".into(),
-            Some("value".into()),
-            0,
-            None,
-            None,
-        ))
-        .unwrap();
+        sst1.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
         let table = sst1.build().unwrap();
         ts.write_sst(&wal_id, table).await.unwrap();
 
         let mut sst2 = ts.table_builder();
-        sst2.add(RowEntry::new(
-            "key".into(),
-            Some("value".into()),
-            0,
-            None,
-            None,
-        ))
-        .unwrap();
+        sst2.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
         let table2 = sst2.build().unwrap();
 
         // write another wal sst with the same id.
@@ -773,13 +722,7 @@ mod tests {
                 ValueDeletable::Value(Bytes::copy_from_slice(&value)),
             ));
             writer
-                .add(RowEntry::new(
-                    key.to_vec().into(),
-                    Some(value.to_vec().into()),
-                    0,
-                    None,
-                    None,
-                ))
+                .add(RowEntry::new_value(key.as_ref(), value.as_ref(), 0))
                 .await
                 .unwrap();
         }
