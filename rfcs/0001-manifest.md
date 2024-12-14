@@ -424,7 +424,7 @@ The set of SSTs that are referenced by a manifest are:
 
 _NOTE: The inclusive `>=` for `wal_id_last_compacted` is required so the compactor doesn't delete the most recently compacted file. We need this file to get the `writer_epoch` during the recovery process detailed in the Read Clients section below._
 
-_NOTE: Clock skew can affect the timing between the compactor and the snapshot clients. We're assuming we have well behaved clocks, a [Network Time Protocol](https://www.ntp.org/documentation/4.2.8-series/ntpd/) (NTP) daemon, or [PTP Hardware Cocks](https://aws.amazon.com/blogs/compute/its-about-time-microsecond-accurate-clocks-on-amazon-ec2-instances/) (PHCs)._
+_NOTE: Clock skew can affect the timing between the compactor and the snapshot clients. We're assuming we have well behaved clocks, a [Network Time Protocol](https://www.ntp.org/documentation/4.2.8-series/ntpd/) (NTP) daemon, or [PTP Hardware Clocks](https://aws.amazon.com/blogs/compute/its-about-time-microsecond-accurate-clocks-on-amazon-ec2-instances/) (PHCs)._
 
 _NOTE: A [previous design proposal](https://github.com/slatedb/slatedb/pull/39/files#diff-d589c7beb3d163638e94dbc8e086b3efe093852f0cad96f04cb1283c3bd1eb74R105) used a `heartbeat_s` field that clients would update periodically. After some discussion (see [here](https://github.com/slatedb/slatedb/pull/39/files#r1588896947)), we landed on a design that supports both reference counts and snapshot timeouts. Reference counts are useful for long-lived snapshots that exist indefinitely. Heartbeats are useful for short-lived snapshots that exist for the lifespan of a single process._
 
@@ -464,7 +464,7 @@ At this point, there are four potential outcomes:
 
 1. The write is successful.
 2. The write was unsuccessful. Another writer wrote an SST with the same ID and a lower (older) `writer_epoch`.
-3. The write was unsuccessful. Another writer wrote an SST with the same ID and a the same `writer_epoch`.
+3. The write was unsuccessful. Another writer wrote an SST with the same ID and the same `writer_epoch`.
 4. The write was unsuccessful. Another writer wrote an SST with the same ID and a higher (newer) `writer_epoch`.
 
 If the write was successful (1), all previous (older) writers have now been fenced.
