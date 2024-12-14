@@ -313,13 +313,13 @@ We have to track the running transactions's sequence number in the `Oracle`.
 
 Also, it's less make sense to allow a transaction to be running for 12 hours, the `recent_committed_txns` will also keep growing for such 12 hours, and the GC will not be able to release the entries. This is a potential problem that the memory usage of the `Oracle` will keep growing, and possible lead to OOM.
 
-To mitigate this, we could allow users to set a default expiration time for all of the transactions, and the transactions will be considered as expired if it's not committed within the expiration time.
+To mitigate this, we could allow users to set a default expiration time for all of the transactions & snapshots, and the transactions & snapshots will be considered as expired if it's not finished within the expiration time.
 
 ```rust
 struct Oracle {
-    running_txns: HashMap<u64, TransactionState>;
+    running_txns: HashSet<u64>,
     next_seq: u64,
-    recent_committed_txns: Deque<Arc<TransactionState>>,
+    recent_committed: Deque<TransactionState>>,
 }
 
 struct TransactionState {
@@ -332,7 +332,9 @@ struct TransactionState {
 }
 ```
 
-We should let the `Oracle` to track the running transactions, and when the transaction is finished, whether it's committed or rolled back, the `Oracle` should remove the transaction from the `running_txns` map. Also, whenever we found it becomes expired, we should also remove it from `running_txns` immediately.
+We should let the `Oracle` to track the running transactions in `running_txns`, and when the transaction is finished, whether it's committed or rolled back, the `Oracle` should remove the transaction from the `running_txns` set. If the transaction is expired, the `Oracle` should also remove the transaction from the `running_txns` set.
+
+Please note that Snapshot could also be considered as a read only transaction, and it should also be tracked in `running_txns`. And Snapshot should also has a default expiration as well.
 
 With `running_txns`, we could find out the earliest running transaction's sequence number, and `Oracle` could use this sequence number to determine which entries in `recent_committed_txns` could be GCed. This could help us to ensure both `running_txns` and `recent_committed_txns` do not grow out of a time limit.
 
