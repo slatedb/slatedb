@@ -53,7 +53,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
-use crate::types::{RowAttributes, ValueDeletable};
+use crate::types::ValueDeletable;
 use std::rc::Rc;
 use tracing::{info, warn};
 
@@ -392,6 +392,10 @@ impl DbInner {
             sst_iterators.push_back(load_sst_iters(self, sst_id).await?);
         }
 
+        // load the last seq number from manifest, and use it as the starting seq number.
+        // there might have bigger seq number in the WALs, we'd update the last seq number
+        // to the max seq number while iterating over the WALs.
+        let mut last_seq = self.state.read().state().core.last_seq;
         while let Some((mut sst_iter, sst_id)) = sst_iterators.pop_front() {
             last_sst_id = sst_id;
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
@@ -408,28 +412,8 @@ impl DbInner {
                         guard.update_clock_tick(ts)?;
                     }
 
-                    match &kv.value {
-                        ValueDeletable::Value(value) => {
-                            guard.memtable().put(
-                                kv.key.clone(),
-                                value.clone(),
-                                RowAttributes {
-                                    ts: kv.create_ts,
-                                    expire_ts: kv.expire_ts,
-                                },
-                            );
-                        }
-                        ValueDeletable::Merge(_) => {
-                            todo!()
-                        }
-                        ValueDeletable::Tombstone => guard.memtable().delete(
-                            kv.key.clone(),
-                            RowAttributes {
-                                ts: kv.create_ts,
-                                expire_ts: kv.expire_ts,
-                            },
-                        ),
-                    }
+                    last_seq = last_seq.max(kv.seq);
+                    guard.memtable().put(kv.clone());
                 }
                 self.maybe_freeze_memtable(&mut guard, sst_id)?;
                 if guard.state().core.next_wal_sst_id == sst_id {
@@ -448,6 +432,9 @@ impl DbInner {
             last_sst_id + 1,
             self.state.read().state().core.next_wal_sst_id
         );
+
+        // restore the last seq number
+        self.state.write().update_last_seq(last_seq);
 
         Ok(())
     }
@@ -1159,7 +1146,8 @@ mod tests {
     };
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
-    use crate::test_utils::{gen_attrs, TestClock};
+    use crate::test_utils::TestClock;
+    use crate::types::{RowEntry, ValueDeletable};
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -1567,9 +1555,13 @@ mod tests {
         )
         .await
         .unwrap();
-        db.delete_with_options(&[b'b'; 32], &write_options)
+        db.delete_with_options(&[b'b'; 31], &write_options)
             .await
             .unwrap();
+
+        // ensure the memtable's size is greater than l0_sst_size_bytes, or
+        // the memtable will not be flushed to l0, and the test will hang
+        // at this put_with_options call.
         let write_options = WriteOptions {
             await_durable: true,
         };
@@ -1598,9 +1590,27 @@ mod tests {
         assert_iterator(
             &mut iter,
             vec![
-                RowEntry::new_value(&[b'a'; 32], &[b'j'; 32], 0).with_create_ts(0),
-                RowEntry::new_tombstone(&[b'b'; 32], 0).with_create_ts(0),
-                RowEntry::new_value(&[b'c'; 32], &[b'l'; 32], 0).with_create_ts(10),
+                RowEntry {
+                    key: Bytes::copy_from_slice(&[b'a'; 32]),
+                    value: ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
+                    seq: 1,
+                    create_ts: Some(0),
+                    expire_ts: None,
+                },
+                RowEntry {
+                    key: Bytes::copy_from_slice(&[b'b'; 31]),
+                    value: ValueDeletable::Tombstone,
+                    seq: 2,
+                    create_ts: Some(0),
+                    expire_ts: None,
+                },
+                RowEntry {
+                    key: Bytes::copy_from_slice(&[b'c'; 32]),
+                    value: ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
+                    seq: 3,
+                    create_ts: Some(10),
+                    expire_ts: None,
+                },
             ],
         )
         .await;
@@ -1766,21 +1776,27 @@ mod tests {
 
         let memtable = {
             let mut lock = kv_store.inner.state.write();
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc1111"),
-                Bytes::copy_from_slice(b"value1111"),
-                gen_attrs(1),
-            );
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc2222"),
-                Bytes::copy_from_slice(b"value2222"),
-                gen_attrs(2),
-            );
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc3333"),
-                Bytes::copy_from_slice(b"value3333"),
-                gen_attrs(3),
-            );
+            lock.wal().put(RowEntry {
+                key: Bytes::copy_from_slice(b"abc1111"),
+                value: ValueDeletable::Value(Bytes::copy_from_slice(b"value1111")),
+                seq: 1,
+                create_ts: None,
+                expire_ts: None,
+            });
+            lock.wal().put(RowEntry {
+                key: Bytes::copy_from_slice(b"abc2222"),
+                value: ValueDeletable::Value(Bytes::copy_from_slice(b"value2222")),
+                seq: 2,
+                create_ts: None,
+                expire_ts: None,
+            });
+            lock.wal().put(RowEntry {
+                key: Bytes::copy_from_slice(b"abc3333"),
+                value: ValueDeletable::Value(Bytes::copy_from_slice(b"value3333")),
+                seq: 3,
+                create_ts: None,
+                expire_ts: None,
+            });
             lock.wal().table().clone()
         };
 
@@ -1867,6 +1883,41 @@ mod tests {
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
         let db_state = stored_manifest.db_state();
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_restore_seq_number() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let db = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        db.put(b"key1", b"val1").await.unwrap();
+        db.put(b"key2", b"val2").await.unwrap();
+        db.put(b"key3", b"val3").await.unwrap();
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        let db_restored = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        let mut state = db_restored.inner.state.write();
+        let memtable = state.memtable();
+        let mut iter = memtable.table().iter();
+        assert_eq!(iter.next_entry().await.unwrap().unwrap().seq, 1);
+        assert_eq!(iter.next_entry().await.unwrap().unwrap().seq, 2);
+        assert_eq!(iter.next_entry().await.unwrap().unwrap().seq, 3);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
