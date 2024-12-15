@@ -163,10 +163,10 @@ impl KVTable {
     pub(crate) fn get(&self, key: &[u8]) -> Option<RowEntry> {
         let start_key = LookupKey::new(Bytes::from(key.to_vec()), 0);
         let end_key = LookupKey::new(Bytes::from(key.to_vec()), u64::MAX);
-        let bounds = (Bound::Included(&start_key), Bound::Included(&end_key));
+        let bounds = (Bound::Included(start_key), Bound::Included(end_key));
         self.map
             .range(bounds)
-            .last()
+            .next_back()
             .map(|entry| entry.value().clone())
     }
 
