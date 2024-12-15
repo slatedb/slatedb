@@ -28,14 +28,12 @@ role ObjectStore:
 symmetric role SlateDBWriter:
     action Init:
         self.state = "waiting"
-        self.flush_count = 0
         self.was_ever_open = 0
     
     atomic action FlushWal:
         if self.state != "opened":
             return
         self.WriteWal()
-        self.flush_count += 1
     
     func LoadLatestManifest():
         manifests = manifest_store.List()
@@ -46,9 +44,8 @@ symmetric role SlateDBWriter:
             self.next_wal = wal[-1] + 1 if wal else 1
             result = self.WriteManifest(record(id = recent_manifest.id + 1, writer_epoch = recent_manifest.writer_epoch + 1))
         else:
-            atomic:
-                self.next_wal = 1
-                result = self.WriteManifest(record(id = 1, writer_epoch = 1))        
+            self.next_wal = 1
+            result = self.WriteManifest(record(id = 1, writer_epoch = 1))        
         return result
 
     func WriteManifest(new_manifest):
@@ -88,7 +85,7 @@ symmetric role SlateDBWriter:
                 atomic:
                     self.state = "opened"
                     self.was_ever_open = 1
-                break
+                    break
             else:
                 manifests = manifest_store.List()
                 recent_manifest = manifest_store.Read(manifests[len(manifests) - 1])
