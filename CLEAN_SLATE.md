@@ -8,7 +8,8 @@ We want to build SlateDB with a single ethos that helps the community work toget
 
 ## Vision
 
-> We believe that the future of object storage are multi-region, low latency buckets that support atomic CAS operations. Inspired by [The Cloud Storage Triad: Latency, Cost, Durability](https://materializedview.io/p/cloud-storage-triad-latency-cost-durability), we set out to build a storage engine built for the cloud. SlateDB is that storage engine.
+> We believe that the future of object storage is multi-region, low latency buckets that support atomic compare-and-swap operations. Inspired by [The Cloud Storage Triad: Latency, Cost, Durability](https://materializedview.io/p/cloud-storage-triad-latency-cost-durability), we set out to build a storage engine built for the cloud. SlateDB is that storage engine.
+>
 > &mdash;[Building a Cloud Native LSM on Object Storage by Chris Riccomini & Rohan Desai](https://www.youtube.com/watch?v=8L_4kWhdzNc), P99 CONF 2024
 
 Our vision of, "a storage engine built for the cloud," is an embedded key-value store that...
@@ -37,7 +38,7 @@ We have deliberately chosen to avoid the following features:
 
 ## Style
 
-Clean Slate lives in service of our vision. SlateDB is a transactional database, ACID semantics are paramount. To build an ACID-compliant database comfortably, Clean Slate is simple, incremental, and empirical. We make changes incrementally. Changes that add complexity must justify the change with empirical evidence.
+Clean Slate lives in service of our vision. SlateDB is a transactional database, so ACID semantics are paramount. To build an ACID-compliant database comfortably, Clean Slate is simple, incremental, and empirical. We make changes incrementally. Changes that add complexity must justify the change with empirical evidence.
 
 Clean Slate manifests itself in many ways. Here are a few examples:
 
