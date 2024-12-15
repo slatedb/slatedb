@@ -161,7 +161,6 @@ impl KVTable {
     /// Some(None) if the key is in the memtable but has a tombstone value,
     /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
     pub(crate) fn get(&self, key: &[u8]) -> Option<RowEntry> {
-        // TODO: get the last element is not considered as efficient in the current SkipMap's code.
         let start_key = LookupKey::new(Bytes::from(key.to_vec()), 0);
         let end_key = LookupKey::new(Bytes::from(key.to_vec()), u64::MAX);
         let bounds = (Bound::Included(&start_key), Bound::Included(&end_key));
