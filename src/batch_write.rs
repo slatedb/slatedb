@@ -59,6 +59,7 @@ impl DbInner {
             let mut guard = self.state.write();
 
             guard.update_clock_tick(now)?;
+            let seq = guard.increment_seq();
             let current_wal = guard.wal();
             for op in batch.ops {
                 match op {
@@ -68,7 +69,7 @@ impl DbInner {
                             value: ValueDeletable::Value(value),
                             create_ts: Some(now),
                             expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
-                            seq: 0, // TODO: assign sequence number
+                            seq,
                         });
                     }
                     WriteOp::Delete(key) => {
@@ -77,7 +78,7 @@ impl DbInner {
                             value: ValueDeletable::Tombstone,
                             create_ts: Some(now),
                             expire_ts: None,
-                            seq: 0, // TODO: assign sequence number
+                            seq,
                         });
                     }
                 }
@@ -91,6 +92,7 @@ impl DbInner {
             }
             let mut guard = self.state.write();
             guard.update_clock_tick(now)?;
+            let seq = guard.increment_seq();
             let current_memtable = guard.memtable();
             for op in batch.ops {
                 match op {
@@ -100,7 +102,7 @@ impl DbInner {
                             value: ValueDeletable::Value(value),
                             create_ts: Some(now),
                             expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
-                            seq: 0, // TODO: assign sequence number
+                            seq,
                         });
                     }
                     WriteOp::Delete(key) => {
@@ -109,7 +111,7 @@ impl DbInner {
                             value: ValueDeletable::Tombstone,
                             create_ts: Some(now),
                             expire_ts: None,
-                            seq: 0, // TODO: assign sequence number
+                            seq,
                         });
                     }
                 }

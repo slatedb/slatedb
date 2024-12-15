@@ -130,7 +130,6 @@ impl WritableKVTable {
         &self.table
     }
 
-    // TODO: replace put() with RowEntry
     pub(crate) fn put(&mut self, row: RowEntry) {
         self.table.put(row)
     }
