@@ -11,6 +11,12 @@ on:
 env:
   RUSTFLAGS: "-Dwarnings"
 
+permissions:
+  # Required for PR comments
+  pull-requests: write
+  # Required for storing benchmark results
+  contents: write
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -68,3 +74,28 @@ jobs:
       - name: Run Tests
         run: cargo nextest run --all-features --profile ci
 
+  microbenchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run benchmark
+        run: cargo bench -- --output-format bencher | tee output.txt
+
+      - name: Download nightly benchmark data
+        uses: actions/cache/restore@v4
+        with:
+          path: ./microbenchmarks-cache
+          key: ${{ runner.os }}-microbenchmarks
+
+      - name: Update benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: cargo bench
+          tool: 'cargo'
+          output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          external-data-json-path: ./microbenchmarks-cache/benchmark-data.json
+          comment-on-alert: true
+          summary-always: true
+          max-items-in-chart: 30

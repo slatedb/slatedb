@@ -79,10 +79,8 @@ async fn exec_list_manifest(
         _ => u64::MIN..u64::MAX,
     };
 
-    Ok(println!(
-        "{}",
-        list_manifests(path, object_store, range).await?
-    ))
+    println!("{}", list_manifests(path, object_store, range).await?);
+    Ok(())
 }
 
 async fn exec_create_checkpoint(
@@ -101,7 +99,8 @@ async fn exec_create_checkpoint(
         },
     )
     .await?;
-    Ok(println!("{:?}", result))
+    println!("{:?}", result);
+    Ok(())
 }
 
 async fn exec_refresh_checkpoint(
@@ -110,10 +109,11 @@ async fn exec_refresh_checkpoint(
     id: Uuid,
     lifetime: Option<Duration>,
 ) -> Result<(), Box<dyn Error>> {
-    Ok(println!(
+    println!(
         "{:?}",
         Db::refresh_checkpoint(path, object_store, id, lifetime).await?
-    ))
+    );
+    Ok(())
 }
 
 async fn exec_delete_checkpoint(
@@ -121,10 +121,8 @@ async fn exec_delete_checkpoint(
     object_store: Arc<dyn ObjectStore>,
     id: Uuid,
 ) -> Result<(), Box<dyn Error>> {
-    Ok(println!(
-        "{:?}",
-        Db::delete_checkpoint(path, object_store, id).await?
-    ))
+    println!("{:?}", Db::delete_checkpoint(path, object_store, id).await?);
+    Ok(())
 }
 
 async fn exec_list_checkpoints(
@@ -133,7 +131,8 @@ async fn exec_list_checkpoints(
 ) -> Result<(), Box<dyn Error>> {
     let checkpoint = list_checkpoints(path, object_store).await?;
     let checkpoint_json = serde_json::to_string(&checkpoint)?;
-    Ok(println!("{}", checkpoint_json))
+    println!("{}", checkpoint_json);
+    Ok(())
 }
 
 async fn exec_gc_once(
