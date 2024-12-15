@@ -41,6 +41,7 @@ use crate::config::{
 };
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
+use crate::filter;
 use crate::flush::WalFlushThreadMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
@@ -53,7 +54,6 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
-use crate::{db, filter};
 use std::rc::Rc;
 use tracing::{info, warn};
 
