@@ -1146,8 +1146,6 @@ mod tests {
     };
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
-    #[cfg(feature = "wal_disable")]
-    use crate::test_utils::assert_iterator;
     use crate::test_utils::TestClock;
     use crate::types::{RowEntry, ValueDeletable};
 
@@ -1526,8 +1524,6 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
     async fn test_wal_disabled() {
-        use crate::test_utils::gen_attrs;
-        use crate::test_utils::gen_empty_attrs;
         use crate::{test_utils::assert_iterator, types::RowEntry};
 
         let clock = Arc::new(TestClock::new());
@@ -1593,18 +1589,28 @@ mod tests {
             .unwrap();
         assert_iterator(
             &mut iter,
-            &[
-                (
-                    vec![b'a'; 32],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
-                    gen_attrs(0),
-                ),
-                (vec![b'b'; 32], ValueDeletable::Tombstone, gen_empty_attrs()),
-                (
-                    vec![b'c'; 32],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
-                    gen_attrs(10),
-                ),
+            vec![
+                RowEntry {
+                    key: Bytes::copy_from_slice(&[b'a'; 32]),
+                    value: ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
+                    seq: 1,
+                    create_ts: Some(0),
+                    expire_ts: None,
+                },
+                RowEntry {
+                    key: Bytes::copy_from_slice(&[b'b'; 31]),
+                    value: ValueDeletable::Tombstone,
+                    seq: 2,
+                    create_ts: Some(0),
+                    expire_ts: None,
+                },
+                RowEntry {
+                    key: Bytes::copy_from_slice(&[b'c'; 32]),
+                    value: ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
+                    seq: 3,
+                    create_ts: Some(10),
+                    expire_ts: None,
+                },
             ],
         )
         .await;
