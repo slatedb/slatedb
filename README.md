@@ -94,7 +94,7 @@ SlateDB is currently in the early stages of development. It is not yet ready for
 - [x] Manifest persistence ([#14](https://github.com/slatedb/slatedb/issues/14))
 - [x] Compaction ([#7](https://github.com/slatedb/slatedb/issues/7))
 - [ ] Transactions
-- [ ] Merge operator ([#328](https://github.com/slatedb/slatedb/issues/328))
+- [x] Merge operator ([#328](https://github.com/slatedb/slatedb/issues/328))
 
 ## License
 
