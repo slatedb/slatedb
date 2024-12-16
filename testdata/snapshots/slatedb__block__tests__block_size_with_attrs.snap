@@ -1,0 +1,13 @@
+---
+source: src/block.rs
+expression: "(block.size(), block.data, block.offsets)"
+snapshot_kind: text
+---
+(
+    73,
+    b"\0\0\0\x04key1\0\0\0\0\0\0\0\0\x04\0\0\0\0\0\0\0\x01\0\0\0\x06value1\0\x03\0\x012\0\0\0\0\0\0\0\0\x04\0\0\0\0\0\0\0\x01\0\0\0\x06value2",
+    [
+        0,
+        35,
+    ],
+)
