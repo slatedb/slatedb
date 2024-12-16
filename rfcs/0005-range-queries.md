@@ -76,7 +76,7 @@ impl DbIterator {
     ///  due to an underlying error
     pub async fn next(
         &mut self,
-    ) -> Result<Option<DbRecord>, SlateDbError> {
+    ) -> Result<Option<KeyValue>, SlateDbError> {
         ...
     }
 
@@ -93,16 +93,16 @@ impl DbIterator {
     ///  in order to reclaim resources
     pub async fn seek(
         &mut self,
-        lower_bound: Bound<&[u8]>
+        next_key: Bytes,
     ) -> Result<(), SlateDbError> {
         ...
     }	
 
 }
 
-struct DbRecord {
-    key: Bytes,
-    value: Bytes,
+pub struct KeyValue {
+    pub key: Bytes,
+    pub value: Bytes,
 }
 ```
 
@@ -136,7 +136,7 @@ pub struct ScanOptions {
     /// The read commit level for read operations
     pub read_level: ReadLevel,
     /// The number of bytes to read ahead
-    pub read_ahead_size: usize,
+    pub read_ahead_bytes: usize,
     /// Whether or not fetched blocks should be cached
     pub cache_blocks: bool
 }

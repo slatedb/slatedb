@@ -109,6 +109,12 @@ impl TableStore {
         }
     }
 
+    /// Get the number of blocks for a size specified in bytes.
+    /// The returned value will be rounded down to the nearest block.
+    pub(crate) fn bytes_to_blocks(&self, bytes: usize) -> usize {
+        bytes.div_ceil(self.sst_format.block_size)
+    }
+
     pub(crate) async fn list_wal_ssts<R: RangeBounds<u64>>(
         &self,
         id_range: R,
@@ -579,6 +585,8 @@ mod tests {
     use std::sync::Arc;
 
     use object_store::{memory::InMemory, path::Path, ObjectStore};
+    use proptest::prelude::any;
+    use proptest::proptest;
     use ulid::Ulid;
 
     use crate::error;
@@ -966,5 +974,20 @@ mod tests {
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 1);
         assert_eq!(ssts[0].id, id2);
+    }
+
+    proptest! {
+        #[test]
+        fn convert_bytes_to_blocks_precise_when_aligned_with_block_size(
+            block_size in any::<usize>(),
+            num_blocks in any::<usize>(),
+        ) {
+            let os = Arc::new(InMemory::new());
+            let format = SsTableFormat { block_size, ..SsTableFormat::default() };
+            let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+            if let Some(bytes) = block_size.checked_mul(num_blocks) {
+                assert_eq!(num_blocks, ts.bytes_to_blocks(bytes));
+            }
+        }
     }
 }

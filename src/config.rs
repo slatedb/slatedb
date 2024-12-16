@@ -171,6 +171,7 @@ use crate::db_cache::DbCache;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
+pub const DEFAULT_SCAN_OPTIONS: &ScanOptions = &ScanOptions::default();
 pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
 pub const DEFAULT_PUT_OPTIONS: &PutOptions = &PutOptions::default();
 
@@ -202,6 +203,28 @@ impl ReadOptions {
     const fn default() -> Self {
         Self {
             read_level: ReadLevel::Commited,
+        }
+    }
+}
+
+pub struct ScanOptions {
+    /// The read commit level for read operations
+    pub read_level: ReadLevel,
+    /// The number of bytes to read ahead. The value is rounded up to the nearest
+    /// block size when fetching from object storage. The default is 1, which
+    /// rounds up to one block.
+    pub read_ahead_bytes: usize,
+    /// Whether or not fetched blocks should be cached
+    pub cache_blocks: bool,
+}
+
+impl ScanOptions {
+    /// Create a new ScanOptions with `read_level` set to [`ReadLevel::Commited`].
+    pub const fn default() -> Self {
+        Self {
+            read_level: ReadLevel::Commited,
+            read_ahead_bytes: 1,
+            cache_blocks: false,
         }
     }
 }
