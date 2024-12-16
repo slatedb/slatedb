@@ -1,5 +1,6 @@
 use std::cell::Cell;
-use std::ops::Bound;
+use std::collections::VecDeque;
+use std::ops::{RangeBounds, RangeFull};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -7,8 +8,10 @@ use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
 
+use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, SeekToKey};
+use crate::merge_iterator::MergeIterator;
 use crate::types::{RowAttributes, RowEntry, ValueDeletable};
 use crate::utils::WatchableOnceCell;
 
@@ -33,9 +36,53 @@ pub(crate) struct ImmutableWal {
     table: Arc<KVTable>,
 }
 
-type MemTableRange<'a> = Range<'a, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, ValueWithAttributes>;
+type MemTableRange<'a, T> = Range<'a, Bytes, T, Bytes, ValueWithAttributes>;
 
-pub struct MemTableIterator<'a>(MemTableRange<'a>);
+pub(crate) struct MemTableIterator<'a, T: RangeBounds<Bytes>>(MemTableRange<'a, T>);
+
+pub(crate) struct VecDequeKeyValueIterator {
+    rows: VecDeque<RowEntry>,
+}
+
+impl VecDequeKeyValueIterator {
+    pub(crate) fn new(rows: VecDeque<RowEntry>) -> Self {
+        Self { rows }
+    }
+
+    pub(crate) async fn materialize_range(
+        tables: VecDeque<Arc<KVTable>>,
+        range: BytesRange,
+    ) -> Result<Self, SlateDBError> {
+        let memtable_iters = tables.iter().map(|t| t.range(range.clone())).collect();
+        let mut merge_iter = MergeIterator::new(memtable_iters).await?;
+        let mut rows = VecDeque::new();
+
+        while let Some(row_entry) = merge_iter.next_entry().await? {
+            rows.push_back(row_entry.clone());
+        }
+
+        Ok(VecDequeKeyValueIterator::new(rows))
+    }
+}
+
+impl KeyValueIterator for VecDequeKeyValueIterator {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        Ok(self.rows.pop_front())
+    }
+}
+
+impl SeekToKey for VecDequeKeyValueIterator {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        loop {
+            let front = self.rows.front();
+            if front.map_or(false, |record| record.key < next_key) {
+                self.rows.pop_front();
+            } else {
+                return Ok(());
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ValueWithAttributes {
@@ -43,13 +90,13 @@ pub(crate) struct ValueWithAttributes {
     pub(crate) attrs: RowAttributes,
 }
 
-impl<'a> KeyValueIterator for MemTableIterator<'a> {
+impl<'a, T: RangeBounds<Bytes>> KeyValueIterator for MemTableIterator<'a, T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.next_entry_sync())
     }
 }
 
-impl MemTableIterator<'_> {
+impl<T: RangeBounds<Bytes>> MemTableIterator<'_, T> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
         self.0.next().map(|entry| RowEntry {
             key: entry.key().clone(),
@@ -155,15 +202,12 @@ impl KVTable {
         self.map.get(key).map(|entry| entry.value().clone())
     }
 
-    pub(crate) fn iter(&self) -> MemTableIterator {
-        let bounds = (Bound::Unbounded, Bound::Unbounded);
-        MemTableIterator(self.map.range(bounds))
+    pub(crate) fn iter(&self) -> MemTableIterator<RangeFull> {
+        self.range(..)
     }
 
-    #[allow(dead_code)] // will be used in #8
-    pub(crate) fn range_from(&self, start: Bytes) -> MemTableIterator {
-        let bounds = (Bound::Included(start), Bound::Unbounded);
-        MemTableIterator(self.map.range(bounds))
+    pub(crate) fn range<T: RangeBounds<Bytes>>(&self, range: T) -> MemTableIterator<T> {
+        MemTableIterator(self.map.range(range))
     }
 
     /// Inserts a value, returning as soon as the value is written to the memtable but before
@@ -312,7 +356,7 @@ mod tests {
             gen_attrs(5),
         );
 
-        let mut iter = table.table().range_from(Bytes::from_static(b"abc333"));
+        let mut iter = table.table().range(Bytes::from_static(b"abc333")..);
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc333".as_slice());
         assert_eq!(kv.value, b"value3".as_slice());
@@ -354,7 +398,7 @@ mod tests {
             gen_attrs(5),
         );
 
-        let mut iter = table.table().range_from(Bytes::from_static(b"abc345"));
+        let mut iter = table.table().range(Bytes::from_static(b"abc345")..);
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc444".as_slice());
         assert_eq!(kv.value, b"value4".as_slice());
