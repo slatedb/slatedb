@@ -86,7 +86,7 @@ SlateDB is currently in the early stages of development. It is not yet ready for
 
 - [x] Basic API (get, put, delete)
 - [x] SSTs on object storage
-- [ ] Range queries ([#8](https://github.com/slatedb/slatedb/issues/8))
+- [x] Range queries ([#8](https://github.com/slatedb/slatedb/issues/8))
 - [x] Block cache ([#15](https://github.com/slatedb/slatedb/issues/15))
 - [x] Disk cache ([#9](https://github.com/slatedb/slatedb/issues/9))
 - [x] Compression ([#10](https://github.com/slatedb/slatedb/issues/10))
@@ -94,7 +94,7 @@ SlateDB is currently in the early stages of development. It is not yet ready for
 - [x] Manifest persistence ([#14](https://github.com/slatedb/slatedb/issues/14))
 - [x] Compaction ([#7](https://github.com/slatedb/slatedb/issues/7))
 - [ ] Transactions
-- [x] Merge operator ([#328](https://github.com/slatedb/slatedb/issues/328))
+- [ ] Merge operator ([#328](https://github.com/slatedb/slatedb/issues/328))
 
 ## License
 
