@@ -23,7 +23,7 @@ Our vision of, "a storage engine built for the cloud," is an embedded key-value 
 
 This vision has led us to support the following features in SlateDB:
 
-- **Zero-disk architecture**: SlateDB should be capable of running withhout any disks. Object storage is always the only source of truth.
+- **Zero-disk architecture**: SlateDB should be capable of running without any disks. Object storage is always the only source of truth.
 - **Single-writer**: SlateDB only needs to support one writer process at a time. SlateDB should enforce this property. Applications that need multiple writers should use multiple SlateDB databases as partitions.
 - **Multi-reader**: SlateDB allows multiple processes, potentially across multiple machines, to read from a single SlateDB database.
 - **Read caching**: SlateDB should cache reads to improve performance and reduce cloud API costs.
