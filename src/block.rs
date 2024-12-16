@@ -171,7 +171,7 @@ impl BlockBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{gen_attrs, gen_empty_attrs};
+    use crate::test_utils::{assert_debug_snapshot, gen_attrs, gen_empty_attrs};
 
     #[test]
     fn test_block() {
@@ -184,6 +184,7 @@ mod tests {
         let decoded = Block::decode(encoded);
         assert_eq!(block.data, decoded.data);
         assert_eq!(block.offsets, decoded.offsets);
+        assert_debug_snapshot!("test_block", (block.data, block.offsets));
     }
 
     #[test]
@@ -195,6 +196,7 @@ mod tests {
         let block = builder.build().unwrap();
         let encoded = block.encode();
         let _decoded = Block::decode(encoded);
+        assert_debug_snapshot!("block_with_tombstone", (block.data, block.offsets));
     }
 
     #[test]
@@ -204,12 +206,14 @@ mod tests {
         assert!(builder.add_value(b"key2", b"value2", gen_attrs(1)));
         let block = builder.build().unwrap();
         assert_eq!(73, block.size());
+        assert_debug_snapshot!("block_size_with_attrs", (block.size(), block.data, block.offsets));
 
         let mut builder = BlockBuilder::new(4096);
         assert!(builder.add_value(b"key1", b"value1", gen_empty_attrs()));
         assert!(builder.add_value(b"key2", b"value2", gen_empty_attrs()));
         let block = builder.build().unwrap();
         assert_eq!(57, block.size());
+        assert_debug_snapshot!("block_size_with_empty_attrs", (block.size(), block.data, block.offsets));
     }
 
     #[test]
