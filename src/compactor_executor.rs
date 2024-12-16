@@ -16,13 +16,14 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
 use crate::sorted_run_iterator::SortedRunIterator;
-use crate::sst_iter::SstIterator;
+use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 
 use crate::metrics::DbStats;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
 use tracing::error;
+use crate::bytes_range::BytesRange;
 
 pub(crate) struct CompactionJob {
     pub(crate) destination: u32,
@@ -93,34 +94,52 @@ pub(crate) struct TokioCompactionExecutorInner {
 
 impl TokioCompactionExecutorInner {
     async fn load_iterators<'a>(
-        &'a self,
+        &self,
         compaction: &'a CompactionJob,
     ) -> Result<
         TwoMergeIterator<MergeIterator<SstIterator<'a>>, MergeIterator<SortedRunIterator<'a>>>,
         SlateDBError,
     > {
+        let sst_iter_options = SstIteratorOptions {
+            max_fetch_tasks: 4,
+            blocks_to_fetch: 256,
+            cache_blocks: false, // don't clobber the cache
+            eager_spawn: false,
+        };
+
         let mut l0_iters = VecDeque::new();
+        // TODO: No need to copy l0 SST
         for l0 in compaction.ssts.iter() {
-            // block cache is disabled here so that we dont clobber the cache
-            let iter = SstIterator::new_spawn(l0, self.table_store.clone(), 4, 256, false).await?;
-            l0_iters.push_back(iter);
+            l0_iters.push_back(SstIterator::range(
+                l0.clone(),
+                BytesRange::from(..),
+                self.table_store.clone(),
+                sst_iter_options,
+            ).await?);
         }
         let l0_merge_iter = MergeIterator::new(l0_iters).await?;
+
         let mut sr_iters = VecDeque::new();
+        // TODO: No need to copy sorted run
         for sr in compaction.sorted_runs.iter() {
-            let iter =
-                SortedRunIterator::new_spawn(sr, self.table_store.clone(), 16, 256, false).await?;
+            let iter = SortedRunIterator::all(
+                sr.clone(),
+                self.table_store.clone(),
+                sst_iter_options,
+            ).await?;
             sr_iters.push_back(iter);
         }
         let sr_merge_iter = MergeIterator::new(sr_iters).await?;
-        TwoMergeIterator::new(l0_merge_iter, sr_merge_iter).await
+        Ok(TwoMergeIterator::new(l0_merge_iter, sr_merge_iter).await?)
     }
 
     async fn execute_compaction(
-        &self,
+        self: &Arc<Self>,
         compaction: CompactionJob,
     ) -> Result<SortedRun, SlateDBError> {
-        let mut all_iter = self.load_iterators(&compaction).await?;
+        let mut all_iter = self.load_iterators(
+            &compaction
+        ).await?;
         let mut output_ssts = Vec::new();
         let mut current_writer = self
             .table_store

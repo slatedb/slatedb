@@ -316,7 +316,7 @@ mod tests {
     use crate::manifest_store::{ManifestStore, StoredManifest};
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
-    use crate::sst_iter::SstIterator;
+    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
     use crate::test_utils::TestClock;
 
@@ -347,7 +347,12 @@ mod tests {
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
-        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1, false)
+
+        let mut iter = SstIterator::all(
+            handle.clone(), // TODO: Fix unneeded clone
+            table_store.clone(),
+            SstIteratorOptions::default()
+        )
             .await
             .unwrap();
         for i in 0..4 {
@@ -450,7 +455,11 @@ mod tests {
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
-        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1, false)
+        let mut iter = SstIterator::all(
+            handle.clone(), // TODO: Replace clone after we have ref supported
+            table_store.clone(),
+            SstIteratorOptions::default()
+        )
             .await
             .unwrap();
 

@@ -39,18 +39,15 @@ impl BytesRange {
         }
     }
 
+    pub(crate) fn unbounded() -> Self {
+        Self::new(Unbounded, Unbounded)
+    }
+
     pub(crate) fn from<T: RangeBounds<Bytes>>(range: T) -> Self {
         Self::new(range.start_bound().cloned(), range.end_bound().cloned())
     }
 
-    pub(crate) fn with_start_key(start_key: Option<Bytes>) -> Self {
-        match start_key {
-            None => Self::from(..),
-            Some(k) => Self::from(k..),
-        }
-    }
-
-    pub(crate) fn contains(&self, value: &Bytes) -> bool {
+    pub(crate) fn contains(&self, value: &[u8]) -> bool {
         let above_start_bound = match &self.start_bound {
             Unbounded => true,
             Included(b) => value >= b,
@@ -95,7 +92,6 @@ impl BytesRange {
 
     /// Get the end bound as an [`Option`]. Returns `None` if unbounded. Otherwise, it
     /// returns `Some(bytes)` if the bound is either `Included(bytes)` or `Excluded(bytes)`.
-    #[cfg(test)]
     pub(crate) fn end_bound_opt(&self) -> Option<Bytes> {
         as_option(self.end_bound()).cloned()
     }

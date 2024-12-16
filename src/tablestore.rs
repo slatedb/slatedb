@@ -591,7 +591,7 @@ mod tests {
 
     use crate::error;
     use crate::sst::SsTableFormat;
-    use crate::sst_iter::SstIterator;
+    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     #[cfg(feature = "moka")]
     use crate::tablestore::DbCache;
     use crate::tablestore::TableStore;
@@ -656,8 +656,12 @@ mod tests {
             .unwrap();
         let sst = writer.close().await.unwrap();
 
+        let sst_iter_options = SstIteratorOptions {
+            eager_spawn: true,
+            .. SstIteratorOptions::default()
+        };
         // then:
-        let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1, true)
+        let mut iter = SstIterator::all(sst, ts.clone(), sst_iter_options)
             .await
             .unwrap();
         assert_iterator(

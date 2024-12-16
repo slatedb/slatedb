@@ -1,21 +1,20 @@
 use crate::bytes_range::BytesRange;
-use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::mem_table::VecDequeKeyValueIterator;
 use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
-use crate::sorted_run_iterator::SortedRunIterator;
-use crate::sst_iter::SstIterator;
 use crate::types::KeyValue;
 
 use bytes::Bytes;
 use std::collections::VecDeque;
+use crate::sorted_run_iterator::SortedRunIterator;
+use crate::sst_iter::SstIterator;
 
 type ScanIterator<'a> = TwoMergeIterator<
     VecDequeKeyValueIterator,
     TwoMergeIterator<
-        MergeIterator<SstIterator<'a, Box<SsTableHandle>>>,
-        MergeIterator<SortedRunIterator<'a, Box<SsTableHandle>>>,
+        MergeIterator<SstIterator<'a>>,
+        MergeIterator<SortedRunIterator<'a>>,
     >,
 >;
 
@@ -30,8 +29,8 @@ impl<'a> DbIterator<'a> {
     pub(crate) async fn new(
         range: BytesRange,
         mem_iter: VecDequeKeyValueIterator,
-        l0_iters: VecDeque<SstIterator<'a, Box<SsTableHandle>>>,
-        sr_iters: VecDeque<SortedRunIterator<'a, Box<SsTableHandle>>>,
+        l0_iters: VecDeque<SstIterator<'a>>,
+        sr_iters: VecDeque<SortedRunIterator<'a>>,
     ) -> Result<Self, SlateDBError> {
         let (l0_iter, sr_iter) =
             tokio::join!(MergeIterator::new(l0_iters), MergeIterator::new(sr_iters),);

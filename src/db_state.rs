@@ -1,15 +1,16 @@
-use crate::checkpoint::Checkpoint;
 use bytes::Bytes;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::Range;
 use std::sync::Arc;
 use tracing::debug;
 use ulid::Ulid;
 use SsTableId::{Compacted, Wal};
 
 use crate::bytes_range::BytesRange;
+use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
@@ -158,8 +159,17 @@ impl SortedRun {
             .map(|idx| &self.ssts[idx])
     }
 
-    pub(crate) fn tables_covering_range(&self, range: &BytesRange) -> VecDeque<&SsTableHandle> {
-        let mut covering_ssts = VecDeque::new();
+    pub(crate) fn find_ssts_with_range_from_key(&self, key: &[u8]) -> VecDeque<&SsTableHandle> {
+        match self.find_sst_with_range_covering_key_idx(key) {
+            Some(idx) => self.ssts[idx..].iter().collect(),
+            None => self.ssts[..].iter().collect(),
+        }
+    }
+
+    pub(crate) fn table_idx_covering_range(&self, range: &BytesRange) -> Range<usize> {
+        let mut min_idx = None;
+        let mut max_idx = 0;
+
         for idx in 0..self.ssts.len() {
             let current_sst = &self.ssts[idx];
 
@@ -171,10 +181,21 @@ impl SortedRun {
             };
 
             if current_sst.intersects_range(upper_bound_key, range) {
-                covering_ssts.push_back(&self.ssts[idx]);
+                if matches!(min_idx, None) {
+                    min_idx = Some(idx);
+                }
+
+                max_idx = idx;
             }
         }
-        covering_ssts
+        // TODO: This is wrong
+        let min_idx = min_idx.unwrap_or(0);
+        min_idx..(max_idx + 1)
+    }
+
+    pub(crate) fn tables_covering_range(&self, range: &BytesRange) -> VecDeque<&SsTableHandle> {
+        let matching_range = self.table_idx_covering_range(range);
+        self.ssts[matching_range].iter().collect()
     }
 }
 
