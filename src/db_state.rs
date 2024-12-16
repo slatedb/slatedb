@@ -13,6 +13,7 @@ use crate::bytes_range::BytesRange;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
+use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 
 #[derive(Clone, PartialEq, Serialize)]
 pub(crate) struct SsTableHandle {
@@ -181,6 +182,7 @@ pub(crate) struct DbState {
     memtable: WritableKVTable,
     wal: WritableKVTable,
     state: Arc<COWDbState>,
+    error: WatchableOnceCell<SlateDBError>,
 }
 
 // represents the state that is mutated by creating a new copy with the mutations
@@ -251,6 +253,7 @@ impl DbState {
                 imm_wal: VecDeque::new(),
                 core: core_db_state,
             }),
+            error: WatchableOnceCell::new(),
         }
     }
 
@@ -271,7 +274,14 @@ impl DbState {
         self.state.core.next_wal_sst_id - 1
     }
 
+    pub fn error_reader(&self) -> WatchableOnceCellReader<SlateDBError> {
+        self.error.reader()
+    }
+
     // mutations
+    pub fn record_fatal_error(&mut self, error: SlateDBError) {
+        self.error.write(error);
+    }
 
     pub fn wal(&mut self) -> &mut WritableKVTable {
         &mut self.wal
@@ -289,18 +299,25 @@ impl DbState {
         self.state = Arc::new(state);
     }
 
-    pub fn freeze_memtable(&mut self, wal_id: u64) {
+    pub fn freeze_memtable(&mut self, wal_id: u64) -> Result<(), SlateDBError> {
+        if let Some(err) = self.error.reader().read() {
+            return Err(err.clone());
+        }
         let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
         let mut state = self.state_copy();
         state
             .imm_memtable
             .push_front(Arc::new(ImmutableMemtable::new(old_memtable, wal_id)));
         self.update_state(state);
+        Ok(())
     }
 
-    pub fn freeze_wal(&mut self) -> Option<u64> {
+    pub fn freeze_wal(&mut self) -> Result<Option<u64>, SlateDBError> {
+        if let Some(err) = self.error.reader().read() {
+            return Err(err.clone());
+        }
         if self.wal.table().is_empty() {
-            return None;
+            return Ok(None);
         }
         let old_wal = std::mem::replace(&mut self.wal, WritableKVTable::new());
         let mut state = self.state_copy();
@@ -309,7 +326,7 @@ impl DbState {
         state.imm_wal.push_front(imm_wal);
         state.core.next_wal_sst_id += 1;
         self.update_state(state);
-        Some(id)
+        Ok(Some(id))
     }
 
     pub fn pop_imm_wal(&mut self) {
@@ -425,7 +442,9 @@ mod tests {
     fn add_l0s_to_dbstate(db_state: &mut DbState, n: u32) {
         let dummy_info = create_sst_info(None);
         for i in 0..n {
-            db_state.freeze_memtable(i as u64);
+            db_state
+                .freeze_memtable(i as u64)
+                .expect("db in error state");
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
             let handle = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), dummy_info.clone());
             db_state.move_imm_memtable_to_l0(imm, handle);

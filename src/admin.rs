@@ -124,6 +124,7 @@ pub async fn run_gc_instance(
         gc_opts,
         tokio_handle,
         stats.clone(),
+        |_| {},
     )
     .await;
 

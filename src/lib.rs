@@ -50,6 +50,7 @@ mod tablestore;
 mod test_utils;
 mod transactional_object_store;
 mod types;
+mod utils;
 
 /// Re-export the object store crate.
 ///
