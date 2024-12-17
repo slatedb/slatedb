@@ -176,7 +176,7 @@ mod tests {
     use crate::test_utils::{assert_debug_snapshot, gen_attrs, gen_empty_attrs};
 
     #[derive(Debug)]
-    pub(crate) struct BlockTestCase {
+    struct BlockTestCase {
         name: &'static str,
         entries: Vec<(&'static [u8], Option<&'static [u8]>)>, // (key, value) with None for tombstone
         expected_size: Option<usize>,                         // Expected size of the block
