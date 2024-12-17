@@ -170,21 +170,36 @@ impl BlockBuilder {
 
 #[cfg(test)]
 mod tests {
-    use rstest::{fixture, rstest};
+    use rstest::rstest;
 
     use super::*;
     use crate::test_utils::{assert_debug_snapshot, gen_attrs, gen_empty_attrs};
 
     #[derive(Debug)]
-    struct BlockTestCase {
+    pub(crate) struct BlockTestCase {
         name: &'static str,
         entries: Vec<(&'static [u8], Option<&'static [u8]>)>, // (key, value) with None for tombstone
         expected_size: Option<usize>,                         // Expected size of the block
+        use_timestamped_attrs: bool, // Flag to use attributes with a timestamp
+        timestamp: Option<i64>,      // timestamp value
     }
 
-    #[fixture]
-    fn block_builder() -> BlockBuilder {
-        BlockBuilder::new(4096)
+    fn build_block(test_case: &BlockTestCase) -> Block {
+        let mut builder = BlockBuilder::new(4096);
+
+        for (key, value) in &test_case.entries {
+            let attrs = if test_case.use_timestamped_attrs {
+                gen_attrs(test_case.timestamp.unwrap_or(1)) // Use timestamp value or default to 1
+            } else {
+                gen_empty_attrs()
+            };
+
+            match value {
+                Some(v) => assert!(builder.add_value(key, v, attrs)),
+                None => assert!(builder.add_tombstone(key, gen_empty_attrs())),
+            }
+        }
+        builder.build().expect("Failed to build block")
     }
 
     #[rstest]
@@ -196,16 +211,11 @@ mod tests {
             (b"key2", Some(b"value2")),
         ],
         expected_size: None,
+        use_timestamped_attrs: false,
+        timestamp: None,
     })]
-    fn test_block(#[case] test_case: BlockTestCase, block_builder: BlockBuilder) {
-        let mut builder = block_builder;
-        for (key, value) in test_case.entries {
-            match value {
-                Some(v) => assert!(builder.add_value(key, v, gen_empty_attrs())),
-                None => assert!(builder.add_tombstone(key, gen_empty_attrs())),
-            }
-        }
-        let block = builder.build().unwrap();
+    fn test_block(#[case] test_case: BlockTestCase) {
+        let block = build_block(&test_case);
         let encoded = block.encode();
         let decoded = Block::decode(encoded);
         assert_eq!(block.data, decoded.data);
@@ -222,16 +232,11 @@ mod tests {
             (b"key3", Some(b"value3")),
         ],
         expected_size: None,
+        use_timestamped_attrs: false,
+        timestamp: None,
     })]
-    fn test_block_with_tombstone(#[case] test_case: BlockTestCase, block_builder: BlockBuilder) {
-        let mut builder = block_builder;
-        for (key, value) in test_case.entries {
-            match value {
-                Some(v) => assert!(builder.add_value(key, v, gen_empty_attrs())),
-                None => assert!(builder.add_tombstone(key, gen_empty_attrs())),
-            }
-        }
-        let block = builder.build().unwrap();
+    fn test_block_with_tombstone(#[case] test_case: BlockTestCase) {
+        let block = build_block(&test_case);
         let encoded = block.encode();
         let _decoded = Block::decode(encoded);
         assert_debug_snapshot!(test_case.name, (block.data, block.offsets));
@@ -245,24 +250,15 @@ mod tests {
             (b"key2", Some(b"value2")),
         ],
         expected_size: Some(73),
+        use_timestamped_attrs: true,
+        timestamp: Some(1),
     })]
-    fn test_block_size(#[case] test_case: BlockTestCase, block_builder: BlockBuilder) {
-        let mut builder = block_builder;
-        for (key, value) in test_case.entries {
-            match value {
-                Some(v) => assert!(builder.add_value(key, v, gen_attrs(1))),
-                None => assert!(builder.add_tombstone(key, gen_empty_attrs())),
-            }
-        }
-        let block = builder.build().unwrap();
+    fn test_block_size(#[case] test_case: BlockTestCase) {
+        let block = build_block(&test_case);
         if let Some(expected_size) = test_case.expected_size {
             assert_eq!(expected_size, block.size());
         }
-        assert_debug_snapshot!(
-            test_case.name,
-            (block.size(), block.data, block.offsets)
-        );
-
+        assert_debug_snapshot!(test_case.name, (block.size(), block.data, block.offsets));
     }
 
     #[rstest]
@@ -273,16 +269,11 @@ mod tests {
             (b"key2", Some(b"value2")),
         ],
         expected_size: Some(57),
+        use_timestamped_attrs: false,
+        timestamp: None,
     })]
-    fn test_block_size_with_empty_attrs(#[case] test_case: BlockTestCase,block_builder: BlockBuilder) {
-        let mut builder = block_builder;
-        for (key, value) in test_case.entries {
-            match value {
-                Some(v) => assert!(builder.add_value(key, v, gen_empty_attrs())),
-                None => assert!(builder.add_tombstone(key, gen_empty_attrs())),
-            }
-        }
-        let block = builder.build().unwrap();
+    fn test_block_size_with_empty_attrs(#[case] test_case: BlockTestCase) {
+        let block = build_block(&test_case);
         if let Some(expected_size) = test_case.expected_size {
             assert_eq!(expected_size, block.size());
         }
