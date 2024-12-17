@@ -170,50 +170,123 @@ impl BlockBuilder {
 
 #[cfg(test)]
 mod tests {
+    use rstest::{fixture, rstest};
+
     use super::*;
     use crate::test_utils::{assert_debug_snapshot, gen_attrs, gen_empty_attrs};
 
-    #[test]
-    fn test_block() {
-        let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add_value(b"key1", b"value1", gen_empty_attrs()));
-        assert!(builder.add_value(b"key1", b"value1", gen_empty_attrs()));
-        assert!(builder.add_value(b"key2", b"value2", gen_empty_attrs()));
+    #[derive(Debug)]
+    struct BlockTestCase {
+        name: &'static str,
+        entries: Vec<(&'static [u8], Option<&'static [u8]>)>, // (key, value) with None for tombstone
+        expected_size: Option<usize>,                         // Expected size of the block
+    }
+
+    #[fixture]
+    fn block_builder() -> BlockBuilder {
+        BlockBuilder::new(4096)
+    }
+
+    #[rstest]
+    #[case(BlockTestCase {
+        name: "test_block",
+        entries: vec![
+            (b"key1", Some(b"value1")),
+            (b"key1", Some(b"value1")),
+            (b"key2", Some(b"value2")),
+        ],
+        expected_size: None,
+    })]
+    fn test_block(#[case] test_case: BlockTestCase, block_builder: BlockBuilder) {
+        let mut builder = block_builder;
+        for (key, value) in test_case.entries {
+            match value {
+                Some(v) => assert!(builder.add_value(key, v, gen_empty_attrs())),
+                None => assert!(builder.add_tombstone(key, gen_empty_attrs())),
+            }
+        }
         let block = builder.build().unwrap();
         let encoded = block.encode();
         let decoded = Block::decode(encoded);
         assert_eq!(block.data, decoded.data);
         assert_eq!(block.offsets, decoded.offsets);
-        assert_debug_snapshot!("test_block", (block.data, block.offsets));
+        assert_debug_snapshot!(test_case.name, (block.data, block.offsets));
     }
 
-    #[test]
-    fn test_block_with_tombstone() {
-        let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add_value(b"key1", b"value1", gen_empty_attrs()));
-        assert!(builder.add_tombstone(b"key2", gen_empty_attrs()));
-        assert!(builder.add_value(b"key3", b"value3", gen_empty_attrs()));
+    #[rstest]
+    #[case(BlockTestCase {
+        name: "block_with_tombstone",
+        entries: vec![
+            (b"key1", Some(b"value1")),
+            (b"key2", None),
+            (b"key3", Some(b"value3")),
+        ],
+        expected_size: None,
+    })]
+    fn test_block_with_tombstone(#[case] test_case: BlockTestCase, block_builder: BlockBuilder) {
+        let mut builder = block_builder;
+        for (key, value) in test_case.entries {
+            match value {
+                Some(v) => assert!(builder.add_value(key, v, gen_empty_attrs())),
+                None => assert!(builder.add_tombstone(key, gen_empty_attrs())),
+            }
+        }
         let block = builder.build().unwrap();
         let encoded = block.encode();
         let _decoded = Block::decode(encoded);
-        assert_debug_snapshot!("block_with_tombstone", (block.data, block.offsets));
+        assert_debug_snapshot!(test_case.name, (block.data, block.offsets));
     }
 
-    #[test]
-    fn test_block_size() {
-        let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add_value(b"key1", b"value1", gen_attrs(1)));
-        assert!(builder.add_value(b"key2", b"value2", gen_attrs(1)));
+    #[rstest]
+    #[case(BlockTestCase {
+        name: "block_size_with_attrs",
+        entries: vec![
+            (b"key1", Some(b"value1")),
+            (b"key2", Some(b"value2")),
+        ],
+        expected_size: Some(73),
+    })]
+    fn test_block_size(#[case] test_case: BlockTestCase, block_builder: BlockBuilder) {
+        let mut builder = block_builder;
+        for (key, value) in test_case.entries {
+            match value {
+                Some(v) => assert!(builder.add_value(key, v, gen_attrs(1))),
+                None => assert!(builder.add_tombstone(key, gen_empty_attrs())),
+            }
+        }
         let block = builder.build().unwrap();
-        assert_eq!(73, block.size());
-        assert_debug_snapshot!("block_size_with_attrs", (block.size(), block.data, block.offsets));
+        if let Some(expected_size) = test_case.expected_size {
+            assert_eq!(expected_size, block.size());
+        }
+        assert_debug_snapshot!(
+            test_case.name,
+            (block.size(), block.data, block.offsets)
+        );
 
-        let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add_value(b"key1", b"value1", gen_empty_attrs()));
-        assert!(builder.add_value(b"key2", b"value2", gen_empty_attrs()));
+    }
+
+    #[rstest]
+    #[case(BlockTestCase {
+        name: "block_size_with_empty_attrs",
+        entries: vec![
+            (b"key1", Some(b"value1")),
+            (b"key2", Some(b"value2")),
+        ],
+        expected_size: Some(57),
+    })]
+    fn test_block_size_with_empty_attrs(#[case] test_case: BlockTestCase,block_builder: BlockBuilder) {
+        let mut builder = block_builder;
+        for (key, value) in test_case.entries {
+            match value {
+                Some(v) => assert!(builder.add_value(key, v, gen_empty_attrs())),
+                None => assert!(builder.add_tombstone(key, gen_empty_attrs())),
+            }
+        }
         let block = builder.build().unwrap();
-        assert_eq!(57, block.size());
-        assert_debug_snapshot!("block_size_with_empty_attrs", (block.size(), block.data, block.offsets));
+        if let Some(expected_size) = test_case.expected_size {
+            assert_eq!(expected_size, block.size());
+        }
+        assert_debug_snapshot!(test_case.name, (block.size(), block.data, block.offsets));
     }
 
     #[test]
