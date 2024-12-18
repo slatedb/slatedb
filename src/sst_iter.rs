@@ -1,12 +1,17 @@
+use bytes::Bytes;
 use std::cmp::min;
 use std::collections::VecDeque;
+use std::marker::PhantomData;
+use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::RangeBounds;
 use std::sync::Arc;
-
 use tokio::task::JoinHandle;
 
+use crate::bytes_range::BytesRange;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
+use crate::iter::SeekToKey;
 use crate::{
     block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, tablestore::TableStore,
     types::RowEntry,
@@ -25,13 +30,14 @@ pub(crate) struct SstIterator<'a, H: AsRef<SsTableHandle> = &'a SsTableHandle> {
     table: H,
     index: Arc<SsTableIndexOwned>,
     current_iter: Option<BlockIterator<Arc<Block>>>,
-    from_key: Option<&'a [u8]>,
+    range: BytesRange,
     next_block_idx_to_fetch: usize,
     fetch_tasks: VecDeque<FetchTask>,
     max_fetch_tasks: usize,
     blocks_to_fetch: usize,
     table_store: Arc<TableStore>,
     cache_blocks: bool,
+    _marker: PhantomData<&'a H>,
 }
 
 impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
@@ -66,14 +72,14 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
     pub(crate) async fn new_from_key(
         table: H,
         table_store: Arc<TableStore>,
-        from_key: &'a [u8],
+        from_key: Bytes,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
         cache_blocks: bool,
     ) -> Result<Self, SlateDBError> {
         Self::new_opts(
             table,
-            Some(from_key),
+            BytesRange::from(from_key..),
             table_store,
             max_fetch_tasks,
             blocks_to_fetch,
@@ -92,7 +98,7 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
     ) -> Result<Self, SlateDBError> {
         Self::new_opts(
             table,
-            None,
+            BytesRange::from(..),
             table_store,
             max_fetch_tasks,
             blocks_to_fetch,
@@ -111,7 +117,7 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
     ) -> Result<Self, SlateDBError> {
         Self::new_opts(
             table,
-            None,
+            BytesRange::from(..),
             table_store,
             max_fetch_tasks,
             blocks_to_fetch,
@@ -124,7 +130,7 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new_opts(
         table: H,
-        from_key: Option<&'a [u8]>,
+        range: BytesRange,
         table_store: Arc<TableStore>,
         max_fetch_tasks: usize,
         blocks_to_fetch: usize,
@@ -134,20 +140,24 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
         assert!(max_fetch_tasks > 0);
         assert!(blocks_to_fetch > 0);
         let index = table_store.read_index(table.as_ref()).await?;
-        let next_block_idx_to_fetch = from_key
-            .map(|k| Self::first_block_with_data_including_or_after_key(&index.borrow(), k))
-            .unwrap_or(0);
+        let next_block_idx_to_fetch = match range.start_bound() {
+            Unbounded => 0,
+            Included(k) | Excluded(k) => {
+                Self::first_block_with_data_including_or_after_key(&index.borrow(), k.as_ref())
+            }
+        };
         let mut iter = Self {
             table,
             index,
             current_iter: None,
             next_block_idx_to_fetch,
-            from_key,
+            range,
             fetch_tasks: VecDeque::new(),
             max_fetch_tasks,
             blocks_to_fetch,
             table_store,
             cache_blocks,
+            _marker: PhantomData,
         };
         if spawn {
             iter.spawn_fetches();
@@ -196,11 +206,14 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
                     }
                     FetchTask::Finished(blocks) => {
                         if let Some(block) = blocks.pop_front() {
-                            let first_key = self.from_key.take();
-                            return match first_key {
-                                None => Ok(Some(BlockIterator::from_first_key(block))),
-                                Some(k) => Ok(Some(BlockIterator::from_key(block, k))),
+                            let start_bound = self.range.start_bound();
+                            let iter = match start_bound {
+                                Unbounded => BlockIterator::from_first_key(block),
+                                Included(key) | Excluded(key) => {
+                                    BlockIterator::from_key(block, key).await?
+                                }
                             };
+                            return Ok(Some(iter));
                         } else {
                             self.fetch_tasks.pop_front();
                         }
@@ -216,6 +229,12 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
             }
         }
     }
+
+    fn end_iteration(&mut self) {
+        let num_blocks = self.index.borrow().block_meta().len();
+        self.next_block_idx_to_fetch = num_blocks;
+        self.current_iter = None
+    }
 }
 
 impl<'a, H: AsRef<SsTableHandle>> KeyValueIterator for SstIterator<'a, H> {
@@ -230,14 +249,44 @@ impl<'a, H: AsRef<SsTableHandle>> KeyValueIterator for SstIterator<'a, H> {
             };
 
             let kv = current_iter.next_entry().await?;
-
             match kv {
-                Some(kv) => return Ok(Some(kv)),
+                Some(kv) if self.range.contains(&kv.key) => return Ok(Some(kv)),
+                Some(kv) => match self.range.end_bound() {
+                    Unbounded => continue,
+                    Included(end_key) | Excluded(end_key) => {
+                        if kv.key > end_key {
+                            self.end_iteration();
+                            return Ok(None);
+                        } else {
+                            continue;
+                        }
+                    }
+                },
                 None => {
                     self.current_iter = None;
                     // We have exhausted the current block, but not necessarily the entire SST,
                     // so we fall back to the top to check if we have more blocks to read.
                 }
+            }
+        }
+    }
+}
+
+impl<'a, H: AsRef<SsTableHandle>> SeekToKey for SstIterator<'a, H> {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        loop {
+            let current_iter = if let Some(current_iter) = self.current_iter.as_mut() {
+                current_iter
+            } else if let Some(next_iter) = self.next_iter().await? {
+                self.current_iter.insert(next_iter)
+            } else {
+                return Ok(());
+            };
+            current_iter.seek(next_key).await?;
+            if current_iter.is_empty() {
+                self.current_iter = None;
+            } else {
+                return Ok(());
             }
         }
     }
@@ -378,16 +427,10 @@ mod tests {
             let mut expected_val_gen = test_case_val_gen.clone();
             let from_key = test_case_key_gen.next();
             let _ = test_case_val_gen.next();
-            let mut iter = SstIterator::new_from_key(
-                &sst,
-                table_store.clone(),
-                from_key.as_ref(),
-                1,
-                1,
-                false,
-            )
-            .await
-            .unwrap();
+            let mut iter =
+                SstIterator::new_from_key(&sst, table_store.clone(), from_key.clone(), 1, 1, false)
+                    .await
+                    .unwrap();
             for _ in 0..nkeys - i {
                 let e = iter.next().await.unwrap().unwrap();
                 assert_kv(
@@ -423,10 +466,16 @@ mod tests {
         let mut expected_val_gen = val_gen.clone();
         let (sst, nkeys) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
-        let mut iter =
-            SstIterator::new_from_key(&sst, table_store.clone(), &[b'a'; 16], 1, 1, false)
-                .await
-                .unwrap();
+        let mut iter = SstIterator::new_from_key(
+            &sst,
+            table_store.clone(),
+            Bytes::from_static(&[b'a'; 16]),
+            1,
+            1,
+            false,
+        )
+        .await
+        .unwrap();
 
         for _ in 0..nkeys {
             let e = iter.next().await.unwrap().unwrap();
@@ -460,10 +509,16 @@ mod tests {
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
         let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
-        let mut iter =
-            SstIterator::new_from_key(&sst, table_store.clone(), &[b'z'; 16], 1, 1, false)
-                .await
-                .unwrap();
+        let mut iter = SstIterator::new_from_key(
+            &sst,
+            table_store.clone(),
+            Bytes::from_static(&[b'z'; 16]),
+            1,
+            1,
+            false,
+        )
+        .await
+        .unwrap();
 
         assert!(iter.next().await.unwrap().is_none());
     }

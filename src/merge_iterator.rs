@@ -1,9 +1,8 @@
+use crate::error::SlateDBError;
+use crate::iter::{KeyValueIterator, SeekToKey};
+use crate::types::RowEntry;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
-
-use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
-use crate::types::RowEntry;
 
 pub(crate) struct TwoMergeIterator<T1: KeyValueIterator, T2: KeyValueIterator> {
     iterator1: (T1, Option<RowEntry>),
@@ -41,6 +40,53 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> TwoMergeIterator<T1, T2> {
     }
 }
 
+impl<T1, T2> TwoMergeIterator<T1, T2>
+where
+    T1: KeyValueIterator + SeekToKey,
+    T2: KeyValueIterator + SeekToKey,
+{
+    async fn seek1(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        match &self.iterator1.1 {
+            None => Ok(()),
+            Some(val) => {
+                if val.key < next_key {
+                    self.iterator1.0.seek(next_key).await?;
+                    self.iterator1.1 = self.iterator1.0.next_entry().await?;
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    async fn seek2(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        match &self.iterator2.1 {
+            None => Ok(()),
+            Some(val) => {
+                if val.key < next_key {
+                    self.iterator2.0.seek(next_key).await?;
+                    self.iterator2.1 = self.iterator2.0.next_entry().await?;
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+impl<T1, T2> SeekToKey for TwoMergeIterator<T1, T2>
+where
+    T1: KeyValueIterator + SeekToKey,
+    T2: KeyValueIterator + SeekToKey,
+{
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.seek1(next_key).await?;
+        self.seek2(next_key).await
+    }
+}
+
 impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIterator<T1, T2> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if let Some(next1) = self.iterator1.1.as_ref() {
@@ -63,6 +109,29 @@ struct MergeIteratorHeapEntry<T: KeyValueIterator> {
     next_kv: RowEntry,
     index: u32,
     iterator: T,
+}
+
+impl<T: KeyValueIterator + SeekToKey> MergeIteratorHeapEntry<T> {
+    /// Seek the iterator and return a new heap entry
+    async fn seek(
+        mut self,
+        next_key: &[u8],
+    ) -> Result<Option<MergeIteratorHeapEntry<T>>, SlateDBError> {
+        if self.next_kv.key >= next_key {
+            Ok(Some(self))
+        } else {
+            self.iterator.seek(next_key).await?;
+            if let Some(next_kv) = self.iterator.next_entry().await? {
+                Ok(Some(MergeIteratorHeapEntry {
+                    next_kv,
+                    index: self.index,
+                    iterator: self.iterator,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+    }
 }
 
 impl<T: KeyValueIterator> Eq for MergeIteratorHeapEntry<T> {}
@@ -143,12 +212,34 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
     }
 }
 
+impl<T: KeyValueIterator + SeekToKey> SeekToKey for MergeIterator<T> {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        let mut seek_futures = VecDeque::new();
+        if let Some(iterator) = self.current.take() {
+            seek_futures.push_back(iterator.seek(next_key))
+        }
+
+        for iterator in self.iterators.drain() {
+            seek_futures.push_back(iterator.0.seek(next_key));
+        }
+
+        for seek_result in futures::future::join_all(seek_futures).await {
+            if let Some(seeked_iterator) = seek_result? {
+                self.iterators.push(Reverse(seeked_iterator));
+            }
+        }
+
+        self.current = self.iterators.pop().map(|r| r.0);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::error::SlateDBError;
-    use crate::iter::KeyValueIterator;
+    use crate::iter::{KeyValueIterator, SeekToKey};
     use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
-    use crate::test_utils::assert_iterator;
+    use crate::test_utils::{assert_iterator, assert_next_entry};
     use crate::types::RowEntry;
     use std::collections::VecDeque;
     use std::vec;
@@ -277,6 +368,91 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn test_seek_merge_iter() {
+        let mut iters = VecDeque::new();
+        iters.push_back(
+            TestIterator::new()
+                .with_entry(b"aa", b"aa1")
+                .with_entry(b"bb", b"bb1"),
+        );
+        iters.push_back(
+            TestIterator::new()
+                .with_entry(b"aa", b"aa2")
+                .with_entry(b"bb", b"bb2")
+                .with_entry(b"cc", b"cc2"),
+        );
+
+        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        merge_iter.seek(b"bb".as_ref()).await.unwrap();
+
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_value(b"bb", b"bb1", 0),
+                RowEntry::new_value(b"cc", b"cc2", 0),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_seek_merge_iter_to_current_key() {
+        let mut iters = VecDeque::new();
+        iters.push_back(
+            TestIterator::new()
+                .with_entry(b"aa", b"aa1")
+                .with_entry(b"bb", b"bb1"),
+        );
+        iters.push_back(
+            TestIterator::new()
+                .with_entry(b"aa", b"aa2")
+                .with_entry(b"bb", b"bb2")
+                .with_entry(b"cc", b"cc2"),
+        );
+
+        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        assert_next_entry(&mut merge_iter, &RowEntry::new_value(b"aa", b"aa1", 0)).await;
+
+        merge_iter.seek(b"bb".as_ref()).await.unwrap();
+
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_value(b"bb", b"bb1", 0),
+                RowEntry::new_value(b"cc", b"cc2", 0),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_two_merge_seek() {
+        let iter1 = TestIterator::new()
+            .with_entry(b"aa", b"aa1")
+            .with_entry(b"bb", b"bb1")
+            .with_entry(b"dd", b"dd1");
+        let iter2 = TestIterator::new()
+            .with_entry(b"aa", b"aa2")
+            .with_entry(b"bb", b"bb2")
+            .with_entry(b"cc", b"cc2")
+            .with_entry(b"ee", b"ee2");
+
+        let mut merge_iter = TwoMergeIterator::new(iter1, iter2).await.unwrap();
+        merge_iter.seek(b"b".as_ref()).await.unwrap();
+
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_value(b"bb", b"bb1", 0),
+                RowEntry::new_value(b"cc", b"cc2", 0),
+                RowEntry::new_value(b"dd", b"dd1", 0),
+                RowEntry::new_value(b"ee", b"ee2", 0),
+            ],
+        )
+        .await;
+    }
+
     struct TestIterator {
         entries: VecDeque<Result<RowEntry, SlateDBError>>,
     }
@@ -301,6 +477,20 @@ mod tests {
                 Ok(kv) => Ok(Some(kv)),
                 Err(err) => Err(err),
             })
+        }
+    }
+
+    impl SeekToKey for TestIterator {
+        async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+            while let Some(entry_result) = self.entries.front() {
+                let entry = entry_result.clone()?;
+                if entry.key < next_key {
+                    self.entries.pop_front();
+                } else {
+                    break;
+                }
+            }
+            Ok(())
         }
     }
 }

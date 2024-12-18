@@ -82,6 +82,12 @@ pub enum SlateDBError {
     #[error("Read channel error: {0}")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
 
+    #[error("Iterator invalidated after unexpected error {0}")]
+    InvalidatedIterator(#[from] Box<SlateDBError>),
+
+    #[error("Invalid Argument")]
+    InvalidArgument { msg: String },
+
     #[error("background task panic'd")]
     // we need to wrap the panic args in an Arc so SlateDbError is Clone
     // we need to wrap the panic args in a mutex so that SlateDbError is Sync
