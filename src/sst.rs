@@ -78,9 +78,17 @@ impl SsTableFormat {
 
     pub(crate) fn decode_filter(
         &self,
-        filter_bytes: Bytes,
+        bytes: Bytes,
         compression_codec: Option<CompressionCodec>,
     ) -> Result<BloomFilter, SlateDBError> {
+        let checksum_sz = std::mem::size_of::<u32>();
+        let filter_bytes = bytes.slice(..bytes.len() - checksum_sz);
+        let mut checksum_bytes = bytes.slice(bytes.len() - checksum_sz..);
+        let checksum = crc32fast::hash(&filter_bytes);
+        let stored_checksum = checksum_bytes.get_u32();
+        if checksum != stored_checksum {
+            return Err(SlateDBError::ChecksumMismatch);
+        }
         let filter_bytes = match compression_codec {
             Some(c) => Self::decompress(filter_bytes, c)?,
             None => filter_bytes,
@@ -115,9 +123,17 @@ impl SsTableFormat {
 
     fn decode_index(
         &self,
-        index_bytes: Bytes,
+        bytes: Bytes,
         compression_codec: Option<CompressionCodec>,
     ) -> Result<SsTableIndexOwned, SlateDBError> {
+        let checksum_sz = std::mem::size_of::<u32>();
+        let index_bytes = bytes.slice(..bytes.len() - checksum_sz);
+        let mut checksum_bytes = bytes.slice(bytes.len() - checksum_sz..);
+        let checksum = crc32fast::hash(&index_bytes);
+        let stored_checksum = checksum_bytes.get_u32();
+        if checksum != stored_checksum {
+            return Err(SlateDBError::ChecksumMismatch);
+        }
         let index_bytes = match compression_codec {
             Some(c) => Self::decompress(index_bytes, c)?,
             None => index_bytes,
@@ -470,8 +486,10 @@ impl EncodedSsTableBuilder<'_> {
                 None => encoded_filter,
                 Some(c) => Self::compress(encoded_filter, c)?,
             };
-            filter_len = compressed_filter.len();
+            let checksum = crc32fast::hash(&compressed_filter);
+            filter_len = compressed_filter.len() + std::mem::size_of::<u32>();
             buf.put(compressed_filter);
+            buf.put_u32(checksum);
             maybe_filter = Some(filter);
         }
 
@@ -489,9 +507,11 @@ impl EncodedSsTableBuilder<'_> {
             None => index_block,
             Some(c) => Self::compress(index_block, c)?,
         };
+        let checksum = crc32fast::hash(&index_block);
         let index_offset = self.current_len + buf.len();
-        let index_len = index_block.len();
+        let index_len = index_block.len() + std::mem::size_of::<u32>();
         buf.put(index_block);
+        buf.put_u32(checksum);
 
         let meta_offset = self.current_len + buf.len();
         let info = SsTableInfo {
@@ -522,6 +542,7 @@ mod tests {
     use std::vec;
 
     use bytes::BytesMut;
+    use flatbuffers::FlatBufferBuilder;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -1008,6 +1029,53 @@ mod tests {
             .unwrap();
 
         assert_eq!(88, index.size());
+    }
+
+    #[tokio::test]
+    async fn test_index_checksum_mismatch() {
+        let format = SsTableFormat::default();
+        // create index
+        let mut index_builder = FlatBufferBuilder::new();
+        let block_meta = Vec::<flatbuffers::WIPOffset<BlockMeta>>::new();
+        let vector = index_builder.create_vector(&block_meta);
+        let index_wip = SsTableIndex::create(
+            &mut index_builder,
+            &SsTableIndexArgs {
+                block_meta: Some(vector),
+            },
+        );
+        index_builder.finish(index_wip, None);
+        let index_block = Bytes::from(index_builder.finished_data().to_vec());
+
+        // create corrupted data by modifying bytes but keeping same checksum
+        let mut corrupted_bytes = BytesMut::new();
+        corrupted_bytes.put(index_block.clone());
+        corrupted_bytes.put_u32(crc32fast::hash(&index_block));
+        corrupted_bytes[0] ^= 1;
+
+        let result = format.decode_index(corrupted_bytes.freeze(), None);
+
+        assert!(matches!(result, Err(SlateDBError::ChecksumMismatch)));
+    }
+
+    #[tokio::test]
+    async fn test_filter_block_checksum_mismatch() {
+        let format = SsTableFormat::default();
+        // create bloom filter
+        let mut bloom_filter_builder = BloomFilterBuilder::new(10);
+        bloom_filter_builder.add_key(b"test_key");
+        let filter = bloom_filter_builder.build();
+        let encoded = filter.encode();
+
+        // create corrupted data by modifying bytes but keeping same checksum
+        let mut corrupted_bytes = BytesMut::new();
+        corrupted_bytes.put(encoded.clone());
+        corrupted_bytes.put_u32(crc32fast::hash(&encoded)); // original checksum
+        corrupted_bytes[0] ^= 1; // corrupt one byte
+
+        let result = format.decode_filter(corrupted_bytes.freeze(), None);
+
+        assert!(matches!(result, Err(SlateDBError::ChecksumMismatch)));
     }
 
     struct BytesBlob {
