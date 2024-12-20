@@ -534,7 +534,6 @@ mod tests {
     use std::vec;
 
     use bytes::BytesMut;
-    use flatbuffers::FlatBufferBuilder;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
