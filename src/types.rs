@@ -53,6 +53,17 @@ impl RowEntry {
     }
 
     #[cfg(test)]
+    pub fn new_merge(key: &[u8], value: &[u8], seq: u64) -> Self {
+        Self {
+            key: Bytes::copy_from_slice(key),
+            value: ValueDeletable::Merge(Bytes::copy_from_slice(value)),
+            seq,
+            create_ts: None,
+            expire_ts: None,
+        }
+    }
+
+    #[cfg(test)]
     pub fn new_tombstone(key: &[u8], seq: u64) -> Self {
         Self {
             key: Bytes::copy_from_slice(key),
@@ -60,6 +71,17 @@ impl RowEntry {
             seq,
             create_ts: None,
             expire_ts: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_seq(&self, seq: u64) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value.clone(),
+            seq,
+            create_ts: self.create_ts,
+            expire_ts: self.expire_ts,
         }
     }
 
