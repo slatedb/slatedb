@@ -214,16 +214,6 @@ mod tests {
         use_timestamped_attrs: false,
         timestamp: None,
     })]
-    fn test_block(#[case] test_case: BlockTestCase) {
-        let block = build_block(&test_case);
-        let encoded = block.encode();
-        let decoded = Block::decode(encoded);
-        assert_eq!(block.data, decoded.data);
-        assert_eq!(block.offsets, decoded.offsets);
-        assert_debug_snapshot!(test_case.name, (block.data, block.offsets));
-    }
-
-    #[rstest]
     #[case(BlockTestCase {
         name: "block_with_tombstone",
         entries: vec![
@@ -235,14 +225,6 @@ mod tests {
         use_timestamped_attrs: false,
         timestamp: None,
     })]
-    fn test_block_with_tombstone(#[case] test_case: BlockTestCase) {
-        let block = build_block(&test_case);
-        let encoded = block.encode();
-        let _decoded = Block::decode(encoded);
-        assert_debug_snapshot!(test_case.name, (block.data, block.offsets));
-    }
-
-    #[rstest]
     #[case(BlockTestCase {
         name: "block_size_with_attrs",
         entries: vec![
@@ -253,15 +235,6 @@ mod tests {
         use_timestamped_attrs: true,
         timestamp: Some(1),
     })]
-    fn test_block_size(#[case] test_case: BlockTestCase) {
-        let block = build_block(&test_case);
-        if let Some(expected_size) = test_case.expected_size {
-            assert_eq!(expected_size, block.size());
-        }
-        assert_debug_snapshot!(test_case.name, (block.size(), block.data, block.offsets));
-    }
-
-    #[rstest]
     #[case(BlockTestCase {
         name: "block_size_with_empty_attrs",
         entries: vec![
@@ -272,12 +245,18 @@ mod tests {
         use_timestamped_attrs: false,
         timestamp: None,
     })]
-    fn test_block_size_with_empty_attrs(#[case] test_case: BlockTestCase) {
+    fn test_block(#[case] test_case: BlockTestCase) {
         let block = build_block(&test_case);
+        let encoded = block.encode();
+        let decoded = Block::decode(encoded);
+        assert_eq!(block.data, decoded.data);
+        assert_eq!(block.offsets, decoded.offsets);
         if let Some(expected_size) = test_case.expected_size {
             assert_eq!(expected_size, block.size());
+            assert_debug_snapshot!(test_case.name, (block.size(), block.data, block.offsets));
+        } else {
+            assert_debug_snapshot!(test_case.name, (block.data, block.offsets));
         }
-        assert_debug_snapshot!(test_case.name, (block.size(), block.data, block.offsets));
     }
 
     #[test]
