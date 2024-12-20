@@ -12,7 +12,7 @@ use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::merge_iterator::MergeIterator;
-use crate::types::{RowAttributes, RowEntry, ValueDeletable};
+use crate::types::RowEntry;
 use crate::utils::WatchableOnceCell;
 
 /// Memtable may contains multiple versions of a single user key, with a monotonically increasing sequence number.
@@ -294,6 +294,7 @@ impl KVTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ValueDeletable;
 
     #[tokio::test]
     async fn test_memtable_iter() {
