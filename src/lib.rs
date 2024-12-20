@@ -12,6 +12,7 @@ mod block;
 mod block_iterator;
 #[cfg(any(test, feature = "bencher"))]
 mod bytes;
+mod bytes_range;
 mod cached_object_store;
 pub mod checkpoint;
 #[cfg(feature = "bencher")]
@@ -23,6 +24,7 @@ pub mod config;
 pub mod db;
 pub mod db_cache;
 mod db_common;
+pub mod db_iter;
 mod db_state;
 pub mod error;
 mod filter;
@@ -36,6 +38,8 @@ mod mem_table;
 mod mem_table_flush;
 mod merge_iterator;
 mod metrics;
+#[cfg(test)]
+mod proptest_util;
 mod row_codec;
 pub mod size_tiered_compaction;
 mod sorted_run_iterator;

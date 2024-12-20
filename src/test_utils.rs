@@ -8,18 +8,25 @@ use std::sync::atomic::{AtomicI64, Ordering};
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
     for expected_entry in entries.iter() {
-        let actual_entry = iterator
-            .next_entry()
-            .await
-            .expect("iterator next_entry failed")
-            .expect("expected iterator to return a value");
-        assert_eq!(actual_entry, expected_entry.clone());
+        assert_next_entry(iterator, expected_entry).await;
     }
     assert!(iterator
         .next_entry()
         .await
         .expect("iterator next_entry failed")
         .is_none());
+}
+
+pub(crate) async fn assert_next_entry<T: KeyValueIterator>(
+    iterator: &mut T,
+    expected_entry: &RowEntry,
+) {
+    let actual_entry = iterator
+        .next_entry()
+        .await
+        .expect("iterator next_entry failed")
+        .expect("expected iterator to return a value");
+    assert_eq!(actual_entry, expected_entry.clone())
 }
 
 pub fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
