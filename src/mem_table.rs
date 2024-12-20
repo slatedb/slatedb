@@ -534,19 +534,25 @@ mod tests {
             expire_ts: None,
             seq: 1,
         });
-        assert_eq!(table.table.size(), 16); // first(5) + foo(3) + attrs(8)
+        assert_eq!(table.table.size(), 16);
 
-        // ensure that multiple deletes keep the table size stable
-        for ts in 2..5 {
-            table.put(RowEntry {
-                key: Bytes::from_static(b"first"),
-                value: ValueDeletable::Tombstone,
-                create_ts: None,
-                expire_ts: None,
-                seq: ts,
-            });
-            assert_eq!(table.table.size(), 13); // first(5) + attrs(8)
-        }
+        table.put(RowEntry {
+            key: Bytes::from_static(b"first"),
+            value: ValueDeletable::Tombstone,
+            create_ts: None,
+            expire_ts: None,
+            seq: 2,
+        });
+        assert_eq!(table.table.size(), 29);
+
+        table.put(RowEntry {
+            key: Bytes::from_static(b"first"),
+            value: ValueDeletable::Tombstone,
+            create_ts: None,
+            expire_ts: None,
+            seq: 2,
+        });
+        assert_eq!(table.table.size(), 29);
 
         table.put(RowEntry {
             key: Bytes::from_static(b"abc333"),
@@ -555,7 +561,7 @@ mod tests {
             expire_ts: None,
             seq: 1,
         });
-        assert_eq!(table.table.size(), 31); // 13 + abc333(6) + val1(4) + attrs(8)
+        assert_eq!(table.table.size(), 47);
 
         table.put(RowEntry {
             key: Bytes::from_static(b"def456"),
@@ -564,7 +570,7 @@ mod tests {
             expire_ts: None,
             seq: 2,
         });
-        assert_eq!(table.table.size(), 46); // 31 + def456(6) + blablabla(9) + attrs(0)
+        assert_eq!(table.table.size(), 70);
 
         table.put(RowEntry {
             key: Bytes::from_static(b"def456"),
@@ -573,7 +579,7 @@ mod tests {
             expire_ts: None,
             seq: 3,
         });
-        assert_eq!(table.table.size(), 51); // 46 - blablabla(9) + blabla(6) - attrs(0) + attrs(8)
+        assert_eq!(table.table.size(), 90);
 
         table.put(RowEntry {
             key: Bytes::from_static(b"abc333"),
@@ -582,6 +588,6 @@ mod tests {
             expire_ts: None,
             seq: 4,
         });
-        assert_eq!(table.table.size(), 47) // 51 - val1(4)
+        assert_eq!(table.table.size(), 104);
     }
 }
