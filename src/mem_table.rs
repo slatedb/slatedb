@@ -518,8 +518,11 @@ mod tests {
             seq: 2,
         });
 
-        let mut iter = table.table().iter();
-        assert!(iter.next_entry().await.unwrap().is_none());
+        let iter = table.table().iter();
+        let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter]))
+            .await
+            .unwrap();
+        assert_eq!(merge_iter.next_entry().await.unwrap(), None);
     }
 
     #[tokio::test]

@@ -150,7 +150,7 @@ impl<T: KeyValueIterator> PartialOrd<Self> for MergeIteratorHeapEntry<T> {
 
 impl<T: KeyValueIterator> Ord for MergeIteratorHeapEntry<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        match self.next_kv.key.cmp(&other.next_kv.key) {
+        match (&self.next_kv.key, self.next_kv.seq).cmp(&(&other.next_kv.key, other.next_kv.seq)) {
             Ordering::Less => Ordering::Less,
             Ordering::Greater => Ordering::Greater,
             Ordering::Equal => self.index.cmp(&other.index),
