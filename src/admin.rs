@@ -1,6 +1,11 @@
 use crate::checkpoint::Checkpoint;
-use crate::error::SlateDBError;
+use crate::config::GarbageCollectorOptions;
+use crate::garbage_collector::GarbageCollector;
 use crate::manifest_store::ManifestStore;
+use crate::metrics::DbStats;
+use crate::sst::SsTableFormat;
+use crate::tablestore::TableStore;
+use futures::{StreamExt, TryStreamExt};
 #[cfg(feature = "aws")]
 use log::warn;
 use object_store::path::Path;
@@ -9,6 +14,7 @@ use std::env;
 use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
+use tokio::runtime::Handle;
 
 /// read-only access to the latest manifest file
 pub async fn read_manifest(
@@ -17,9 +23,13 @@ pub async fn read_manifest(
     maybe_id: Option<u64>,
 ) -> Result<Option<String>, Box<dyn Error>> {
     let manifest_store = ManifestStore::new(path, object_store);
-    let id_manifest = match maybe_id {
-        None => manifest_store.read_latest_manifest().await?,
-        Some(id) => manifest_store.read_manifest(id).await?,
+    let id_manifest = if let Some(id) = maybe_id {
+        manifest_store
+            .try_read_manifest(id)
+            .await?
+            .map(|manifest| (id, manifest))
+    } else {
+        manifest_store.try_read_latest_manifest().await?
     };
 
     match id_manifest {
@@ -43,10 +53,26 @@ pub async fn list_checkpoints(
     object_store: Arc<dyn ObjectStore>,
 ) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
     let manifest_store = ManifestStore::new(path, object_store);
-    let Some((_, manifest)) = manifest_store.read_latest_manifest().await? else {
-        return Err(Box::new(SlateDBError::ManifestMissing));
-    };
+    let (_, manifest) = manifest_store.read_latest_manifest().await?;
     Ok(manifest.core.checkpoints)
+}
+
+/// Deletes all objects with the specified prefix. This includes all
+/// "subdirectories" objects, since object stores are not hierarchical.
+pub async fn delete_objects_with_prefix(
+    object_store: Arc<dyn ObjectStore>,
+    maybe_prefix: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
+    let stream = object_store
+        .list(maybe_prefix)
+        .map_ok(|m| m.location)
+        .boxed();
+    object_store
+        .delete_stream(stream)
+        .try_collect::<Vec<Path>>()
+        .await
+        .map(|_| ())
+        .map_err(|e| e.into())
 }
 
 /// Loads an object store from configured environment variables.
@@ -74,6 +100,37 @@ pub fn load_object_store_from_env(
         "azure" => load_azure(),
         _ => Err(format!("Unknown CLOUD_PROVIDER: '{}'", provider).into()),
     }
+}
+
+pub async fn run_gc_instance(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    gc_opts: GarbageCollectorOptions,
+) -> Result<(), Box<dyn Error>> {
+    let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
+    let sst_format = SsTableFormat::default(); // read only SSTs, can use default
+    let table_store = Arc::new(TableStore::new(
+        object_store.clone(),
+        sst_format.clone(),
+        path.clone(),
+        None, // no need for cache in GC
+    ));
+
+    let tokio_handle = Handle::current();
+    let stats = Arc::new(DbStats::new());
+    let collector = GarbageCollector::new(
+        manifest_store,
+        table_store,
+        gc_opts,
+        tokio_handle,
+        stats.clone(),
+        |_| {},
+    )
+    .await;
+
+    collector.register_interrupt_handler();
+    collector.await_shutdown().await;
+    Ok(())
 }
 
 /// Loads a local object store instance.
@@ -158,4 +215,162 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
         .with_access_key(key)
         .with_container_name(container);
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use object_store::{memory::InMemory, path::Path};
+
+    #[tokio::test]
+    async fn test_delete_objects_with_prefix_empty() {
+        let store = Arc::new(InMemory::new());
+        let result = delete_objects_with_prefix(store, Some(&Path::from("test/prefix"))).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_with_prefix_single_object() {
+        let store = Arc::new(InMemory::new());
+
+        // Put an object
+        store
+            .put(&Path::from("test/prefix/object1"), vec![1, 2, 3].into())
+            .await
+            .unwrap();
+
+        // Delete objects with prefix
+        let result =
+            delete_objects_with_prefix(store.clone(), Some(&Path::from("test/prefix"))).await;
+        assert!(result.is_ok());
+
+        // Verify object is deleted
+        let list_result = store
+            .list(Some(&Path::from("test/prefix")))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(list_result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_with_prefix_multiple_objects() {
+        let store = Arc::new(InMemory::new());
+
+        // Put multiple objects with same prefix
+        store
+            .put(&Path::from("test/prefix/object1"), vec![1, 2, 3].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("test/prefix/object2"), vec![4, 5, 6].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("test/other/object3"), vec![7, 8, 9].into())
+            .await
+            .unwrap();
+
+        // Delete objects with prefix
+        let result =
+            delete_objects_with_prefix(store.clone(), Some(&Path::from("test/prefix"))).await;
+        assert!(result.is_ok());
+
+        // Verify only objects with prefix are deleted
+        let list_result = store.list(None).collect::<Vec<_>>().await;
+        assert_eq!(list_result.len(), 1);
+        assert_eq!(
+            list_result[0].as_ref().unwrap().location,
+            Path::from("test/other/object3")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_with_empty_prefix() {
+        let store = Arc::new(InMemory::new());
+
+        // Put multiple objects at different paths
+        store
+            .put(&Path::from("test/prefix/object1"), vec![1, 2, 3].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("other/path/object2"), vec![4, 5, 6].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("root_object"), vec![7, 8, 9].into())
+            .await
+            .unwrap();
+
+        // Test with empty string prefix
+        let result = delete_objects_with_prefix(store.clone(), Some(&Path::from(""))).await;
+        assert!(result.is_ok());
+
+        // Verify all objects are deleted
+        let list_result = store.list(None).collect::<Vec<_>>().await;
+        assert!(
+            list_result.is_empty(),
+            "Expected all objects to be deleted with empty prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_with_root_prefix() {
+        let store = Arc::new(InMemory::new());
+
+        // Put multiple objects at different paths
+        store
+            .put(&Path::from("test/prefix/object1"), vec![1, 2, 3].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("other/path/object2"), vec![4, 5, 6].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("root_object"), vec![7, 8, 9].into())
+            .await
+            .unwrap();
+
+        // Test with "/" prefix
+        let result = delete_objects_with_prefix(store.clone(), Some(&Path::from("/"))).await;
+        assert!(result.is_ok());
+
+        // Verify all objects are deleted
+        let list_result = store.list(None).collect::<Vec<_>>().await;
+        assert!(
+            list_result.is_empty(),
+            "Expected all objects to be deleted with '/' prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_with_none_prefix() {
+        let store = Arc::new(InMemory::new());
+
+        // Put multiple objects at different paths
+        store
+            .put(&Path::from("test/prefix/object1"), vec![1, 2, 3].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("other/path/object2"), vec![4, 5, 6].into())
+            .await
+            .unwrap();
+        store
+            .put(&Path::from("root_object"), vec![7, 8, 9].into())
+            .await
+            .unwrap();
+
+        // Test with None prefix
+        let result = delete_objects_with_prefix(store.clone(), None).await;
+        assert!(result.is_ok());
+
+        // Verify all objects are deleted
+        let list_result = store.list(None).collect::<Vec<_>>().await;
+        assert!(
+            list_result.is_empty(),
+            "Expected all objects to be deleted with None prefix"
+        );
+    }
 }

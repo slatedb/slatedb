@@ -72,7 +72,6 @@ pub(crate) struct SstFileMetadata {
 }
 
 impl TableStore {
-    #[allow(dead_code)]
     pub fn new<P: Into<Path>>(
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
@@ -108,6 +107,12 @@ impl TableStore {
             )),
             block_cache,
         }
+    }
+
+    /// Get the number of blocks for a size specified in bytes.
+    /// The returned value will be rounded down to the nearest block.
+    pub(crate) fn bytes_to_blocks(&self, bytes: usize) -> usize {
+        bytes.div_ceil(self.sst_format.block_size)
     }
 
     pub(crate) async fn list_wal_ssts<R: RangeBounds<u64>>(
@@ -277,8 +282,6 @@ impl TableStore {
         Ok(sst_list)
     }
 
-    // todo: clean up the warning suppression when we start using open_sst outside tests
-    #[allow(dead_code)]
     pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
         let path = self.path(id);
         let obj = ReadOnlyObject {
@@ -582,6 +585,8 @@ mod tests {
     use std::sync::Arc;
 
     use object_store::{memory::InMemory, path::Path, ObjectStore};
+    use proptest::prelude::any;
+    use proptest::proptest;
     use ulid::Ulid;
 
     use crate::error;
@@ -590,8 +595,8 @@ mod tests {
     #[cfg(feature = "moka")]
     use crate::tablestore::DbCache;
     use crate::tablestore::TableStore;
-    use crate::test_utils::{assert_iterator, gen_attrs};
-    use crate::types::{RowAttributes, RowEntry, ValueDeletable};
+    use crate::test_utils::assert_iterator;
+    use crate::types::{RowEntry, ValueDeletable};
     use crate::{
         block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
     };
@@ -634,37 +639,19 @@ mod tests {
         // when:
         let mut writer = ts.table_writer(id);
         writer
-            .add(RowEntry::new(
-                vec![b'a'; 16].into(),
-                Some(vec![1u8; 16].into()),
-                0,
-                None,
-                None,
-            ))
+            .add(RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0))
             .await
             .unwrap();
         writer
-            .add(RowEntry::new(
-                vec![b'b'; 16].into(),
-                Some(vec![2u8; 16].into()),
-                0,
-                None,
-                None,
-            ))
+            .add(RowEntry::new_value(&[b'b'; 16], &[2u8; 16], 0))
             .await
             .unwrap();
         writer
-            .add(RowEntry::new(vec![b'c'; 16].into(), None, 0, None, None))
+            .add(RowEntry::new_tombstone(&[b'c'; 16], 0))
             .await
             .unwrap();
         writer
-            .add(RowEntry::new(
-                vec![b'd'; 16].into(),
-                Some(vec![4u8; 16].into()),
-                0,
-                None,
-                None,
-            ))
+            .add(RowEntry::new_value(&[b'd'; 16], &[4u8; 16], 0))
             .await
             .unwrap();
         let sst = writer.close().await.unwrap();
@@ -675,30 +662,11 @@ mod tests {
             .unwrap();
         assert_iterator(
             &mut iter,
-            &[
-                (
-                    vec![b'a'; 16],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[1u8; 16])),
-                    gen_attrs(1),
-                ),
-                (
-                    vec![b'b'; 16],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[2u8; 16])),
-                    gen_attrs(2),
-                ),
-                (
-                    vec![b'c'; 16],
-                    ValueDeletable::Tombstone,
-                    RowAttributes {
-                        ts: None,
-                        expire_ts: None,
-                    },
-                ),
-                (
-                    vec![b'd'; 16],
-                    ValueDeletable::Value(Bytes::copy_from_slice(&[4u8; 16])),
-                    gen_attrs(4),
-                ),
+            vec![
+                RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0),
+                RowEntry::new_value(&[b'b'; 16], &[2u8; 16], 0),
+                RowEntry::new_tombstone(&[b'c'; 16], 0),
+                RowEntry::new_value(&[b'd'; 16], &[4u8; 16], 0),
             ],
         )
         .await;
@@ -717,26 +685,12 @@ mod tests {
 
         // write a wal sst
         let mut sst1 = ts.table_builder();
-        sst1.add(RowEntry::new(
-            "key".into(),
-            Some("value".into()),
-            0,
-            None,
-            None,
-        ))
-        .unwrap();
+        sst1.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
         let table = sst1.build().unwrap();
         ts.write_sst(&wal_id, table).await.unwrap();
 
         let mut sst2 = ts.table_builder();
-        sst2.add(RowEntry::new(
-            "key".into(),
-            Some("value".into()),
-            0,
-            None,
-            None,
-        ))
-        .unwrap();
+        sst2.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
         let table2 = sst2.build().unwrap();
 
         // write another wal sst with the same id.
@@ -776,13 +730,7 @@ mod tests {
                 ValueDeletable::Value(Bytes::copy_from_slice(&value)),
             ));
             writer
-                .add(RowEntry::new(
-                    key.to_vec().into(),
-                    Some(value.to_vec().into()),
-                    0,
-                    None,
-                    None,
-                ))
+                .add(RowEntry::new_value(key.as_ref(), value.as_ref(), 0))
                 .await
                 .unwrap();
         }
@@ -1026,5 +974,20 @@ mod tests {
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 1);
         assert_eq!(ssts[0].id, id2);
+    }
+
+    proptest! {
+        #[test]
+        fn convert_bytes_to_blocks_precise_when_aligned_with_block_size(
+            block_size in any::<usize>(),
+            num_blocks in any::<usize>(),
+        ) {
+            let os = Arc::new(InMemory::new());
+            let format = SsTableFormat { block_size, ..SsTableFormat::default() };
+            let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+            if let Some(bytes) = block_size.checked_mul(num_blocks) {
+                assert_eq!(num_blocks, ts.bytes_to_blocks(bytes));
+            }
+        }
     }
 }

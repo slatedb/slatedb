@@ -1,9 +1,8 @@
+use crate::error::SlateDBError;
+use crate::iter::{KeyValueIterator, SeekToKey};
+use crate::types::RowEntry;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
-
-use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
-use crate::types::RowEntry;
 
 pub(crate) struct TwoMergeIterator<T1: KeyValueIterator, T2: KeyValueIterator> {
     iterator1: (T1, Option<RowEntry>),
@@ -41,6 +40,53 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> TwoMergeIterator<T1, T2> {
     }
 }
 
+impl<T1, T2> TwoMergeIterator<T1, T2>
+where
+    T1: KeyValueIterator + SeekToKey,
+    T2: KeyValueIterator + SeekToKey,
+{
+    async fn seek1(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        match &self.iterator1.1 {
+            None => Ok(()),
+            Some(val) => {
+                if val.key < next_key {
+                    self.iterator1.0.seek(next_key).await?;
+                    self.iterator1.1 = self.iterator1.0.next_entry().await?;
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    async fn seek2(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        match &self.iterator2.1 {
+            None => Ok(()),
+            Some(val) => {
+                if val.key < next_key {
+                    self.iterator2.0.seek(next_key).await?;
+                    self.iterator2.1 = self.iterator2.0.next_entry().await?;
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+impl<T1, T2> SeekToKey for TwoMergeIterator<T1, T2>
+where
+    T1: KeyValueIterator + SeekToKey,
+    T2: KeyValueIterator + SeekToKey,
+{
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.seek1(next_key).await?;
+        self.seek2(next_key).await
+    }
+}
+
 impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIterator<T1, T2> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if let Some(next1) = self.iterator1.1.as_ref() {
@@ -63,6 +109,29 @@ struct MergeIteratorHeapEntry<T: KeyValueIterator> {
     next_kv: RowEntry,
     index: u32,
     iterator: T,
+}
+
+impl<T: KeyValueIterator + SeekToKey> MergeIteratorHeapEntry<T> {
+    /// Seek the iterator and return a new heap entry
+    async fn seek(
+        mut self,
+        next_key: &[u8],
+    ) -> Result<Option<MergeIteratorHeapEntry<T>>, SlateDBError> {
+        if self.next_kv.key >= next_key {
+            Ok(Some(self))
+        } else {
+            self.iterator.seek(next_key).await?;
+            if let Some(next_kv) = self.iterator.next_entry().await? {
+                Ok(Some(MergeIteratorHeapEntry {
+                    next_kv,
+                    index: self.index,
+                    iterator: self.iterator,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+    }
 }
 
 impl<T: KeyValueIterator> Eq for MergeIteratorHeapEntry<T> {}
@@ -143,15 +212,37 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
     }
 }
 
+impl<T: KeyValueIterator + SeekToKey> SeekToKey for MergeIterator<T> {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        let mut seek_futures = VecDeque::new();
+        if let Some(iterator) = self.current.take() {
+            seek_futures.push_back(iterator.seek(next_key))
+        }
+
+        for iterator in self.iterators.drain() {
+            seek_futures.push_back(iterator.0.seek(next_key));
+        }
+
+        for seek_result in futures::future::join_all(seek_futures).await {
+            if let Some(seeked_iterator) = seek_result? {
+                self.iterators.push(Reverse(seeked_iterator));
+            }
+        }
+
+        self.current = self.iterators.pop().map(|r| r.0);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::error::SlateDBError;
-    use crate::iter::KeyValueIterator;
+    use crate::iter::{KeyValueIterator, SeekToKey};
     use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
-    use crate::test_utils::{assert_iterator, gen_attrs};
-    use crate::types::{RowEntry, ValueDeletable};
-    use bytes::Bytes;
+    use crate::test_utils::{assert_iterator, assert_next_entry};
+    use crate::types::RowEntry;
     use std::collections::VecDeque;
+    use std::vec;
 
     #[tokio::test]
     async fn test_merge_iterator_should_include_entries_in_order() {
@@ -179,52 +270,16 @@ mod tests {
 
         assert_iterator(
             &mut merge_iter,
-            &[
-                (
-                    "aaaa".into(),
-                    ValueDeletable::Value(Bytes::from("1111")),
-                    gen_attrs(0),
-                ),
-                (
-                    "bbbb".into(),
-                    ValueDeletable::Value(Bytes::from("2222")),
-                    gen_attrs(3),
-                ),
-                (
-                    "cccc".into(),
-                    ValueDeletable::Value(Bytes::from("3333")),
-                    gen_attrs(1),
-                ),
-                (
-                    "dddd".into(),
-                    ValueDeletable::Value(Bytes::from("4444")),
-                    gen_attrs(6),
-                ),
-                (
-                    "eeee".into(),
-                    ValueDeletable::Value(Bytes::from("5555")),
-                    gen_attrs(7),
-                ),
-                (
-                    "gggg".into(),
-                    ValueDeletable::Value(Bytes::from("7777")),
-                    gen_attrs(8),
-                ),
-                (
-                    "xxxx".into(),
-                    ValueDeletable::Value(Bytes::from("24242424")),
-                    gen_attrs(4),
-                ),
-                (
-                    "yyyy".into(),
-                    ValueDeletable::Value(Bytes::from("25252525")),
-                    gen_attrs(5),
-                ),
-                (
-                    "zzzz".into(),
-                    ValueDeletable::Value(Bytes::from("26262626")),
-                    gen_attrs(2),
-                ),
+            vec![
+                RowEntry::new_value(b"aaaa", b"1111", 0),
+                RowEntry::new_value(b"bbbb", b"2222", 0),
+                RowEntry::new_value(b"cccc", b"3333", 0),
+                RowEntry::new_value(b"dddd", b"4444", 0),
+                RowEntry::new_value(b"eeee", b"5555", 0),
+                RowEntry::new_value(b"gggg", b"7777", 0),
+                RowEntry::new_value(b"xxxx", b"24242424", 0),
+                RowEntry::new_value(b"yyyy", b"25252525", 0),
+                RowEntry::new_value(b"zzzz", b"26262626", 0),
             ],
         )
         .await;
@@ -254,27 +309,11 @@ mod tests {
 
         assert_iterator(
             &mut merge_iter,
-            &[
-                (
-                    "aaaa".into(),
-                    ValueDeletable::Value(Bytes::from("1111")),
-                    gen_attrs(0),
-                ),
-                (
-                    "bbbb".into(),
-                    ValueDeletable::Value(Bytes::from("2222")),
-                    gen_attrs(4),
-                ),
-                (
-                    "cccc".into(),
-                    ValueDeletable::Value(Bytes::from("use this one c")),
-                    gen_attrs(1),
-                ),
-                (
-                    "xxxx".into(),
-                    ValueDeletable::Value(Bytes::from("use this one x")),
-                    gen_attrs(3),
-                ),
+            vec![
+                RowEntry::new_value(b"aaaa", b"1111", 0),
+                RowEntry::new_value(b"bbbb", b"2222", 0),
+                RowEntry::new_value(b"cccc", b"use this one c", 0),
+                RowEntry::new_value(b"xxxx", b"use this one x", 0),
             ],
         )
         .await;
@@ -295,37 +334,13 @@ mod tests {
 
         assert_iterator(
             &mut merge_iter,
-            &[
-                (
-                    "aaaa".into(),
-                    ValueDeletable::Value(Bytes::from("1111")),
-                    gen_attrs(0),
-                ),
-                (
-                    "bbbb".into(),
-                    ValueDeletable::Value(Bytes::from("2222")),
-                    gen_attrs(3),
-                ),
-                (
-                    "cccc".into(),
-                    ValueDeletable::Value(Bytes::from("3333")),
-                    gen_attrs(1),
-                ),
-                (
-                    "xxxx".into(),
-                    ValueDeletable::Value(Bytes::from("24242424")),
-                    gen_attrs(4),
-                ),
-                (
-                    "yyyy".into(),
-                    ValueDeletable::Value(Bytes::from("25252525")),
-                    gen_attrs(5),
-                ),
-                (
-                    "zzzz".into(),
-                    ValueDeletable::Value(Bytes::from("26262626")),
-                    gen_attrs(2),
-                ),
+            vec![
+                RowEntry::new_value(b"aaaa", b"1111", 0),
+                RowEntry::new_value(b"bbbb", b"2222", 0),
+                RowEntry::new_value(b"cccc", b"3333", 0),
+                RowEntry::new_value(b"xxxx", b"24242424", 0),
+                RowEntry::new_value(b"yyyy", b"25252525", 0),
+                RowEntry::new_value(b"zzzz", b"26262626", 0),
             ],
         )
         .await;
@@ -344,22 +359,95 @@ mod tests {
 
         assert_iterator(
             &mut merge_iter,
-            &[
-                (
-                    "aaaa".into(),
-                    ValueDeletable::Value(Bytes::from("1111")),
-                    gen_attrs(0),
-                ),
-                (
-                    "cccc".into(),
-                    ValueDeletable::Value(Bytes::from("use this one c")),
-                    gen_attrs(1),
-                ),
-                (
-                    "xxxx".into(),
-                    ValueDeletable::Value(Bytes::from("24242424")),
-                    gen_attrs(3),
-                ),
+            vec![
+                RowEntry::new_value(b"aaaa", b"1111", 0),
+                RowEntry::new_value(b"cccc", b"use this one c", 0),
+                RowEntry::new_value(b"xxxx", b"24242424", 0),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_seek_merge_iter() {
+        let mut iters = VecDeque::new();
+        iters.push_back(
+            TestIterator::new()
+                .with_entry(b"aa", b"aa1")
+                .with_entry(b"bb", b"bb1"),
+        );
+        iters.push_back(
+            TestIterator::new()
+                .with_entry(b"aa", b"aa2")
+                .with_entry(b"bb", b"bb2")
+                .with_entry(b"cc", b"cc2"),
+        );
+
+        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        merge_iter.seek(b"bb".as_ref()).await.unwrap();
+
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_value(b"bb", b"bb1", 0),
+                RowEntry::new_value(b"cc", b"cc2", 0),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_seek_merge_iter_to_current_key() {
+        let mut iters = VecDeque::new();
+        iters.push_back(
+            TestIterator::new()
+                .with_entry(b"aa", b"aa1")
+                .with_entry(b"bb", b"bb1"),
+        );
+        iters.push_back(
+            TestIterator::new()
+                .with_entry(b"aa", b"aa2")
+                .with_entry(b"bb", b"bb2")
+                .with_entry(b"cc", b"cc2"),
+        );
+
+        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        assert_next_entry(&mut merge_iter, &RowEntry::new_value(b"aa", b"aa1", 0)).await;
+
+        merge_iter.seek(b"bb".as_ref()).await.unwrap();
+
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_value(b"bb", b"bb1", 0),
+                RowEntry::new_value(b"cc", b"cc2", 0),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_two_merge_seek() {
+        let iter1 = TestIterator::new()
+            .with_entry(b"aa", b"aa1")
+            .with_entry(b"bb", b"bb1")
+            .with_entry(b"dd", b"dd1");
+        let iter2 = TestIterator::new()
+            .with_entry(b"aa", b"aa2")
+            .with_entry(b"bb", b"bb2")
+            .with_entry(b"cc", b"cc2")
+            .with_entry(b"ee", b"ee2");
+
+        let mut merge_iter = TwoMergeIterator::new(iter1, iter2).await.unwrap();
+        merge_iter.seek(b"b".as_ref()).await.unwrap();
+
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_value(b"bb", b"bb1", 0),
+                RowEntry::new_value(b"cc", b"cc2", 0),
+                RowEntry::new_value(b"dd", b"dd1", 0),
+                RowEntry::new_value(b"ee", b"ee2", 0),
             ],
         )
         .await;
@@ -377,7 +465,7 @@ mod tests {
         }
 
         fn with_entry(mut self, key: &'static [u8], val: &'static [u8]) -> Self {
-            let entry = RowEntry::new(key.into(), Some(val.to_vec().into()), 0, None, None);
+            let entry = RowEntry::new_value(key, val, 0);
             self.entries.push_back(Ok(entry));
             self
         }
@@ -389,6 +477,20 @@ mod tests {
                 Ok(kv) => Ok(Some(kv)),
                 Err(err) => Err(err),
             })
+        }
+    }
+
+    impl SeekToKey for TestIterator {
+        async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+            while let Some(entry_result) = self.entries.front() {
+                let entry = entry_result.clone()?;
+                if entry.key < next_key {
+                    self.entries.pop_front();
+                } else {
+                    break;
+                }
+            }
+            Ok(())
         }
     }
 }

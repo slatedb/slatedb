@@ -164,12 +164,14 @@ use tokio::runtime::Handle;
 use uuid::Uuid;
 
 use crate::compactor::CompactionScheduler;
+use crate::config::GcExecutionMode::Periodic;
 use crate::error::{DbOptionsError, SlateDBError};
 
 use crate::db_cache::DbCache;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
+pub const DEFAULT_SCAN_OPTIONS: &ScanOptions = &ScanOptions::default();
 pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
 pub const DEFAULT_PUT_OPTIONS: &PutOptions = &PutOptions::default();
 
@@ -201,6 +203,28 @@ impl ReadOptions {
     const fn default() -> Self {
         Self {
             read_level: ReadLevel::Commited,
+        }
+    }
+}
+
+pub struct ScanOptions {
+    /// The read commit level for read operations
+    pub read_level: ReadLevel,
+    /// The number of bytes to read ahead. The value is rounded up to the nearest
+    /// block size when fetching from object storage. The default is 1, which
+    /// rounds up to one block.
+    pub read_ahead_bytes: usize,
+    /// Whether or not fetched blocks should be cached
+    pub cache_blocks: bool,
+}
+
+impl ScanOptions {
+    /// Create a new ScanOptions with `read_level` set to [`ReadLevel::Commited`].
+    pub const fn default() -> Self {
+        Self {
+            read_level: ReadLevel::Commited,
+            read_ahead_bytes: 1,
+            cache_blocks: false,
         }
     }
 }
@@ -827,19 +851,30 @@ pub struct GarbageCollectorOptions {
 impl Default for GarbageCollectorDirectoryOptions {
     fn default() -> Self {
         Self {
-            poll_interval: Duration::from_secs(300),
+            execution_mode: Periodic(Duration::from_secs(300)),
             min_age: Duration::from_secs(86_400),
         }
     }
 }
 
+#[derive(Clone, Copy, Deserialize, Serialize, Debug)]
+#[serde(tag = "mode", content = "config")]
+pub enum GcExecutionMode {
+    /// Run garbage collection once.
+    Once,
+
+    /// Run garbage collection periodically.
+    Periodic(
+        #[serde(deserialize_with = "deserialize_duration")]
+        #[serde(serialize_with = "serialize_duration")]
+        Duration,
+    ),
+}
+
 /// Garbage collector options for a directory.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct GarbageCollectorDirectoryOptions {
-    /// The interval at which the garbage collector checks for files to garbage collect.
-    #[serde(deserialize_with = "deserialize_duration")]
-    #[serde(serialize_with = "serialize_duration")]
-    pub poll_interval: Duration,
+    pub execution_mode: GcExecutionMode,
 
     /// The minimum age of a file before it can be garbage collected.
     #[serde(deserialize_with = "deserialize_duration")]
@@ -856,7 +891,7 @@ impl Default for GarbageCollectorOptions {
         Self {
             manifest_options: Some(Default::default()),
             wal_options: Some(GarbageCollectorDirectoryOptions {
-                poll_interval: Duration::from_secs(60),
+                execution_mode: Periodic(Duration::from_secs(60)),
                 min_age: Duration::from_secs(60),
             }),
             compacted_options: Some(Default::default()),

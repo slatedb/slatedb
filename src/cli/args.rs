@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
+use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -93,8 +94,159 @@ pub(crate) enum CliCommands {
 
     /// List the current checkpoints of the db.
     ListCheckpoints {},
+
+    /// Runs a garbage collection for a specific resource type once
+    RunGarbageCollection {
+        /// the type of resource to clean up (manifest, wal, compacted)
+        #[arg(short, long)]
+        resource: GcResource,
+
+        /// the minimum age of the resource before considering it for GC
+        #[arg(short, long)]
+        #[clap(value_parser = humantime::parse_duration)]
+        min_age: Duration,
+    },
+
+    /// Schedules a period garbage collection job
+    #[command(group(
+    ArgGroup::new("gc_config")
+        .args(["manifest", "wal", "compacted"])
+        .multiple(true)
+        .required(true)
+    ))]
+    ScheduleGarbageCollection {
+        /// Configuration for manifest garbage collection should be set in the
+        /// format min_age=<duration>,period=<duration> -- the min_age is the
+        /// minimum manifest age that should be considered for collection and
+        /// the period is how often to attempt a GC
+        #[arg(long, value_parser = parse_gc_schedule)]
+        manifest: Option<GcSchedule>,
+
+        /// Configuration for WAL garbage collection should be set in the
+        /// format min_age=<duration>,period=<duration> -- the min_age is the
+        /// minimum WAL age that should be considered for collection and
+        /// the period is how often to attempt a GC
+        #[arg(long, value_parser = parse_gc_schedule)]
+        wal: Option<GcSchedule>,
+
+        /// Configuration for compacted SST garbage collection should be set in the
+        /// format min_age=<duration>,period=<duration> -- the min_age is the
+        /// minimum SST age that should be considered for collection and
+        /// the period is how often to attempt a GC
+        #[arg(long, value_parser = parse_gc_schedule)]
+        compacted: Option<GcSchedule>,
+    },
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+pub(crate) enum GcResource {
+    Manifest,
+    Wal,
+    Compacted,
+}
+
+fn parse_gc_schedule(s: &str) -> Result<GcSchedule, String> {
+    let parts: HashMap<String, String> = s
+        .split(',')
+        .filter_map(|kv| {
+            let mut parts = kv.splitn(2, '=');
+            match (parts.next(), parts.next()) {
+                (Some(key), Some(value)) => Some((key.to_string(), value.to_string())),
+                _ => None,
+            }
+        })
+        .collect();
+
+    let min_age = parts
+        .get("min_age")
+        .ok_or_else(|| "Missing or invalid 'min_age'".to_string())
+        .and_then(|v| {
+            humantime::parse_duration(v).map_err(|e| {
+                "Could not parse min_age as duration: "
+                    .to_string()
+                    .to_owned()
+                    + e.to_string().as_str()
+            })
+        })?;
+    let period = parts
+        .get("period")
+        .ok_or_else(|| "Missing or invalid 'period'".to_string())
+        .and_then(|v| humantime::parse_duration(v).map_err(|e| e.to_string()))?;
+
+    Ok(GcSchedule { min_age, period })
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GcSchedule {
+    /// Minimum age of resources to collect
+    pub(crate) min_age: Duration,
+
+    /// How often to run the garbage collection
+    pub(crate) period: Duration,
 }
 
 pub(crate) fn parse_args() -> CliArgs {
     CliArgs::parse()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::args::parse_gc_schedule;
+    use rstest::rstest;
+    use std::time::Duration;
+
+    #[rstest]
+    #[case(
+        "min_age=10m,period=1m",
+        Some(Duration::from_secs(600)),
+        Some(Duration::from_secs(60)),
+        None
+    )]
+    #[case(
+        "min_age=10m,period=1m,ignored=5m",
+        Some(Duration::from_secs(600)),
+        Some(Duration::from_secs(60)),
+        None
+    )]
+    #[case("period=1m", None, None, Some("Missing or invalid 'min_age'"))]
+    #[case("min_age=10m", None, None, Some("Missing or invalid 'period'"))]
+    #[case(
+        "min_age=invalid,period=1m",
+        None,
+        None,
+        Some("Could not parse min_age as duration")
+    )]
+    #[case(
+        "min_age=,period=1m",
+        None,
+        None,
+        Some("Could not parse min_age as duration: value was empty")
+    )]
+    fn parse_gc_schedule_tests(
+        #[case] input: &str,
+        #[case] expected_min_age: Option<Duration>,
+        #[case] expected_period: Option<Duration>,
+        #[case] expected_error: Option<&str>,
+    ) {
+        let result = parse_gc_schedule(input);
+
+        match (result, expected_min_age, expected_period, expected_error) {
+            // Valid case: min_age and period are parsed correctly
+            (Ok(schedule), Some(min_age), Some(period), None) => {
+                assert_eq!(schedule.min_age, min_age);
+                assert_eq!(schedule.period, period);
+            }
+            // Error case: check if the error message matches
+            (Err(err), None, None, Some(expected_msg)) => {
+                assert!(
+                    err.contains(expected_msg),
+                    "Expected error to contain '{}', got '{}'",
+                    expected_msg,
+                    err
+                );
+            }
+            // Any unexpected combination fails the test
+            result => panic!("Unexpected test case result. {:?}", result),
+        }
+    }
 }

@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use crate::error::SlateDBError;
 use crate::types::ValueDeletable;
 use bitflags::bitflags;
@@ -9,6 +11,7 @@ bitflags! {
         const TOMBSTONE = 0b00000001;
         const HAS_EXPIRE_TS = 0b00000010;
         const HAS_CREATE_TS = 0b00000100;
+        const MERGE_OPERAND = 0b00001000;
     }
 }
 
@@ -79,6 +82,7 @@ impl SstRowEntry {
     pub fn flags(&self) -> RowFlags {
         let mut flags = match &self.value {
             ValueDeletable::Value(_) => RowFlags::default(),
+            ValueDeletable::Merge(_) => RowFlags::MERGE_OPERAND,
             ValueDeletable::Tombstone => RowFlags::TOMBSTONE,
         };
         if self.expire_ts.is_some() {
@@ -102,9 +106,9 @@ impl SstRowEntry {
         if self.create_ts.is_some() {
             size += 8; // i64 create_ts
         }
-        if let Some(value) = self.value.as_option() {
+        if !matches!(self.value, ValueDeletable::Tombstone) {
             size += 4; // u32 value_len
-            size += value.len(); // value
+            size += self.value.len(); // value
         }
         size
     }
@@ -150,18 +154,15 @@ impl SstRowCodecV0 {
             );
         }
 
-        // skip encoding value for tombstone
-        if flags.contains(RowFlags::TOMBSTONE) {
-            return;
+        match &row.value {
+            ValueDeletable::Value(v) | ValueDeletable::Merge(v) => {
+                output.put_u32(v.len() as u32);
+                output.put(v.as_ref());
+            }
+            ValueDeletable::Tombstone => {
+                // skip encoding value for tombstone
+            }
         }
-
-        // encode value
-        let val = row
-            .value
-            .as_option()
-            .expect("value is not set with no tombstone");
-        output.put_u32(val.len() as u32);
-        output.put(val.as_ref());
     }
 
     pub fn decode(&self, data: &mut Bytes) -> Result<SstRowEntry, SlateDBError> {
@@ -172,7 +173,7 @@ impl SstRowCodecV0 {
 
         // decode seq & flags
         let seq = data.get_u64();
-        let flags = RowFlags::from_bits(data.get_u8()).ok_or(SlateDBError::InvalidRowFlags)?;
+        let flags = self.decode_flags(data.get_u8())?;
 
         // decode expire_ts & create_ts
         let (expire_ts, create_ts) =
@@ -207,8 +208,29 @@ impl SstRowCodecV0 {
             seq,
             expire_ts,
             create_ts,
-            value: ValueDeletable::Value(value),
+            value: if flags.contains(RowFlags::MERGE_OPERAND) {
+                ValueDeletable::Merge(value)
+            } else {
+                ValueDeletable::Value(value)
+            },
         })
+    }
+
+    fn decode_flags(&self, flags: u8) -> Result<RowFlags, SlateDBError> {
+        let parsed =
+            RowFlags::from_bits(flags).ok_or_else(|| SlateDBError::InvalidRowFlags {
+                encoded_bits: flags,
+                known_bits: RowFlags::all().bits(),
+                message: "Unable to parse flags. This may be caused by reading data encoded with a newer codec.".to_string(),
+            })?;
+        if parsed.contains(RowFlags::TOMBSTONE | RowFlags::MERGE_OPERAND) {
+            return Err(SlateDBError::InvalidRowFlags {
+                encoded_bits: parsed.bits(),
+                known_bits: RowFlags::all().bits(),
+                message: "Tombstone and Merge Operand are mutually exclusive.".to_string(),
+            });
+        }
+        Ok(parsed)
     }
 }
 
@@ -368,6 +390,25 @@ mod tests {
 
     #[test]
     fn test_decode_invalid_flags() {
+        let codec = SstRowCodecV0::new();
+        let mut tests: Vec<u8> = Vec::new();
+
+        // Tombstone and Merge Operand are mutually exclusive
+        tests.push(0b00001001);
+        // Unknown bits
+        tests.push(0b00010000);
+        tests.push(0b00100000);
+        tests.push(0b01000000);
+        tests.push(0b10000000);
+
+        for invalid_flags in tests.iter() {
+            let err = codec.decode_flags(*invalid_flags).unwrap_err();
+            assert!(matches!(err, SlateDBError::InvalidRowFlags { .. }));
+        }
+    }
+
+    #[test]
+    fn test_decode_invalid_flags_from_row() {
         let mut encoded_data = Vec::new();
         let key_prefix_len = 3;
         let key_suffix = b"bad".as_slice();
@@ -384,13 +425,47 @@ mod tests {
         let mut data = Bytes::from(encoded_data);
 
         // Attempt to decode the row
-        let codec = SstRowCodecV0 {};
-        let result = codec.decode(&mut data);
+        let codec = SstRowCodecV0::new();
+        let err = codec
+            .decode(&mut data)
+            .map(|_| "decoded entry")
+            .unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidRowFlags { .. }));
+    }
 
-        assert!(result.is_err());
-        match result {
-            Err(SlateDBError::InvalidRowFlags) => (),
-            _ => panic!("Expected InvalidRowFlags"),
-        }
+    #[test]
+    fn test_encode_decode_merge_row() {
+        let mut encoded_data = Vec::new();
+        let key_prefix_len = 5;
+        let key_suffix = b"merge";
+        let value: &[u8] = b"value";
+
+        // Encode the row
+        let codec = SstRowCodecV0::new();
+        codec.encode(
+            &mut encoded_data,
+            &SstRowEntry::new(
+                key_prefix_len,
+                Bytes::from(key_suffix.to_vec()),
+                1,
+                ValueDeletable::Merge(Bytes::from(value)),
+                Some(2),
+                Some(1),
+            ),
+        );
+
+        let first_key = Bytes::from(b"happybeefdata".as_ref());
+        let mut data = Bytes::from(encoded_data);
+        let decoded = codec.decode(&mut data).expect("decoding failed");
+
+        // Expected key: first_key[..5] + "merge" = "happymerge"
+        let expected_key = Bytes::from(b"happymerge" as &[u8]);
+        let expected_value = ValueDeletable::Merge(Bytes::from(value));
+
+        assert_eq!(decoded.restore_full_key(&first_key), &expected_key);
+        assert_eq!(decoded.value, expected_value);
+        assert_eq!(decoded.expire_ts, Some(1));
+        assert_eq!(decoded.create_ts, Some(2));
+        assert_eq!(decoded.size(), 43);
     }
 }

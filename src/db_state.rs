@@ -3,14 +3,17 @@ use bytes::Bytes;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
+use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::Arc;
 use tracing::debug;
 use ulid::Ulid;
 use SsTableId::{Compacted, Wal};
 
+use crate::bytes_range::BytesRange;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
+use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 
 #[derive(Clone, PartialEq, Serialize)]
 pub(crate) struct SsTableHandle {
@@ -34,6 +37,27 @@ impl SsTableHandle {
             return key >= first_key;
         }
         false
+    }
+
+    pub(crate) fn intersects_range(
+        &self,
+        end_bound_key: Option<Bytes>,
+        range: &BytesRange,
+    ) -> bool {
+        let start_bound = match &self.info.first_key {
+            None => Unbounded,
+            Some(key) => Included(key),
+        }
+        .cloned();
+
+        let end_bound = match end_bound_key {
+            None => Unbounded,
+            Some(end_bound_key) => Excluded(end_bound_key),
+        };
+
+        let this_range = BytesRange::new(start_bound, end_bound);
+        let intersection = this_range.intersection(range);
+        intersection.non_empty()
     }
 
     pub(crate) fn estimate_size(&self) -> u64 {
@@ -133,12 +157,32 @@ impl SortedRun {
         self.find_sst_with_range_covering_key_idx(key)
             .map(|idx| &self.ssts[idx])
     }
+
+    pub(crate) fn tables_covering_range(&self, range: &BytesRange) -> VecDeque<&SsTableHandle> {
+        let mut covering_ssts = VecDeque::new();
+        for idx in 0..self.ssts.len() {
+            let current_sst = &self.ssts[idx];
+
+            let upper_bound_key = if idx + 1 < self.ssts.len() {
+                let next_sst = &self.ssts[idx + 1];
+                next_sst.info.first_key.clone()
+            } else {
+                None
+            };
+
+            if current_sst.intersects_range(upper_bound_key, range) {
+                covering_ssts.push_back(&self.ssts[idx]);
+            }
+        }
+        covering_ssts
+    }
 }
 
 pub(crate) struct DbState {
     memtable: WritableKVTable,
     wal: WritableKVTable,
     state: Arc<COWDbState>,
+    error: WatchableOnceCell<SlateDBError>,
 }
 
 // represents the state that is mutated by creating a new copy with the mutations
@@ -209,6 +253,7 @@ impl DbState {
                 imm_wal: VecDeque::new(),
                 core: core_db_state,
             }),
+            error: WatchableOnceCell::new(),
         }
     }
 
@@ -229,7 +274,14 @@ impl DbState {
         self.state.core.next_wal_sst_id - 1
     }
 
+    pub fn error_reader(&self) -> WatchableOnceCellReader<SlateDBError> {
+        self.error.reader()
+    }
+
     // mutations
+    pub fn record_fatal_error(&mut self, error: SlateDBError) {
+        self.error.write(error);
+    }
 
     pub fn wal(&mut self) -> &mut WritableKVTable {
         &mut self.wal
@@ -247,18 +299,25 @@ impl DbState {
         self.state = Arc::new(state);
     }
 
-    pub fn freeze_memtable(&mut self, wal_id: u64) {
+    pub fn freeze_memtable(&mut self, wal_id: u64) -> Result<(), SlateDBError> {
+        if let Some(err) = self.error.reader().read() {
+            return Err(err.clone());
+        }
         let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
         let mut state = self.state_copy();
         state
             .imm_memtable
             .push_front(Arc::new(ImmutableMemtable::new(old_memtable, wal_id)));
         self.update_state(state);
+        Ok(())
     }
 
-    pub fn freeze_wal(&mut self) -> Option<u64> {
+    pub fn freeze_wal(&mut self) -> Result<Option<u64>, SlateDBError> {
+        if let Some(err) = self.error.reader().read() {
+            return Err(err.clone());
+        }
         if self.wal.table().is_empty() {
-            return None;
+            return Ok(None);
         }
         let old_wal = std::mem::replace(&mut self.wal, WritableKVTable::new());
         let mut state = self.state_copy();
@@ -267,7 +326,7 @@ impl DbState {
         state.imm_wal.push_front(imm_wal);
         state.core.next_wal_sst_id += 1;
         self.update_state(state);
-        Some(id)
+        Ok(Some(id))
     }
 
     pub fn pop_imm_wal(&mut self) {
@@ -335,9 +394,15 @@ impl DbState {
 
 #[cfg(test)]
 mod tests {
+    use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::proptest_util::arbitrary;
+    use bytes::Bytes;
+    use proptest::collection::vec;
+    use proptest::proptest;
+    use std::collections::BTreeSet;
+    use std::collections::Bound::Included;
+    use std::ops::RangeBounds;
     use ulid::Ulid;
-
-    use crate::db_state::{CoreDbState, DbState, SsTableHandle, SsTableId, SsTableInfo};
 
     #[test]
     fn test_should_refresh_db_state_with_l0s_up_to_last_compacted() {
@@ -375,18 +440,74 @@ mod tests {
     }
 
     fn add_l0s_to_dbstate(db_state: &mut DbState, n: u32) {
-        let dummy_info = create_sst_info();
+        let dummy_info = create_sst_info(None);
         for i in 0..n {
-            db_state.freeze_memtable(i as u64);
+            db_state
+                .freeze_memtable(i as u64)
+                .expect("db in error state");
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
             let handle = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), dummy_info.clone());
             db_state.move_imm_memtable_to_l0(imm, handle);
         }
     }
 
-    fn create_sst_info() -> SsTableInfo {
+    #[test]
+    fn test_sorted_run_collect_tables_in_range() {
+        let max_bytes_len = 5;
+        proptest!(|(
+            table_first_keys in vec(arbitrary::nonempty_bytes(max_bytes_len), 1..10),
+            range in arbitrary::nonempty_range(max_bytes_len),
+        )| {
+            let sorted_first_keys: BTreeSet<Bytes> = table_first_keys.into_iter().collect();
+            let sorted_run = create_sorted_run(0, &sorted_first_keys);
+            let covering_tables = sorted_run.tables_covering_range(&range);
+            let first_key = sorted_first_keys.first().unwrap().clone();
+
+            if covering_tables.is_empty() {
+                let end_bound =  range.end_bound_opt().unwrap();
+                assert!(end_bound <= first_key);
+            } else {
+                let range_start_key = range.start_bound_opt().unwrap_or(Bytes::new());
+                let covering_first_key = covering_tables.front()
+                .and_then(|t| t.info.first_key.clone())
+                .unwrap();
+
+                if range_start_key < covering_first_key {
+                    assert_eq!(covering_first_key, first_key)
+                }
+
+                let range_end_key: Bytes = range.end_bound_opt()
+                .unwrap_or(vec![u8::MAX; max_bytes_len + 1].into());
+
+                let covering_last_key = covering_tables.iter().last()
+                .and_then(|t| t.info.first_key.clone())
+                .unwrap();
+                if covering_last_key == range_end_key {
+                    assert_eq!(Included(range_end_key), range.end_bound().cloned());
+                } else {
+                    assert!(covering_last_key < range_end_key);
+                }
+            }
+        });
+    }
+
+    fn create_sorted_run(id: u32, first_keys: &BTreeSet<Bytes>) -> SortedRun {
+        let mut ssts = Vec::new();
+        for first_key in first_keys {
+            ssts.push(create_compacted_sst_handle(Some(first_key.clone())));
+        }
+        SortedRun { id, ssts }
+    }
+
+    fn create_compacted_sst_handle(first_key: Option<Bytes>) -> SsTableHandle {
+        let sst_info = create_sst_info(first_key);
+        let sst_id = SsTableId::Compacted(Ulid::new());
+        SsTableHandle::new(sst_id, sst_info.clone())
+    }
+
+    fn create_sst_info(first_key: Option<Bytes>) -> SsTableInfo {
         SsTableInfo {
-            first_key: None,
+            first_key,
             index_offset: 0,
             index_len: 0,
             filter_offset: 0,
