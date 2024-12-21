@@ -135,7 +135,7 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIt
             if peeked_kv.key != current_kv.key {
                 break;
             }
-            if peeked_kv.seq > current_kv.seq {
+            if peeked_kv.seq >= current_kv.seq {
                 current_kv = peeked_kv.clone();
             }
             self.advance_inner().await?;
