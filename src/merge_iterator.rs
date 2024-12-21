@@ -38,6 +38,44 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> TwoMergeIterator<T1, T2> {
             self.iterator2.0.next_entry().await?,
         ))
     }
+
+    fn peek1(&self) -> Option<&RowEntry> {
+        self.iterator1.1.as_ref()
+    }
+
+    fn peek2(&self) -> Option<&RowEntry> {
+        self.iterator2.1.as_ref()
+    }
+
+    fn peek_inner(&self) -> Option<&RowEntry> {
+        match (self.peek1(), self.peek2()) {
+            (None, None) => None,
+            (Some(v1), None) => Some(v1),
+            (None, Some(v2)) => Some(v2),
+            (Some(v1), Some(v2)) => {
+                if v1.key < v2.key {
+                    Some(v1)
+                } else {
+                    Some(v2)
+                }
+            }
+        }
+    }
+
+    async fn advance_inner(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        match (self.peek1(), self.peek2()) {
+            (None, None) => Ok(None),
+            (Some(_), None) => self.advance1().await,
+            (None, Some(_)) => self.advance2().await,
+            (Some(next1), Some(next2)) => {
+                if next1.key < next2.key {
+                    self.advance1().await
+                } else {
+                    self.advance2().await
+                }
+            }
+        }
+    }
 }
 
 impl<T1, T2> TwoMergeIterator<T1, T2>
@@ -89,24 +127,26 @@ where
 
 impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIterator<T1, T2> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        if let Some(next1) = self.iterator1.1.as_ref() {
-            if let Some(next2) = self.iterator2.1.as_ref() {
-                if next1.key <= next2.key {
-                    if next1.key == next2.key {
-                        self.advance2().await?;
-                    }
-                    return self.advance1().await;
-                }
-                return self.advance2().await;
+        let mut current_kv = match self.advance_inner().await? {
+            Some(kv) => kv,
+            None => return Ok(None),
+        };
+        while let Some(peeked_kv) = self.peek_inner() {
+            if peeked_kv.key != current_kv.key {
+                break;
             }
-            return self.advance1().await;
+            if peeked_kv.seq >= current_kv.seq {
+                current_kv = peeked_kv.clone();
+            }
+            self.advance_inner().await?;
         }
-        self.advance2().await
+        Ok(Some(current_kv))
     }
 }
 
 struct MergeIteratorHeapEntry<T: KeyValueIterator> {
     next_kv: RowEntry,
+    // when we got two entries with the same key, we'd choose the one with the higher index
     index: u32,
     iterator: T,
 }
@@ -150,11 +190,18 @@ impl<T: KeyValueIterator> PartialOrd<Self> for MergeIteratorHeapEntry<T> {
 
 impl<T: KeyValueIterator> Ord for MergeIteratorHeapEntry<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        match self.next_kv.key.cmp(&other.next_kv.key) {
-            Ordering::Less => Ordering::Less,
-            Ordering::Greater => Ordering::Greater,
-            Ordering::Equal => self.index.cmp(&other.index),
-        }
+        // the row entry with higher index, should always has higher seqnum
+        // if a key both exists in L0_1 and L0_2, the one in L0_2 should be
+        // returned first, as L0_2 is created later than L0_1, and the seqnum
+        // is higher.
+        //
+        // we'll wrap a Reverse in the BinaryHeap, so the cmp here is in
+        // increasing order.
+        (&self.next_kv.key, self.index, self.next_kv.seq).cmp(&(
+            &other.next_kv.key,
+            other.index,
+            other.next_kv.seq,
+        ))
     }
 }
 
@@ -199,16 +246,24 @@ impl<T: KeyValueIterator> MergeIterator<T> {
 
 impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        if let Some(kv) = self.advance().await? {
-            while let Some(next_entry) = self.current.as_ref() {
-                if next_entry.next_kv.key != kv.key {
-                    break;
-                }
-                self.advance().await?;
+        let mut current_kv = match self.advance().await? {
+            Some(kv) => kv,
+            None => return Ok(None),
+        };
+
+        // iterate until we find a key that is not the same as the current key,
+        // find the one with the highest seqnum.
+        while let Some(peeked_entry) = self.current.as_ref() {
+            if peeked_entry.next_kv.key != current_kv.key {
+                break;
             }
-            return Ok(Some(kv));
+
+            if peeked_entry.next_kv.seq > current_kv.seq {
+                current_kv = peeked_entry.next_kv.clone();
+            }
+            self.advance().await?;
         }
-        Ok(None)
+        Ok(Some(current_kv))
     }
 }
 
