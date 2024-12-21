@@ -89,24 +89,25 @@ where
 
 impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIterator<T1, T2> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        if let Some(next1) = self.iterator1.1.as_ref() {
-            if let Some(next2) = self.iterator2.1.as_ref() {
+        match (self.iterator1.1.as_ref(), self.iterator2.1.as_ref()) {
+            (None, None) => Ok(None),
+            (Some(_), None) => self.advance1().await,
+            (None, Some(_)) => self.advance2().await,
+            (Some(next1), Some(next2)) => {
                 if next1.key < next2.key {
-                    return self.advance1().await;
+                    self.advance1().await
                 } else if next1.key > next2.key {
-                    return self.advance2().await;
+                    self.advance2().await
                 } else {
                     // if the key is the same, we choose the one with higher seqnum
                     if next1.seq > next2.seq {
-                        return self.advance1().await;
+                        self.advance1().await
                     } else {
-                        return self.advance2().await;
+                        self.advance2().await
                     }
                 }
             }
-            return self.advance1().await;
         }
-        self.advance2().await
     }
 }
 
