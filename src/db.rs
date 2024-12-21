@@ -410,6 +410,8 @@ impl DbInner {
         Ok(())
     }
 
+    #[allow(unused)]
+    // TODO(asukamilet): We will refactor flush logic as soon as possible, and after refactor we may not need this function
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
@@ -1262,9 +1264,19 @@ impl Db {
         self.inner.write_with_options(batch, options).await
     }
 
-    /// Flush the database to disk.
+    /// Flush current in-memory components(WAL/Memtable) data for persistence.
     /// If WAL is enabled, flushes the WAL to disk.
     /// If WAL is disabled, flushes the memtables to disk.
+    ///
+    /// Note that the logic of [`DB::flush`] is as follows.
+    /// 1. If WAL is enabled, freeze the current active WAL, then flush all immutable WALs to memtable.
+    /// 2. We freeze the current active memtable and flush all the memtables for persistence.
+    /// 3. If WAL is disabled, skip step 1.
+    ///
+    /// In other words, when we freeze the active WAL/memtable there is a new WAL/memtable available, and the flush
+    /// process takes place in the background. slateDB does not prevent you from continuing to write to the WAL/memtable
+    /// in the foreground! So if you're writing fast, you may notice after the flush is over that new immutable
+    /// WALs/Memtables exist.
     ///
     /// ## Errors
     /// - `SlateDBError`: if there was an error flushing the database
@@ -1286,36 +1298,27 @@ impl Db {
     /// ```
     pub async fn flush(&self) -> Result<(), SlateDBError> {
         if self.inner.wal_enabled() {
-            self.inner.flush_wals().await
+            // DBInner::flush() will frozen the active WAL and flush all imm_wals to memtable
+            self.inner.flush().await?;
+            {
+                // TODO(asukamilet): refactor flush logic
+                let mut guard = self.inner.state.write();
+                let wal_id = guard.last_written_wal_id() + 1;
+                guard.freeze_memtable(wal_id)?;
+            }
+            self.inner.flush_memtables().await
         } else {
+            {
+                let mut guard = self.inner.state.write();
+                let wal_id = guard.last_written_wal_id() + 1;
+                guard.freeze_memtable(wal_id)?;
+            }
             self.inner.flush_memtables().await
         }
     }
 
     pub fn metrics(&self) -> Arc<DbStats> {
         self.inner.db_stats.clone()
-    }
-
-    /// Only used for test cases in slateDB internal, please don't use it as a normal operation
-    #[allow(unused)]
-    async fn force_flush(&self) -> Result<(), SlateDBError> {
-        if self.inner.wal_enabled() {
-            // DBInner::flush() will frozen the active WAL and flush all imm_wals to memtable
-            self.inner.flush().await?;
-            {
-                let mut guard = self.inner.state.write();
-                let wal_id = guard.last_written_wal_id() + 1;
-                guard.freeze_memtable(wal_id);
-            }
-            self.inner.flush_memtables().await
-        } else {
-            {
-                let mut guard = self.inner.state.write();
-                let wal_id = guard.last_written_wal_id() + 1;
-                guard.freeze_memtable(wal_id);
-            }
-            self.inner.flush_memtables().await
-        }
     }
 }
 
@@ -1439,7 +1442,7 @@ mod tests {
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
-        kv_store.flush().await.unwrap();
+        kv_store.inner.flush_wals().await.unwrap();
 
         assert_eq!(
             cached_object_store
@@ -2149,7 +2152,8 @@ mod tests {
         db.flush().await.unwrap();
 
         let snapshot = db.inner.state.read().snapshot();
-        assert_eq!(snapshot.state.imm_memtable.len(), 1);
+        assert_eq!(snapshot.state.imm_memtable.len(), 2);
+        assert!(snapshot.memtable.is_empty());
     }
 
     #[tokio::test]
@@ -2253,7 +2257,7 @@ mod tests {
                 .put(&i.to_be_bytes(), &i.to_be_bytes())
                 .await
                 .unwrap();
-            kv_store.flush().await.unwrap();
+            kv_store.inner.flush_wals().await.unwrap();
             next_wal_id += 1;
         }
 
@@ -2750,7 +2754,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_force_flush() {
+    async fn test_flush() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
 
@@ -2766,7 +2770,7 @@ mod tests {
         // Data size less than flush threshold.
         db.put(b"a", b"114514").await.unwrap();
         db.put(b"b", b"810810").await.unwrap();
-        db.force_flush().await.unwrap();
+        db.flush().await.unwrap();
 
         let snapshot = db.inner.state.read().snapshot();
         if db.inner.wal_enabled() {
@@ -2847,7 +2851,7 @@ mod tests {
         // put with time = 10
         clock.ticker.store(10, Ordering::SeqCst);
         db.put(b"1", b"1").await.unwrap();
-        db.flush().await.unwrap();
+        db.inner.flush_wals().await.unwrap();
 
         let db2 = Db::open_with_opts(
             path.clone(),
