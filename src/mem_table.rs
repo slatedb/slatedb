@@ -17,55 +17,55 @@ use crate::utils::WatchableOnceCell;
 
 /// Memtable may contains multiple versions of a single user key, with a monotonically increasing sequence number.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) struct LookupKey {
+pub(crate) struct KVTableInternalKey {
     user_key: Bytes,
     seq: u64,
 }
 
-impl LookupKey {
+impl KVTableInternalKey {
     pub fn new(user_key: Bytes, seq: u64) -> Self {
         Self { user_key, seq }
     }
 }
 
-impl Ord for LookupKey {
+impl Ord for KVTableInternalKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         (&self.user_key, self.seq).cmp(&(&other.user_key, other.seq))
     }
 }
 
-impl PartialOrd for LookupKey {
+impl PartialOrd for KVTableInternalKey {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct LookupKeyRange {
-    start_bound: Bound<LookupKey>,
-    end_bound: Bound<LookupKey>,
+pub(crate) struct KVTableInternalKeyRange {
+    start_bound: Bound<KVTableInternalKey>,
+    end_bound: Bound<KVTableInternalKey>,
 }
 
-impl RangeBounds<LookupKey> for LookupKeyRange {
-    fn start_bound(&self) -> Bound<&LookupKey> {
+impl RangeBounds<KVTableInternalKey> for KVTableInternalKeyRange {
+    fn start_bound(&self) -> Bound<&KVTableInternalKey> {
         self.start_bound.as_ref()
     }
 
-    fn end_bound(&self) -> Bound<&LookupKey> {
+    fn end_bound(&self) -> Bound<&KVTableInternalKey> {
         self.end_bound.as_ref()
     }
 }
 
-impl From<BytesRange> for LookupKeyRange {
+impl From<BytesRange> for KVTableInternalKeyRange {
     fn from(range: BytesRange) -> Self {
         let start_bound = match range.start_bound() {
-            Bound::Included(key) => Bound::Included(LookupKey::new(key.clone(), 0)),
-            Bound::Excluded(key) => Bound::Included(LookupKey::new(key.clone(), 0)),
+            Bound::Included(key) => Bound::Included(KVTableInternalKey::new(key.clone(), 0)),
+            Bound::Excluded(key) => Bound::Included(KVTableInternalKey::new(key.clone(), 0)),
             Bound::Unbounded => Bound::Unbounded,
         };
         let end_bound = match range.end_bound() {
-            Bound::Included(key) => Bound::Included(LookupKey::new(key.clone(), u64::MAX)),
-            Bound::Excluded(key) => Bound::Included(LookupKey::new(key.clone(), u64::MAX)),
+            Bound::Included(key) => Bound::Included(KVTableInternalKey::new(key.clone(), u64::MAX)),
+            Bound::Excluded(key) => Bound::Included(KVTableInternalKey::new(key.clone(), u64::MAX)),
             Bound::Unbounded => Bound::Unbounded,
         };
         Self {
@@ -76,7 +76,7 @@ impl From<BytesRange> for LookupKeyRange {
 }
 
 pub(crate) struct KVTable {
-    map: SkipMap<LookupKey, RowEntry>,
+    map: SkipMap<KVTableInternalKey, RowEntry>,
     durable: WatchableOnceCell<Result<(), SlateDBError>>,
     size: AtomicUsize,
 }
@@ -96,15 +96,15 @@ pub(crate) struct ImmutableWal {
     table: Arc<KVTable>,
 }
 
-pub(crate) struct MemTableIterator<'a, T: RangeBounds<LookupKey>> {
-    /// The lookup key range is considered as wider than the user key range since it includes sequence
-    /// numbers. For example, with keys ("key001", seq=1), ("key002", seq=2), ("key002", seq=3),
-    /// ("key003", seq=4), if the user specifies a range of Excluded("key002"), we cannot directly create
-    /// a LookupKeyRange that equivant with Excluded("key002") that filter out all the sequence numbers.
+pub(crate) struct MemTableIterator<'a, T: RangeBounds<KVTableInternalKey>> {
+    /// The kv table internal key range is considered as wider than the user key range since it includes sequence
+    /// numbers. For example, with keys ("key001", seq=1), ("key002", seq=2), ("key002", seq=3), ("key003", seq=4),
+    /// if the user specifies a range of Excluded("key002"), we cannot directly create
+    /// a KVTableInternalKeyRange that equivant with Excluded("key002") that filter out all the sequence numbers.
     /// We have to store the original user key range with an additional filter to handle the Excluded case.
     user_key_range: BytesRange,
     /// `inner` is the Iterator impl of SkipMap, which is the underlying data structure of MemTable.
-    inner: Range<'a, LookupKey, T, LookupKey, RowEntry>,
+    inner: Range<'a, KVTableInternalKey, T, KVTableInternalKey, RowEntry>,
 }
 
 pub(crate) struct VecDequeKeyValueIterator {
@@ -151,13 +151,13 @@ impl SeekToKey for VecDequeKeyValueIterator {
     }
 }
 
-impl<'a, T: RangeBounds<LookupKey>> KeyValueIterator for MemTableIterator<'a, T> {
+impl<'a, T: RangeBounds<KVTableInternalKey>> KeyValueIterator for MemTableIterator<'a, T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.next_entry_sync())
     }
 }
 
-impl<T: RangeBounds<LookupKey>> MemTableIterator<'_, T> {
+impl<T: RangeBounds<KVTableInternalKey>> MemTableIterator<'_, T> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
         for entry in self.inner.by_ref() {
             if self.user_key_range.contains(&entry.key().user_key) {
@@ -253,35 +253,35 @@ impl KVTable {
     /// Some(None) if the key is in the memtable but has a tombstone value,
     /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
     pub(crate) fn get(&self, key: &[u8]) -> Option<RowEntry> {
-        let start_key = LookupKey::new(Bytes::from(key.to_vec()), 0);
-        let end_key = LookupKey::new(Bytes::from(key.to_vec()), u64::MAX);
+        let start_key = KVTableInternalKey::new(Bytes::from(key.to_vec()), 0);
+        let end_key = KVTableInternalKey::new(Bytes::from(key.to_vec()), u64::MAX);
         self.map
             .range(start_key..end_key)
             .next_back()
             .map(|entry| entry.value().clone())
     }
 
-    pub(crate) fn iter(&self) -> MemTableIterator<LookupKeyRange> {
+    pub(crate) fn iter(&self) -> MemTableIterator<KVTableInternalKeyRange> {
         self.range(BytesRange::from(..))
     }
 
-    pub(crate) fn range(&self, range: BytesRange) -> MemTableIterator<LookupKeyRange> {
-        // the lookup key range is wider than the user key range, we have to
+    pub(crate) fn range(&self, range: BytesRange) -> MemTableIterator<KVTableInternalKeyRange> {
+        // the kv table internal key range is wider than the user key range, we have to
         // memoize the user key range to avoid Excluded(key) being included in the
         // range.
         MemTableIterator {
             user_key_range: range.clone(),
-            inner: self.map.range(LookupKeyRange::from(range)),
+            inner: self.map.range(KVTableInternalKeyRange::from(range)),
         }
     }
 
     fn put(&self, row: RowEntry) {
         self.size.fetch_add(row.estimated_size(), Ordering::Relaxed);
-        let lookup_key = LookupKey::new(row.key.clone(), row.seq);
+        let internal_key = KVTableInternalKey::new(row.key.clone(), row.seq);
         let previous_size = Cell::new(None);
 
         // TODO: memtable is considered as append only, so i suppose we do not need consider removing the previous row here
-        self.map.compare_insert(lookup_key, row, |previous_row| {
+        self.map.compare_insert(internal_key, row, |previous_row| {
             // Optimistically calculate the size of the previous value.
             // `compare_fn` might be called multiple times in case of concurrent
             // writes to the same key, so we use `Cell` to avoid substracting
