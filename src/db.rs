@@ -2174,13 +2174,7 @@ mod tests {
 
         let memtable = {
             let mut lock = kv_store.inner.state.write();
-            lock.wal().put(RowEntry {
-                key: Bytes::copy_from_slice(b"abc1111"),
-                value: ValueDeletable::Value(Bytes::copy_from_slice(b"value1111")),
-                seq: 1,
-                create_ts: None,
-                expire_ts: None,
-            });
+            lock.wal().put(RowEntry::new_value(b"abc1111", b"value1111", 1));
             lock.wal().put(RowEntry {
                 key: Bytes::copy_from_slice(b"abc2222"),
                 value: ValueDeletable::Value(Bytes::copy_from_slice(b"value2222")),
