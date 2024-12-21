@@ -79,7 +79,7 @@ corruption before discussing my proposal for SlateDB.
 high-reliability, full-featured, SQL database engine". SQLite implements
 physical durability, and makes no assumptions about the reliability of the disk
 it operates upon. SQLite becomes unavailable when corruption occurs, returning
-`SQLITE_ERROR` when preforming queries against a corrupted file.
+`SQLITE_ERROR` when performing queries against a corrupted file.
 
 > SQLite assumes that the detection and/or correction of bit errors caused by
 > cosmic rays, thermal noise, quantum fluctuations, device driver bugs, or
@@ -116,7 +116,7 @@ are based off the WAL of the primary node. If the WAL is corrupted,
 transactions associated with that WAL entry are lost and the database becomes
 unavailable. See https://www.postgresql.org/docs/9.1/app-pgresetxlog.html
 
-PostgreSQL does not preform checksum on data read from disk by default. It must
+PostgreSQL does not perform checksum on data read from disk by default. It must
 be enabled See
 https://www.postgresql.org/docs/current/app-initdb.html#APP-INITDB-DATA-CHECKSUMS
 
@@ -209,12 +209,12 @@ durability and availability systems on top of SlateDB.
   entries.
 
 ### Proposed Solution
-To provide support both Availability and Durability, I propose adding a callback
-function called `DBOptions.on_corruption` which is called when SlateDB encounters
-corruption during operation. The use of a call back allows developers to decide their
-desired behavior when corruption is detected. The return value of the callback
-then informs SlateDB of the users desire to abort the current operation with an
-error, or to continue operation attempting to skip the encountered corruption.
+I propose adding a callback function called `DBOptions.on_corruption` which is
+called when SlateDB encounters corruption during operation. The use of a call
+back allows developers to decide their desired behavior when corruption is
+detected. The return value of the callback then informs SlateDB of the users
+desire to abort the current operation with an error, or to continue operation
+attempting to skip the encountered corruption.
 
 To support developers who value availability, the `on_corruption` callback can
 be designed to log or notify the operator of the corruption, but otherwise
@@ -245,7 +245,7 @@ restore corrupted data from replicas or backups.
 
     // If we want the database to become unavailable until 
     // corruption is fixed, return an error and SlateDB will
-    // preform a safe shutdown.
+    // perform a safe shutdown.
     return fmt.Errorf("Corruption Detected: %s", d.String())
 
     // Else we return no error, and the database remains available.
@@ -253,17 +253,17 @@ restore corrupted data from replicas or backups.
   }
 ```
 
-If not defined by the user, the `DBOptions.on_corruption` callback should
-both log and return an error. This ensures that SlateDB is durable by default.
+To support durability by default, if `DBOptions.on_corruption` is not defined by
+the user, `DBOptions.on_corruption` should default to a function which both
+logs the error and returns it.
 
 #### Handling WAL Corruption
 It is reasonable for a developer to assume that once data is confirmed to be
-written to the WAL, the data or transaction is considered durably written to
-storage. However, as can be seen in the "Corruption Review" section of this
-document, this assumption is only theoretical. In practice, it is possible for
-WAL entries written to storage to be corrupted resulting in data loss.
-Additionally, this corruption may only be discovered during compaction or
-recovery.
+written to the Write-Ahead Log (WAL), the data or transaction is considered
+durably written to storage. However, as discussed in the "Corruption Review"
+section of this document, this assumption is only theoretical. In practice,
+corruption may only be discovered when recovering from a system failure or
+crash, which is when WAL entries are most critical.
 
 It is important to note that during normal LSM operation, the movement of
 entries from the WAL to the SSTable occurs in memory. The WAL is only used as a
@@ -277,12 +277,16 @@ true.
 Although the probability of both conditions being true is very low, especially
 in the context of durable object storage, it is not impossible.
 
-To ensure durability by default, I propose that `open_with_opts()` perform
-WAL recovery synchronously and return any WAL corruption found 
-as errors, aborting the database open process until the corruption is resolved.
-The error returned should be a distinct type that can easily be matched to 
-determine if the error is due to non-transient corruption or a transient error
-(such as network connectivity issues).
+To address this, I propose that the `open_with_opts()` function perform WAL
+recovery synchronously and call `DBOptions.on_corruption` when WAL corruption
+is detected. If `DBOptions.on_corruption` returns an error, the database open
+operation should be aborted, and an error should be returned from
+`open_with_opts()`. If `DBOptions.on_corruption` does not return an error,
+corrupt entries in the WAL should be skipped until a valid entry is found.
+
+The error returned should be of a distinct type that can easily be identified
+to determine whether the error is due to non-transient corruption or a
+transient issue (such as network connectivity problems).
 
 #### Handling SST Corruption During Compaction
 Compaction is an asynchronous process that may encounter corrupted SST files
@@ -326,20 +330,10 @@ application can then provide operators with detailed information included in
 the error returned by SlateDB, including the nature of the corruption and
 suggestions on how to fix it.
 
-##### Remaining Available
-In the case where corruption is encountered, and `DBOptions.on_corruption` allows
-operation to continue, SlateDB should endeavor to return the most recent 
-valid data it can.
-
-- If the SST Bloom Filter indicates a value exists in the SST, yet the key was
-  not found, and corruption was detected during iteration, the `get` caller
-  should receive a Corruption error.
-- If the most recent value is in a non-corrupt block, the `get` call should
-  return successfully
-- If the SST index is corrupt and `get` has not yet found the KV in an earlier
-  SST, the call should receive a Corruption error. (This effectively prevents
-  reads in SSTs older than the first corrupt SST)
-- MORE?
+#### Handling SST Corruption in Cache Files
+If SlateDB detects corruption in a cache file, it should invalidate the cache
+file and remove the corrupt file. It is not necessary to call
+`DBOptions.on_corruption` as there is no action for the operator to take.
 
 #### Corruption Inspection and Repair
 To support the repair of SSTs, I propose introducing two new functions:
@@ -350,8 +344,8 @@ SST that has been identified as corrupt.
 To support the repair of the WAL, I propose introducing two additional functions:
 `wal_inspect()` and `wal_repair()`. These functions will allow developers to
 inspect the current contents of the WAL, including corrupted entries, and to
-repair the WAL to the best of its ability through entity recovery or truncation
-of the WAL.
+repair the WAL to the best of its ability through skipping corrupted entries 
+or truncation of the WAL.
 
 The inspection functions are designed to provide verbose information about the
 WAL or SST. This includes reporting the contents of the files and any
@@ -379,14 +373,7 @@ inspect the corrupt data file after the database has been restored to an
 operational state.
 
 #### For Convenience
-For convenience:
-- We could optionally introduce a new database option called
-  `DbOptions.wal_auto_recovery`, similar in naming to `DbOptions.wal_enabled`.
-  If set to `true`, then `open_with_opts()` will automatically repair the WAL
-  using the `wal_repair()` function. It is only a convenience, as the same
-  result can be achieved by calling `open_with_opts()`, immediately calling
-  `wal_repair()`, and then calling `open_with_opts()` again.
-- We could optionally support verification of the entire database when
-  `DB::open_with_opts()` is called through a future `DBOptions` configuration.
-  Additionally, we can expose the inspection and repair function via a CLI
-  available to operators.
+We could optionally support verification of the entire database when
+`open_with_opts()` is called through a future `DBOptions` configuration.
+Additionally, we can expose the inspection and repair function via a CLI
+available to operators.
