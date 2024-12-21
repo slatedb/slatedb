@@ -207,14 +207,18 @@ impl<T: KeyValueIterator> MergeIterator<T> {
 
 impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        if let Some(kv) = self.advance().await? {
+        if let Some(mut kv_selected) = self.advance().await? {
+            // iterate until we find a key that is not the same as the current key,
+            // find the one with the highest seqnum.
             while let Some(next_entry) = self.current.as_ref() {
-                if next_entry.next_kv.key != kv.key {
+                if next_entry.next_kv.key != kv_selected.key {
                     break;
+                } else if next_entry.next_kv.seq > kv_selected.seq {
+                    kv_selected = next_entry.next_kv.clone();
                 }
                 self.advance().await?;
             }
-            return Ok(Some(kv));
+            return Ok(Some(kv_selected));
         }
         Ok(None)
     }
