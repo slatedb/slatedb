@@ -1,7 +1,6 @@
 use std::cell::Cell;
-use std::cmp::Reverse;
 use std::collections::VecDeque;
-use std::ops::{Bound, RangeBounds, RangeFull};
+use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -42,7 +41,7 @@ impl PartialOrd for LookupKey {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct LookupKeyRange {
+pub(crate) struct LookupKeyRange {
     start_bound: Bound<LookupKey>,
     end_bound: Bound<LookupKey>,
 }
@@ -61,15 +60,15 @@ impl From<BytesRange> for LookupKeyRange {
     fn from(range: BytesRange) -> Self {
         let start_bound = match range.start_bound() {
             Bound::Included(key) => Bound::Included(LookupKey::new(key.clone(), 0)),
-            Bound::Excluded(key) => Bound::Excluded(LookupKey::new(key.clone(), 0)),
+            Bound::Excluded(key) => Bound::Included(LookupKey::new(key.clone(), 0)),
             Bound::Unbounded => Bound::Unbounded,
         };
         let end_bound = match range.end_bound() {
             Bound::Included(key) => Bound::Included(LookupKey::new(key.clone(), u64::MAX)),
-            Bound::Excluded(key) => Bound::Excluded(LookupKey::new(key.clone(), u64::MAX)),
+            Bound::Excluded(key) => Bound::Included(LookupKey::new(key.clone(), u64::MAX)),
             Bound::Unbounded => Bound::Unbounded,
         };
-        LookupKeyRange {
+        Self {
             start_bound,
             end_bound,
         }
@@ -97,9 +96,16 @@ pub(crate) struct ImmutableWal {
     table: Arc<KVTable>,
 }
 
-type MemTableRange<'a, T> = Range<'a, LookupKey, T, LookupKey, RowEntry>;
-
-pub(crate) struct MemTableIterator<'a, T: RangeBounds<LookupKey>>(MemTableRange<'a, T>);
+pub(crate) struct MemTableIterator<'a, T: RangeBounds<LookupKey>> {
+    /// The lookup key range is considered as wider than the user key range since it includes sequence
+    /// numbers. For example, with keys ("key001", seq=1), ("key002", seq=2), ("key002", seq=3),
+    /// ("key003", seq=4), if the user specifies a range of Excluded("key002"), we cannot directly create
+    /// a LookupKeyRange with Excluded("key002") since that would exclude all sequence numbers. Instead,
+    /// we store the original user key range with an additional filter to handle the Excluded case.
+    user_key_range: BytesRange,
+    /// `inner` is the Iterator impl of SkipMap, which is the underlying data structure of MemTable.
+    inner: Range<'a, LookupKey, T, LookupKey, RowEntry>,
+}
 
 pub(crate) struct VecDequeKeyValueIterator {
     rows: VecDeque<RowEntry>,
@@ -114,11 +120,7 @@ impl VecDequeKeyValueIterator {
         tables: VecDeque<Arc<KVTable>>,
         range: BytesRange,
     ) -> Result<Self, SlateDBError> {
-        let lookup_range = LookupKeyRange::from(range);
-        let memtable_iters = tables
-            .iter()
-            .map(|t| t.range(lookup_range.clone()))
-            .collect();
+        let memtable_iters = tables.iter().map(|t| t.range(range.clone())).collect();
         let mut merge_iter = MergeIterator::new(memtable_iters).await?;
         let mut rows = VecDeque::new();
 
@@ -157,7 +159,12 @@ impl<'a, T: RangeBounds<LookupKey>> KeyValueIterator for MemTableIterator<'a, T>
 
 impl<T: RangeBounds<LookupKey>> MemTableIterator<'_, T> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
-        self.0.next().map(|entry| entry.value().clone())
+        while let Some(entry) = self.inner.next() {
+            if self.user_key_range.contains(&entry.key().user_key) {
+                return Some(entry.value().clone());
+            }
+        }
+        None
     }
 }
 
@@ -254,13 +261,18 @@ impl KVTable {
             .map(|entry| entry.value().clone())
     }
 
-    pub(crate) fn iter(&self) -> MemTableIterator<RangeFull> {
-        self.range(..)
+    pub(crate) fn iter(&self) -> MemTableIterator<LookupKeyRange> {
+        self.range(BytesRange::from(..))
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn range<T: RangeBounds<LookupKey>>(&self, range: T) -> MemTableIterator<T> {
-        MemTableIterator(self.map.range(range))
+    pub(crate) fn range(&self, range: BytesRange) -> MemTableIterator<LookupKeyRange> {
+        // the lookup key range is wider than the user key range, we have to
+        // memoize the user key range to avoid Excluded(key) being included in the
+        // range.
+        MemTableIterator {
+            user_key_range: range.clone(),
+            inner: self.map.range(LookupKeyRange::from(range)),
+        }
     }
 
     fn put(&self, row: RowEntry) {
@@ -421,7 +433,7 @@ mod tests {
 
         let mut iter = table
             .table()
-            .range(LookupKey::new(Bytes::from_static(b"abc333"), 0)..);
+            .range(BytesRange::from(Bytes::from_static(b"abc333")..));
         let kv = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc333".as_slice());
         assert_eq!(
@@ -484,9 +496,9 @@ mod tests {
 
         let mut iter = table
             .table()
-            .range(LookupKey::new(Bytes::from_static(b"abc345"), 0)..);
+            .range(BytesRange::from(Bytes::from_static(b"abc334")..));
         let kv = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc444".as_slice());
+        assert_eq!(kv.key, Bytes::from_static(b"abc444"));
         assert_eq!(
             kv.value,
             ValueDeletable::Value(Bytes::from_static(b"value4"))
