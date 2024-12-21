@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::cmp::Reverse;
 use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds, RangeFull};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,7 +31,9 @@ impl LookupKey {
 
 impl Ord for LookupKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (&self.user_key, self.seq).cmp(&(&other.user_key, other.seq))
+        (&self.user_key, self.seq)
+            .cmp(&(&other.user_key, other.seq))
+            .reverse()
     }
 }
 
@@ -245,12 +248,10 @@ impl KVTable {
     /// Some(None) if the key is in the memtable but has a tombstone value,
     /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
     pub(crate) fn get(&self, key: &[u8]) -> Option<RowEntry> {
-        let start_key = LookupKey::new(Bytes::from(key.to_vec()), 0);
-        let end_key = LookupKey::new(Bytes::from(key.to_vec()), u64::MAX);
-        let bounds = (Bound::Included(start_key), Bound::Included(end_key));
+        let start_key = LookupKey::new(Bytes::from(key.to_vec()), u64::MAX);
         self.map
-            .range(bounds)
-            .next_back()
+            .range(start_key..)
+            .next()
             .map(|entry| entry.value().clone())
     }
 
@@ -518,10 +519,22 @@ mod tests {
             seq: 2,
         });
 
+        // it should return the the higher seqnum first
+        let mut iter = table.table().iter();
+        assert_eq!(
+            iter.next_entry().await.unwrap().unwrap().value,
+            ValueDeletable::Tombstone
+        );
+
+        // in merge iterator, it should only return one entry
         let iter = table.table().iter();
         let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter]))
             .await
             .unwrap();
+        assert_eq!(
+            merge_iter.next_entry().await.unwrap().unwrap().value,
+            ValueDeletable::Tombstone
+        );
         assert_eq!(merge_iter.next_entry().await.unwrap(), None);
     }
 
