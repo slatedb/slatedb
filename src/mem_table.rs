@@ -100,8 +100,8 @@ pub(crate) struct MemTableIterator<'a, T: RangeBounds<LookupKey>> {
     /// The lookup key range is considered as wider than the user key range since it includes sequence
     /// numbers. For example, with keys ("key001", seq=1), ("key002", seq=2), ("key002", seq=3),
     /// ("key003", seq=4), if the user specifies a range of Excluded("key002"), we cannot directly create
-    /// a LookupKeyRange with Excluded("key002") since that would exclude all sequence numbers. Instead,
-    /// we store the original user key range with an additional filter to handle the Excluded case.
+    /// a LookupKeyRange that equivant with Excluded("key002") that filter out all the sequence numbers.
+    /// We have to store the original user key range with an additional filter to handle the Excluded case.
     user_key_range: BytesRange,
     /// `inner` is the Iterator impl of SkipMap, which is the underlying data structure of MemTable.
     inner: Range<'a, LookupKey, T, LookupKey, RowEntry>,
@@ -159,7 +159,7 @@ impl<'a, T: RangeBounds<LookupKey>> KeyValueIterator for MemTableIterator<'a, T>
 
 impl<T: RangeBounds<LookupKey>> MemTableIterator<'_, T> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
-        while let Some(entry) = self.inner.next() {
+        for entry in self.inner.by_ref() {
             if self.user_key_range.contains(&entry.key().user_key) {
                 return Some(entry.value().clone());
             }
