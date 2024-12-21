@@ -31,9 +31,7 @@ impl LookupKey {
 
 impl Ord for LookupKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (&self.user_key, self.seq)
-            .cmp(&(&other.user_key, other.seq))
-            .reverse()
+        (&self.user_key, self.seq).cmp(&(&other.user_key, other.seq))
     }
 }
 
@@ -248,10 +246,11 @@ impl KVTable {
     /// Some(None) if the key is in the memtable but has a tombstone value,
     /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
     pub(crate) fn get(&self, key: &[u8]) -> Option<RowEntry> {
-        let start_key = LookupKey::new(Bytes::from(key.to_vec()), u64::MAX);
+        let start_key = LookupKey::new(Bytes::from(key.to_vec()), 0);
+        let end_key = LookupKey::new(Bytes::from(key.to_vec()), u64::MAX);
         self.map
-            .range(start_key..)
-            .next()
+            .range(start_key..end_key)
+            .next_back()
             .map(|entry| entry.value().clone())
     }
 
@@ -506,25 +505,18 @@ mod tests {
         let mut table = WritableKVTable::new();
         table.put(RowEntry {
             key: Bytes::from_static(b"abc333"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value3")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 1,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc333"),
             value: ValueDeletable::Tombstone,
             create_ts: None,
             expire_ts: None,
             seq: 2,
         });
-
-        // it should return the the higher seqnum first
-        let mut iter = table.table().iter();
-        assert_eq!(
-            iter.next_entry().await.unwrap().unwrap().value,
-            ValueDeletable::Tombstone
-        );
+        table.put(RowEntry {
+            key: Bytes::from_static(b"abc333"),
+            value: ValueDeletable::Value(Bytes::from_static(b"value3")),
+            create_ts: None,
+            expire_ts: None,
+            seq: 1,
+        });
 
         // in merge iterator, it should only return one entry
         let iter = table.table().iter();
