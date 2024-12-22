@@ -1302,7 +1302,7 @@ mod tests {
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
     use crate::test_utils::TestClock;
-    use crate::types::{RowEntry, ValueDeletable};
+    use crate::types::RowEntry;
 
     use crate::proptest_util;
     use futures::{future::join_all, StreamExt};
@@ -1988,27 +1988,9 @@ mod tests {
         assert_iterator(
             &mut iter,
             vec![
-                RowEntry {
-                    key: Bytes::copy_from_slice(&[b'a'; 32]),
-                    value: ValueDeletable::Value(Bytes::copy_from_slice(&[b'j'; 32])),
-                    seq: 1,
-                    create_ts: Some(0),
-                    expire_ts: None,
-                },
-                RowEntry {
-                    key: Bytes::copy_from_slice(&[b'b'; 31]),
-                    value: ValueDeletable::Tombstone,
-                    seq: 2,
-                    create_ts: Some(0),
-                    expire_ts: None,
-                },
-                RowEntry {
-                    key: Bytes::copy_from_slice(&[b'c'; 32]),
-                    value: ValueDeletable::Value(Bytes::copy_from_slice(&[b'l'; 32])),
-                    seq: 3,
-                    create_ts: Some(10),
-                    expire_ts: None,
-                },
+                RowEntry::new_value(&[b'a'; 32], &[b'j'; 32], 1).with_create_ts(0),
+                RowEntry::new_tombstone(&[b'b'; 31], 2).with_create_ts(0),
+                RowEntry::new_value(&[b'c'; 32], &[b'l'; 32], 3).with_create_ts(10),
             ],
         )
         .await;
@@ -2174,21 +2156,12 @@ mod tests {
 
         let memtable = {
             let mut lock = kv_store.inner.state.write();
-            lock.wal().put(RowEntry::new_value(b"abc1111", b"value1111", 1));
-            lock.wal().put(RowEntry {
-                key: Bytes::copy_from_slice(b"abc2222"),
-                value: ValueDeletable::Value(Bytes::copy_from_slice(b"value2222")),
-                seq: 2,
-                create_ts: None,
-                expire_ts: None,
-            });
-            lock.wal().put(RowEntry {
-                key: Bytes::copy_from_slice(b"abc3333"),
-                value: ValueDeletable::Value(Bytes::copy_from_slice(b"value3333")),
-                seq: 3,
-                create_ts: None,
-                expire_ts: None,
-            });
+            lock.wal()
+                .put(RowEntry::new_value(b"abc1111", b"value1111", 1));
+            lock.wal()
+                .put(RowEntry::new_value(b"abc2222", b"value2222", 2));
+            lock.wal()
+                .put(RowEntry::new_value(b"abc3333", b"value3333", 3));
             lock.wal().table().clone()
         };
 
