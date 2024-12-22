@@ -173,90 +173,182 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::test_utils::{assert_debug_snapshot, gen_attrs, gen_empty_attrs};
+    use crate::{
+        test_utils::{assert_debug_snapshot, decode_codec_entries},
+        types::ValueDeletable,
+    };
 
     #[derive(Debug)]
     struct BlockTestCase {
         name: &'static str,
-        entries: Vec<(&'static [u8], Option<&'static [u8]>)>, // (key, value) with None for tombstone
-        expected_size: Option<usize>,                         // Expected size of the block
-        use_timestamped_attrs: bool, // Flag to use attributes with a timestamp
-        timestamp: Option<i64>,      // timestamp value
+        entries: Vec<RowEntry>, // Use RowEntry instead of (key, value)
+        expected_size: usize,   // Expected size of the block
     }
 
     fn build_block(test_case: &BlockTestCase) -> Block {
         let mut builder = BlockBuilder::new(4096);
 
-        for (key, value) in &test_case.entries {
-            let attrs = if test_case.use_timestamped_attrs {
-                gen_attrs(test_case.timestamp.unwrap_or(1)) // Use timestamp value or default to 1
+        for entry in &test_case.entries {
+            assert!(builder.add(entry.clone()));
+        }
+
+        builder.build().expect("Failed to build block")
+    }
+
+    fn assert_decoded_entries(
+        data: &Bytes,
+        offsets: &[u16],
+        expected_entries: &[RowEntry],
+    ) -> Result<(), SlateDBError> {
+        let decoded_entries = decode_codec_entries(data.clone(), offsets)?;
+        let mut prev_key = Bytes::new();
+
+        for (decoded_entry, expected_entry) in decoded_entries.iter().zip(expected_entries.iter()) {
+            // Reconstruct the full key from the key_prefix_len and key_suffix
+            let full_key = if decoded_entry.key_prefix_len > 0 {
+                let mut full_key = prev_key.slice(..decoded_entry.key_prefix_len).to_vec();
+                full_key.extend_from_slice(&decoded_entry.key_suffix);
+                Bytes::from(full_key)
             } else {
-                gen_empty_attrs()
+                decoded_entry.key_suffix.clone()
             };
 
-            match value {
-                Some(v) => assert!(builder.add_value(key, v, attrs)),
-                None => assert!(builder.add_tombstone(key, gen_empty_attrs())),
+            // Update prev_key for the next iteration
+            prev_key = full_key.clone();
+
+            // Compare the reconstructed full key with the expected key
+            assert_eq!(full_key, expected_entry.key);
+
+            // Compare the sequence number
+            assert_eq!(decoded_entry.seq, expected_entry.seq);
+
+            // Compare the creation timestamp
+            assert_eq!(decoded_entry.create_ts, expected_entry.create_ts);
+
+            // Compare the expiration timestamp
+            if let ValueDeletable::Tombstone = decoded_entry.value {
+                assert_eq!(decoded_entry.expire_ts, None);
+            } else {
+                assert_eq!(decoded_entry.expire_ts, expected_entry.expire_ts);
+            }
+
+            // Compare the values
+            match (&decoded_entry.value, &expected_entry.value) {
+                (ValueDeletable::Value(decoded_value), ValueDeletable::Value(expected_value)) => {
+                    assert_eq!(decoded_value, expected_value);
+                }
+                (ValueDeletable::Merge(decoded_value), ValueDeletable::Merge(expected_value)) => {
+                    assert_eq!(decoded_value, expected_value);
+                }
+                (ValueDeletable::Tombstone, ValueDeletable::Tombstone) => {
+                    assert_eq!(decoded_entry.value, expected_entry.value);
+                }
+                _ => panic!(
+                    "Mismatched value types: decoded_entry = {:?}, expected_entry = {:?}",
+                    decoded_entry.value, expected_entry.value
+                ),
             }
         }
-        builder.build().expect("Failed to build block")
+
+        Ok(())
     }
 
     #[rstest]
     #[case(BlockTestCase {
         name: "test_block",
         entries: vec![
-            (b"key1", Some(b"value1")),
-            (b"key1", Some(b"value1")),
-            (b"key2", Some(b"value2")),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key1"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value1")),
+                0,
+                Some(0),
+                Some(0),
+            ),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key1"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value1")),
+                0,
+                Some(0),
+                Some(0),
+            ),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key2"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value2")),
+                0,
+                Some(0),
+                Some(0),
+            ),
         ],
-        expected_size: None,
-        use_timestamped_attrs: false,
-        timestamp: None,
+        expected_size: 130,
     })]
     #[case(BlockTestCase {
         name: "block_with_tombstone",
         entries: vec![
-            (b"key1", Some(b"value1")),
-            (b"key2", None),
-            (b"key3", Some(b"value3")),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key1"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value1")),
+                0,
+                Some(0),
+                Some(0),
+            ),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key2"),
+                ValueDeletable::Tombstone,
+                0,
+                Some(0),
+                Some(0),
+            ),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key3"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value3")),
+                0,
+                Some(0),
+                Some(0),
+            ),
         ],
-        expected_size: None,
-        use_timestamped_attrs: false,
-        timestamp: None,
+        expected_size: 121,
     })]
     #[case(BlockTestCase {
-        name: "block_size_with_attrs",
+        name: "block_with_merge",
         entries: vec![
-            (b"key1", Some(b"value1")),
-            (b"key2", Some(b"value2")),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key1"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value1")),
+                0,
+                Some(0),
+                Some(0),
+            ),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key1"),
+                ValueDeletable::Merge(Bytes::copy_from_slice(b"value1")),
+                0,
+                Some(0),
+                Some(0),
+            ),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key2"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value2")),
+                0,
+                Some(0),
+                Some(0),
+            ),
         ],
-        expected_size: Some(73),
-        use_timestamped_attrs: true,
-        timestamp: Some(1),
-    })]
-    #[case(BlockTestCase {
-        name: "block_size_with_empty_attrs",
-        entries: vec![
-            (b"key1", Some(b"value1")),
-            (b"key2", Some(b"value2")),
-        ],
-        expected_size: Some(57),
-        use_timestamped_attrs: false,
-        timestamp: None,
+        expected_size: 130,
     })]
     fn test_block(#[case] test_case: BlockTestCase) {
         let block = build_block(&test_case);
         let encoded = block.encode();
-        let decoded = Block::decode(encoded);
-        assert_eq!(block.data, decoded.data);
-        assert_eq!(block.offsets, decoded.offsets);
-        if let Some(expected_size) = test_case.expected_size {
-            assert_eq!(expected_size, block.size());
-            assert_debug_snapshot!(test_case.name, (block.size(), block.data, block.offsets));
-        } else {
-            assert_debug_snapshot!(test_case.name, (block.data, block.offsets));
-        }
+        let decoded = Block::decode(encoded.clone());
+        let block_data = &block.data;
+        let block_offsets = &block.offsets;
+        // Decode the block data using offsets and validate each decoded entry
+        assert_decoded_entries(block_data, block_offsets, &test_case.entries)
+            .expect("Decoding error");
+
+        assert_eq!(block_data, &decoded.data);
+        assert_eq!(block_offsets, &decoded.offsets);
+        assert_eq!(block.size(), test_case.expected_size);
+        assert_debug_snapshot!(test_case.name, (block.size(), block.data, block.offsets));
     }
 
     #[test]
