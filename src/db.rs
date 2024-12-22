@@ -1301,7 +1301,7 @@ mod tests {
     use crate::proptest_util::sample;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
-    use crate::test_utils::TestClock;
+    use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
 
     use crate::proptest_util;
@@ -2280,9 +2280,15 @@ mod tests {
         let mut state = db_restored.inner.state.write();
         let memtable = state.memtable();
         let mut iter = memtable.table().iter();
-        assert_eq!(iter.next_entry().await.unwrap().unwrap().seq, 1);
-        assert_eq!(iter.next_entry().await.unwrap().unwrap().seq, 2);
-        assert_eq!(iter.next_entry().await.unwrap().unwrap().seq, 3);
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"key1", b"val1", 1).with_create_ts(0),
+                RowEntry::new_value(b"key2", b"val2", 2).with_create_ts(0),
+                RowEntry::new_value(b"key3", b"val3", 3).with_create_ts(0),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
