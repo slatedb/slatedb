@@ -135,7 +135,7 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIt
             if peeked_kv.key != current_kv.key {
                 break;
             }
-            if peeked_kv.seq >= current_kv.seq {
+            if peeked_kv.seq > current_kv.seq {
                 current_kv = peeked_kv.clone();
             }
             self.advance_inner().await?;
@@ -230,6 +230,10 @@ impl<T: KeyValueIterator> MergeIterator<T> {
         })
     }
 
+    fn peek(&self) -> Option<&RowEntry> {
+        self.current.as_ref().map(|c| &c.next_kv)
+    }
+
     async fn advance(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if let Some(mut iterator_state) = self.current.take() {
             let current_kv = iterator_state.next_kv;
@@ -253,13 +257,12 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
 
         // iterate until we find a key that is not the same as the current key,
         // find the one with the highest seqnum.
-        while let Some(peeked_entry) = self.current.as_ref() {
-            if peeked_entry.next_kv.key != current_kv.key {
+        while let Some(peeked_entry) = self.peek() {
+            if peeked_entry.key != current_kv.key {
                 break;
             }
-
-            if peeked_entry.next_kv.seq > current_kv.seq {
-                current_kv = peeked_entry.next_kv.clone();
+            if peeked_entry.seq > current_kv.seq {
+                current_kv = peeked_entry.clone();
             }
             self.advance().await?;
         }
@@ -345,19 +348,20 @@ mod tests {
         let mut iters = VecDeque::new();
         iters.push_back(
             TestIterator::new()
-                .with_entry(b"aaaa", b"1111", 0)
-                .with_entry(b"cccc", b"use this one c", 0),
+                .with_entry(b"aaaa", b"0000", 5)
+                .with_entry(b"aaaa", b"1111", 6)
+                .with_entry(b"cccc", b"use this one c", 5),
         );
         iters.push_back(
             TestIterator::new()
-                .with_entry(b"cccc", b"badc1", 0)
-                .with_entry(b"xxxx", b"use this one x", 0),
+                .with_entry(b"cccc", b"badc1", 1)
+                .with_entry(b"xxxx", b"use this one x", 4),
         );
         iters.push_back(
             TestIterator::new()
-                .with_entry(b"bbbb", b"2222", 0)
-                .with_entry(b"cccc", b"badc2", 0)
-                .with_entry(b"xxxx", b"badx1", 0),
+                .with_entry(b"bbbb", b"2222", 3)
+                .with_entry(b"cccc", b"badc2", 3)
+                .with_entry(b"xxxx", b"badx1", 3),
         );
 
         let mut merge_iter = MergeIterator::new(iters).await.unwrap();
@@ -365,10 +369,10 @@ mod tests {
         assert_iterator(
             &mut merge_iter,
             vec![
-                RowEntry::new_value(b"aaaa", b"1111", 0),
-                RowEntry::new_value(b"bbbb", b"2222", 0),
-                RowEntry::new_value(b"cccc", b"use this one c", 0),
-                RowEntry::new_value(b"xxxx", b"use this one x", 0),
+                RowEntry::new_value(b"aaaa", b"1111", 6),
+                RowEntry::new_value(b"bbbb", b"2222", 3),
+                RowEntry::new_value(b"cccc", b"use this one c", 5),
+                RowEntry::new_value(b"xxxx", b"use this one x", 4),
             ],
         )
         .await;
@@ -405,10 +409,10 @@ mod tests {
     async fn test_two_iterator_should_write_one_entry_with_given_key() {
         let iter1 = TestIterator::new()
             .with_entry(b"aaaa", b"1111", 0)
-            .with_entry(b"cccc", b"use this one c", 0);
+            .with_entry(b"cccc", b"use this one c", 5);
         let iter2 = TestIterator::new()
-            .with_entry(b"cccc", b"badc1", 0)
-            .with_entry(b"xxxx", b"24242424", 0);
+            .with_entry(b"cccc", b"badc1", 2)
+            .with_entry(b"xxxx", b"24242424", 3);
 
         let mut merge_iter = TwoMergeIterator::new(iter1, iter2).await.unwrap();
 
@@ -416,8 +420,8 @@ mod tests {
             &mut merge_iter,
             vec![
                 RowEntry::new_value(b"aaaa", b"1111", 0),
-                RowEntry::new_value(b"cccc", b"use this one c", 0),
-                RowEntry::new_value(b"xxxx", b"24242424", 0),
+                RowEntry::new_value(b"cccc", b"use this one c", 5),
+                RowEntry::new_value(b"xxxx", b"24242424", 3),
             ],
         )
         .await;
@@ -484,14 +488,16 @@ mod tests {
     #[tokio::test]
     async fn test_two_merge_seek() {
         let iter1 = TestIterator::new()
-            .with_entry(b"aa", b"aa1", 0)
-            .with_entry(b"bb", b"bb1", 0)
-            .with_entry(b"dd", b"dd1", 0);
+            .with_entry(b"aa", b"aa1", 1)
+            .with_entry(b"bb", b"bb0", 1)
+            .with_entry(b"bb", b"bb1", 2)
+            .with_entry(b"dd", b"dd1", 3);
         let iter2 = TestIterator::new()
-            .with_entry(b"aa", b"aa2", 0)
-            .with_entry(b"bb", b"bb2", 0)
-            .with_entry(b"cc", b"cc2", 0)
-            .with_entry(b"ee", b"ee2", 0);
+            .with_entry(b"aa", b"aa2", 4)
+            .with_entry(b"bb", b"bb2", 5)
+            .with_entry(b"cc", b"cc0", 5)
+            .with_entry(b"cc", b"cc2", 6)
+            .with_entry(b"ee", b"ee2", 7);
 
         let mut merge_iter = TwoMergeIterator::new(iter1, iter2).await.unwrap();
         merge_iter.seek(b"b".as_ref()).await.unwrap();
@@ -499,10 +505,10 @@ mod tests {
         assert_iterator(
             &mut merge_iter,
             vec![
-                RowEntry::new_value(b"bb", b"bb1", 0),
-                RowEntry::new_value(b"cc", b"cc2", 0),
-                RowEntry::new_value(b"dd", b"dd1", 0),
-                RowEntry::new_value(b"ee", b"ee2", 0),
+                RowEntry::new_value(b"bb", b"bb2", 5),
+                RowEntry::new_value(b"cc", b"cc2", 6),
+                RowEntry::new_value(b"dd", b"dd1", 3),
+                RowEntry::new_value(b"ee", b"ee2", 7),
             ],
         )
         .await;
