@@ -304,21 +304,21 @@ mod tests {
         let mut iters = VecDeque::new();
         iters.push_back(
             TestIterator::new()
-                .with_entry(b"aaaa", b"1111")
-                .with_entry(b"cccc", b"3333")
-                .with_entry(b"zzzz", b"26262626"),
+                .with_entry(b"aaaa", b"1111", 0)
+                .with_entry(b"cccc", b"3333", 0)
+                .with_entry(b"zzzz", b"26262626", 0),
         );
         iters.push_back(
             TestIterator::new()
-                .with_entry(b"bbbb", b"2222")
-                .with_entry(b"xxxx", b"24242424")
-                .with_entry(b"yyyy", b"25252525"),
+                .with_entry(b"bbbb", b"2222", 0)
+                .with_entry(b"xxxx", b"24242424", 0)
+                .with_entry(b"yyyy", b"25252525", 0),
         );
         iters.push_back(
             TestIterator::new()
-                .with_entry(b"dddd", b"4444")
-                .with_entry(b"eeee", b"5555")
-                .with_entry(b"gggg", b"7777"),
+                .with_entry(b"dddd", b"4444", 0)
+                .with_entry(b"eeee", b"5555", 0)
+                .with_entry(b"gggg", b"7777", 0),
         );
 
         let mut merge_iter = MergeIterator::new(iters).await.unwrap();
@@ -345,19 +345,19 @@ mod tests {
         let mut iters = VecDeque::new();
         iters.push_back(
             TestIterator::new()
-                .with_entry(b"aaaa", b"1111")
-                .with_entry(b"cccc", b"use this one c"),
+                .with_entry(b"aaaa", b"1111", 0)
+                .with_entry(b"cccc", b"use this one c", 0),
         );
         iters.push_back(
             TestIterator::new()
-                .with_entry(b"cccc", b"badc1")
-                .with_entry(b"xxxx", b"use this one x"),
+                .with_entry(b"cccc", b"badc1", 0)
+                .with_entry(b"xxxx", b"use this one x", 0),
         );
         iters.push_back(
             TestIterator::new()
-                .with_entry(b"bbbb", b"2222")
-                .with_entry(b"cccc", b"badc2")
-                .with_entry(b"xxxx", b"badx1"),
+                .with_entry(b"bbbb", b"2222", 0)
+                .with_entry(b"cccc", b"badc2", 0)
+                .with_entry(b"xxxx", b"badx1", 0),
         );
 
         let mut merge_iter = MergeIterator::new(iters).await.unwrap();
@@ -377,13 +377,13 @@ mod tests {
     #[tokio::test]
     async fn test_two_iterator_should_include_entries_in_order() {
         let iter1 = TestIterator::new()
-            .with_entry(b"aaaa", b"1111")
-            .with_entry(b"cccc", b"3333")
-            .with_entry(b"zzzz", b"26262626");
+            .with_entry(b"aaaa", b"1111", 0)
+            .with_entry(b"cccc", b"3333", 0)
+            .with_entry(b"zzzz", b"26262626", 0);
         let iter2 = TestIterator::new()
-            .with_entry(b"bbbb", b"2222")
-            .with_entry(b"xxxx", b"24242424")
-            .with_entry(b"yyyy", b"25252525");
+            .with_entry(b"bbbb", b"2222", 0)
+            .with_entry(b"xxxx", b"24242424", 0)
+            .with_entry(b"yyyy", b"25252525", 0);
 
         let mut merge_iter = TwoMergeIterator::new(iter1, iter2).await.unwrap();
 
@@ -404,11 +404,11 @@ mod tests {
     #[tokio::test]
     async fn test_two_iterator_should_write_one_entry_with_given_key() {
         let iter1 = TestIterator::new()
-            .with_entry(b"aaaa", b"1111")
-            .with_entry(b"cccc", b"use this one c");
+            .with_entry(b"aaaa", b"1111", 0)
+            .with_entry(b"cccc", b"use this one c", 0);
         let iter2 = TestIterator::new()
-            .with_entry(b"cccc", b"badc")
-            .with_entry(b"xxxx", b"24242424");
+            .with_entry(b"cccc", b"badc1", 0)
+            .with_entry(b"xxxx", b"24242424", 0);
 
         let mut merge_iter = TwoMergeIterator::new(iter1, iter2).await.unwrap();
 
@@ -428,14 +428,14 @@ mod tests {
         let mut iters = VecDeque::new();
         iters.push_back(
             TestIterator::new()
-                .with_entry(b"aa", b"aa1")
-                .with_entry(b"bb", b"bb1"),
+                .with_entry(b"aa", b"aa1", 0)
+                .with_entry(b"bb", b"bb1", 0),
         );
         iters.push_back(
             TestIterator::new()
-                .with_entry(b"aa", b"aa2")
-                .with_entry(b"bb", b"bb2")
-                .with_entry(b"cc", b"cc2"),
+                .with_entry(b"aa", b"aa2", 0)
+                .with_entry(b"bb", b"bb2", 0)
+                .with_entry(b"cc", b"cc2", 0),
         );
 
         let mut merge_iter = MergeIterator::new(iters).await.unwrap();
@@ -456,14 +456,14 @@ mod tests {
         let mut iters = VecDeque::new();
         iters.push_back(
             TestIterator::new()
-                .with_entry(b"aa", b"aa1")
-                .with_entry(b"bb", b"bb1"),
+                .with_entry(b"aa", b"aa1", 0)
+                .with_entry(b"bb", b"bb1", 0),
         );
         iters.push_back(
             TestIterator::new()
-                .with_entry(b"aa", b"aa2")
-                .with_entry(b"bb", b"bb2")
-                .with_entry(b"cc", b"cc2"),
+                .with_entry(b"aa", b"aa2", 0)
+                .with_entry(b"bb", b"bb2", 0)
+                .with_entry(b"cc", b"cc2", 0),
         );
 
         let mut merge_iter = MergeIterator::new(iters).await.unwrap();
@@ -484,14 +484,14 @@ mod tests {
     #[tokio::test]
     async fn test_two_merge_seek() {
         let iter1 = TestIterator::new()
-            .with_entry(b"aa", b"aa1")
-            .with_entry(b"bb", b"bb1")
-            .with_entry(b"dd", b"dd1");
+            .with_entry(b"aa", b"aa1", 0)
+            .with_entry(b"bb", b"bb1", 0)
+            .with_entry(b"dd", b"dd1", 0);
         let iter2 = TestIterator::new()
-            .with_entry(b"aa", b"aa2")
-            .with_entry(b"bb", b"bb2")
-            .with_entry(b"cc", b"cc2")
-            .with_entry(b"ee", b"ee2");
+            .with_entry(b"aa", b"aa2", 0)
+            .with_entry(b"bb", b"bb2", 0)
+            .with_entry(b"cc", b"cc2", 0)
+            .with_entry(b"ee", b"ee2", 0);
 
         let mut merge_iter = TwoMergeIterator::new(iter1, iter2).await.unwrap();
         merge_iter.seek(b"b".as_ref()).await.unwrap();
@@ -519,8 +519,8 @@ mod tests {
             }
         }
 
-        fn with_entry(mut self, key: &'static [u8], val: &'static [u8]) -> Self {
-            let entry = RowEntry::new_value(key, val, 0);
+        fn with_entry(mut self, key: &'static [u8], val: &'static [u8], seq: u64) -> Self {
+            let entry = RowEntry::new_value(key, val, seq);
             self.entries.push_back(Ok(entry));
             self
         }
