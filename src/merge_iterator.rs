@@ -146,7 +146,6 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIt
 
 struct MergeIteratorHeapEntry<T: KeyValueIterator> {
     next_kv: RowEntry,
-    // when we got two entries with the same key, we'd choose the one with the higher index
     index: u32,
     iterator: T,
 }
