@@ -549,67 +549,25 @@ mod tests {
         let mut table = WritableKVTable::new();
 
         assert_eq!(table.table.size(), 0);
-        table.put(RowEntry {
-            key: Bytes::from_static(b"first"),
-            value: ValueDeletable::Value(Bytes::from_static(b"foo")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 1,
-        });
+        table.put(RowEntry::new_value(b"first", b"foo", 1));
         assert_eq!(table.table.size(), 16);
 
-        table.put(RowEntry {
-            key: Bytes::from_static(b"first"),
-            value: ValueDeletable::Tombstone,
-            create_ts: None,
-            expire_ts: None,
-            seq: 2,
-        });
+        table.put(RowEntry::new_tombstone(b"first", 2));
         assert_eq!(table.table.size(), 29);
 
-        table.put(RowEntry {
-            key: Bytes::from_static(b"first"),
-            value: ValueDeletable::Tombstone,
-            create_ts: None,
-            expire_ts: None,
-            seq: 2,
-        });
+        table.put(RowEntry::new_tombstone(b"first", 2));
         assert_eq!(table.table.size(), 29);
 
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc333"),
-            value: ValueDeletable::Value(Bytes::from_static(b"val1")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 1,
-        });
+        table.put(RowEntry::new_value(b"abc333", b"val1", 1));
         assert_eq!(table.table.size(), 47);
 
-        table.put(RowEntry {
-            key: Bytes::from_static(b"def456"),
-            value: ValueDeletable::Value(Bytes::from_static(b"blablabla")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 2,
-        });
+        table.put(RowEntry::new_value(b"def456", b"blablabla", 2));
         assert_eq!(table.table.size(), 70);
 
-        table.put(RowEntry {
-            key: Bytes::from_static(b"def456"),
-            value: ValueDeletable::Value(Bytes::from_static(b"blabla")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 3,
-        });
+        table.put(RowEntry::new_value(b"def456", b"blabla", 3));
         assert_eq!(table.table.size(), 90);
 
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc333"),
-            value: ValueDeletable::Tombstone,
-            create_ts: None,
-            expire_ts: None,
-            seq: 4,
-        });
+        table.put(RowEntry::new_tombstone(b"abc333", 4));
         assert_eq!(table.table.size(), 104);
     }
 }
