@@ -308,240 +308,113 @@ impl KVTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ValueDeletable;
+    use crate::test_utils::assert_iterator;
 
     #[tokio::test]
     async fn test_memtable_iter() {
         let mut table = WritableKVTable::new();
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc333"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value3")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 1,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc111"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value1")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 2,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc555"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value5")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 3,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc444"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value4")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 4,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc222"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value2")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 5,
-        });
+        table.put(RowEntry::new_value(b"abc333", b"value3", 1));
+        table.put(RowEntry::new_value(b"abc111", b"value1", 2));
+        table.put(RowEntry::new_value(b"abc555", b"value5", 3));
+        table.put(RowEntry::new_value(b"abc444", b"value4", 4));
+        table.put(RowEntry::new_value(b"abc222", b"value2", 5));
 
         let mut iter = table.table().iter();
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc111".as_slice());
-        assert_eq!(kv.value, b"value1".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc222".as_slice());
-        assert_eq!(kv.value, b"value2".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc333".as_slice());
-        assert_eq!(kv.value, b"value3".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc444".as_slice());
-        assert_eq!(kv.value, b"value4".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc555".as_slice());
-        assert_eq!(kv.value, b"value5".as_slice());
-        assert!(iter.next().await.unwrap().is_none());
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"abc111", b"value1", 2),
+                RowEntry::new_value(b"abc222", b"value2", 5),
+                RowEntry::new_value(b"abc333", b"value3", 1),
+                RowEntry::new_value(b"abc444", b"value4", 4),
+                RowEntry::new_value(b"abc555", b"value5", 3),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_memtable_iter_entry_attrs() {
         let mut table = WritableKVTable::new();
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc333"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value3")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 1,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc111"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value1")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 2,
-        });
+        table.put(RowEntry::new_value(b"abc333", b"value3", 1));
+        table.put(RowEntry::new_value(b"abc111", b"value1", 2));
 
         let mut iter = table.table().iter();
-        let kv = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc111".as_slice());
-        let kv = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc333".as_slice());
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"abc111", b"value1", 2),
+                RowEntry::new_value(b"abc333", b"value3", 1),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_memtable_range_from_existing_key() {
         let mut table = WritableKVTable::new();
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc333"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value3")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 1,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc111"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value1")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 2,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc555"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value5")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 3,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc444"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value4")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 4,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc222"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value2")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 5,
-        });
+        table.put(RowEntry::new_value(b"abc333", b"value3", 1));
+        table.put(RowEntry::new_value(b"abc111", b"value1", 2));
+        table.put(RowEntry::new_value(b"abc555", b"value5", 3));
+        table.put(RowEntry::new_value(b"abc444", b"value4", 4));
+        table.put(RowEntry::new_value(b"abc222", b"value2", 5));
 
         let mut iter = table
             .table()
             .range(BytesRange::from(Bytes::from_static(b"abc333")..));
-        let kv = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc333".as_slice());
-        assert_eq!(
-            kv.value,
-            ValueDeletable::Value(Bytes::from_static(b"value3"))
-        );
-        let kv = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc444".as_slice());
-        assert_eq!(
-            kv.value,
-            ValueDeletable::Value(Bytes::from_static(b"value4"))
-        );
-        let kv = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc555".as_slice());
-        assert_eq!(
-            kv.value,
-            ValueDeletable::Value(Bytes::from_static(b"value5"))
-        );
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"abc333", b"value3", 1),
+                RowEntry::new_value(b"abc444", b"value4", 4),
+                RowEntry::new_value(b"abc555", b"value5", 3),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_memtable_range_from_nonexisting_key() {
         let mut table = WritableKVTable::new();
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc333"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value3")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 1,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc111"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value1")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 2,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc555"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value5")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 3,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc444"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value4")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 4,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc222"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value2")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 5,
-        });
+        table.put(RowEntry::new_value(b"abc333", b"value3", 1));
+        table.put(RowEntry::new_value(b"abc111", b"value1", 2));
+        table.put(RowEntry::new_value(b"abc555", b"value5", 3));
+        table.put(RowEntry::new_value(b"abc444", b"value4", 4));
+        table.put(RowEntry::new_value(b"abc222", b"value2", 5));
 
         let mut iter = table
             .table()
             .range(BytesRange::from(Bytes::from_static(b"abc334")..));
-        let kv = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(kv.key, Bytes::from_static(b"abc444"));
-        assert_eq!(
-            kv.value,
-            ValueDeletable::Value(Bytes::from_static(b"value4"))
-        );
-        let kv = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc555".as_slice());
-        assert_eq!(
-            kv.value,
-            ValueDeletable::Value(Bytes::from_static(b"value5"))
-        );
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"abc444", b"value4", 4),
+                RowEntry::new_value(b"abc555", b"value5", 3),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_memtable_iter_delete() {
         let mut table = WritableKVTable::new();
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc333"),
-            value: ValueDeletable::Tombstone,
-            create_ts: None,
-            expire_ts: None,
-            seq: 2,
-        });
-        table.put(RowEntry {
-            key: Bytes::from_static(b"abc333"),
-            value: ValueDeletable::Value(Bytes::from_static(b"value3")),
-            create_ts: None,
-            expire_ts: None,
-            seq: 1,
-        });
+        table.put(RowEntry::new_tombstone(b"abc333", 2));
+        table.put(RowEntry::new_value(b"abc333", b"value3", 1));
+        table.put(RowEntry::new_value(b"abc444", b"value4", 4));
 
         // in merge iterator, it should only return one entry
         let iter = table.table().iter();
         let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter]))
             .await
             .unwrap();
-        assert_eq!(
-            merge_iter.next_entry().await.unwrap().unwrap().value,
-            ValueDeletable::Tombstone
-        );
-        assert_eq!(merge_iter.next_entry().await.unwrap(), None);
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_tombstone(b"abc333", 2),
+                RowEntry::new_value(b"abc444", b"value4", 4),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
