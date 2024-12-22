@@ -280,20 +280,7 @@ impl KVTable {
     fn put(&self, row: RowEntry) {
         self.size.fetch_add(row.estimated_size(), Ordering::Relaxed);
         let internal_key = KVTableInternalKey::new(row.key.clone(), row.seq);
-        let previous_size = Cell::new(None);
-
-        // TODO: memtable is considered as append only, so i suppose we do not need consider removing the previous row here
-        self.map.compare_insert(internal_key, row, |previous_row| {
-            // Optimistically calculate the size of the previous value.
-            // `compare_fn` might be called multiple times in case of concurrent
-            // writes to the same key, so we use `Cell` to avoid substracting
-            // the size multiple times. The last call will set the correct size.
-            previous_size.set(Some(previous_row.estimated_size()));
-            true
-        });
-        if let Some(size) = previous_size.take() {
-            self.size.fetch_sub(size, Ordering::Relaxed);
-        }
+        self.map.insert(internal_key, row);
     }
 
     pub(crate) async fn await_durable(&self) -> Result<(), SlateDBError> {
