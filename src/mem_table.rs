@@ -30,7 +30,9 @@ impl KVTableInternalKey {
 
 impl Ord for KVTableInternalKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (&self.user_key, self.seq).cmp(&(&other.user_key, other.seq))
+        self.user_key
+            .cmp(&other.user_key)
+            .then(self.seq.cmp(&other.seq).reverse())
     }
 }
 
@@ -59,13 +61,13 @@ impl RangeBounds<KVTableInternalKey> for KVTableInternalKeyRange {
 impl From<BytesRange> for KVTableInternalKeyRange {
     fn from(range: BytesRange) -> Self {
         let start_bound = match range.start_bound() {
-            Bound::Included(key) => Bound::Included(KVTableInternalKey::new(key.clone(), 0)),
-            Bound::Excluded(key) => Bound::Included(KVTableInternalKey::new(key.clone(), 0)),
+            Bound::Included(key) => Bound::Included(KVTableInternalKey::new(key.clone(), u64::MAX)),
+            Bound::Excluded(key) => Bound::Included(KVTableInternalKey::new(key.clone(), u64::MAX)),
             Bound::Unbounded => Bound::Unbounded,
         };
         let end_bound = match range.end_bound() {
-            Bound::Included(key) => Bound::Included(KVTableInternalKey::new(key.clone(), u64::MAX)),
-            Bound::Excluded(key) => Bound::Included(KVTableInternalKey::new(key.clone(), u64::MAX)),
+            Bound::Included(key) => Bound::Included(KVTableInternalKey::new(key.clone(), 0)),
+            Bound::Excluded(key) => Bound::Included(KVTableInternalKey::new(key.clone(), 0)),
             Bound::Unbounded => Bound::Unbounded,
         };
         Self {
@@ -253,11 +255,14 @@ impl KVTable {
     /// Some(None) if the key is in the memtable but has a tombstone value,
     /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
     pub(crate) fn get(&self, key: &[u8]) -> Option<RowEntry> {
-        let start_key = KVTableInternalKey::new(Bytes::from(key.to_vec()), 0);
-        let end_key = KVTableInternalKey::new(Bytes::from(key.to_vec()), u64::MAX);
+        let user_key = Bytes::from(key.to_vec());
+        let range = KVTableInternalKeyRange::from(BytesRange::new(
+            Bound::Included(user_key.clone()),
+            Bound::Included(user_key),
+        ));
         self.map
-            .range(start_key..end_key)
-            .next_back()
+            .range(range)
+            .next()
             .map(|entry| entry.value().clone())
     }
 
@@ -266,9 +271,6 @@ impl KVTable {
     }
 
     pub(crate) fn range(&self, range: BytesRange) -> MemTableIterator<KVTableInternalKeyRange> {
-        // the kv table internal key range is wider than the user key range, we have to
-        // memoize the user key range to avoid Excluded(key) being included in the
-        // range.
         MemTableIterator {
             user_key_range: range.clone(),
             inner: self.map.range(KVTableInternalKeyRange::from(range)),
