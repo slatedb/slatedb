@@ -105,3 +105,9 @@ SlateDB is licensed under the Apache License, Version 2.0.
 SlateDB is a member of the [Commonhaus Foundation](https://www.commonhaus.org/).
 
 [![Commonhaus Foundation](https://github.com/commonhaus/artwork/blob/main/foundation/brand/png/CF_logo_horizontal_single_default_200px.png?raw=true)](https://www.commonhaus.org/)
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/commonhaus/artwork/blob/main/foundation/brand/png/CF_logo_horizontal_single_reverse_200px.png?raw=true">
+  <img src="https://github.com/commonhaus/artwork/blob/main/foundation/brand/png/CF_logo_horizontal_single_default_200px.png?raw=true">
+</picture>
+
