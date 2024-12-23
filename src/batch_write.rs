@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use tokio::runtime::Handle;
 
-use crate::types::RowAttributes;
+use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::spawn_bg_task;
 use crate::{
     batch::{WriteBatch, WriteOp},
@@ -59,27 +59,27 @@ impl DbInner {
             let mut guard = self.state.write();
 
             guard.update_clock_tick(now)?;
+            let seq = guard.increment_seq();
             let current_wal = guard.wal();
             for op in batch.ops {
                 match op {
                     WriteOp::Put(key, value, opts) => {
-                        current_wal.put(
+                        current_wal.put(RowEntry {
                             key,
-                            value,
-                            RowAttributes {
-                                ts: Some(now),
-                                expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
-                            },
-                        );
+                            value: ValueDeletable::Value(value),
+                            create_ts: Some(now),
+                            expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
+                            seq,
+                        });
                     }
                     WriteOp::Delete(key) => {
-                        current_wal.delete(
+                        current_wal.put(RowEntry {
                             key,
-                            RowAttributes {
-                                ts: Some(now),
-                                expire_ts: None,
-                            },
-                        );
+                            value: ValueDeletable::Tombstone,
+                            create_ts: Some(now),
+                            expire_ts: None,
+                            seq,
+                        });
                     }
                 }
             }
@@ -92,27 +92,27 @@ impl DbInner {
             }
             let mut guard = self.state.write();
             guard.update_clock_tick(now)?;
+            let seq = guard.increment_seq();
             let current_memtable = guard.memtable();
             for op in batch.ops {
                 match op {
                     WriteOp::Put(key, value, opts) => {
-                        current_memtable.put(
+                        current_memtable.put(RowEntry {
                             key,
-                            value,
-                            RowAttributes {
-                                ts: Some(now),
-                                expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
-                            },
-                        );
+                            value: ValueDeletable::Value(value),
+                            create_ts: Some(now),
+                            expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
+                            seq,
+                        });
                     }
                     WriteOp::Delete(key) => {
-                        current_memtable.delete(
+                        current_memtable.put(RowEntry {
                             key,
-                            RowAttributes {
-                                ts: Some(now),
-                                expire_ts: None,
-                            },
-                        );
+                            value: ValueDeletable::Tombstone,
+                            create_ts: Some(now),
+                            expire_ts: None,
+                            seq,
+                        });
                     }
                 }
             }
