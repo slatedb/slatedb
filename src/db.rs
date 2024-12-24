@@ -441,9 +441,14 @@ impl DbInner {
                 SsTableId::Wal(id) => *id,
                 SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
             };
-            let iter =
-                SstIterator::new_spawn(Arc::clone(&sst), db_inner.table_store.clone(), 1, 256, true)
-                    .await?;
+            let iter = SstIterator::new_spawn(
+                Arc::clone(&sst),
+                db_inner.table_store.clone(),
+                1,
+                256,
+                true,
+            )
+            .await?;
             Ok((iter, id))
         }
 
