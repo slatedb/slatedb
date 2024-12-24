@@ -1,5 +1,7 @@
 use crate::config::Clock;
+use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
+use crate::row_codec::{SstRowCodecV0, SstRowEntry};
 use crate::types::{KeyValue, RowAttributes, RowEntry};
 use bytes::Bytes;
 use rand::Rng;
@@ -84,3 +86,19 @@ macro_rules! assert_debug_snapshot {
 }
 
 pub(crate) use assert_debug_snapshot;
+
+pub(crate) fn decode_codec_entries(
+    data: Bytes,
+    offsets: &[u16],
+) -> Result<Vec<SstRowEntry>, SlateDBError> {
+    let codec = SstRowCodecV0::new();
+    let mut entries = Vec::new();
+
+    for &offset in offsets {
+        let mut cursor = data.slice(offset as usize..);
+        let entry = codec.decode(&mut cursor)?;
+        entries.push(entry);
+    }
+
+    Ok(entries)
+}
