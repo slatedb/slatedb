@@ -6,7 +6,6 @@ use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 use futures::{StreamExt, TryStreamExt};
-#[cfg(feature = "aws")]
 use object_store::path::Path;
 use object_store::ObjectStore;
 use std::env;
