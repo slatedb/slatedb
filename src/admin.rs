@@ -182,10 +182,6 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     let builder = if let Some(dynamodb_table) = dynamodb_table {
         builder.with_conditional_put(S3ConditionalPut::Dynamo(DynamoCommit::new(dynamodb_table)))
     } else {
-        warn!(
-            "Running without configuring a DynamoDB Table. This is OK when running an admin, \
-        but any operations that attempt a CAS will fail."
-        );
         builder
     };
 
