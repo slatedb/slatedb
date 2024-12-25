@@ -142,3 +142,13 @@ SlateDB is currently in the early stages of development. It is not yet ready for
 ## License
 
 SlateDB is licensed under the Apache License, Version 2.0.
+
+## Foundation
+
+SlateDB is a member of the [Commonhaus Foundation](https://www.commonhaus.org/).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/commonhaus/artwork/blob/main/foundation/brand/png/CF_logo_horizontal_single_reverse_200px.png?raw=true">
+  <img src="https://github.com/commonhaus/artwork/blob/main/foundation/brand/png/CF_logo_horizontal_single_default_200px.png?raw=true">
+</picture>
+
