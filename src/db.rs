@@ -2507,17 +2507,28 @@ mod tests {
         assert!(flush_result.is_err());
         db.close().await.unwrap();
 
+        // pause write-compacted-sst-io-error to prevent immutable tables
+        // from being flushed, so we can snapshot the state when there is
+        // an immutable table to verify its contents.
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "pause").unwrap();
+
         // reload the db
-        let db = Db::open_with_opts(
+        let db = Db::open_with_fp_registry(
             path.clone(),
             test_db_options(0, 128, None),
             object_store.clone(),
+            fp_registry.clone(),
         )
         .await
         .unwrap();
 
         // verify that we reload imm
         let snapshot = db.inner.state.read().snapshot();
+
+        // resume write-compacted-sst-io-error since we got a snapshot and
+        // want to let the test finish.
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
+
         assert_eq!(snapshot.state.imm_memtable.len(), 1);
 
         // one empty wal and one wal for the first put
