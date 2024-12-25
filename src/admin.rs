@@ -180,7 +180,7 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     let builder = if let Some(dynamodb_table) = dynamodb_table {
         builder.with_conditional_put(S3ConditionalPut::Dynamo(DynamoCommit::new(dynamodb_table)))
     } else {
-        builder
+        builder.with_conditional_put(S3ConditionalPut::ETagMatch)
     };
 
     let builder = if let Some(endpoint) = endpoint {
