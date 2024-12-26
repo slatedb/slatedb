@@ -40,6 +40,7 @@ mod merge_iterator;
 mod metrics;
 #[cfg(test)]
 mod proptest_util;
+mod put_local_object_store;
 mod row_codec;
 pub mod size_tiered_compaction;
 mod sorted_run_iterator;

@@ -9,13 +9,12 @@
 //! * Automatic recovery of buffered files after process restart
 //!
 //! Reads are always directed to the underlying store, which means there may be a delay between a
-//! successful write returning and the data being available for read operations. Reads might appear out
-//! of order due to the asynchronous nature of the upload process. To prevent this, set `max_put_tasks`
-//! to 1.
+//! successful write returning and the data being available for read operations.
 //!
 //! Puts will be retried up to `max_retries` times if the upload fails. If the upload still fails after
-//! the maximum retries, a failure will be returned when the next `put_opts` is called.
-//! 
+//! the maximum retries, a failure will be returned when the next `put_opts` is called. All further `put_opts`
+//! calls will return an error.
+//!
 //! ETags and versions are not supported.
 //!
 //! # Examples
@@ -24,33 +23,38 @@
 //! use std::sync::Arc;
 //! use std::path::PathBuf;
 //! use object_store::memory::InMemory;
-//! use object_store::{ObjectStore, path::Path};
+//! use object_store::{ObjectStore, path::Path, PutOptions, GetOptions};
 //! use bytes::Bytes;
 //!
 //! # async fn example() -> object_store::Result<()> {
 //! // Create an underlying object store (e.g., S3, GCS, or in this case Memory)
 //! let inner_store = Arc::new(InMemory::new());
 //!
-//! // Create a temporary directory for buffering writes
-//! let temp_dir = PathBuf::from("/tmp/object_store_buffer");
+//! // Create a directory for buffering writes
+//! let buffer_dir = PathBuf::from("/tmp/object_store_buffer");
 //!
 //! // Initialize PutLocalObjectStore with configuration
 //! let store = PutLocalObjectStore::new(
 //!     inner_store,
-//!     temp_dir,
-//!     10,    // Maximum concurrent upload tasks
+//!     buffer_dir,
+//!     10,    // Maximum buffered files on disk
 //!     3,     // Maximum retry attempts for failed uploads
 //! )?;
 //!
 //! // Write data - this will be buffered to local disk first
 //! let data = Bytes::from("Hello, World!");
 //! let path = Path::from("example/file.txt");
-//! store.put_opts(&path, data.into(), PutOptions::default()).await?;
 //!
-//! // Data is now on local disk and being uploaded asynchronously
+//! // Put operation with default options
+//! let put_result = store.put_opts(&path, data.into(), PutOptions::default()).await?;
+//!
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! Note: Reads are always directed to the underlying store, so there may be a brief delay
+//! between a successful write returning and the data being available for read operations.
+//! The store will automatically retry failed uploads based on the configured `max_retries`.
 //!
 //! # Recovery Behavior
 //!

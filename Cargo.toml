@@ -12,6 +12,7 @@ readme = "README.md"
 async-channel = "2.3.1"
 async-trait = "0.1.82"
 atomic = "0.6.0"
+base64 = "0.21.7"
 bitflags = "2.6.0"
 bytemuck = "1.18.0"
 bytes = { version = "1.7.1", features = ["serde"] }
