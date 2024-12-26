@@ -69,6 +69,7 @@ use std::collections::VecDeque;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::engine::general_purpose::URL_SAFE;
 use base64::Engine;
@@ -77,12 +78,19 @@ use futures::{future::BoxFuture, stream::BoxStream};
 use object_store::{path::Path, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta};
 use object_store::{ObjectStore, PutMultipartOpts, PutOptions, PutPayload, PutResult};
 use tokio::fs;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 /// Base delay in milliseconds for exponential backoff during retries
 const BASE_DELAY_MS: u64 = 100;
+
+/// Structure to track a pending upload
+struct PendingUpload {
+    temp_path: PathBuf,
+    location: Path,
+    opts: PutOptions,
+}
 
 /// A wrapper around an ObjectStore that writes data to local files first, then asynchronously
 /// uploads them to the wrapped ObjectStore.
@@ -91,10 +99,14 @@ pub struct PutLocalObjectStore {
     inner: Arc<dyn ObjectStore>,
     /// Directory where temporary files are stored before being uploaded
     temp_dir: PathBuf,
-    /// Queue of ongoing put tasks
-    put_tasks: Arc<Mutex<VecDeque<JoinHandle<object_store::Result<PutResult>>>>>,
-    /// Maximum number of concurrent put tasks
-    max_put_tasks: usize,
+    /// Sequence counter for ordering files
+    sequence: AtomicU64,
+    /// Channel sender for upload requests
+    upload_sender: mpsc::Sender<PendingUpload>,
+    /// Handle to the uploader task
+    uploader: Mutex<Option<JoinHandle<object_store::Result<()>>>>,
+    /// Maximum number of buffered files
+    max_buffered_files: usize,
     /// Maximum number of retry attempts for put operations
     max_retries: u32,
 }
@@ -104,19 +116,87 @@ impl PutLocalObjectStore {
     pub async fn new(
         inner: Arc<dyn ObjectStore>,
         temp_dir: PathBuf,
-        max_put_tasks: usize,
+        max_buffered_files: usize,
         max_retries: u32,
     ) -> object_store::Result<Self> {
         // Create temp directory if it doesn't exist
         fs::create_dir_all(&temp_dir).await?;
 
+        // Create channel for upload requests
+        let (upload_sender, mut upload_receiver) = mpsc::channel(max_buffered_files);
+
         let store = Self {
-            inner,
+            inner: inner.clone(),
             temp_dir: temp_dir.clone(),
-            put_tasks: Arc::new(Mutex::new(VecDeque::new())),
-            max_put_tasks,
+            sequence: AtomicU64::new(0),
+            upload_sender,
+            uploader: Mutex::new(None),
+            max_buffered_files,
             max_retries,
         };
+
+        // Start the uploader task
+        let uploader = tokio::spawn({
+            let inner = inner.clone();
+            let max_retries = max_retries;
+
+            async move {
+                let mut last_error = None;
+                while let Some(upload) = upload_receiver.recv().await {
+                    let mut retries = 0;
+                    loop {
+                        let bytes = match fs::read(&upload.temp_path).await {
+                            Ok(b) => b,
+                            Err(e) => {
+                                last_error = Some(object_store::Error::Generic {
+                                    store: "PutLocalObjectStore",
+                                    source: Box::new(e),
+                                });
+                                break;
+                            }
+                        };
+
+                        match inner
+                            .put_opts(
+                                &upload.location,
+                                bytes.into(),
+                                upload.opts.clone(),
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                let _ = fs::remove_file(upload.temp_path).await;
+                                break;
+                            }
+                            Err(e) => {
+                                if retries >= max_retries {
+                                    let _ = fs::remove_file(upload.temp_path).await;
+                                    last_error = Some(e);
+                                    break;
+                                }
+                                let delay = Duration::from_millis(BASE_DELAY_MS * (1 << retries));
+                                sleep(delay).await;
+                                retries += 1;
+                            }
+                        }
+                    }
+
+                    // Break the outer loop if we hit an error
+                    if last_error.is_some() {
+                        break;
+                    }
+                }
+                // Return the last error if any
+                if let Some(e) = last_error {
+                    Err(e)
+                } else {
+                    Ok(())
+                }
+            }
+        });
+
+        // Store the uploader handle
+        *store.uploader.lock().await = Some(uploader);
 
         // Recover any files that were not uploaded
         store.recover_local_files().await?;
@@ -124,17 +204,35 @@ impl PutLocalObjectStore {
         Ok(store)
     }
 
-    /// Generate a temporary file path for a given object path
-    fn temp_file_path(&self, location: &Path) -> PathBuf {
+    /// Generate a temporary file path for a given object path and sequence number
+    fn temp_file_path(&self, location: &Path, sequence: u64) -> PathBuf {
         // Convert the path to a string and base64url encode it
         let path_str = location.as_ref();
-        let filename = URL_SAFE.encode(path_str.as_bytes());
+        let encoded = URL_SAFE.encode(path_str.as_bytes());
+        // Add sequence prefix
+        let filename = format!("{:016x}_{}", sequence, encoded);
         self.temp_dir.join(filename)
     }
 
     /// Convert a temporary filename back to an object path
-    fn temp_file_to_path(&self, filename: &str) -> object_store::Result<Path> {
-        let decoded = URL_SAFE.decode(filename.as_bytes())
+    fn temp_file_to_path(&self, filename: &str) -> object_store::Result<(u64, Path)> {
+        let parts: Vec<&str> = filename.splitn(2, '_').collect();
+        if parts.len() != 2 {
+            return Err(object_store::Error::Generic {
+                store: "PutLocalObjectStore",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Invalid filename format",
+                )),
+            });
+        }
+
+        let sequence = u64::from_str_radix(parts[0], 16).map_err(|e| object_store::Error::Generic {
+            store: "PutLocalObjectStore",
+            source: Box::new(e),
+        })?;
+
+        let decoded = URL_SAFE.decode(parts[1].as_bytes())
             .map_err(|e| object_store::Error::Generic {
                 store: "PutLocalObjectStore",
                 source: Box::new(e),
@@ -146,55 +244,49 @@ impl PutLocalObjectStore {
                 source: Box::new(e),
             })?;
 
-        Ok(Path::from(path_str))
+        Ok((sequence, Path::from(path_str)))
     }
 
     /// Recover any files in the temporary directory by uploading them
     async fn recover_local_files(&self) -> object_store::Result<()> {
         let mut entries = fs::read_dir(&self.temp_dir).await?;
+        let mut files = Vec::new();
         
+        // Collect all files and their sequence numbers
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             if path.is_file().await? {
-                let bytes = fs::read(&path).await?;
-                let filename = path
-                    .file_name()
-                    .unwrap()
-                    .to_str()
-                    .unwrap();
-                let location = self.temp_file_to_path(filename)?;
-                
-                // Upload file to object store
-                self.inner
-                    .put_opts(
-                        &location,
-                        bytes.into(),
-                        PutOptions::default(),
-                    )
-                    .await?;
-                
-                // Delete temporary file
-                fs::remove_file(path).await?;
+                if let Ok((sequence, _)) = self.temp_file_to_path(
+                    path.file_name().unwrap().to_str().unwrap()
+                ) {
+                    files.push((sequence, path));
+                }
             }
+        }
+
+        // Sort by sequence number
+        files.sort_by_key(|(seq, _)| *seq);
+
+        // Queue files for upload
+        for (_, path) in files {
+            let filename = path.file_name().unwrap().to_str().unwrap();
+            let (_, location) = self.temp_file_to_path(filename)?;
+
+            self.upload_sender.send(PendingUpload {
+                temp_path: path,
+                location,
+                opts: PutOptions::default(),
+            }).await.map_err(|e| object_store::Error::Generic {
+                store: "PutLocalObjectStore",
+                source: Box::new(e),
+            })?;
         }
         Ok(())
     }
 
     /// Process completed put tasks and remove them from the queue
     async fn process_completed_tasks(&self) -> object_store::Result<()> {
-        let mut tasks = self.put_tasks.lock().await;
-        
-        let mut i = 0;
-        while i < tasks.len() {
-            if tasks[i].is_finished() {
-                // Remove and await the completed task
-                if let Some(handle) = tasks.remove(i) {
-                    handle.await??;
-                }
-            } else {
-                i += 1;
-            }
-        }
+        // Not needed with single uploader task
         Ok(())
     }
 }
@@ -207,63 +299,46 @@ impl ObjectStore for PutLocalObjectStore {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
-        // Process any completed tasks
-        self.process_completed_tasks().await?;
+        // Get next sequence number
+        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
 
         // Write to local file
-        let temp_path = self.temp_file_path(location);
+        let temp_path = self.temp_file_path(location, sequence);
         let bytes = match payload {
             PutPayload::Bytes(bytes) => bytes,
             PutPayload::File(path) => Bytes::from(fs::read(path).await?),
         };
         fs::write(&temp_path, &bytes).await?;
 
-        // Spawn task to upload file and clean up
-        let inner = self.inner.clone();
-        let temp_path_clone = temp_path.clone();
-        let location_clone = location.clone();
-        let max_retries = self.max_retries;
-        let bytes = bytes.clone();
-
-        let mut tasks = self.put_tasks.lock().await;
-        while tasks.len() >= self.max_put_tasks {
-            drop(tasks);
-            tokio::task::yield_now().await;
-            self.process_completed_tasks().await?;
-            tasks = self.put_tasks.lock().await;
+        // Check if uploader task has errored
+        if let Some(uploader) = self.uploader.lock().await.as_ref() {
+            if uploader.is_finished() {
+                // Join the task to get the error
+                if let Some(handle) = self.uploader.lock().await.take() {
+                    handle.await??;
+                }
+                return Err(object_store::Error::Generic {
+                    store: "PutLocalObjectStore",
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "Uploader task has stopped unexpectedly",
+                    )),
+                });
+            }
         }
 
-        let handle = tokio::spawn(async move {
-            let mut retries = 0;
-            loop {
-                match inner
-                    .put_opts(
-                        &location_clone,
-                        bytes.clone().into(),
-                        opts.clone(),
-                    )
-                    .await
-                {
-                    Ok(result) => {
-                        // Delete temporary file on success
-                        fs::remove_file(temp_path_clone).await?;
-                        break Ok(result);
-                    }
-                    Err(e) => {
-                        if retries >= max_retries {
-                            fs::remove_file(temp_path_clone).await?;
-                            break Err(e);
-                        }
-                        // Exponential backoff: delay = base_delay * 2^retries
-                        let delay = Duration::from_millis(BASE_DELAY_MS * (1 << retries));
-                        sleep(delay).await;
-                        retries += 1;
-                    }
-                }
-            }
-        });
-
-        tasks.push_back(handle);
+        // Queue the upload
+        self.upload_sender
+            .send(PendingUpload {
+                temp_path,
+                location: location.clone(),
+                opts,
+            })
+            .await
+            .map_err(|e| object_store::Error::Generic {
+                store: "PutLocalObjectStore",
+                source: Box::new(e),
+            })?;
 
         Ok(PutResult {
             e_tag: None,
@@ -350,7 +425,7 @@ mod tests {
             .await?;
 
         // Verify data was written to temp file
-        let temp_path = store.temp_file_path(&location);
+        let temp_path = store.temp_file_path(&location, 0);
         assert!(temp_path.exists());
 
         // Wait for async upload to complete
@@ -380,10 +455,10 @@ mod tests {
 
         for path in test_paths {
             let location = Path::from(path);
-            let temp_path = store.temp_file_path(&location);
+            let temp_path = store.temp_file_path(&location, 0);
             let filename = temp_path.file_name().unwrap().to_str().unwrap();
             let recovered = store.temp_file_to_path(filename)?;
-            assert_eq!(recovered.as_ref(), path);
+            assert_eq!(recovered.1.as_ref(), path);
         }
 
         Ok(())
@@ -397,7 +472,7 @@ mod tests {
         // Write a file to temp directory
         let data = Bytes::from("test data");
         let location = Path::from("test/recovery.txt");
-        let temp_path = temp_dir.join(URL_SAFE.encode("test/recovery.txt"));
+        let temp_path = temp_dir.join(format!("{:016x}_{}", 0, URL_SAFE.encode("test/recovery.txt")));
         fs::write(&temp_path, &data).await?;
 
         // Create store which should recover the file
