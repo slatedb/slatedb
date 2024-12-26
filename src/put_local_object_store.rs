@@ -151,15 +151,6 @@ impl ObjectStore for PutLocalObjectStore {
         };
         fs::write(&temp_path, &bytes).await?;
 
-        // Create metadata for result
-        let meta = ObjectMeta {
-            location: location.clone(),
-            last_modified: SystemTime::now(),
-            size: bytes.len(),
-            e_tag: None,
-            version: None,
-        };
-
         // Spawn task to upload file and clean up
         let inner = self.inner.clone();
         let temp_path_clone = temp_path.clone();
