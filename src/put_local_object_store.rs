@@ -1,3 +1,68 @@
+//! A local file system-based write buffer for object stores.
+//!
+//! This module provides [`PutLocalObjectStore`], a wrapper around any [`ObjectStore`] implementation
+//! that buffers write operations to local disk before asynchronously uploading them to the underlying
+//! store. This approach offers several benefits:
+//!
+//! * Improved write performance by leveraging local disk speeds
+//! * Resilience against temporary network issues or object store outages
+//! * Automatic recovery of buffered files after process restart
+//!
+//! Reads are always directed to the underlying store, which means there may be a delay between a
+//! successful write returning and the data being available for read operations. Reads might appear out
+//! of order due to the asynchronous nature of the upload process. To prevent this, set `max_put_tasks`
+//! to 1.
+//!
+//! Puts will be retried up to `max_retries` times if the upload fails. If the upload still fails after
+//! the maximum retries, a failure will be returned when the next `put_opts` is called.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use std::sync::Arc;
+//! use std::path::PathBuf;
+//! use object_store::memory::InMemory;
+//! use object_store::{ObjectStore, path::Path};
+//! use bytes::Bytes;
+//!
+//! # async fn example() -> object_store::Result<()> {
+//! // Create an underlying object store (e.g., S3, GCS, or in this case Memory)
+//! let inner_store = Arc::new(InMemory::new());
+//!
+//! // Create a temporary directory for buffering writes
+//! let temp_dir = PathBuf::from("/tmp/object_store_buffer");
+//!
+//! // Initialize PutLocalObjectStore with configuration
+//! let store = PutLocalObjectStore::new(
+//!     inner_store,
+//!     temp_dir,
+//!     10,    // Maximum concurrent upload tasks
+//!     3,     // Maximum retry attempts for failed uploads
+//! )?;
+//!
+//! // Write data - this will be buffered to local disk first
+//! let data = Bytes::from("Hello, World!");
+//! let path = Path::from("example/file.txt");
+//! store.put_opts(&path, data.into(), PutOptions::default()).await?;
+//!
+//! // Data is now on local disk and being uploaded asynchronously
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Recovery Behavior
+//!
+//! When a [`PutLocalObjectStore`] is created, it automatically scans the temporary directory for any
+//! files from previous sessions and attempts to upload them to the underlying store. This ensures
+//! data durability even across process restarts or crashes.
+//!
+//! # Warning
+//!
+//! This store should not be used in scenarios requiring immediate read-after-write consistency
+//! or where local disk space is constrained. Always ensure the temporary directory is on a
+//! reliable disk with adequate free space.
+//!
+
 use std::collections::VecDeque;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
@@ -184,6 +249,7 @@ impl ObjectStore for PutLocalObjectStore {
                     }
                     Err(e) => {
                         if retries >= max_retries {
+                            fs::remove_file(temp_path_clone).await?;
                             break Err(e);
                         }
                         // Exponential backoff: delay = base_delay * 2^retries
