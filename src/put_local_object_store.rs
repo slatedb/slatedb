@@ -15,6 +15,8 @@
 //!
 //! Puts will be retried up to `max_retries` times if the upload fails. If the upload still fails after
 //! the maximum retries, a failure will be returned when the next `put_opts` is called.
+//! 
+//! ETags and versions are not supported.
 //!
 //! # Examples
 //!
