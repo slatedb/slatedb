@@ -1,8 +1,10 @@
 use std::collections::VecDeque;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
+use base64::engine::general_purpose::URL_SAFE;
+use base64::Engine;
 use bytes::Bytes;
 use futures::{future::BoxFuture, stream::BoxStream};
 use object_store::{path::Path, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta};
@@ -10,12 +12,10 @@ use object_store::{ObjectStore, PutMultipartOpts, PutOptions, PutPayload, PutRes
 use tokio::fs;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio::time::sleep;
 
-/// Task representing an async put operation
-enum PutTask {
-    InFlight(JoinHandle<object_store::Result<PutResult>>),
-    Finished(object_store::Result<PutResult>),
-}
+/// Base delay in milliseconds for exponential backoff during retries
+const BASE_DELAY_MS: u64 = 100;
 
 /// A wrapper around an ObjectStore that writes data to local files first, then asynchronously
 /// uploads them to the wrapped ObjectStore.
@@ -25,9 +25,11 @@ pub struct PutLocalObjectStore {
     /// Directory where temporary files are stored before being uploaded
     temp_dir: PathBuf,
     /// Queue of ongoing put tasks
-    put_tasks: Arc<Mutex<VecDeque<PutTask>>>,
+    put_tasks: Arc<Mutex<VecDeque<JoinHandle<object_store::Result<PutResult>>>>>,
     /// Maximum number of concurrent put tasks
     max_put_tasks: usize,
+    /// Maximum number of retry attempts for put operations
+    max_retries: u32,
 }
 
 impl PutLocalObjectStore {
@@ -36,6 +38,7 @@ impl PutLocalObjectStore {
         inner: Arc<dyn ObjectStore>,
         temp_dir: PathBuf,
         max_put_tasks: usize,
+        max_retries: u32,
     ) -> object_store::Result<Self> {
         // Create temp directory if it doesn't exist
         fs::create_dir_all(&temp_dir).await?;
@@ -45,6 +48,7 @@ impl PutLocalObjectStore {
             temp_dir: temp_dir.clone(),
             put_tasks: Arc::new(Mutex::new(VecDeque::new())),
             max_put_tasks,
+            max_retries,
         };
 
         // Recover any files that were not uploaded
@@ -55,11 +59,27 @@ impl PutLocalObjectStore {
 
     /// Generate a temporary file path for a given object path
     fn temp_file_path(&self, location: &Path) -> PathBuf {
-        let filename = location
-            .parts()
-            .collect::<Vec<_>>()
-            .join("_");
+        // Convert the path to a string and base64url encode it
+        let path_str = location.as_ref();
+        let filename = URL_SAFE.encode(path_str.as_bytes());
         self.temp_dir.join(filename)
+    }
+
+    /// Convert a temporary filename back to an object path
+    fn temp_file_to_path(&self, filename: &str) -> object_store::Result<Path> {
+        let decoded = URL_SAFE.decode(filename.as_bytes())
+            .map_err(|e| object_store::Error::Generic {
+                store: "PutLocalObjectStore",
+                source: Box::new(e),
+            })?;
+
+        let path_str = String::from_utf8(decoded)
+            .map_err(|e| object_store::Error::Generic {
+                store: "PutLocalObjectStore",
+                source: Box::new(e),
+            })?;
+
+        Ok(Path::from(path_str))
     }
 
     /// Recover any files in the temporary directory by uploading them
@@ -70,13 +90,12 @@ impl PutLocalObjectStore {
             let path = entry.path();
             if path.is_file().await? {
                 let bytes = fs::read(&path).await?;
-                let location = Path::from(
-                    path.file_name()
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .replace("_", "/"),
-                );
+                let filename = path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                let location = self.temp_file_to_path(filename)?;
                 
                 // Upload file to object store
                 self.inner
@@ -100,18 +119,13 @@ impl PutLocalObjectStore {
         
         let mut i = 0;
         while i < tasks.len() {
-            match &tasks[i] {
-                PutTask::InFlight(handle) if handle.is_finished() => {
-                    // Replace with Finished variant
-                    if let Some(PutTask::InFlight(handle)) = tasks.remove(i) {
-                        let result = handle.await?;
-                        tasks.push_back(PutTask::Finished(Ok(result)));
-                    }
+            if tasks[i].is_finished() {
+                // Remove and await the completed task
+                if let Some(handle) = tasks.remove(i) {
+                    handle.await??;
                 }
-                PutTask::Finished(_) => {
-                    tasks.remove(i);
-                }
-                _ => i += 1,
+            } else {
+                i += 1;
             }
         }
         Ok(())
@@ -150,6 +164,8 @@ impl ObjectStore for PutLocalObjectStore {
         let inner = self.inner.clone();
         let temp_path_clone = temp_path.clone();
         let location_clone = location.clone();
+        let max_retries = self.max_retries;
+        let bytes = bytes.clone();
 
         let mut tasks = self.put_tasks.lock().await;
         while tasks.len() >= self.max_put_tasks {
@@ -160,22 +176,35 @@ impl ObjectStore for PutLocalObjectStore {
         }
 
         let handle = tokio::spawn(async move {
-            // Upload to inner store
-            let result = inner
-                .put_opts(
-                    &location_clone,
-                    bytes.into(),
-                    opts,
-                )
-                .await?;
-
-            // Delete temporary file
-            fs::remove_file(temp_path_clone).await?;
-
-            Ok(result)
+            let mut retries = 0;
+            loop {
+                match inner
+                    .put_opts(
+                        &location_clone,
+                        bytes.clone().into(),
+                        opts.clone(),
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        // Delete temporary file on success
+                        fs::remove_file(temp_path_clone).await?;
+                        break Ok(result);
+                    }
+                    Err(e) => {
+                        if retries >= max_retries {
+                            break Err(e);
+                        }
+                        // Exponential backoff: delay = base_delay * 2^retries
+                        let delay = Duration::from_millis(BASE_DELAY_MS * (1 << retries));
+                        sleep(delay).await;
+                        retries += 1;
+                    }
+                }
+            }
         });
 
-        tasks.push_back(PutTask::InFlight(handle));
+        tasks.push_back(handle);
 
         Ok(PutResult {
             e_tag: None,
@@ -252,7 +281,7 @@ mod tests {
     async fn test_put_local_object_store() -> object_store::Result<()> {
         let inner = Arc::new(InMemory::new());
         let temp_dir = tempdir()?.into_path();
-        let store = PutLocalObjectStore::new(inner.clone(), temp_dir.clone(), 2).await?;
+        let store = PutLocalObjectStore::new(inner.clone(), temp_dir.clone(), 2, 3).await?;
 
         // Put some data
         let data = Bytes::from("hello world");
@@ -279,6 +308,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_path_conversion() -> object_store::Result<()> {
+        let inner = Arc::new(InMemory::new());
+        let temp_dir = tempdir()?.into_path();
+        let store = PutLocalObjectStore::new(inner.clone(), temp_dir.clone(), 2, 3).await?;
+
+        let test_paths = vec![
+            "simple.txt",
+            "path/to/file.txt",
+            "path/with/special/@#$%^&*/chars.txt",
+        ];
+
+        for path in test_paths {
+            let location = Path::from(path);
+            let temp_path = store.temp_file_path(&location);
+            let filename = temp_path.file_name().unwrap().to_str().unwrap();
+            let recovered = store.temp_file_to_path(filename)?;
+            assert_eq!(recovered.as_ref(), path);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_recover_local_files() -> object_store::Result<()> {
         let inner = Arc::new(InMemory::new());
         let temp_dir = tempdir()?.into_path();
@@ -286,11 +338,11 @@ mod tests {
         // Write a file to temp directory
         let data = Bytes::from("test data");
         let location = Path::from("test/recovery.txt");
-        let temp_path = temp_dir.join("test_recovery.txt");
+        let temp_path = temp_dir.join(URL_SAFE.encode("test/recovery.txt"));
         fs::write(&temp_path, &data).await?;
 
         // Create store which should recover the file
-        let store = PutLocalObjectStore::new(inner.clone(), temp_dir.clone(), 2).await?;
+        let store = PutLocalObjectStore::new(inner.clone(), temp_dir.clone(), 2, 3).await?;
 
         // Verify data was uploaded to inner store
         let result = inner.get(&location).await?;
