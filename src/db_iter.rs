@@ -87,7 +87,6 @@ impl<'a> DbIterator<'a> {
     ///
     /// Returns [`SlateDBError::InvalidatedIterator`] if the iterator has been
     ///  invalidated in order to reclaim resources.
-    #[allow(dead_code)]
     pub async fn seek(&mut self, next_key: Bytes) -> Result<(), SlateDBError> {
         if let Some(error) = self.invalidated_error.clone() {
             Err(SlateDBError::InvalidatedIterator(Box::new(error)))
