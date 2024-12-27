@@ -175,14 +175,13 @@ mod tests {
     use super::*;
     use crate::{
         test_utils::{assert_debug_snapshot, decode_codec_entries},
-        types::ValueDeletable,
+        types::{RowAttributes, ValueDeletable},
     };
 
     #[derive(Debug)]
     struct BlockTestCase {
         name: &'static str,
         entries: Vec<RowEntry>, // Use RowEntry instead of (key, value)
-        expected_size: usize,   // Expected size of the block
     }
 
     fn build_block(test_case: &BlockTestCase) -> Block {
@@ -193,64 +192,6 @@ mod tests {
         }
 
         builder.build().expect("Failed to build block")
-    }
-
-    fn assert_decoded_entries(
-        data: &Bytes,
-        offsets: &[u16],
-        expected_entries: &[RowEntry],
-    ) -> Result<(), SlateDBError> {
-        let decoded_entries = decode_codec_entries(data.clone(), offsets)?;
-        let mut prev_key = Bytes::new();
-
-        for (decoded_entry, expected_entry) in decoded_entries.iter().zip(expected_entries.iter()) {
-            // Reconstruct the full key from the key_prefix_len and key_suffix
-            let full_key = if decoded_entry.key_prefix_len > 0 {
-                let mut full_key = prev_key.slice(..decoded_entry.key_prefix_len).to_vec();
-                full_key.extend_from_slice(&decoded_entry.key_suffix);
-                Bytes::from(full_key)
-            } else {
-                decoded_entry.key_suffix.clone()
-            };
-
-            // Update prev_key for the next iteration
-            prev_key = full_key.clone();
-
-            // Compare the reconstructed full key with the expected key
-            assert_eq!(full_key, expected_entry.key);
-
-            // Compare the sequence number
-            assert_eq!(decoded_entry.seq, expected_entry.seq);
-
-            // Compare the creation timestamp
-            assert_eq!(decoded_entry.create_ts, expected_entry.create_ts);
-
-            // Compare the expiration timestamp
-            if let ValueDeletable::Tombstone = decoded_entry.value {
-                assert_eq!(decoded_entry.expire_ts, None);
-            } else {
-                assert_eq!(decoded_entry.expire_ts, expected_entry.expire_ts);
-            }
-
-            // Compare the values
-            match (&decoded_entry.value, &expected_entry.value) {
-                (ValueDeletable::Value(decoded_value), ValueDeletable::Value(expected_value)) => {
-                    assert_eq!(decoded_value, expected_value);
-                }
-                (ValueDeletable::Merge(decoded_value), ValueDeletable::Merge(expected_value)) => {
-                    assert_eq!(decoded_value, expected_value);
-                }
-                (ValueDeletable::Tombstone, ValueDeletable::Tombstone) => {
-                    assert_eq!(decoded_entry.value, expected_entry.value);
-                }
-                _ => panic!(
-                    "Mismatched value types: decoded_entry = {:?}, expected_entry = {:?}",
-                    decoded_entry.value, expected_entry.value
-                ),
-            }
-        }
-
-        Ok(())
     }
 
     #[rstest]
@@ -279,7 +220,6 @@ mod tests {
                 Some(0),
             ),
         ],
-        expected_size: 130,
     })]
     #[case(BlockTestCase {
         name: "block_with_tombstone",
@@ -306,7 +246,6 @@ mod tests {
                 Some(0),
             ),
         ],
-        expected_size: 121,
     })]
     #[case(BlockTestCase {
         name: "block_with_merge",
@@ -333,7 +272,6 @@ mod tests {
                 Some(0),
             ),
         ],
-        expected_size: 130,
     })]
     fn test_block(#[case] test_case: BlockTestCase) {
         let block = build_block(&test_case);
@@ -342,13 +280,23 @@ mod tests {
         let block_data = &block.data;
         let block_offsets = &block.offsets;
         // Decode the block data using offsets and validate each decoded entry
-        assert_decoded_entries(block_data, block_offsets, &test_case.entries)
-            .expect("Decoding error");
+        let decoded_entries = decode_codec_entries(block_data.clone(), block_offsets)
+            .expect("Failed to decode codec entries");
+        assert_eq!(decoded_entries, test_case.entries);
 
         assert_eq!(block_data, &decoded.data);
         assert_eq!(block_offsets, &decoded.offsets);
-        assert_eq!(block.size(), test_case.expected_size);
         assert_debug_snapshot!(test_case.name, (block.size(), block.data, block.offsets));
+    }
+
+    #[test]
+    fn test_add_tombstone() {
+        let mut builder = BlockBuilder::new(4096);
+        let attrs = RowAttributes {
+            ts: Some(0),
+            expire_ts: None,
+        };
+        assert!(builder.add_tombstone(b"key1", attrs));
     }
 
     #[test]
