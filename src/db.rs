@@ -58,7 +58,6 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
-use std::rc::Rc;
 use tracing::{info, warn};
 
 pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
@@ -431,8 +430,8 @@ impl DbInner {
         async fn load_sst_iters(
             db_inner: &DbInner,
             sst_id: u64,
-        ) -> Result<(SstIterator<'_, Rc<SsTableHandle>>, u64), SlateDBError> {
-            let sst = Rc::new(
+        ) -> Result<(SstIterator<'_, Arc<SsTableHandle>>, u64), SlateDBError> {
+            let sst = Arc::new(
                 db_inner
                     .table_store
                     .open_sst(&SsTableId::Wal(sst_id))
@@ -442,9 +441,14 @@ impl DbInner {
                 SsTableId::Wal(id) => *id,
                 SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
             };
-            let iter =
-                SstIterator::new_spawn(Rc::clone(&sst), db_inner.table_store.clone(), 1, 256, true)
-                    .await?;
+            let iter = SstIterator::new_spawn(
+                Arc::clone(&sst),
+                db_inner.table_store.clone(),
+                1,
+                256,
+                true,
+            )
+            .await?;
             Ok((iter, id))
         }
 
