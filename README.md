@@ -57,7 +57,7 @@ async fn main() {
     // Put
     let key = b"test_key";
     let value = b"test_value";
-    kv_store.put(key, value).await;
+    kv_store.put(key, value).await.unwrap();
 
     // Get
     assert_eq!(
@@ -66,13 +66,13 @@ async fn main() {
     );
 
     // Delete
-    kv_store.delete(key).await;
+    kv_store.delete(key).await.unwrap();
     assert!(kv_store.get(key).await.unwrap().is_none());
 
-    kv_store.put(b"test_key1", b"test_value1").await;
-    kv_store.put(b"test_key2", b"test_value2").await;
-    kv_store.put(b"test_key3", b"test_value3").await;
-    kv_store.put(b"test_key4", b"test_value4").await;
+    kv_store.put(b"test_key1", b"test_value1").await.unwrap();
+    kv_store.put(b"test_key2", b"test_value2").await.unwrap();
+    kv_store.put(b"test_key3", b"test_value3").await.unwrap();
+    kv_store.put(b"test_key4", b"test_value4").await.unwrap();
 
     // Scan over unbound range
     let mut iter = kv_store.scan(..).await.unwrap();
@@ -105,7 +105,7 @@ async fn main() {
     // Seek ahead to next key
     let mut iter = kv_store.scan(..).await.unwrap();
     let next_key = Bytes::from_static(b"test_key4");
-    iter.seek(next_key).await;
+    iter.seek(next_key).await.unwrap();
     assert_eq!(
         iter.next().await.unwrap(),
         Some((b"test_key4" as &[u8], b"test_value4" as &[u8]).into())
