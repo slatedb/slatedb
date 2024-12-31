@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
+use crate::error::SlateDBError;
 use crate::types::ValueDeletable;
-use crate::{error::SlateDBError, types::RowEntry};
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -58,27 +58,6 @@ pub(crate) struct SstRowEntry {
     pub expire_ts: Option<i64>,
     pub create_ts: Option<i64>,
     pub value: ValueDeletable,
-}
-
-impl PartialEq<RowEntry> for SstRowEntry {
-    fn eq(&self, other: &RowEntry) -> bool {
-        let full_key = if self.key_prefix_len > 0 {
-            let mut full_key = other.key.slice(..self.key_prefix_len).to_vec();
-            full_key.extend_from_slice(&self.key_suffix);
-            Bytes::from(full_key)
-        } else {
-            self.key_suffix.clone()
-        };
-
-        full_key == other.key
-            && self.value == other.value
-            && self.seq == other.seq
-            && self.create_ts == other.create_ts
-            && match (&self.value, &other.value) {
-                (ValueDeletable::Tombstone, ValueDeletable::Tombstone) => true,
-                _ => self.expire_ts == other.expire_ts,
-            }
-    }
 }
 
 impl SstRowEntry {

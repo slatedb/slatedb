@@ -1,7 +1,7 @@
 use crate::config::Clock;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
-use crate::row_codec::{SstRowCodecV0, SstRowEntry};
+use crate::row_codec::SstRowCodecV0;
 use crate::types::{KeyValue, RowAttributes, RowEntry};
 use bytes::Bytes;
 use rand::Rng;
@@ -90,14 +90,28 @@ pub(crate) use assert_debug_snapshot;
 pub(crate) fn decode_codec_entries(
     data: Bytes,
     offsets: &[u16],
-) -> Result<Vec<SstRowEntry>, SlateDBError> {
+) -> Result<Vec<RowEntry>, SlateDBError> {
     let codec = SstRowCodecV0::new();
     let mut entries = Vec::new();
+    let mut last_key = Bytes::new(); // Track the last full key
 
     for &offset in offsets {
         let mut cursor = data.slice(offset as usize..);
-        let entry = codec.decode(&mut cursor)?;
-        entries.push(entry);
+        let sst_row_entry = codec.decode(&mut cursor)?;
+
+        let full_key = sst_row_entry.restore_full_key(&last_key);
+
+        // Update last_key for the next entry
+        last_key = full_key.clone();
+
+        let row_entry = RowEntry {
+            key: full_key,
+            value: sst_row_entry.value,
+            seq: sst_row_entry.seq,
+            create_ts: sst_row_entry.create_ts,
+            expire_ts: sst_row_entry.expire_ts,
+        };
+        entries.push(row_entry);
     }
 
     Ok(entries)

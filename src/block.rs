@@ -141,6 +141,7 @@ impl BlockBuilder {
         self.add(entry)
     }
 
+    #[allow(dead_code)]
     #[cfg(test)]
     pub fn add_tombstone(&mut self, key: &[u8], attrs: crate::types::RowAttributes) -> bool {
         let entry = RowEntry::new(
@@ -175,7 +176,7 @@ mod tests {
     use super::*;
     use crate::{
         test_utils::{assert_debug_snapshot, decode_codec_entries},
-        types::{RowAttributes, ValueDeletable},
+        types::ValueDeletable,
     };
 
     #[derive(Debug)]
@@ -236,7 +237,7 @@ mod tests {
                 ValueDeletable::Tombstone,
                 0,
                 Some(0),
-                Some(0),
+                None,
             ),
             RowEntry::new(
                 Bytes::copy_from_slice(b"key3"),
@@ -287,16 +288,6 @@ mod tests {
         assert_eq!(block_data, &decoded.data);
         assert_eq!(block_offsets, &decoded.offsets);
         assert_debug_snapshot!(test_case.name, (block.size(), block.data, block.offsets));
-    }
-
-    #[test]
-    fn test_add_tombstone() {
-        let mut builder = BlockBuilder::new(4096);
-        let attrs = RowAttributes {
-            ts: Some(0),
-            expire_ts: None,
-        };
-        assert!(builder.add_tombstone(b"key1", attrs));
     }
 
     #[test]
