@@ -58,16 +58,18 @@ impl RangeBounds<KVTableInternalKey> for KVTableInternalKeyRange {
     }
 }
 
+/// Convert a user key range to a memtable internal key range. The internal key range should contain all the sequence
+/// numbers for the given user key in the range.
 impl From<BytesRange> for KVTableInternalKeyRange {
     fn from(range: BytesRange) -> Self {
         let start_bound = match range.start_bound() {
             Bound::Included(key) => Bound::Included(KVTableInternalKey::new(key.clone(), u64::MAX)),
-            Bound::Excluded(key) => Bound::Included(KVTableInternalKey::new(key.clone(), u64::MAX)),
+            Bound::Excluded(key) => Bound::Excluded(KVTableInternalKey::new(key.clone(), 0)),
             Bound::Unbounded => Bound::Unbounded,
         };
         let end_bound = match range.end_bound() {
             Bound::Included(key) => Bound::Included(KVTableInternalKey::new(key.clone(), 0)),
-            Bound::Excluded(key) => Bound::Included(KVTableInternalKey::new(key.clone(), 0)),
+            Bound::Excluded(key) => Bound::Excluded(KVTableInternalKey::new(key.clone(), u64::MAX)),
             Bound::Unbounded => Bound::Unbounded,
         };
         Self {
@@ -99,12 +101,6 @@ pub(crate) struct ImmutableWal {
 }
 
 pub(crate) struct MemTableIterator<'a, T: RangeBounds<KVTableInternalKey>> {
-    /// The kv table internal key range is considered as wider than the user key range since it includes sequence
-    /// numbers. For example, with keys ("key001", seq=1), ("key002", seq=2), ("key002", seq=3), ("key003", seq=4),
-    /// if the user specifies a range of Excluded("key002"), we cannot directly create
-    /// a KVTableInternalKeyRange that equivant with Excluded("key002") that filter out all the sequence numbers.
-    /// We have to store the original user key range with an additional filter to handle the Excluded case.
-    user_key_range: BytesRange,
     /// `inner` is the Iterator impl of SkipMap, which is the underlying data structure of MemTable.
     inner: Range<'a, KVTableInternalKey, T, KVTableInternalKey, RowEntry>,
 }
@@ -161,12 +157,7 @@ impl<'a, T: RangeBounds<KVTableInternalKey>> KeyValueIterator for MemTableIterat
 
 impl<T: RangeBounds<KVTableInternalKey>> MemTableIterator<'_, T> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
-        for entry in self.inner.by_ref() {
-            if self.user_key_range.contains(&entry.key().user_key) {
-                return Some(entry.value().clone());
-            }
-        }
-        None
+        self.inner.next().map(|entry| entry.value().clone())
     }
 }
 
@@ -272,7 +263,6 @@ impl KVTable {
 
     pub(crate) fn range(&self, range: BytesRange) -> MemTableIterator<KVTableInternalKeyRange> {
         MemTableIterator {
-            user_key_range: range.clone(),
             inner: self.map.range(KVTableInternalKeyRange::from(range)),
         }
     }
@@ -308,6 +298,7 @@ impl KVTable {
 mod tests {
     use super::*;
     use crate::test_utils::assert_iterator;
+    use rstest::rstest;
 
     #[tokio::test]
     async fn test_memtable_iter() {
@@ -441,5 +432,76 @@ mod tests {
 
         table.put(RowEntry::new_tombstone(b"abc333", 4));
         assert_eq!(table.table.size(), 104);
+    }
+
+    #[rstest]
+    #[case(
+        BytesRange::from(..),
+        KVTableInternalKeyRange {
+            start_bound: Bound::Unbounded,
+            end_bound: Bound::Unbounded,
+        },
+        vec![KVTableInternalKey::new(Bytes::from_static(b"abc111"), 1)],
+        vec![]
+    )]
+    #[case(
+        BytesRange::from(Bytes::from_static(b"abc111")..=Bytes::from_static(b"abc333")),
+        KVTableInternalKeyRange {
+            start_bound: Bound::Included(KVTableInternalKey::new(Bytes::from_static(b"abc111"), u64::MAX)),
+            end_bound: Bound::Included(KVTableInternalKey::new(Bytes::from_static(b"abc333"), 0)),
+        },
+        vec![
+            KVTableInternalKey::new(Bytes::from_static(b"abc111"), 1),
+            KVTableInternalKey::new(Bytes::from_static(b"abc222"), 2),
+            KVTableInternalKey::new(Bytes::from_static(b"abc333"), 3),
+            KVTableInternalKey::new(Bytes::from_static(b"abc333"), 0),
+            KVTableInternalKey::new(Bytes::from_static(b"abc333"), u64::MAX),
+        ],
+        vec![KVTableInternalKey::new(Bytes::from_static(b"abc444"), 4)]
+    )]
+    #[case(
+        BytesRange::from(Bytes::from_static(b"abc222")..Bytes::from_static(b"abc444")),
+        KVTableInternalKeyRange {
+            start_bound: Bound::Included(KVTableInternalKey::new(Bytes::from_static(b"abc222"), u64::MAX)),
+            end_bound: Bound::Excluded(KVTableInternalKey::new(Bytes::from_static(b"abc444"), u64::MAX)),
+        },
+        vec![
+            KVTableInternalKey::new(Bytes::from_static(b"abc222"), 1),
+            KVTableInternalKey::new(Bytes::from_static(b"abc333"), 2),
+        ],
+        vec![
+            KVTableInternalKey::new(Bytes::from_static(b"abc444"), 0),
+            KVTableInternalKey::new(Bytes::from_static(b"abc444"), u64::MAX),
+            KVTableInternalKey::new(Bytes::from_static(b"abc555"), u64::MAX),
+        ]
+    )]
+    #[case(
+        BytesRange::from(..=Bytes::from_static(b"abc333")),
+        KVTableInternalKeyRange {
+            start_bound: Bound::Unbounded,
+            end_bound: Bound::Included(KVTableInternalKey::new(Bytes::from_static(b"abc333"), 0)),
+        },
+        vec![
+            KVTableInternalKey::new(Bytes::from_static(b"abc111"), 1),
+            KVTableInternalKey::new(Bytes::from_static(b"abc222"), 2),
+            KVTableInternalKey::new(Bytes::from_static(b"abc333"), 3),
+            KVTableInternalKey::new(Bytes::from_static(b"abc333"), u64::MAX),
+        ],
+        vec![KVTableInternalKey::new(Bytes::from_static(b"abc444"), 4)]
+    )]
+    fn test_from_internal_key_range(
+        #[case] range: BytesRange,
+        #[case] expected: KVTableInternalKeyRange,
+        #[case] should_contains: Vec<KVTableInternalKey>,
+        #[case] should_not_contains: Vec<KVTableInternalKey>,
+    ) {
+        let range = KVTableInternalKeyRange::from(range);
+        assert_eq!(range, expected);
+        for key in should_contains {
+            assert!(range.contains(&key));
+        }
+        for key in should_not_contains {
+            assert!(!range.contains(&key));
+        }
     }
 }
