@@ -59,7 +59,11 @@ impl RangeBounds<KVTableInternalKey> for KVTableInternalKeyRange {
 }
 
 /// Convert a user key range to a memtable internal key range. The internal key range should contain all the sequence
-/// numbers for the given user key in the range.
+/// numbers for the given user key in the range. This is used for iterating over the memtable in [`KVTable::range`].
+///
+/// Please note that the sequence number is ordered in reverse, given a user key range (`key001`..=`key001`), the first
+/// sequence number in this range is u64::MAX, and the last sequence number is 0. The output range should be
+/// `(key001, u64::MAX) ..= (key001, 0)`.
 impl From<BytesRange> for KVTableInternalKeyRange {
     fn from(range: BytesRange) -> Self {
         let start_bound = match range.start_bound() {
