@@ -42,8 +42,8 @@ impl Default for SstIteratorOptions {
 
 /// This enum encapsulates access to an SST and corresponding ownership requirements.
 /// For example, [`SstView::Owned`] allows the table handle to be owned, which is
-/// needed for [`crate::db::Db::scan`] since it returns the iterator, while [`SstView::Key`]
-/// accommodates single-key  access by reference which is needed for [`crate::db::Db::get`].
+/// needed for [`crate::db::Db::scan`] since it returns the iterator, while [`SstView::Borrowed`]
+/// accommodates access by reference which is useful for [`crate::db::Db::scan`].
 pub(crate) enum SstView<'a> {
     Owned(SsTableHandle, BytesRange),
     Borrowed(&'a SsTableHandle, (Bound<&'a [u8]>, Bound<&'a [u8]>)),
