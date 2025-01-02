@@ -134,7 +134,6 @@ impl DbInner {
         // Since the key remains unchanged during the point query, we only need to compute
         // the hash value once and pass it to the filter to avoid unnecessary hash computation
         let key_hash = filter::filter_hash(key);
-        let key_bytes = Bytes::copy_from_slice(key);
 
         // cache blocks that are being read
         let sst_iter_options = SstIteratorOptions {
@@ -146,7 +145,7 @@ impl DbInner {
 
         for sst in &snapshot.state.core.l0 {
             if self
-                .sst_might_include_key(sst, &key_bytes, key_hash)
+                .sst_might_include_key(sst, key, key_hash)
                 .await?
             {
                 let mut iter =
