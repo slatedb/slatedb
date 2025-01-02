@@ -144,10 +144,7 @@ impl DbInner {
         };
 
         for sst in &snapshot.state.core.l0 {
-            if self
-                .sst_might_include_key(sst, key, key_hash)
-                .await?
-            {
+            if self.sst_might_include_key(sst, key, key_hash).await? {
                 let mut iter =
                     SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
                         .await?;
