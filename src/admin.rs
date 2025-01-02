@@ -6,8 +6,6 @@ use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 use futures::{StreamExt, TryStreamExt};
-#[cfg(feature = "aws")]
-use log::warn;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use std::env;
@@ -182,11 +180,7 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     let builder = if let Some(dynamodb_table) = dynamodb_table {
         builder.with_conditional_put(S3ConditionalPut::Dynamo(DynamoCommit::new(dynamodb_table)))
     } else {
-        warn!(
-            "Running without configuring a DynamoDB Table. This is OK when running an admin, \
-        but any operations that attempt a CAS will fail."
-        );
-        builder
+        builder.with_conditional_put(S3ConditionalPut::ETagMatch)
     };
 
     let builder = if let Some(endpoint) = endpoint {

@@ -3,12 +3,13 @@ use crate::error::SlateDBError;
 use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::mem_table::VecDequeKeyValueIterator;
 use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
+use crate::sorted_run_iterator::SortedRunIterator;
+use crate::sst_iter::SstIterator;
 use crate::types::KeyValue;
 
 use bytes::Bytes;
 use std::collections::VecDeque;
-use crate::sorted_run_iterator::SortedRunIterator;
-use crate::sst_iter::SstIterator;
+use std::ops::RangeBounds;
 
 type ScanIterator<'a> = TwoMergeIterator<
     VecDequeKeyValueIterator,
@@ -86,7 +87,6 @@ impl<'a> DbIterator<'a> {
     ///
     /// Returns [`SlateDBError::InvalidatedIterator`] if the iterator has been
     ///  invalidated in order to reclaim resources.
-    #[allow(dead_code)]
     pub async fn seek(&mut self, next_key: Bytes) -> Result<(), SlateDBError> {
         if let Some(error) = self.invalidated_error.clone() {
             Err(SlateDBError::InvalidatedIterator(Box::new(error)))

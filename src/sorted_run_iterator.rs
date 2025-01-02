@@ -7,13 +7,13 @@ use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use bytes::Bytes;
 use std::collections::VecDeque;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 #[derive(Debug)]
 pub(crate) enum SortedRunView<'a> {
-    Range(VecDeque<SsTableHandle>, BytesRange),
-    RangeFrom(VecDeque<&'a SsTableHandle>, &'a [u8]),
-    Key(VecDeque<&'a SsTableHandle>, &'a [u8]),
+    Owned(VecDeque<SsTableHandle>, BytesRange),
+    Borrowed(VecDeque<&'a SsTableHandle>, (Bound<&'a [u8]>, Bound<&'a [u8]>)),
 }
 
 impl<'a> SortedRunView<'a> {
@@ -21,12 +21,10 @@ impl<'a> SortedRunView<'a> {
     fn pop_sst(&mut self) -> Option<SstView<'a>> {
         eprintln!("{self:?}");
         match self {
-            SortedRunView::Range(tables, r) =>
-                tables.pop_front().map(|table| SstView::Range(table, r.clone())),
-            SortedRunView::RangeFrom(tables, k) =>
-                tables.pop_front().map(|table| SstView::RangeFrom(table, k)),
-            SortedRunView::Key(tables, k) =>
-                tables.pop_front().map(|table| SstView::Key(table, k)),
+            SortedRunView::Owned(tables, r) =>
+                tables.pop_front().map(|table| SstView::Owned(table, r.clone())),
+            SortedRunView::Borrowed(tables, r) =>
+                tables.pop_front().map(|table| SstView::Borrowed(table, r.clone())),
         }
     }
 
@@ -49,9 +47,8 @@ impl<'a> SortedRunView<'a> {
 
     fn peek_next_table(&self) -> Option<&SsTableHandle> {
         match self {
-            SortedRunView::Range(tables, _) => tables.front(),
-            SortedRunView::RangeFrom(tables, _) => tables.front().map(|t| t.as_ref()),
-            SortedRunView::Key(tables, _) => tables.front().map(|t| t.as_ref()),
+            SortedRunView::Owned(tables, _) => tables.front(),
+            SortedRunView::Borrowed(tables, _) => tables.front().map(|t| t.as_ref()),
         }
     }
 }
@@ -79,23 +76,28 @@ impl<'a> SortedRunIterator<'a> {
         Ok(res)
     }
 
-    pub(crate) async fn range(
+    pub(crate) async fn new_owned<T: RangeBounds<Bytes>>(
         sorted_run: SortedRun,
-        range: BytesRange,
+        range: T,
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
-        // TODO: Move instead of clone
-        let tables = sorted_run
-            .tables_covering_range(&range)
-            .into_iter()
-            .cloned()
-            .collect();
-        SortedRunIterator::new(
-            SortedRunView::Range(tables, range),
-            table_store,
-            sst_iter_options,
-        ).await
+        let range = BytesRange::from(range);
+        let tables = sorted_run.into_tables_covering_range(range.as_ref());
+        let view = SortedRunView::Owned(tables, range);
+        SortedRunIterator::new(view, table_store, sst_iter_options).await
+    }
+
+    pub(crate) async fn new_borrowed<T: RangeBounds<&'a [u8]>>(
+        sorted_run: &'a SortedRun,
+        range: T,
+        table_store: Arc<TableStore>,
+        sst_iter_options: SstIteratorOptions,
+    ) -> Result<Self, SlateDBError> {
+        let range = (range.start_bound().cloned(), range.end_bound().cloned());
+        let tables = sorted_run.tables_covering_range(range);
+        let view = SortedRunView::Borrowed(tables, range);
+        SortedRunIterator::new(view, table_store, sst_iter_options).await
     }
 
     pub(crate) async fn for_key(
@@ -104,42 +106,11 @@ impl<'a> SortedRunIterator<'a> {
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
     ) -> Result<SortedRunIterator<'a>, SlateDBError> {
-        let tables = sorted_run
-            .find_sst_with_range_covering_key(key)
-            .into_iter()
-            .collect();
-        SortedRunIterator::new(
-            SortedRunView::Key(tables, key),
+        Self::new_borrowed(
+            sorted_run,
+            key..=key,
             table_store,
             sst_iter_options,
-        ).await
-    }
-
-    pub(crate) async fn range_from(
-        sorted_run: &'a SortedRun,
-        key: &'a [u8],
-        table_store: Arc<TableStore>,
-        sst_iter_options: SstIteratorOptions,
-    ) -> Result<SortedRunIterator<'a>, SlateDBError> {
-        let tables = sorted_run
-            .find_ssts_with_range_from_key(key);
-        Self::new(
-            SortedRunView::RangeFrom(tables, key),
-            table_store,
-            sst_iter_options
-        ).await
-    }
-
-    pub(crate) async fn all(
-        sorted_run: SortedRun,
-        table_store: Arc<TableStore>,
-        sst_iter_options: SstIteratorOptions,
-    ) -> Result<Self, SlateDBError> {
-        Self::range(
-            sorted_run,
-            BytesRange::unbounded(),
-            table_store,
-            sst_iter_options
         ).await
     }
 
@@ -227,8 +198,9 @@ mod tests {
             ssts: vec![handle],
         };
 
-        let mut iter = SortedRunIterator::all(
+        let mut iter = SortedRunIterator::new_owned(
             sr,
+            ..,
             table_store,
             SstIteratorOptions::default()
         )
@@ -278,8 +250,9 @@ mod tests {
             ssts: vec![handle1, handle2],
         };
 
-        let mut iter = SortedRunIterator::all(
+        let mut iter = SortedRunIterator::new_owned(
             sr,
+            ..,
             table_store.clone(),
             SstIteratorOptions::default(),
         )
@@ -324,9 +297,9 @@ mod tests {
             let mut expected_val_gen = test_case_val_gen.clone();
             let from_key = test_case_key_gen.next();
             _ = test_case_val_gen.next();
-            let mut iter = SortedRunIterator::range_from(
+            let mut iter = SortedRunIterator::new_borrowed(
                 &sr,
-                &from_key,
+                from_key.as_ref()..,
                 table_store.clone(),
                 SstIteratorOptions::default(),
             )
@@ -362,9 +335,9 @@ mod tests {
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
         let mut expected_val_gen = val_gen.clone();
         let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
-        let mut iter = SortedRunIterator::range_from(
+        let mut iter = SortedRunIterator::new_borrowed(
             &sr,
-            &[b'a', 10],
+            [b'a', 10].as_ref()..,
             table_store.clone(),
             SstIteratorOptions::default(),
         )
@@ -399,9 +372,9 @@ mod tests {
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
         let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
 
-        let mut iter = SortedRunIterator::range_from(
+        let mut iter = SortedRunIterator::new_borrowed(
             &sr,
-            &[b'z', 30],
+            [b'z', 30].as_ref()..,
             table_store.clone(),
             SstIteratorOptions::default(),
         )
@@ -429,8 +402,9 @@ mod tests {
         let sr =
             build_sorted_run_from_table(&table, table_store.clone(), entries_per_sst, &mut rng)
                 .await;
-        let mut sr_iter = SortedRunIterator::all(
+        let mut sr_iter = SortedRunIterator::new_owned(
             sr,
+            ..,
             table_store.clone(),
             SstIteratorOptions::default(),
         ).await.unwrap();

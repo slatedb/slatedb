@@ -348,8 +348,9 @@ mod tests {
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
-        let mut iter = SstIterator::all(
-            handle.clone(), // TODO: Fix unneeded clone
+        let mut iter = SstIterator::new_borrowed(
+            handle,
+            ..,
             table_store.clone(),
             SstIteratorOptions::default()
         )
@@ -455,8 +456,9 @@ mod tests {
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
-        let mut iter = SstIterator::all(
-            handle.clone(), // TODO: Replace clone after we have ref supported
+        let mut iter = SstIterator::new_borrowed(
+            handle,
+            ..,
             table_store.clone(),
             SstIteratorOptions::default()
         )
