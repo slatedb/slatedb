@@ -149,12 +149,9 @@ impl DbInner {
                 .sst_might_include_key(sst, &key_bytes, key_hash)
                 .await?
             {
-                let mut iter = SstIterator::new_for_key(
-                    sst,
-                    key,
-                    self.table_store.clone(),
-                    sst_iter_options,
-                ).await?;
+                let mut iter =
+                    SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
+                        .await?;
 
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
@@ -166,12 +163,9 @@ impl DbInner {
 
         for sr in &snapshot.state.core.compacted {
             if self.sr_might_include_key(sr, key, key_hash).await? {
-                let mut iter = SortedRunIterator::for_key(
-                    sr,
-                    key,
-                    self.table_store.clone(),
-                    sst_iter_options,
-                ).await?;
+                let mut iter =
+                    SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
+                        .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
                         return unwrap_result(entry.value);
@@ -219,22 +213,24 @@ impl DbInner {
         let mut l0_iters = VecDeque::new();
         for sst in state.core.l0 {
             let iter = SstIterator::new_owned(
-                sst,
                 range.clone(),
+                sst,
                 self.table_store.clone(),
-                sst_iter_options
-            ).await?;
+                sst_iter_options,
+            )
+            .await?;
             l0_iters.push_back(iter);
         }
 
         let mut sr_iters = VecDeque::new();
         for sr in state.core.compacted {
             let iter = SortedRunIterator::new_owned(
-                sr,
                 range.clone(),
+                sr,
                 self.table_store.clone(),
                 sst_iter_options,
-            ).await?;
+            )
+            .await?;
             sr_iters.push_back(iter);
         }
 
@@ -449,12 +445,9 @@ impl DbInner {
                 cache_blocks: true,
                 eager_spawn: true,
             };
-            let iter = SstIterator::new_owned(
-                sst,
-                ..,
-                db_inner.table_store.clone(),
-                sst_iter_options
-            ).await?;
+            let iter =
+                SstIterator::new_owned(.., sst, db_inner.table_store.clone(), sst_iter_options)
+                    .await?;
             Ok((iter, id))
         }
 
@@ -2000,9 +1993,10 @@ mod tests {
         assert_eq!(state.l0.len(), 1);
 
         let l0 = state.l0.front().unwrap();
-        let mut iter = SstIterator::all(l0, table_store.clone(), SstIteratorOptions::default())
-            .await
-            .unwrap();
+        let mut iter =
+            SstIterator::new_borrowed(.., l0, table_store.clone(), SstIteratorOptions::default())
+                .await
+                .unwrap();
         assert_iterator(
             &mut iter,
             vec![
@@ -2065,20 +2059,15 @@ mod tests {
         assert_eq!(l0.len(), 3);
         let sst_iter_options = SstIteratorOptions {
             eager_spawn: false,
-            .. SstIteratorOptions::default()
+            ..SstIteratorOptions::default()
         };
 
         for i in 0u8..3u8 {
-            // TODO: Remove clone
             let sst1 = l0.get(2 - i as usize).unwrap();
-            let mut iter = SstIterator::new_borrowed(
-                sst1,
-                ..,
-                table_store.clone(),
-                sst_iter_options
-            )
-                .await
-                .unwrap();
+            let mut iter =
+                SstIterator::new_borrowed(.., sst1, table_store.clone(), sst_iter_options)
+                    .await
+                    .unwrap();
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);

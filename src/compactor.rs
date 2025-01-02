@@ -349,13 +349,13 @@ mod tests {
         let handle = compacted.first().unwrap();
 
         let mut iter = SstIterator::new_borrowed(
-            handle,
             ..,
+            handle,
             table_store.clone(),
-            SstIteratorOptions::default()
+            SstIteratorOptions::default(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         for i in 0..4 {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), &[b'a' + i as u8; 16]);
@@ -457,13 +457,13 @@ mod tests {
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
         let mut iter = SstIterator::new_borrowed(
-            handle,
             ..,
+            handle,
             table_store.clone(),
-            SstIteratorOptions::default()
+            SstIteratorOptions::default(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), &[1; 16]);

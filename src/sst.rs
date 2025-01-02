@@ -550,7 +550,7 @@ mod tests {
         assert!(block.is_some());
         let block = block.unwrap();
         let block = Block::decode(block.slice(..block.len() - 4));
-        BlockIterator::from_first_key(block)
+        BlockIterator::new(block)
     }
 
     #[tokio::test]
@@ -633,7 +633,7 @@ mod tests {
         let block = format
             .read_block_raw(&encoded.info, &index, 0, &raw_sst)
             .unwrap();
-        let mut iter = BlockIterator::from_first_key(block);
+        let mut iter = BlockIterator::new(block);
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'a'; 8], &[b'1'; 8], 0).with_create_ts(1)],
@@ -642,7 +642,7 @@ mod tests {
         let block = format
             .read_block_raw(&encoded.info, &index, 1, &raw_sst)
             .unwrap();
-        let mut iter = BlockIterator::from_first_key(block);
+        let mut iter = BlockIterator::new(block);
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'b'; 8], &[b'2'; 8], 0).with_create_ts(2)],
@@ -651,7 +651,7 @@ mod tests {
         let block = format
             .read_block_raw(&encoded.info, &index, 2, &raw_sst)
             .unwrap();
-        let mut iter = BlockIterator::from_first_key(block);
+        let mut iter = BlockIterator::new(block);
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'c'; 8], &[b'3'; 8], 0).with_create_ts(3)],
@@ -898,7 +898,7 @@ mod tests {
             .unwrap();
 
         // then:
-        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
+        let mut iter = BlockIterator::new(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             vec![
@@ -907,7 +907,7 @@ mod tests {
             ],
         )
         .await;
-        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
+        let mut iter = BlockIterator::new(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'c'; 20], &[3u8; 20], 0).with_create_ts(3)],
@@ -958,7 +958,7 @@ mod tests {
             .unwrap();
 
         // then:
-        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
+        let mut iter = BlockIterator::new(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             vec![
@@ -967,13 +967,13 @@ mod tests {
             ],
         )
         .await;
-        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
+        let mut iter = BlockIterator::new(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'c'; 20], &[3u8; 20], 0).with_create_ts(3)],
         )
         .await;
-        let mut iter = BlockIterator::from_first_key(blocks.pop_front().unwrap());
+        let mut iter = BlockIterator::new(blocks.pop_front().unwrap());
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'd'; 20], &[4u8; 20], 0).with_create_ts(4)],

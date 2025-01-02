@@ -107,38 +107,30 @@ impl TokioCompactionExecutorInner {
         };
 
         let mut l0_iters = VecDeque::new();
-        // TODO: No need to copy l0 SST
         for l0 in compaction.ssts.iter() {
-            l0_iters.push_back(SstIterator::new_owned(
-                l0.clone(),
-                ..,
-                self.table_store.clone(),
-                sst_iter_options,
-            ).await?);
+            l0_iters.push_back(
+                SstIterator::new_borrowed(.., l0, self.table_store.clone(), sst_iter_options)
+                    .await?,
+            );
         }
         let l0_merge_iter = MergeIterator::new(l0_iters).await?;
 
         let mut sr_iters = VecDeque::new();
         for sr in compaction.sorted_runs.iter() {
-            let iter = SortedRunIterator::new_borrowed(
-                sr,
-                ..,
-                self.table_store.clone(),
-                sst_iter_options,
-            ).await?;
+            let iter =
+                SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), sst_iter_options)
+                    .await?;
             sr_iters.push_back(iter);
         }
         let sr_merge_iter = MergeIterator::new(sr_iters).await?;
-        Ok(TwoMergeIterator::new(l0_merge_iter, sr_merge_iter).await?)
+        TwoMergeIterator::new(l0_merge_iter, sr_merge_iter).await
     }
 
     async fn execute_compaction(
-        self: &Arc<Self>,
+        &self,
         compaction: CompactionJob,
     ) -> Result<SortedRun, SlateDBError> {
-        let mut all_iter = self.load_iterators(
-            &compaction
-        ).await?;
+        let mut all_iter = self.load_iterators(&compaction).await?;
         let mut output_ssts = Vec::new();
         let mut current_writer = self
             .table_store

@@ -13,18 +13,22 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub(crate) enum SortedRunView<'a> {
     Owned(VecDeque<SsTableHandle>, BytesRange),
-    Borrowed(VecDeque<&'a SsTableHandle>, (Bound<&'a [u8]>, Bound<&'a [u8]>)),
+    Borrowed(
+        VecDeque<&'a SsTableHandle>,
+        (Bound<&'a [u8]>, Bound<&'a [u8]>),
+    ),
 }
 
 impl<'a> SortedRunView<'a> {
-
     fn pop_sst(&mut self) -> Option<SstView<'a>> {
         eprintln!("{self:?}");
         match self {
-            SortedRunView::Owned(tables, r) =>
-                tables.pop_front().map(|table| SstView::Owned(table, r.clone())),
-            SortedRunView::Borrowed(tables, r) =>
-                tables.pop_front().map(|table| SstView::Borrowed(table, r.clone())),
+            SortedRunView::Owned(tables, r) => tables
+                .pop_front()
+                .map(|table| SstView::Owned(table, r.clone())),
+            SortedRunView::Borrowed(tables, r) => {
+                tables.pop_front().map(|table| SstView::Borrowed(table, *r))
+            }
         }
     }
 
@@ -34,11 +38,7 @@ impl<'a> SortedRunView<'a> {
         sst_iterator_options: SstIteratorOptions,
     ) -> Result<Option<SstIterator<'a>>, SlateDBError> {
         let next_iter = if let Some(view) = self.pop_sst() {
-            Some(SstIterator::new(
-                view,
-                table_store.clone(),
-                sst_iterator_options
-            ).await?)
+            Some(SstIterator::new(view, table_store.clone(), sst_iterator_options).await?)
         } else {
             None
         };
@@ -48,7 +48,7 @@ impl<'a> SortedRunView<'a> {
     fn peek_next_table(&self) -> Option<&SsTableHandle> {
         match self {
             SortedRunView::Owned(tables, _) => tables.front(),
-            SortedRunView::Borrowed(tables, _) => tables.front().map(|t| t.as_ref()),
+            SortedRunView::Borrowed(tables, _) => tables.front().copied(),
         }
     }
 }
@@ -77,8 +77,8 @@ impl<'a> SortedRunIterator<'a> {
     }
 
     pub(crate) async fn new_owned<T: RangeBounds<Bytes>>(
-        sorted_run: SortedRun,
         range: T,
+        sorted_run: SortedRun,
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
@@ -89,8 +89,8 @@ impl<'a> SortedRunIterator<'a> {
     }
 
     pub(crate) async fn new_borrowed<T: RangeBounds<&'a [u8]>>(
-        sorted_run: &'a SortedRun,
         range: T,
+        sorted_run: &'a SortedRun,
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
@@ -106,19 +106,14 @@ impl<'a> SortedRunIterator<'a> {
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
     ) -> Result<SortedRunIterator<'a>, SlateDBError> {
-        Self::new_borrowed(
-            sorted_run,
-            key..=key,
-            table_store,
-            sst_iter_options,
-        ).await
+        Self::new_borrowed(key..=key, sorted_run, table_store, sst_iter_options).await
     }
 
     async fn advance_table(&mut self) -> Result<(), SlateDBError> {
-        self.current_iter = self.view.build_next_iter(
-            self.table_store.clone(),
-            self.sst_iter_options,
-        ).await?;
+        self.current_iter = self
+            .view
+            .build_next_iter(self.table_store.clone(), self.sst_iter_options)
+            .await?;
         Ok(())
     }
 }
@@ -139,7 +134,7 @@ impl KeyValueIterator for SortedRunIterator<'_> {
 impl SeekToKey for SortedRunIterator<'_> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         while let Some(next_table) = self.view.peek_next_table() {
-            let next_table_first_key = next_table.as_ref().info.first_key.as_ref();
+            let next_table_first_key = next_table.info.first_key.as_ref();
             match next_table_first_key {
                 Some(key) if key < next_key => self.advance_table().await?,
                 _ => break,
@@ -198,14 +193,10 @@ mod tests {
             ssts: vec![handle],
         };
 
-        let mut iter = SortedRunIterator::new_owned(
-            sr,
-            ..,
-            table_store,
-            SstIteratorOptions::default()
-        )
-            .await
-            .unwrap();
+        let mut iter =
+            SortedRunIterator::new_owned(.., sr, table_store, SstIteratorOptions::default())
+                .await
+                .unwrap();
 
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
@@ -251,13 +242,13 @@ mod tests {
         };
 
         let mut iter = SortedRunIterator::new_owned(
-            sr,
             ..,
+            sr,
             table_store.clone(),
             SstIteratorOptions::default(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
@@ -298,13 +289,13 @@ mod tests {
             let from_key = test_case_key_gen.next();
             _ = test_case_val_gen.next();
             let mut iter = SortedRunIterator::new_borrowed(
-                &sr,
                 from_key.as_ref()..,
+                &sr,
                 table_store.clone(),
                 SstIteratorOptions::default(),
             )
-                .await
-                .unwrap();
+            .await
+            .unwrap();
             for _ in 0..30 - i {
                 assert_kv(
                     &iter.next().await.unwrap().unwrap(),
@@ -336,13 +327,13 @@ mod tests {
         let mut expected_val_gen = val_gen.clone();
         let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
         let mut iter = SortedRunIterator::new_borrowed(
-            &sr,
             [b'a', 10].as_ref()..,
+            &sr,
             table_store.clone(),
             SstIteratorOptions::default(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         for _ in 0..30 {
             assert_kv(
@@ -373,13 +364,13 @@ mod tests {
         let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
 
         let mut iter = SortedRunIterator::new_borrowed(
-            &sr,
             [b'z', 30].as_ref()..,
+            &sr,
             table_store.clone(),
             SstIteratorOptions::default(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         assert!(iter.next().await.unwrap().is_none());
     }
@@ -403,11 +394,13 @@ mod tests {
             build_sorted_run_from_table(&table, table_store.clone(), entries_per_sst, &mut rng)
                 .await;
         let mut sr_iter = SortedRunIterator::new_owned(
-            sr,
             ..,
+            sr,
             table_store.clone(),
             SstIteratorOptions::default(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let mut table_iter = table.iter();
         loop {
             let skip = rng.gen::<usize>() % (max_entries_per_sst * 2);

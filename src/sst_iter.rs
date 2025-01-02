@@ -1,9 +1,9 @@
+use bytes::Bytes;
 use std::cmp::min;
 use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
-use bytes::Bytes;
 use tokio::task::JoinHandle;
 
 use crate::bytes_range::BytesRange;
@@ -11,7 +11,10 @@ use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::iter::SeekToKey;
-use crate::{block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, tablestore::TableStore, types::RowEntry};
+use crate::{
+    block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, tablestore::TableStore,
+    types::RowEntry,
+};
 
 enum FetchTask {
     InFlight(JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
@@ -63,7 +66,7 @@ impl SstView<'_> {
 
     fn table_as_ref(&self) -> &SsTableHandle {
         match self {
-            SstView::Owned(t, _) => t.as_ref(),
+            SstView::Owned(t, _) => t,
             SstView::Borrowed(t, _) => t,
         }
     }
@@ -72,14 +75,15 @@ impl SstView<'_> {
     fn contains(&self, key: &[u8]) -> bool {
         match self {
             SstView::Owned(_, r) => r.contains(key),
-            SstView::Borrowed(_, r) =>
-                <(Bound<&[u8]>, Bound<&[u8]>) as RangeBounds<[u8]>>::contains::<[u8]>(r, key),
+            SstView::Borrowed(_, r) => {
+                <(Bound<&[u8]>, Bound<&[u8]>) as RangeBounds<[u8]>>::contains::<[u8]>(r, key)
+            }
         }
     }
 
     /// Check whether a key exceeds the range of this view.
     fn key_exceeds(&self, key: &[u8]) -> bool {
-        match self.end_key(){
+        match self.end_key() {
             Included(end) => key > end,
             Excluded(end) => key >= end,
             Unbounded => false,
@@ -94,11 +98,14 @@ struct IteratorState {
 
 impl IteratorState {
     fn new() -> Self {
-        Self { initialized: false, current_iter: None }
+        Self {
+            initialized: false,
+            current_iter: None,
+        }
     }
 
     fn is_finished(&self) -> bool {
-        self.initialized && matches!(self.current_iter, None)
+        self.initialized && self.current_iter.is_none()
     }
 
     fn advance(&mut self, iterator: BlockIterator<Arc<Block>>) {
@@ -124,7 +131,6 @@ pub(crate) struct SstIterator<'a> {
 }
 
 impl<'a> SstIterator<'a> {
-
     pub(crate) async fn new(
         view: SstView<'a>,
         table_store: Arc<TableStore>,
@@ -133,10 +139,7 @@ impl<'a> SstIterator<'a> {
         assert!(options.max_fetch_tasks > 0);
         assert!(options.blocks_to_fetch > 0);
         let index = table_store.read_index(view.table_as_ref()).await?;
-        let block_idx_range = SstIterator::blocks_covering_view(
-            &index.borrow(),
-            &view,
-        );
+        let block_idx_range = SstIterator::blocks_covering_view(&index.borrow(), &view);
 
         let mut iter = Self {
             view,
@@ -156,8 +159,8 @@ impl<'a> SstIterator<'a> {
     }
 
     pub(crate) async fn new_owned<T: RangeBounds<Bytes>>(
-        table: SsTableHandle,
         range: T,
+        table: SsTableHandle,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
@@ -166,26 +169,23 @@ impl<'a> SstIterator<'a> {
     }
 
     pub(crate) async fn new_borrowed<T: RangeBounds<&'a [u8]>>(
-        table: &'a SsTableHandle,
         range: T,
+        table: &'a SsTableHandle,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
-        let bounds = (
-            range.start_bound().cloned(),
-            range.end_bound().cloned(),
-        );
+        let bounds = (range.start_bound().cloned(), range.end_bound().cloned());
         let view = SstView::Borrowed(table, bounds);
         Self::new(view, table_store.clone(), options).await
     }
 
-    pub(crate) async fn new_for_key(
+    pub(crate) async fn for_key(
         table: &'a SsTableHandle,
         key: &'a [u8],
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
-        Self::new_borrowed(table, key..=key, table_store, options).await
+        Self::new_borrowed(key..=key, table, table_store, options).await
     }
 
     fn first_block_with_data_including_or_after_key(index: &SsTableIndex, key: &[u8]) -> usize {
@@ -216,21 +216,16 @@ impl<'a> SstIterator<'a> {
         found_block_id
     }
 
-    fn blocks_covering_view(
-        index: &SsTableIndex,
-        view: &SstView,
-    ) -> Range<usize> {
-        // No way to include an inclusive range if the number of blocks is 0
-
+    fn blocks_covering_view(index: &SsTableIndex, view: &SstView) -> Range<usize> {
         let start_block_id = match view.start_key() {
-            Included(k) | Excluded(k) =>
-                Self::first_block_with_data_including_or_after_key(index, k),
+            Included(k) | Excluded(k) => {
+                Self::first_block_with_data_including_or_after_key(index, k)
+            }
             Unbounded => 0,
         };
 
         let end_block_id_exclusive = match view.end_key() {
-            Included(k) =>
-                Self::first_block_with_data_including_or_after_key(index, k) + 1,
+            Included(k) => Self::first_block_with_data_including_or_after_key(index, k) + 1,
             Excluded(k) => {
                 let block_index = Self::first_block_with_data_including_or_after_key(index, k);
                 let block = index.block_meta().get(block_index);
@@ -239,7 +234,7 @@ impl<'a> SstIterator<'a> {
                 } else {
                     block_index + 1
                 }
-            },
+            }
             Unbounded => index.block_meta().len(),
         };
 
@@ -286,7 +281,7 @@ impl<'a> SstIterator<'a> {
                     }
                     FetchTask::Finished(blocks) => {
                         if let Some(block) = blocks.pop_front() {
-                            return Ok(Some(BlockIterator::from_first_key(block)));
+                            return Ok(Some(BlockIterator::new(block)));
                         } else {
                             self.fetch_tasks.pop_front();
                         }
@@ -294,10 +289,7 @@ impl<'a> SstIterator<'a> {
                 }
             } else {
                 assert!(self.fetch_tasks.is_empty());
-                assert_eq!(
-                    self.next_block_idx_to_fetch,
-                    self.index.borrow().block_meta().len()
-                );
+                assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.end);
                 return Ok(None);
             }
         }
@@ -335,11 +327,13 @@ impl KeyValueIterator for SstIterator<'_> {
             };
 
             match next_entry {
-                Some(kv) => if self.view.contains(&kv.key) {
-                    return Ok(Some(kv))
-                } else if self.view.key_exceeds(&kv.key) {
-                    self.stop()
-                },
+                Some(kv) => {
+                    if self.view.contains(&kv.key) {
+                        return Ok(Some(kv));
+                    } else if self.view.key_exceeds(&kv.key) {
+                        self.stop()
+                    }
+                }
                 None => self.advance_block().await?,
             }
         }
@@ -350,7 +344,9 @@ impl KeyValueIterator for SstIterator<'_> {
 impl SeekToKey for SstIterator<'_> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         if !self.view.contains(next_key) {
-            return Err(SlateDBError::InvalidArgument { msg: "FIXME".to_string() });
+            return Err(SlateDBError::InvalidArgument {
+                msg: "FIXME".to_string(),
+            });
         }
 
         while !self.state.is_finished() {
@@ -408,16 +404,12 @@ mod tests {
         // TODO: Need to verify argument types
         let sst_iter_options = SstIteratorOptions {
             cache_blocks: true,
-            .. SstIteratorOptions::default()
+            ..SstIteratorOptions::default()
         };
-        let mut iter = SstIterator::new_owned(
-            sst_handle,
-            ..,
-            table_store.clone(),
-            sst_iter_options
-        )
-            .await
-            .unwrap();
+        let mut iter =
+            SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options)
+                .await
+                .unwrap();
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
@@ -476,14 +468,10 @@ mod tests {
             cache_blocks: true,
             ..SstIteratorOptions::default()
         };
-        let mut iter = SstIterator::new_owned(
-            sst_handle,
-            ..,
-            table_store.clone(),
-            sst_iter_options,
-        )
-            .await
-            .unwrap();
+        let mut iter =
+            SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options)
+                .await
+                .unwrap();
         for i in 0..1000 {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, format!("key{}", i));
@@ -524,13 +512,13 @@ mod tests {
             let from_key = test_case_key_gen.next();
             let _ = test_case_val_gen.next();
             let mut iter = SstIterator::new_borrowed(
-                &sst,
                 from_key.as_ref()..,
+                &sst,
                 table_store.clone(),
-                SstIteratorOptions::default()
+                SstIteratorOptions::default(),
             )
-                .await
-                .unwrap();
+            .await
+            .unwrap();
             for _ in 0..nkeys - i {
                 let e = iter.next().await.unwrap().unwrap();
                 assert_kv(
@@ -567,10 +555,10 @@ mod tests {
         let (sst, nkeys) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
         let mut iter = SstIterator::new_borrowed(
-            &sst,
             [b'a'; 16].as_ref()..,
+            &sst,
             table_store.clone(),
-            SstIteratorOptions::default()
+            SstIteratorOptions::default(),
         )
         .await
         .unwrap();
@@ -608,10 +596,10 @@ mod tests {
         let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
         let mut iter = SstIterator::new_borrowed(
-            &sst,
             [b'z'; 16].as_ref()..,
+            &sst,
             table_store.clone(),
-            SstIteratorOptions::default()
+            SstIteratorOptions::default(),
         )
         .await
         .unwrap();

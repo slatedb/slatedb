@@ -5,6 +5,8 @@ use crate::row_codec::SstRowCodecV0;
 use crate::types::{KeyValue, RowAttributes, RowEntry};
 use bytes::Bytes;
 use rand::Rng;
+use std::ops::Bound;
+use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
@@ -115,4 +117,14 @@ pub(crate) fn decode_codec_entries(
     }
 
     Ok(entries)
+}
+
+pub(crate) fn bound_as_option<T>(bound: Bound<&T>) -> Option<&T>
+where
+    T: ?Sized,
+{
+    match bound {
+        Included(b) | Excluded(b) => Some(b),
+        Unbounded => None,
+    }
 }

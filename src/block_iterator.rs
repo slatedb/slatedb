@@ -83,20 +83,12 @@ impl<B: BlockLike> SeekToKey for BlockIterator<B> {
 }
 
 impl<B: BlockLike> BlockIterator<B> {
-    pub fn from_first_key(block: B) -> BlockIterator<B> {
+    pub fn new(block: B) -> BlockIterator<B> {
         BlockIterator {
             first_key: BlockIterator::decode_first_key(&block),
             block,
             off_off: 0,
         }
-    }
-
-    /// Construct a BlockIterator that starts at the given key, or at the first
-    /// key greater than the given key if the exact key given is not in the block.
-    pub async fn from_key(block: B, key: &[u8]) -> Result<BlockIterator<B>, SlateDBError> {
-        let mut iter = Self::from_first_key(block);
-        iter.seek(key).await?;
-        Ok(iter)
     }
 
     fn advance(&mut self) {
@@ -152,7 +144,7 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_first_key(&block);
+        let mut iter = BlockIterator::new(&block);
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"donkey", b"kong");
         let kv = iter.next().await.unwrap().unwrap();
@@ -163,13 +155,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_iter_from_existing_key() {
+    async fn test_seek_to_existing_key() {
         let mut block_builder = BlockBuilder::new(1024);
         assert!(block_builder.add_value(b"donkey", b"kong", gen_attrs(1)));
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"kratos").await.unwrap();
+        let mut iter = BlockIterator::new(&block);
+        iter.seek(b"kratos").await.unwrap();
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
@@ -178,15 +171,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_iter_from_nonexisting_key() {
+    async fn test_seek_to_nonexisting_key() {
         let mut block_builder = BlockBuilder::new(1024);
         assert!(block_builder.add_value(b"donkey", b"kong", gen_attrs(1)));
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"ka".as_ref())
-            .await
-            .unwrap();
+        let mut iter = BlockIterator::new(&block);
+        iter.seek(b"ka").await.unwrap();
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
@@ -195,15 +187,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_iter_from_end() {
+    async fn test_seek_to_key_beyond_last_key() {
         let mut block_builder = BlockBuilder::new(1024);
         assert!(block_builder.add_value(b"donkey", b"kong", gen_attrs(1)));
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_key(&block, b"zzz".as_ref())
-            .await
-            .unwrap();
+        let mut iter = BlockIterator::new(&block);
+        iter.seek(b"zzz").await.unwrap();
         assert!(iter.next().await.unwrap().is_none());
     }
 
@@ -214,9 +205,9 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_empty_attrs()));
         assert!(block_builder.add_value(b"super", b"mario", gen_empty_attrs()));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_first_key(block);
+        let mut iter = BlockIterator::new(block);
         assert_next_entry(&mut iter, &RowEntry::new_value(b"donkey", b"kong", 0)).await;
-        iter.seek(b"s".as_ref()).await.unwrap();
+        iter.seek(b"s").await.unwrap();
         assert_iterator(&mut iter, vec![RowEntry::new_value(b"super", b"mario", 0)]).await;
     }
 
@@ -227,7 +218,7 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_empty_attrs()));
         assert!(block_builder.add_value(b"super", b"mario", gen_empty_attrs()));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_first_key(block);
+        let mut iter = BlockIterator::new(block);
         assert_next_entry(&mut iter, &RowEntry::new_value(b"donkey", b"kong", 0)).await;
         iter.seek(b"kratos").await.unwrap();
         assert_iterator(
@@ -247,7 +238,7 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::from_first_key(block);
+        let mut iter = BlockIterator::new(block);
         iter.seek(b"zelda".as_ref()).await.unwrap();
         assert_iterator(&mut iter, Vec::new()).await;
     }

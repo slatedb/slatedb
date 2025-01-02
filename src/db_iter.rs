@@ -13,10 +13,7 @@ use std::ops::RangeBounds;
 
 type ScanIterator<'a> = TwoMergeIterator<
     VecDequeKeyValueIterator,
-    TwoMergeIterator<
-        MergeIterator<SstIterator<'a>>,
-        MergeIterator<SortedRunIterator<'a>>,
-    >,
+    TwoMergeIterator<MergeIterator<SstIterator<'a>>, MergeIterator<SortedRunIterator<'a>>>,
 >;
 
 pub struct DbIterator<'a> {

@@ -50,25 +50,15 @@ impl BytesRange {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn non_empty(&self) -> bool {
         !self.is_empty()
     }
 
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         let bounds = self.as_ref();
         is_empty(bounds.0, bounds.1)
-    }
-
-    /// Get the start bound as an [`Option`]. Returns `None` if unbounded. Otherwise, it
-    /// returns `Some(bytes)` if the bound is either `Included(bytes)` or `Excluded(bytes)`.
-    pub(crate) fn start_bound_opt(&self) -> Option<Bytes> {
-        as_option(self.start_bound()).cloned()
-    }
-
-    /// Get the end bound as an [`Option`]. Returns `None` if unbounded. Otherwise, it
-    /// returns `Some(bytes)` if the bound is either `Included(bytes)` or `Excluded(bytes)`.
-    pub(crate) fn end_bound_opt(&self) -> Option<Bytes> {
-        as_option(self.end_bound()).cloned()
     }
 }
 
@@ -127,16 +117,6 @@ pub(crate) fn has_nonempty_intersection(
     let start_bound = max_start_bound(r1.0, r2.0);
     let end_bound = min_end_bound(r1.1, r2.1);
     !is_empty(start_bound, end_bound)
-}
-
-fn as_option<T>(bound: Bound<&T>) -> Option<&T>
-where
-    T: ?Sized,
-{
-    match bound {
-        Included(b) | Excluded(b) => Some(b),
-        Unbounded => None,
-    }
 }
 
 #[cfg(test)]
