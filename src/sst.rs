@@ -859,7 +859,7 @@ mod tests {
         ],
     ])]
     #[tokio::test]
-    async fn test_read_blocks_v2(
+    async fn test_read_blocks(
         #[case] block_range: Range<usize>,
         #[case] expected_blocks: Vec<Vec<RowEntry>>,
     ) {
