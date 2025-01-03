@@ -530,6 +530,8 @@ impl EncodedSsTableBuilder<'_> {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use std::sync::Arc;
     use std::vec;
 
@@ -659,21 +661,42 @@ mod tests {
         .await;
     }
 
+    #[rstest]
+    #[case::default_sst(SsTableFormat::default(), 0, true)]
+    #[case::sst_with_no_filter(SsTableFormat { min_filter_keys: 9, ..SsTableFormat::default() }, 0, false)]
+    #[case::sst_builds_filter_with_correct_bits_per_key(SsTableFormat { filter_bits_per_key: 10, ..SsTableFormat::default() }, 0, true)]
+    #[case::sst_builds_filter_with_correct_bits_per_key(SsTableFormat { filter_bits_per_key: 20, ..SsTableFormat::default() }, 0, true)]
     #[tokio::test]
-    async fn test_sstable() {
+    async fn test_sstable(
+        #[case] format: SsTableFormat,
+        #[case] wal_id: u64,
+        #[case] should_have_filter: bool,
+    ) {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::default();
-        let table_store = TableStore::new(object_store, format, root_path, None);
+        let table_store = TableStore::new(object_store, format.clone(), root_path, None);
         let mut builder = table_store.table_builder();
-        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
-        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
+        for k in 1..=8 {
+            builder
+                .add_value(
+                    format!("key{}", k).as_bytes(),
+                    format!("value{}", k).as_bytes(),
+                    gen_attrs(k),
+                )
+                .unwrap();
+        }
         let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
 
+        if let Some(filter) = encoded.filter.clone() {
+            let bytes = filter.encode();
+            // filters are encoded as a 16-bit number of probes followed by the filter
+            assert_eq!(bytes.len() as u32, 2 + format.filter_bits_per_key);
+        }
+
         // write sst and validate that the handle returned has the correct content.
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded)
+            .write_sst(&SsTableId::Wal(wal_id), encoded)
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
@@ -685,7 +708,7 @@ mod tests {
         );
 
         // construct sst info from the raw bytes and validate that it matches the original info.
-        let sst_handle_from_store = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
+        let sst_handle_from_store = table_store.open_sst(&SsTableId::Wal(wal_id)).await.unwrap();
         assert_eq!(encoded_info, sst_handle_from_store.info);
         let index = table_store
             .read_index(&sst_handle_from_store)
@@ -703,14 +726,28 @@ mod tests {
             index.borrow().block_meta().get(0).first_key().bytes(),
             "first key in block meta should be correct after reading from store"
         );
+
+        // Validate filter presence
+        if should_have_filter {
+            assert!(sst_info.filter_len > 0);
+        } else {
+            assert_eq!(sst_info.filter_len, 0);
+        }
     }
 
+    #[rstest]
+    #[case::none(None)]
+    #[cfg_attr(feature = "snappy", case::snappy(Some(CompressionCodec::Snappy)))]
+    #[cfg_attr(feature = "zlib", case::zlib(Some(CompressionCodec::Zlib)))]
+    #[cfg_attr(feature = "lz4", case::lz4(Some(CompressionCodec::Lz4)))]
+    #[cfg_attr(feature = "zstd", case::zstd(Some(CompressionCodec::Zstd)))]
     #[tokio::test]
-    async fn test_sstable_no_filter() {
+    async fn test_sstable_with_compression(#[case] compression: Option<CompressionCodec>) {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
         let format = SsTableFormat {
-            min_filter_keys: 3,
+            compression_codec: compression,
             ..SsTableFormat::default()
         };
         let table_store = TableStore::new(object_store, format, root_path, None);
@@ -724,140 +761,108 @@ mod tests {
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
+        let index = table_store.read_index(&sst_handle).await.unwrap();
+        let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
+
+        assert!(filter.might_contain(filter_hash(b"key1")));
+        assert!(filter.might_contain(filter_hash(b"key2")));
         assert_eq!(encoded_info, sst_handle.info);
-        assert_eq!(sst_handle.info.filter_len, 0);
+        assert_eq!(1, index.borrow().block_meta().len());
+        assert_eq!(
+            b"key1",
+            sst_handle.info.first_key.unwrap().as_ref(),
+            "first key in sst info should be correct"
+        );
     }
 
+    #[rstest]
+    #[case::none(None, None)]
+    #[cfg_attr(
+        all(feature = "snappy", feature = "zlib"),
+        case::snappy_zlib(Some(CompressionCodec::Snappy), Some(CompressionCodec::Zlib))
+    )]
+    #[cfg_attr(
+        all(feature = "zlib", feature = "lz4"),
+        case::zlib_lz4(Some(CompressionCodec::Zlib), Some(CompressionCodec::Lz4))
+    )]
+    #[cfg_attr(
+        all(feature = "lz4", feature = "zstd"),
+        case::lz4_zstd(Some(CompressionCodec::Lz4), Some(CompressionCodec::Zstd))
+    )]
+    #[cfg_attr(
+        all(feature = "zstd", feature = "snappy"),
+        case::zstd_snappy(Some(CompressionCodec::Zstd), Some(CompressionCodec::Snappy))
+    )]
     #[tokio::test]
-    async fn test_sstable_builds_filter_with_correct_bits_per_key() {
-        async fn test_inner(filter_bits_per_key: u32) {
-            let root_path = Path::from("");
-            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let format = SsTableFormat {
-                filter_bits_per_key,
-                ..SsTableFormat::default()
-            };
-            let table_store = TableStore::new(object_store, format, root_path, None);
-            let mut builder = table_store.table_builder();
-            for k in 0..8 {
-                builder
-                    .add_value(format!("{}", k).as_bytes(), b"value", gen_attrs(1))
-                    .unwrap();
-            }
-            let encoded = builder.build().unwrap();
-            let filter = encoded.filter.unwrap();
-            let bytes = filter.encode();
-            // filters are encoded as a 16-bit number of probes followed by the filter
-            assert_eq!(bytes.len() as u32, 2 + filter_bits_per_key);
-        }
+    async fn test_sstable_with_compression_using_sst_info(
+        #[case] compression: Option<CompressionCodec>,
+        #[case] dummy_codec: Option<CompressionCodec>,
+    ) {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            compression_codec: compression,
+            ..SsTableFormat::default()
+        };
+        let table_store = TableStore::new(object_store.clone(), format, root_path.clone(), None);
+        let mut builder = table_store.table_builder();
+        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
+        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
+        let encoded = builder.build().unwrap();
+        let encoded_info = encoded.info.clone();
+        table_store
+            .write_sst(&SsTableId::Wal(0), encoded)
+            .await
+            .unwrap();
 
-        test_inner(10).await;
-        test_inner(20).await;
+        // decompression is independent of TableFormat. It uses the CompressionFormat from SSTable Info to decompress sst.
+        let format = SsTableFormat {
+            compression_codec: dummy_codec,
+            ..SsTableFormat::default()
+        };
+        let table_store = TableStore::new(object_store, format, root_path, None);
+        let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
+        let index = table_store.read_index(&sst_handle).await.unwrap();
+        let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
+
+        assert!(filter.might_contain(filter_hash(b"key1")));
+        assert!(filter.might_contain(filter_hash(b"key2")));
+        assert_eq!(encoded_info, sst_handle.info);
+        assert_eq!(1, index.borrow().block_meta().len());
+        assert_eq!(
+            b"key1",
+            sst_handle.info.first_key.unwrap().as_ref(),
+            "first key in sst info should be correct"
+        );
     }
 
+    #[rstest]
+    #[case::partial_blocks(0..2, vec![
+        vec![
+            RowEntry::new_value(&[b'a'; 2], &[1u8; 2], 0),
+            RowEntry::new_value(&[b'b'; 2], &[2u8; 2], 0),
+        ],
+        vec![
+            RowEntry::new_value(&[b'c'; 20], &[3u8; 20], 0).with_create_ts(3),
+        ],
+    ])]
+    #[case::all_blocks(0..3, vec![
+        vec![
+            RowEntry::new_value(&[b'a'; 2], &[1u8; 2], 0),
+            RowEntry::new_value(&[b'b'; 2], &[2u8; 2], 0),
+        ],
+        vec![
+            RowEntry::new_value(&[b'c'; 20], &[3u8; 20], 0).with_create_ts(3),
+        ],
+        vec![
+            RowEntry::new_value(&[b'd'; 20], &[4u8; 20], 0).with_create_ts(4),
+        ],
+    ])]
     #[tokio::test]
-    async fn test_sstable_with_compression() {
-        #[allow(unused)]
-        async fn test_compression_inner(compression: CompressionCodec) {
-            let root_path = Path::from("");
-            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let format = SsTableFormat {
-                compression_codec: Some(compression),
-                ..SsTableFormat::default()
-            };
-            let table_store = TableStore::new(object_store, format, root_path, None);
-            let mut builder = table_store.table_builder();
-            builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
-            builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
-            let encoded = builder.build().unwrap();
-            let encoded_info = encoded.info.clone();
-            table_store
-                .write_sst(&SsTableId::Wal(0), encoded)
-                .await
-                .unwrap();
-            let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
-            let index = table_store.read_index(&sst_handle).await.unwrap();
-            let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
-
-            assert!(filter.might_contain(filter_hash(b"key1")));
-            assert!(filter.might_contain(filter_hash(b"key2")));
-            assert_eq!(encoded_info, sst_handle.info);
-            assert_eq!(1, index.borrow().block_meta().len());
-            assert_eq!(
-                b"key1",
-                sst_handle.info.first_key.unwrap().as_ref(),
-                "first key in sst info should be correct"
-            );
-        }
-
-        #[allow(unused)]
-        async fn test_compression_using_sst_info(
-            compression: CompressionCodec,
-            dummy_codec: CompressionCodec,
-        ) {
-            let root_path = Path::from("");
-            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let format = SsTableFormat {
-                compression_codec: Some(compression),
-                ..SsTableFormat::default()
-            };
-            let table_store =
-                TableStore::new(object_store.clone(), format, root_path.clone(), None);
-            let mut builder = table_store.table_builder();
-            builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
-            builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
-            let encoded = builder.build().unwrap();
-            let encoded_info = encoded.info.clone();
-            table_store
-                .write_sst(&SsTableId::Wal(0), encoded)
-                .await
-                .unwrap();
-
-            // Decompression is independent of TableFormat. It uses the CompressionFormat from SSTable Info to decompress sst.
-            let format = SsTableFormat {
-                compression_codec: Some(dummy_codec),
-                ..SsTableFormat::default()
-            };
-            let table_store = TableStore::new(object_store, format, root_path, None);
-            let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
-            let index = table_store.read_index(&sst_handle).await.unwrap();
-            let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
-
-            assert!(filter.might_contain(filter_hash(b"key1")));
-            assert!(filter.might_contain(filter_hash(b"key2")));
-            assert_eq!(encoded_info, sst_handle.info);
-            assert_eq!(1, index.borrow().block_meta().len());
-            assert_eq!(
-                b"key1",
-                sst_handle.info.first_key.unwrap().as_ref(),
-                "first key in sst info should be correct"
-            );
-        }
-
-        #[cfg(all(feature = "snappy", feature = "zlib"))]
-        {
-            test_compression_inner(CompressionCodec::Snappy).await;
-            test_compression_using_sst_info(CompressionCodec::Snappy, CompressionCodec::Zlib).await;
-        }
-        #[cfg(all(feature = "zlib", feature = "lz4"))]
-        {
-            test_compression_inner(CompressionCodec::Zlib).await;
-            test_compression_using_sst_info(CompressionCodec::Zlib, CompressionCodec::Lz4).await;
-        }
-        #[cfg(all(feature = "lz4", feature = "zstd"))]
-        {
-            test_compression_inner(CompressionCodec::Lz4).await;
-            test_compression_using_sst_info(CompressionCodec::Lz4, CompressionCodec::Zstd).await;
-        }
-        #[cfg(all(feature = "zstd", feature = "snappy"))]
-        {
-            test_compression_inner(CompressionCodec::Zstd).await;
-            test_compression_using_sst_info(CompressionCodec::Zstd, CompressionCodec::Snappy).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn test_read_blocks() {
+    async fn test_read_blocks(
+        #[case] block_range: Range<usize>,
+        #[case] expected_blocks: Vec<Vec<RowEntry>>,
+    ) {
         // given:
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -893,92 +898,15 @@ mod tests {
 
         // when:
         let mut blocks = format
-            .read_blocks(&info, &index, 0..2, &blob)
+            .read_blocks(&info, &index, block_range, &blob)
             .await
             .unwrap();
 
         // then:
-        let mut iter = BlockIterator::new(blocks.pop_front().unwrap());
-        assert_iterator(
-            &mut iter,
-            vec![
-                RowEntry::new_value(&[b'a'; 2], &[1u8; 2], 0),
-                RowEntry::new_value(&[b'b'; 2], &[2u8; 2], 0),
-            ],
-        )
-        .await;
-        let mut iter = BlockIterator::new(blocks.pop_front().unwrap());
-        assert_iterator(
-            &mut iter,
-            vec![RowEntry::new_value(&[b'c'; 20], &[3u8; 20], 0).with_create_ts(3)],
-        )
-        .await;
-        assert!(blocks.is_empty())
-    }
-
-    #[tokio::test]
-    async fn test_read_all_blocks() {
-        // given:
-        let root_path = Path::from("");
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat {
-            min_filter_keys: 1,
-            block_size: 48,
-            ..SsTableFormat::default()
-        };
-        let table_store = TableStore::new(object_store, format.clone(), root_path, None);
-        let mut builder = table_store.table_builder();
-        builder
-            .add_value(&[b'a'; 2], &[1u8; 2], gen_empty_attrs())
-            .unwrap();
-        builder
-            .add_value(&[b'b'; 2], &[2u8; 2], gen_empty_attrs())
-            .unwrap();
-        builder
-            .add_value(&[b'c'; 20], &[3u8; 20], gen_attrs(3))
-            .unwrap();
-        builder
-            .add_value(&[b'd'; 20], &[4u8; 20], gen_attrs(4))
-            .unwrap();
-        let encoded = builder.build().unwrap();
-        let info = encoded.info.clone();
-        let mut bytes = BytesMut::new();
-        encoded
-            .unconsumed_blocks
-            .iter()
-            .for_each(|b| bytes.put(b.clone()));
-        let bytes = bytes.freeze();
-        let index = format.read_index_raw(&encoded.info, &bytes).unwrap();
-        let blob = BytesBlob { bytes };
-
-        // when:
-        let mut blocks = format
-            .read_blocks(&info, &index, 0..3, &blob)
-            .await
-            .unwrap();
-
-        // then:
-        let mut iter = BlockIterator::new(blocks.pop_front().unwrap());
-        assert_iterator(
-            &mut iter,
-            vec![
-                RowEntry::new_value(&[b'a'; 2], &[1u8; 2], 0),
-                RowEntry::new_value(&[b'b'; 2], &[2u8; 2], 0),
-            ],
-        )
-        .await;
-        let mut iter = BlockIterator::new(blocks.pop_front().unwrap());
-        assert_iterator(
-            &mut iter,
-            vec![RowEntry::new_value(&[b'c'; 20], &[3u8; 20], 0).with_create_ts(3)],
-        )
-        .await;
-        let mut iter = BlockIterator::new(blocks.pop_front().unwrap());
-        assert_iterator(
-            &mut iter,
-            vec![RowEntry::new_value(&[b'd'; 20], &[4u8; 20], 0).with_create_ts(4)],
-        )
-        .await;
+        for expected_entries in expected_blocks {
+            let mut iter = BlockIterator::new(blocks.pop_front().unwrap());
+            assert_iterator(&mut iter, expected_entries).await;
+        }
         assert!(blocks.is_empty())
     }
 
