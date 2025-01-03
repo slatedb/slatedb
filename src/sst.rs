@@ -667,7 +667,7 @@ mod tests {
     #[case::sst_builds_filter_with_correct_bits_per_key(SsTableFormat { filter_bits_per_key: 10, ..SsTableFormat::default() }, 0, true)]
     #[case::sst_builds_filter_with_correct_bits_per_key(SsTableFormat { filter_bits_per_key: 20, ..SsTableFormat::default() }, 0, true)]
     #[tokio::test]
-    async fn test_sstable_variants(
+    async fn test_sstable(
         #[case] format: SsTableFormat,
         #[case] wal_id: u64,
         #[case] should_have_filter: bool,
