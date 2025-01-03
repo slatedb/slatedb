@@ -660,6 +660,7 @@ mod tests {
             next_wal_sst_id: 0,
             last_compacted_wal_sst_id: 0,
             last_clock_tick: 0,
+            last_seq: 0,
             checkpoints: vec![],
         }
     }

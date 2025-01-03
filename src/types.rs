@@ -41,6 +41,25 @@ impl RowEntry {
             expire_ts,
         }
     }
+
+    pub fn estimated_size(&self) -> usize {
+        let mut size = self.key.len();
+        match &self.value {
+            ValueDeletable::Value(v) | ValueDeletable::Merge(v) => size += v.len(),
+            ValueDeletable::Tombstone => {}
+        }
+        // Add size for sequence number
+        size += std::mem::size_of::<u64>();
+        // Add size for timestamps
+        if self.create_ts.is_some() {
+            size += std::mem::size_of::<i64>();
+        }
+        if self.expire_ts.is_some() {
+            size += std::mem::size_of::<i64>();
+        }
+        size
+    }
+
     #[cfg(test)]
     pub fn new_value(key: &[u8], value: &[u8], seq: u64) -> Self {
         Self {
