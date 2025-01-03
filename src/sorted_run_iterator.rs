@@ -21,7 +21,6 @@ pub(crate) enum SortedRunView<'a> {
 
 impl<'a> SortedRunView<'a> {
     fn pop_sst(&mut self) -> Option<SstView<'a>> {
-        eprintln!("{self:?}");
         match self {
             SortedRunView::Owned(tables, r) => tables
                 .pop_front()
