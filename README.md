@@ -28,7 +28,6 @@ Add the following to your `Cargo.toml`:
 [dependencies]
 slatedb = "*"
 bytes = "*"
-object_store = "*"
 tokio = "*"
 ```
 
