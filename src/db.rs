@@ -137,10 +137,9 @@ impl DbInner {
 
         // cache blocks that are being read
         let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 1,
-            blocks_to_fetch: 1,
             cache_blocks: true,
             eager_spawn: true,
+            ..SstIteratorOptions::default()
         };
 
         for sst in &snapshot.state.core.l0 {
@@ -2053,10 +2052,7 @@ mod tests {
         let db_state = stored_manifest.refresh().await.unwrap();
         let l0 = &db_state.l0;
         assert_eq!(l0.len(), 3);
-        let sst_iter_options = SstIteratorOptions {
-            eager_spawn: false,
-            ..SstIteratorOptions::default()
-        };
+        let sst_iter_options = SstIteratorOptions::default();
 
         for i in 0u8..3u8 {
             let sst1 = l0.get(2 - i as usize).unwrap();
