@@ -345,7 +345,8 @@ impl SeekToKey for SstIterator<'_> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         if !self.view.contains(next_key) {
             return Err(SlateDBError::InvalidArgument {
-                msg: "FIXME".to_string(),
+                msg: format!("Cannot seek to a key '{:?}' which is outside the iterator range (start: {:?}, end: {:?})",
+                             next_key, self.view.start_key(), self.view.end_key())
             });
         }
 

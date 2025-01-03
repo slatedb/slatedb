@@ -89,7 +89,10 @@ impl<'a> DbIterator<'a> {
             Err(SlateDBError::InvalidatedIterator(Box::new(error)))
         } else if !self.range.contains(&next_key) {
             Err(SlateDBError::InvalidArgument {
-                msg: "Next key must be contained in the original range".to_string(),
+                msg: format!(
+                    "Cannot seek to a key '{:?}' which is outside the iterator range {:?}",
+                    next_key, self.range
+                ),
             })
         } else if self
             .last_key
