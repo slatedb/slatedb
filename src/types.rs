@@ -43,11 +43,7 @@ impl RowEntry {
     }
 
     pub fn estimated_size(&self) -> usize {
-        let mut size = self.key.len();
-        match &self.value {
-            ValueDeletable::Value(v) | ValueDeletable::Merge(v) => size += v.len(),
-            ValueDeletable::Tombstone => {}
-        }
+        let mut size = self.key.len() + self.value.len();
         // Add size for sequence number
         size += std::mem::size_of::<u64>();
         // Add size for timestamps
