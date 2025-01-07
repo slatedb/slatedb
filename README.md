@@ -28,7 +28,6 @@ Add the following to your `Cargo.toml`:
 [dependencies]
 slatedb = "*"
 bytes = "*"
-object_store = "*"
 tokio = "*"
 ```
 
@@ -38,11 +37,12 @@ Then you can use SlateDB in your Rust code:
 use bytes::Bytes;
 use slatedb::db::Db;
 use slatedb::config::DbOptions;
+use slatedb::error::SlateDBError;
 use slatedb::object_store::{ObjectStore, memory::InMemory};
 use std::sync::Arc;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), SlateDBError> {
     // Setup
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let options = DbOptions::default();
@@ -51,31 +51,30 @@ async fn main() {
         options,
         object_store,
     )
-    .await
-    .unwrap();
+    .await?;
 
     // Put
     let key = b"test_key";
     let value = b"test_value";
-    kv_store.put(key, value).await;
+    kv_store.put(key, value).await?;
 
     // Get
     assert_eq!(
-        kv_store.get(key).await.unwrap(),
+        kv_store.get(key).await?,
         Some(Bytes::from_static(value))
     );
 
     // Delete
-    kv_store.delete(key).await;
-    assert!(kv_store.get(key).await.unwrap().is_none());
+    kv_store.delete(key).await?;
+    assert!(kv_store.get(key).await?.is_none());
 
-    kv_store.put(b"test_key1", b"test_value1").await;
-    kv_store.put(b"test_key2", b"test_value2").await;
-    kv_store.put(b"test_key3", b"test_value3").await;
-    kv_store.put(b"test_key4", b"test_value4").await;
+    kv_store.put(b"test_key1", b"test_value1").await?;
+    kv_store.put(b"test_key2", b"test_value2").await?;
+    kv_store.put(b"test_key3", b"test_value3").await?;
+    kv_store.put(b"test_key4", b"test_value4").await?;
 
     // Scan over unbound range
-    let mut iter = kv_store.scan(..).await.unwrap();
+    let mut iter = kv_store.scan(..).await?;
     let mut count = 1;
     while let Ok(Some(item)) = iter.next().await {
         assert_eq!(
@@ -92,28 +91,30 @@ async fn main() {
     // Scan over bound range
     let start_key = Bytes::from_static(b"test_key1");
     let end_key = Bytes::from_static(b"test_key2");
-    let mut iter = kv_store.scan(start_key..=end_key).await.unwrap();
+    let mut iter = kv_store.scan(start_key..=end_key).await?;
     assert_eq!(
-        iter.next().await.unwrap(),
+        iter.next().await?,
         Some((b"test_key1" as &[u8], b"test_value1" as &[u8]).into())
     );
     assert_eq!(
-        iter.next().await.unwrap(),
+        iter.next().await?,
         Some((b"test_key2" as &[u8], b"test_value2" as &[u8]).into())
     );
 
     // Seek ahead to next key
-    let mut iter = kv_store.scan(..).await.unwrap();
+    let mut iter = kv_store.scan(..).await?;
     let next_key = Bytes::from_static(b"test_key4");
-    iter.seek(next_key).await;
+    iter.seek(next_key).await?;
     assert_eq!(
-        iter.next().await.unwrap(),
+        iter.next().await?,
         Some((b"test_key4" as &[u8], b"test_value4" as &[u8]).into())
     );
-    assert_eq!(iter.next().await.unwrap(), None);
+    assert_eq!(iter.next().await?, None);
 
     // Close
-    kv_store.close().await.unwrap();
+    kv_store.close().await?;
+
+    Ok(())
 }
 ```
 
