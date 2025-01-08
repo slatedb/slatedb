@@ -55,7 +55,7 @@ use crate::mem_table_flush::MemtableFlushThreadMsg;
 use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
-use crate::sst_iter::SstIterator;
+use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowAttributes, ValueDeletable};
 use tracing::{info, warn};
@@ -134,22 +134,20 @@ impl DbInner {
         // Since the key remains unchanged during the point query, we only need to compute
         // the hash value once and pass it to the filter to avoid unnecessary hash computation
         let key_hash = filter::filter_hash(key);
-        let key_bytes = Bytes::copy_from_slice(key);
+
+        // cache blocks that are being read
+        let sst_iter_options = SstIteratorOptions {
+            cache_blocks: true,
+            eager_spawn: true,
+            ..SstIteratorOptions::default()
+        };
 
         for sst in &snapshot.state.core.l0 {
-            if self
-                .sst_might_include_key(sst, &key_bytes, key_hash)
-                .await?
-            {
-                let mut iter = SstIterator::new_from_key(
-                    sst,
-                    self.table_store.clone(),
-                    key_bytes.clone(),
-                    1,
-                    1,
-                    true,
-                )
-                .await?; // cache blocks that are being read
+            if self.sst_might_include_key(sst, key, key_hash).await? {
+                let mut iter =
+                    SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
+                        .await?;
+
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
                         return unwrap_result(entry.value);
@@ -157,17 +155,12 @@ impl DbInner {
                 }
             }
         }
+
         for sr in &snapshot.state.core.compacted {
             if self.sr_might_include_key(sr, key, key_hash).await? {
-                let mut iter: SortedRunIterator<&SsTableHandle> = SortedRunIterator::new_from_key(
-                    sr,
-                    key_bytes.clone(),
-                    self.table_store.clone(),
-                    1,
-                    1,
-                    true,
-                ) // cache blocks
-                .await?;
+                let mut iter =
+                    SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
+                        .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
                         return unwrap_result(entry.value);
@@ -203,35 +196,37 @@ impl DbInner {
             VecDequeKeyValueIterator::materialize_range(memtables, range.clone()).await?;
 
         let state = snapshot.state.as_ref().clone();
-        let mut l0_iters = VecDeque::new();
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
+        let sst_iter_options = SstIteratorOptions {
+            max_fetch_tasks: 1,
+            blocks_to_fetch: read_ahead_blocks,
+            cache_blocks: options.cache_blocks,
+            eager_spawn: true,
+        };
+
+        let mut l0_iters = VecDeque::new();
         for sst in state.core.l0 {
-            let iter = SstIterator::new_opts(
-                Box::new(sst),
+            let iter = SstIterator::new_owned(
                 range.clone(),
+                sst,
                 self.table_store.clone(),
-                1,
-                read_ahead_blocks,
-                true,
-                options.cache_blocks,
+                sst_iter_options,
             )
             .await?;
             l0_iters.push_back(iter);
         }
 
-        let mut sr_iters: VecDeque<SortedRunIterator<Box<SsTableHandle>>> = VecDeque::new();
+        let mut sr_iters = VecDeque::new();
         for sr in state.core.compacted {
-            let sorted_run_iter = SortedRunIterator::new_from_range(
-                sr,
+            let iter = SortedRunIterator::new_owned(
                 range.clone(),
+                sr,
                 self.table_store.clone(),
-                1,
-                read_ahead_blocks,
-                options.cache_blocks,
+                sst_iter_options,
             )
             .await?;
-            sr_iters.push_back(sorted_run_iter);
+            sr_iters.push_back(iter);
         }
 
         DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters).await
@@ -430,25 +425,24 @@ impl DbInner {
         async fn load_sst_iters(
             db_inner: &DbInner,
             sst_id: u64,
-        ) -> Result<(SstIterator<'_, Arc<SsTableHandle>>, u64), SlateDBError> {
-            let sst = Arc::new(
-                db_inner
-                    .table_store
-                    .open_sst(&SsTableId::Wal(sst_id))
-                    .await?,
-            );
+        ) -> Result<(SstIterator<'_>, u64), SlateDBError> {
+            let sst = db_inner
+                .table_store
+                .open_sst(&SsTableId::Wal(sst_id))
+                .await?;
             let id = match &sst.id {
                 SsTableId::Wal(id) => *id,
                 SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
             };
-            let iter = SstIterator::new_spawn(
-                Arc::clone(&sst),
-                db_inner.table_store.clone(),
-                1,
-                256,
-                true,
-            )
-            .await?;
+            let sst_iter_options = SstIteratorOptions {
+                max_fetch_tasks: 1,
+                blocks_to_fetch: 256,
+                cache_blocks: true,
+                eager_spawn: true,
+            };
+            let iter =
+                SstIterator::new_owned(.., sst, db_inner.table_store.clone(), sst_iter_options)
+                    .await?;
             Ok((iter, id))
         }
 
@@ -1994,9 +1988,10 @@ mod tests {
         assert_eq!(state.l0.len(), 1);
 
         let l0 = state.l0.front().unwrap();
-        let mut iter = SstIterator::new(l0, table_store.clone(), 1, 1, false)
-            .await
-            .unwrap();
+        let mut iter =
+            SstIterator::new_borrowed(.., l0, table_store.clone(), SstIteratorOptions::default())
+                .await
+                .unwrap();
         assert_iterator(
             &mut iter,
             vec![
@@ -2057,11 +2052,14 @@ mod tests {
         let db_state = stored_manifest.refresh().await.unwrap();
         let l0 = &db_state.l0;
         assert_eq!(l0.len(), 3);
+        let sst_iter_options = SstIteratorOptions::default();
+
         for i in 0u8..3u8 {
             let sst1 = l0.get(2 - i as usize).unwrap();
-            let mut iter = SstIterator::new(sst1, table_store.clone(), 1, 1, true)
-                .await
-                .unwrap();
+            let mut iter =
+                SstIterator::new_borrowed(.., sst1, table_store.clone(), sst_iter_options)
+                    .await
+                    .unwrap();
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);
