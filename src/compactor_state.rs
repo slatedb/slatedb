@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
-
 use tracing::info;
 use ulid::Ulid;
 
@@ -131,8 +130,59 @@ impl CompactorState {
                 return Err(SlateDBError::InvalidCompaction);
             }
         }
+
+        self.validate_compaction(&compaction.sources, compaction.destination)?;
+
         info!("accepted submitted compaction: {:?}", compaction);
         self.compactions.insert(compaction.destination, compaction);
+        Ok(())
+    }
+
+    pub(crate) fn validate_compaction(
+        &mut self,
+        sources: &[SourceId],
+        destination: u32,
+    ) -> Result<(), SlateDBError> {
+        let compacted = &self.db_state.compacted;
+        let sources_logical_order: Vec<SourceId> = self
+            .db_state
+            .l0
+            .iter()
+            .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+            .chain(compacted.iter().map(|sr| SourceId::SortedRun(sr.id)))
+            .collect();
+
+        let mut start_idx = 0;
+        while start_idx < sources_logical_order.len() && sources_logical_order[start_idx] != sources[0] {
+            start_idx += 1;
+        }
+
+        if start_idx + sources.len() > sources_logical_order.len() ||
+            !sources.iter().eq(&sources_logical_order[start_idx..start_idx + sources.len()])
+        {
+            return Err(SlateDBError::InvalidCompaction);
+        }
+
+        match sources.last() {
+            Some(SourceId::Sst(_)) => {
+                if let Some(first_sr) = compacted.first() {
+                    if destination < first_sr.id {
+                        return Err(SlateDBError::InvalidCompaction);
+                    }
+                }
+            }
+            Some(SourceId::SortedRun(last_sr)) => {
+                if compacted.iter().any(|sr| sr.id == destination) {
+                    if destination != *last_sr {
+                        return Err(SlateDBError::InvalidCompaction);
+                    }
+                } else {
+                    return Err(SlateDBError::InvalidCompaction);
+                }
+            }
+            None => return Err(SlateDBError::InvalidCompaction),
+        }
+
         Ok(())
     }
 
@@ -464,6 +514,75 @@ mod tests {
             .map(|h| h.id.unwrap_compacted_id())
             .collect();
         assert_eq!(merged_l0, expected_merged_l0s);
+    }
+
+    #[test]
+    fn test_should_submit_invalid_compaction_wrong_order() {
+        // given:
+        let rt = build_runtime();
+        let (_, _, mut state) = build_test_state(rt.handle());
+
+        let l0_sst = &mut state.db_state().l0.clone();
+        let last_sst = l0_sst.pop_back();
+        l0_sst.push_front(last_sst.unwrap());
+        // when:
+        let result = state.submit_compaction(build_l0_compaction(l0_sst, 0));
+
+        // then:
+        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
+    }
+
+    #[test]
+    fn test_should_submit_invalid_compaction_skipped_sst() {
+        // given:
+        let rt = build_runtime();
+        let (_, _, mut state) = build_test_state(rt.handle());
+
+        let l0_sst = &mut state.db_state().l0.clone();
+        let last_sst = l0_sst.pop_back().unwrap();
+        l0_sst.push_front(last_sst);
+        l0_sst.pop_back();
+        // when:
+        let result = state.submit_compaction(build_l0_compaction(l0_sst, 0));
+
+        // then:
+        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
+    }
+
+    #[test]
+    fn test_should_submit_invalid_compaction_with_sr() {
+        // given:
+        let rt = build_runtime();
+        let (_, _, mut state) = build_test_state(rt.handle());
+
+        let mut compaction = build_l0_compaction(&state.db_state().l0, 0);
+        compaction.sources.push(SourceId::SortedRun(5));
+        // when:
+        let result = state.submit_compaction(compaction);
+
+        // then:
+        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
+    }
+
+    #[test]
+    fn test_should_submit_correct_compaction() {
+        // given:
+        let rt = build_runtime();
+        let (_os, mut _sm, mut state) = build_test_state(rt.handle());
+        // compact the last sst
+        let original_l0s = &state.db_state().clone().l0;
+        let result = state.submit_compaction(Compaction::new(
+            original_l0s
+                .iter()
+                .enumerate()
+                .filter(|(i, _e)| i > &2usize)
+                .map(|(_i, x)| Sst(x.id.unwrap_compacted_id()))
+                .collect::<Vec<SourceId>>(),
+            0,
+        ));
+
+        // then:
+        assert!(matches!(result, Ok(())));
     }
 
     // test helpers
