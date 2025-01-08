@@ -34,7 +34,7 @@ impl Default for SstIteratorOptions {
         SstIteratorOptions {
             max_fetch_tasks: 1,
             blocks_to_fetch: 1,
-            cache_blocks: false,
+            cache_blocks: true,
             eager_spawn: false,
         }
     }
@@ -67,7 +67,7 @@ impl SstView<'_> {
     fn table_as_ref(&self) -> &SsTableHandle {
         match self {
             SstView::Owned(t, _) => t,
-            SstView::Borrowed(t, _) => t,
+            SstView::Borrowed(t, _) => *t,
         }
     }
 

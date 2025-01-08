@@ -11,7 +11,7 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 #[derive(Debug)]
-pub(crate) enum SortedRunView<'a> {
+enum SortedRunView<'a> {
     Owned(VecDeque<SsTableHandle>, BytesRange),
     Borrowed(
         VecDeque<&'a SsTableHandle>,
@@ -60,7 +60,7 @@ pub(crate) struct SortedRunIterator<'a> {
 }
 
 impl<'a> SortedRunIterator<'a> {
-    pub(crate) async fn new(
+    async fn new(
         view: SortedRunView<'a>,
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,

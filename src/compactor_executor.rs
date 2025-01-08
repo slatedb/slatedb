@@ -103,7 +103,7 @@ impl TokioCompactionExecutorInner {
             max_fetch_tasks: 4,
             blocks_to_fetch: 256,
             cache_blocks: false, // don't clobber the cache
-            eager_spawn: false,
+            eager_spawn: true,
         };
 
         let mut l0_iters = VecDeque::new();
