@@ -13,7 +13,7 @@ pub(crate) struct BytesRange {
 // Checks for the annoying case when we have ("prefix", "prefix\0").
 // When both bounds are excluded, the range is empty even though
 // "prefix" < "prefix\0".
-pub(crate) fn is_prefix_increment(prefix: &Bytes, b: &Bytes) -> bool {
+pub(crate) fn is_prefix_increment(prefix: &[u8], b: &[u8]) -> bool {
     if !b.starts_with(prefix.as_ref()) {
         return false;
     }
@@ -43,119 +43,91 @@ impl BytesRange {
         Self::new(range.start_bound().cloned(), range.end_bound().cloned())
     }
 
-    pub(crate) fn with_start_key(start_key: Option<Bytes>) -> Self {
-        match start_key {
-            None => Self::from(..),
-            Some(k) => Self::from(k..),
-        }
+    pub(crate) fn as_ref(&self) -> (Bound<&[u8]>, Bound<&[u8]>) {
+        (
+            self.start_bound().map(|b| b.as_ref()),
+            self.end_bound().map(|b| b.as_ref()),
+        )
     }
 
-    pub(crate) fn contains(&self, value: &Bytes) -> bool {
-        let above_start_bound = match &self.start_bound {
-            Unbounded => true,
-            Included(b) => value >= b,
-            Excluded(b) => value > b,
-        };
-
-        let below_end_bound = match &self.end_bound {
-            Unbounded => true,
-            Included(b) => value <= b,
-            Excluded(b) => value < b,
-        };
-
-        above_start_bound && below_end_bound
-    }
-
+    #[cfg(test)]
     pub(crate) fn non_empty(&self) -> bool {
         !self.is_empty()
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        match self.end_bound() {
-            Unbounded => false,
-            Included(end) => match self.start_bound() {
-                Unbounded => false,
-                Included(start) => start > end,
-                Excluded(start) => start >= end,
-            },
-            Excluded(end) => match self.start_bound() {
-                Unbounded => end.len() == 0,
-                Included(start_bytes) => start_bytes >= end,
-                Excluded(start) if start >= end => true,
-                Excluded(start) => is_prefix_increment(start, end),
-            },
-        }
-    }
-
-    /// Get the start bound as an [`Option`]. Returns `None` if unbounded. Otherwise, it
-    /// returns `Some(bytes)` if the bound is either `Included(bytes)` or `Excluded(bytes)`.
-    pub(crate) fn start_bound_opt(&self) -> Option<Bytes> {
-        as_option(self.start_bound()).cloned()
-    }
-
-    /// Get the end bound as an [`Option`]. Returns `None` if unbounded. Otherwise, it
-    /// returns `Some(bytes)` if the bound is either `Included(bytes)` or `Excluded(bytes)`.
     #[cfg(test)]
-    pub(crate) fn end_bound_opt(&self) -> Option<Bytes> {
-        as_option(self.end_bound()).cloned()
-    }
-
-    /// Helper to get the larger or small bound depending on a
-    /// comparison function (which is assumed to just be `<` or `>`).
-    fn clamp_bound<'a>(
-        a: Bound<&'a Bytes>,
-        b: Bound<&'a Bytes>,
-        cmp: fn(&Bytes, &Bytes) -> bool,
-    ) -> Bound<&'a Bytes> {
-        match (a, b) {
-            (Unbounded, _) => b,
-            (_, Unbounded) => a,
-            (Included(a_bytes), Included(b_bytes)) if a_bytes == b_bytes => a,
-            (Included(a_bytes) | Excluded(a_bytes), Included(b_bytes) | Excluded(b_bytes)) => {
-                if a_bytes == b_bytes {
-                    Excluded(a_bytes)
-                } else if cmp(a_bytes, b_bytes) {
-                    a
-                } else {
-                    b
-                }
-            }
-        }
-    }
-
-    fn min_end_bound<'a>(a: Bound<&'a Bytes>, b: Bound<&'a Bytes>) -> Bound<&'a Bytes> {
-        Self::clamp_bound(a, b, |a, b| a < b)
-    }
-
-    fn max_start_bound<'a>(a: Bound<&'a Bytes>, b: Bound<&'a Bytes>) -> Bound<&'a Bytes> {
-        Self::clamp_bound(a, b, |a, b| a > b)
-    }
-
-    pub(crate) fn intersection(&self, other: &BytesRange) -> BytesRange {
-        let start_bound = Self::max_start_bound(self.start_bound(), other.start_bound());
-        let end_bound = Self::min_end_bound(self.end_bound(), other.end_bound());
-        BytesRange::new(start_bound.cloned(), end_bound.cloned())
+    pub(crate) fn is_empty(&self) -> bool {
+        let bounds = self.as_ref();
+        is_empty(bounds.0, bounds.1)
     }
 }
 
-fn as_option<T>(bound: Bound<&T>) -> Option<&T>
-where
-    T: ?Sized,
-{
-    match bound {
-        Included(b) | Excluded(b) => Some(b),
-        Unbounded => None,
+fn is_empty(start_bound: Bound<&[u8]>, end_bound: Bound<&[u8]>) -> bool {
+    match end_bound {
+        Unbounded => false,
+        Included(end) => match start_bound {
+            Unbounded => false,
+            Included(start) => start > end,
+            Excluded(start) => start >= end,
+        },
+        Excluded(end) => match start_bound {
+            Unbounded => end.len() == 0,
+            Included(start_bytes) => start_bytes >= end,
+            Excluded(start) if start >= end => true,
+            Excluded(start) => is_prefix_increment(start, end),
+        },
     }
+}
+
+/// Helper to get the larger or small bound depending on a
+/// comparison function (which is assumed to just be `<` or `>`).
+fn clamp_bound<'a>(
+    a: Bound<&'a [u8]>,
+    b: Bound<&'a [u8]>,
+    cmp: fn(&[u8], &[u8]) -> bool,
+) -> Bound<&'a [u8]> {
+    match (a, b) {
+        (Unbounded, _) => b,
+        (_, Unbounded) => a,
+        (Included(a_bytes), Included(b_bytes)) if a_bytes == b_bytes => a,
+        (Included(a_bytes) | Excluded(a_bytes), Included(b_bytes) | Excluded(b_bytes)) => {
+            if a_bytes == b_bytes {
+                Excluded(a_bytes)
+            } else if cmp(a_bytes, b_bytes) {
+                a
+            } else {
+                b
+            }
+        }
+    }
+}
+
+fn min_end_bound<'a>(a: Bound<&'a [u8]>, b: Bound<&'a [u8]>) -> Bound<&'a [u8]> {
+    clamp_bound(a, b, |a, b| a < b)
+}
+
+fn max_start_bound<'a>(a: Bound<&'a [u8]>, b: Bound<&'a [u8]>) -> Bound<&'a [u8]> {
+    clamp_bound(a, b, |a, b| a > b)
+}
+
+pub(crate) fn has_nonempty_intersection(
+    r1: (Bound<&[u8]>, Bound<&[u8]>),
+    r2: (Bound<&[u8]>, Bound<&[u8]>),
+) -> bool {
+    let start_bound = max_start_bound(r1.0, r2.0);
+    let end_bound = min_end_bound(r1.1, r2.1);
+    !is_empty(start_bound, end_bound)
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::bytes_range::BytesRange;
+    use crate::bytes_range::{has_nonempty_intersection, BytesRange};
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
 
     use proptest::proptest;
     use std::ops::Bound::Unbounded;
+    use std::ops::RangeBounds;
 
     #[test]
     fn test_arbitrary_range() {
@@ -169,25 +141,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_intersection_of_empty_range_is_empty() {
+    fn test_intersection_of_empty_range_and_nonempty_range_is_empty() {
         proptest!(|(
             empty_range in arbitrary::empty_range(10),
             non_empty_range in arbitrary::nonempty_range(10),
         )| {
-            let intersection = empty_range.intersection(&non_empty_range);
-            assert!(intersection.is_empty());
-
-            let intersection = non_empty_range.intersection(&empty_range);
-            assert!(intersection.is_empty());
+            assert!(!has_nonempty_intersection(
+                empty_range.as_ref(),
+                non_empty_range.as_ref(),
+            ))
         });
     }
 
     #[test]
-    fn test_intersection_of_non_empty_range_and_unbounded_range_equals_non_empty_range() {
+    fn test_intersection_of_non_empty_and_unbounded_range_is_nonempty() {
         proptest!(|(non_empty_range in arbitrary::nonempty_range(10))| {
             let unbounded_range = BytesRange::new(Unbounded, Unbounded);
-            let intersection = non_empty_range.intersection(&unbounded_range);
-            assert_eq!(non_empty_range, intersection);
+            assert!(has_nonempty_intersection(
+                non_empty_range.as_ref(),
+                unbounded_range.as_ref()
+            ))
         });
     }
 
@@ -207,16 +180,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_both_ranges_contain_values_chosen_from_intersection() {
+    fn test_nonempty_intersection_of_intersecting_ranges() {
         proptest!(|(
             (non_empty_1, non_empty_2) in arbitrary::nonempty_intersecting_ranges(10),
-            mut rng in arbitrary::rng()
         )| {
-            let intersection = non_empty_1.intersection(&non_empty_2);
-            assert!(intersection.non_empty());
-            let bytes = sample::bytes_in_range(&mut rng, &intersection);
-            assert!(non_empty_1.contains(&bytes));
-            assert!(non_empty_2.contains(&bytes));
+            assert!(has_nonempty_intersection(
+                non_empty_1.as_ref(),
+                non_empty_2.as_ref(),
+            ));
         });
     }
 }

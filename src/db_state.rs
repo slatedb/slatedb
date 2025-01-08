@@ -1,19 +1,19 @@
+use crate::bytes_range;
 use crate::checkpoint::Checkpoint;
+use crate::config::CompressionCodec;
+use crate::error::SlateDBError;
+use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
+use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use bytes::Bytes;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::{Bound, Range};
 use std::sync::Arc;
 use tracing::debug;
 use ulid::Ulid;
 use SsTableId::{Compacted, Wal};
-
-use crate::bytes_range::BytesRange;
-use crate::config::CompressionCodec;
-use crate::error::SlateDBError;
-use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
-use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 
 #[derive(Clone, PartialEq, Serialize)]
 pub(crate) struct SsTableHandle {
@@ -42,22 +42,19 @@ impl SsTableHandle {
     pub(crate) fn intersects_range(
         &self,
         end_bound_key: Option<Bytes>,
-        range: &BytesRange,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
     ) -> bool {
         let start_bound = match &self.info.first_key {
             None => Unbounded,
-            Some(key) => Included(key),
-        }
-        .cloned();
-
-        let end_bound = match end_bound_key {
-            None => Unbounded,
-            Some(end_bound_key) => Excluded(end_bound_key),
+            Some(key) => Included(key.as_ref()),
         };
 
-        let this_range = BytesRange::new(start_bound, end_bound);
-        let intersection = this_range.intersection(range);
-        intersection.non_empty()
+        let end_bound = match &end_bound_key {
+            None => Unbounded,
+            Some(key) => Excluded(key.as_ref()),
+        };
+
+        bytes_range::has_nonempty_intersection(range, (start_bound, end_bound))
     }
 
     pub(crate) fn estimate_size(&self) -> u64 {
@@ -158,8 +155,10 @@ impl SortedRun {
             .map(|idx| &self.ssts[idx])
     }
 
-    pub(crate) fn tables_covering_range(&self, range: &BytesRange) -> VecDeque<&SsTableHandle> {
-        let mut covering_ssts = VecDeque::new();
+    fn table_idx_covering_range(&self, range: (Bound<&[u8]>, Bound<&[u8]>)) -> Range<usize> {
+        let mut min_idx = None;
+        let mut max_idx = 0;
+
         for idx in 0..self.ssts.len() {
             let current_sst = &self.ssts[idx];
 
@@ -171,10 +170,34 @@ impl SortedRun {
             };
 
             if current_sst.intersects_range(upper_bound_key, range) {
-                covering_ssts.push_back(&self.ssts[idx]);
+                if min_idx.is_none() {
+                    min_idx = Some(idx);
+                }
+
+                max_idx = idx;
             }
         }
-        covering_ssts
+
+        match min_idx {
+            Some(min_idx) => min_idx..(max_idx + 1),
+            None => 0..0,
+        }
+    }
+
+    pub(crate) fn tables_covering_range(
+        &self,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+    ) -> VecDeque<&SsTableHandle> {
+        let matching_range = self.table_idx_covering_range(range);
+        self.ssts[matching_range].iter().collect()
+    }
+
+    pub(crate) fn into_tables_covering_range(
+        mut self,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+    ) -> VecDeque<SsTableHandle> {
+        let matching_range = self.table_idx_covering_range(range);
+        self.ssts.drain(matching_range).collect()
     }
 }
 
@@ -396,6 +419,7 @@ impl DbState {
 mod tests {
     use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::proptest_util::arbitrary;
+    use crate::test_utils;
     use bytes::Bytes;
     use proptest::collection::vec;
     use proptest::proptest;
@@ -460,14 +484,19 @@ mod tests {
         )| {
             let sorted_first_keys: BTreeSet<Bytes> = table_first_keys.into_iter().collect();
             let sorted_run = create_sorted_run(0, &sorted_first_keys);
-            let covering_tables = sorted_run.tables_covering_range(&range);
+            let covering_tables = sorted_run.tables_covering_range(range.as_ref());
             let first_key = sorted_first_keys.first().unwrap().clone();
 
+            let range_start_key = test_utils::bound_as_option(range.start_bound())
+            .cloned()
+            .unwrap_or_default();
+            let range_end_key = test_utils::bound_as_option(range.end_bound())
+            .cloned()
+            .unwrap_or(vec![u8::MAX; max_bytes_len + 1].into());
+
             if covering_tables.is_empty() {
-                let end_bound =  range.end_bound_opt().unwrap();
-                assert!(end_bound <= first_key);
+                assert!(range_end_key <= first_key);
             } else {
-                let range_start_key = range.start_bound_opt().unwrap_or(Bytes::new());
                 let covering_first_key = covering_tables.front()
                 .and_then(|t| t.info.first_key.clone())
                 .unwrap();
@@ -475,9 +504,6 @@ mod tests {
                 if range_start_key < covering_first_key {
                     assert_eq!(covering_first_key, first_key)
                 }
-
-                let range_end_key: Bytes = range.end_bound_opt()
-                .unwrap_or(vec![u8::MAX; max_bytes_len + 1].into());
 
                 let covering_last_key = covering_tables.iter().last()
                 .and_then(|t| t.info.first_key.clone())
