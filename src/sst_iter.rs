@@ -67,7 +67,7 @@ impl SstView<'_> {
     fn table_as_ref(&self) -> &SsTableHandle {
         match self {
             SstView::Owned(t, _) => t,
-            SstView::Borrowed(t, _) => *t,
+            SstView::Borrowed(t, _) => t,
         }
     }
 
