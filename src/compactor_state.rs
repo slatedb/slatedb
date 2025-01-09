@@ -136,11 +136,11 @@ impl CompactorState {
         Ok(())
     }
 
-    pub(crate) fn merge_db_state(&mut self, writer_state: &CoreDbState) {
+    pub(crate) fn merge_db_state(&mut self, updated_state: &CoreDbState) {
         // the writer may have added more l0 SSTs. Add these to our l0 list.
         let last_compacted_l0 = self.db_state.l0_last_compacted;
         let mut merged_l0s = VecDeque::new();
-        let writer_l0 = &writer_state.l0;
+        let writer_l0 = &updated_state.l0;
         for writer_l0_sst in writer_l0 {
             let writer_l0_id = writer_l0_sst.id.unwrap_compacted_id();
             // todo: this is brittle. we are relying on the l0 list always being updated in
@@ -159,9 +159,13 @@ impl CompactorState {
         // write out the merged core db state and manifest
         let mut merged = self.db_state.clone();
         merged.l0 = merged_l0s;
-        merged.last_compacted_wal_sst_id = writer_state.last_compacted_wal_sst_id;
-        merged.next_wal_sst_id = writer_state.next_wal_sst_id;
-        merged.last_clock_tick = writer_state.last_clock_tick;
+        merged.last_compacted_wal_sst_id = updated_state.last_compacted_wal_sst_id;
+        merged.next_wal_sst_id = updated_state.next_wal_sst_id;
+        merged.last_clock_tick = updated_state.last_clock_tick;
+
+        // We also need to account for any new checkpoints
+        merged.checkpoints.clone_from(&updated_state.checkpoints);
+
         self.db_state = merged;
     }
 
@@ -240,18 +244,19 @@ mod tests {
     use std::thread::sleep;
     use std::time::{Duration, SystemTime};
 
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
-    use tokio::runtime::{Handle, Runtime};
-
     use super::*;
+    use crate::checkpoint::Checkpoint;
     use crate::compactor_state::CompactionStatus::Submitted;
     use crate::compactor_state::SourceId::Sst;
     use crate::config::DbOptions;
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::manifest_store::{ManifestStore, StoredManifest};
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+    use tokio::runtime::{Handle, Runtime};
+    use uuid::Uuid;
 
     const PATH: &str = "/test/db";
 
@@ -338,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_refresh_db_state_correctly_when_never_compacted() {
+    fn test_should_merge_db_state_correctly_when_never_compacted() {
         // given:
         let rt = build_runtime();
         let (os, mut sm, mut state) = build_test_state(rt.handle());
@@ -369,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_refresh_db_state_correctly() {
+    fn test_should_merge_db_state_correctly() {
         // given:
         let rt = build_runtime();
         let (os, mut sm, mut state) = build_test_state(rt.handle());
@@ -423,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_refresh_db_state_correctly_when_all_l0_compacted() {
+    fn test_should_merge_db_state_correctly_when_all_l0_compacted() {
         // given:
         let rt = build_runtime();
         let (os, mut sm, mut state) = build_test_state(rt.handle());
@@ -464,6 +469,27 @@ mod tests {
             .map(|h| h.id.unwrap_compacted_id())
             .collect();
         assert_eq!(merged_l0, expected_merged_l0s);
+    }
+
+    #[test]
+    fn test_should_merge_db_state_with_new_checkpoints() {
+        // given:
+        let mut state = CompactorState::new(CoreDbState::new());
+        // mimic an externally added checkpoint
+        let mut updated_state = state.db_state().clone();
+        let checkpoint = Checkpoint {
+            id: Uuid::new_v4(),
+            manifest_id: 1,
+            expire_time: None,
+            create_time: SystemTime::now(),
+        };
+        updated_state.checkpoints.push(checkpoint.clone());
+
+        // when:
+        state.merge_db_state(&updated_state);
+
+        // then:
+        assert_eq!(vec![checkpoint], state.db_state().checkpoints);
     }
 
     // test helpers
