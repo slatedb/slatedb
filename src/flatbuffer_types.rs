@@ -416,7 +416,7 @@ mod tests {
                 create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
             },
         ];
-        let manifest = Manifest::init_new(core);
+        let manifest = Manifest::new(core);
         let codec = FlatBufferManifestCodec {};
 
         // when:

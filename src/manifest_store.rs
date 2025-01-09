@@ -122,7 +122,7 @@ impl StoredManifest {
         store: Arc<ManifestStore>,
         core: CoreDbState,
     ) -> Result<Self, SlateDBError> {
-        let manifest = Manifest::init_new(core);
+        let manifest = Manifest::new(core);
         Self::init(store, manifest).await
     }
 
@@ -134,7 +134,7 @@ impl StoredManifest {
         parent_db: DbLink,
         parent_manifest: &Manifest,
     ) -> Result<Self, SlateDBError> {
-        let manifest = Manifest::init_clone(parent_db, parent_manifest);
+        let manifest = Manifest::cloned(parent_db, parent_manifest);
         Self::init(clone_manifest_store, manifest).await
     }
 
