@@ -244,19 +244,19 @@ mod tests {
     use std::thread::sleep;
     use std::time::{Duration, SystemTime};
 
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
-    use tokio::runtime::{Handle, Runtime};
-    use uuid::Uuid;
-    use crate::checkpoint::Checkpoint;
     use super::*;
+    use crate::checkpoint::Checkpoint;
     use crate::compactor_state::CompactionStatus::Submitted;
     use crate::compactor_state::SourceId::Sst;
     use crate::config::DbOptions;
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::manifest_store::{ManifestStore, StoredManifest};
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+    use tokio::runtime::{Handle, Runtime};
+    use uuid::Uuid;
 
     const PATH: &str = "/test/db";
 
@@ -490,7 +490,6 @@ mod tests {
 
         // then:
         assert_eq!(vec![checkpoint], state.db_state().checkpoints);
-
     }
 
     // test helpers
