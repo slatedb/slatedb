@@ -156,7 +156,7 @@ We’ll make the following changes to the public API to support creating and usi
 /// checkpoint includes only writes that were durable at the time of the call. This will be faster,
 /// but may not include data from recent writes.
 enum CheckpointScope {
-    All{force_flush: bool},
+    All { force_flush: bool },
     Durable
 }
 
@@ -185,37 +185,30 @@ pub struct CheckpointCreateResult {
 }
 
 impl Db {
-    /// Opens a Db from a checkpoint. If no db already exists at the specified path, then this will create
+    /// Clone a Db from a checkpoint. If no db already exists at the specified path, then this will create
     /// a new db under the path that is a clone of the db at parent_path. A clone is a shallow copy of the
     /// parent database - it starts with a manifest that references the same SSTs, but doesn't actually copy
     /// those SSTs, except for the WAL. New writes will be written to the newly created db and will not be
     /// reflected in the parent database. The clone can optionally be created from an existing checkpoint. If
-    /// parent_checkpoint is None, then the manifest referenced by parent_checkpoint is used as the base for
+    /// checkpoint is None, then the manifest referenced by parent_checkpoint is used as the base for
     /// the clone db's manifest. Otherwise, this method creates a new checkpoint for the current version of
     /// the parent db.
-    pub async fn open_from_checkpoint(
-        path: Path,
-        object_store: Arc<dyn ObjectStore>,
-        parent_path: Path,
-        parent_checkpoint: Option<Uuid>,
-    ) -> Result<Self, SlateDBError> {
+    pub async fn create_clone(
+        &self,
+        clone_path: Path,
+        checkpoint: Option<Checkpoint>,
+    ) -> Result<(), SlateDBError> {
         …
     }
 
     /// Creates a checkpoint of an opened db using the provided options. Returns the ID of the created
     /// checkpoint and the id of the referenced manifest.
-    pub async fn create_checkpoint(&self, options: &CheckpointOptions) -> Result<CheckpointCreateResult, SlateDBError> {
+    pub async fn create_checkpoint(
+        &self,
+        options: &CheckpointOptions
+    ) -> Result<CheckpointCreateResult, SlateDBError> {
         …
     }
-
-    /// Creates a checkpoint of the db stored in the object store at the specified path using the provided options.
-    /// Note that the scope option does not impact the behaviour of this method. The checkpoint will reference
-    /// the current active manifest of the db.
-    pub async fn create_checkpoint(
-       path: &Path,
-       object_store: Arc<dyn ObjectStore>,
-       options: &CheckpointOptions,
-    ) -> Result<CheckpointCreateResult, SlateDBError> {}
 
     /// Refresh the lifetime of an existing checkpoint. Takes the id of an existing checkpoint
     /// and a lifetime, and sets the lifetime of the checkpoint to the specified lifetime. If
@@ -227,7 +220,7 @@ impl Db {
         id: Uuid,
         lifetime: Option<Duration>,
     ) -> Result<(), SlateDBError> {}
-    
+
     /// Deletes the checkpoint with the specified id.
     pub async fn delete_checkpoint(
         path: &Path,
@@ -242,9 +235,37 @@ impl Db {
     /// database. If `soft` is false, then all cleanup will be performed by the call to this
     /// method. If `soft` is false, the destroy will return SlateDbError::InvalidDeletion if
     /// there are any remaining non-expired checkpoints.
-   pub async fn destroy(path: Path, object_store: Arc<dyn ObjectStore>, soft: bool) -> Result<(), SlateDbError> {
-       …
-   }
+    pub async fn destroy(path: Path, object_store: Arc<dyn ObjectStore>, soft: bool) -> Result<(), SlateDbError> {
+        …
+    }
+}
+
+mod admin {
+    /// Clone a Db from a checkpoint. If no db already exists at the specified path, then this will create
+    /// a new db under the path that is a clone of the db at parent_path. A clone is a shallow copy of the
+    /// parent database - it starts with a manifest that references the same SSTs, but doesn't actually copy
+    /// those SSTs, except for the WAL. New writes will be written to the newly created db and will not be
+    /// reflected in the parent database. The clone can optionally be created from an existing checkpoint. If
+    /// parent_checkpoint is None, then the manifest referenced by parent_checkpoint is used as the base for
+    /// the clone db's manifest. Otherwise, this method creates a new checkpoint for the current version of
+    /// the parent db.
+    pub async fn create_clone(
+        clone_path: Path,
+        object_store: Arc<dyn ObjectStore>,
+        parent_path: Path,
+        parent_checkpoint: Option<Uuid>,
+    ) -> Result<(), SlateDBError> {
+        …
+    }
+
+    /// Creates a checkpoint of the db stored in the object store at the specified path using the provided options.
+    /// Note that the scope option does not impact the behaviour of this method. The checkpoint will reference
+    /// the current active manifest of the db.
+    pub async fn create_checkpoint(
+        path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        options: &CheckpointOptions,
+    ) -> Result<CheckpointCreateResult, SlateDBError> {}
 }
 
 /// Configuration options for the database reader. These options are set on client startup.
@@ -254,14 +275,12 @@ pub struct DbReaderOptions {
     /// to detect newly compacted data.
     pub manifest_poll_interval: Duration,
 
-
     /// For readers that refresh their checkpoint, this specifies the lifetime to use for the
     /// created checkpoint. The checkpoint’s expire time will be set to the current time plus
     /// this value. If not specified, then the checkpoint will be created with no expiry, and
     /// must be manually removed. This lifetime must always be greater than
     /// manifest_poll_interval x 2
     pub checkpoint_lifetime: Option<Duration>,
-
 
     /// The max size of a single in-memory table used to buffer WAL entries
     /// Defaults to 64MB
@@ -285,10 +304,10 @@ impl DbReader {
         object_store: Arc<dyn ObjectStore>,
         checkpoint: Option<UUID>,
         options: DbReaderOptions
-    ) -> Result<Self, SlateDBError> {...}
+    ) -> Result<Self, SlateDBError> { ... }
 
     /// Read a key an return the read value, if any.
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {...}
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> { ... }
 }
 
 pub struct GarbageCollectorOptions {
