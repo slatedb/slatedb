@@ -394,29 +394,41 @@ impl DbState {
         Ok(tick)
     }
 
-    pub fn refresh_db_state(&mut self, compactor_state: &CoreDbState) {
-        // copy over L0 up to l0_last_compacted
-        let l0_last_compacted = &compactor_state.l0_last_compacted;
-        let mut new_l0 = VecDeque::new();
-        for sst in self.state.core.l0.iter() {
-            if let Some(l0_last_compacted) = l0_last_compacted {
-                if sst.id.unwrap_compacted_id() == *l0_last_compacted {
-                    break;
-                }
-            }
-            new_l0.push_back(sst.clone());
-        }
-        let compacted = compactor_state.compacted.clone();
+    pub fn merge_db_state(&mut self, updated_state: &CoreDbState) {
+        // The compactor removes tables from l0_last_compacted, so we
+        // only want to keep the tables up to there.
+        let l0_last_compacted = &updated_state.l0_last_compacted;
+        let new_l0 = if let Some(l0_last_compacted) = l0_last_compacted {
+            self.state
+                .core
+                .l0
+                .iter()
+                .cloned()
+                .take_while(|sst| sst.id.unwrap_compacted_id() != *l0_last_compacted)
+                .collect()
+        } else {
+            self.state.core.l0.iter().cloned().collect()
+        };
+
+        let compacted = updated_state.compacted.clone();
         let mut state = self.state_copy();
         state.core.l0_last_compacted.clone_from(l0_last_compacted);
         state.core.l0 = new_l0;
         state.core.compacted = compacted;
+
+        // Checkpoints may also be added externally, so we need to copy them.
+        state
+            .core
+            .checkpoints
+            .clone_from(&updated_state.checkpoints);
+
         self.update_state(state);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::checkpoint::Checkpoint;
     use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::proptest_util::arbitrary;
     use crate::test_utils;
@@ -426,10 +438,33 @@ mod tests {
     use std::collections::BTreeSet;
     use std::collections::Bound::Included;
     use std::ops::RangeBounds;
+    use std::time::SystemTime;
     use ulid::Ulid;
+    use uuid::Uuid;
 
     #[test]
-    fn test_should_refresh_db_state_with_l0s_up_to_last_compacted() {
+    fn test_should_merge_db_state_with_new_checkpoints() {
+        // given:
+        let mut db_state = DbState::new(CoreDbState::new());
+        // mimic an externally added checkpoint
+        let mut updated_state = db_state.state.core.clone();
+        let checkpoint = Checkpoint {
+            id: Uuid::new_v4(),
+            manifest_id: 1,
+            expire_time: None,
+            create_time: SystemTime::now(),
+        };
+        updated_state.checkpoints.push(checkpoint.clone());
+
+        // when:
+        db_state.merge_db_state(&updated_state);
+
+        // then:
+        assert_eq!(vec![checkpoint], db_state.state.core.checkpoints);
+    }
+
+    #[test]
+    fn test_should_merge_db_state_with_l0s_up_to_last_compacted() {
         // given:
         let mut db_state = DbState::new(CoreDbState::new());
         add_l0s_to_dbstate(&mut db_state, 4);
@@ -439,7 +474,7 @@ mod tests {
         compactor_state.l0_last_compacted = Some(last_compacted.id.unwrap_compacted_id());
 
         // when:
-        db_state.refresh_db_state(&compactor_state);
+        db_state.merge_db_state(&compactor_state);
 
         // then:
         let expected: Vec<SsTableId> = compactor_state.l0.iter().map(|l0| l0.id).collect();
@@ -448,14 +483,14 @@ mod tests {
     }
 
     #[test]
-    fn test_should_refresh_db_state_with_all_l0s_if_none_compacted() {
+    fn test_should_merge_db_state_with_all_l0s_if_none_compacted() {
         // given:
         let mut db_state = DbState::new(CoreDbState::new());
         add_l0s_to_dbstate(&mut db_state, 4);
         let l0s = db_state.state.core.l0.clone();
 
         // when:
-        db_state.refresh_db_state(&CoreDbState::new());
+        db_state.merge_db_state(&CoreDbState::new());
 
         // then:
         let expected: Vec<SsTableId> = l0s.iter().map(|l0| l0.id).collect();

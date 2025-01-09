@@ -250,7 +250,7 @@ impl DbInner {
                 }
                 Err(SlateDBError::Fenced) => {
                     let updated_state = manifest.refresh().await?;
-                    self.state.write().refresh_db_state(updated_state);
+                    self.state.write().merge_db_state(updated_state);
                     empty_wal_id += 1;
                 }
                 Err(e) => {
