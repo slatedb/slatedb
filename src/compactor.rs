@@ -278,7 +278,7 @@ impl CompactorOrchestrator {
     }
 
     fn refresh_db_state(&mut self) -> Result<(), SlateDBError> {
-        self.state.refresh_db_state(self.manifest.db_state()?);
+        self.state.merge_db_state(self.manifest.db_state()?);
         self.maybe_schedule_compactions()?;
         Ok(())
     }
