@@ -136,7 +136,7 @@ impl CompactorState {
         Ok(())
     }
 
-    pub(crate) fn refresh_db_state(&mut self, writer_state: &CoreDbState) {
+    pub(crate) fn merge_db_state(&mut self, writer_state: &CoreDbState) {
         // the writer may have added more l0 SSTs. Add these to our l0 list.
         let last_compacted_l0 = self.db_state.l0_last_compacted;
         let mut merged_l0s = VecDeque::new();
@@ -350,7 +350,7 @@ mod tests {
             wait_for_manifest_with_l0_len(&mut sm, rt.handle(), state.db_state().l0.len() + 1);
 
         // when:
-        state.refresh_db_state(&writer_db_state);
+        state.merge_db_state(&writer_db_state);
 
         // then:
         assert!(state.db_state().l0_last_compacted.is_none());
@@ -394,7 +394,7 @@ mod tests {
         let db_state_before_merge = state.db_state().clone();
 
         // when:
-        state.refresh_db_state(&writer_db_state);
+        state.merge_db_state(&writer_db_state);
 
         // then:
         let db_state = state.db_state();
@@ -451,7 +451,7 @@ mod tests {
             wait_for_manifest_with_l0_len(&mut sm, rt.handle(), original_l0s.len() + 1);
 
         // when:
-        state.refresh_db_state(&writer_db_state);
+        state.merge_db_state(&writer_db_state);
 
         // then:
         let db_state = state.db_state();
