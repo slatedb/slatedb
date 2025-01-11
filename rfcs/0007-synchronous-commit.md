@@ -28,7 +28,7 @@ Also, as discussed in the meeting & comments, we hope this change can be done in
 - [Understanding synchronous_commit in PostgreSQL](https://medium.com/@mihir20/understanding-synchronous-commit-in-postgresql-54cb5609a221)
 - [RocksDB: WAL Performance](https://github.com/facebook/rocksdb/wiki/WAL-Performance)
 
-## Comparison with other systems
+## Other Systems
 
 We'll compare the synchronous commit semantics & durability guarantees of other systems with SlateDB. The comparison will be based on the following aspects:
 
@@ -40,7 +40,7 @@ We'll compare the synchronous commit semantics & durability guarantees of other 
 
 PostgreSQL offers a flexible setting called `synchronous_commit` to control the commit semantics & durability guarantees at various levels. These levels contain:
 
-* `off`: The commit is considered complete as soon as the transaction is finished, without waiting for the WAL to be written. Data loss is possible if a crash occurs.
+* `off`: The commit is considered complete as soon as the transaction is finished, without waiting for the WAL to be written to disk. Data loss is possible if a crash occurs.
 * `local`: The commit waits for the WAL to be written and flushed to local disk before returning.
 * `on` (default): The commit waits for the WAL to be written and flushed to local storage, and then waits for at least one standby to apply the WAL if there's synchronous replication configured.
 * `remote_write`: The commit waits for the WAL to be written to local storage and replicated to standby servers, and wait for the standby to flush to file system.
@@ -98,9 +98,9 @@ This is likely to be a trade-off for performance. In many use cases, especially 
 
 Writes with `sync = true` and `sync = false` can be mixed together in RocksDB. If transaction A is committed with `sync = false`, and transaction B is started after transaction A, the writes from transaction A will be visible to the readers in transaction B, and both the writes from transaction A and B will be persisted when the transaction B is committed with `sync = true`. That means the WAL writes are ordered, whatever a `sync = true` write is committed, all the previous writes are guaranteed to be persisted.
 
-There's also an important note that writing data to WAL is possible to be failure. In this case, RocksDB will retry the write until it turns out the failure is not ephemeral. If the failure is unfortunately continuing (e.g. the disk is full, or the disk is corrupted), RocksDB will give up and mark the db state as fatal, rollback the transaction, and make the db instance read-only.
+There's also an important note that writing to WAL is possible to be failure. In this case, RocksDB will retry the write until it turns out the failure is not ephemeral. If the failure is unfortunately continuing (e.g. the disk is full, or the disk is corrupted), RocksDB will give up and mark the db state as fatal, rollback the transaction, and make the db instance read-only.
 
-### SlateDB
+## Current Design in SlateDB
 
 This section is based on @criccomini 's comment in <https://github.com/slatedb/slatedb/pull/260#issuecomment-2576502212>.
 
@@ -120,13 +120,13 @@ And the `WriteOptions` struct contains a `await_durability: DurabilityLevel` opt
 
 Please note that the commit semantic is a bit different from other systems' Synchronous Commit. No matter what `DurabilityLevel` is set in the write operation, this write is considered visible to the readers with `DurabilityLevel::Memory` immediately after the write is appended to the WAL, not nessarily flushed to storage.
 
-The reason is that SlateDB's WAL is not a place for crash recovery only, but also a place for data reads. The read path is WAL, then MemTable, then L0 SST, then SSTs at deeper levels.
+The reason is that SlateDB's WAL is not a place for crash recovery only, but also a place for data reads. The read path is first access the WAL, then MemTable, then L0 SST, then SSTs at deeper levels.
 
 In the notion of Synchronous Commit, the data is considered as committed as soon as the write is persisted to the WAL storage. Users can specify the durability level as `DurabilityLevel::Remote` for the read calls to ensure only the committed/persisted data is read.
 
 ## Possible Improvements
 
-When comparing with the PostgreSQL & RocksDB's Synchronous Commit model, the current model does not provide a way to allow users to read the unpersisted committed data cleanly.
+When comparing with the PostgreSQL & RocksDB's Synchronous Commit model, the current model in SlateDB may faces some challenges to replicate the Synchronous Commit semantics.
 
 Like, in a transaction which hopes to be a Synchronous Commit, this write is not considered as committed until the data is flushed to storage. But the data is already visible if a reader accepts unpersisted data with `DurabilityLevel::Memory`, thus, this means it's possible to read the leaked uncommitted data before it's committed.
 
@@ -135,7 +135,7 @@ If a user do not want to read the leaked uncommitted data, they can ensure all t
 In summary:
 
 - We can not replicate the Synchronous Commit semantics with setting writers as `DurabilityLevel::Remote` and readers as `DurabilityLevel::Memory`, for it's possible to read the leaked uncommitted data before it's committed.
-- We can neither replicate the Synchronous Commit semantics with setting writers as `DurabilityLevel::Remote` and readers as `DurabilityLevel::Remote`, for it risks to rollback the transaction on conflicts if other writers are writing unpersisted data with `DurabilityLevel::Memory` on the same keys.
+- We'll also face some challenges to replicate the Synchronous Commit semantics with setting writers as `DurabilityLevel::Remote` and readers as `DurabilityLevel::Remote`, for it risks to rollback the transaction on conflicts if other writers are writing unpersisted data with `DurabilityLevel::Memory` on the same keys.
 
 ## Proposal
 
