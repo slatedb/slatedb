@@ -30,13 +30,14 @@ As previously discussed in meetings and comments, we intend to implement these c
 
 ## Other Systems
 
-Let's examine how other systems handle synchronous commits and durability guarantees. We'll focus on these key aspects:
+Let's examine how other systems handle synchronous commits and durability guarantees before diving into the design. We'll focus on these key aspects:
 
 1. The API for users to specify their commit semantics & durability requirements
 2. Use cases & trade-offs, and the default settings
 3. Error handling
 
 ### PostgreSQL
+
 PostgreSQL provides a flexible setting called `synchronous_commit` that controls transaction durability and commit behavior. It offers several levels:
 
 * `off`: Commits complete immediately after the transaction finishes, without waiting for the WAL to be written to disk. This means data loss is possible if a crash occurs.
@@ -91,7 +92,7 @@ To optimize synchronous commit performance, RocksDB implements Group Commit, whi
 
 (SlateDB can implement a similar Group Commit mechanism through its Commit Pipeline, allowing us to batch multiple writes into single WAL operations.)
 
-It's important to note that RocksDB defaults to `sync = false`, meaning WAL writes are not crash-safe by default.
+It worths to note that RocksDB defaults to `sync = false`, meaning WAL writes are not crash-safe by default.
 
 This default is likely to be a trade-off for performance. In many distributed systems (RocksDB's primary use case imo), some data loss on individual nodes is acceptable without compromising overall system durability. Examples include Raft clusters, distributed key-value stores, and stream processing state stores. For these use cases, enabling `manual_wal_flush` is often a good idea.
 
@@ -141,22 +142,21 @@ SlateDB differs from both PostgreSQL and RocksDB in multiple ways. Unlike Postgr
 These unique characteristics of SlateDB must be carefully considered as we design our durability and commit semantics.
 
 ## Possible Improvements
+Synchronous Commit is a critical feature for mission-critical systems. It guarantees full ACID compliance by ensuring writes remain invisible until they are committed to durable storage. It also allows for different levels of durability guarantees to balance various use cases and trade-offs.
 
-Synchronous Commit is a very important feature for many mission critical systems. It guarantees a full ACID commit that ensures the writes is invisible until it's committed to durable storage, and it's possible to give different levels of durability guarantees for different use cases & trade offs.
+However, when comparing SlateDB's current model with PostgreSQL and RocksDB's Synchronous Commit implementations, there are some challenges in replicating the same semantics.
 
-However, when comparing with the PostgreSQL & RocksDB's Synchronous Commit model, the current model in SlateDB may faces some challenges to replicate the Synchronous Commit semantics.
+For example, in a transaction intended to be synchronously committed, the write should not be considered committed until the data is flushed to storage. But in SlateDB's current model, the data becomes visible to readers accepting unpersisted data (using `DurabilityLevel::Memory`) as soon as the write is appended to the WAL - before it's actually persisted to storage. This means uncommitted data can potentially be read before it's durably committed.
 
-Like, in a transaction which hopes to be a Synchronous Commit, this write is not considered as committed until the data is flushed to storage. But in the current model, the data will be visible to the readers whom accept unpersisted data with `DurabilityLevel::Memory` as soon as the write is appended to the WAL (before the WAL is persisted to storage), thus, this means it's possible to read the leaked uncommitted data before it's durable committed.
-
-If a user do not want to read the leaked uncommitted data, they can ensure all the reads are persisted by using `DurabilityLevel::Remote` for all the persisted data is committed. But it's not wise to limit the read to persisted -only data in a transaction, because it'll face conflicts if some others put some unpersisted writes on the same keys this transaction accesses, it'll constantly face rollbacks on conflicts in this case.
+If users want to avoid reading uncommitted data, they can use `DurabilityLevel::Remote` to ensure they only read persisted data. However, this approach has drawbacks within transactions. If other writers make unpersisted writes (`DurabilityLevel::Memory`) to the same keys that the transaction is accessing, it will constantly encounter conflicts and rollbacks.
 
 In short:
 
-- We can not guarantee the Synchronous Commit semantics with setting writers as `DurabilityLevel::Remote` and readers as `DurabilityLevel::Memory`, for it's possible to read the leaked uncommitted data before it's durable committed.
-- We'll also face some challenges to guarantee the Synchronous Commit semantics with setting writers as `DurabilityLevel::Remote` and readers as `DurabilityLevel::Remote`, for it risks to rollback the transaction on conflicts if there're other writers whom has written some unpersisted data with `DurabilityLevel::Memory` on the same keys.
+- We cannot guarantee Synchronous Commit semantics by setting writers to `DurabilityLevel::Remote` and readers to `DurabilityLevel::Memory`, since uncommitted data may be visible before it's durably committed.
+- Setting both writers and readers to `DurabilityLevel::Remote` also presents challenges, as transactions may frequently roll back due to conflicts with unpersisted writes made by other writers using `DurabilityLevel::Memory` on the same keys.
 
 ## Proposal
 
-This proposal is planning to add a possible way to allow users to work with Synchronous Commit semantics, while keeping the current model's capabilities not reduced.
+This proposal aims to provide users with true Synchronous Commit semantics while preserving all capabilities of the current model.
 
 tbd
