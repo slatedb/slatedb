@@ -101,12 +101,12 @@ Another important consideration is WAL write is possible to be failures. RocksDB
 
 ## Synchronous Commit in a summary 
 
-With the above references from PostgreSQL & RocksDB, we can summarize the expected semantics of Synchronous Commit in a way that:
+Based on the PostgreSQL and RocksDB references above, we can summarize the key semantics of Synchronous Commit:
 
-1. The write is considered as committed as soon as the WAL is persisted to storage in a Synchronous Commit. Before the write is persisted, the data is invisible to the readers.
-2. If got permanent failure on persisting the WAL in a Synchronous Commit, the transaction will be rolled back like nothing happened. The db instance will be marked as a fatal state, and be turned into read-only.
-3. It's possible to have multiple levels of Synchronous Commit, which allows user to trade-off between performance and durability.
-4. Synchronous Commit and Unsynchronous Commit can be mixed together in different transactions. Transaction with Synchronous Commit is able to read the writes from the transaction which disables Synchronous Commit, and the Synchronous Commit will persist all the previous writes which is possible to be Unsynchronous Commit in the WAL.
+1. A write is only considered committed once the WAL has been persisted to storage. Until then, the data remains invisible to readers.
+2. If there is a permanent failure while persisting the WAL during a Synchronous Commit, the transaction rolls back completely. The database instance enters a fatal state and switches to read-only mode.
+3. Multiple levels of Synchronous Commit can be supported, allowing users to balance performance and durability requirements.
+4. Synchronous and Unsynchronous Commits can be interleaved in different transactions. A transaction using Synchronous Commit can read writes from transactions that used Unsynchronous Commit. When a Synchronous Commit persists, it also persists any previous Unsynchronous Commit writes in the WAL.
 
 ## Current Design in SlateDB
 
