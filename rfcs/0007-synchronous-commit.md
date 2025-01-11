@@ -16,7 +16,7 @@ Let's start an RFC to discuss the topic to allow us to discuss the topic in the 
 
 The goals of this RFC are to:
 
-1. Define clear commit semantics & durability guarantees for SlateDB that users can safely rely on.
+1. Define clear synchronous commit semantics & durability guarantees for SlateDB that users can safely rely on.
 2. Define the API for users to specify their commit semantics & durability requirements.
 3. Take tiered WAL into consideration.
 4. Organize the possible code changes for the above goals.
@@ -100,6 +100,15 @@ Writes with `sync = true` and `sync = false` can be mixed together in RocksDB. I
 
 There's also an important note that writing to WAL is possible to be failure. In this case, RocksDB will retry the write until it turns out the failure is not ephemeral. If the failure is unfortunately continuing (e.g. the disk is full, or the disk is corrupted), RocksDB will give up and mark the db state as fatal, rollback the transaction, and make the db instance read-only.
 
+## Synchronous Commit in a summary 
+
+With the above references from PostgreSQL & RocksDB, we can summarize the Synchronous Commit in a way that:
+
+1. The write is considered as committed as soon as the WAL is persisted to storage in a Synchronous Commit. Before the write is persisted, the data is invisible to the readers.
+2. If got permanent failure on persisting the WAL in a Synchronous Commit, the transaction will be rolled back like nothing happened. The db instance will be marked in a fatal state, and turn into read-only.
+3. It's possible to have multiple levels of Synchronous Commit, which allows user to trade-off between performance and durability.
+4. Synchronous Commit and Unsynchronous Commit can be mixed together in different transactions. Transaction with Synchronous Commit is able to read the writes from the transaction which disables Synchronous Commit, and the Synchronous Commit will persist all the previous writes which is possible to be Unsynchronous Commit in the WAL.
+
 ## Current Design in SlateDB
 
 This section is based on @criccomini 's comment in <https://github.com/slatedb/slatedb/pull/260#issuecomment-2576502212>.
@@ -127,11 +136,14 @@ In the notion of Synchronous Commit, the data is considered as committed as soon
 SlateDB is different from PostgreSQL in that it's not a distributed system which contains Primary/Standby like PostgreSQL. It's also different from RocksDB in that it's stored in S3 instead of local disk, which is considered slower on write operations, and it also costs $ on API requests. As the result:
 
 1. Group commit is considered a must to reduce the cost of API requests and have a better performance than multiple small writes. However, even with Group Commit, it'll still considered as slower than local disk. (it might possible to improve the performance of writing to S3 by using parallel writes, but it'll also increase the cost of API requests, and increase the complexity of handling the failure cases.)
-2. It's not bad to allow readers to read unpersisted data & uncommitted data while waiting the write to be committed, because the writer is expected to be required to wait longer for the write to be committed when the reader accepts to be eventually consistent.
+2. With consider writes is expected to wait longer. If the reader accepts to be eventually consistent, it'll be not bad to allow readers to read unpersisted data & uncommitted data while waiting the writes to be durable committed.
+3. It's more likely to face permanent failures on writing WAL in a S3 based system when the network is unstable.
+
+As above, we need to focus on certain aspects in our design while considering SlateDB's unique characteristics.
 
 ## Possible Improvements
 
-Synchronous Commit is a very important feature for many critical systems.
+Synchronous Commit is a very important feature for many mission critical systems. It guarantees the data is invisible until it's committed to durable storage.
 
 However, when comparing with the PostgreSQL & RocksDB's Synchronous Commit model, the current model in SlateDB may faces some challenges to replicate the Synchronous Commit semantics.
 
@@ -141,8 +153,8 @@ If a user do not want to read the leaked uncommitted data, they can ensure all t
 
 In short:
 
-- We can not replicate the Synchronous Commit semantics with setting writers as `DurabilityLevel::Remote` and readers as `DurabilityLevel::Memory`, for it's possible to read the leaked uncommitted data before it's committed.
-- We'll also face some challenges to replicate the Synchronous Commit semantics with setting writers as `DurabilityLevel::Remote` and readers as `DurabilityLevel::Remote`, for it risks to rollback the transaction on conflicts if other writers are writing unpersisted data with `DurabilityLevel::Memory` on the same keys.
+- We can not guarantee the Synchronous Commit semantics with setting writers as `DurabilityLevel::Remote` and readers as `DurabilityLevel::Memory`, for it's possible to read the leaked uncommitted data before it's committed.
+- We'll also face some challenges to guarantee the Synchronous Commit semantics with setting writers as `DurabilityLevel::Remote` and readers as `DurabilityLevel::Remote`, for it risks to rollback the transaction on conflicts if other writers are writing unpersisted data with `DurabilityLevel::Memory` on the same keys.
 
 ## Proposal
 
