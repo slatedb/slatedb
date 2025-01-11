@@ -59,7 +59,7 @@ Let's summarize the use cases and trade-offs for different `synchronous_commit` 
 
 ### RocksDB
 
-Let's directly quote the RocksDB documentation about the description of Synchronous Commit in RocksDB:
+Let's look at how RocksDB describes synchronous commit in their documentation:
 
 > #### Non-Sync Mode
 >
@@ -81,23 +81,23 @@ Let's directly quote the RocksDB documentation about the description of Synchron
 >
 > Writes with different write options might disqualify themselves to be combined. The maximum group size is 1MB. RocksDB won't try to increase batch size by proactive delaying the writes.
 
-Same as PostgreSQL, RocksDB also provides a `sync` option to control the commit semantics & durability guarantees. For write operations with `sync = true`, the commit is not considered as committed until the data is `fsync()`ed to storage.
+Like PostgreSQL, RocksDB provides a `sync` option to control commit behavior and durability guarantees. When `sync = true`, a write is not considered committed until the data is `fsync()`ed to storage.
 
-For `sync = false`, the commit is considered as committed as soon as the transaction is finished, without waiting for the WAL to be written. The WAL is still buffered in kernel's Page Cache, data loss is possible if a crash occurs.
+When `sync = false`, a write is considered committed immediately after the transaction completes, without waiting for the WAL to be written. While the WAL is still buffered in the kernel's page cache, data loss can occur if a crash happens.
 
-But instead of PostgreSQL's `synchronous_commit` which has multiple levels, RocksDB only provides a simple boolean option. The reason is that RocksDB is an embedded database, and do not have the concept of Primary/Standby like PostgreSQL.
+Unlike PostgreSQL's `synchronous_commit` which offers multiple levels, RocksDB only provides a simple boolean option. This is because RocksDB is an embedded database and doesn't have the primary/standby architecture that PostgreSQL has.
 
-To improve the performance of synchronous commit, RocksDB provides a Group Commit mechanism, which is commonly used in WAL based systems. This mechanism will combine multiple writes into a single WAL write, and then flush the WAL to storage in a bigger batch to improve the IO throughput.
+To optimize synchronous commit performance, RocksDB implements Group Commit, which is a common pattern in WAL-based systems. This mechanism batches multiple writes together into a single, larger WAL write and flush operation, should improve I/O throughput a lot when comparing with multiple small writes.
 
-(In SlateDB, we can leverage the Commit Pipeline to implement a similar Group Commit mechanism which batches multiple writes into a single WAL write.)
+(SlateDB can implement a similar Group Commit mechanism through its Commit Pipeline, allowing us to batch multiple writes into single WAL operations.)
 
-One thing worth mentioning is that RocksDB defaults to `sync = false`, which means the WAL write is not crash safe.
+It's important to note that RocksDB defaults to `sync = false`, meaning WAL writes are not crash-safe by default.
 
-This is likely to be a trade-off for performance. In many use cases, especially in distributed systems (which is the most common use case for RocksDB), it's some times acceptable to allow data loss in a single node without hurting the durability of the system. Like making a raft cluster, distributed KV cluster, or a local state store for stream processing, etc. In these cases, `manual_wal_flush` is often a good idea.
+This default is likely to be a trade-off for performance. In many distributed systems (RocksDB's primary use case imo), some data loss on individual nodes is acceptable without compromising overall system durability. Examples include Raft clusters, distributed key-value stores, and stream processing state stores. For these use cases, enabling `manual_wal_flush` is often a good idea.
 
-Writes with `sync = true` and `sync = false` can be mixed together in RocksDB. If transaction A is committed with `sync = false`, and transaction B is started after transaction A, the writes from transaction A will be visible to the readers in transaction B, and both the writes from transaction A and B will be persisted when the transaction B is committed with `sync = true`. That means the WAL writes are ordered, whatever a `sync = true` write is committed, all the previous writes are guaranteed to be persisted.
+RocksDB allows mixing writes with different sync settings. For example, if transaction A commits with `sync = false` and transaction B starts afterwards, transaction A's writes will be visible to readers in transaction B. When transaction B commits with `sync = true`, both transactions' writes are persisted. This ordering guarantee means that when a `sync = true` write commits, all previous writes are guaranteed to be persisted as well.
 
-There's also an important note that writing to WAL is possible to be failure. In this case, RocksDB will retry the write until it turns out the failure is not ephemeral. If the failure finally turns out to be permanent (e.g. the disk is full, or the disk is corrupted), RocksDB will give up and mark the db state as fatal, rollback the transaction, and make the db instance read-only.
+Another important consideration is WAL write is possible to be failures. RocksDB handles these by retrying writes until determining whether the failure is temporary or permanent. In cases of permanent failure (like a full or corrupted disk), RocksDB marks the database state as fatal, rolls back the transaction like nothing happened, and switches the database instance to read-only mode.
 
 ## Synchronous Commit in a summary 
 
