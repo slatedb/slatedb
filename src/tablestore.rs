@@ -538,7 +538,7 @@ pub(crate) struct EncodedSsTableWriter<'a> {
     blocks_written: usize,
 }
 
-impl<'a> EncodedSsTableWriter<'a> {
+impl EncodedSsTableWriter<'_> {
     pub async fn add(&mut self, entry: RowEntry) -> Result<(), SlateDBError> {
         self.builder.add(entry)?;
         self.drain_blocks().await

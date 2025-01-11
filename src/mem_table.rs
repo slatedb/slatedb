@@ -75,7 +75,7 @@ impl SeekToKey for VecDequeKeyValueIterator {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
             let front = self.rows.front();
-            if front.map_or(false, |record| record.key < next_key) {
+            if front.is_some_and(|record| record.key < next_key) {
                 self.rows.pop_front();
             } else {
                 return Ok(());
@@ -90,7 +90,7 @@ pub(crate) struct ValueWithAttributes {
     pub(crate) attrs: RowAttributes,
 }
 
-impl<'a, T: RangeBounds<Bytes>> KeyValueIterator for MemTableIterator<'a, T> {
+impl<T: RangeBounds<Bytes>> KeyValueIterator for MemTableIterator<'_, T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.next_entry_sync())
     }
