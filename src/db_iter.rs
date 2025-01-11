@@ -97,7 +97,7 @@ impl<'a> DbIterator<'a> {
         } else if self
             .last_key
             .clone()
-            .map_or(false, |last_key| next_key <= last_key)
+            .is_some_and(|last_key| next_key <= last_key)
         {
             Err(SlateDBError::InvalidArgument {
                 msg: "Cannot seek to a key less than the last returned key".to_string(),

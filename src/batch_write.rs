@@ -26,9 +26,8 @@
 //! be contention between `get`s, which holds a lock, and the write loop._
 
 use core::panic;
-use log::warn;
+use log::{info, warn};
 use std::sync::Arc;
-
 use tokio::runtime::Handle;
 
 use crate::types::RowAttributes;
@@ -152,7 +151,12 @@ impl DbInner {
         Some(spawn_bg_task(
             tokio_handle,
             move |err| {
-                warn!("write task exited with {:?}", err);
+                match err {
+                    SlateDBError::BackgroundTaskShutdown => {
+                        info!("write task shutdown complete");
+                    }
+                    _ => warn!("write task exited with {:?}", err),
+                }
                 // notify any waiters about the failure
                 let mut state = this.state.write();
                 state.record_fatal_error(err.clone());
