@@ -132,13 +132,13 @@ The reason is that SlateDB's WAL is not a place for crash recovery only, but als
 
 In the notion of Synchronous Commit, the data is considered as committed as soon as the write is persisted to the WAL storage. Users can specify the durability level as `DurabilityLevel::Remote` for the read calls to ensure only the committed/persisted data is read.
 
-SlateDB is different from PostgreSQL in that it's not a distributed system which contains Primary/Standby like PostgreSQL. It's also different from RocksDB in that it's stored in S3 instead of local disk, which is considered slower on write operations, and it also costs $ on API requests. As the result:
+SlateDB differs from both PostgreSQL and RocksDB in multiple ways. Unlike PostgreSQL, it's not a distributed system with Primary/Standby nodes. And unlike RocksDB, it stores data in S3 rather than local disk, which means slower write operations and additional costs for API requests. These differences lead to several key considerations:
 
-1. Group commit is considered a must to reduce the cost of API requests and have a better performance than multiple small writes. However, even with Group Commit, it'll still considered as slower than local disk. (it might possible to improve the performance of writing to S3 by using parallel writes, but it'll also increase the cost of API requests, and increase the complexity of handling the failure cases.)
-2. With consider writes is expected to wait longer. If the reader accepts to be eventually consistent, it'll be not bad to allow readers to read unpersisted data & uncommitted data while waiting the writes to be durable committed.
-3. It's more likely to face permanent failures on writing WAL in a S3 based system when the network is unstable. It's more urgent to allow performing auto-recovery from the io failures for the db instance.
+1. Group commit is essential. By batching multiple writes together, we can reduce both API costs and improve performance compared to multiple small writes. However, even with Group Commit, writes to S3 will still be slower than local disk writes. (While parallel writes to S3 could potentially improve performance, this would increase both API costs and the complexity of handling failures.)
+2. Writes will inherently take longer due to S3 latency. Given this reality, it makes sense to allow readers who can accept eventual consistency to access unpersisted and uncommitted data while waiting for writes to be durably committed.
+3. Writing WAL to S3 has a higher risk of permanent failures due to network instability compared to local disk. This makes it critical to implement robust auto-recovery mechanisms for handling I/O failures.
 
-As above, we need to focus on certain aspects in our design while considering SlateDB's unique characteristics.
+These unique characteristics of SlateDB must be carefully considered as we design our durability and commit semantics.
 
 ## Possible Improvements
 
