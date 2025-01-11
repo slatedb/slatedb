@@ -124,15 +124,22 @@ The reason is that SlateDB's WAL is not a place for crash recovery only, but als
 
 In the notion of Synchronous Commit, the data is considered as committed as soon as the write is persisted to the WAL storage. Users can specify the durability level as `DurabilityLevel::Remote` for the read calls to ensure only the committed/persisted data is read.
 
+SlateDB is different from PostgreSQL in that it's not a distributed system which contains Primary/Standby like PostgreSQL. It's also different from RocksDB in that it's stored in S3 instead of local disk, which is considered slower on write operations, and it also costs $ on API requests. As the result:
+
+1. Group commit is considered a must to reduce the cost of API requests and have a better performance than multiple small writes. However, even with Group Commit, it'll still considered as slower than local disk. (it might possible to improve the performance of writing to S3 by using parallel writes, but it'll also increase the cost of API requests, and increase the complexity of handling the failure cases.)
+2. It's not bad to allow readers to read unpersisted data & uncommitted data while waiting the write to be committed, because the writer is expected to be required to wait longer for the write to be committed when the reader accepts to be eventually consistent.
+
 ## Possible Improvements
 
-When comparing with the PostgreSQL & RocksDB's Synchronous Commit model, the current model in SlateDB may faces some challenges to replicate the Synchronous Commit semantics.
+Synchronous Commit is a very important feature for many critical systems.
+
+However, when comparing with the PostgreSQL & RocksDB's Synchronous Commit model, the current model in SlateDB may faces some challenges to replicate the Synchronous Commit semantics.
 
 Like, in a transaction which hopes to be a Synchronous Commit, this write is not considered as committed until the data is flushed to storage. But the data is already visible if a reader accepts unpersisted data with `DurabilityLevel::Memory`, thus, this means it's possible to read the leaked uncommitted data before it's committed.
 
 If a user do not want to read the leaked uncommitted data, they can ensure all the reads are persisted by using `DurabilityLevel::Remote` for all the persisted data is committed. But it's not wise to limit the read to persisted -only data in a transaction, or it'll be a problem if some others put some unpersisted writes on some keys, it'll constantly cause rollbacks on conflicts if this transaction accesses these same keys.
 
-In summary:
+In short:
 
 - We can not replicate the Synchronous Commit semantics with setting writers as `DurabilityLevel::Remote` and readers as `DurabilityLevel::Memory`, for it's possible to read the leaked uncommitted data before it's committed.
 - We'll also face some challenges to replicate the Synchronous Commit semantics with setting writers as `DurabilityLevel::Remote` and readers as `DurabilityLevel::Remote`, for it risks to rollback the transaction on conflicts if other writers are writing unpersisted data with `DurabilityLevel::Memory` on the same keys.
