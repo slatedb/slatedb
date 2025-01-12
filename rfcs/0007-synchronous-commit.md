@@ -160,10 +160,12 @@ SlateDB differs from both PostgreSQL and RocksDB in multiple ways. Unlike Postgr
 1. Group commit is essential. By batching multiple writes together, we can reduce both API costs and improve performance compared to multiple small writes. However, even with Group Commit, writes to S3 will still be slower than local disk writes. (While parallel writes to S3 could potentially improve performance, this would increase both API costs and the complexity of handling failures.)
 2. Writes will inherently take longer due to S3 latency. Given this reality, it makes sense to allow readers who can accept eventual consistency to access unpersisted and uncommitted data while waiting for writes to be durably committed.
 3. Writing WAL to S3 has a higher risk of permanent failures due to network instability compared to local disk. This makes it critical to implement robust auto-recovery mechanisms for handling I/O failures.
+4. We should provide a way to control the durability level of the read operations, so that users can choose to read the persisted data only data.
 
 These unique characteristics of SlateDB must be carefully considered as we design our durability and commit semantics.
 
 ## Possible Improvements
+
 Synchronous Commit is a critical feature for mission-critical systems. It guarantees full ACID compliance by ensuring writes remain invisible until they are committed to durable storage. It also allows for different levels of durability guarantees to balance various use cases and trade-offs.
 
 However, when comparing SlateDB's current model with PostgreSQL and RocksDB's Synchronous Commit implementations, there are some challenges in replicating the same semantics.
@@ -179,6 +181,68 @@ In short:
 
 ## Proposal
 
+### Read Watermark
+
 This proposal aims to provide users with true Synchronous Commit semantics while preserving all capabilities of the current model.
 
-tbd
+To address the challenges mentioned above, we need to add an option which allows users to read the "Committed" data only, other than "Memory" and "Remote" data.
+
+As we've discussed before, it's important to note that "Commit" and "Durability" are distinct concepts that aren't necessarily coupled with each other. Data can be considered "Committed" even if it hasn't been flushed to persistent storage - it may exist only in memory. While such data isn't persisted, it can still be treated as safely committed from a transactional perspective.
+
+Later transactions can safely depend on these "Unpersisted" but "Committed" data without worrying about conflicts, since they represent the latest committed state of the data. This allows for consistent transaction semantics even when some committed data hasn't yet been persisted to storage.
+
+On the other hand, "Committed" data won't contain data that is still in the process of being committed (which is possible in the read with `DurabilityLevel::Memory` in the current model). This ensures that readers will never see data that could potentially be rolled back if a write operation fails.
+
+By allowing users to read "Committed" data, we can address the challenges outlined in the "Possible Improvements" section. The ability to read committed data only, regardless of persistence status, enables proper transaction semantics while still allowing for performance optimizations through writes with lower durability requirements. This provides a cleaner separation between transaction consistency and durability guarantees.
+
+Let's assume we have a sequence of writes like this:
+
+| seq | operation | marks |
+| --- | ----------------- | ---- |
+| 100 | WRITE key001 = "value001" with (durability: Memory) | |
+| 101 | WRITE key002 = "value002" with (durability: Memory) | |
+| 102 | WRITE key003 = "value003" with (durability: Memory) | |
+| 103 | WRITE key004 = "value004" with (durability: Remote) | <-- last remote persisted watermark |
+| 104 | WRITE key005 = "value005" with (durability: Memory) | |
+| 105 | WRITE key006 = "value006" with (durability: Memory) | <-- last committed watermark |
+| 106 | WRITE key007 = "value007" with (durability: Remote), but still haven't persisted yet | <-- last committing watermark |
+
+While "Committed" is distinct from the "DurabilityLevel" concept, both the "Committed" and "Persisted" states can be tracked using separate watermarks in the commit history of sequence number.
+
+It'll not make sense to set "Committed" watermark with something like `DurabilityLevel::Committed`. We need to define a better name to both contains the "Memory", "Committed" and "Persisted" positions.
+
+Let's call it `ReadWatermark`.
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ReadWatermark {
+    LastCommitting,
+    #[default]
+    LastCommitted,
+    LastLocalPersisted,
+    LastRemotePersisted,
+}
+```
+
+The read operation may look like this:
+
+```rust
+let opts = ReadOptions::new().with_watermark(ReadWatermark::LastCommitting);
+db.get(key, opts).await?;
+```
+
+The biggest semantic difference between `ReadWatermark` and `DurabilityLevel` is `ReadWatermark` reflects the positions of the commit history, while `DurabilityLevel` reflects the durability level on different levels of storage.
+
+These watermarks have the following relationships:
+
+- The "last committing watermark" is always greater than or equal to the "last committed watermark"
+- The "last committed watermark" is always greater than or equal to the "last local persisted watermark"
+- The "last local persisted watermark" is always greater than or equal to the "last remote persisted watermark"
+
+If we successfully write a key that succesfully persisted to S3, at this point, all these watermarks will become exactly the same. 
+
+It's important to note the difference between "LastCommitting" and "LastCommitted" watermarks: with high durability commits, writes are first appended to the WAL before being persisted to storage. During this window, using the "LastCommitting" watermark allows reading data that could potentially be rolled back if persistence fails, while "LastCommitted" only shows data that has been fully committed. This is useful for users who want to read the latest writes as soon as possible and don't mind if the data might be rolled back.
+
+I think this option should be used with caution. `ReadWatermark::LastCommitted` is considered as a safer option, since it only shows data that has been fully committed.
+
+### Sync Commit
