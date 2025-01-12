@@ -116,7 +116,7 @@ To optimize synchronous commit performance, RocksDB implements Group Commit, whi
 
 It worths to note that RocksDB defaults to `sync = false`, meaning WAL writes are not crash-safe by default.
 
-This default is likely to be a trade-off for performance. In many distributed systems (RocksDB's primary use case imo), some data loss on individual nodes is acceptable without compromising overall system durability. Examples include Raft clusters, distributed key-value stores, and stream processing state stores. For these use cases, enabling `manual_wal_flush` is often a good idea.
+This default is likely to be a trade-off for performance. In many distributed systems (RocksDB's primary use case imo), some data loss on individual nodes is acceptable without compromising overall system durability. Examples include Raft clusters, distributed key-value stores, and stream processing state stores. For these use cases, enabling `sync: false` or `manual_wal_flush: true` is possible to be a good idea.
 
 RocksDB allows mixing writes with different sync settings. For example, if transaction A commits with `sync = false` and transaction B starts afterwards, transaction A's writes will be visible to readers in transaction B. When transaction B commits with `sync = true`, both transactions' writes are persisted. This ordering guarantee means that when a `sync = true` write commits, all previous writes are guaranteed to be persisted as well.
 
@@ -128,7 +128,7 @@ Based on the PostgreSQL and RocksDB references above, we can summarize the key s
 
 1. A write is only considered committed once the WAL has been persisted to storage. Until then, the data remains invisible to readers.
 2. If there is a permanent failure while persisting the WAL during a Synchronous Commit, the transaction rolls back completely. The database instance enters a fatal state and switches to read-only mode.
-3. Multiple levels of Synchronous Commit can be supported, allowing users to balance performance and durability requirements.
+3. It's possible to have multiple levels of Synchronous Commit, or even disable it, allowing users to balance performance and durability requirements.
 4. Synchronous and Unsynchronous Commits can be interleaved in different transactions. A transaction using Synchronous Commit can read writes from transactions that used Unsynchronous Commit. When a Synchronous Commit persists, it also persists any previous Unsynchronous Commit writes in the WAL.
 
 ## Current Design in SlateDB
