@@ -237,17 +237,17 @@ The biggest semantic difference between `ReadWatermark` and `DurabilityLevel` is
 
 These watermarks have the following relationships:
 
-- The "last committing watermark" is always greater than or equal to the "last committed watermark"
-- The "last committed watermark" is always greater than or equal to the "last local persisted watermark"
-- The "last local persisted watermark" is always greater than or equal to the "last remote persisted watermark"
+- The "last committing watermark"'s position (in term of sequence number) is always greater than or equal to the "last committed watermark"
+- The "last committed watermark"'s position is always greater than or equal to the "last local persisted watermark"
+- The "last local persisted watermark"'s position is always greater than or equal to the "last remote persisted watermark"
 
 If we successfully write a key that succesfully persisted to S3, at this point, all these watermarks will point to the same position. 
 
-It's important to note the difference between "LastCommitting" and "LastCommitted" watermarks: with high durability commits, writes are first appended to the WAL before being persisted to storage. During this window, using the "LastCommitting" watermark allows reading data that could potentially be rolled back if persistence fails, while "LastCommitted" only shows data that has been fully committed. SlateDB allows user to read the WAL data which is not applied to MemTable yet. This is useful for users who want to read the latest writes as soon as possible and don't mind if the data might be rolled back.
+It's important to note the difference between "LastCommitting" and "LastCommitted" watermarks: with high durability commits, writes are first appended to the WAL before being persisted to storage. During this window, using the "LastCommitting" watermark allows reading data that could potentially be rolled back if persistence fails, while "LastCommitted" only shows data that has been fully committed. SlateDB allows the read path to access the WAL data which is not applied to MemTable yet. This is useful for users who want to read the latest writes as soon as possible and don't mind if the data might be rolled back.
 
 I think `ReadWatermark::LastCommitting` should be used with caution. `ReadWatermark::LastCommitted` is considered as a safer option, since it only shows data that has been fully committed.
 
-For reads in a transaction, it's possible to allow users specify the watermark as `ReadWatermark::LastRemotePersisted` or `ReadWatermark::LastLocalPersisted`. This might let users read an older version of the data, but it won't violate the semantics of conflict checking: if there's a newer version of the same key, this transaction could be rolled back on commit.
+For reads in a transaction, it's possible to allow users specify the watermark as `ReadWatermark::LastRemotePersisted` or `ReadWatermark::LastLocalPersisted`. This might let users read an older version of the data, but it won't violate the semantics of conflict checking: if there exists a newer version of the same key, this transaction could be rolled back on commit.
 
 But it's not make sense to allow users to read `ReadWatermark::LastCommitting` in a transaction. It'll definitely violate the SSI semantics. As it read data which is possible to be rolled back later. Let's not do that by restricting the read watermark to be at least `ReadWatermark::LastCommitted`.
 
