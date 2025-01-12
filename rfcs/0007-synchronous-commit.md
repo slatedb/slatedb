@@ -159,10 +159,12 @@ SlateDB differs from both PostgreSQL and RocksDB in multiple ways. Unlike Postgr
 
 1. Group commit is essential. By batching multiple writes together, we can reduce both API costs and improve performance compared to multiple small writes. However, even with Group Commit, writes to S3 will still be slower than local disk writes. (While parallel writes to S3 could potentially improve performance, this would increase both API costs and the complexity of handling failures.)
 2. Writes will inherently take longer due to S3 latency. Given this reality, it makes sense to allow readers who can accept eventual consistency to access unpersisted and uncommitted data while waiting for writes to be durably committed.
-3. Writing WAL to S3 has a higher risk of permanent failures due to network instability compared to local disk. This makes it critical to implement robust auto-recovery mechanisms for handling I/O failures.
+3. Writing WAL to S3 has a higher risk of permanent failures due to network instability compared to local disk. This makes it critical to implement robust auto-recovery mechanisms for handling I/O failures. [^1]
 4. We should provide a way to control the durability level of the read operations, so that users can choose to read the persisted data only data.
 
 These unique characteristics of SlateDB must be carefully considered as we design our durability and commit semantics.
+
+[^1]: The discussion in [RFC for Handling Data Corruption](https://github.com/slatedb/slatedb/pull/441) may also related to this topic.
 
 ## Possible Improvements
 
