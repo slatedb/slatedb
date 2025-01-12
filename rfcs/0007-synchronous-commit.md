@@ -46,9 +46,31 @@ PostgreSQL provides a flexible setting called `synchronous_commit` that controls
 * `remote_write`: Commits wait for the WAL to be written locally and replicated to standby servers, then wait for standbys to flush to their file systems.
 * `remote_apply`: Commits wait for the WAL to be written and flushed locally, then wait for standbys to fully apply the WAL, this ensures the data consistent between primary and standby.
 
-The article "Understanding synchronous_commit in PostgreSQL" includes a helpful diagram showing how the `on` and `off` settings work:
+The article "Understanding synchronous_commit in PostgreSQL" includes a helpful diagram showing how the `on` and `off` settings work (converted into a mermaid sequence diagram by @criccomini with ChatGPT):
 
-![](./images/postgres-sync-commit.png)
+```mermaid
+sequenceDiagram
+    participant Client
+    participant ClientBackend
+    participant SharedBuffer
+    participant WALBuffer
+    participant WALWriter
+    participant Disk
+ 
+    Client ->> ClientBackend: Execute DML
+    ClientBackend ->> SharedBuffer: Write Data
+    ClientBackend ->> WALBuffer: Write WAL
+ 
+    alt synchronous_commit is off
+        ClientBackend -->> Client: Return Success (if off)
+        WALBuffer ->> WALWriter: Asynchronous WAL write
+        WALWriter ->> Disk: Asynchronous Write
+    else synchronous_commit is on
+        WALBuffer ->> WALWriter: Wait for WALWriter
+        WALWriter ->> Disk: Flush WAL
+        ClientBackend -->> Client: Return Success (if on)
+    end
+```
 
 The key distinction between `on` and `off` is that `on` ensures the WAL is written and flushed to local storage before proceeding. This highlights a central theme throughout this RFC: synchronous commit and durability fundamentally revolve around WAL handling.
 
