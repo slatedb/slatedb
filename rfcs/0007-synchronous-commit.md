@@ -112,7 +112,7 @@ Unlike PostgreSQL's `synchronous_commit` which offers multiple levels, RocksDB o
 
 To optimize synchronous commit performance, RocksDB implements Group Commit, which is a common pattern in WAL-based systems. This mechanism batches multiple writes together into a single, larger WAL write and flush operation, should improve I/O throughput a lot when comparing with multiple small writes.
 
-(SlateDB can implement a similar Group Commit mechanism through its Commit Pipeline, allowing us to batch multiple writes into single WAL operations.)
+(SlateDB implemented a similar Group Commit mechanism through its Commit Pipeline, multiple writes with `await_durable: true` will be batched into a single WAL write after `flush.interval` seconds or when the WAL buffer is full.)
 
 It worths to note that RocksDB defaults to `sync = false`, meaning WAL writes are not crash-safe by default.
 
