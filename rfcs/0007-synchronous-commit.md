@@ -243,7 +243,9 @@ If we successfully write a key that succesfully persisted to S3, at this point, 
 
 It's important to note the difference between "LastCommitting" and "LastCommitted" watermarks: with high durability commits, writes are first appended to the WAL before being persisted to storage. During this window, using the "LastCommitting" watermark allows reading data that could potentially be rolled back if persistence fails, while "LastCommitted" only shows data that has been fully committed. This is useful for users who want to read the latest writes as soon as possible and don't mind if the data might be rolled back.
 
-I think this option should be used with caution. `ReadWatermark::LastCommitted` is considered as a safer option, since it only shows data that has been fully committed.
+I think `ReadWatermark::LastCommitting` should be used with caution. `ReadWatermark::LastCommitted` is considered as a safer option, since it only shows data that has been fully committed.
+
+In conclusion, the difference between the current model and this proposal is adding a "Committed" watermark. And as it's not make sense to use `DurabilityLevel` to contain it, we propose to use `ReadWatermark` to identify the positions of the commit history for read operations.
 
 ### Sync Commit
 
@@ -278,7 +280,7 @@ let opts = WriteOptions::new().with_sync(SyncLevel::Off);
 db.write(key, value, opts).await?;
 ```
 
-The inner implementation of the write side do not need to change, it's still just await the data to be persisted to storage, then return. All we put into discussion here is the naming stuff.
+The inner implementation of the write side do not need to change, it's still just await the data to be persisted to storage as the specified durability level, then return. All we put into discussion here is the naming stuff.
 
 ## Implementation
 
