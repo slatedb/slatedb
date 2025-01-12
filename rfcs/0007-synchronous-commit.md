@@ -246,3 +246,40 @@ It's important to note the difference between "LastCommitting" and "LastCommitte
 I think this option should be used with caution. `ReadWatermark::LastCommitted` is considered as a safer option, since it only shows data that has been fully committed.
 
 ### Sync Commit
+
+In contrast to the read side which may mix the positions in term of "durability" and "commit", the write / commit side is more straightforward, it only need to track the things about durability.
+
+To implement Synchronous Commit semantics, the write side remains do not need to change at all: the operation returns once the WAL is persisted according to the specified durability level. A `DurabilityLevel` is all we need here.
+
+Like:
+
+```rust
+let opts = WriteOptions::new().with_await_durability(DurabilityLevel::Remote);
+db.write(key, value, opts).await?;
+```
+
+In other systems, this option is often named as `sync`, to emphasize the idea of synchronous commit. To respect the idea of Least Surprise, it might be not a bad idea to rename `await_durability` to `sync`.
+
+```rust
+let opts = WriteOptions::new().with_sync(DurabilityLevel::Memory);
+db.write(key, value, opts).await?;
+```
+
+However, when writes are not persisted to storage, this can be thought of as **disabling** synchronous commit entirely rather than synchronizing to memory. The code sample may be like:
+
+```rust
+enum SyncLevel {
+    Off,
+    Local,
+    Remote,
+}
+
+let opts = WriteOptions::new().with_sync(SyncLevel::Off);
+db.write(key, value, opts).await?;
+```
+
+The inner implementation of the write side do not need to change, it's still just await the data to be persisted to storage, then return. All we put into discussion here is the naming stuff.
+
+## Implementation
+
+tbd.
