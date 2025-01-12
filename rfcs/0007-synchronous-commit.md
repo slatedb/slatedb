@@ -286,6 +286,13 @@ let opts = WriteOptions::new().with_sync(SyncLevel::Off);
 db.write(key, value, opts).await?;
 ```
 
+The benefits of this naming change are:
+
+1. The name "Synchronous Commit" directly describes the feature we aim to support.
+2. The term "sync" is commonly used across database systems and is well understood, familiar to users.
+3. The names are shorter, easier to type & read.
+4. It's accurate to describe as sync commit as "off" when it comes with memory durability.
+
 The inner implementation of the write side do not need to change, it's still just await the data to be persisted to storage as the specified durability level, then return. All we put into discussion here is the naming stuff.
 
 ## Implementation
