@@ -249,9 +249,9 @@ I think `ReadWatermark::LastCommitting` should be used with caution. `ReadWaterm
 
 For reads in a transaction, it's possible to allow users specify the watermark as `ReadWatermark::LastRemotePersisted` or `ReadWatermark::LastLocalPersisted`. This might let users read an older version of the data, but it won't violate the semantics of conflict checking: if there exists a newer version of the same key, this transaction could be rolled back on commit.
 
-But it's not make sense to allow users to read `ReadWatermark::LastCommitting` in a transaction. It'll definitely violate the SSI semantics. As it read data which is possible to be rolled back later. Let's not do that by restricting the read watermark to be at least `ReadWatermark::LastCommitted`.
+But it does not make sense to allow users to read `ReadWatermark::LastCommitting` in a transaction. It'll definitely violate the SSI semantics. As it read data which is possible to be rolled back later. Let's not do that by restricting the read watermark to be at least `ReadWatermark::LastCommitted`.
 
-In conclusion, the difference between the current model and this proposal is adding a "Committed" watermark. And as it's not make sense to use `DurabilityLevel` to contain it, we propose to use `ReadWatermark` to identify the positions of the commit history for read operations.
+In conclusion, the difference between the current model and this proposal is adding a "Committed" watermark. And as it does not make sense to use `DurabilityLevel` to contain it, we propose to use `ReadWatermark` to identify the positions of the commit history for read operations.
 
 ### Sync Commit
 
