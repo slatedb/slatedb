@@ -273,7 +273,7 @@ let opts = WriteOptions::new().with_sync(DurabilityLevel::Memory);
 db.write(key, value, opts).await?;
 ```
 
-However, when writes are not persisted to storage, this can be thought of as **disabling** synchronous commit entirely rather than synchronizing to memory. The code sample may be like:
+However, for the writes that not expected to durablely persisted, this can be thought of as **disabling** synchronous commit entirely rather than synchronizing to memory. The code sample may be like:
 
 ```rust
 enum SyncLevel {
