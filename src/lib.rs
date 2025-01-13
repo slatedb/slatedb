@@ -27,7 +27,7 @@ mod db_common;
 pub mod db_iter;
 mod db_state;
 pub mod error;
-mod filter;
+pub mod filter;
 mod flatbuffer_types;
 mod flush;
 mod garbage_collector;
