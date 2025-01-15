@@ -50,7 +50,7 @@ mod tablestore;
 #[cfg(test)]
 mod test_utils;
 mod transactional_object_store;
-mod types;
+pub mod types;
 mod utils;
 
 /// Re-export the bytes crate.
