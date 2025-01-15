@@ -116,12 +116,14 @@ mod tests {
     use crate::db_state::SsTableId;
     use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
+    use crate::manifest::Manifest;
     use crate::manifest_store::ManifestStore;
     use crate::proptest_util::{rng, sample};
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
     use crate::{admin, test_utils};
+    use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -360,21 +362,63 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_scope_with_force_flush() {
-        test_checkpoint_scope_all(true).await;
+        let db_options = DbOptions {
+            flush_interval: Duration::from_millis(5000),
+            ..DbOptions::default()
+        };
+        test_checkpoint_scope_all(db_options, true, |manifest| {
+            SsTableId::Wal(manifest.core.next_wal_sst_id - 1)
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn test_checkpoint_scope_with_no_force_flush() {
-        test_checkpoint_scope_all(false).await;
-    }
-
-    async fn test_checkpoint_scope_all(force_flush: bool) {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
         let db_options = DbOptions {
-            flush_interval: Duration::from_millis(100),
+            flush_interval: Duration::from_millis(10),
             ..DbOptions::default()
         };
+        test_checkpoint_scope_all(db_options, false, |manifest| {
+            SsTableId::Wal(manifest.core.next_wal_sst_id - 1)
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_checkpoint_scope_with_force_flush_wal_disabled() {
+        let db_options = DbOptions {
+            flush_interval: Duration::from_millis(5000),
+            wal_enabled: false,
+            ..DbOptions::default()
+        };
+        test_checkpoint_scope_all(db_options, true, |manifest| {
+            manifest.core.l0.front().unwrap().id
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_checkpoint_scope_with_no_force_flush_wal_disabled() {
+        let db_options = DbOptions {
+            flush_interval: Duration::from_millis(10),
+            wal_enabled: false,
+            ..DbOptions::default()
+        };
+        test_checkpoint_scope_all(db_options, false, |manifest| {
+            manifest.core.l0.front().unwrap().id
+        })
+        .await;
+    }
+
+    async fn test_checkpoint_scope_all<F: FnOnce(Manifest) -> SsTableId>(
+        db_options: DbOptions,
+        force_flush: bool,
+        last_flushed_table: F,
+    ) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
         let db = Db::open_with_opts(path.clone(), db_options, Arc::clone(&object_store))
             .await
             .unwrap();
@@ -383,19 +427,13 @@ mod tests {
         let table = sample::table(&mut rng, 1000, 10);
         test_utils::seed_database(&db, &table, false).await.unwrap();
 
-        let checkpoint_options = CheckpointOptions {
-            scope: CheckpointScope::All { force_flush },
-            ..CheckpointOptions::default()
-        };
-
-        let checkpoint = db.create_checkpoint(&checkpoint_options).await.unwrap();
-
-        let table_store = Arc::new(TableStore::new(
-            Arc::clone(&object_store),
-            SsTableFormat::default(),
-            path.clone(),
-            None,
-        ));
+        let checkpoint = db
+            .create_checkpoint(&CheckpointOptions {
+                scope: CheckpointScope::All { force_flush },
+                ..CheckpointOptions::default()
+            })
+            .await
+            .unwrap();
 
         let manifest_store = ManifestStore::new(&path, object_store.clone());
         let manifest = manifest_store
@@ -403,16 +441,34 @@ mod tests {
             .await
             .unwrap();
 
-        let last_checkpoint_wal_id = manifest.core.next_wal_sst_id - 1;
-        let last_checkpoint_wal = table_store
-            .open_sst(&SsTableId::Wal(last_checkpoint_wal_id))
-            .await
-            .unwrap();
+        let last_written_kv = table.last_key_value().unwrap();
+        let last_flushed_table_id = last_flushed_table(manifest);
+        assert_flushed_entry(
+            Arc::clone(&object_store),
+            path,
+            &last_flushed_table_id,
+            last_written_kv,
+        )
+        .await;
+    }
 
-        let last_kv = table.last_key_value().unwrap();
+    async fn assert_flushed_entry(
+        object_store: Arc<dyn ObjectStore>,
+        path: Path,
+        table_id: &SsTableId,
+        kv: (&Bytes, &Bytes),
+    ) {
+        let table_store = Arc::new(TableStore::new(
+            Arc::clone(&object_store),
+            SsTableFormat::default(),
+            path.clone(),
+            None,
+        ));
+        let last_checkpoint_wal = table_store.open_sst(table_id).await.unwrap();
+
         let mut wal_iter = SstIterator::for_key(
             &last_checkpoint_wal,
-            last_kv.0,
+            kv.0,
             Arc::clone(&table_store),
             SstIteratorOptions::default(),
         )
@@ -420,6 +476,6 @@ mod tests {
         .unwrap();
 
         let wal_entry = wal_iter.next().await.unwrap().unwrap();
-        assert_eq!(*last_kv.1, wal_entry.value)
+        assert_eq!(*kv.1, wal_entry.value)
     }
 }
