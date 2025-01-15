@@ -171,11 +171,11 @@ impl DbInner {
         Ok(None)
     }
 
-    pub async fn scan_with_options<'a>(
-        &'a self,
+    pub async fn scan_with_options(
+        &self,
         range: BytesRange,
         options: &ScanOptions,
-    ) -> Result<DbIterator<'a>, SlateDBError> {
+    ) -> Result<DbIterator, SlateDBError> {
         self.check_error()?;
         let snapshot = Arc::new(self.state.read().snapshot());
         let mut memtables = VecDeque::new();
@@ -1473,7 +1473,7 @@ mod tests {
     async fn assert_ordered_scan_in_range(
         table: &BTreeMap<Bytes, Bytes>,
         range: &BytesRange,
-        iter: &mut DbIterator<'_>,
+        iter: &mut DbIterator,
     ) {
         let mut expected = table.range((range.start_bound().cloned(), range.end_bound().cloned()));
 

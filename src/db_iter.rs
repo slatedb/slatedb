@@ -16,19 +16,19 @@ type ScanIterator<'a> = TwoMergeIterator<
     TwoMergeIterator<MergeIterator<SstIterator<'a>>, MergeIterator<SortedRunIterator<'a>>>,
 >;
 
-pub struct DbIterator<'a> {
+pub struct DbIterator {
     range: BytesRange,
-    iter: ScanIterator<'a>,
+    iter: ScanIterator<'static>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
 }
 
-impl<'a> DbIterator<'a> {
+impl DbIterator {
     pub(crate) async fn new(
         range: BytesRange,
         mem_iter: VecDequeKeyValueIterator,
-        l0_iters: VecDeque<SstIterator<'a>>,
-        sr_iters: VecDeque<SortedRunIterator<'a>>,
+        l0_iters: VecDeque<SstIterator<'static>>,
+        sr_iters: VecDeque<SortedRunIterator<'static>>,
     ) -> Result<Self, SlateDBError> {
         let (l0_iter, sr_iter) =
             tokio::join!(MergeIterator::new(l0_iters), MergeIterator::new(sr_iters),);
