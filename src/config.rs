@@ -340,12 +340,14 @@ fn default_clock() -> Arc<dyn Clock + Send + Sync> {
 /// flush_interval or reaching l0_sst_size_bytes, respectively. If set to Durable, then the
 /// checkpoint includes only writes that were durable at the time of the call. This will be faster,
 /// but may not include data from recent writes.
+#[derive(Debug, Copy, Clone)]
 pub enum CheckpointScope {
     All { force_flush: bool },
     Durable,
 }
 
 /// Specify options to provide when creating a checkpoint.
+#[derive(Debug, Clone)]
 pub struct CheckpointOptions {
     /// Specifies the scope targeted by the checkpoint (see above)
     pub scope: CheckpointScope,

@@ -13,6 +13,7 @@ use std::ops::{Bound, Range};
 use std::sync::Arc;
 use tracing::debug;
 use ulid::Ulid;
+use uuid::Uuid;
 use SsTableId::{Compacted, Wal};
 
 #[derive(Clone, PartialEq, Serialize)]
@@ -255,6 +256,10 @@ impl CoreDbState {
         debug!("{:?}", l0s);
         debug!("{:?}", compacted);
         debug!("-----------------");
+    }
+
+    pub(crate) fn find_checkpoint(&self, checkpoint_id: &Uuid) -> Option<&Checkpoint> {
+        self.checkpoints.iter().find(|c| c.id == *checkpoint_id)
     }
 }
 

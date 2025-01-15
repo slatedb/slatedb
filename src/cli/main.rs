@@ -89,7 +89,7 @@ async fn exec_create_checkpoint(
     lifetime: Option<Duration>,
     source: Option<Uuid>,
 ) -> Result<(), Box<dyn Error>> {
-    let result = Db::create_checkpoint(
+    let result = admin::create_checkpoint(
         path,
         object_store,
         &CheckpointOptions {

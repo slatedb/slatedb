@@ -6,8 +6,7 @@ use tokio::select;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{error, info};
 
-use crate::db::{DbInner, FlushMsg};
-use crate::db_state;
+use crate::db::{DbInner, FlushMsg, FlushSender};
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskShutdown;
@@ -15,17 +14,36 @@ use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
 use crate::types::{RowAttributes, ValueDeletable};
 use crate::utils::spawn_bg_task;
+use crate::{db_state, utils};
 
 #[derive(Debug)]
 pub(crate) enum WalFlushThreadMsg {
     Shutdown,
-    FlushImmutableWals,
+    FlushImmutableWals { force_flush: bool },
+}
+
+struct WalFlusher {
+    db_inner: Arc<DbInner>,
+    flush_waiters: Vec<FlushSender>,
+}
+
+impl WalFlusher {
+    async fn flush(&mut self) -> Result<(), SlateDBError> {
+        self.db_inner.state.write().freeze_wal()?;
+        self.db_inner.flush_imm_wals().await?;
+        self.db_inner.flush().await?;
+        for waiter in self.flush_waiters.drain(..) {
+            let res = waiter.send(Ok(()));
+            if let Err(Err(e)) = res {
+                error!("error sending flush response: {e}");
+            }
+        }
+        Ok(())
+    }
 }
 
 impl DbInner {
     pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
-        self.state.write().freeze_wal()?;
-        self.flush_imm_wals().await?;
         Ok(())
     }
 
@@ -104,6 +122,7 @@ impl DbInner {
         let this = Arc::clone(self);
         async fn core_flush_loop(
             this: &Arc<DbInner>,
+            flusher: &mut WalFlusher,
             rx: &mut UnboundedReceiver<FlushMsg<WalFlushThreadMsg>>,
         ) -> Result<(), SlateDBError> {
             let mut ticker = tokio::time::interval(this.options.flush_interval);
@@ -115,7 +134,7 @@ impl DbInner {
                     }
                     // Tick to freeze and flush the memtable
                     _ = ticker.tick() => {
-                        let result = this.flush().await;
+                        let result = flusher.flush().await;
                         if let Err(err) = result {
                             error!("error from wal flush: {err}");
                             return Err(err);
@@ -129,17 +148,16 @@ impl DbInner {
                                 _ = this.flush().await;
                                 return Ok(())
                             },
-                            WalFlushThreadMsg::FlushImmutableWals => {
-                                let result = this.flush().await;
-                                if let Err(err) = &result {
-                                    error!("error from wal flush: {err}");
-                                    return Err(err.clone());
+                            WalFlushThreadMsg::FlushImmutableWals{ force_flush } => {
+                                if let Some(sender) = rsp_sender {
+                                    flusher.flush_waiters.push(sender);
                                 }
 
-                                if let Some(rsp_sender) = rsp_sender {
-                                    let res = rsp_sender.send(result);
-                                    if let Err(Err(err)) = res {
-                                        error!("error sending flush response: {err}");
+                                if force_flush {
+                                    let result = flusher.flush().await;
+                                    if let Err(err) = &result {
+                                        error!("error from wal flush: {err}");
+                                        return Err(err.clone());
                                     }
                                 }
                             },
@@ -150,16 +168,15 @@ impl DbInner {
         }
 
         let fut = async move {
-            let result = core_flush_loop(&this, &mut rx).await;
+            let mut flusher = WalFlusher {
+                db_inner: this.clone(),
+                flush_waiters: Vec::new(),
+            };
 
-            let pending_result = result.clone().and_then(|_| Err(BackgroundTaskShutdown));
-            while !rx.is_empty() {
-                let (rsp_sender, _) = rx.recv().await.expect("channel unexpectedly closed");
-                if let Some(rsp_sender) = rsp_sender {
-                    let _ = rsp_sender.send(pending_result.clone());
-                }
-            }
-
+            let result = core_flush_loop(&this, &mut flusher, &mut rx).await;
+            let error = result.clone().err().unwrap_or(BackgroundTaskShutdown);
+            utils::close_and_drain_receiver(&mut rx, &error).await;
+            utils::drain_sender_queue(&mut flusher.flush_waiters, &error);
             info!("wal flush thread exiting with {:?}", result);
             result
         };

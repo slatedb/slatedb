@@ -36,11 +36,12 @@ use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
+use crate::checkpoint::CheckpointCreateResult;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
-    DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions, DEFAULT_READ_OPTIONS,
-    DEFAULT_SCAN_OPTIONS, DEFAULT_WRITE_OPTIONS,
+    CheckpointOptions, DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
+    DEFAULT_READ_OPTIONS, DEFAULT_SCAN_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
 use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
@@ -59,9 +60,18 @@ use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowAttributes, ValueDeletable};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
 pub(crate) type FlushMsg<T> = (Option<FlushSender>, T);
+
+pub(crate) type CheckpointSender =
+    tokio::sync::oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>;
+pub(crate) struct CheckpointMsg {
+    pub(crate) id: Uuid,
+    pub(crate) options: CheckpointOptions,
+    pub(crate) sender: CheckpointSender,
+}
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -70,10 +80,12 @@ pub(crate) struct DbInner {
     pub(crate) wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
     pub(crate) memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
+    pub(crate) checkpoint_notifier: UnboundedSender<CheckpointMsg>,
     pub(crate) db_stats: Arc<DbStats>,
 }
 
 impl DbInner {
+    #[allow(clippy::too_many_arguments)] // TODO: Maybe factor out notifiers into a separate struct?
     pub async fn new(
         options: DbOptions,
         table_store: Arc<TableStore>,
@@ -81,6 +93,7 @@ impl DbInner {
         wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
         memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
+        checkpoint_notifier: UnboundedSender<CheckpointMsg>,
         db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let state = DbState::new(core_db_state);
@@ -91,6 +104,7 @@ impl DbInner {
             wal_flush_notifier,
             memtable_flush_notifier,
             write_notifier,
+            checkpoint_notifier,
             db_stats,
         };
         Ok(db_inner)
@@ -405,18 +419,40 @@ impl DbInner {
     }
 
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
+        self.send_flush_wals(true).await
+    }
+
+    async fn await_flush_wals(&self) -> Result<(), SlateDBError> {
+        self.send_flush_wals(false).await
+    }
+
+    async fn send_flush_wals(&self, force_flush: bool) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
-            .send((Some(tx), WalFlushThreadMsg::FlushImmutableWals))
+            .send((
+                Some(tx),
+                WalFlushThreadMsg::FlushImmutableWals { force_flush },
+            ))
             .map_err(|_| SlateDBError::WalFlushChannelError)?;
         rx.await?
     }
 
     // use to manually flush memtables
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
+        self.send_flush_memtables(true).await
+    }
+
+    async fn await_flush_memtables(&self) -> Result<(), SlateDBError> {
+        self.send_flush_memtables(false).await
+    }
+
+    async fn send_flush_memtables(&self, force_flush: bool) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
-            .send((Some(tx), MemtableFlushThreadMsg::FlushImmutableMemtables))
+            .send((
+                Some(tx),
+                MemtableFlushThreadMsg::FlushImmutableMemtables { force_flush },
+            ))
             .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         rx.await?
     }
@@ -544,7 +580,7 @@ impl DbInner {
 }
 
 pub struct Db {
-    inner: Arc<DbInner>,
+    pub(crate) inner: Arc<DbInner>,
     /// The handle for the flush thread.
     wal_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
@@ -721,6 +757,7 @@ impl Db {
 
         let mut manifest = Self::init_db(&manifest_store, latest_manifest).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (checkpoint_tx, checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
         let (wal_flush_tx, wal_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
@@ -731,6 +768,7 @@ impl Db {
                 wal_flush_tx,
                 memtable_flush_tx,
                 write_tx,
+                checkpoint_tx,
                 db_stats,
             )
             .await?,
@@ -745,8 +783,12 @@ impl Db {
         } else {
             None
         };
-        let memtable_flush_task =
-            inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
+        let memtable_flush_task = inner.spawn_memtable_flush_task(
+            manifest,
+            memtable_flush_rx,
+            checkpoint_rx,
+            &tokio_handle,
+        );
         let write_task = inner.spawn_write_task(write_rx, &tokio_handle);
         let mut compactor = None;
         if let Some(compactor_options) = &inner.options.compactor_options {
@@ -1290,6 +1332,14 @@ impl Db {
         }
     }
 
+    pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
+        if self.inner.wal_enabled() {
+            self.inner.await_flush_wals().await
+        } else {
+            self.inner.await_flush_memtables().await
+        }
+    }
+
     pub fn metrics(&self) -> Arc<DbStats> {
         self.inner.db_stats.clone()
     }
@@ -1314,7 +1364,7 @@ mod tests {
     use crate::sst_iter::SstIterator;
     use crate::test_utils::{gen_attrs, TestClock};
 
-    use crate::proptest_util;
+    use crate::{proptest_util, test_utils};
     use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
@@ -1492,17 +1542,6 @@ mod tests {
         }
     }
 
-    async fn seed_database(db: &Db, table: &BTreeMap<Bytes, Bytes>, await_durable: bool) {
-        let put_options = PutOptions::default();
-        let write_options = &WriteOptions { await_durable };
-
-        for (key, value) in table.iter() {
-            db.put_with_options(key, value, &put_options, write_options)
-                .await
-                .unwrap();
-        }
-    }
-
     async fn build_database_from_table(
         table: &BTreeMap<Bytes, Bytes>,
         db_options: DbOptions,
@@ -1513,7 +1552,7 @@ mod tests {
             .await
             .unwrap();
 
-        seed_database(&db, table, false).await;
+        test_utils::seed_database(&db, table, false).await.unwrap();
 
         if await_durable {
             db.flush().await.unwrap();

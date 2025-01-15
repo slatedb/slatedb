@@ -1,15 +1,5 @@
-use std::collections::BTreeMap;
-use std::ops::RangeBounds;
-use std::sync::Arc;
-
-use chrono::Utc;
-use futures::StreamExt;
-use object_store::path::Path;
-use object_store::Error::AlreadyExists;
-use object_store::{Error, ObjectStore};
-use serde::Serialize;
-use tracing::warn;
-
+use crate::checkpoint::Checkpoint;
+use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{InvalidDBState, LatestManifestMissing, ManifestMissing};
@@ -18,6 +8,18 @@ use crate::manifest::{Manifest, ManifestCodec};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
+use chrono::Utc;
+use futures::StreamExt;
+use object_store::path::Path;
+use object_store::Error::AlreadyExists;
+use object_store::{Error, ObjectStore};
+use serde::Serialize;
+use std::collections::BTreeMap;
+use std::ops::RangeBounds;
+use std::sync::Arc;
+use std::time::SystemTime;
+use tracing::warn;
+use uuid::Uuid;
 
 pub(crate) struct FenceableManifest {
     stored_manifest: StoredManifest,
@@ -77,6 +79,10 @@ impl FenceableManifest {
     ) -> Result<(), SlateDBError> {
         self.check_epoch()?;
         self.stored_manifest.update_db_state(db_state).await
+    }
+
+    pub(crate) fn next_manifest_id(&self) -> u64 {
+        self.stored_manifest.id + 1
     }
 
     #[allow(clippy::panic)]
@@ -159,6 +165,58 @@ impl StoredManifest {
         self.manifest = manifest;
         self.id = id;
         Ok(&self.manifest.core)
+    }
+
+    /// Create a new checkpoint from the latest manifest state. This only creates
+    /// the checkpoint struct, but does not persist it in the manifest.
+    fn new_checkpoint(
+        &self,
+        checkpoint_id: Uuid,
+        options: &CheckpointOptions,
+    ) -> Result<Checkpoint, SlateDBError> {
+        let expire_time = options.lifetime.map(|l| SystemTime::now() + l);
+        let db_state = self.db_state();
+        let manifest_id = match options.source {
+            Some(source_checkpoint_id) => {
+                let Some(source_checkpoint) = db_state.find_checkpoint(&source_checkpoint_id)
+                else {
+                    return Err(InvalidDBState);
+                };
+                source_checkpoint.manifest_id
+            }
+            None => {
+                if !db_state.initialized {
+                    return Err(InvalidDBState);
+                }
+                self.id()
+            }
+        };
+        Ok(Checkpoint {
+            id: checkpoint_id,
+            manifest_id,
+            expire_time,
+            create_time: SystemTime::now(),
+        })
+    }
+
+    pub(crate) async fn write_new_checkpoint(
+        &mut self,
+        checkpoint_id: Uuid,
+        options: &CheckpointOptions,
+    ) -> Result<Checkpoint, SlateDBError> {
+        self.maybe_apply_db_state_update(|stored_manifest| {
+            let checkpoint = stored_manifest.new_checkpoint(checkpoint_id, options)?;
+            let mut updated_db_state = stored_manifest.db_state().clone();
+            updated_db_state.checkpoints.push(checkpoint);
+            Ok(Some(updated_db_state))
+        })
+        .await?;
+        let checkpoint = self
+            .db_state()
+            .find_checkpoint(&checkpoint_id)
+            .expect("update applied but checkpoint not found")
+            .clone();
+        Ok(checkpoint)
     }
 
     pub(crate) async fn update_db_state(&mut self, core: CoreDbState) -> Result<(), SlateDBError> {
@@ -269,11 +327,20 @@ impl ManifestStore {
 
     /// Delete a manifest from the object store.
     pub(crate) async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError> {
-        // TODO Once we implement snapshots, we should check if the manifest is snapshotted as well
-        let (active_id, _) = self.read_latest_manifest().await?;
+        let (active_id, manifest) = self.read_latest_manifest().await?;
         if active_id == id {
             return Err(SlateDBError::InvalidDeletion);
         }
+
+        if manifest
+            .core
+            .checkpoints
+            .iter()
+            .any(|ck| ck.manifest_id == id)
+        {
+            return Err(SlateDBError::InvalidDeletion);
+        }
+
         let manifest_path = &self.get_manifest_path(id);
         self.object_store.delete(manifest_path).await?;
         Ok(())
@@ -400,8 +467,10 @@ impl ManifestStore {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
+    use crate::config::CheckpointOptions;
     use crate::db_state::CoreDbState;
     use crate::error;
+    use crate::error::SlateDBError;
     use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -709,5 +778,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(initial_id + 1, sm.id);
+    }
+
+    #[tokio::test]
+    async fn test_deletion_of_manifest_with_checkpoint_reference_not_allowed() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let checkpoint1 = sm
+            .write_new_checkpoint(Uuid::new_v4(), &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        let _ = sm
+            .write_new_checkpoint(Uuid::new_v4(), &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            ms.delete_manifest(checkpoint1.manifest_id).await,
+            Err(SlateDBError::InvalidDeletion)
+        ));
     }
 }

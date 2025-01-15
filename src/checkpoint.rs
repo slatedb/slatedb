@@ -1,5 +1,5 @@
-use crate::config::CheckpointOptions;
-use crate::db::Db;
+use crate::config::{CheckpointOptions, CheckpointScope};
+use crate::db::{CheckpointMsg, Db};
 use crate::error::SlateDBError;
 use crate::manifest_store::{ManifestStore, StoredManifest};
 use object_store::path::Path;
@@ -26,60 +26,31 @@ pub struct CheckpointCreateResult {
 }
 
 impl Db {
-    /// Creates a checkpoint of the db stored in the object store at the specified path using the
-    /// provided options. Note that the scope option does not impact the behaviour of this method.
-    /// The checkpoint will reference the current active manifest of the db.
+    /// Creates a checkpoint of an opened db using the provided options. Returns the ID of the created
+    /// checkpoint and the id of the referenced manifest.
     pub async fn create_checkpoint(
-        path: &Path,
-        object_store: Arc<dyn ObjectStore>,
+        &self,
         options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
-        let manifest_store = Arc::new(ManifestStore::new(path, object_store));
-        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
-        let id = Uuid::new_v4();
-        stored_manifest
-            .maybe_apply_db_state_update(|stored_manifest| {
-                let expire_time = options.lifetime.map(|l| SystemTime::now() + l);
-                let db_state = stored_manifest.db_state();
-                let manifest_id = match options.source {
-                    Some(source_checkpoint_id) => {
-                        let Some(source_checkpoint) = db_state
-                            .checkpoints
-                            .iter()
-                            .find(|c| c.id == source_checkpoint_id)
-                        else {
-                            return Err(SlateDBError::InvalidDBState);
-                        };
-                        source_checkpoint.manifest_id
-                    }
-                    None => {
-                        if !db_state.initialized {
-                            return Err(SlateDBError::InvalidDBState);
-                        }
-                        stored_manifest.id()
-                    }
-                };
-                let checkpoint = Checkpoint {
-                    id,
-                    manifest_id,
-                    expire_time,
-                    create_time: SystemTime::now(),
-                };
-                let mut updated_db_state = db_state.clone();
-                updated_db_state.checkpoints.push(checkpoint);
-                Ok(Some(updated_db_state))
+        if let CheckpointScope::All { force_flush } = options.scope {
+            if force_flush {
+                self.flush().await?;
+            } else {
+                self.await_flush().await?;
+            }
+        }
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .checkpoint_notifier
+            .send(CheckpointMsg {
+                id: Uuid::new_v4(),
+                options: options.clone(),
+                sender: tx,
             })
-            .await?;
-        let checkpoint = stored_manifest
-            .db_state()
-            .checkpoints
-            .iter()
-            .find(|c| c.id == id)
-            .expect("update applied but checkpoint not found");
-        Ok(CheckpointCreateResult {
-            id,
-            manifest_id: checkpoint.manifest_id,
-        })
+            .map_err(|_| SlateDBError::CheckpointChannelError)?;
+
+        rx.await?
     }
 
     /// Refresh the lifetime of an existing checkpoint. Takes the id of an existing checkpoint
@@ -140,10 +111,17 @@ impl Db {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
-    use crate::config::{CheckpointOptions, DbOptions};
+    use crate::config::{CheckpointOptions, CheckpointScope, DbOptions};
     use crate::db::Db;
+    use crate::db_state::SsTableId;
     use crate::error::SlateDBError;
+    use crate::iter::KeyValueIterator;
     use crate::manifest_store::ManifestStore;
+    use crate::proptest_util::{rng, sample};
+    use crate::sst::SsTableFormat;
+    use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::tablestore::TableStore;
+    use crate::{admin, test_utils};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -165,7 +143,7 @@ mod tests {
         let CheckpointCreateResult {
             id: checkpoint_id,
             manifest_id: checkpoint_manifest_id,
-        } = Db::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
+        } = admin::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -196,7 +174,7 @@ mod tests {
         let CheckpointCreateResult {
             id: checkpoint_id,
             manifest_id: _,
-        } = Db::create_checkpoint(
+        } = admin::create_checkpoint(
             &path,
             object_store.clone(),
             &CheckpointOptions {
@@ -232,14 +210,14 @@ mod tests {
         let CheckpointCreateResult {
             id: source_checkpoint_id,
             manifest_id: source_checkpoint_manifest_id,
-        } = Db::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
+        } = admin::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
             .await
             .unwrap();
 
         let CheckpointCreateResult {
             id: _,
             manifest_id: checkpoint_manifest_id,
-        } = Db::create_checkpoint(
+        } = admin::create_checkpoint(
             &path,
             object_store.clone(),
             &CheckpointOptions {
@@ -262,7 +240,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = Db::create_checkpoint(
+        let result = admin::create_checkpoint(
             &path,
             object_store.clone(),
             &CheckpointOptions {
@@ -282,7 +260,8 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
 
         let result =
-            Db::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default()).await;
+            admin::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
+                .await;
 
         assert!(result.is_err());
         assert!(matches!(
@@ -298,7 +277,7 @@ mod tests {
         let _ = Db::open_with_opts(path.clone(), DbOptions::default(), object_store.clone())
             .await
             .unwrap();
-        let CheckpointCreateResult { id, manifest_id: _ } = Db::create_checkpoint(
+        let CheckpointCreateResult { id, manifest_id: _ } = admin::create_checkpoint(
             &path,
             object_store.clone(),
             &CheckpointOptions {
@@ -366,7 +345,7 @@ mod tests {
             .await
             .unwrap();
         let CheckpointCreateResult { id, manifest_id: _ } =
-            Db::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
+            admin::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
                 .await
                 .unwrap();
 
@@ -377,5 +356,70 @@ mod tests {
         let manifest_store = ManifestStore::new(&path, object_store.clone());
         let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         assert!(!manifest.core.checkpoints.iter().any(|c| c.id == id));
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_scope_with_force_flush() {
+        test_checkpoint_scope_all(true).await;
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_scope_with_no_force_flush() {
+        test_checkpoint_scope_all(false).await;
+    }
+
+    async fn test_checkpoint_scope_all(force_flush: bool) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let db_options = DbOptions {
+            flush_interval: Duration::from_millis(100),
+            ..DbOptions::default()
+        };
+        let db = Db::open_with_opts(path.clone(), db_options, Arc::clone(&object_store))
+            .await
+            .unwrap();
+
+        let mut rng = rng::new_test_rng(None);
+        let table = sample::table(&mut rng, 1000, 10);
+        test_utils::seed_database(&db, &table, false).await.unwrap();
+
+        let checkpoint_options = CheckpointOptions {
+            scope: CheckpointScope::All { force_flush },
+            ..CheckpointOptions::default()
+        };
+
+        let checkpoint = db.create_checkpoint(&checkpoint_options).await.unwrap();
+
+        let table_store = Arc::new(TableStore::new(
+            Arc::clone(&object_store),
+            SsTableFormat::default(),
+            path.clone(),
+            None,
+        ));
+
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
+        let manifest = manifest_store
+            .read_manifest(checkpoint.manifest_id)
+            .await
+            .unwrap();
+
+        let last_checkpoint_wal_id = manifest.core.next_wal_sst_id - 1;
+        let last_checkpoint_wal = table_store
+            .open_sst(&SsTableId::Wal(last_checkpoint_wal_id))
+            .await
+            .unwrap();
+
+        let last_kv = table.last_key_value().unwrap();
+        let mut wal_iter = SstIterator::for_key(
+            &last_checkpoint_wal,
+            last_kv.0,
+            Arc::clone(&table_store),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let wal_entry = wal_iter.next().await.unwrap().unwrap();
+        assert_eq!(*last_kv.1, wal_entry.value)
     }
 }

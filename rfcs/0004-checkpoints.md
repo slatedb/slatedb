@@ -208,15 +208,6 @@ impl Db {
         …
     }
 
-    /// Creates a checkpoint of the db stored in the object store at the specified path using the provided options.
-    /// Note that the scope option does not impact the behaviour of this method. The checkpoint will reference
-    /// the current active manifest of the db.
-    pub async fn create_checkpoint(
-       path: &Path,
-       object_store: Arc<dyn ObjectStore>,
-       options: &CheckpointOptions,
-    ) -> Result<CheckpointCreateResult, SlateDBError> {}
-
     /// Refresh the lifetime of an existing checkpoint. Takes the id of an existing checkpoint
     /// and a lifetime, and sets the lifetime of the checkpoint to the specified lifetime. If
     /// there is no checkpoint with the specified id, then this fn fails with
@@ -245,6 +236,17 @@ impl Db {
    pub async fn destroy(path: Path, object_store: Arc<dyn ObjectStore>, soft: bool) -> Result<(), SlateDbError> {
        …
    }
+}
+
+mod admin {
+    /// Creates a checkpoint of the db stored in the object store at the specified path using the provided options.
+    /// Note that the scope option does not impact the behaviour of this method. The checkpoint will reference
+    /// the current active manifest of the db.
+    pub async fn create_checkpoint(
+        path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        options: &CheckpointOptions,
+    ) -> Result<CheckpointCreateResult, SlateDBError> {}    
 }
 
 /// Configuration options for the database reader. These options are set on client startup.

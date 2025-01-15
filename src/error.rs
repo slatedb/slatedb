@@ -2,6 +2,7 @@ use std::any::Any;
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
+use uuid::Uuid;
 
 #[derive(Clone, Debug, Error)]
 pub enum SlateDBError {
@@ -79,13 +80,16 @@ pub enum SlateDBError {
     #[error("Error flushing memtables: channel closed")]
     MemtableFlushChannelError,
 
+    #[error("Error creating checkpoint: channel closed")]
+    CheckpointChannelError,
+
     #[error("Read channel error: {0}")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
 
     #[error("Iterator invalidated after unexpected error {0}")]
     InvalidatedIterator(#[from] Box<SlateDBError>),
 
-    #[error("Invalid Argument")]
+    #[error("Invalid argument: {msg}")]
     InvalidArgument { msg: String },
 
     #[error("background task panic'd")]
@@ -95,6 +99,9 @@ pub enum SlateDBError {
 
     #[error("background task shutdown")]
     BackgroundTaskShutdown,
+
+    #[error("Checkpoint {0} missing")]
+    CheckpointMissing(Uuid),
 }
 
 impl From<std::io::Error> for SlateDBError {

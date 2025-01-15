@@ -1,7 +1,8 @@
-use crate::checkpoint::Checkpoint;
-use crate::config::GarbageCollectorOptions;
+use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
+use crate::config::{CheckpointOptions, GarbageCollectorOptions};
+use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
-use crate::manifest_store::ManifestStore;
+use crate::manifest_store::{ManifestStore, StoredManifest};
 use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
@@ -13,6 +14,7 @@ use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use tokio::runtime::Handle;
+use uuid::Uuid;
 
 /// read-only access to the latest manifest file
 pub async fn read_manifest(
@@ -209,6 +211,24 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
         .with_access_key(key)
         .with_container_name(container);
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
+}
+
+/// Creates a checkpoint of the db stored in the object store at the specified path using the
+/// provided options. Note that the scope option does not impact the behaviour of this method.
+/// The checkpoint will reference the current active manifest of the db.
+pub async fn create_checkpoint(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    options: &CheckpointOptions,
+) -> Result<CheckpointCreateResult, SlateDBError> {
+    let manifest_store = Arc::new(ManifestStore::new(path, object_store));
+    let mut stored_manifest = StoredManifest::load(manifest_store).await?;
+    let id = Uuid::new_v4();
+    let checkpoint = stored_manifest.write_new_checkpoint(id, options).await?;
+    Ok(CheckpointCreateResult {
+        id,
+        manifest_id: checkpoint.manifest_id,
+    })
 }
 
 #[cfg(test)]
