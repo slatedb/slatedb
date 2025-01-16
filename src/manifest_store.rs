@@ -251,7 +251,6 @@ impl ManifestStore {
         id: u64,
         manifest: &Manifest,
     ) -> Result<(), SlateDBError> {
-        println!("{:?}", manifest);
         let manifest_path = &self.get_manifest_path(id);
 
         self.object_store
