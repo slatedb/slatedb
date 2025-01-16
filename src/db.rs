@@ -2918,7 +2918,9 @@ mod tests {
             path.clone(),
             test_db_options_with_clock(0, 1024, None, clock.clone()),
             Arc::clone(&object_store),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         assert_eq!(db.inner.mono_clock.last_tick.load(Ordering::SeqCst), 11);
     }
@@ -2934,8 +2936,8 @@ mod tests {
             test_db_options_with_clock(0, 32, None, clock.clone()),
             Arc::clone(&object_store),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         // this will exceed the l0_sst_size_bytes, meaning a clean shutdown
         // will update the manifest
