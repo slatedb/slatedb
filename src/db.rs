@@ -2571,6 +2571,50 @@ mod tests {
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
     }
 
+    #[tokio::test]
+    async fn test_wal_id_last_seen_should_exist_even_if_wal_write_fails() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let db = Arc::new(
+            Db::open_with_fp_registry(
+                path.clone(),
+                test_db_options(0, 128, None),
+                object_store.clone(),
+                fp_registry.clone(),
+            )
+            .await
+            .unwrap(),
+        );
+
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
+
+        // Trigger a WAL write, which should not advance the manifest WAL ID
+        let result = db.put(b"foo", b"bar").await;
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
+
+        // Close, which flushes the latest manifest to the object store
+        db.close().await.unwrap();
+
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
+        let table_store = Arc::new(TableStore::new(
+            object_store.clone(),
+            SsTableFormat::default(),
+            path.clone(),
+            None,
+        ));
+
+        // Get the next WAL SST ID based on what's currently in the object store
+        let next_wal_sst_id = table_store.next_wal_sst_id(0).await.unwrap();
+
+        // Get the latest manifest
+        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+
+        // The manifest's next_wal_sst_id, which uses `wal_id_last_seen + 1`, should
+        // be the same as the next WAL SST ID based on what's currently in the object store
+        assert_eq!(manifest.core.next_wal_sst_id, next_wal_sst_id);
+    }
+
     async fn do_test_should_read_compacted_db(options: DbOptions) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
