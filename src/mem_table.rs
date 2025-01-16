@@ -135,9 +135,7 @@ impl ImmutableMemtable {
 
 impl ImmutableWal {
     pub(crate) fn new(table: WritableKVTable) -> Self {
-        Self {
-            table: table.table,
-        }
+        Self { table: table.table }
     }
 
     pub(crate) fn table(&self) -> Arc<KVTable> {

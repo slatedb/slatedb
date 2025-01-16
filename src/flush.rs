@@ -45,7 +45,11 @@ impl DbInner {
         Ok(handle)
     }
 
-    async fn flush_imm_wal(&self, id: u64, imm: Arc<ImmutableWal>) -> Result<SsTableHandle, SlateDBError> {
+    async fn flush_imm_wal(
+        &self,
+        id: u64,
+        imm: Arc<ImmutableWal>,
+    ) -> Result<SsTableHandle, SlateDBError> {
         let wal_id = db_state::SsTableId::Wal(id);
         self.flush_imm_table(&wal_id, imm.table()).await
     }
@@ -84,7 +88,11 @@ impl DbInner {
         while let Some((imm, id)) = {
             let rguard = self.state.read();
             let state = rguard.state();
-            state.imm_wal.back().cloned().map(|imm| (imm, state.core.next_wal_sst_id))
+            state
+                .imm_wal
+                .back()
+                .cloned()
+                .map(|imm| (imm, state.core.next_wal_sst_id))
         } {
             self.flush_imm_wal(id, imm.clone()).await?;
             let mut wguard = self.state.write();
