@@ -225,6 +225,9 @@ pub(crate) struct CoreDbState {
     pub(crate) compacted: Vec<SortedRun>,
     pub(crate) next_wal_sst_id: u64,
     pub(crate) last_compacted_wal_sst_id: u64,
+    /// the `last_clock_tick` includes all data in L0 and below --
+    /// WAL entries will have their latest ticks recovered on replay
+    /// into the in-memory state
     pub(crate) last_clock_tick: i64,
     pub(crate) checkpoints: Vec<Checkpoint>,
 }
@@ -371,6 +374,7 @@ impl DbState {
         assert!(Arc::ptr_eq(&popped, &imm_memtable));
         state.core.l0.push_front(sst_handle);
         state.core.last_compacted_wal_sst_id = imm_memtable.last_wal_id();
+        state.core.last_clock_tick = imm_memtable.table().last_tick();
         self.update_state(state);
     }
 

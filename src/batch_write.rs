@@ -52,12 +52,11 @@ pub(crate) struct WriteBatchRequest {
 impl DbInner {
     #[allow(clippy::panic)]
     async fn write_batch(&self, batch: WriteBatch) -> Result<Arc<KVTable>, SlateDBError> {
-        let now = self.options.clock.now();
+        let now = self.mono_clock.now()?;
 
         let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
 
-            guard.update_clock_tick(now)?;
             let current_wal = guard.wal();
             for op in batch.ops {
                 match op {

@@ -19,6 +19,8 @@
 //!     Ok(())
 //! }
 //! ```
+
+use std::cmp;
 use std::collections::VecDeque;
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -58,6 +60,7 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowAttributes, ValueDeletable};
+use crate::utils::MonotonicClock;
 use tracing::{info, warn};
 
 pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
@@ -71,6 +74,7 @@ pub(crate) struct DbInner {
     pub(crate) memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: Arc<DbStats>,
+    pub(crate) mono_clock: Arc<MonotonicClock>,
 }
 
 impl DbInner {
@@ -83,6 +87,10 @@ impl DbInner {
         write_notifier: UnboundedSender<WriteBatchMsg>,
         db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
+        let mono_clock = Arc::new(MonotonicClock::new(
+            options.clock.clone(),
+            core_db_state.last_clock_tick,
+        ));
         let state = DbState::new(core_db_state);
         let db_inner = Self {
             state: Arc::new(RwLock::new(state)),
@@ -92,6 +100,7 @@ impl DbInner {
             memtable_flush_notifier,
             write_notifier,
             db_stats,
+            mono_clock,
         };
         Ok(db_inner)
     }
@@ -461,6 +470,7 @@ impl DbInner {
             .map(|wal_sst| wal_sst.id.unwrap_wal_id())
             .collect::<Vec<_>>();
         let mut last_sst_id = wal_id_last_compacted;
+        let mut last_tick = self.state.read().state().core.last_clock_tick;
         let sst_batch_size = 4;
 
         let mut remaining_sst_list = Vec::new();
@@ -489,6 +499,7 @@ impl DbInner {
                 for kv in wal_replay_buf.iter() {
                     if let Some(ts) = kv.create_ts {
                         guard.update_clock_tick(ts)?;
+                        last_tick = cmp::max(last_tick, ts);
                     }
 
                     match &kv.value {
@@ -525,6 +536,8 @@ impl DbInner {
                 sst_iterators.push_back(load_sst_iters(self, *sst_id).await?);
             }
         }
+
+        self.mono_clock.set_last_tick(last_tick)?;
 
         // assert that we didn't have any gaps in the wal
         assert_eq!(
@@ -2864,6 +2877,124 @@ mod tests {
             BytesRange::from(..),
         )
         .await
+    }
+
+    async fn test_recover_clock_tick_from_wal() {
+        let clock = Arc::new(TestClock::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+
+        let db = Db::open_with_opts(
+            path.clone(),
+            test_db_options_with_clock(0, 1024, None, clock.clone()),
+            Arc::clone(&object_store),
+        )
+        .await
+        .unwrap();
+
+        clock.ticker.store(10, Ordering::SeqCst);
+        db.put(&[b'a'; 4], &[b'j'; 8])
+            .await
+            .expect("write batch failed");
+        clock.ticker.store(11, Ordering::SeqCst);
+        db.put(&[b'b'; 4], &[b'k'; 8])
+            .await
+            .expect("write batch failed");
+
+        // close the db to flush the manifest
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        // check the last_clock_tick persisted in the manifest, it should be
+        // i64::MIN because no WAL SST has yet made its way into L0
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        let db_state = stored_manifest.db_state();
+        let last_clock_tick = db_state.last_clock_tick;
+        assert_eq!(last_clock_tick, i64::MIN);
+
+        let clock = Arc::new(TestClock::new());
+        let db = Db::open_with_opts(
+            path.clone(),
+            test_db_options_with_clock(0, 1024, None, clock.clone()),
+            Arc::clone(&object_store),
+        ).await.unwrap();
+
+        assert_eq!(db.inner.mono_clock.last_tick.load(Ordering::SeqCst), 11);
+    }
+
+    #[tokio::test]
+    async fn test_should_update_manifest_clock_tick_on_l0_flush() {
+        let clock = Arc::new(TestClock::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+
+        let db = Db::open_with_opts(
+            path.clone(),
+            test_db_options_with_clock(0, 32, None, clock.clone()),
+            Arc::clone(&object_store),
+        )
+            .await
+            .unwrap();
+
+        // this will exceed the l0_sst_size_bytes, meaning a clean shutdown
+        // will update the manifest
+        clock.ticker.store(10, Ordering::SeqCst);
+        db.put(&[b'a'; 4], &[b'j'; 8])
+            .await
+            .expect("write batch failed");
+        clock.ticker.store(11, Ordering::SeqCst);
+        db.put(&[b'b'; 4], &[b'k'; 8])
+            .await
+            .expect("write batch failed");
+
+        // close the db to flush the manifest
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        // check the last_clock_tick persisted in the manifest, it should be
+        // i64::MIN because no WAL SST has yet made its way into L0
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        let db_state = stored_manifest.db_state();
+        let last_clock_tick = db_state.last_clock_tick;
+        assert_eq!(last_clock_tick, 11);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_recover_clock_tick_from_manifest() {
+        let clock = Arc::new(TestClock::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let mut options = test_db_options_with_clock(0, 32, None, clock.clone());
+        options.wal_enabled = false;
+
+        let db = Db::open_with_opts(path.clone(), options, Arc::clone(&object_store))
+            .await
+            .unwrap();
+
+        clock.ticker.store(10, Ordering::SeqCst);
+        db.put(&[b'a'; 4], &[b'j'; 28])
+            .await
+            .expect("write batch failed");
+        clock.ticker.store(11, Ordering::SeqCst);
+        db.put(&[b'b'; 4], &[b'k'; 28])
+            .await
+            .expect("write batch failed");
+
+        // close the db to flush the manifest
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        let clock = Arc::new(TestClock::new());
+        let mut options = test_db_options_with_clock(0, 32, None, clock.clone());
+        options.wal_enabled = false;
+        let db = Db::open_with_opts(path.clone(), options, Arc::clone(&object_store))
+            .await
+            .unwrap();
+
+        assert_eq!(db.inner.mono_clock.last_tick.load(Ordering::SeqCst), 11);
     }
 
     async fn wait_for_manifest_condition(
