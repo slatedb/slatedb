@@ -423,6 +423,9 @@ impl DbInner {
 
     fn freeze_memtable(&self) -> Result<(), SlateDBError> {
         let mut guard = self.state.write();
+        if guard.memtable().is_empty() {
+            return Ok(());
+        }
         let wal_id = guard.last_written_wal_id();
         guard.freeze_memtable(wal_id)
     }
@@ -498,7 +501,6 @@ impl DbInner {
                 let mut guard = self.state.write();
                 for kv in wal_replay_buf.iter() {
                     if let Some(ts) = kv.create_ts {
-                        guard.update_clock_tick(ts)?;
                         last_tick = cmp::max(last_tick, ts);
                     }
 
@@ -2879,6 +2881,7 @@ mod tests {
         .await
     }
 
+    #[tokio::test]
     async fn test_recover_clock_tick_from_wal() {
         let clock = Arc::new(TestClock::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());

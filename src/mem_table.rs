@@ -177,6 +177,10 @@ impl WritableKVTable {
     pub(crate) fn size(&self) -> usize {
         self.table.size()
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.size() == 0
+    }
 }
 
 impl KVTable {
