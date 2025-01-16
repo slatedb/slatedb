@@ -437,6 +437,12 @@ impl DbInner {
         rx.await?
     }
 
+    fn freeze_memtable(&self) -> Result<(), SlateDBError> {
+        let mut guard = self.state.write();
+        let wal_id = guard.last_written_wal_id();
+        guard.freeze_memtable(wal_id)
+    }
+
     // use to manually flush memtables
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         self.send_flush_memtables(true).await
@@ -1340,6 +1346,7 @@ impl Db {
         if self.inner.wal_enabled() {
             self.inner.flush_wals().await
         } else {
+            self.inner.freeze_memtable()?;
             self.inner.flush_memtables().await
         }
     }
@@ -2870,6 +2877,44 @@ mod tests {
                 e.to_string()
             ),
         }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn should_flush_all_memtables_when_wal_disabled() {
+        // Given:
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+
+        let db_options = DbOptions {
+            wal_enabled: false,
+            flush_interval: Duration::from_secs(10),
+            ..DbOptions::default()
+        };
+
+        let db = Db::open_with_opts(path.clone(), db_options.clone(), Arc::clone(&object_store))
+            .await
+            .unwrap();
+
+        let mut rng = proptest_util::rng::new_test_rng(None);
+        let table = sample::table(&mut rng, 1000, 5);
+        seed_database(&db, &table, false).await;
+        db.flush().await.unwrap();
+
+        // When: reopen the database without closing the old instance
+        let reopened_db =
+            Db::open_with_opts(path.clone(), db_options.clone(), Arc::clone(&object_store))
+                .await
+                .unwrap();
+
+        // Then:
+        assert_records_in_range(
+            &table,
+            &reopened_db,
+            &ScanOptions::default(),
+            BytesRange::from(..),
+        )
+        .await
     }
 
     async fn wait_for_manifest_condition(
