@@ -6,11 +6,11 @@ table Uuid {
 }
 
 table DbParent {
-   // Optional path to a parent database from which this database was cloned
-   parent_path: string (required);
+   // Path to the parent database from which this database was cloned
+   path: string (required);
 
-   // Optional parent checkpoint ID
-   parent_checkpoint: Uuid (required);
+   // Parent checkpoint ID that this clone was derived from
+   checkpoint: Uuid (required);
 }
 
 // Manifest to persist state of DB.

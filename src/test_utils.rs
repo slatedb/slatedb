@@ -6,9 +6,9 @@ use crate::types::{KeyValue, RowAttributes, RowEntry};
 use bytes::Bytes;
 use rand::Rng;
 use std::collections::BTreeMap;
-use std::ops::RangeBounds;
 use std::ops::Bound;
 use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.

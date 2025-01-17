@@ -948,8 +948,8 @@ impl<'a> flatbuffers::Follow<'a> for DbParent<'a> {
 }
 
 impl<'a> DbParent<'a> {
-  pub const VT_PARENT_PATH: flatbuffers::VOffsetT = 4;
-  pub const VT_PARENT_CHECKPOINT: flatbuffers::VOffsetT = 6;
+  pub const VT_PATH: flatbuffers::VOffsetT = 4;
+  pub const VT_CHECKPOINT: flatbuffers::VOffsetT = 6;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -961,25 +961,25 @@ impl<'a> DbParent<'a> {
     args: &'args DbParentArgs<'args>
   ) -> flatbuffers::WIPOffset<DbParent<'bldr>> {
     let mut builder = DbParentBuilder::new(_fbb);
-    if let Some(x) = args.parent_checkpoint { builder.add_parent_checkpoint(x); }
-    if let Some(x) = args.parent_path { builder.add_parent_path(x); }
+    if let Some(x) = args.checkpoint { builder.add_checkpoint(x); }
+    if let Some(x) = args.path { builder.add_path(x); }
     builder.finish()
   }
 
 
   #[inline]
-  pub fn parent_path(&self) -> &'a str {
+  pub fn path(&self) -> &'a str {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(DbParent::VT_PARENT_PATH, None).unwrap()}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(DbParent::VT_PATH, None).unwrap()}
   }
   #[inline]
-  pub fn parent_checkpoint(&self) -> Uuid<'a> {
+  pub fn checkpoint(&self) -> Uuid<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Uuid>>(DbParent::VT_PARENT_CHECKPOINT, None).unwrap()}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Uuid>>(DbParent::VT_CHECKPOINT, None).unwrap()}
   }
 }
 
@@ -990,22 +990,22 @@ impl flatbuffers::Verifiable for DbParent<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("parent_path", Self::VT_PARENT_PATH, true)?
-     .visit_field::<flatbuffers::ForwardsUOffset<Uuid>>("parent_checkpoint", Self::VT_PARENT_CHECKPOINT, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("path", Self::VT_PATH, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<Uuid>>("checkpoint", Self::VT_CHECKPOINT, true)?
      .finish();
     Ok(())
   }
 }
 pub struct DbParentArgs<'a> {
-    pub parent_path: Option<flatbuffers::WIPOffset<&'a str>>,
-    pub parent_checkpoint: Option<flatbuffers::WIPOffset<Uuid<'a>>>,
+    pub path: Option<flatbuffers::WIPOffset<&'a str>>,
+    pub checkpoint: Option<flatbuffers::WIPOffset<Uuid<'a>>>,
 }
 impl<'a> Default for DbParentArgs<'a> {
   #[inline]
   fn default() -> Self {
     DbParentArgs {
-      parent_path: None, // required field
-      parent_checkpoint: None, // required field
+      path: None, // required field
+      checkpoint: None, // required field
     }
   }
 }
@@ -1016,12 +1016,12 @@ pub struct DbParentBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
 }
 impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> DbParentBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_parent_path(&mut self, parent_path: flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(DbParent::VT_PARENT_PATH, parent_path);
+  pub fn add_path(&mut self, path: flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(DbParent::VT_PATH, path);
   }
   #[inline]
-  pub fn add_parent_checkpoint(&mut self, parent_checkpoint: flatbuffers::WIPOffset<Uuid<'b >>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Uuid>>(DbParent::VT_PARENT_CHECKPOINT, parent_checkpoint);
+  pub fn add_checkpoint(&mut self, checkpoint: flatbuffers::WIPOffset<Uuid<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Uuid>>(DbParent::VT_CHECKPOINT, checkpoint);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> DbParentBuilder<'a, 'b, A> {
@@ -1034,8 +1034,8 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> DbParentBuilder<'a, 'b, A> {
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<DbParent<'a>> {
     let o = self.fbb_.end_table(self.start_);
-    self.fbb_.required(o, DbParent::VT_PARENT_PATH,"parent_path");
-    self.fbb_.required(o, DbParent::VT_PARENT_CHECKPOINT,"parent_checkpoint");
+    self.fbb_.required(o, DbParent::VT_PATH,"path");
+    self.fbb_.required(o, DbParent::VT_CHECKPOINT,"checkpoint");
     flatbuffers::WIPOffset::new(o.value())
   }
 }
@@ -1043,8 +1043,8 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> DbParentBuilder<'a, 'b, A> {
 impl core::fmt::Debug for DbParent<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut ds = f.debug_struct("DbParent");
-      ds.field("parent_path", &self.parent_path());
-      ds.field("parent_checkpoint", &self.parent_checkpoint());
+      ds.field("path", &self.path());
+      ds.field("checkpoint", &self.checkpoint());
       ds.finish()
   }
 }
