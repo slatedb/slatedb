@@ -1,9 +1,8 @@
 use bytes::Bytes;
 use std::cmp::min;
 use std::collections::VecDeque;
-use std::marker::PhantomData;
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::ops::RangeBounds;
+use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
@@ -22,25 +21,173 @@ enum FetchTask {
     Finished(VecDeque<Arc<Block>>),
 }
 
-pub(crate) struct SstIterator<'a, H: AsRef<SsTableHandle> = &'a SsTableHandle> {
-    // We use a trait bound `H` here instead of the concrete type `SstTableHandle` to
-    // make it easier for the users of this API to pass table handles wrapped in
-    // smart pointers thereby making it easier to workaround some lifetime constraints.
-    // An example of this can be found in `DbInner::replay_wal`.
-    table: H,
-    index: Arc<SsTableIndexOwned>,
-    current_iter: Option<BlockIterator<Arc<Block>>>,
-    range: BytesRange,
-    next_block_idx_to_fetch: usize,
-    fetch_tasks: VecDeque<FetchTask>,
-    max_fetch_tasks: usize,
-    blocks_to_fetch: usize,
-    table_store: Arc<TableStore>,
-    cache_blocks: bool,
-    _marker: PhantomData<&'a H>,
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct SstIteratorOptions {
+    pub(crate) max_fetch_tasks: usize,
+    pub(crate) blocks_to_fetch: usize,
+    pub(crate) cache_blocks: bool,
+    pub(crate) eager_spawn: bool,
 }
 
-impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
+impl Default for SstIteratorOptions {
+    fn default() -> Self {
+        SstIteratorOptions {
+            max_fetch_tasks: 1,
+            blocks_to_fetch: 1,
+            cache_blocks: true,
+            eager_spawn: false,
+        }
+    }
+}
+
+/// This enum encapsulates access to an SST and corresponding ownership requirements.
+/// For example, [`SstView::Owned`] allows the table handle to be owned, which is
+/// needed for [`crate::db::Db::scan`] since it returns the iterator, while [`SstView::Borrowed`]
+/// accommodates access by reference which is useful for [`crate::db::Db::get`].
+pub(crate) enum SstView<'a> {
+    Owned(SsTableHandle, BytesRange),
+    Borrowed(&'a SsTableHandle, (Bound<&'a [u8]>, Bound<&'a [u8]>)),
+}
+
+impl SstView<'_> {
+    fn start_key(&self) -> Bound<&[u8]> {
+        match self {
+            SstView::Owned(_, r) => r.start_bound().map(|b| b.as_ref()),
+            SstView::Borrowed(_, (start, _)) => *start,
+        }
+    }
+
+    fn end_key(&self) -> Bound<&[u8]> {
+        match self {
+            SstView::Owned(_, r) => r.end_bound().map(|b| b.as_ref()),
+            SstView::Borrowed(_, (_, end)) => *end,
+        }
+    }
+
+    fn table_as_ref(&self) -> &SsTableHandle {
+        match self {
+            SstView::Owned(t, _) => t,
+            SstView::Borrowed(t, _) => t,
+        }
+    }
+
+    /// Check whether a key is contained within this view.
+    fn contains(&self, key: &[u8]) -> bool {
+        match self {
+            SstView::Owned(_, r) => r.contains(key),
+            SstView::Borrowed(_, r) => {
+                <(Bound<&[u8]>, Bound<&[u8]>) as RangeBounds<[u8]>>::contains::<[u8]>(r, key)
+            }
+        }
+    }
+
+    /// Check whether a key exceeds the range of this view.
+    fn key_exceeds(&self, key: &[u8]) -> bool {
+        match self.end_key() {
+            Included(end) => key > end,
+            Excluded(end) => key >= end,
+            Unbounded => false,
+        }
+    }
+}
+
+struct IteratorState {
+    initialized: bool,
+    current_iter: Option<BlockIterator<Arc<Block>>>,
+}
+
+impl IteratorState {
+    fn new() -> Self {
+        Self {
+            initialized: false,
+            current_iter: None,
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.initialized && self.current_iter.is_none()
+    }
+
+    fn advance(&mut self, iterator: BlockIterator<Arc<Block>>) {
+        self.initialized = true;
+        self.current_iter = Some(iterator);
+    }
+
+    fn stop(&mut self) {
+        self.initialized = true;
+        self.current_iter = None;
+    }
+}
+
+pub(crate) struct SstIterator<'a> {
+    view: SstView<'a>,
+    index: Arc<SsTableIndexOwned>,
+    state: IteratorState,
+    next_block_idx_to_fetch: usize,
+    block_idx_range: Range<usize>,
+    fetch_tasks: VecDeque<FetchTask>,
+    table_store: Arc<TableStore>,
+    options: SstIteratorOptions,
+}
+
+impl<'a> SstIterator<'a> {
+    pub(crate) async fn new(
+        view: SstView<'a>,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Self, SlateDBError> {
+        assert!(options.max_fetch_tasks > 0);
+        assert!(options.blocks_to_fetch > 0);
+        let index = table_store.read_index(view.table_as_ref()).await?;
+        let block_idx_range = SstIterator::blocks_covering_view(&index.borrow(), &view);
+
+        let mut iter = Self {
+            view,
+            index,
+            state: IteratorState::new(),
+            next_block_idx_to_fetch: block_idx_range.start,
+            block_idx_range,
+            fetch_tasks: VecDeque::new(),
+            table_store,
+            options,
+        };
+
+        if options.eager_spawn {
+            iter.spawn_fetches();
+        }
+        Ok(iter)
+    }
+
+    pub(crate) async fn new_owned<T: RangeBounds<Bytes>>(
+        range: T,
+        table: SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Self, SlateDBError> {
+        let view = SstView::Owned(table, BytesRange::from(range));
+        Self::new(view, table_store.clone(), options).await
+    }
+
+    pub(crate) async fn new_borrowed<T: RangeBounds<&'a [u8]>>(
+        range: T,
+        table: &'a SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Self, SlateDBError> {
+        let bounds = (range.start_bound().cloned(), range.end_bound().cloned());
+        let view = SstView::Borrowed(table, bounds);
+        Self::new(view, table_store.clone(), options).await
+    }
+
+    pub(crate) async fn for_key(
+        table: &'a SsTableHandle,
+        key: &'a [u8],
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Self, SlateDBError> {
+        Self::new_borrowed(key..=key, table, table_store, options).await
+    }
+
     fn first_block_with_data_including_or_after_key(index: &SsTableIndex, key: &[u8]) -> usize {
         // search for the block that could contain the key.
         let mut low = 0;
@@ -69,117 +216,45 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
         found_block_id
     }
 
-    pub(crate) async fn new_from_key(
-        table: H,
-        table_store: Arc<TableStore>,
-        from_key: Bytes,
-        max_fetch_tasks: usize,
-        blocks_to_fetch: usize,
-        cache_blocks: bool,
-    ) -> Result<Self, SlateDBError> {
-        Self::new_opts(
-            table,
-            BytesRange::from(from_key..),
-            table_store,
-            max_fetch_tasks,
-            blocks_to_fetch,
-            false,
-            cache_blocks,
-        )
-        .await
-    }
-
-    pub(crate) async fn new_spawn(
-        table: H,
-        table_store: Arc<TableStore>,
-        max_fetch_tasks: usize,
-        blocks_to_fetch: usize,
-        cache_blocks: bool,
-    ) -> Result<Self, SlateDBError> {
-        Self::new_opts(
-            table,
-            BytesRange::from(..),
-            table_store,
-            max_fetch_tasks,
-            blocks_to_fetch,
-            true,
-            cache_blocks,
-        )
-        .await
-    }
-
-    pub(crate) async fn new(
-        table: H,
-        table_store: Arc<TableStore>,
-        max_fetch_tasks: usize,
-        blocks_to_fetch: usize,
-        cache_blocks: bool,
-    ) -> Result<Self, SlateDBError> {
-        Self::new_opts(
-            table,
-            BytesRange::from(..),
-            table_store,
-            max_fetch_tasks,
-            blocks_to_fetch,
-            false,
-            cache_blocks,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn new_opts(
-        table: H,
-        range: BytesRange,
-        table_store: Arc<TableStore>,
-        max_fetch_tasks: usize,
-        blocks_to_fetch: usize,
-        spawn: bool,
-        cache_blocks: bool,
-    ) -> Result<Self, SlateDBError> {
-        assert!(max_fetch_tasks > 0);
-        assert!(blocks_to_fetch > 0);
-        let index = table_store.read_index(table.as_ref()).await?;
-        let next_block_idx_to_fetch = match range.start_bound() {
-            Unbounded => 0,
+    fn blocks_covering_view(index: &SsTableIndex, view: &SstView) -> Range<usize> {
+        let start_block_id = match view.start_key() {
             Included(k) | Excluded(k) => {
-                Self::first_block_with_data_including_or_after_key(&index.borrow(), k.as_ref())
+                Self::first_block_with_data_including_or_after_key(index, k)
             }
+            Unbounded => 0,
         };
-        let mut iter = Self {
-            table,
-            index,
-            current_iter: None,
-            next_block_idx_to_fetch,
-            range,
-            fetch_tasks: VecDeque::new(),
-            max_fetch_tasks,
-            blocks_to_fetch,
-            table_store,
-            cache_blocks,
-            _marker: PhantomData,
+
+        let end_block_id_exclusive = match view.end_key() {
+            Included(k) => Self::first_block_with_data_including_or_after_key(index, k) + 1,
+            Excluded(k) => {
+                let block_index = Self::first_block_with_data_including_or_after_key(index, k);
+                let block = index.block_meta().get(block_index);
+                if k == block.first_key().bytes() {
+                    block_index
+                } else {
+                    block_index + 1
+                }
+            }
+            Unbounded => index.block_meta().len(),
         };
-        if spawn {
-            iter.spawn_fetches();
-        }
-        Ok(iter)
+
+        start_block_id..end_block_id_exclusive
     }
 
     fn spawn_fetches(&mut self) {
-        let num_blocks = self.index.borrow().block_meta().len();
-        while self.fetch_tasks.len() < self.max_fetch_tasks
-            && self.next_block_idx_to_fetch < num_blocks
+        while self.fetch_tasks.len() < self.options.max_fetch_tasks
+            && self.block_idx_range.contains(&self.next_block_idx_to_fetch)
         {
             let blocks_to_fetch = min(
-                self.blocks_to_fetch,
-                num_blocks - self.next_block_idx_to_fetch,
+                self.options.blocks_to_fetch,
+                self.block_idx_range.end - self.next_block_idx_to_fetch,
             );
-            let table = self.table.as_ref().clone();
+            let table = self.view.table_as_ref().clone();
             let table_store = self.table_store.clone();
             let blocks_start = self.next_block_idx_to_fetch;
             let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
             let index = self.index.clone();
-            let cache_blocks = self.cache_blocks;
+            let cache_blocks = self.options.cache_blocks;
             self.fetch_tasks
                 .push_back(FetchTask::InFlight(tokio::spawn(async move {
                     table_store
@@ -206,14 +281,7 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
                     }
                     FetchTask::Finished(blocks) => {
                         if let Some(block) = blocks.pop_front() {
-                            let start_bound = self.range.start_bound();
-                            let iter = match start_bound {
-                                Unbounded => BlockIterator::from_first_key(block),
-                                Included(key) | Excluded(key) => {
-                                    BlockIterator::from_key(block, key).await?
-                                }
-                            };
-                            return Ok(Some(iter));
+                            return Ok(Some(BlockIterator::new(block)));
                         } else {
                             self.fetch_tasks.pop_front();
                         }
@@ -221,74 +289,77 @@ impl<'a, H: AsRef<SsTableHandle>> SstIterator<'a, H> {
                 }
             } else {
                 assert!(self.fetch_tasks.is_empty());
-                assert_eq!(
-                    self.next_block_idx_to_fetch,
-                    self.index.borrow().block_meta().len()
-                );
+                assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.end);
                 return Ok(None);
             }
         }
     }
 
-    fn end_iteration(&mut self) {
+    async fn advance_block(&mut self) -> Result<(), SlateDBError> {
+        if !self.state.is_finished() {
+            if let Some(mut iter) = self.next_iter().await? {
+                match self.view.start_key() {
+                    Included(start_key) | Excluded(start_key) => iter.seek(start_key).await?,
+                    Unbounded => (),
+                }
+                self.state.advance(iter);
+            } else {
+                self.state.stop();
+            }
+        }
+        Ok(())
+    }
+
+    fn stop(&mut self) {
         let num_blocks = self.index.borrow().block_meta().len();
         self.next_block_idx_to_fetch = num_blocks;
-        self.current_iter = None
+        self.state.stop();
     }
 }
 
-impl<'a, H: AsRef<SsTableHandle>> KeyValueIterator for SstIterator<'a, H> {
+impl KeyValueIterator for SstIterator<'_> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        loop {
-            let current_iter = if let Some(current_iter) = self.current_iter.as_mut() {
-                current_iter
-            } else if let Some(next_iter) = self.next_iter().await? {
-                self.current_iter.insert(next_iter)
+        while !self.state.is_finished() {
+            let next_entry = if let Some(iter) = self.state.current_iter.as_mut() {
+                iter.next_entry().await?
             } else {
-                return Ok(None);
+                None
             };
 
-            let kv = current_iter.next_entry().await?;
-            match kv {
-                Some(kv) if self.range.contains(&kv.key) => return Ok(Some(kv)),
-                Some(kv) => match self.range.end_bound() {
-                    Unbounded => continue,
-                    Included(end_key) | Excluded(end_key) => {
-                        if kv.key > end_key {
-                            self.end_iteration();
-                            return Ok(None);
-                        } else {
-                            continue;
-                        }
+            match next_entry {
+                Some(kv) => {
+                    if self.view.contains(&kv.key) {
+                        return Ok(Some(kv));
+                    } else if self.view.key_exceeds(&kv.key) {
+                        self.stop()
                     }
-                },
-                None => {
-                    self.current_iter = None;
-                    // We have exhausted the current block, but not necessarily the entire SST,
-                    // so we fall back to the top to check if we have more blocks to read.
+                }
+                None => self.advance_block().await?,
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl SeekToKey for SstIterator<'_> {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        if !self.view.contains(next_key) {
+            return Err(SlateDBError::InvalidArgument {
+                msg: format!("Cannot seek to a key '{:?}' which is outside the iterator range (start: {:?}, end: {:?})",
+                             next_key, self.view.start_key(), self.view.end_key())
+            });
+        }
+
+        while !self.state.is_finished() {
+            if let Some(iter) = self.state.current_iter.as_mut() {
+                iter.seek(next_key).await?;
+                if !iter.is_empty() {
+                    break;
                 }
             }
+            self.advance_block().await?;
         }
-    }
-}
-
-impl<'a, H: AsRef<SsTableHandle>> SeekToKey for SstIterator<'a, H> {
-    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        loop {
-            let current_iter = if let Some(current_iter) = self.current_iter.as_mut() {
-                current_iter
-            } else if let Some(next_iter) = self.next_iter().await? {
-                self.current_iter.insert(next_iter)
-            } else {
-                return Ok(());
-            };
-            current_iter.seek(next_key).await?;
-            if current_iter.is_empty() {
-                self.current_iter = None;
-            } else {
-                return Ok(());
-            }
-        }
+        Ok(())
     }
 }
 
@@ -331,9 +402,15 @@ mod tests {
         let index = table_store.read_index(&sst_handle).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 1);
 
-        let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 1, 1, true)
-            .await
-            .unwrap();
+        // TODO: Need to verify argument types
+        let sst_iter_options = SstIteratorOptions {
+            cache_blocks: true,
+            ..SstIteratorOptions::default()
+        };
+        let mut iter =
+            SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options)
+                .await
+                .unwrap();
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
@@ -385,9 +462,17 @@ mod tests {
         let index = table_store.read_index(&sst_handle).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 10);
 
-        let mut iter = SstIterator::new(&sst_handle, table_store.clone(), 3, 3, true)
-            .await
-            .unwrap();
+        // TODO: verify cache_blocks=true is intended
+        let sst_iter_options = SstIteratorOptions {
+            max_fetch_tasks: 3,
+            blocks_to_fetch: 3,
+            cache_blocks: true,
+            ..SstIteratorOptions::default()
+        };
+        let mut iter =
+            SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options)
+                .await
+                .unwrap();
         for i in 0..1000 {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, format!("key{}", i));
@@ -427,10 +512,14 @@ mod tests {
             let mut expected_val_gen = test_case_val_gen.clone();
             let from_key = test_case_key_gen.next();
             let _ = test_case_val_gen.next();
-            let mut iter =
-                SstIterator::new_from_key(&sst, table_store.clone(), from_key.clone(), 1, 1, false)
-                    .await
-                    .unwrap();
+            let mut iter = SstIterator::new_borrowed(
+                from_key.as_ref()..,
+                &sst,
+                table_store.clone(),
+                SstIteratorOptions::default(),
+            )
+            .await
+            .unwrap();
             for _ in 0..nkeys - i {
                 let e = iter.next().await.unwrap().unwrap();
                 assert_kv(
@@ -466,13 +555,11 @@ mod tests {
         let mut expected_val_gen = val_gen.clone();
         let (sst, nkeys) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
-        let mut iter = SstIterator::new_from_key(
+        let mut iter = SstIterator::new_borrowed(
+            [b'a'; 16].as_ref()..,
             &sst,
             table_store.clone(),
-            Bytes::from_static(&[b'a'; 16]),
-            1,
-            1,
-            false,
+            SstIteratorOptions::default(),
         )
         .await
         .unwrap();
@@ -509,13 +596,11 @@ mod tests {
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
         let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
-        let mut iter = SstIterator::new_from_key(
+        let mut iter = SstIterator::new_borrowed(
+            [b'z'; 16].as_ref()..,
             &sst,
             table_store.clone(),
-            Bytes::from_static(&[b'z'; 16]),
-            1,
-            1,
-            false,
+            SstIteratorOptions::default(),
         )
         .await
         .unwrap();

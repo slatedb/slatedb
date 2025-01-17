@@ -278,7 +278,7 @@ impl CompactorOrchestrator {
     }
 
     fn refresh_db_state(&mut self) -> Result<(), SlateDBError> {
-        self.state.refresh_db_state(self.manifest.db_state()?);
+        self.state.merge_db_state(self.manifest.db_state()?);
         self.maybe_schedule_compactions()?;
         Ok(())
     }
@@ -316,7 +316,7 @@ mod tests {
     use crate::manifest_store::{ManifestStore, StoredManifest};
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
-    use crate::sst_iter::SstIterator;
+    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
     use crate::test_utils::TestClock;
 
@@ -347,9 +347,15 @@ mod tests {
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
-        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1, false)
-            .await
-            .unwrap();
+
+        let mut iter = SstIterator::new_borrowed(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap();
         for i in 0..4 {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), &[b'a' + i as u8; 16]);
@@ -450,9 +456,14 @@ mod tests {
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
-        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1, false)
-            .await
-            .unwrap();
+        let mut iter = SstIterator::new_borrowed(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap();
 
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), &[1; 16]);

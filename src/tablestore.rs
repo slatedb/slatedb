@@ -538,7 +538,7 @@ pub(crate) struct EncodedSsTableWriter<'a> {
     blocks_written: usize,
 }
 
-impl<'a> EncodedSsTableWriter<'a> {
+impl EncodedSsTableWriter<'_> {
     pub async fn add(&mut self, entry: RowEntry) -> Result<(), SlateDBError> {
         self.builder.add(entry)?;
         self.drain_blocks().await
@@ -591,7 +591,7 @@ mod tests {
 
     use crate::error;
     use crate::sst::SsTableFormat;
-    use crate::sst_iter::SstIterator;
+    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     #[cfg(feature = "moka")]
     use crate::tablestore::DbCache;
     use crate::tablestore::TableStore;
@@ -656,8 +656,12 @@ mod tests {
             .unwrap();
         let sst = writer.close().await.unwrap();
 
+        let sst_iter_options = SstIteratorOptions {
+            eager_spawn: true,
+            ..SstIteratorOptions::default()
+        };
         // then:
-        let mut iter = SstIterator::new(&sst, ts.clone(), 1, 1, true)
+        let mut iter = SstIterator::new_owned(.., sst, ts.clone(), sst_iter_options)
             .await
             .unwrap();
         assert_iterator(
@@ -834,7 +838,7 @@ mod tests {
         let mut expected_iter = expected.iter();
 
         while let (Some(block), Some(expected_item)) = (block_iter.next(), expected_iter.next()) {
-            let mut iter = BlockIterator::from_first_key(block.clone());
+            let mut iter = BlockIterator::new(block.clone());
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, expected_item.0);
             assert_eq!(ValueDeletable::Value(kv.value), expected_item.1);

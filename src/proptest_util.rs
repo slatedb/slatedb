@@ -218,8 +218,8 @@ pub(crate) mod rng {
 /// generated so that the test failure can be easily reproduced.
 #[cfg(test)]
 pub(crate) mod sample {
-    use crate::bytes_range;
     use crate::bytes_range::BytesRange;
+    use crate::{bytes_range, test_utils};
     use bytes::{BufMut, Bytes, BytesMut};
     use proptest::test_runner::TestRng;
     use rand::distributions::uniform::SampleRange;
@@ -403,16 +403,18 @@ pub(crate) mod sample {
             "Cannot choose an arbitrary value from an empty range"
         );
 
-        if let Some(end) = range.end_bound_opt() {
-            if !can_decrement_without_truncation(&end) {
+        if let Some(end) = test_utils::bound_as_option(range.end_bound()) {
+            if !can_decrement_without_truncation(end) {
                 let min_len = range.start_bound().map(|b| b.len());
                 let max_len = range.end_bound().map(|b| b.len());
                 return minvalue_bytes(rng, min_len, max_len);
-            } else if range.start_bound() == Included(&end) {
+            } else if range.start_bound() == Included(end) {
                 return end.clone();
             } else {
-                let start = range.start_bound_opt().unwrap_or_default();
-                if bytes_range::is_prefix_increment(&start, &end) {
+                let start = test_utils::bound_as_option(range.start_bound())
+                    .cloned()
+                    .unwrap_or_default();
+                if bytes_range::is_prefix_increment(&start, end) {
                     let mut tmp = Vec::new();
                     if matches!(range.start_bound(), Included(_) | Unbounded) {
                         tmp.push(start);
