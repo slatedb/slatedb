@@ -452,19 +452,7 @@ impl DbInner {
         self.send_flush_memtables(false).await
     }
 
-    #[cfg(feature = "wal_disable")]
-    fn freeze_memtable(&self) -> Result<(), SlateDBError> {
-        let mut guard = self.state.write();
-        let wal_id = guard.last_written_wal_id();
-        guard.freeze_memtable(wal_id)
-    }
-
     async fn send_flush_memtables(&self, force_flush: bool) -> Result<(), SlateDBError> {
-        #[cfg(feature = "wal_disable")]
-        if !self.wal_enabled() && force_flush {
-            self.freeze_memtable()?;
-        }
-
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
             .send((
@@ -2898,7 +2886,7 @@ mod tests {
 
         let mut rng = proptest_util::rng::new_test_rng(None);
         let table = sample::table(&mut rng, 1000, 5);
-        seed_database(&db, &table, false).await;
+        test_utils::seed_database(&db, &table, false).await.unwrap();
         db.flush().await.unwrap();
 
         // When: reopen the database without closing the old instance

@@ -112,11 +112,13 @@ impl MemtableFlusher {
         }
     }
 
-    async fn flush(&mut self) -> Result<(), SlateDBError> {
+    async fn flush(&mut self, complete_flush: bool) -> Result<(), SlateDBError> {
         let result = self.flush_imm_memtables_to_l0().await;
-        while let Some(sender) = self.flush_waiters.pop() {
-            if let Err(Err(e)) = sender.send(result.clone()) {
-                error!("Failed to send flush error: {e}");
+        if complete_flush {
+            while let Some(sender) = self.flush_waiters.pop() {
+                if let Err(Err(e)) = sender.send(result.clone()) {
+                    error!("Failed to send flush error: {e}");
+                }
             }
         }
         result
@@ -158,8 +160,9 @@ impl DbInner {
     async fn flush_and_record(
         self: &Arc<Self>,
         flusher: &mut MemtableFlusher,
+        complete_flush: bool,
     ) -> Result<(), SlateDBError> {
-        let result = flusher.flush().await;
+        let result = flusher.flush(complete_flush).await;
         if let Err(err) = &result {
             error!("error from memtable flush: {err}");
         } else {
@@ -199,7 +202,7 @@ impl DbInner {
                             error!("error loading manifest: {err}");
                             return Err(err);
                         }
-                        this.flush_and_record(flusher).await?
+                        this.flush_and_record(flusher, false).await?
                     }
                     flush_msg = flush_rx.recv() => {
                         let (rsp_sender, msg) = flush_msg.expect("channel unexpectedly closed");
@@ -212,7 +215,7 @@ impl DbInner {
                                     flusher.flush_waiters.push(sender);
                                 }
                                 if force_flush {
-                                    this.flush_and_record(flusher).await?;
+                                    this.flush_and_record(flusher, true).await?;
                                 }
                             }
                         }

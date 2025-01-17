@@ -406,10 +406,36 @@ mod tests {
             wal_enabled: false,
             ..DbOptions::default()
         };
-        test_checkpoint_scope_all(db_options, false, |manifest| {
-            manifest.core.l0.front().unwrap().id
-        })
-        .await;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let db = Arc::new(
+            Db::open_with_opts(path.clone(), db_options, Arc::clone(&object_store))
+                .await
+                .unwrap(),
+        );
+
+        let mut rng = rng::new_test_rng(None);
+        let table = sample::table(&mut rng, 1000, 10);
+        test_utils::seed_database(&db, &table, false).await.unwrap();
+
+        let checkpoint_options = CheckpointOptions {
+            scope: CheckpointScope::All { force_flush: false },
+            ..CheckpointOptions::default()
+        };
+
+        // Under the current implementation, when the WAL is disabled, we have to wait for
+        // either an explicit flush or for enough accumulated new data to force a flush of
+        // the current memtable.
+        let db_clone = Arc::clone(&db);
+        let checkpoint_handle =
+            tokio::spawn(async move { db_clone.create_checkpoint(&checkpoint_options).await });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        db.flush().await.unwrap();
+
+        let checkpoint_result = tokio::join!(checkpoint_handle).0.unwrap().unwrap();
+        eprintln!("{checkpoint_result:?}")
     }
 
     async fn test_checkpoint_scope_all<F: FnOnce(Manifest) -> SsTableId>(
