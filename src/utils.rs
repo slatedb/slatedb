@@ -351,4 +351,27 @@ mod tests {
             panic!("Expected InvalidClockTick from mono_clock")
         }
     }
+
+    #[test]
+    fn test_monotonicity_enforcement_on_mono_clock_set_tick() {
+        // Given:
+        let clock = Arc::new(TestClock::new());
+        let mono_clock = MonotonicClock::new(clock.clone(), 0);
+
+        // When:
+        clock.ticker.store(10, SeqCst);
+        mono_clock.now().unwrap();
+
+        // Then:
+        if let Err(SlateDBError::InvalidClockTick {
+            last_tick,
+            next_tick,
+        }) = mono_clock.set_last_tick(5)
+        {
+            assert_eq!(last_tick, 10);
+            assert_eq!(next_tick, 5);
+        } else {
+            panic!("Expected InvalidClockTick from mono_clock")
+        }
+    }
 }

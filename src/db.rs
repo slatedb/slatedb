@@ -89,7 +89,7 @@ impl DbInner {
     ) -> Result<Self, SlateDBError> {
         let mono_clock = Arc::new(MonotonicClock::new(
             options.clock.clone(),
-            core_db_state.last_clock_tick,
+            core_db_state.last_l0_clock_tick,
         ));
         let state = DbState::new(core_db_state);
         let db_inner = Self {
@@ -473,7 +473,7 @@ impl DbInner {
             .map(|wal_sst| wal_sst.id.unwrap_wal_id())
             .collect::<Vec<_>>();
         let mut last_sst_id = wal_id_last_compacted;
-        let mut last_tick = self.state.read().state().core.last_clock_tick;
+        let mut last_tick = self.state.read().state().core.last_l0_clock_tick;
         let sst_batch_size = 4;
 
         let mut remaining_sst_list = Vec::new();
@@ -2905,15 +2905,14 @@ mod tests {
             .expect("write batch failed");
 
         // close the db to flush the manifest
-        db.flush().await.unwrap();
         db.close().await.unwrap();
 
-        // check the last_clock_tick persisted in the manifest, it should be
+        // check the last_l0_clock_tick persisted in the manifest, it should be
         // i64::MIN because no WAL SST has yet made its way into L0
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
         let db_state = stored_manifest.db_state();
-        let last_clock_tick = db_state.last_clock_tick;
+        let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, i64::MIN);
 
         let clock = Arc::new(TestClock::new());
@@ -2962,7 +2961,7 @@ mod tests {
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
         let db_state = stored_manifest.db_state();
-        let last_clock_tick = db_state.last_clock_tick;
+        let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, 11);
     }
 
