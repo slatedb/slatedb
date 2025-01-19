@@ -297,4 +297,29 @@ The inner implementation of the write side do not need to change, it's still jus
 
 ## Implementation
 
-tbd.
+The key change is to seperate "append to WAL" and "apply to MemTable to make the change to be visible" into two different steps.
+
+In the current design, whenever a write operation is called, it'll append the data to the WAL, the data is becoming visible to readers with `DurabilityLevel::Memory` immediately, as the readers will read the data from the WAL in front of MemTable. And when the WAL buffer reaches the `flush.interval` or `flush.size`, it'll be flushed to storage, and apply to MemTable.
+
+```mermaid
+sequenceDiagram
+    participant WriteBatch
+    participant WAL
+    participant Flusher
+    participant MemTable
+
+    WriteBatch->>WAL: append write op to current WAL
+    Note over WAL: become visible to readers with DurabilityLevel::Memory
+    WriteBatch->>WAL: call maybe_freeze_wal
+    Note over WAL: triggers freeze_wal after reaches `flush.interval` or `flush.size`
+    WAL->>Flusher: freeze_wal
+    Note over Flusher: send FlushImmutableTableWals message
+    Flusher->>Flusher: flush_imm_wals (write WAL)
+    Flusher->>MemTable: flush_imm_wal_to_memtable
+    Note over MemTable: Probabilistically triggers maybe_freeze_memtable
+```
+
+In this proposal, the behavior on read side will not be changed by `ReadWatermark::LastCommitting`, as the readers will still read the data from the WAL in front of MemTable.
+
+But on the write side, after the data is appended to the WAL, it'll be applied to MemTable as soon as possible, to make the change to be visible to readers.
+
