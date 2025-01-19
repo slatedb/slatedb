@@ -295,10 +295,9 @@ The benefits of this naming change are:
 
 The inner implementation of the write side do not need to change, it's still just await the data to be persisted to storage as the specified durability level, then return. All we put into discussion here is the naming stuff.
 
-
 ## Implementation
 
-The key change is to seperate "append to WAL" and "apply to MemTable to make the change to be visible" into two different steps.
+The key change is to seperate "Append to WAL" and "Commit to make it visible" into two different steps.
 
 In the current design, whenever a write operation is called, it'll append the data to the WAL, the data is becoming visible to readers with `DurabilityLevel::Memory` immediately, as the readers will read the data from the WAL in front of MemTable. And when the WAL buffer reaches the `flush.interval` or `flush.size`, it'll be flushed to storage, and apply to MemTable.
 
@@ -313,14 +312,16 @@ sequenceDiagram
 
     WriteBatch->>WAL: append write op to current WAL
     Note over WAL: become visible to readers with DurabilityLevel::Memory
-    WriteBatch->>WAL: call maybe_freeze_wal
+    WAL->>WAL: maybe trigger a flush
     Note over WAL: freeze the current WAL, and flush this WAL
     WAL->>Flusher: Flush WAL
     Flusher-->>WAL: ACK FlushWAL message
     WAL->>MemTable: Merge WAL to MemTable
 ```
 
-In this proposal, the behavior on read side will not be changed by `ReadWatermark::LastCommitting`, as the readers will still read the data from the WAL in front of MemTable. For the reads with `ReadWatermark::LastCommitted`, `ReadWatermark::LastLocalPersisted` and `ReadWatermark::LastRemotePersisted`, the readers will read the data from MemTable first, at the different positions of sequence number.
+In this proposal, "Commit to make it visible" effectively means "applying the changes to the MemTable", whenever the change is applied to MemTable, it's considered as committed.
+
+The changes to the read path are minimal. Readers with `ReadWatermark::LastCommitting` will continue to read data from the WAL before accessing the MemTable. For reads with `ReadWatermark::LastCommitted`, `ReadWatermark::LastLocalPersisted`, or `ReadWatermark::LastRemotePersisted`, readers will first check the MemTable, using different sequence numbers as watermarks to determine visibility.
 
 On the write side, after the data is appended to the WAL, it'll be applied to MemTable as soon as possible to make the change to be visible to readers.
 
@@ -347,11 +348,11 @@ sequenceDiagram
     WAL->>MemTable: apply write op to MemTable
     Note over MemTable: become visible to readers with ReadWaterMark::LastCommitted
 
-    MemTable-->>WriteBatch: wake up waiters of last applied position
-
     alt sync is Remote
         WriteBatch->>WAL: await last applied position
     end
+
+    MemTable-->>WriteBatch: wake up waiters of last applied position
 ```
 
 ### Handling No WAL Write
@@ -389,13 +390,57 @@ sequenceDiagram
     MemTable->>MemTable: apply write op to MemTable, and freeze it into IMM
     Note over MemTable: become visible to readers with ReadWaterMark::LastCommitted 
 
-    MemTable-->>WriteBatch: wake up waiters of last applied position
-
     alt sync is Remote
         WriteBatch->>WAL: await last applied position
     end
+
+    MemTable-->>WriteBatch: wake up waiters of last applied position
 ```
 
 ### Handling WAL Write Failures
 
-tbd
+It's more likely to have WAL write failures on object storage like S3 than local disk.
+
+We do not have to fail the write operation immediately when the WAL write fails. Instead, we can retry the write operation with a backoff.
+
+However, it's possible to have some failure on flushing WAL to object storage which last for several minutes or even longer, and without a local disk which might help to buffer the WAL during the failure.
+
+In this case, we can still buffer the WAL in memory as long as possible. When the failure is resolved, we can resume the flush operation.
+
+However, the memory is limited, and we can't buffer the WAL in memory forever. We need to set a threshold like named as `max_wal_mem_buffer_bytes` to set the max size of the WAL buffer if the flush operation always fails. When this threshold is reached, we can't buffer the WAL anymore, and we have to mark the db into an read-only state.
+
+When the WAL fails to be flushed to storage, the write operation with `SyncLevel::Remote` should be failed with an `IOError`, and considered as not committed. This write operation is ok to be visible to readers with `ReadWatermark::LastCommitting`, but should be invisible to readers with read watermark higher than `ReadWatermark::LastCommitted`.
+
+### Possible Code Changes
+
+As above described, we need to tackle with several details to implement this proposal, like:
+
+1. The synchronization of flushing the WAL to storage.
+2. Notify the writers when the WAL is successfully flushed to storage.
+3. Retry the flush operation when it fails with backoff, and finally mark the db into an read-only state if it's permanent failure.
+4. Flush the memory buffered WAL to storage in order.
+5. Support tiered WAL storage like local disk and S3.
+6. Handle the no-WAL mode.
+
+Given the complexity of these changes, implementing everything in a single PR would be challenging. It's difficult to estimate the implementation effort required or identify all the code that will need to change in this RFC. A better approach would be to break this down into several smaller PRs, starting with some small refactoring to make the subsequent changes easier to be implemented.
+
+One possible code change would be introducing a `WALManager` struct to centralize management of the WAL buffer and flush operations, helping to encapsulate the complexity in a single place.
+
+For inspiration, we can also consider to reference how Badger structures their code. In Badger's implementation, they embed the WAL buffer inside the memtable struct, as shown here:
+
+```go
+// memTable structure stores a skiplist and a corresponding WAL. Writes to memTable are written
+// both to the WAL and the skiplist. On a crash, the WAL is replayed to bring the skiplist back to
+// its pre-crash form.
+type memTable struct {
+	sl         *skl.Skiplist
+	wal        *logFile
+	maxVersion uint64
+	opt        Options
+	buf        *bytes.Buffer
+}
+```
+
+It makes sense to put the manager of the WAL buffer inside the memtable struct, as WAL is closely related to the memtable, it actually make a good encapsulation: put the complexities behind some simple `put()` / `get()` interface.
+
+However, it's a different codebase, it would be better to keep code structure changes minimal with each iteration. It'll make more sense to have several small PoC PRs. Introducing a `WALManager` might be a good first step to encapsulate the WAL buffer, flushing, and synchronous commit functionality. This would allow us to have more detailed discussions about code structure as we develop these PoCs.
