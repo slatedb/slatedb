@@ -247,7 +247,7 @@ impl CompactorOrchestrator {
             destination: compaction.destination,
             ssts,
             sorted_runs,
-            compaction_ts: db_state.last_clock_tick,
+            compaction_ts: db_state.last_l0_clock_tick,
         });
     }
 
@@ -452,7 +452,7 @@ mod tests {
         let db_state = db_state.expect("db was not compacted");
         assert!(db_state.l0_last_compacted.is_some());
         assert_eq!(db_state.compacted.len(), 1);
-        assert_eq!(db_state.last_clock_tick, 70);
+        assert_eq!(db_state.last_l0_clock_tick, 70);
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();

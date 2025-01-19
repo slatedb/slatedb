@@ -6,6 +6,7 @@ use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use bytes::Bytes;
 use serde::Serialize;
+use std::cmp;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -225,7 +226,10 @@ pub(crate) struct CoreDbState {
     pub(crate) compacted: Vec<SortedRun>,
     pub(crate) next_wal_sst_id: u64,
     pub(crate) last_compacted_wal_sst_id: u64,
-    pub(crate) last_clock_tick: i64,
+    /// the `last_l0_clock_tick` includes all data in L0 and below --
+    /// WAL entries will have their latest ticks recovered on replay
+    /// into the in-memory state
+    pub(crate) last_l0_clock_tick: i64,
     pub(crate) checkpoints: Vec<Checkpoint>,
 }
 
@@ -238,7 +242,7 @@ impl CoreDbState {
             compacted: vec![],
             next_wal_sst_id: 1,
             last_compacted_wal_sst_id: 0,
-            last_clock_tick: i64::MIN,
+            last_l0_clock_tick: i64::MIN,
             checkpoints: vec![],
         }
     }
@@ -360,7 +364,7 @@ impl DbState {
         &mut self,
         imm_memtable: Arc<ImmutableMemtable>,
         sst_handle: SsTableHandle,
-    ) {
+    ) -> Result<(), SlateDBError> {
         let mut state = self.state_copy();
         let popped = state
             .imm_memtable
@@ -369,27 +373,25 @@ impl DbState {
         assert!(Arc::ptr_eq(&popped, &imm_memtable));
         state.core.l0.push_front(sst_handle);
         state.core.last_compacted_wal_sst_id = imm_memtable.last_wal_id();
+
+        // ensure the persisted manifest tick never goes backwards in time
+        let memtable_tick = imm_memtable.table().last_tick();
+        state.core.last_l0_clock_tick = cmp::max(state.core.last_l0_clock_tick, memtable_tick);
+        if state.core.last_l0_clock_tick != memtable_tick {
+            return Err(SlateDBError::InvalidClockTick {
+                last_tick: state.core.last_l0_clock_tick,
+                next_tick: memtable_tick,
+            });
+        }
+
         self.update_state(state);
+        Ok(())
     }
 
     pub fn increment_next_wal_id(&mut self) {
         let mut state = self.state_copy();
         state.core.next_wal_sst_id += 1;
         self.update_state(state);
-    }
-
-    pub fn update_clock_tick(&mut self, tick: i64) -> Result<i64, SlateDBError> {
-        if self.state.core.last_clock_tick > tick {
-            return Err(SlateDBError::InvalidClockTick {
-                last_tick: self.state.core.last_clock_tick,
-                next_tick: tick,
-            });
-        }
-
-        let mut state = self.state_copy();
-        state.core.last_clock_tick = tick;
-        self.update_state(state);
-        Ok(tick)
     }
 
     pub fn merge_db_state(&mut self, updated_state: &CoreDbState) {
@@ -504,7 +506,7 @@ mod tests {
                 .expect("db in error state");
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
             let handle = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), dummy_info.clone());
-            db_state.move_imm_memtable_to_l0(imm, handle);
+            db_state.move_imm_memtable_to_l0(imm, handle).unwrap();
         }
     }
 

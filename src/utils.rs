@@ -1,6 +1,9 @@
+use crate::config::Clock;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{BackgroundTaskPanic, BackgroundTaskShutdown};
 use std::future::Future;
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
 
 pub(crate) struct WatchableOnceCell<T: Clone> {
@@ -138,11 +141,50 @@ where
         .expect("failed to create monitor thread")
 }
 
+/// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
+/// from the underlying implementation are montonoically increasing
+pub(crate) struct MonotonicClock {
+    pub(crate) last_tick: AtomicI64,
+    delegate: Arc<dyn Clock + Send + Sync>,
+}
+
+impl MonotonicClock {
+    pub(crate) fn new(delegate: Arc<dyn Clock + Send + Sync>, init_tick: i64) -> Self {
+        Self {
+            delegate,
+            last_tick: AtomicI64::new(init_tick),
+        }
+    }
+
+    pub(crate) fn set_last_tick(&self, tick: i64) -> Result<i64, SlateDBError> {
+        self.enforce_monotonic(tick)
+    }
+
+    pub(crate) fn now(&self) -> Result<i64, SlateDBError> {
+        let tick = self.delegate.now();
+        self.enforce_monotonic(tick)
+    }
+
+    fn enforce_monotonic(&self, tick: i64) -> Result<i64, SlateDBError> {
+        let updated_last_tick = self.last_tick.fetch_max(tick, SeqCst);
+        if tick < updated_last_tick {
+            return Err(SlateDBError::InvalidClockTick {
+                last_tick: updated_last_tick,
+                next_tick: tick,
+            });
+        }
+
+        Ok(tick)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::error::SlateDBError;
-    use crate::utils::{spawn_bg_task, spawn_bg_thread, WatchableOnceCell};
+    use crate::test_utils::TestClock;
+    use crate::utils::{spawn_bg_task, spawn_bg_thread, MonotonicClock, WatchableOnceCell};
     use parking_lot::Mutex;
+    use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
 
     struct ErrorCaptor {
@@ -284,5 +326,52 @@ mod tests {
         });
         register.write(123);
         h.await.unwrap();
+    }
+
+    #[test]
+    fn test_monotonicity_enforcement_on_mono_clock() {
+        // Given:
+        let clock = Arc::new(TestClock::new());
+        let mono_clock = MonotonicClock::new(clock.clone(), 0);
+
+        // When:
+        clock.ticker.store(10, SeqCst);
+        mono_clock.now().unwrap();
+        clock.ticker.store(5, SeqCst);
+
+        // Then:
+        if let Err(SlateDBError::InvalidClockTick {
+            last_tick,
+            next_tick,
+        }) = mono_clock.now()
+        {
+            assert_eq!(last_tick, 10);
+            assert_eq!(next_tick, 5);
+        } else {
+            panic!("Expected InvalidClockTick from mono_clock")
+        }
+    }
+
+    #[test]
+    fn test_monotonicity_enforcement_on_mono_clock_set_tick() {
+        // Given:
+        let clock = Arc::new(TestClock::new());
+        let mono_clock = MonotonicClock::new(clock.clone(), 0);
+
+        // When:
+        clock.ticker.store(10, SeqCst);
+        mono_clock.now().unwrap();
+
+        // Then:
+        if let Err(SlateDBError::InvalidClockTick {
+            last_tick,
+            next_tick,
+        }) = mono_clock.set_last_tick(5)
+        {
+            assert_eq!(last_tick, 10);
+            assert_eq!(next_tick, 5);
+        } else {
+            panic!("Expected InvalidClockTick from mono_clock")
+        }
     }
 }
