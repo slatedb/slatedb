@@ -336,15 +336,22 @@ sequenceDiagram
     WriteBatch->>WAL: append write op to current WAL
     Note over WAL: become visible to readers with ReadWatermark::LastCommitting
 
+    WAL->>WAL: Maybe trigger a flush
+    Note over WAL: when it reaches flush.interval or flush.size
+
     WAL->>Flusher: Flush WAL
-    alt sync is Remote
-        WriteBatch->>WAL: await last wal flushed position
-    end
+
 
     Flusher-->>WAL: ack FlushWAL message, increment last wal flushed position
 
     WAL->>MemTable: apply write op to MemTable
-    Note over MemTable: become visible to readers with ReadWaterMark::LastCommitted 
+    Note over MemTable: become visible to readers with ReadWaterMark::LastCommitted
+
+    MemTable-->>WriteBatch: wake up waiters of last applied position
+
+    alt sync is Remote
+        WriteBatch->>WAL: await last applied position
+    end
 ```
 
 ### Handling No WAL Write
@@ -355,9 +362,11 @@ In the new proposal, the read path need not to be changed, the readers could sti
 
 The write path needs some adjustments. The no-WAL mode will still maintain an in-memory WAL, but it's never flushed to storage.
 
-For `SyncLevel::Off`, the write operation could be considered as apply to MemTable immediately.
+For `SyncLevel::Off`, the write operation could be considered as apply to MemTable immediately, and will be considered as committed.
 
 For `SyncLevel::Remote`, the write operation could be considered as append to an in-memory WAL, and directly flush them to L0 SST after the WAL buffer + MemTable reaches the memtable's L0 size threshold.
+
+The sequence diagram is like this:
 
 ```mermaid
 sequenceDiagram
@@ -369,17 +378,22 @@ sequenceDiagram
     WriteBatch->>WAL: append write op to current WAL
     Note over WAL: become visible to readers with ReadWatermark::LastCommitting
 
+    WAL->>WAL: Maybe trigger a flush
     Note over WAL: When the WAL buffer + MemTable reaches the memtable's L0 size threshold, trigger a flush.
-    WAL->>Flusher: Flush L0 SST
+
+    WAL->>MemTable: Flush L0 SST
+    MemTable->>Flusher: Flush L0 SST
+
+    Flusher-->>MemTable: ack Flush L0 SST message, increment last L0 flushed position
+
+    MemTable->>MemTable: apply write op to MemTable, and freeze it into IMM
+    Note over MemTable: become visible to readers with ReadWaterMark::LastCommitted 
+
+    MemTable-->>WriteBatch: wake up waiters of last applied position
 
     alt sync is Remote
-        WriteBatch->>WAL: await last flushed position
+        WriteBatch->>WAL: await last applied position
     end
-
-    Flusher-->>WAL: ack Flush L0 SST message, increment last wal flushed position
-
-    WAL->>MemTable: apply write op to MemTable, and freeze it into IMM
-    Note over MemTable: become visible to readers with ReadWaterMark::LastCommitted 
 ```
 
 ### Handling WAL Write Failures
