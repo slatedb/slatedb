@@ -301,6 +301,8 @@ The key change is to seperate "append to WAL" and "apply to MemTable to make the
 
 In the current design, whenever a write operation is called, it'll append the data to the WAL, the data is becoming visible to readers with `DurabilityLevel::Memory` immediately, as the readers will read the data from the WAL in front of MemTable. And when the WAL buffer reaches the `flush.interval` or `flush.size`, it'll be flushed to storage, and apply to MemTable.
 
+The sequence diagram is like this:
+
 ```mermaid
 sequenceDiagram
     participant WriteBatch
@@ -319,7 +321,28 @@ sequenceDiagram
     Note over MemTable: Probabilistically triggers maybe_freeze_memtable
 ```
 
-In this proposal, the behavior on read side will not be changed by `ReadWatermark::LastCommitting`, as the readers will still read the data from the WAL in front of MemTable.
+In this proposal, the behavior on read side will not be changed by `ReadWatermark::LastCommitting`, as the readers will still read the data from the WAL in front of MemTable. For the reads with `ReadWatermark::LastCommitted`, `ReadWatermark::LastLocalPersisted` and `ReadWatermark::LastRemotePersisted`, the readers will read the data from MemTable first, at the different positions of sequence number.
 
-But on the write side, after the data is appended to the WAL, it'll be applied to MemTable as soon as possible, to make the change to be visible to readers.
+On the write side, after the data is appended to the WAL, it'll be applied to MemTable as soon as possible to make the change to be visible to readers.
+
+The sequence diagram is like this:
+
+```mermaid
+sequenceDiagram
+    participant WriteBatch
+    participant WAL
+    participant Flusher
+    participant MemTable
+
+    WriteBatch->>WAL: append write op to current WAL
+    Note over WAL: become visible to readers with ReadWatermark::LastCommitting
+
+    WAL->>Flusher: maybe_freeze_wal
+    alt sync is Remote
+        WAL->>WAL: await last wal flushed position
+    end
+
+    WriteBatch->>MemTable: apply write op to MemTable
+    Note over MemTable: become visible to readers with ReadWaterMark::LastCommitted 
+```
 
