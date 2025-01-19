@@ -307,8 +307,8 @@ The sequence diagram is like this:
 sequenceDiagram
     participant WriteBatch
     participant WAL
-    participant Flusher
     participant MemTable
+    participant Flusher
 
     WriteBatch->>WAL: append write op to current WAL
     Note over WAL: become visible to readers with DurabilityLevel::Memory
@@ -316,8 +316,7 @@ sequenceDiagram
     Note over WAL: triggers freeze_wal after reaches `flush.interval` or `flush.size`
     WAL->>Flusher: freeze_wal
     Note over Flusher: send FlushImmutableTableWals message
-    Flusher->>Flusher: flush_imm_wals (write WAL)
-    Flusher->>MemTable: flush_imm_wal_to_memtable
+    WAL->>MemTable: flush_imm_wal_to_memtable
     Note over MemTable: Probabilistically triggers maybe_freeze_memtable
 ```
 
@@ -331,13 +330,14 @@ The sequence diagram is like this:
 sequenceDiagram
     participant WriteBatch
     participant WAL
-    participant Flusher
     participant MemTable
+    participant Flusher
 
     WriteBatch->>WAL: append write op to current WAL
     Note over WAL: become visible to readers with ReadWatermark::LastCommitting
 
-    WAL->>Flusher: maybe_freeze_wal
+    WAL->>Flusher: Flush WAL
+    Flusher-->>WAL: ack FlushWAL message, increment last wal flushed position
     alt sync is Remote
         WAL->>WAL: await last wal flushed position
     end
