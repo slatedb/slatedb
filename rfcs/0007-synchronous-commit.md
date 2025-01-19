@@ -295,6 +295,7 @@ The benefits of this naming change are:
 
 The inner implementation of the write side do not need to change, it's still just await the data to be persisted to storage as the specified durability level, then return. All we put into discussion here is the naming stuff.
 
+
 ## Implementation
 
 The key change is to seperate "append to WAL" and "apply to MemTable to make the change to be visible" into two different steps.
@@ -313,11 +314,10 @@ sequenceDiagram
     WriteBatch->>WAL: append write op to current WAL
     Note over WAL: become visible to readers with DurabilityLevel::Memory
     WriteBatch->>WAL: call maybe_freeze_wal
-    Note over WAL: triggers freeze_wal after reaches `flush.interval` or `flush.size`
-    WAL->>Flusher: freeze_wal
-    Note over Flusher: send FlushImmutableTableWals message
-    WAL->>MemTable: flush_imm_wal_to_memtable
-    Note over MemTable: Probabilistically triggers maybe_freeze_memtable
+    Note over WAL: freeze the current WAL, and flush this WAL
+    WAL->>Flusher: Flush WAL
+    Flusher-->>WAL: ACK FlushWAL message
+    WAL->>MemTable: Merge WAL to MemTable
 ```
 
 In this proposal, the behavior on read side will not be changed by `ReadWatermark::LastCommitting`, as the readers will still read the data from the WAL in front of MemTable. For the reads with `ReadWatermark::LastCommitted`, `ReadWatermark::LastLocalPersisted` and `ReadWatermark::LastRemotePersisted`, the readers will read the data from MemTable first, at the different positions of sequence number.
@@ -337,12 +337,51 @@ sequenceDiagram
     Note over WAL: become visible to readers with ReadWatermark::LastCommitting
 
     WAL->>Flusher: Flush WAL
-    Flusher-->>WAL: ack FlushWAL message, increment last wal flushed position
     alt sync is Remote
-        WAL->>WAL: await last wal flushed position
+        WriteBatch->>WAL: await last wal flushed position
     end
 
-    WriteBatch->>MemTable: apply write op to MemTable
+    Flusher-->>WAL: ack FlushWAL message, increment last wal flushed position
+
+    WAL->>MemTable: apply write op to MemTable
     Note over MemTable: become visible to readers with ReadWaterMark::LastCommitted 
 ```
 
+### Handling No WAL Write
+
+SlateDB also support a no-WAL mode. In this mode, the write operation directly applied to MemTable without appending to the WAL. And the write operation can await the data to be persisted to storage as the specified durability level.
+
+In the new proposal, the read path need not to be changed, the readers could still read the WAL and Memtable as before.
+
+The write path needs some adjustments. The no-WAL mode will still maintain an in-memory WAL, but it's never flushed to storage.
+
+For `SyncLevel::Off`, the write operation could be considered as apply to MemTable immediately.
+
+For `SyncLevel::Remote`, the write operation could be considered as append to an in-memory WAL, and directly flush them to L0 SST after the WAL buffer + MemTable reaches the memtable's L0 size threshold.
+
+```mermaid
+sequenceDiagram
+    participant WriteBatch
+    participant WAL
+    participant MemTable
+    participant Flusher
+
+    WriteBatch->>WAL: append write op to current WAL
+    Note over WAL: become visible to readers with ReadWatermark::LastCommitting
+
+    Note over WAL: When the WAL buffer + MemTable reaches the memtable's L0 size threshold, trigger a flush.
+    WAL->>Flusher: Flush L0 SST
+
+    alt sync is Remote
+        WriteBatch->>WAL: await last flushed position
+    end
+
+    Flusher-->>WAL: ack Flush L0 SST message, increment last wal flushed position
+
+    WAL->>MemTable: apply write op to MemTable, and freeze it into IMM
+    Note over MemTable: become visible to readers with ReadWaterMark::LastCommitted 
+```
+
+### Handling WAL Write Failures
+
+tbd
