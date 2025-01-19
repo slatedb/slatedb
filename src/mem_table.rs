@@ -35,7 +35,6 @@ pub(crate) struct ImmutableMemtable {
 }
 
 pub(crate) struct ImmutableWal {
-    id: u64,
     table: Arc<KVTable>,
 }
 
@@ -138,15 +137,8 @@ impl ImmutableMemtable {
 }
 
 impl ImmutableWal {
-    pub(crate) fn new(id: u64, table: WritableKVTable) -> Self {
-        Self {
-            id,
-            table: table.table,
-        }
-    }
-
-    pub(crate) fn id(&self) -> u64 {
-        self.id
+    pub(crate) fn new(table: WritableKVTable) -> Self {
+        Self { table: table.table }
     }
 
     pub(crate) fn table(&self) -> Arc<KVTable> {

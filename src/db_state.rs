@@ -339,21 +339,19 @@ impl DbState {
         Ok(())
     }
 
-    pub fn freeze_wal(&mut self) -> Result<Option<u64>, SlateDBError> {
+    pub fn freeze_wal(&mut self) -> Result<(), SlateDBError> {
         if let Some(err) = self.error.reader().read() {
             return Err(err.clone());
         }
         if self.wal.table().is_empty() {
-            return Ok(None);
+            return Ok(());
         }
         let old_wal = std::mem::replace(&mut self.wal, WritableKVTable::new());
         let mut state = self.state_copy();
-        let imm_wal = Arc::new(ImmutableWal::new(state.core.next_wal_sst_id, old_wal));
-        let id = imm_wal.id();
+        let imm_wal = Arc::new(ImmutableWal::new(old_wal));
         state.imm_wal.push_front(imm_wal);
-        state.core.next_wal_sst_id += 1;
         self.update_state(state);
-        Ok(Some(id))
+        Ok(())
     }
 
     pub fn pop_imm_wal(&mut self) {
