@@ -87,16 +87,15 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
 impl<T: KeyValueIterator> MergeOperatorIterator<T> {
     async fn merge_with_older_entries(
         &mut self,
-        key: Bytes,
-        seq: u64,
-        value: Bytes,
-        create_ts: Option<i64>,
-        expire_ts: Option<i64>,
+        first_entry: RowEntry,
     ) -> Result<Option<RowEntry>, SlateDBError> {
-        let key = key;
-        let mut merged_value = value;
-        let mut max_create_ts = create_ts;
-        let mut min_expire_ts = expire_ts;
+        let mut merged_value = match first_entry.value {
+            ValueDeletable::Merge(ref v) => v.clone(),
+            _ => unreachable!("Entry doesn't contain merge operand."),
+        };
+        let key = first_entry.key;
+        let mut max_create_ts = first_entry.create_ts;
+        let mut min_expire_ts = first_entry.expire_ts;
 
         // Keep looking ahead and merging as long as we find mergeable entries
         loop {
@@ -105,13 +104,15 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                 Some(next_entry)
                     if key == next_entry.key
                         && (self.merge_different_expire_ts
-                            || expire_ts == next_entry.expire_ts) =>
+                            || first_entry.expire_ts == next_entry.expire_ts) =>
                 {
-                    // Accumulate timestamps
+                    // Accumulate timestamps. For create_ts we use the maximum (when the accumulated value has last changed),
+                    // and for expire_ts we use the minimum (when the accumulated becomes invalid).
                     max_create_ts = merge_options(max_create_ts, next_entry.create_ts, i64::max);
                     min_expire_ts = merge_options(min_expire_ts, next_entry.expire_ts, i64::min);
-                    // For sequence number, there is nothing to accumulate. Just ensure it keeps decreasing
-                    if seq < next_entry.seq {
+                    // For sequence number, we want to use the maximum. Since all the entries are sorted in descending order,
+                    // we just ensure it keeps decreasing.
+                    if first_entry.seq < next_entry.seq {
                         return Err(SlateDBError::InvalidDBState);
                     }
 
@@ -122,7 +123,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                             return Ok(Some(RowEntry::new(
                                 key,
                                 ValueDeletable::Value(merged_value),
-                                seq,
+                                first_entry.seq,
                                 max_create_ts,
                                 min_expire_ts,
                             )));
@@ -136,7 +137,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                             return Ok(Some(RowEntry::new(
                                 key,
                                 ValueDeletable::Value(merged_value),
-                                seq,
+                                first_entry.seq,
                                 max_create_ts,
                                 min_expire_ts,
                             )));
@@ -144,11 +145,11 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                     }
                 }
                 Some(next_entry) => {
-                    // Different key. We need to return both entries ...
+                    // Different key or expire timestamp. We need to return both entries ...
                     let result = RowEntry::new(
                         key,
                         ValueDeletable::Merge(merged_value),
-                        seq,
+                        first_entry.seq,
                         max_create_ts,
                         min_expire_ts,
                     );
@@ -162,7 +163,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                     return Ok(Some(RowEntry::new(
                         key,
                         ValueDeletable::Merge(merged_value),
-                        seq,
+                        first_entry.seq,
                         max_create_ts,
                         min_expire_ts,
                     )));
@@ -180,18 +181,10 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorIterator<T> {
         };
         if let Some(entry) = next_entry {
             match &entry.value {
-                ValueDeletable::Merge(merge_value) => {
+                ValueDeletable::Merge(_) => {
                     // A mergeable entry, we need to accumulate all mergeable entries
                     // ahead for the same key and merge them into a single value.
-                    return self
-                        .merge_with_older_entries(
-                            entry.key.clone(),
-                            entry.seq,
-                            merge_value.clone(),
-                            entry.create_ts,
-                            entry.expire_ts,
-                        )
-                        .await;
+                    return self.merge_with_older_entries(entry).await;
                 }
                 // Not a mergeable entry, just return it.
                 _ => return Ok(Some(entry)),
