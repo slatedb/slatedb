@@ -1,7 +1,8 @@
 use crate::config::{CheckpointOptions, CheckpointScope};
-use crate::db::{CheckpointMsg, Db};
+use crate::db::Db;
 use crate::error::SlateDBError;
 use crate::manifest_store::{ManifestStore, StoredManifest};
+use crate::mem_table_flush::MemtableFlushMsg;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
@@ -43,9 +44,8 @@ impl Db {
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.inner
-            .checkpoint_notifier
-            .send(CheckpointMsg {
-                id: Uuid::new_v4(),
+            .memtable_flush_notifier
+            .send(MemtableFlushMsg::CreateCheckpoint {
                 options: options.clone(),
                 sender: tx,
             })
@@ -437,7 +437,6 @@ mod tests {
         db.flush().await.unwrap();
 
         tokio::join!(checkpoint_handle).0.unwrap().unwrap();
-
     }
 
     async fn test_checkpoint_scope_all<F: FnOnce(Manifest) -> SsTableId>(

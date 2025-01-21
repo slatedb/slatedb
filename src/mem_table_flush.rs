@@ -1,22 +1,30 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
-use crate::db::{CheckpointMsg, DbInner, FlushMsg};
+use crate::config::CheckpointOptions;
+use crate::db::DbInner;
 use crate::db_state::{CoreDbState, SsTableId};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{BackgroundTaskShutdown, CheckpointMissing};
 use crate::manifest_store::FenceableManifest;
-use crate::utils;
 use crate::utils::spawn_bg_task;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::oneshot::Sender;
 use tracing::{error, info, warn};
 use ulid::Ulid;
+use uuid::Uuid;
 
 #[derive(Debug)]
-pub enum MemtableFlushThreadMsg {
+pub(crate) enum MemtableFlushMsg {
+    FlushImmutableMemtables {
+        sender: Option<Sender<Result<(), SlateDBError>>>,
+    },
+    CreateCheckpoint {
+        options: CheckpointOptions,
+        sender: Sender<Result<CheckpointCreateResult, SlateDBError>>,
+    },
     Shutdown,
-    FlushImmutableMemtables,
 }
 
 pub(crate) struct MemtableFlusher {
@@ -34,14 +42,14 @@ impl MemtableFlusher {
 
     async fn write_checkpoint(
         &mut self,
-        checkpoint_msg: &CheckpointMsg,
+        options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
         let mut core = {
             let rguard_state = self.db_inner.state.read();
             rguard_state.state().core.clone()
         };
 
-        let checkpoint = self.build_checkpoint(&core, checkpoint_msg)?;
+        let checkpoint = self.build_checkpoint(&core, options)?;
         let result = CheckpointCreateResult {
             id: checkpoint.id,
             manifest_id: checkpoint.manifest_id,
@@ -62,9 +70,10 @@ impl MemtableFlusher {
     fn build_checkpoint(
         &self,
         state: &CoreDbState,
-        msg: &CheckpointMsg,
+        options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let checkpoint_manifest_id = if let Some(source_id) = &msg.options.source {
+        let id = Uuid::new_v4();
+        let manifest_id = if let Some(source_id) = &options.source {
             if let Some(checkpoint) = state.find_checkpoint(source_id) {
                 checkpoint.manifest_id
             } else {
@@ -74,11 +83,11 @@ impl MemtableFlusher {
             self.manifest.next_manifest_id()
         };
 
-        let expire_time = msg.options.lifetime.map(|l| SystemTime::now() + l);
+        let expire_time = options.lifetime.map(|l| SystemTime::now() + l);
 
         Ok(Checkpoint {
-            id: msg.id,
-            manifest_id: checkpoint_manifest_id,
+            id,
+            manifest_id,
             expire_time,
             create_time: SystemTime::now(),
         })
@@ -86,11 +95,11 @@ impl MemtableFlusher {
 
     pub(crate) async fn write_checkpoint_safely(
         &mut self,
-        checkpoint: &CheckpointMsg,
+        options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
         loop {
             self.load_manifest().await?;
-            let result = self.write_checkpoint(checkpoint).await;
+            let result = self.write_checkpoint(options).await;
             if matches!(result, Err(SlateDBError::ManifestVersionExists)) {
                 error!("conflicting manifest version. retry write");
             } else {
@@ -160,8 +169,7 @@ impl DbInner {
     pub(crate) fn spawn_memtable_flush_task(
         self: &Arc<Self>,
         manifest: FenceableManifest,
-        mut flush_rx: UnboundedReceiver<FlushMsg<MemtableFlushThreadMsg>>,
-        mut checkpoint_rx: UnboundedReceiver<CheckpointMsg>,
+        mut flush_rx: UnboundedReceiver<MemtableFlushMsg>,
         tokio_handle: &Handle,
     ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
         let this = Arc::clone(self);
@@ -169,8 +177,7 @@ impl DbInner {
         async fn core_flush_loop(
             this: &Arc<DbInner>,
             flusher: &mut MemtableFlusher,
-            flush_rx: &mut UnboundedReceiver<FlushMsg<MemtableFlushThreadMsg>>,
-            checkpoint_rx: &mut UnboundedReceiver<CheckpointMsg>,
+            flush_rx: &mut UnboundedReceiver<MemtableFlushMsg>,
         ) -> Result<(), SlateDBError> {
             let mut manifest_poll_interval =
                 tokio::time::interval(this.options.manifest_poll_interval);
@@ -191,29 +198,28 @@ impl DbInner {
                         this.flush_and_record(flusher).await?
                     }
                     flush_msg = flush_rx.recv() => {
-                        let (rsp_sender, msg) = flush_msg.expect("channel unexpectedly closed");
+                        let msg = flush_msg.expect("channel unexpectedly closed");
                         match msg {
-                            MemtableFlushThreadMsg::Shutdown => {
+                            MemtableFlushMsg::Shutdown => {
                                 return Ok(());
                             },
-                            MemtableFlushThreadMsg::FlushImmutableMemtables => {
+                            MemtableFlushMsg::FlushImmutableMemtables { sender} => {
                                 this.flush_and_record(flusher).await?;
-                                if let Some(rsp_sender) = rsp_sender {
+                                if let Some(rsp_sender) = sender {
                                     let res = rsp_sender.send(Ok(()));
                                     if let Err(Err(err)) = res {
                                         error!("error sending flush response: {err}");
                                     }
                                 }
+                            },
+                            MemtableFlushMsg::CreateCheckpoint { options, sender } => {
+                                let write_result = flusher.write_checkpoint_safely(&options).await;
+                                if let Err(Err(e)) = sender.send(write_result) {
+                                    error!("Failed to send checkpoint error: {e}");
+                                }
                             }
                         }
                     },
-                    checkpoint_msg = checkpoint_rx.recv() => {
-                        let checkpoint_msg = checkpoint_msg.expect("channel unexpectedly closed");
-                        let write_result = flusher.write_checkpoint_safely(&checkpoint_msg).await;
-                        if let Err(Err(e)) = checkpoint_msg.sender.send(write_result) {
-                            error!("Failed to send checkpoint error: {e}");
-                        }
-                    }
                 }
             }
         }
@@ -226,13 +232,11 @@ impl DbInner {
 
             // Stop the loop when the shut down has been received *and* all
             // remaining `rx` flushes and checkpoints have been drained.
-            let result =
-                core_flush_loop(&this, &mut flusher, &mut flush_rx, &mut checkpoint_rx).await;
+            let result = core_flush_loop(&this, &mut flusher, &mut flush_rx).await;
 
             // respond to any pending msgs
             let pending_error = result.clone().err().unwrap_or(BackgroundTaskShutdown);
-            utils::close_and_drain_receiver(&mut flush_rx, &pending_error).await;
-            Self::close_and_drain_checkpoint_receiver(&mut checkpoint_rx, &pending_error).await;
+            Self::drain_messages(&mut flush_rx, &pending_error).await;
 
             if let Err(err) = flusher.write_manifest_safely().await {
                 error!("error writing manifest on shutdown: {}", err);
@@ -265,14 +269,21 @@ impl DbInner {
         ))
     }
 
-    async fn close_and_drain_checkpoint_receiver(
-        rx: &mut UnboundedReceiver<CheckpointMsg>,
-        error: &SlateDBError,
-    ) {
+    async fn drain_messages(rx: &mut UnboundedReceiver<MemtableFlushMsg>, error: &SlateDBError) {
         rx.close();
         while !rx.is_empty() {
             let msg = rx.recv().await.expect("channel unexpectedly closed");
-            let _ = msg.sender.send(Err(error.clone()));
+            match msg {
+                MemtableFlushMsg::CreateCheckpoint { options: _, sender } => {
+                    let _ = sender.send(Err(error.clone()));
+                }
+                MemtableFlushMsg::FlushImmutableMemtables {
+                    sender: Some(sender),
+                } => {
+                    let _ = sender.send(Err(error.clone()));
+                }
+                _ => (),
+            }
         }
     }
 }

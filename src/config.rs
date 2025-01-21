@@ -347,7 +347,7 @@ pub enum CheckpointScope {
 }
 
 /// Specify options to provide when creating a checkpoint.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CheckpointOptions {
     /// Optionally specifies the lifetime of the checkpoint to create. The expire time will be
     /// set to the current wallclock time plus the specified lifetime. If lifetime is None, then
@@ -358,15 +358,6 @@ pub struct CheckpointOptions {
     /// is useful for users to establish checkpoints from existing checkpoints, but with a different
     /// lifecycle and/or metadata.
     pub source: Option<Uuid>,
-}
-
-impl Default for CheckpointOptions {
-    fn default() -> Self {
-        Self {
-            lifetime: None,
-            source: None,
-        }
-    }
 }
 
 /// Configuration options for the database. These options are set on client startup.

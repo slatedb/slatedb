@@ -36,12 +36,11 @@ use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
-use crate::checkpoint::CheckpointCreateResult;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{
-    CheckpointOptions, DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
-    DEFAULT_READ_OPTIONS, DEFAULT_SCAN_OPTIONS, DEFAULT_WRITE_OPTIONS,
+    DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions, DEFAULT_READ_OPTIONS,
+    DEFAULT_SCAN_OPTIONS, DEFAULT_WRITE_OPTIONS,
 };
 use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
@@ -52,7 +51,7 @@ use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::{VecDequeKeyValueIterator, WritableKVTable};
-use crate::mem_table_flush::MemtableFlushThreadMsg;
+use crate::mem_table_flush::MemtableFlushMsg;
 use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
@@ -60,40 +59,28 @@ use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowAttributes, ValueDeletable};
 use tracing::{info, warn};
-use uuid::Uuid;
 
 pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
 pub(crate) type FlushMsg<T> = (Option<FlushSender>, T);
-
-pub(crate) type CheckpointSender =
-    tokio::sync::oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>;
-pub(crate) struct CheckpointMsg {
-    pub(crate) id: Uuid,
-    pub(crate) options: CheckpointOptions,
-    pub(crate) sender: CheckpointSender,
-}
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
-    pub(crate) memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
+    pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
-    pub(crate) checkpoint_notifier: UnboundedSender<CheckpointMsg>,
     pub(crate) db_stats: Arc<DbStats>,
 }
 
 impl DbInner {
-    #[allow(clippy::too_many_arguments)] // TODO: Maybe factor out notifiers into a separate struct?
     pub async fn new(
         options: DbOptions,
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
         wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
-        memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
+        memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
-        checkpoint_notifier: UnboundedSender<CheckpointMsg>,
         db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let state = DbState::new(core_db_state);
@@ -104,7 +91,6 @@ impl DbInner {
             wal_flush_notifier,
             memtable_flush_notifier,
             write_notifier,
-            checkpoint_notifier,
             db_stats,
         };
         Ok(db_inner)
@@ -436,7 +422,7 @@ impl DbInner {
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
-            .send((Some(tx), MemtableFlushThreadMsg::FlushImmutableMemtables))
+            .send(MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) })
             .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         rx.await?
     }
@@ -741,7 +727,6 @@ impl Db {
 
         let mut manifest = Self::init_db(&manifest_store, latest_manifest).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (checkpoint_tx, checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
         let (wal_flush_tx, wal_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
@@ -752,7 +737,6 @@ impl Db {
                 wal_flush_tx,
                 memtable_flush_tx,
                 write_tx,
-                checkpoint_tx,
                 db_stats,
             )
             .await?,
@@ -767,12 +751,8 @@ impl Db {
         } else {
             None
         };
-        let memtable_flush_task = inner.spawn_memtable_flush_task(
-            manifest,
-            memtable_flush_rx,
-            checkpoint_rx,
-            &tokio_handle,
-        );
+        let memtable_flush_task =
+            inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
         let write_task = inner.spawn_write_task(write_rx, &tokio_handle);
         let mut compactor = None;
         if let Some(compactor_options) = &inner.options.compactor_options {
@@ -904,7 +884,7 @@ impl Db {
         // Shutdown the memtable flush thread.
         self.inner
             .memtable_flush_notifier
-            .send((None, MemtableFlushThreadMsg::Shutdown))
+            .send(MemtableFlushMsg::Shutdown)
             .ok();
 
         if let Some(memtable_flush_task) = {
