@@ -106,18 +106,19 @@ impl DbInner {
     }
 
     /// Get the value for a given key.
-    pub async fn get_with_options(
+    pub async fn get_with_options<K: AsRef<[u8]>>(
         &self,
-        key: &[u8],
+        key: K,
         options: &ReadOptions,
-    ) -> Result<Option<Bytes>, SlateDBError> {
+    ) -> Result<Option<Vec<u8>>, SlateDBError> {
         self.check_error()?;
+        let key = key.as_ref();
         let snapshot = self.state.read().snapshot();
 
         // Temporary function to convert ValueDeletable to Option<Bytes> until
         // we add proper support for merges.
         let unwrap_result = |v| match v {
-            ValueDeletable::Value(v) => Ok(Some(v)),
+            ValueDeletable::Value(v) => Ok(Some(v.to_vec())),
             ValueDeletable::Merge(_) => {
                 unimplemented!("MergeOperator is not yet fully implemented")
             }
@@ -950,8 +951,10 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
-        self.inner.get_with_options(key, DEFAULT_READ_OPTIONS).await
+    pub async fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, SlateDBError> {
+        self.inner
+            .get_with_options(key.as_ref(), DEFAULT_READ_OPTIONS)
+            .await
     }
 
     /// Get a value from the database with custom read options.
@@ -990,12 +993,12 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn get_with_options(
+    pub async fn get_with_options<K: AsRef<[u8]>>(
         &self,
-        key: &[u8],
+        key: K,
         options: &ReadOptions,
-    ) -> Result<Option<Bytes>, SlateDBError> {
-        self.inner.get_with_options(key, options).await
+    ) -> Result<Option<Vec<u8>>, SlateDBError> {
+        self.inner.get_with_options(key.as_ref(), options).await
     }
 
     /// Scan a range of keys using the default options [`DEFAULT_SCAN_OPTIONS`].
