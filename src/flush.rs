@@ -7,6 +7,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{error, info};
 
 use crate::db::{DbInner, FlushMsg};
+use crate::db_state;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskShutdown;
@@ -14,7 +15,6 @@ use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
 use crate::types::{RowAttributes, ValueDeletable};
 use crate::utils::spawn_bg_task;
-use crate::db_state;
 
 #[derive(Debug)]
 pub(crate) enum WalFlushThreadMsg {
@@ -198,5 +198,4 @@ impl DbInner {
             }
         }
     }
-
 }
