@@ -61,7 +61,7 @@ async fn main() -> Result<(), SlateDBError> {
     // Get
     assert_eq!(
         kv_store.get(key).await?,
-        Some(Bytes::from_static(value))
+        Some("test_value".into())
     );
 
     // Delete
@@ -79,11 +79,11 @@ async fn main() -> Result<(), SlateDBError> {
     while let Ok(Some(item)) = iter.next().await {
         assert_eq!(
             item.key,
-            Bytes::from(format!("test_key{count}").into_bytes())
+            format!("test_key{count}").into_bytes()
         );
         assert_eq!(
             item.value,
-            Bytes::from(format!("test_value{count}").into_bytes())
+            format!("test_value{count}").into_bytes()
         );
         count += 1;
     }

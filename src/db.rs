@@ -947,7 +947,7 @@ impl Db {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.put(b"key", b"value").await?;
-    ///     assert_eq!(db.get(b"key").await?, Some(Bytes::from_static(b"value")));
+    ///     assert_eq!(db.get(b"key").await?, Some("value".into()));
     ///     Ok(())
     /// }
     /// ```
@@ -979,7 +979,6 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use bytes::Bytes;
     /// use slatedb::{db::Db, config::ReadOptions, error::SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
@@ -989,7 +988,7 @@ impl Db {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.put(b"key", b"value").await?;
-    ///     assert_eq!(db.get_with_options(b"key", &ReadOptions::default()).await?, Some(Bytes::from_static(b"value")));
+    ///     assert_eq!(db.get_with_options(b"key", &ReadOptions::default()).await?, Some("value".into()));
     ///     Ok(())
     /// }
     /// ```
@@ -1011,7 +1010,6 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use bytes::Bytes;
     /// use slatedb::{db::Db, error::SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
@@ -1362,10 +1360,7 @@ mod tests {
         kv_store.put(key, value).await.unwrap();
         kv_store.flush().await.unwrap();
 
-        assert_eq!(
-            kv_store.get(key).await.unwrap(),
-            Some(Bytes::from_static(value))
-        );
+        assert_eq!(kv_store.get(key).await.unwrap(), Some(value.into()));
         kv_store.delete(key).await.unwrap();
         assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();
@@ -1398,7 +1393,7 @@ mod tests {
 
         let got = kv_store.get(key).await.unwrap();
         let access_count1 = kv_store.metrics().object_store_cache_part_access.get();
-        assert_eq!(got, Some(Bytes::from_static(value)));
+        assert_eq!(got, Some(value.into()));
         assert!(access_count1 > 0);
         assert!(access_count1 >= access_count0);
         assert!(kv_store.metrics().object_store_cache_part_hits.get() >= 1);
@@ -1752,10 +1747,7 @@ mod tests {
 
         // Read back keys
         assert_eq!(kv_store.get(b"key1").await.unwrap(), None);
-        assert_eq!(
-            kv_store.get(b"key2").await.unwrap(),
-            Some(Bytes::from_static(b"value2"))
-        );
+        assert_eq!(kv_store.get(b"key2").await.unwrap(), Some(b"value2".into()));
 
         kv_store.close().await.unwrap();
     }
@@ -1789,10 +1781,7 @@ mod tests {
 
         // Read back keys
         assert_eq!(kv_store.get(b"key1").await.unwrap(), None);
-        assert_eq!(
-            kv_store.get(b"key2").await.unwrap(),
-            Some(Bytes::from_static(b"value2"))
-        );
+        assert_eq!(kv_store.get(b"key2").await.unwrap(), Some("value2".into()));
 
         kv_store.close().await.unwrap();
     }
@@ -2172,10 +2161,7 @@ mod tests {
         kv_store.put(key, value).await.unwrap();
         kv_store.flush().await.unwrap();
 
-        assert_eq!(
-            kv_store.get(key).await.unwrap(),
-            Some(Bytes::from_static(value))
-        );
+        assert_eq!(kv_store.get(key).await.unwrap(), Some(value.into()));
     }
 
     #[tokio::test]
@@ -2277,13 +2263,13 @@ mod tests {
 
         for i in 0..l0_count {
             let val = kv_store_restored.get(&[b'a' + i as u8; 16]).await.unwrap();
-            assert_eq!(val, Some(Bytes::copy_from_slice(&[b'b' + i as u8; 48])));
+            assert_eq!(val, Some((&[b'b' + i as u8; 48]).into()));
             let val = kv_store_restored.get(&[b'j' + i as u8; 16]).await.unwrap();
-            assert_eq!(val, Some(Bytes::copy_from_slice(&[b'k' + i as u8; 48])));
+            assert_eq!(val, Some((&[b'k' + i as u8; 48]).into()));
         }
         for i in 0..sst_count {
             let val = kv_store_restored.get(&i.to_be_bytes()).await.unwrap();
-            assert_eq!(val, Some(Bytes::copy_from_slice(&i.to_be_bytes())));
+            assert_eq!(val, Some(i.to_be_bytes().into()));
         }
         kv_store_restored.close().await.unwrap();
 
@@ -2331,7 +2317,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(val, Some(Bytes::from("bar")));
+        assert_eq!(val, Some("bar".into()));
 
         // Validate committed read should still return None
         let val = kv_store.get("foo".as_bytes()).await.unwrap();
@@ -2373,7 +2359,7 @@ mod tests {
             .unwrap();
 
         let val = kv_store.get("foo".as_bytes()).await.unwrap();
-        assert_eq!(val, Some(Bytes::from("bar")));
+        assert_eq!(val, Some("bar".into()));
         let val = kv_store
             .get_with_options(
                 "foo".as_bytes(),
@@ -2383,7 +2369,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(val, Some(Bytes::from("bla")));
+        assert_eq!(val, Some("bla".into()));
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
         kv_store.close().await.unwrap();
@@ -2419,7 +2405,7 @@ mod tests {
             .unwrap();
 
         let val = kv_store.get("foo".as_bytes()).await.unwrap();
-        assert_eq!(val, Some(Bytes::from("bar")));
+        assert_eq!(val, Some("bar".into()));
         let val = kv_store
             .get_with_options(
                 "foo".as_bytes(),
@@ -2485,14 +2471,8 @@ mod tests {
         );
         assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 2);
         assert_eq!(snapshot.state.core.next_wal_sst_id, next_wal_id);
-        assert_eq!(
-            reader.get(&key1).await.unwrap(),
-            Some(Bytes::copy_from_slice(&value1))
-        );
-        assert_eq!(
-            reader.get(&key2).await.unwrap(),
-            Some(Bytes::copy_from_slice(&value2))
-        );
+        assert_eq!(reader.get(&key1).await.unwrap(), Some((&value1).into()));
+        assert_eq!(reader.get(&key2).await.unwrap(), Some((&value2).into()));
 
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
         db.close().await.unwrap();
@@ -2562,10 +2542,7 @@ mod tests {
         assert!(snapshot.state.imm_memtable.get(1).is_none());
 
         assert_eq!(snapshot.state.core.next_wal_sst_id, 4);
-        assert_eq!(
-            db.get(&key1).await.unwrap(),
-            Some(Bytes::copy_from_slice(&value1))
-        );
+        assert_eq!(db.get(&key1).await.unwrap(), Some((&value1).into()));
     }
 
     #[tokio::test]
@@ -2680,9 +2657,9 @@ mod tests {
         db.put(&[b'm'; 32], &[129u8; 32]).await.unwrap();
 
         let val = db.get(&[b'a'; 32]).await.unwrap();
-        assert_eq!(val, Some(Bytes::copy_from_slice(&[128u8; 32])));
+        assert_eq!(val, Some((&[128u8; 32]).into()));
         let val = db.get(&[b'm'; 32]).await.unwrap();
-        assert_eq!(val, Some(Bytes::copy_from_slice(&[129u8; 32])));
+        assert_eq!(val, Some((&[129u8; 32]).into()));
         for i in 1..4 {
             info!(
                 "3 l0: {} {}",
@@ -2690,15 +2667,15 @@ mod tests {
                 db.inner.state.read().state().core.compacted.len()
             );
             let val = db.get(&[b'a' + i; 32]).await.unwrap();
-            assert_eq!(val, Some(Bytes::copy_from_slice(&[1u8 + i; 32])));
+            assert_eq!(val, Some((&[1u8 + i; 32]).into()));
             let val = db.get(&[b'm' + i; 32]).await.unwrap();
-            assert_eq!(val, Some(Bytes::copy_from_slice(&[13u8 + i; 32])));
+            assert_eq!(val, Some((&[13u8 + i; 32]).into()));
         }
         for i in 0..4 {
             let val = db.get(&[b'f' + i; 32]).await.unwrap();
-            assert_eq!(val, Some(Bytes::copy_from_slice(&[6u8 + i; 32])));
+            assert_eq!(val, Some((&[6u8 + i; 32]).into()));
             let val = db.get(&[b's' + i; 32]).await.unwrap();
-            assert_eq!(val, Some(Bytes::copy_from_slice(&[19u8 + i; 32])));
+            assert_eq!(val, Some((&[19u8 + i; 32]).into()));
         }
         let neg_lookup = db.get(b"abc").await;
         assert!(neg_lookup.unwrap().is_none());
