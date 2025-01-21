@@ -407,7 +407,7 @@ However, it's possible to have some failure on flushing WAL to object storage wh
 
 In this case, we can still buffer the WAL in memory as long as possible. When the failure is resolved, we can resume the flush operation.
 
-However, the memory is limited, and we can't buffer the WAL in memory forever. We need to set a threshold like named as `max_wal_mem_buffer_bytes` to set the max size of the WAL buffer if the flush operation always fails. When this threshold is reached, we can't buffer the WAL anymore, and we have to mark the db into an read-only state.
+However, the memory is limited, and we can't buffer the WAL in memory forever. We already have a threshold setting `max_unflushed_bytes` for this. When this threshold is reached, we can't buffer the WAL anymore, and we have to mark the db into an read-only state.
 
 When the WAL fails to be flushed to storage, the write operation with `SyncLevel::Remote` should be failed with an `IOError`, and considered as not committed. This write operation is ok to be visible to readers with `ReadWatermark::LastCommitting`, but should be invisible to readers with read watermark higher than `ReadWatermark::LastCommitted`.
 
