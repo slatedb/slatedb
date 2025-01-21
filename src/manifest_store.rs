@@ -201,9 +201,9 @@ impl StoredManifest {
 
     pub(crate) async fn write_new_checkpoint(
         &mut self,
-        checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
+        let checkpoint_id = Uuid::new_v4();
         self.maybe_apply_db_state_update(|stored_manifest| {
             let checkpoint = stored_manifest.new_checkpoint(checkpoint_id, options)?;
             let mut updated_db_state = stored_manifest.db_state().clone();
@@ -789,12 +789,12 @@ mod tests {
             .unwrap();
 
         let checkpoint1 = sm
-            .write_new_checkpoint(Uuid::new_v4(), &CheckpointOptions::default())
+            .write_new_checkpoint(&CheckpointOptions::default())
             .await
             .unwrap();
 
         let _ = sm
-            .write_new_checkpoint(Uuid::new_v4(), &CheckpointOptions::default())
+            .write_new_checkpoint(&CheckpointOptions::default())
             .await
             .unwrap();
 

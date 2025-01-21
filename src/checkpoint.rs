@@ -436,8 +436,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         db.flush().await.unwrap();
 
-        let checkpoint_result = tokio::join!(checkpoint_handle).0.unwrap().unwrap();
-        eprintln!("{checkpoint_result:?}")
+        tokio::join!(checkpoint_handle).0.unwrap().unwrap();
+
     }
 
     async fn test_checkpoint_scope_all<F: FnOnce(Manifest) -> SsTableId>(
