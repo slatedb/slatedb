@@ -349,9 +349,6 @@ pub enum CheckpointScope {
 /// Specify options to provide when creating a checkpoint.
 #[derive(Debug, Clone)]
 pub struct CheckpointOptions {
-    /// Specifies the scope targeted by the checkpoint (see above)
-    pub scope: CheckpointScope,
-
     /// Optionally specifies the lifetime of the checkpoint to create. The expire time will be
     /// set to the current wallclock time plus the specified lifetime. If lifetime is None, then
     /// the checkpoint is created without an expiry time.
@@ -366,7 +363,6 @@ pub struct CheckpointOptions {
 impl Default for CheckpointOptions {
     fn default() -> Self {
         Self {
-            scope: CheckpointScope::Durable,
             lifetime: None,
             source: None,
         }

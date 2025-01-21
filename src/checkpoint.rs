@@ -30,9 +30,10 @@ impl Db {
     /// checkpoint and the id of the referenced manifest.
     pub async fn create_checkpoint(
         &self,
+        scope: CheckpointScope,
         options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
-        if let CheckpointScope::All { force_flush } = options.scope {
+        if let CheckpointScope::All { force_flush } = scope {
             if force_flush {
                 self.flush().await?;
             } else {
@@ -419,17 +420,18 @@ mod tests {
         let table = sample::table(&mut rng, 1000, 10);
         test_utils::seed_database(&db, &table, false).await.unwrap();
 
-        let checkpoint_options = CheckpointOptions {
-            scope: CheckpointScope::All { force_flush: false },
-            ..CheckpointOptions::default()
-        };
-
         // Under the current implementation, when the WAL is disabled, we have to wait for
         // either an explicit flush or for enough accumulated new data to force a flush of
         // the current memtable.
         let db_clone = Arc::clone(&db);
-        let checkpoint_handle =
-            tokio::spawn(async move { db_clone.create_checkpoint(&checkpoint_options).await });
+        let checkpoint_handle = tokio::spawn(async move {
+            db_clone
+                .create_checkpoint(
+                    CheckpointScope::All { force_flush: false },
+                    &CheckpointOptions::default(),
+                )
+                .await
+        });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         db.flush().await.unwrap();
@@ -454,10 +456,10 @@ mod tests {
         test_utils::seed_database(&db, &table, false).await.unwrap();
 
         let checkpoint = db
-            .create_checkpoint(&CheckpointOptions {
-                scope: CheckpointScope::All { force_flush },
-                ..CheckpointOptions::default()
-            })
+            .create_checkpoint(
+                CheckpointScope::All { force_flush },
+                &CheckpointOptions::default(),
+            )
             .await
             .unwrap();
 
