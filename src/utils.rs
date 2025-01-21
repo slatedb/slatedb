@@ -178,6 +178,19 @@ impl MonotonicClock {
     }
 }
 
+/// Merge two options using the provided function.
+pub(crate) fn merge_options<T>(
+    current: Option<T>,
+    next: Option<T>,
+    f: impl Fn(T, T) -> T,
+) -> Option<T> {
+    match (current, next) {
+        (Some(current), Some(next)) => Some(f(current, next)),
+        (None, next) => next,
+        (current, None) => current,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::error::SlateDBError;
