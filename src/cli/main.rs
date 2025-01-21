@@ -5,7 +5,7 @@ use slatedb::admin;
 use slatedb::admin::{list_checkpoints, list_manifests, read_manifest, run_gc_instance};
 use slatedb::config::GcExecutionMode::{Once, Periodic};
 use slatedb::config::{
-    CheckpointOptions, CheckpointScope, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
 use slatedb::db::Db;
 use std::error::Error;

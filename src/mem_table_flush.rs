@@ -142,7 +142,7 @@ impl MemtableFlusher {
                 .await?;
             {
                 let mut guard = self.db_inner.state.write();
-                guard.move_imm_memtable_to_l0(imm_memtable.clone(), sst_handle);
+                guard.move_imm_memtable_to_l0(imm_memtable.clone(), sst_handle)?;
             }
             imm_memtable.notify_flush_to_l0(Ok(()));
             self.write_manifest_safely().await?;

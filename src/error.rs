@@ -4,6 +4,8 @@ use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::merge_operator::MergeOperatorError;
+
 #[derive(Clone, Debug, Error)]
 pub enum SlateDBError {
     #[error("IO error: {0}")]
@@ -67,7 +69,8 @@ pub enum SlateDBError {
     #[error("Error Compressing Block")]
     BlockCompressionError,
 
-    #[error("Invalid RowFlags (encoded_bits: {encoded_bits:#b}, known_bits: {known_bits:#b}): {message}")]
+    #[error("Invalid RowFlags (encoded_bits: {encoded_bits:#b}, known_bits: {known_bits:#b}): {message}"
+    )]
     InvalidRowFlags {
         encoded_bits: u8,
         known_bits: u8,
@@ -99,6 +102,9 @@ pub enum SlateDBError {
 
     #[error("background task shutdown")]
     BackgroundTaskShutdown,
+
+    #[error("Merge Operator error: {0}")]
+    MergeOperatorError(#[from] MergeOperatorError),
 
     #[error("Checkpoint {0} missing")]
     CheckpointMissing(Uuid),

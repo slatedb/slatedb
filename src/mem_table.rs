@@ -1,12 +1,12 @@
-use std::cell::Cell;
-use std::collections::VecDeque;
-use std::ops::{RangeBounds, RangeFull};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
+use std::cell::Cell;
+use std::collections::VecDeque;
+use std::ops::{RangeBounds, RangeFull};
+use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
@@ -19,6 +19,9 @@ pub(crate) struct KVTable {
     map: SkipMap<Bytes, ValueWithAttributes>,
     durable: WatchableOnceCell<Result<(), SlateDBError>>,
     size: AtomicUsize,
+    /// this corresponds to the timestamp of the most recent
+    /// modifying operation on this KVTable (insertion or deletion)
+    last_tick: AtomicI64,
 }
 
 pub(crate) struct WritableKVTable {
@@ -32,7 +35,6 @@ pub(crate) struct ImmutableMemtable {
 }
 
 pub(crate) struct ImmutableWal {
-    id: u64,
     table: Arc<KVTable>,
 }
 
@@ -135,15 +137,8 @@ impl ImmutableMemtable {
 }
 
 impl ImmutableWal {
-    pub(crate) fn new(id: u64, table: WritableKVTable) -> Self {
-        Self {
-            id,
-            table: table.table,
-        }
-    }
-
-    pub(crate) fn id(&self) -> u64 {
-        self.id
+    pub(crate) fn new(table: WritableKVTable) -> Self {
+        Self { table: table.table }
     }
 
     pub(crate) fn table(&self) -> Arc<KVTable> {
@@ -175,6 +170,10 @@ impl WritableKVTable {
     pub(crate) fn size(&self) -> usize {
         self.table.size()
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.size() == 0
+    }
 }
 
 impl KVTable {
@@ -183,6 +182,7 @@ impl KVTable {
             map: SkipMap::new(),
             size: AtomicUsize::new(0),
             durable: WatchableOnceCell::new(),
+            last_tick: AtomicI64::new(i64::MIN),
         }
     }
 
@@ -192,6 +192,10 @@ impl KVTable {
 
     pub(crate) fn size(&self) -> usize {
         self.size.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn last_tick(&self) -> i64 {
+        self.last_tick.load(SeqCst)
     }
 
     /// Get the value for a given key.
@@ -218,6 +222,11 @@ impl KVTable {
             key_len + value.len() + sizeof_attributes(&attrs),
             Ordering::Relaxed,
         );
+
+        // it is safe to use fetch_max here to update the last tick
+        // because the monotonicity is enforced when generating the clock tick
+        // (see [crate::utils::MonotonicClock::now])
+        attrs.ts.map(|tick| self.last_tick.fetch_max(tick, SeqCst));
 
         let previous_size = Cell::new(None);
         self.map.compare_insert(
