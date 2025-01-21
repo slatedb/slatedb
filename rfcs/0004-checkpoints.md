@@ -162,9 +162,6 @@ enum CheckpointScope {
 
 /// Specify options to provide when creating a checkpoint.
 struct CheckpointOptions {
-    /// Specifies the scope targeted by the checkpoint (see above)
-    scope: CheckpointScope,
-
     /// Optionally specifies the lifetime of the checkpoint to create. The expire time will be set to
     /// the current wallclock time plus the specified lifetime. If lifetime is None, then the checkpoint
     /// is created without an expiry time.
@@ -204,7 +201,11 @@ impl Db {
 
     /// Creates a checkpoint of an opened db using the provided options. Returns the ID of the created
     /// checkpoint and the id of the referenced manifest.
-    pub async fn create_checkpoint(&self, options: &CheckpointOptions) -> Result<CheckpointCreateResult, SlateDBError> {
+    pub async fn create_checkpoint(
+        &self,
+        scope: CheckpointScope,
+        options: &CheckpointOptions,
+    ) -> Result<CheckpointCreateResult, SlateDBError> {
         …
     }
 
