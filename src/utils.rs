@@ -4,7 +4,6 @@ use crate::error::SlateDBError::{BackgroundTaskPanic, BackgroundTaskShutdown};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::oneshot::Sender;
 
 pub(crate) struct WatchableOnceCell<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
@@ -151,15 +150,6 @@ pub(crate) async fn close_and_drain_receiver<T>(
         if let Some(sender) = rsp_sender {
             let _ = sender.send(Err(error.clone()));
         }
-    }
-}
-
-pub(crate) fn drain_sender_queue<S>(
-    senders: &mut Vec<Sender<Result<S, SlateDBError>>>,
-    error: &SlateDBError,
-) {
-    while let Some(sender) = senders.pop() {
-        let _ = sender.send(Err(error.clone()));
     }
 }
 

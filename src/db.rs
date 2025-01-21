@@ -419,20 +419,9 @@ impl DbInner {
     }
 
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
-        self.send_flush_wals(true).await
-    }
-
-    async fn await_flush_wals(&self) -> Result<(), SlateDBError> {
-        self.send_flush_wals(false).await
-    }
-
-    async fn send_flush_wals(&self, force_flush: bool) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
-            .send((
-                Some(tx),
-                WalFlushThreadMsg::FlushImmutableWals { force_flush },
-            ))
+            .send((Some(tx), WalFlushThreadMsg::FlushImmutableWals))
             .map_err(|_| SlateDBError::WalFlushChannelError)?;
         rx.await?
     }
@@ -445,20 +434,9 @@ impl DbInner {
 
     // use to manually flush memtables
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
-        self.send_flush_memtables(true).await
-    }
-
-    async fn await_flush_memtables(&self) -> Result<(), SlateDBError> {
-        self.send_flush_memtables(false).await
-    }
-
-    async fn send_flush_memtables(&self, force_flush: bool) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
-            .send((
-                Some(tx),
-                MemtableFlushThreadMsg::FlushImmutableMemtables { force_flush },
-            ))
+            .send((Some(tx), MemtableFlushThreadMsg::FlushImmutableMemtables))
             .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         rx.await?
     }
@@ -1340,11 +1318,15 @@ impl Db {
     }
 
     pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
-        if self.inner.wal_enabled() {
-            self.inner.await_flush_wals().await
-        } else {
-            self.inner.await_flush_memtables().await
+        let wal = {
+            let guard = self.inner.state.read();
+            let snapshot = guard.snapshot();
+            snapshot.wal.clone()
+        };
+        if wal.is_empty() {
+            return Ok(());
         }
+        wal.await_durable().await
     }
 
     pub fn metrics(&self) -> Arc<DbStats> {

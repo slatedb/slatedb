@@ -1,5 +1,5 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
-use crate::db::{CheckpointMsg, DbInner, FlushMsg, FlushSender};
+use crate::db::{CheckpointMsg, DbInner, FlushMsg};
 use crate::db_state::{CoreDbState, SsTableId};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{BackgroundTaskShutdown, CheckpointMissing};
@@ -16,13 +16,12 @@ use ulid::Ulid;
 #[derive(Debug)]
 pub enum MemtableFlushThreadMsg {
     Shutdown,
-    FlushImmutableMemtables { force_flush: bool },
+    FlushImmutableMemtables,
 }
 
 pub(crate) struct MemtableFlusher {
     db_inner: Arc<DbInner>,
     manifest: FenceableManifest,
-    flush_waiters: Vec<FlushSender>,
 }
 
 impl MemtableFlusher {
@@ -112,18 +111,6 @@ impl MemtableFlusher {
         }
     }
 
-    async fn flush(&mut self, complete_flush: bool) -> Result<(), SlateDBError> {
-        let result = self.flush_imm_memtables_to_l0().await;
-        if complete_flush {
-            while let Some(sender) = self.flush_waiters.pop() {
-                if let Err(Err(e)) = sender.send(result.clone()) {
-                    error!("Failed to send flush error: {e}");
-                }
-            }
-        }
-        result
-    }
-
     async fn flush_imm_memtables_to_l0(&mut self) -> Result<(), SlateDBError> {
         while let Some(imm_memtable) = {
             let rguard = self.db_inner.state.read();
@@ -160,9 +147,8 @@ impl DbInner {
     async fn flush_and_record(
         self: &Arc<Self>,
         flusher: &mut MemtableFlusher,
-        complete_flush: bool,
     ) -> Result<(), SlateDBError> {
-        let result = flusher.flush(complete_flush).await;
+        let result = flusher.flush_imm_memtables_to_l0().await;
         if let Err(err) = &result {
             error!("error from memtable flush: {err}");
         } else {
@@ -202,7 +188,7 @@ impl DbInner {
                             error!("error loading manifest: {err}");
                             return Err(err);
                         }
-                        this.flush_and_record(flusher, false).await?
+                        this.flush_and_record(flusher).await?
                     }
                     flush_msg = flush_rx.recv() => {
                         let (rsp_sender, msg) = flush_msg.expect("channel unexpectedly closed");
@@ -210,12 +196,13 @@ impl DbInner {
                             MemtableFlushThreadMsg::Shutdown => {
                                 return Ok(());
                             },
-                            MemtableFlushThreadMsg::FlushImmutableMemtables { force_flush } => {
-                                if let Some(sender) = rsp_sender {
-                                    flusher.flush_waiters.push(sender);
-                                }
-                                if force_flush {
-                                    this.flush_and_record(flusher, true).await?;
+                            MemtableFlushThreadMsg::FlushImmutableMemtables => {
+                                this.flush_and_record(flusher).await?;
+                                if let Some(rsp_sender) = rsp_sender {
+                                    let res = rsp_sender.send(Ok(()));
+                                    if let Err(Err(err)) = res {
+                                        error!("error sending flush response: {err}");
+                                    }
                                 }
                             }
                         }
@@ -235,7 +222,6 @@ impl DbInner {
             let mut flusher = MemtableFlusher {
                 db_inner: this.clone(),
                 manifest,
-                flush_waiters: Vec::new(),
             };
 
             // Stop the loop when the shut down has been received *and* all
@@ -246,7 +232,6 @@ impl DbInner {
             // respond to any pending msgs
             let pending_error = result.clone().err().unwrap_or(BackgroundTaskShutdown);
             utils::close_and_drain_receiver(&mut flush_rx, &pending_error).await;
-            utils::drain_sender_queue(&mut flusher.flush_waiters, &pending_error);
             Self::close_and_drain_checkpoint_receiver(&mut checkpoint_rx, &pending_error).await;
 
             if let Err(err) = flusher.write_manifest_safely().await {

@@ -17,10 +17,7 @@ impl DbInner {
         }
         guard.freeze_memtable(wal_id)?;
         self.memtable_flush_notifier
-            .send((
-                None,
-                MemtableFlushThreadMsg::FlushImmutableMemtables { force_flush: true },
-            ))
+            .send((None, MemtableFlushThreadMsg::FlushImmutableMemtables))
             .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         Ok(())
     }
@@ -38,10 +35,7 @@ impl DbInner {
         }
         guard.freeze_wal()?;
         self.wal_flush_notifier
-            .send((
-                None,
-                WalFlushThreadMsg::FlushImmutableWals { force_flush: true },
-            ))
+            .send((None, WalFlushThreadMsg::FlushImmutableWals))
             .map_err(|_| SlateDBError::WalFlushChannelError)?;
         Ok(())
     }
