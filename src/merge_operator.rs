@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use bytes::Bytes;
 use thiserror::Error;
 
 use crate::{
@@ -28,16 +27,15 @@ pub enum MergeOperatorError {}
 /// # Examples
 /// Here's an example of a counter merge operator:
 /// ```
-/// use bytes::Bytes;
 /// use slatedb::merge_operator::{MergeOperator, MergeOperatorError};
 ///
 /// struct CounterMergeOperator;
 ///
 /// impl MergeOperator for CounterMergeOperator {
-///     fn merge(&self, existing_value: Bytes, value: Bytes) -> Result<Bytes, MergeOperatorError> {
-///         let existing = u64::from_le_bytes(existing_value.as_ref().try_into().unwrap());
-///         let increment = u64::from_le_bytes(value.as_ref().try_into().unwrap());
-///         Ok(Bytes::copy_from_slice(&(existing + increment).to_le_bytes()))
+///     fn merge(&self, existing_value: &[u8], value: &[u8]) -> Result<Vec<u8>, MergeOperatorError> {
+///         let existing = u64::from_le_bytes(existing_value.try_into().unwrap());
+///         let increment = u64::from_le_bytes(value.try_into().unwrap());
+///         Ok((existing + increment).to_le_bytes().to_vec())
 ///     }
 /// }
 /// ```
@@ -54,7 +52,7 @@ pub trait MergeOperator {
     /// # Returns
     /// * `Ok(Bytes)` - The merged result as bytes
     /// * `Err(MergeOperatorError)` - If the merge operation fails
-    fn merge(&self, existing_value: Bytes, value: Bytes) -> Result<Bytes, MergeOperatorError>;
+    fn merge(&self, existing_value: &[u8], value: &[u8]) -> Result<Vec<u8>, MergeOperatorError>;
 }
 
 pub(crate) type MergeOperatorType = Arc<dyn MergeOperator + Send + Sync>;
@@ -90,7 +88,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         first_entry: RowEntry,
     ) -> Result<Option<RowEntry>, SlateDBError> {
         let mut merged_value = match first_entry.value {
-            ValueDeletable::Merge(ref v) => v.clone(),
+            ValueDeletable::Merge(ref v) => v.to_vec(),
             _ => unreachable!("Entry doesn't contain merge operand."),
         };
         let key = first_entry.key;
@@ -119,10 +117,10 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                     match next_entry.value {
                         ValueDeletable::Value(value) => {
                             // Final merge with a regular value
-                            let merged_value = self.merge_operator.merge(merged_value, value)?;
+                            let merged_value = self.merge_operator.merge(&merged_value, &value)?;
                             return Ok(Some(RowEntry::new(
                                 key,
-                                ValueDeletable::Value(merged_value),
+                                ValueDeletable::Value(merged_value.into()),
                                 first_entry.seq,
                                 max_create_ts,
                                 min_expire_ts,
@@ -130,13 +128,13 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                         }
                         ValueDeletable::Merge(value) => {
                             // Continue merging
-                            merged_value = self.merge_operator.merge(merged_value, value)?;
+                            merged_value = self.merge_operator.merge(&merged_value, &value)?;
                             continue;
                         }
                         ValueDeletable::Tombstone => {
                             return Ok(Some(RowEntry::new(
                                 key,
-                                ValueDeletable::Value(merged_value),
+                                ValueDeletable::Value(merged_value.into()),
                                 first_entry.seq,
                                 max_create_ts,
                                 min_expire_ts,
@@ -148,7 +146,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                     // Different key or expire timestamp. We need to return both entries ...
                     let result = RowEntry::new(
                         key,
-                        ValueDeletable::Merge(merged_value),
+                        ValueDeletable::Merge(merged_value.into()),
                         first_entry.seq,
                         max_create_ts,
                         min_expire_ts,
@@ -162,7 +160,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                     // End of iterator, return accumulated merge
                     return Ok(Some(RowEntry::new(
                         key,
-                        ValueDeletable::Merge(merged_value),
+                        ValueDeletable::Merge(merged_value.into()),
                         first_entry.seq,
                         max_create_ts,
                         min_expire_ts,
@@ -207,10 +205,14 @@ mod tests {
     struct MockMergeOperator;
 
     impl MergeOperator for MockMergeOperator {
-        fn merge(&self, existing_value: Bytes, value: Bytes) -> Result<Bytes, MergeOperatorError> {
+        fn merge(
+            &self,
+            existing_value: &[u8],
+            value: &[u8],
+        ) -> Result<Vec<u8>, MergeOperatorError> {
             let mut merged = existing_value.to_vec();
-            merged.extend_from_slice(&value);
-            Ok(Bytes::from(merged))
+            merged.extend_from_slice(value);
+            Ok(merged)
         }
     }
 
