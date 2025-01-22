@@ -57,7 +57,6 @@ impl DbInner {
         let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
 
-            guard.update_clock_tick(now)?;
             let seq = guard.increment_seq();
             let current_wal = guard.wal();
             for op in batch.ops {
@@ -90,7 +89,6 @@ impl DbInner {
                 panic!("wal_disabled feature must be enabled");
             }
             let mut guard = self.state.write();
-            guard.update_clock_tick(now)?;
             let seq = guard.increment_seq();
             let current_memtable = guard.memtable();
             for op in batch.ops {

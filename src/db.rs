@@ -60,7 +60,6 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
-use crate::types::{RowAttributes, ValueDeletable};
 use crate::utils::MonotonicClock;
 use tracing::{info, warn};
 

@@ -226,13 +226,12 @@ pub(crate) struct CoreDbState {
     pub(crate) compacted: Vec<SortedRun>,
     pub(crate) next_wal_sst_id: u64,
     pub(crate) last_compacted_wal_sst_id: u64,
-    pub(crate) last_clock_tick: i64,
-    pub(crate) last_seq: u64,
     /// the `last_l0_clock_tick` includes all data in L0 and below --
     /// WAL entries will have their latest ticks recovered on replay
     /// into the in-memory state
     pub(crate) last_l0_clock_tick: i64,
     pub(crate) checkpoints: Vec<Checkpoint>,
+    pub(crate) last_seq: u64,
 }
 
 impl CoreDbState {
@@ -244,10 +243,9 @@ impl CoreDbState {
             compacted: vec![],
             next_wal_sst_id: 1,
             last_compacted_wal_sst_id: 0,
-            last_clock_tick: i64::MIN,
-            last_seq: 0,
             last_l0_clock_tick: i64::MIN,
             checkpoints: vec![],
+            last_seq: 0,
         }
     }
 
@@ -398,6 +396,20 @@ impl DbState {
         self.update_state(state);
     }
 
+    pub fn increment_seq(&mut self) -> u64 {
+        let mut state = self.state_copy();
+        let last_seq = state.core.last_seq;
+        state.core.last_seq += 1;
+        self.update_state(state);
+        last_seq + 1
+    }
+
+    pub fn update_last_seq(&mut self, seq: u64) {
+        let mut state = self.state_copy();
+        state.core.last_seq = seq;
+        self.update_state(state);
+    }
+
     pub fn merge_db_state(&mut self, updated_state: &CoreDbState) {
         // The compactor removes tables from l0_last_compacted, so we
         // only want to keep the tables up to there.
@@ -413,35 +425,8 @@ impl DbState {
         } else {
             self.state.core.l0.iter().cloned().collect()
         };
-    }
 
-    pub fn increment_seq(&mut self) -> u64 {
-        let mut state = self.state_copy();
-        let last_seq = state.core.last_seq;
-        state.core.last_seq += 1;
-        self.update_state(state);
-        last_seq + 1
-    }
-
-    pub fn update_last_seq(&mut self, seq: u64) {
-        let mut state = self.state_copy();
-        state.core.last_seq = seq;
-        self.update_state(state);
-    }
-
-    pub fn refresh_db_state(&mut self, compactor_state: &CoreDbState) {
-        // copy over L0 up to l0_last_compacted
-        let l0_last_compacted = &compactor_state.l0_last_compacted;
-        let mut new_l0 = VecDeque::new();
-        for sst in self.state.core.l0.iter() {
-            if let Some(l0_last_compacted) = l0_last_compacted {
-                if sst.id.unwrap_compacted_id() == *l0_last_compacted {
-                    break;
-                }
-            }
-            new_l0.push_back(sst.clone());
-        }
-        let compacted = compactor_state.compacted.clone();
+        let compacted = updated_state.compacted.clone();
         let mut state = self.state_copy();
         state.core.l0_last_compacted.clone_from(l0_last_compacted);
         state.core.l0 = new_l0;

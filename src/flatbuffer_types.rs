@@ -161,7 +161,6 @@ impl FlatBufferManifestCodec {
             compacted,
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
             last_compacted_wal_sst_id: manifest.wal_id_last_compacted(),
-            last_clock_tick: manifest.last_clock_tick(),
             last_seq: manifest.last_seq(),
             last_l0_clock_tick: manifest.last_l0_clock_tick(),
             checkpoints,

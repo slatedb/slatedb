@@ -7,12 +7,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
-use std::cell::Cell;
-use std::collections::VecDeque;
-use std::ops::{RangeBounds, RangeFull};
+use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
-use std::sync::Arc;
 
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
@@ -161,7 +157,7 @@ impl SeekToKey for VecDequeKeyValueIterator {
     }
 }
 
-impl<'a, T: RangeBounds<KVTableInternalKey>> KeyValueIterator for MemTableIterator<'a, T> {
+impl<T: RangeBounds<KVTableInternalKey>> KeyValueIterator for MemTableIterator<'_, T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.next_entry_sync())
     }
