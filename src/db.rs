@@ -48,7 +48,7 @@ use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter;
-use crate::flush::WalFlushThreadMsg;
+use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -63,14 +63,11 @@ use crate::types::{RowAttributes, ValueDeletable};
 use crate::utils::MonotonicClock;
 use tracing::{info, warn};
 
-pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
-pub(crate) type FlushMsg<T> = (Option<FlushSender>, T);
-
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
+    pub(crate) wal_flush_notifier: UnboundedSender<WalFlushMsg>,
     pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: Arc<DbStats>,
@@ -82,7 +79,7 @@ impl DbInner {
         options: DbOptions,
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
-        wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
+        wal_flush_notifier: UnboundedSender<WalFlushMsg>,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
         db_stats: Arc<DbStats>,
@@ -416,7 +413,7 @@ impl DbInner {
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
-            .send((Some(tx), WalFlushThreadMsg::FlushImmutableWals))
+            .send(WalFlushMsg::FlushImmutableWals { sender: Some(tx) })
             .map_err(|_| SlateDBError::WalFlushChannelError)?;
         rx.await?
     }
@@ -885,7 +882,7 @@ impl Db {
         // Shutdown the WAL flush thread.
         self.inner
             .wal_flush_notifier
-            .send((None, WalFlushThreadMsg::Shutdown))
+            .send(WalFlushMsg::Shutdown)
             .ok();
 
         if let Some(flush_task) = {
