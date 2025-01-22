@@ -17,7 +17,7 @@ impl From<(&[u8], &[u8])> for KeyValue {
 
 /// Represents a key-value pair that may be a tombstone.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RowEntry {
+pub(crate) struct RowEntry {
     pub key: Bytes,
     pub value: ValueDeletable,
     pub seq: u64,
