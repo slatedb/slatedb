@@ -2,6 +2,7 @@ use std::any::Any;
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::merge_operator::MergeOperatorError;
 
@@ -68,7 +69,8 @@ pub enum SlateDBError {
     #[error("Error Compressing Block")]
     BlockCompressionError,
 
-    #[error("Invalid RowFlags (encoded_bits: {encoded_bits:#b}, known_bits: {known_bits:#b}): {message}")]
+    #[error("Invalid RowFlags (encoded_bits: {encoded_bits:#b}, known_bits: {known_bits:#b}): {message}"
+    )]
     InvalidRowFlags {
         encoded_bits: u8,
         known_bits: u8,
@@ -81,13 +83,16 @@ pub enum SlateDBError {
     #[error("Error flushing memtables: channel closed")]
     MemtableFlushChannelError,
 
+    #[error("Error creating checkpoint: channel closed")]
+    CheckpointChannelError,
+
     #[error("Read channel error: {0}")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
 
     #[error("Iterator invalidated after unexpected error {0}")]
     InvalidatedIterator(#[from] Box<SlateDBError>),
 
-    #[error("Invalid Argument")]
+    #[error("Invalid argument: {msg}")]
     InvalidArgument { msg: String },
 
     #[error("background task panic'd")]
@@ -100,6 +105,9 @@ pub enum SlateDBError {
 
     #[error("Merge Operator error: {0}")]
     MergeOperatorError(#[from] MergeOperatorError),
+
+    #[error("Checkpoint {0} missing")]
+    CheckpointMissing(Uuid),
 }
 
 impl From<std::io::Error> for SlateDBError {

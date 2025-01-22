@@ -340,16 +340,15 @@ fn default_clock() -> Arc<dyn Clock + Send + Sync> {
 /// flush_interval or reaching l0_sst_size_bytes, respectively. If set to Durable, then the
 /// checkpoint includes only writes that were durable at the time of the call. This will be faster,
 /// but may not include data from recent writes.
+#[derive(Debug, Copy, Clone)]
 pub enum CheckpointScope {
     All { force_flush: bool },
     Durable,
 }
 
 /// Specify options to provide when creating a checkpoint.
+#[derive(Debug, Clone, Default)]
 pub struct CheckpointOptions {
-    /// Specifies the scope targeted by the checkpoint (see above)
-    pub scope: CheckpointScope,
-
     /// Optionally specifies the lifetime of the checkpoint to create. The expire time will be
     /// set to the current wallclock time plus the specified lifetime. If lifetime is None, then
     /// the checkpoint is created without an expiry time.
@@ -359,16 +358,6 @@ pub struct CheckpointOptions {
     /// is useful for users to establish checkpoints from existing checkpoints, but with a different
     /// lifecycle and/or metadata.
     pub source: Option<Uuid>,
-}
-
-impl Default for CheckpointOptions {
-    fn default() -> Self {
-        Self {
-            scope: CheckpointScope::Durable,
-            lifetime: None,
-            source: None,
-        }
-    }
 }
 
 /// Configuration options for the database. These options are set on client startup.
