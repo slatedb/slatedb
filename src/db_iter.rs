@@ -84,7 +84,8 @@ impl<'a> DbIterator<'a> {
     ///
     /// Returns [`SlateDBError::InvalidatedIterator`] if the iterator has been
     ///  invalidated in order to reclaim resources.
-    pub async fn seek(&mut self, next_key: Bytes) -> Result<(), SlateDBError> {
+    pub async fn seek<K: AsRef<[u8]>>(&mut self, next_key: K) -> Result<(), SlateDBError> {
+        let next_key = next_key.as_ref();
         if let Some(error) = self.invalidated_error.clone() {
             Err(SlateDBError::InvalidatedIterator(Box::new(error)))
         } else if !self.range.contains(&next_key) {
@@ -103,7 +104,7 @@ impl<'a> DbIterator<'a> {
                 msg: "Cannot seek to a key less than the last returned key".to_string(),
             })
         } else {
-            let result = self.iter.seek(&next_key).await;
+            let result = self.iter.seek(next_key).await;
             self.maybe_invalidate(result)
         }
     }
