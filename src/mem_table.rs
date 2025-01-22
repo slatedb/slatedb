@@ -282,6 +282,14 @@ impl KVTable {
         let internal_key = KVTableInternalKey::new(row.key.clone(), row.seq);
         let previous_size = Cell::new(None);
 
+        // it is safe to use fetch_max here to update the last tick
+        // because the monotonicity is enforced when generating the clock tick
+        // (see [crate::utils::MonotonicClock::now])
+        if let Some(create_ts) = row.create_ts {
+            self.last_tick
+                .fetch_max(create_ts, atomic::Ordering::SeqCst);
+        }
+
         self.map.compare_insert(internal_key, row, |previous_row| {
             // Optimistically calculate the size of the previous value.
             // `compare_fn` might be called multiple times in case of concurrent
