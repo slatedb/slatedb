@@ -1100,7 +1100,11 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), SlateDBError> {
+    pub async fn put<K, V>(&self, key: K, value: V) -> Result<(), SlateDBError>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
         let mut batch = WriteBatch::new();
         batch.put(key, value);
         self.write(batch).await
@@ -1132,13 +1136,17 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn put_with_options(
+    pub async fn put_with_options<K, V>(
         &self,
-        key: &[u8],
-        value: &[u8],
+        key: K,
+        value: V,
         put_opts: &PutOptions,
         write_opts: &WriteOptions,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<(), SlateDBError>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
         let mut batch = WriteBatch::new();
         batch.put_with_options(key, value, put_opts);
         self.write_with_options(batch, write_opts).await
@@ -1167,9 +1175,9 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn delete(&self, key: &[u8]) -> Result<(), SlateDBError> {
+    pub async fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), SlateDBError> {
         let mut batch = WriteBatch::new();
-        batch.delete(key);
+        batch.delete(key.as_ref());
         self.write(batch).await
     }
 
@@ -1197,9 +1205,9 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn delete_with_options(
+    pub async fn delete_with_options<K: AsRef<[u8]>>(
         &self,
-        key: &[u8],
+        key: K,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
         let mut batch = WriteBatch::new();
@@ -2442,11 +2450,11 @@ mod tests {
         // write a few keys that will result in memtable flushes
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
-        db.put(&key1, &value1).await.unwrap();
+        db.put(key1, value1).await.unwrap();
         next_wal_id += 1;
         let key2 = [b'c'; 32];
         let value2 = [b'd'; 96];
-        db.put(&key2, &value2).await.unwrap();
+        db.put(key2, value2).await.unwrap();
         next_wal_id += 1;
 
         let reader = Db::open_with_opts(
@@ -2471,8 +2479,8 @@ mod tests {
         );
         assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 2);
         assert_eq!(snapshot.state.core.next_wal_sst_id, next_wal_id);
-        assert_eq!(reader.get(&key1).await.unwrap(), Some((&value1).into()));
-        assert_eq!(reader.get(&key2).await.unwrap(), Some((&value2).into()));
+        assert_eq!(reader.get(key1).await.unwrap(), Some((value1).into()));
+        assert_eq!(reader.get(key2).await.unwrap(), Some((value2).into()));
 
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
         db.close().await.unwrap();
