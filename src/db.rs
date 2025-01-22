@@ -1958,7 +1958,7 @@ mod tests {
                 tokio::spawn(async move {
                     let mut batch = WriteBatch::new();
                     for key in 1..=NUM_KEYS {
-                        batch.put(&key.to_be_bytes(), &key.to_be_bytes());
+                        batch.put(key.to_be_bytes(), key.to_be_bytes());
                     }
                     store.write(batch).await.expect("write batch failed");
                 })
@@ -1970,7 +1970,7 @@ mod tests {
                     let mut batch = WriteBatch::new();
                     for key in 1..=NUM_KEYS {
                         let value = (key * 2).to_be_bytes();
-                        batch.put(&key.to_be_bytes(), &value);
+                        batch.put(key.to_be_bytes(), value);
                     }
                     store.write(batch).await.expect("write batch failed");
                 })
