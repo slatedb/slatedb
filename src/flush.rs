@@ -44,8 +44,12 @@ impl DbInner {
         Ok(handle)
     }
 
-    async fn flush_imm_wal(&self, imm: Arc<ImmutableWal>) -> Result<SsTableHandle, SlateDBError> {
-        let wal_id = db_state::SsTableId::Wal(imm.id());
+    async fn flush_imm_wal(
+        &self,
+        id: u64,
+        imm: Arc<ImmutableWal>,
+    ) -> Result<SsTableHandle, SlateDBError> {
+        let wal_id = db_state::SsTableId::Wal(id);
         self.flush_imm_table(&wal_id, imm.table()).await
     }
 
@@ -57,16 +61,22 @@ impl DbInner {
     }
 
     async fn flush_imm_wals(&self) -> Result<(), SlateDBError> {
-        while let Some(imm) = {
+        while let Some((imm, id)) = {
             let rguard = self.state.read();
-            rguard.state().imm_wal.back().cloned()
+            let state = rguard.state();
+            state
+                .imm_wal
+                .back()
+                .cloned()
+                .map(|imm| (imm, state.core.next_wal_sst_id))
         } {
-            self.flush_imm_wal(imm.clone()).await?;
+            self.flush_imm_wal(id, imm.clone()).await?;
             let mut wguard = self.state.write();
             wguard.pop_imm_wal();
+            wguard.increment_next_wal_id();
             // flush to the memtable before notifying so that data is available for reads
             self.flush_imm_wal_to_memtable(wguard.memtable(), imm.table());
-            self.maybe_freeze_memtable(&mut wguard, imm.id())?;
+            self.maybe_freeze_memtable(&mut wguard, id)?;
             imm.table().notify_durable(Ok(()));
         }
         Ok(())
@@ -150,8 +160,8 @@ impl DbInner {
                 state.record_fatal_error(err.clone());
                 info!("notifying writeable wal of error");
                 state.wal().table().notify_durable(Err(err.clone()));
+                info!("notifying immutable wals of error");
                 for imm in state.snapshot().state.imm_wal.iter() {
-                    info!("notifying immutable wal {} of error", imm.id());
                     imm.table().notify_durable(Err(err.clone()));
                 }
             },

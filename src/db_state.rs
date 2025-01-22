@@ -1,19 +1,20 @@
+use crate::bytes_range;
 use crate::checkpoint::Checkpoint;
-use bytes::Bytes;
-use serde::Serialize;
-use std::collections::VecDeque;
-use std::fmt::{Debug, Formatter};
-use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::sync::Arc;
-use tracing::debug;
-use ulid::Ulid;
-use SsTableId::{Compacted, Wal};
-
-use crate::bytes_range::BytesRange;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
+use bytes::Bytes;
+use serde::Serialize;
+use std::cmp;
+use std::collections::VecDeque;
+use std::fmt::{Debug, Formatter};
+use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::{Bound, Range};
+use std::sync::Arc;
+use tracing::debug;
+use ulid::Ulid;
+use SsTableId::{Compacted, Wal};
 
 #[derive(Clone, PartialEq, Serialize)]
 pub(crate) struct SsTableHandle {
@@ -42,22 +43,19 @@ impl SsTableHandle {
     pub(crate) fn intersects_range(
         &self,
         end_bound_key: Option<Bytes>,
-        range: &BytesRange,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
     ) -> bool {
         let start_bound = match &self.info.first_key {
             None => Unbounded,
-            Some(key) => Included(key),
-        }
-        .cloned();
-
-        let end_bound = match end_bound_key {
-            None => Unbounded,
-            Some(end_bound_key) => Excluded(end_bound_key),
+            Some(key) => Included(key.as_ref()),
         };
 
-        let this_range = BytesRange::new(start_bound, end_bound);
-        let intersection = this_range.intersection(range);
-        intersection.non_empty()
+        let end_bound = match &end_bound_key {
+            None => Unbounded,
+            Some(key) => Excluded(key.as_ref()),
+        };
+
+        bytes_range::has_nonempty_intersection(range, (start_bound, end_bound))
     }
 
     pub(crate) fn estimate_size(&self) -> u64 {
@@ -158,8 +156,10 @@ impl SortedRun {
             .map(|idx| &self.ssts[idx])
     }
 
-    pub(crate) fn tables_covering_range(&self, range: &BytesRange) -> VecDeque<&SsTableHandle> {
-        let mut covering_ssts = VecDeque::new();
+    fn table_idx_covering_range(&self, range: (Bound<&[u8]>, Bound<&[u8]>)) -> Range<usize> {
+        let mut min_idx = None;
+        let mut max_idx = 0;
+
         for idx in 0..self.ssts.len() {
             let current_sst = &self.ssts[idx];
 
@@ -171,10 +171,34 @@ impl SortedRun {
             };
 
             if current_sst.intersects_range(upper_bound_key, range) {
-                covering_ssts.push_back(&self.ssts[idx]);
+                if min_idx.is_none() {
+                    min_idx = Some(idx);
+                }
+
+                max_idx = idx;
             }
         }
-        covering_ssts
+
+        match min_idx {
+            Some(min_idx) => min_idx..(max_idx + 1),
+            None => 0..0,
+        }
+    }
+
+    pub(crate) fn tables_covering_range(
+        &self,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+    ) -> VecDeque<&SsTableHandle> {
+        let matching_range = self.table_idx_covering_range(range);
+        self.ssts[matching_range].iter().collect()
+    }
+
+    pub(crate) fn into_tables_covering_range(
+        mut self,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+    ) -> VecDeque<SsTableHandle> {
+        let matching_range = self.table_idx_covering_range(range);
+        self.ssts.drain(matching_range).collect()
     }
 }
 
@@ -204,6 +228,10 @@ pub(crate) struct CoreDbState {
     pub(crate) last_compacted_wal_sst_id: u64,
     pub(crate) last_clock_tick: i64,
     pub(crate) last_seq: u64,
+    /// the `last_l0_clock_tick` includes all data in L0 and below --
+    /// WAL entries will have their latest ticks recovered on replay
+    /// into the in-memory state
+    pub(crate) last_l0_clock_tick: i64,
     pub(crate) checkpoints: Vec<Checkpoint>,
 }
 
@@ -218,6 +246,7 @@ impl CoreDbState {
             last_compacted_wal_sst_id: 0,
             last_clock_tick: i64::MIN,
             last_seq: 0,
+            last_l0_clock_tick: i64::MIN,
             checkpoints: vec![],
         }
     }
@@ -314,21 +343,19 @@ impl DbState {
         Ok(())
     }
 
-    pub fn freeze_wal(&mut self) -> Result<Option<u64>, SlateDBError> {
+    pub fn freeze_wal(&mut self) -> Result<(), SlateDBError> {
         if let Some(err) = self.error.reader().read() {
             return Err(err.clone());
         }
         if self.wal.table().is_empty() {
-            return Ok(None);
+            return Ok(());
         }
         let old_wal = std::mem::replace(&mut self.wal, WritableKVTable::new());
         let mut state = self.state_copy();
-        let imm_wal = Arc::new(ImmutableWal::new(state.core.next_wal_sst_id, old_wal));
-        let id = imm_wal.id();
+        let imm_wal = Arc::new(ImmutableWal::new(old_wal));
         state.imm_wal.push_front(imm_wal);
-        state.core.next_wal_sst_id += 1;
         self.update_state(state);
-        Ok(Some(id))
+        Ok(())
     }
 
     pub fn pop_imm_wal(&mut self) {
@@ -341,7 +368,7 @@ impl DbState {
         &mut self,
         imm_memtable: Arc<ImmutableMemtable>,
         sst_handle: SsTableHandle,
-    ) {
+    ) -> Result<(), SlateDBError> {
         let mut state = self.state_copy();
         let popped = state
             .imm_memtable
@@ -350,7 +377,19 @@ impl DbState {
         assert!(Arc::ptr_eq(&popped, &imm_memtable));
         state.core.l0.push_front(sst_handle);
         state.core.last_compacted_wal_sst_id = imm_memtable.last_wal_id();
+
+        // ensure the persisted manifest tick never goes backwards in time
+        let memtable_tick = imm_memtable.table().last_tick();
+        state.core.last_l0_clock_tick = cmp::max(state.core.last_l0_clock_tick, memtable_tick);
+        if state.core.last_l0_clock_tick != memtable_tick {
+            return Err(SlateDBError::InvalidClockTick {
+                last_tick: state.core.last_l0_clock_tick,
+                next_tick: memtable_tick,
+            });
+        }
+
         self.update_state(state);
+        Ok(())
     }
 
     pub fn increment_next_wal_id(&mut self) {
@@ -359,18 +398,21 @@ impl DbState {
         self.update_state(state);
     }
 
-    pub fn update_clock_tick(&mut self, tick: i64) -> Result<i64, SlateDBError> {
-        if self.state.core.last_clock_tick > tick {
-            return Err(SlateDBError::InvalidClockTick {
-                last_tick: self.state.core.last_clock_tick,
-                next_tick: tick,
-            });
-        }
-
-        let mut state = self.state_copy();
-        state.core.last_clock_tick = tick;
-        self.update_state(state);
-        Ok(tick)
+    pub fn merge_db_state(&mut self, updated_state: &CoreDbState) {
+        // The compactor removes tables from l0_last_compacted, so we
+        // only want to keep the tables up to there.
+        let l0_last_compacted = &updated_state.l0_last_compacted;
+        let new_l0 = if let Some(l0_last_compacted) = l0_last_compacted {
+            self.state
+                .core
+                .l0
+                .iter()
+                .cloned()
+                .take_while(|sst| sst.id.unwrap_compacted_id() != *l0_last_compacted)
+                .collect()
+        } else {
+            self.state.core.l0.iter().cloned().collect()
+        };
     }
 
     pub fn increment_seq(&mut self) -> u64 {
@@ -404,24 +446,56 @@ impl DbState {
         state.core.l0_last_compacted.clone_from(l0_last_compacted);
         state.core.l0 = new_l0;
         state.core.compacted = compacted;
+
+        // Checkpoints may also be added externally, so we need to copy them.
+        state
+            .core
+            .checkpoints
+            .clone_from(&updated_state.checkpoints);
+
         self.update_state(state);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::checkpoint::Checkpoint;
     use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::proptest_util::arbitrary;
+    use crate::test_utils;
     use bytes::Bytes;
     use proptest::collection::vec;
     use proptest::proptest;
     use std::collections::BTreeSet;
     use std::collections::Bound::Included;
     use std::ops::RangeBounds;
+    use std::time::SystemTime;
     use ulid::Ulid;
+    use uuid::Uuid;
 
     #[test]
-    fn test_should_refresh_db_state_with_l0s_up_to_last_compacted() {
+    fn test_should_merge_db_state_with_new_checkpoints() {
+        // given:
+        let mut db_state = DbState::new(CoreDbState::new());
+        // mimic an externally added checkpoint
+        let mut updated_state = db_state.state.core.clone();
+        let checkpoint = Checkpoint {
+            id: Uuid::new_v4(),
+            manifest_id: 1,
+            expire_time: None,
+            create_time: SystemTime::now(),
+        };
+        updated_state.checkpoints.push(checkpoint.clone());
+
+        // when:
+        db_state.merge_db_state(&updated_state);
+
+        // then:
+        assert_eq!(vec![checkpoint], db_state.state.core.checkpoints);
+    }
+
+    #[test]
+    fn test_should_merge_db_state_with_l0s_up_to_last_compacted() {
         // given:
         let mut db_state = DbState::new(CoreDbState::new());
         add_l0s_to_dbstate(&mut db_state, 4);
@@ -431,7 +505,7 @@ mod tests {
         compactor_state.l0_last_compacted = Some(last_compacted.id.unwrap_compacted_id());
 
         // when:
-        db_state.refresh_db_state(&compactor_state);
+        db_state.merge_db_state(&compactor_state);
 
         // then:
         let expected: Vec<SsTableId> = compactor_state.l0.iter().map(|l0| l0.id).collect();
@@ -440,14 +514,14 @@ mod tests {
     }
 
     #[test]
-    fn test_should_refresh_db_state_with_all_l0s_if_none_compacted() {
+    fn test_should_merge_db_state_with_all_l0s_if_none_compacted() {
         // given:
         let mut db_state = DbState::new(CoreDbState::new());
         add_l0s_to_dbstate(&mut db_state, 4);
         let l0s = db_state.state.core.l0.clone();
 
         // when:
-        db_state.refresh_db_state(&CoreDbState::new());
+        db_state.merge_db_state(&CoreDbState::new());
 
         // then:
         let expected: Vec<SsTableId> = l0s.iter().map(|l0| l0.id).collect();
@@ -463,7 +537,7 @@ mod tests {
                 .expect("db in error state");
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
             let handle = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), dummy_info.clone());
-            db_state.move_imm_memtable_to_l0(imm, handle);
+            db_state.move_imm_memtable_to_l0(imm, handle).unwrap();
         }
     }
 
@@ -476,14 +550,19 @@ mod tests {
         )| {
             let sorted_first_keys: BTreeSet<Bytes> = table_first_keys.into_iter().collect();
             let sorted_run = create_sorted_run(0, &sorted_first_keys);
-            let covering_tables = sorted_run.tables_covering_range(&range);
+            let covering_tables = sorted_run.tables_covering_range(range.as_ref());
             let first_key = sorted_first_keys.first().unwrap().clone();
 
+            let range_start_key = test_utils::bound_as_option(range.start_bound())
+            .cloned()
+            .unwrap_or_default();
+            let range_end_key = test_utils::bound_as_option(range.end_bound())
+            .cloned()
+            .unwrap_or(vec![u8::MAX; max_bytes_len + 1].into());
+
             if covering_tables.is_empty() {
-                let end_bound =  range.end_bound_opt().unwrap();
-                assert!(end_bound <= first_key);
+                assert!(range_end_key <= first_key);
             } else {
-                let range_start_key = range.start_bound_opt().unwrap_or(Bytes::new());
                 let covering_first_key = covering_tables.front()
                 .and_then(|t| t.info.first_key.clone())
                 .unwrap();
@@ -491,9 +570,6 @@ mod tests {
                 if range_start_key < covering_first_key {
                     assert_eq!(covering_first_key, first_key)
                 }
-
-                let range_end_key: Bytes = range.end_bound_opt()
-                .unwrap_or(vec![u8::MAX; max_bytes_len + 1].into());
 
                 let covering_last_key = covering_tables.iter().last()
                 .and_then(|t| t.info.first_key.clone())

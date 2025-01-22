@@ -319,8 +319,8 @@ impl Clock for SystemClock {
     fn now(&self) -> i64 {
         // since SystemTime is not guaranteed to be monotonic, we enforce it here
         let tick = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(duration) => duration.as_secs() as i64, // Time is after the epoch
-            Err(e) => -(e.duration().as_secs() as i64), // Time is before the epoch, return negative
+            Ok(duration) => duration.as_millis() as i64, // Time is after the epoch
+            Err(e) => -(e.duration().as_millis() as i64), // Time is before the epoch, return negative
         };
         self.last_tick.fetch_max(tick, SeqCst);
         self.last_tick.load(SeqCst)

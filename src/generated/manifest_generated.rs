@@ -957,7 +957,7 @@ impl<'a> ManifestV1<'a> {
   pub const VT_L0_LAST_COMPACTED: flatbuffers::VOffsetT = 16;
   pub const VT_L0: flatbuffers::VOffsetT = 18;
   pub const VT_COMPACTED: flatbuffers::VOffsetT = 20;
-  pub const VT_LAST_CLOCK_TICK: flatbuffers::VOffsetT = 22;
+  pub const VT_LAST_L0_CLOCK_TICK: flatbuffers::VOffsetT = 22;
   pub const VT_CHECKPOINTS: flatbuffers::VOffsetT = 24;
   pub const VT_LAST_SEQ: flatbuffers::VOffsetT = 26;
 
@@ -972,7 +972,7 @@ impl<'a> ManifestV1<'a> {
   ) -> flatbuffers::WIPOffset<ManifestV1<'bldr>> {
     let mut builder = ManifestV1Builder::new(_fbb);
     builder.add_last_seq(args.last_seq);
-    builder.add_last_clock_tick(args.last_clock_tick);
+    builder.add_last_l0_clock_tick(args.last_l0_clock_tick);
     builder.add_wal_id_last_seen(args.wal_id_last_seen);
     builder.add_wal_id_last_compacted(args.wal_id_last_compacted);
     builder.add_compactor_epoch(args.compactor_epoch);
@@ -1051,11 +1051,11 @@ impl<'a> ManifestV1<'a> {
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRun>>>>(ManifestV1::VT_COMPACTED, None).unwrap()}
   }
   #[inline]
-  pub fn last_clock_tick(&self) -> i64 {
+  pub fn last_l0_clock_tick(&self) -> i64 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<i64>(ManifestV1::VT_LAST_CLOCK_TICK, Some(0)).unwrap()}
+    unsafe { self._tab.get::<i64>(ManifestV1::VT_LAST_L0_CLOCK_TICK, Some(0)).unwrap()}
   }
   #[inline]
   pub fn checkpoints(&self) -> flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Checkpoint<'a>>> {
@@ -1089,7 +1089,7 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
      .visit_field::<flatbuffers::ForwardsUOffset<CompactedSstId>>("l0_last_compacted", Self::VT_L0_LAST_COMPACTED, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("l0", Self::VT_L0, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRun>>>>("compacted", Self::VT_COMPACTED, true)?
-     .visit_field::<i64>("last_clock_tick", Self::VT_LAST_CLOCK_TICK, false)?
+     .visit_field::<i64>("last_l0_clock_tick", Self::VT_LAST_L0_CLOCK_TICK, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Checkpoint>>>>("checkpoints", Self::VT_CHECKPOINTS, true)?
      .visit_field::<u64>("last_seq", Self::VT_LAST_SEQ, false)?
      .finish();
@@ -1106,7 +1106,7 @@ pub struct ManifestV1Args<'a> {
     pub l0_last_compacted: Option<flatbuffers::WIPOffset<CompactedSstId<'a>>>,
     pub l0: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
     pub compacted: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRun<'a>>>>>,
-    pub last_clock_tick: i64,
+    pub last_l0_clock_tick: i64,
     pub checkpoints: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Checkpoint<'a>>>>>,
     pub last_seq: u64,
 }
@@ -1123,7 +1123,7 @@ impl<'a> Default for ManifestV1Args<'a> {
       l0_last_compacted: None,
       l0: None, // required field
       compacted: None, // required field
-      last_clock_tick: 0,
+      last_l0_clock_tick: 0,
       checkpoints: None, // required field
       last_seq: 0,
     }
@@ -1172,8 +1172,8 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_COMPACTED, compacted);
   }
   #[inline]
-  pub fn add_last_clock_tick(&mut self, last_clock_tick: i64) {
-    self.fbb_.push_slot::<i64>(ManifestV1::VT_LAST_CLOCK_TICK, last_clock_tick, 0);
+  pub fn add_last_l0_clock_tick(&mut self, last_l0_clock_tick: i64) {
+    self.fbb_.push_slot::<i64>(ManifestV1::VT_LAST_L0_CLOCK_TICK, last_l0_clock_tick, 0);
   }
   #[inline]
   pub fn add_checkpoints(&mut self, checkpoints: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Checkpoint<'b >>>>) {
@@ -1213,7 +1213,7 @@ impl core::fmt::Debug for ManifestV1<'_> {
       ds.field("l0_last_compacted", &self.l0_last_compacted());
       ds.field("l0", &self.l0());
       ds.field("compacted", &self.compacted());
-      ds.field("last_clock_tick", &self.last_clock_tick());
+      ds.field("last_l0_clock_tick", &self.last_l0_clock_tick());
       ds.field("checkpoints", &self.checkpoints());
       ds.field("last_seq", &self.last_seq());
       ds.finish()

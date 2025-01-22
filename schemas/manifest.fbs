@@ -37,8 +37,9 @@ table ManifestV1 {
     // A list of the sorted runs that are valid to read in the `compacted` folder.
     compacted: [SortedRun] (required);
 
-    // The last clock tick
-    last_clock_tick: long;
+    // The last L0 clock tick (the database should restore the latest
+    // tick when recovering from WAL if there are any WAL entries)
+    last_l0_clock_tick: long;
 
     // A list of checkpoints that are currently open.
     checkpoints: [Checkpoint] (required);
