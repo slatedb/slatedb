@@ -953,7 +953,7 @@ impl Db {
     /// ```
     pub async fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, SlateDBError> {
         self.inner
-            .get_with_options(key.as_ref(), DEFAULT_READ_OPTIONS)
+            .get_with_options(key, DEFAULT_READ_OPTIONS)
             .await
     }
 
@@ -997,7 +997,7 @@ impl Db {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Vec<u8>>, SlateDBError> {
-        self.inner.get_with_options(key.as_ref(), options).await
+        self.inner.get_with_options(key, options).await
     }
 
     /// Scan a range of keys using the default options [`DEFAULT_SCAN_OPTIONS`].
