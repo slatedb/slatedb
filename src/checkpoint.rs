@@ -399,7 +399,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     #[cfg(feature = "wal_disable")]
     async fn test_checkpoint_scope_with_no_force_flush_wal_disabled() {
         let db_options = DbOptions {
@@ -436,7 +436,22 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         db.flush().await.unwrap();
 
-        tokio::join!(checkpoint_handle).0.unwrap().unwrap();
+        let checkpoint = tokio::join!(checkpoint_handle).0.unwrap().unwrap();
+
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
+        let manifest = manifest_store
+            .read_manifest(checkpoint.manifest_id)
+            .await
+            .unwrap();
+
+        let last_written_kv = table.last_key_value().unwrap();
+        assert_flushed_entry(
+            Arc::clone(&object_store),
+            path,
+            &manifest.core.l0.front().unwrap().id,
+            last_written_kv,
+        )
+        .await
     }
 
     async fn test_checkpoint_scope_all<F: FnOnce(Manifest) -> SsTableId>(

@@ -1313,15 +1313,19 @@ impl Db {
     }
 
     pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
-        let wal = {
+        let table = {
             let guard = self.inner.state.read();
             let snapshot = guard.snapshot();
-            snapshot.wal.clone()
+            if self.inner.wal_enabled() {
+                snapshot.wal.clone()
+            } else {
+                snapshot.memtable.clone()
+            }
         };
-        if wal.is_empty() {
+        if table.is_empty() {
             return Ok(());
         }
-        wal.await_durable().await
+        table.await_durable().await
     }
 
     pub fn metrics(&self) -> Arc<DbStats> {
