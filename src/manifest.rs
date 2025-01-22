@@ -81,15 +81,14 @@ mod tests {
             StoredManifest::init_new_db(Arc::clone(&parent_manifest_store), CoreDbState::new())
                 .await
                 .unwrap();
-        let parent_checkpoint_id = Uuid::new_v4();
-        parent_manifest
-            .write_new_checkpoint(parent_checkpoint_id, &CheckpointOptions::default())
+        let checkpoint = parent_manifest
+            .write_new_checkpoint(&CheckpointOptions::default())
             .await
             .unwrap();
 
         let parent_link = DbLink {
             path: parent_path.to_string(),
-            checkpoint_id: parent_checkpoint_id,
+            checkpoint_id: checkpoint.id,
         };
         let clone_path = Path::from("/tmp/test_clone");
         let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
@@ -127,12 +126,11 @@ mod tests {
 
         let checkpoint_id = Uuid::new_v4();
         let checkpoint_manifest_id = manifest.id();
-        manifest
-            .write_new_checkpoint(checkpoint_id, &CheckpointOptions::default())
+        let checkpoint = manifest
+            .write_new_checkpoint(&CheckpointOptions::default())
             .await
             .unwrap();
 
-        let checkpoint = manifest.db_state().find_checkpoint(&checkpoint_id).unwrap();
         assert_eq!(checkpoint_id, checkpoint.id);
         assert_eq!(checkpoint_manifest_id, checkpoint.manifest_id);
 

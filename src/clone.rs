@@ -1,5 +1,4 @@
 use crate::config::CheckpointOptions;
-use crate::config::CheckpointScope::Durable;
 use crate::db::Db;
 use crate::db_state::{CoreDbState, SsTableId};
 use crate::error::SlateDBError;
@@ -126,7 +125,6 @@ impl Db {
 
         let checkpoint_id = Uuid::new_v4();
         let checkpoint_options = CheckpointOptions {
-            scope: Durable,
             lifetime: None,
             source: *parent_checkpoint_id,
         };
@@ -248,7 +246,7 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::CheckpointOptions;
+    use crate::config::{CheckpointOptions, CheckpointScope};
     use crate::db::Db;
     use crate::proptest_util::{rng, sample};
     use crate::test_utils;
@@ -269,7 +267,7 @@ mod tests {
         let parent_db = Db::open(parent_path, Arc::clone(&object_store))
             .await
             .unwrap();
-        test_utils::seed_database(&parent_db, &table, false).await;
+        test_utils::seed_database(&parent_db, &table, false).await.unwrap();
         parent_db.flush().await.unwrap();
         parent_db.close().await.unwrap();
 
@@ -298,24 +296,15 @@ mod tests {
         let parent_db = Db::open(parent_path.clone(), Arc::clone(&object_store))
             .await
             .unwrap();
-        test_utils::seed_database(&parent_db, &checkpoint_table, false).await;
-        parent_db.flush().await.unwrap();
-        parent_db.close().await.unwrap();
-
-        // TODO: It seems necessary to close the database to ensure that the latest
-        //       manifest is flushed. Is that right?
-        let checkpoint = Db::create_checkpoint(
-            &parent_path,
-            Arc::clone(&object_store),
+        test_utils::seed_database(&parent_db, &checkpoint_table, false).await.unwrap();
+        let checkpoint = parent_db.create_checkpoint(
+            CheckpointScope::All { force_flush: true},
             &CheckpointOptions::default(),
         )
-        .await
-        .unwrap();
-
-        let parent_db = Db::open(parent_path.clone(), Arc::clone(&object_store))
             .await
             .unwrap();
-        test_utils::seed_database(&parent_db, &post_checkpoint_table, false).await;
+
+        test_utils::seed_database(&parent_db, &post_checkpoint_table, false).await.unwrap();
         parent_db.flush().await.unwrap();
         parent_db.close().await.unwrap();
 

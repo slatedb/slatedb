@@ -2820,7 +2820,7 @@ mod tests {
             Err(e) => assert!(
                 e.to_string().contains("Last tick: 10, Next tick: 5"),
                 "{}",
-                e.to_string()g
+                e.to_string()
             ),
         }
     }
@@ -2828,7 +2828,7 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_clock_progression_across_db_instances() {
         // Given:
-        glet object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
 
         let clock = Arc::new(TestClock::new());

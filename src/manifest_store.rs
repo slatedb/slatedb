@@ -186,7 +186,7 @@ impl StoredManifest {
 
     /// Create a new checkpoint from the latest manifest state. This only creates
     /// the checkpoint struct, but does not persist it in the manifest.
-    fn new_checkpoint(
+    pub(crate) fn new_checkpoint(
         &self,
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
