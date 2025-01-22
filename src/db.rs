@@ -952,9 +952,7 @@ impl Db {
     /// }
     /// ```
     pub async fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, SlateDBError> {
-        self.inner
-            .get_with_options(key, DEFAULT_READ_OPTIONS)
-            .await
+        self.inner.get_with_options(key, DEFAULT_READ_OPTIONS).await
     }
 
     /// Get a value from the database with custom read options.
