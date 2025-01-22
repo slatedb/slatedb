@@ -358,13 +358,13 @@ mod tests {
         .unwrap();
         for i in 0..4 {
             let kv = iter.next().await.unwrap().unwrap();
-            assert_eq!(kv.key.as_ref(), &[b'a' + i as u8; 16]);
-            assert_eq!(kv.value.as_ref(), &[b'b' + i as u8; 48]);
+            assert_eq!(kv.key, &[b'a' + i as u8; 16]);
+            assert_eq!(kv.value, &[b'b' + i as u8; 48]);
         }
         for i in 0..4 {
             let kv = iter.next().await.unwrap().unwrap();
-            assert_eq!(kv.key.as_ref(), &[b'j' + i as u8; 16]);
-            assert_eq!(kv.value.as_ref(), &[b'k' + i as u8; 48]);
+            assert_eq!(kv.key, &[b'j' + i as u8; 16]);
+            assert_eq!(kv.value, &[b'k' + i as u8; 48]);
         }
         assert!(iter.next().await.unwrap().is_none());
         // todo: test that the db can read the k/vs (once we implement reading from compacted)
@@ -466,12 +466,12 @@ mod tests {
         .unwrap();
 
         let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key.as_ref(), &[1; 16]);
+        assert_eq!(kv.key, &[1; 16]);
 
         // skip k2 because its expired
 
         let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key.as_ref(), &[3; 16]);
+        assert_eq!(kv.key, &[3; 16]);
 
         let maybe_kv = iter.next().await.unwrap();
         assert!(

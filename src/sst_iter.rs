@@ -475,8 +475,8 @@ mod tests {
                 .unwrap();
         for i in 0..1000 {
             let kv = iter.next().await.unwrap().unwrap();
-            assert_eq!(kv.key, format!("key{}", i));
-            assert_eq!(kv.value, format!("value{}", i));
+            assert_eq!(kv.key, format!("key{}", i).as_bytes());
+            assert_eq!(kv.value, format!("value{}", i).as_bytes());
         }
 
         let next = iter.next().await.unwrap();

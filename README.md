@@ -27,14 +27,12 @@ Add the following to your `Cargo.toml`:
 ```toml
 [dependencies]
 slatedb = "*"
-bytes = "*"
 tokio = "*"
 ```
 
 Then you can use SlateDB in your Rust code:
 
 ```rust
-use bytes::Bytes;
 use slatedb::db::Db;
 use slatedb::config::DbOptions;
 use slatedb::error::SlateDBError;
@@ -92,20 +90,20 @@ async fn main() -> Result<(), SlateDBError> {
     let mut iter = kv_store.scan("test_key1"..="test_key2").await?;
     assert_eq!(
         iter.next().await?,
-        Some((b"test_key1" as &[u8], b"test_value1" as &[u8]).into())
+        Some((b"test_key1", b"test_value1").into())
     );
     assert_eq!(
         iter.next().await?,
-        Some((b"test_key2" as &[u8], b"test_value2" as &[u8]).into())
+        Some((b"test_key2", b"test_value2").into())
     );
 
     // Seek ahead to next key
     let mut iter = kv_store.scan_all().await?;
-    let next_key = Bytes::from_static(b"test_key4");
+    let next_key = b"test_key4";
     iter.seek(next_key).await?;
     assert_eq!(
         iter.next().await?,
-        Some((b"test_key4" as &[u8], b"test_value4" as &[u8]).into())
+        Some((b"test_key4", b"test_value4").into())
     );
     assert_eq!(iter.next().await?, None);
 

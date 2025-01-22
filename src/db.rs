@@ -1022,7 +1022,7 @@ impl Db {
     ///     db.put(b"b", b"b_value").await?;
     ///
     ///     let mut iter = db.scan("a".."b").await?;
-    ///     assert_eq!(Some((b"a" as &[u8], b"a_value" as &[u8]).into()), iter.next().await?);
+    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
@@ -1066,8 +1066,8 @@ impl Db {
     ///     db.put(b"b", b"b_value").await?;
     ///
     ///     let mut iter = db.scan_all().await?;
-    ///     assert_eq!(Some((b"a" as &[u8], b"a_value" as &[u8]).into()), iter.next().await?);
-    ///     assert_eq!(Some((b"b" as &[u8], b"b_value" as &[u8]).into()), iter.next().await?);
+    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
+    ///     assert_eq!(Some((b"b", b"b_value").into()), iter.next().await?);
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
@@ -1104,7 +1104,7 @@ impl Db {
     ///         read_level: ReadLevel::Uncommitted,
     ///         ..ScanOptions::default()
     ///     }).await?;
-    ///     assert_eq!(Some((b"a" as &[u8], b"a_value" as &[u8]).into()), iter.next().await?);
+    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
@@ -1156,8 +1156,8 @@ impl Db {
     ///         read_level: ReadLevel::Uncommitted,
     ///         ..ScanOptions::default()
     ///     }).await?;
-    ///     assert_eq!(Some((b"a" as &[u8], b"a_value" as &[u8]).into()), iter.next().await?);
-    ///     assert_eq!(Some((b"b" as &[u8], b"b_value" as &[u8]).into()), iter.next().await?);
+    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
+    ///     assert_eq!(Some((b"b", b"b_value").into()), iter.next().await?);
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
