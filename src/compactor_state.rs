@@ -161,7 +161,7 @@ impl CompactorState {
         merged.l0 = merged_l0s;
         merged.last_compacted_wal_sst_id = updated_state.last_compacted_wal_sst_id;
         merged.next_wal_sst_id = updated_state.next_wal_sst_id;
-        merged.last_clock_tick = updated_state.last_clock_tick;
+        merged.last_l0_clock_tick = updated_state.last_l0_clock_tick;
 
         // We also need to account for any new checkpoints
         merged.checkpoints.clone_from(&updated_state.checkpoints);

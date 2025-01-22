@@ -123,17 +123,6 @@ pub(crate) fn decode_codec_entries(
     Ok(entries)
 }
 
-pub(crate) async fn seed_database(db: &Db, table: &BTreeMap<Bytes, Bytes>, await_durable: bool) {
-    let put_options = PutOptions::default();
-    let write_options = &WriteOptions { await_durable };
-
-    for (key, value) in table.iter() {
-        db.put_with_options(key, value, &put_options, write_options)
-            .await
-            .unwrap();
-    }
-}
-
 pub(crate) async fn assert_ordered_scan_in_range<T: RangeBounds<Bytes>>(
     table: &BTreeMap<Bytes, Bytes>,
     range: T,
@@ -164,4 +153,20 @@ where
         Included(b) | Excluded(b) => Some(b),
         Unbounded => None,
     }
+}
+
+pub(crate) async fn seed_database(
+    db: &Db,
+    table: &BTreeMap<Bytes, Bytes>,
+    await_durable: bool,
+) -> Result<(), SlateDBError> {
+    let put_options = PutOptions::default();
+    let write_options = WriteOptions { await_durable };
+
+    for (key, value) in table.iter() {
+        db.put_with_options(key, value, &put_options, &write_options)
+            .await?;
+    }
+
+    Ok(())
 }

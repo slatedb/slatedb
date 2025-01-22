@@ -2,6 +2,9 @@ use std::any::Any;
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
+use uuid::Uuid;
+
+use crate::merge_operator::MergeOperatorError;
 
 #[derive(Clone, Debug, Error)]
 pub enum SlateDBError {
@@ -66,7 +69,8 @@ pub enum SlateDBError {
     #[error("Error Compressing Block")]
     BlockCompressionError,
 
-    #[error("Invalid RowFlags (encoded_bits: {encoded_bits:#b}, known_bits: {known_bits:#b}): {message}")]
+    #[error("Invalid RowFlags (encoded_bits: {encoded_bits:#b}, known_bits: {known_bits:#b}): {message}"
+    )]
     InvalidRowFlags {
         encoded_bits: u8,
         known_bits: u8,
@@ -78,6 +82,9 @@ pub enum SlateDBError {
 
     #[error("Error flushing memtables: channel closed")]
     MemtableFlushChannelError,
+
+    #[error("Error creating checkpoint: channel closed")]
+    CheckpointChannelError,
 
     #[error("Read channel error: {0}")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
@@ -95,6 +102,12 @@ pub enum SlateDBError {
 
     #[error("background task shutdown")]
     BackgroundTaskShutdown,
+
+    #[error("Merge Operator error: {0}")]
+    MergeOperatorError(#[from] MergeOperatorError),
+
+    #[error("Checkpoint {0} missing")]
+    CheckpointMissing(Uuid),
 
     #[error("Database already exists: {msg}")]
     DatabaseAlreadyExists { msg: String },

@@ -162,9 +162,6 @@ enum CheckpointScope {
 
 /// Specify options to provide when creating a checkpoint.
 struct CheckpointOptions {
-    /// Specifies the scope targeted by the checkpoint (see above)
-    scope: CheckpointScope,
-
     /// Optionally specifies the lifetime of the checkpoint to create. The expire time will be set to
     /// the current wallclock time plus the specified lifetime. If lifetime is None, then the checkpoint
     /// is created without an expiry time.
@@ -205,7 +202,8 @@ impl Db {
     /// checkpoint and the id of the referenced manifest.
     pub async fn create_checkpoint(
         &self,
-        options: &CheckpointOptions
+        scope: CheckpointScope,
+        options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
         …
     }
@@ -241,6 +239,15 @@ impl Db {
 }
 
 mod admin {
+    /// Creates a checkpoint of the db stored in the object store at the specified path using the provided options.
+    /// Note that the scope option does not impact the behaviour of this method. The checkpoint will reference
+    /// the current active manifest of the db.
+    pub async fn create_checkpoint(
+        path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        options: &CheckpointOptions,
+    ) -> Result<CheckpointCreateResult, SlateDBError> {}
+
     /// Clone a Db from a checkpoint. If no db already exists at the specified path, then this will create
     /// a new db under the path that is a clone of the db at parent_path. A clone is a shallow copy of the
     /// parent database - it starts with a manifest that references the same SSTs, but doesn't actually copy
@@ -257,15 +264,6 @@ mod admin {
     ) -> Result<(), SlateDBError> {
         …
     }
-
-    /// Creates a checkpoint of the db stored in the object store at the specified path using the provided options.
-    /// Note that the scope option does not impact the behaviour of this method. The checkpoint will reference
-    /// the current active manifest of the db.
-    pub async fn create_checkpoint(
-        path: &Path,
-        object_store: Arc<dyn ObjectStore>,
-        options: &CheckpointOptions,
-    ) -> Result<CheckpointCreateResult, SlateDBError> {}
 }
 
 /// Configuration options for the database reader. These options are set on client startup.

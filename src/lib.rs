@@ -38,6 +38,7 @@ mod manifest_store;
 mod mem_table;
 mod mem_table_flush;
 mod merge_iterator;
+pub mod merge_operator;
 pub mod metrics;
 #[cfg(test)]
 mod proptest_util;

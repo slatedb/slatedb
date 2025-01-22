@@ -659,7 +659,7 @@ mod tests {
             compacted: srs,
             next_wal_sst_id: 0,
             last_compacted_wal_sst_id: 0,
-            last_clock_tick: 0,
+            last_l0_clock_tick: 0,
             checkpoints: vec![],
         }
     }

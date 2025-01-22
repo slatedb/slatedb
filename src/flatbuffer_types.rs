@@ -165,7 +165,7 @@ impl FlatBufferManifestCodec {
             compacted,
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
             last_compacted_wal_sst_id: manifest.wal_id_last_compacted(),
-            last_clock_tick: manifest.last_clock_tick(),
+            last_l0_clock_tick: manifest.last_l0_clock_tick(),
             checkpoints,
         };
         let parent = manifest.parent().map(|parent| DbLink {
@@ -358,7 +358,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 l0_last_compacted,
                 l0: Some(l0),
                 compacted: Some(compacted),
-                last_clock_tick: core.last_clock_tick,
+                last_l0_clock_tick: core.last_l0_clock_tick,
                 checkpoints: Some(checkpoints),
             },
         );
