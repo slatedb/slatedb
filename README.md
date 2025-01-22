@@ -74,7 +74,7 @@ async fn main() -> Result<(), SlateDBError> {
     kv_store.put(b"test_key4", b"test_value4").await?;
 
     // Scan over unbound range
-    let mut iter = kv_store.scan(..).await?;
+    let mut iter = kv_store.scan_all().await?;
     let mut count = 1;
     while let Ok(Some(item)) = iter.next().await {
         assert_eq!(
@@ -89,9 +89,7 @@ async fn main() -> Result<(), SlateDBError> {
     }
 
     // Scan over bound range
-    let start_key = Bytes::from_static(b"test_key1");
-    let end_key = Bytes::from_static(b"test_key2");
-    let mut iter = kv_store.scan(start_key..=end_key).await?;
+    let mut iter = kv_store.scan("test_key1"..="test_key2").await?;
     assert_eq!(
         iter.next().await?,
         Some((b"test_key1" as &[u8], b"test_value1" as &[u8]).into())
@@ -102,7 +100,7 @@ async fn main() -> Result<(), SlateDBError> {
     );
 
     // Seek ahead to next key
-    let mut iter = kv_store.scan(..).await?;
+    let mut iter = kv_store.scan_all().await?;
     let next_key = Bytes::from_static(b"test_key4");
     iter.seek(next_key).await?;
     assert_eq!(
