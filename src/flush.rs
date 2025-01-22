@@ -141,9 +141,9 @@ impl DbInner {
                             },
                             WalFlushThreadMsg::FlushImmutableWals => {
                                 let result = this.flush().await;
-                                if let Err(err) = &result {
+                                if let Err(err) = result {
                                     error!("error from wal flush: {err}");
-                                    return Err(err.clone());
+                                    return Err(err);
                                 }
 
                                 if let Some(rsp_sender) = rsp_sender {
@@ -161,15 +161,8 @@ impl DbInner {
 
         let fut = async move {
             let result = core_flush_loop(&this, &mut rx).await;
-
-            let pending_result = result.clone().and_then(|_| Err(BackgroundTaskShutdown));
-            while !rx.is_empty() {
-                let (rsp_sender, _) = rx.recv().await.expect("channel unexpectedly closed");
-                if let Some(rsp_sender) = rsp_sender {
-                    let _ = rsp_sender.send(pending_result.clone());
-                }
-            }
-
+            let error = result.clone().err().unwrap_or(BackgroundTaskShutdown);
+            Self::close_and_drain_receiver(&mut rx, &error).await;
             info!("wal flush thread exiting with {:?}", result);
             result
         };
@@ -191,5 +184,18 @@ impl DbInner {
             },
             fut,
         ))
+    }
+
+    async fn close_and_drain_receiver<T>(
+        rx: &mut UnboundedReceiver<FlushMsg<T>>,
+        error: &SlateDBError,
+    ) {
+        rx.close();
+        while !rx.is_empty() {
+            let (rsp_sender, _) = rx.recv().await.expect("channel unexpectedly closed");
+            if let Some(sender) = rsp_sender {
+                let _ = sender.send(Err(error.clone()));
+            }
+        }
     }
 }
