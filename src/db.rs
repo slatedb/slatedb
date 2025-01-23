@@ -48,12 +48,12 @@ use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter;
-use crate::flush::WalFlushThreadMsg;
+use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::{VecDequeKeyValueIterator, WritableKVTable};
-use crate::mem_table_flush::MemtableFlushThreadMsg;
+use crate::mem_table_flush::MemtableFlushMsg;
 use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
@@ -63,15 +63,12 @@ use crate::types::{RowAttributes, ValueDeletable};
 use crate::utils::MonotonicClock;
 use tracing::{info, warn};
 
-pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
-pub(crate) type FlushMsg<T> = (Option<FlushSender>, T);
-
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
-    pub(crate) memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
+    pub(crate) wal_flush_notifier: UnboundedSender<WalFlushMsg>,
+    pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: Arc<DbStats>,
     pub(crate) mono_clock: Arc<MonotonicClock>,
@@ -82,8 +79,8 @@ impl DbInner {
         options: DbOptions,
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
-        wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
-        memtable_flush_notifier: UnboundedSender<FlushMsg<MemtableFlushThreadMsg>>,
+        wal_flush_notifier: UnboundedSender<WalFlushMsg>,
+        memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
         db_stats: Arc<DbStats>,
     ) -> Result<Self, SlateDBError> {
@@ -416,7 +413,7 @@ impl DbInner {
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
-            .send((Some(tx), WalFlushThreadMsg::FlushImmutableWals))
+            .send(WalFlushMsg::FlushImmutableWals { sender: Some(tx) })
             .map_err(|_| SlateDBError::WalFlushChannelError)?;
         rx.await?
     }
@@ -434,7 +431,7 @@ impl DbInner {
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
-            .send((Some(tx), MemtableFlushThreadMsg::FlushImmutableMemtables))
+            .send(MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) })
             .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         rx.await?
     }
@@ -565,7 +562,7 @@ impl DbInner {
 }
 
 pub struct Db {
-    inner: Arc<DbInner>,
+    pub(crate) inner: Arc<DbInner>,
     /// The handle for the flush thread.
     wal_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
@@ -885,7 +882,7 @@ impl Db {
         // Shutdown the WAL flush thread.
         self.inner
             .wal_flush_notifier
-            .send((None, WalFlushThreadMsg::Shutdown))
+            .send(WalFlushMsg::Shutdown)
             .ok();
 
         if let Some(flush_task) = {
@@ -899,7 +896,7 @@ impl Db {
         // Shutdown the memtable flush thread.
         self.inner
             .memtable_flush_notifier
-            .send((None, MemtableFlushThreadMsg::Shutdown))
+            .send(MemtableFlushMsg::Shutdown)
             .ok();
 
         if let Some(memtable_flush_task) = {
@@ -1312,6 +1309,22 @@ impl Db {
         }
     }
 
+    pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
+        let table = {
+            let guard = self.inner.state.read();
+            let snapshot = guard.snapshot();
+            if self.inner.wal_enabled() {
+                snapshot.wal.clone()
+            } else {
+                snapshot.memtable.clone()
+            }
+        };
+        if table.is_empty() {
+            return Ok(());
+        }
+        table.await_durable().await
+    }
+
     pub fn metrics(&self) -> Arc<DbStats> {
         self.inner.db_stats.clone()
     }
@@ -1336,7 +1349,7 @@ mod tests {
     use crate::sst_iter::SstIterator;
     use crate::test_utils::{gen_attrs, TestClock};
 
-    use crate::proptest_util;
+    use crate::{proptest_util, test_utils};
     use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
@@ -1514,17 +1527,6 @@ mod tests {
         }
     }
 
-    async fn seed_database(db: &Db, table: &BTreeMap<Bytes, Bytes>, await_durable: bool) {
-        let put_options = PutOptions::default();
-        let write_options = &WriteOptions { await_durable };
-
-        for (key, value) in table.iter() {
-            db.put_with_options(key, value, &put_options, write_options)
-                .await
-                .unwrap();
-        }
-    }
-
     async fn build_database_from_table(
         table: &BTreeMap<Bytes, Bytes>,
         db_options: DbOptions,
@@ -1535,7 +1537,7 @@ mod tests {
             .await
             .unwrap();
 
-        seed_database(&db, table, false).await;
+        test_utils::seed_database(&db, table, false).await.unwrap();
 
         if await_durable {
             db.flush().await.unwrap();
@@ -2906,7 +2908,7 @@ mod tests {
 
         let mut rng = proptest_util::rng::new_test_rng(None);
         let table = sample::table(&mut rng, 1000, 5);
-        seed_database(&db, &table, false).await;
+        test_utils::seed_database(&db, &table, false).await.unwrap();
         db.flush().await.unwrap();
 
         // When: reopen the database without closing the old instance

@@ -1,10 +1,11 @@
-use crate::config::Clock;
+use crate::config::{Clock, PutOptions, WriteOptions};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::row_codec::SstRowCodecV0;
 use crate::types::{KeyValue, RowAttributes, RowEntry};
 use bytes::Bytes;
 use rand::Rng;
+use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -87,6 +88,7 @@ macro_rules! assert_debug_snapshot {
     };
 }
 
+use crate::db::Db;
 pub(crate) use assert_debug_snapshot;
 
 pub(crate) fn decode_codec_entries(
@@ -127,4 +129,20 @@ where
         Included(b) | Excluded(b) => Some(b),
         Unbounded => None,
     }
+}
+
+pub(crate) async fn seed_database(
+    db: &Db,
+    table: &BTreeMap<Bytes, Bytes>,
+    await_durable: bool,
+) -> Result<(), SlateDBError> {
+    let put_options = PutOptions::default();
+    let write_options = WriteOptions { await_durable };
+
+    for (key, value) in table.iter() {
+        db.put_with_options(key, value, &put_options, &write_options)
+            .await?;
+    }
+
+    Ok(())
 }
