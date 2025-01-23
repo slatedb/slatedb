@@ -189,18 +189,9 @@ impl<T: KeyValueIterator> PartialOrd<Self> for MergeIteratorHeapEntry<T> {
 
 impl<T: KeyValueIterator> Ord for MergeIteratorHeapEntry<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        // the row entry with higher index, should always has higher seqnum
-        // if a key both exists in L0_1 and L0_2, the one in L0_2 should be
-        // returned first, as L0_2 is created later than L0_1, and the seqnum
-        // is higher.
-        //
-        // we'll wrap a Reverse in the BinaryHeap, so the cmp here is in
-        // increasing order.
-        (&self.next_kv.key, self.index, self.next_kv.seq).cmp(&(
-            &other.next_kv.key,
-            other.index,
-            other.next_kv.seq,
-        ))
+        // we'll wrap a Reverse in the BinaryHeap, so the cmp here is in increasing order.
+        // after Reverse is wrapped, it will return the entries with higher seqnum first.
+        (&self.next_kv.key, self.next_kv.seq).cmp(&(&other.next_kv.key, other.next_kv.seq))
     }
 }
 
