@@ -117,7 +117,8 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                     match next_entry.value {
                         ValueDeletable::Value(value) => {
                             // Final merge with a regular value
-                            let merged_value = self.merge_operator.merge(&merged_value, &value)?;
+                            let merged_value =
+                                self.merge_operator.merge(&merged_value, value.as_ref())?;
                             return Ok(Some(RowEntry::new(
                                 key,
                                 ValueDeletable::Value(merged_value.into()),
@@ -128,7 +129,8 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                         }
                         ValueDeletable::Merge(value) => {
                             // Continue merging
-                            merged_value = self.merge_operator.merge(&merged_value, &value)?;
+                            merged_value =
+                                self.merge_operator.merge(&merged_value, value.as_ref())?;
                             continue;
                         }
                         ValueDeletable::Tombstone => {
