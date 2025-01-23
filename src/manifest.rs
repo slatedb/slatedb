@@ -26,10 +26,7 @@ impl Manifest {
     /// manifest will set `initialized=false` to allow for additional
     /// initialization (such as copying wals).
     pub(crate) fn cloned(parent_db: DbLink, parent_manifest: &Manifest) -> Self {
-        let mut clone_core = parent_manifest.core.clone();
-        clone_core.initialized = false;
-        clone_core.checkpoints.clear();
-
+        let mut clone_core = parent_manifest.core.init_clone_db();
         Self {
             parent: Some(parent_db),
             core: clone_core,

@@ -259,6 +259,13 @@ impl CoreDbState {
         }
     }
 
+    pub(crate) fn init_clone_db(&self) -> CoreDbState {
+        let mut clone = self.clone();
+        clone.initialized = false;
+        clone.checkpoints.clear();
+        clone
+    }
+
     pub(crate) fn log_db_runs(&self) {
         let l0s: Vec<_> = self.l0.iter().map(|l0| l0.estimate_size()).collect();
         let compacted: Vec<_> = self
