@@ -1,13 +1,12 @@
-use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
+use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
-use crate::db_state::{CoreDbState, SsTableId};
+use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::{BackgroundTaskShutdown, CheckpointMissing};
+use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::manifest_store::FenceableManifest;
 use crate::utils::spawn_bg_task;
 use std::sync::Arc;
-use std::time::SystemTime;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot::Sender;
@@ -49,7 +48,8 @@ impl MemtableFlusher {
             rguard_state.state().core.clone()
         };
 
-        let checkpoint = self.build_checkpoint(&core, options)?;
+        let checkpoint_id = Uuid::new_v4();
+        let checkpoint = self.manifest.new_checkpoint(checkpoint_id, options)?;
         let result = CheckpointCreateResult {
             id: checkpoint.id,
             manifest_id: checkpoint.manifest_id,
@@ -65,32 +65,6 @@ impl MemtableFlusher {
             rguard_state.state().core.clone()
         };
         self.manifest.update_db_state(core).await
-    }
-
-    fn build_checkpoint(
-        &self,
-        state: &CoreDbState,
-        options: &CheckpointOptions,
-    ) -> Result<Checkpoint, SlateDBError> {
-        let id = Uuid::new_v4();
-        let manifest_id = if let Some(source_id) = &options.source {
-            if let Some(checkpoint) = state.find_checkpoint(source_id) {
-                checkpoint.manifest_id
-            } else {
-                return Err(CheckpointMissing(*source_id));
-            }
-        } else {
-            self.manifest.next_manifest_id()
-        };
-
-        let expire_time = options.lifetime.map(|l| SystemTime::now() + l);
-
-        Ok(Checkpoint {
-            id,
-            manifest_id,
-            expire_time,
-            create_time: SystemTime::now(),
-        })
     }
 
     pub(crate) async fn write_checkpoint_safely(

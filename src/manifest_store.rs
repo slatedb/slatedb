@@ -2,7 +2,7 @@ use crate::checkpoint::Checkpoint;
 use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::{InvalidDBState, LatestManifestMissing, ManifestMissing};
+use crate::error::SlateDBError::{CheckpointMissing, InvalidDBState, LatestManifestMissing, ManifestMissing};
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::{DbLink, Manifest, ManifestCodec};
 use crate::transactional_object_store::{
@@ -81,10 +81,6 @@ impl FenceableManifest {
         self.stored_manifest.update_db_state(db_state).await
     }
 
-    pub(crate) fn next_manifest_id(&self) -> u64 {
-        self.stored_manifest.id + 1
-    }
-
     #[allow(clippy::panic)]
     fn check_epoch(&self) -> Result<(), SlateDBError> {
         let stored_epoch = (self.stored_epoch)(&self.stored_manifest.manifest);
@@ -95,6 +91,14 @@ impl FenceableManifest {
             panic!("the stored epoch is lower than the local epoch")
         }
         Ok(())
+    }
+
+    pub(crate) fn new_checkpoint(
+        &self,
+        checkpoint_id: Uuid,
+        options: &CheckpointOptions,
+    ) -> Result<Checkpoint, SlateDBError> {
+        self.stored_manifest.new_checkpoint(checkpoint_id, options)
     }
 }
 
@@ -156,7 +160,11 @@ impl StoredManifest {
         }))
     }
 
-    /// Load the current manifest from the supplied manifest store. If successful,
+    pub(crate) fn next_manifest_id(&self) -> u64 {
+        self.id + 1
+    }
+
+        /// Load the current manifest from the supplied manifest store. If successful,
     /// this method returns a [`Result`] with an instance of [`StoredManifest`].
     /// If no manifests could be found, the error [`LatestManifestMissing`] is returned.
     pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Self, SlateDBError> {
@@ -197,7 +205,7 @@ impl StoredManifest {
             Some(source_checkpoint_id) => {
                 let Some(source_checkpoint) = db_state.find_checkpoint(&source_checkpoint_id)
                 else {
-                    return Err(InvalidDBState);
+                    return Err(CheckpointMissing(source_checkpoint_id));
                 };
                 source_checkpoint.manifest_id
             }
@@ -205,7 +213,7 @@ impl StoredManifest {
                 if !db_state.initialized {
                     return Err(InvalidDBState);
                 }
-                self.id()
+                self.next_manifest_id()
             }
         };
         Ok(Checkpoint {
@@ -459,7 +467,9 @@ impl ManifestStore {
         id: u64,
     ) -> Result<Option<Manifest>, SlateDBError> {
         let manifest_path = &self.get_manifest_path(id);
-        match self.object_store.get(manifest_path).await {
+        let maybe_manifest =self.object_store.get(manifest_path).await;
+        eprintln!("Found manifest {maybe_manifest:?} for id {id}");
+        match maybe_manifest {
             Ok(manifest) => match manifest.bytes().await {
                 Ok(bytes) => {
                     let manifest = self.codec.decode(&bytes)?;

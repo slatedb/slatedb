@@ -26,7 +26,7 @@ impl Manifest {
     /// manifest will set `initialized=false` to allow for additional
     /// initialization (such as copying wals).
     pub(crate) fn cloned(parent_db: DbLink, parent_manifest: &Manifest) -> Self {
-        let mut clone_core = parent_manifest.core.init_clone_db();
+        let clone_core = parent_manifest.core.init_clone_db();
         Self {
             parent: Some(parent_db),
             core: clone_core,
@@ -65,7 +65,6 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use std::sync::Arc;
-    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_init_clone_manifest() {
@@ -121,16 +120,13 @@ mod tests {
                 .await
                 .unwrap();
 
-        let checkpoint_id = Uuid::new_v4();
-        let checkpoint_manifest_id = manifest.id();
         let checkpoint = manifest
             .write_new_checkpoint(&CheckpointOptions::default())
             .await
             .unwrap();
 
-        assert_eq!(checkpoint_id, checkpoint.id);
-        assert_eq!(checkpoint_manifest_id, checkpoint.manifest_id);
-
+        let latest_manifest_id = manifest_store.read_latest_manifest().await.unwrap().0;
+        assert_eq!(latest_manifest_id, checkpoint.manifest_id);
         assert_eq!(None, checkpoint.expire_time);
     }
 }
