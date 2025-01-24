@@ -2,7 +2,9 @@ use crate::checkpoint::Checkpoint;
 use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::{CheckpointMissing, InvalidDBState, LatestManifestMissing, ManifestMissing};
+use crate::error::SlateDBError::{
+    CheckpointMissing, InvalidDBState, LatestManifestMissing, ManifestMissing,
+};
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::{DbLink, Manifest, ManifestCodec};
 use crate::transactional_object_store::{
@@ -81,6 +83,14 @@ impl FenceableManifest {
         self.stored_manifest.update_db_state(db_state).await
     }
 
+    pub(crate) fn new_checkpoint(
+        &mut self,
+        checkpoint_id: Uuid,
+        options: &CheckpointOptions,
+    ) -> Result<Checkpoint, SlateDBError> {
+        self.stored_manifest.new_checkpoint(checkpoint_id, options)
+    }
+
     #[allow(clippy::panic)]
     fn check_epoch(&self) -> Result<(), SlateDBError> {
         let stored_epoch = (self.stored_epoch)(&self.stored_manifest.manifest);
@@ -91,14 +101,6 @@ impl FenceableManifest {
             panic!("the stored epoch is lower than the local epoch")
         }
         Ok(())
-    }
-
-    pub(crate) fn new_checkpoint(
-        &self,
-        checkpoint_id: Uuid,
-        options: &CheckpointOptions,
-    ) -> Result<Checkpoint, SlateDBError> {
-        self.stored_manifest.new_checkpoint(checkpoint_id, options)
     }
 }
 
@@ -160,17 +162,14 @@ impl StoredManifest {
         }))
     }
 
-    pub(crate) fn next_manifest_id(&self) -> u64 {
-        self.id + 1
-    }
-
-        /// Load the current manifest from the supplied manifest store. If successful,
+    /// Load the current manifest from the supplied manifest store. If successful,
     /// this method returns a [`Result`] with an instance of [`StoredManifest`].
     /// If no manifests could be found, the error [`LatestManifestMissing`] is returned.
     pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Self, SlateDBError> {
         Self::try_load(store).await?.ok_or(LatestManifestMissing)
     }
 
+    #[cfg(test)]
     pub(crate) fn id(&self) -> u64 {
         self.id
     }
@@ -190,6 +189,10 @@ impl StoredManifest {
         self.manifest = manifest;
         self.id = id;
         Ok(&self.manifest.core)
+    }
+
+    fn next_manifest_id(&self) -> u64 {
+        self.id + 1
     }
 
     /// Create a new checkpoint from the latest manifest state. This only creates

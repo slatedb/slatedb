@@ -40,15 +40,12 @@ use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
-use crate::config::{
-    DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions, DEFAULT_READ_OPTIONS,
-    DEFAULT_SCAN_OPTIONS, DEFAULT_WRITE_OPTIONS,
-};
+use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter;
-use crate::flush::WalFlushThreadMsg;
+use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -63,14 +60,11 @@ use crate::types::{RowAttributes, ValueDeletable};
 use crate::utils::MonotonicClock;
 use tracing::{info, warn};
 
-pub(crate) type FlushSender = tokio::sync::oneshot::Sender<Result<(), SlateDBError>>;
-pub(crate) type FlushMsg<T> = (Option<FlushSender>, T);
-
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
+    pub(crate) wal_flush_notifier: UnboundedSender<WalFlushMsg>,
     pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: Arc<DbStats>,
@@ -82,7 +76,7 @@ impl DbInner {
         options: DbOptions,
         table_store: Arc<TableStore>,
         core_db_state: CoreDbState,
-        wal_flush_notifier: UnboundedSender<FlushMsg<WalFlushThreadMsg>>,
+        wal_flush_notifier: UnboundedSender<WalFlushMsg>,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
         db_stats: Arc<DbStats>,
@@ -416,7 +410,7 @@ impl DbInner {
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
-            .send((Some(tx), WalFlushThreadMsg::FlushImmutableWals))
+            .send(WalFlushMsg::FlushImmutableWals { sender: Some(tx) })
             .map_err(|_| SlateDBError::WalFlushChannelError)?;
         rx.await?
     }
@@ -885,7 +879,7 @@ impl Db {
         // Shutdown the WAL flush thread.
         self.inner
             .wal_flush_notifier
-            .send((None, WalFlushThreadMsg::Shutdown))
+            .send(WalFlushMsg::Shutdown)
             .ok();
 
         if let Some(flush_task) = {
@@ -951,7 +945,9 @@ impl Db {
     /// }
     /// ```
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
-        self.inner.get_with_options(key, DEFAULT_READ_OPTIONS).await
+        self.inner
+            .get_with_options(key, &ReadOptions::default())
+            .await
     }
 
     /// Get a value from the database with custom read options.
@@ -998,7 +994,7 @@ impl Db {
         self.inner.get_with_options(key, options).await
     }
 
-    /// Scan a range of keys using the default options [`DEFAULT_SCAN_OPTIONS`].
+    /// Scan a range of keys using the default scan options.
     ///
     /// returns a `DbIterator`
     ///
@@ -1029,7 +1025,7 @@ impl Db {
     /// ```
     pub async fn scan<T: RangeBounds<Bytes>>(&self, range: T) -> Result<DbIterator, SlateDBError> {
         self.inner
-            .scan_with_options(BytesRange::from(range), DEFAULT_SCAN_OPTIONS)
+            .scan_with_options(BytesRange::from(range), &ScanOptions::default())
             .await
     }
 
@@ -1238,7 +1234,8 @@ impl Db {
     /// }
     /// ```
     pub async fn write(&self, batch: WriteBatch) -> Result<(), SlateDBError> {
-        self.write_with_options(batch, DEFAULT_WRITE_OPTIONS).await
+        self.write_with_options(batch, &WriteOptions::default())
+            .await
     }
 
     /// Write a batch of put/delete operations atomically to the database. Batch writes
@@ -1344,7 +1341,6 @@ mod tests {
     use crate::cached_object_store::FsCacheStorage;
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
-        DEFAULT_PUT_OPTIONS,
     };
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
@@ -1963,7 +1959,7 @@ mod tests {
         db.put_with_options(
             &[b'a'; 32],
             &[b'j'; 32],
-            DEFAULT_PUT_OPTIONS,
+            &PutOptions::default(),
             &write_options,
         )
         .await
@@ -1978,7 +1974,7 @@ mod tests {
         db.put_with_options(
             &[b'c'; 32],
             &[b'l'; 32],
-            DEFAULT_PUT_OPTIONS,
+            &PutOptions::default(),
             &write_options,
         )
         .await
@@ -2293,7 +2289,7 @@ mod tests {
             .put_with_options(
                 "foo".as_bytes(),
                 "bar".as_bytes(),
-                DEFAULT_PUT_OPTIONS,
+                &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
                 },
@@ -2344,7 +2340,7 @@ mod tests {
             .put_with_options(
                 "foo".as_bytes(),
                 "bla".as_bytes(),
-                DEFAULT_PUT_OPTIONS,
+                &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
                 },
@@ -2754,7 +2750,7 @@ mod tests {
             db.put_with_options(
                 key,
                 val,
-                DEFAULT_PUT_OPTIONS,
+                &PutOptions::default(),
                 &WriteOptions {
                     await_durable: true,
                 },
@@ -3026,6 +3022,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(db.inner.mono_clock.last_tick.load(Ordering::SeqCst), 11);
+    }
+
+    #[test]
+    fn test_write_option_defaults() {
+        // This is a regression test for a bug where the defaults for WriteOptions were not being
+        // set correctly due to visibility issues.
+        let write_options = WriteOptions::default();
+        assert!(write_options.await_durable);
     }
 
     async fn wait_for_manifest_condition(

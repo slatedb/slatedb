@@ -170,11 +170,6 @@ use crate::error::{DbOptionsError, SlateDBError};
 use crate::db_cache::DbCache;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
-pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
-pub const DEFAULT_SCAN_OPTIONS: &ScanOptions = &ScanOptions::default();
-pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
-pub const DEFAULT_PUT_OPTIONS: &PutOptions = &PutOptions::default();
-
 /// Whether reads see only writes that have been committed durably to the DB.  A
 /// write is considered durably committed if all future calls to read are guaranteed
 /// to serve the data written by the write, until some later durably committed write
@@ -198,15 +193,7 @@ pub struct ReadOptions {
     pub read_level: ReadLevel,
 }
 
-impl ReadOptions {
-    /// Create a new `ReadOptions` with `read_level` set to `Commited`.
-    const fn default() -> Self {
-        Self {
-            read_level: ReadLevel::Commited,
-        }
-    }
-}
-
+#[derive(Clone)]
 pub struct ScanOptions {
     /// The read commit level for read operations
     pub read_level: ReadLevel,
@@ -218,9 +205,9 @@ pub struct ScanOptions {
     pub cache_blocks: bool,
 }
 
-impl ScanOptions {
+impl Default for ScanOptions {
     /// Create a new ScanOptions with `read_level` set to [`ReadLevel::Commited`].
-    pub const fn default() -> Self {
+    fn default() -> Self {
         Self {
             read_level: ReadLevel::Commited,
             read_ahead_bytes: 1,
@@ -231,16 +218,16 @@ impl ScanOptions {
 
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct WriteOptions {
     /// Whether `put` calls should block until the write has been durably committed
     /// to the DB.
     pub await_durable: bool,
 }
 
-impl WriteOptions {
+impl Default for WriteOptions {
     /// Create a new `WriteOptions`` with `await_durable` set to `true`.
-    const fn default() -> Self {
+    fn default() -> Self {
         Self {
             await_durable: true,
         }
@@ -260,10 +247,6 @@ pub struct PutOptions {
 }
 
 impl PutOptions {
-    const fn default() -> Self {
-        Self { ttl: Ttl::Default }
-    }
-
     pub(crate) fn expire_ts_from(&self, default: Option<u64>, now: i64) -> Option<i64> {
         match self.ttl {
             Ttl::Default => match default {

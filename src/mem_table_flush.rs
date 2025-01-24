@@ -47,19 +47,15 @@ impl MemtableFlusher {
             let rguard_state = self.db_inner.state.read();
             rguard_state.state().core.clone()
         };
-
-        let checkpoint_id = Uuid::new_v4();
-        let checkpoint = self.manifest.new_checkpoint(checkpoint_id, options)?;
-        let result = CheckpointCreateResult {
-            id: checkpoint.id,
-            manifest_id: checkpoint.manifest_id,
-        };
+        let id = Uuid::new_v4();
+        let checkpoint = self.manifest.new_checkpoint(id, options)?;
+        let manifest_id = checkpoint.manifest_id;
         core.checkpoints.push(checkpoint);
         self.manifest.update_db_state(core).await?;
-        Ok(result)
+        Ok(CheckpointCreateResult { id, manifest_id })
     }
 
-    async fn write_manifest(&mut self) -> Result<(), SlateDBError> {
+    giasync fn write_manifest(&mut self) -> Result<(), SlateDBError> {
         let core = {
             let rguard_state = self.db_inner.state.read();
             rguard_state.state().core.clone()

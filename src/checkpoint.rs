@@ -255,7 +255,9 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SlateDBError::CheckpointMissing(id) if id == source_checkpoint_id));
+        assert!(
+            matches!(result.unwrap_err(), SlateDBError::CheckpointMissing(id) if id == source_checkpoint_id)
+        );
     }
 
     #[tokio::test]
