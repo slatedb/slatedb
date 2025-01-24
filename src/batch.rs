@@ -4,7 +4,7 @@
 //! collection of write operations (puts and/or deletes) that are applied
 //! atomically to the database.
 
-use crate::config::PutOptions;
+use crate::config::{MergeOptions, PutOptions};
 use bytes::Bytes;
 
 /// A batch of write operations (puts and/or deletes). All operations in the
@@ -42,6 +42,7 @@ impl Default for WriteBatch {
 
 pub(crate) enum WriteOp {
     Put(Bytes, Bytes, PutOptions),
+    Merge(Bytes, Bytes, MergeOptions),
     Delete(Bytes),
 }
 
@@ -69,6 +70,29 @@ impl WriteBatch {
         let value = value.as_ref();
         assert!(!key.is_empty(), "key cannot be empty");
         self.ops.push(WriteOp::Put(
+            Bytes::copy_from_slice(key),
+            Bytes::copy_from_slice(value),
+            options.clone(),
+        ));
+    }
+
+    pub fn merge<K, V>(&mut self, key: K, value: V)
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        self.merge_with_options(key, value, &MergeOptions::default())
+    }
+
+    pub fn merge_with_options<K, V>(&mut self, key: K, value: V, options: &MergeOptions)
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let key = key.as_ref();
+        let value = value.as_ref();
+        assert!(!key.is_empty(), "key cannot be empty");
+        self.ops.push(WriteOp::Merge(
             Bytes::copy_from_slice(key),
             Bytes::copy_from_slice(value),
             options.clone(),

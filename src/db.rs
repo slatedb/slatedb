@@ -39,7 +39,7 @@ use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
-use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
+use crate::config::{DbOptions, MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SsTableId};
@@ -94,6 +94,7 @@ impl DbInner {
             table_store: Arc::clone(&table_store),
             db_stats: db_stats.clone(),
             mono_clock: Arc::clone(&mono_clock),
+            merge_operator: options.merge_operator.clone(),
         };
 
         let db_inner = Self {
@@ -952,6 +953,78 @@ impl Db {
         self.write_with_options(batch, write_opts).await
     }
 
+    /// Write a merge operand into the database with default `WriteOptions`.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to write
+    /// - `value`: the value to write
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error writing the value.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.merge(b"key", b"value").await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn merge<K, V>(&self, key: K, value: V) -> Result<(), SlateDBError>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let mut batch = WriteBatch::new();
+        batch.merge(key, value);
+        self.write(batch).await
+    }
+
+    /// Write a merge operand into the database with custom `MergeOptions` and `WriteOptions`.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to write
+    /// - `value`: the value to write
+    /// - `merge_opts`: the merge options to use
+    /// - `write_opts`: the write options to use
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error writing the value.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, config::{MergeOptions, WriteOptions}, SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.merge_with_options(b"key", b"value", &MergeOptions::default(), &WriteOptions::default()).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn merge_with_options(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        merge_opts: &MergeOptions,
+        write_opts: &WriteOptions,
+    ) -> Result<(), SlateDBError> {
+        let mut batch = WriteBatch::new();
+        batch.merge_with_options(key, value, merge_opts);
+        self.write_with_options(batch, write_opts).await
+    }
+
     /// Delete a key from the database with default `WriteOptions`.
     ///
     /// ## Arguments
@@ -1121,6 +1194,12 @@ impl Db {
         }
     }
 
+    #[cfg(test)]
+    async fn flush_memtables(&self) -> Result<(), SlateDBError> {
+        // self.inner.freeze_memtable()?;
+        self.inner.flush_memtables().await
+    }
+
     pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
         let table = {
             let guard = self.inner.state.read();
@@ -1150,22 +1229,26 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::cached_object_store::stats::{
-        OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
-    };
     use crate::cached_object_store::FsCacheStorage;
-    use crate::config::ReadLevel::{Committed, Uncommitted};
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions, Ttl,
     };
-    use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
-    use crate::iter::KeyValueIterator;
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
-    use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::sst_iter::SstIterator;
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
+
+    use crate::merge_operator::AppendingMergeOperator;
+
+    use crate::cached_object_store::stats::{
+        OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
+    };
+    use crate::config::ReadLevel::{Committed, Uncommitted};
+    use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
+    use crate::iter::KeyValueIterator;
+    use crate::sst_iter::SstIteratorOptions;
     use crate::{proptest_util, test_utils};
     use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
@@ -3230,6 +3313,49 @@ mod tests {
         assert!(write_options.await_durable);
     }
 
+    #[tokio::test]
+    async fn test_merge_xxx() -> Result<(), SlateDBError> {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let db = Db::open_with_opts(
+            path.clone(),
+            DbOptions {
+                merge_operator: Some(Arc::new(AppendingMergeOperator::new())),
+                ..test_db_options(0, 1024, None)
+            },
+            object_store.clone(),
+        )
+        .await?;
+
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await?;
+
+        db.merge("key", "1").await?;
+        db.merge("key", "2").await?;
+        db.merge("key", "3").await?;
+
+        assert_eq!(db.get("key").await?, Some("123".into()));
+
+        db.flush_memtables().await?;
+
+        {
+            let manifest = stored_manifest.refresh().await?;
+            assert_eq!(manifest.core.l0.len(), 1);
+        }
+
+        assert_eq!(db.get("key").await?, Some("123".into()));
+
+        db.merge("key", "4").await?;
+        assert_eq!(db.get("key").await?, Some("1234".into()));
+
+        db.put("key", "1").await?;
+        assert_eq!(db.get("key").await?, Some("1".into()));
+
+        db.close().await?;
+
+        Ok(())
+    }
+
     async fn wait_for_manifest_condition(
         sm: &mut StoredManifest,
         cond: impl Fn(&CoreDbState) -> bool,
@@ -3298,6 +3424,7 @@ mod tests {
             garbage_collector_options: None,
             clock,
             default_ttl: ttl,
+            merge_operator: None,
         }
     }
 }

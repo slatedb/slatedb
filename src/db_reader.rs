@@ -132,6 +132,7 @@ impl DbReaderInner {
             table_store: Arc::clone(&table_store),
             db_stats: db_stats.clone(),
             mono_clock: Arc::clone(&mono_clock),
+            merge_operator: None,
         };
 
         Ok(Self {

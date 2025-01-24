@@ -6,17 +6,19 @@ use crate::db_stats::DbStats;
 use crate::filter_iterator::FilterIterator;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, VecDequeKeyValueIterator};
+use crate::merge_operator::{MergeOperatorAccumulator, MergeOperatorIterator};
 use crate::reader::SstFilterResult::{
     FilterNegative, FilterPositive, RangeNegative, RangePositive,
 };
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
-use crate::types::RowEntry;
+use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{get_now_for_read, is_not_expired, MonotonicClock};
-use crate::{filter, DbIterator, SlateDBError};
+use crate::{filter, DbIterator, MergeOperator, SlateDBError};
 use bytes::Bytes;
 use std::collections::VecDeque;
+use std::ops::Bound;
 use std::sync::Arc;
 
 enum SstFilterResult {
@@ -47,6 +49,7 @@ pub(crate) struct Reader {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) db_stats: DbStats,
     pub(crate) mono_clock: Arc<MonotonicClock>,
+    pub(crate) merge_operator: Option<Arc<dyn MergeOperator + Send + Sync>>,
 }
 
 impl Reader {
@@ -56,28 +59,48 @@ impl Reader {
         options: &ReadOptions,
         snapshot: &(dyn ReadSnapshot + Sync),
     ) -> Result<Option<Bytes>, SlateDBError> {
-        let key = key.as_ref();
+        let key = Bytes::copy_from_slice(key.as_ref());
         let ttl_now = get_now_for_read(self.mono_clock.clone(), options.read_level).await?;
+
+        let mut accumulator = None;
+        if let Some(merge_operator) = self.merge_operator.clone() {
+            accumulator = Some(MergeOperatorAccumulator::new(merge_operator, true));
+        }
 
         if matches!(options.read_level, Uncommitted) {
             let maybe_val = std::iter::once(snapshot.wal())
                 .chain(snapshot.imm_wal().iter().map(|imm| imm.table()))
-                .find_map(|memtable| memtable.get(key));
+                .find_map(|memtable| memtable.get(&key));
             if let Some(val) = maybe_val {
                 return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
             }
         }
 
-        let maybe_val = std::iter::once(snapshot.memtable())
-            .chain(snapshot.imm_memtable().iter().map(|imm| imm.table()))
-            .find_map(|memtable| memtable.get(key));
-        if let Some(val) = maybe_val {
-            return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
+        let single_key_range =
+            BytesRange::new(Bound::Included(key.clone()), Bound::Included(key.clone()));
+        let memtables = std::iter::once(snapshot.memtable())
+            .chain(snapshot.imm_memtable().iter().map(|imm| imm.table()));
+        for memtable in memtables {
+            if let Some(merge_operator) = self.merge_operator.clone() {
+                let memtable_iter = memtable.range_ascending(single_key_range.clone());
+                let mut mo_iter = MergeOperatorIterator::new(merge_operator, memtable_iter, true);
+                if let Some(entry) = accumulator
+                    .as_mut()
+                    .unwrap()
+                    .maybe_merge(mo_iter.next_entry().await?)?
+                {
+                    // return unwrap_result(entry.value);
+                    // TODO EXPIRATION ???
+                    return Ok(Self::unwrap_value_if_not_expired(&entry, ttl_now));
+                }
+            } else if let Some(entry) = memtable.get(&key) {
+                return Ok(Self::unwrap_value_if_not_expired(&entry, ttl_now));
+            }
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
         // the hash value once and pass it to the filter to avoid unnecessary hash computation
-        let key_hash = filter::filter_hash(key);
+        let key_hash = filter::filter_hash(&key);
 
         // cache blocks that are being read
         let sst_iter_options = SstIteratorOptions {
@@ -87,19 +110,25 @@ impl Reader {
         };
 
         for sst in &snapshot.core().l0 {
-            let filter_result = self.sst_might_include_key(sst, key, key_hash).await?;
+            let filter_result = self.sst_might_include_key(sst, &key, key_hash).await?;
             self.record_filter_result(&filter_result);
-
             if filter_result.might_contain_key() {
                 let iter =
-                    SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
+                    SstIterator::for_key(sst, &key, self.table_store.clone(), sst_iter_options)
                         .await?;
+                let mut iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
 
-                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
-                if let Some(entry) = ttl_iter.next_entry().await? {
-                    if entry.key == key {
+                if let Some(merge_operator) = self.merge_operator.clone() {
+                    let mut mo_iter = MergeOperatorIterator::new(merge_operator, iter, true);
+                    if let Some(entry) = accumulator
+                        .as_mut()
+                        .unwrap()
+                        .maybe_merge(mo_iter.next_entry().await?)?
+                    {
                         return Ok(entry.value.as_bytes());
                     }
+                } else if let Some(entry) = iter.next_entry().await? {
+                    return Ok(entry.value.as_bytes());
                 }
                 if matches!(filter_result, FilterPositive) {
                     self.db_stats.sst_filter_false_positives.inc();
@@ -108,24 +137,41 @@ impl Reader {
         }
 
         for sr in &snapshot.core().compacted {
-            let filter_result = self.sr_might_include_key(sr, key, key_hash).await?;
+            let filter_result = self.sr_might_include_key(sr, &key, key_hash).await?;
             self.record_filter_result(&filter_result);
-
             if filter_result.might_contain_key() {
-                let iter =
-                    SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
-                        .await?;
-
-                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
-                if let Some(entry) = ttl_iter.next_entry().await? {
-                    if entry.key == key {
+                let iter = SortedRunIterator::for_key(
+                    sr,
+                    &key,
+                    self.table_store.clone(),
+                    sst_iter_options,
+                )
+                .await?;
+                let mut iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
+                if let Some(merge_operator) = self.merge_operator.clone() {
+                    let mut mo_iter = MergeOperatorIterator::new(merge_operator, iter, true);
+                    if let Some(entry) = accumulator
+                        .as_mut()
+                        .unwrap()
+                        .maybe_merge(mo_iter.next_entry().await?)?
+                    {
                         return Ok(entry.value.as_bytes());
                     }
+                } else if let Some(entry) = iter.next_entry().await? {
+                    return Ok(entry.value.as_bytes());
                 }
                 if matches!(filter_result, FilterPositive) {
                     self.db_stats.sst_filter_false_positives.inc();
                 }
             }
+        }
+
+        if let Some(mut accumulator) = accumulator {
+            return Ok(accumulator.flush().and_then(|entry| match entry.value {
+                ValueDeletable::Merge(v) => Some(v),
+                ValueDeletable::Value(v) => Some(v),
+                ValueDeletable::Tombstone => None,
+            }));
         }
         Ok(None)
     }
