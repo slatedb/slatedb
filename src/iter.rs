@@ -15,8 +15,8 @@ pub trait KeyValueIterator {
                 match kv.value {
                     ValueDeletable::Value(v) => {
                         return Ok(Some(KeyValue {
-                            key: kv.key.into(),
-                            value: v.into(),
+                            key: kv.key,
+                            value: v,
                         }))
                     }
                     ValueDeletable::Merge(_) => todo!(),

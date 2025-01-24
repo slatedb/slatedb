@@ -3,8 +3,8 @@ use bytes::Bytes;
 /// Represents a key-value pair known not to be a tombstone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeyValue {
-    pub key: Vec<u8>,
-    pub value: Vec<u8>,
+    pub key: Bytes,
+    pub value: Bytes,
 }
 
 impl<K, V> From<(&K, &V)> for KeyValue
@@ -13,9 +13,8 @@ where
     V: AsRef<[u8]>,
 {
     fn from(record: (&K, &V)) -> Self {
-        let (key, value) = record;
-        let key = key.as_ref().to_vec();
-        let value = value.as_ref().to_vec();
+        let key = Bytes::copy_from_slice(record.0.as_ref());
+        let value = Bytes::copy_from_slice(record.1.as_ref());
         KeyValue { key, value }
     }
 }
