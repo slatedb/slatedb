@@ -1037,40 +1037,6 @@ impl Db {
             .await
     }
 
-    /// Scan a all keys using the default options.
-    ///
-    /// returns a `DbIterator`
-    ///
-    /// ## Errors
-    /// - `SlateDBError`: if there was an error scanning the range of keys
-    ///
-    /// ## Examples
-    ///
-    /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
-    /// use std::sync::Arc;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
-    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.put(b"a", b"a_value").await?;
-    ///     db.put(b"b", b"b_value").await?;
-    ///
-    ///     let mut iter = db.scan_all().await?;
-    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
-    ///     assert_eq!(Some((b"b", b"b_value").into()), iter.next().await?);
-    ///     assert_eq!(None, iter.next().await?);
-    ///     Ok(())
-    /// }
-    /// ```
-    pub async fn scan_all(&self) -> Result<DbIterator, SlateDBError> {
-        self.inner
-            .scan_with_options(BytesRange::from(..), &ScanOptions::default())
-            .await
-    }
-
     /// Scan a range of keys with the provided options.
     ///
     /// returns a `DbIterator`
@@ -1119,46 +1085,6 @@ impl Db {
         let range = (start, end);
         self.inner
             .scan_with_options(BytesRange::from(range), options)
-            .await
-    }
-
-    /// Scan a all keys with the provided options.
-    ///
-    /// returns a `DbIterator`
-    ///
-    /// ## Errors
-    /// - `SlateDBError`: if there was an error scanning the range of keys
-    ///
-    /// ## Examples
-    ///
-    /// ```
-    /// use slatedb::{db::Db, config::ScanOptions, config::ReadLevel, error::SlateDBError};
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
-    /// use std::sync::Arc;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
-    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.put(b"a", b"a_value").await?;
-    ///     db.put(b"b", b"b_value").await?;
-    ///
-    ///     let mut iter = db.scan_all_with_options(&ScanOptions {
-    ///         read_level: ReadLevel::Uncommitted,
-    ///         ..ScanOptions::default()
-    ///     }).await?;
-    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
-    ///     assert_eq!(Some((b"b", b"b_value").into()), iter.next().await?);
-    ///     assert_eq!(None, iter.next().await?);
-    ///     Ok(())
-    /// }
-    /// ```
-    pub async fn scan_all_with_options(
-        &self,
-        options: &ScanOptions,
-    ) -> Result<DbIterator, SlateDBError> {
-        self.inner
-            .scan_with_options(BytesRange::from(..), options)
             .await
     }
 

@@ -72,7 +72,7 @@ async fn main() -> Result<(), SlateDBError> {
     kv_store.put(b"test_key4", b"test_value4").await?;
 
     // Scan over unbound range
-    let mut iter = kv_store.scan_all().await?;
+    let mut iter = kv_store.scan::<Vec<u8>, _>(..).await?;
     let mut count = 1;
     while let Ok(Some(item)) = iter.next().await {
         assert_eq!(
@@ -98,7 +98,7 @@ async fn main() -> Result<(), SlateDBError> {
     );
 
     // Seek ahead to next key
-    let mut iter = kv_store.scan_all().await?;
+    let mut iter = kv_store.scan::<Vec<u8>, _>(..).await?;
     let next_key = b"test_key4";
     iter.seek(next_key).await?;
     assert_eq!(
