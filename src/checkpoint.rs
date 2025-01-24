@@ -141,7 +141,7 @@ mod tests {
             .unwrap();
         db.close().await.unwrap();
         let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let (manifest_id, before_checkpoint) = manifest_store.read_latest_manifest().await.unwrap();
+        let (_, before_checkpoint) = manifest_store.read_latest_manifest().await.unwrap();
 
         let CheckpointCreateResult {
             id: checkpoint_id,
@@ -150,15 +150,15 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
-        assert_eq!(manifest_id, checkpoint_manifest_id);
+        let (latest_manifest_id, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(latest_manifest_id, checkpoint_manifest_id);
         let checkpoints = &manifest.core.checkpoints;
         assert_eq!(
             before_checkpoint.core.checkpoints.len() + 1,
             checkpoints.len()
         );
         let checkpoint = checkpoints.iter().find(|c| c.id == checkpoint_id).unwrap();
-        assert_eq!(checkpoint.manifest_id, manifest_id);
+        assert_eq!(checkpoint.manifest_id, latest_manifest_id);
         assert_eq!(checkpoint.expire_time, None);
     }
 
@@ -243,18 +243,21 @@ mod tests {
             .await
             .unwrap();
 
+        let source_checkpoint_id = uuid::Uuid::new_v4();
         let result = admin::create_checkpoint(
             &path,
             object_store.clone(),
             &CheckpointOptions {
-                source: Some(uuid::Uuid::new_v4()),
+                source: Some(source_checkpoint_id),
                 ..CheckpointOptions::default()
             },
         )
         .await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SlateDBError::InvalidDBState));
+        assert!(
+            matches!(result.unwrap_err(), SlateDBError::CheckpointMissing(id) if id == source_checkpoint_id)
+        );
     }
 
     #[tokio::test]
