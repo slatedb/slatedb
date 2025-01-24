@@ -2,7 +2,9 @@ use crate::checkpoint::Checkpoint;
 use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::{InvalidDBState, LatestManifestMissing, ManifestMissing};
+use crate::error::SlateDBError::{
+    CheckpointMissing, InvalidDBState, LatestManifestMissing, ManifestMissing,
+};
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::{Manifest, ManifestCodec};
 use crate::transactional_object_store::{
@@ -81,8 +83,12 @@ impl FenceableManifest {
         self.stored_manifest.update_db_state(db_state).await
     }
 
-    pub(crate) fn next_manifest_id(&self) -> u64 {
-        self.stored_manifest.id + 1
+    pub(crate) fn new_checkpoint(
+        &mut self,
+        checkpoint_id: Uuid,
+        options: &CheckpointOptions,
+    ) -> Result<Checkpoint, SlateDBError> {
+        self.stored_manifest.new_checkpoint(checkpoint_id, options)
     }
 
     #[allow(clippy::panic)]
@@ -150,6 +156,7 @@ impl StoredManifest {
         Self::try_load(store).await?.ok_or(LatestManifestMissing)
     }
 
+    #[cfg(test)]
     pub(crate) fn id(&self) -> u64 {
         self.id
     }
@@ -167,9 +174,13 @@ impl StoredManifest {
         Ok(&self.manifest.core)
     }
 
+    fn next_manifest_id(&self) -> u64 {
+        self.id + 1
+    }
+
     /// Create a new checkpoint from the latest manifest state. This only creates
     /// the checkpoint struct, but does not persist it in the manifest.
-    fn new_checkpoint(
+    pub(crate) fn new_checkpoint(
         &self,
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
@@ -180,7 +191,7 @@ impl StoredManifest {
             Some(source_checkpoint_id) => {
                 let Some(source_checkpoint) = db_state.find_checkpoint(&source_checkpoint_id)
                 else {
-                    return Err(InvalidDBState);
+                    return Err(CheckpointMissing(source_checkpoint_id));
                 };
                 source_checkpoint.manifest_id
             }
@@ -188,7 +199,7 @@ impl StoredManifest {
                 if !db_state.initialized {
                     return Err(InvalidDBState);
                 }
-                self.id()
+                self.next_manifest_id()
             }
         };
         Ok(Checkpoint {
