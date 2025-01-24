@@ -53,14 +53,21 @@ mod transactional_object_store;
 mod types;
 mod utils;
 
+/// Re-export the bytes crate.
+///
+/// This is useful for users of the crate who want to use SlateDB
+/// without having to depend on the bytes crate directly.
+pub use bytes;
+
+/// Re-export the fail-parallel crate.
+///
+/// This is useful for users of the crate who want to use SlateDB
+/// with failpoints in their tests without having to depend on the
+/// fail-parallel crate directly.
+pub use fail_parallel;
+
 /// Re-export the object store crate.
 ///
 /// This is useful for users of the crate who want to use SlateDB
 /// without having to depend on the object store crate directly.
 pub use object_store;
-
-/// Re-export the fail-parallel crate.
-///
-/// This is useful for users of the crate who want to use SlateDB
-/// with failpoints in their tests without having to depend on the fail-parallel crate directly.
-pub use fail_parallel;
