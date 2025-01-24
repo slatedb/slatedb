@@ -149,7 +149,7 @@ impl SeekToKey for SortedRunIterator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytes::OrderedBytesGenerator;
+    use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
     use crate::proptest_util;
     use crate::proptest_util::sample;

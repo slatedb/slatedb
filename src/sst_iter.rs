@@ -366,7 +366,7 @@ impl SeekToKey for SstIterator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytes::OrderedBytesGenerator;
+    use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
     use crate::test_utils::{assert_kv, gen_attrs};

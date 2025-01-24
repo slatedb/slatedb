@@ -11,7 +11,7 @@ mod blob;
 mod block;
 mod block_iterator;
 #[cfg(any(test, feature = "bencher"))]
-mod bytes;
+mod bytes_generator;
 mod bytes_range;
 mod cached_object_store;
 pub mod checkpoint;

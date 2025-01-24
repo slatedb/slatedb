@@ -51,7 +51,7 @@ impl OrderedBytesGenerator {
 mod tests {
     use bytes::{BufMut, Bytes};
 
-    use crate::bytes::OrderedBytesGenerator;
+    use crate::bytes_generator::OrderedBytesGenerator;
 
     #[test]
     fn test_should_generate_ordered_bytes() {
