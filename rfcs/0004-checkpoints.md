@@ -467,7 +467,10 @@ When initializing the db for the first time (detected by the absence of a manife
 6. If M_p.`destroyed_at_s` is set:
    1. Delete the checkpoint with checkpoint ID from the parent, if any. If CAS fails, go to step 1.
    2. Exit with error.
-7. If `parent_checkpoint` is not None, read it's manifest M_c. Otherwise let M_c be M_p
+7. Compute the source manifest for the clone
+   1. If `parent_checkpoint` is not None, read it's manifest M_c. 
+   2. Otherwise, create a new checkpoint from the latest parent state with a 
+      nonempty lifetime and set M_c to the corresponding manifest.
 8. Write a new manifest M'. If CAS fails, go to step 1. M' fields are set to:
    - parent: set to point to checkpoint ID and initialized set to false
    - writer_epoch: set to the epoch from M_c + 1.
@@ -478,7 +481,8 @@ When initializing the db for the first time (detected by the absence of a manife
    - l0_last_compacted: copied from M_c
    - compacted: copied from M_c
    - checkpoints: empty
-9. Create or update the checkpoint with checkpoint ID pointing to M_c in the parent DB. If CAS fails, go to step 1.
+9. Create or update the checkpoint with checkpoint ID pointing to M_c in the parent DB
+   using the source checkpoint corresponding to M_c. If CAS fails, go to step 1.
 10. Copy over any WAL SSTs between M_c.`last_compacted_wal_id` and M_c.`wal_id_last_seen`.
 11. Update M' with `initialized` set to true. If CAS fails, go to step 1.
 

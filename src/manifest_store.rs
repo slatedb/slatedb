@@ -169,7 +169,6 @@ impl StoredManifest {
         Self::try_load(store).await?.ok_or(LatestManifestMissing)
     }
 
-    #[cfg(test)]
     pub(crate) fn id(&self) -> u64 {
         self.id
     }
@@ -191,7 +190,7 @@ impl StoredManifest {
         Ok(&self.manifest.core)
     }
 
-    fn next_manifest_id(&self) -> u64 {
+    fn next_id(&self) -> u64 {
         self.id + 1
     }
 
@@ -216,7 +215,7 @@ impl StoredManifest {
                 if !db_state.initialized {
                     return Err(InvalidDBState);
                 }
-                self.next_manifest_id()
+                self.next_id()
             }
         };
         Ok(Checkpoint {
@@ -227,26 +226,11 @@ impl StoredManifest {
         })
     }
 
-    /// Write the given checkpoint to the manifest,
     pub(crate) async fn write_checkpoint(
         &mut self,
-        checkpoint: Checkpoint,
-    ) -> Result<(), SlateDBError> {
-        self.maybe_apply_db_state_update(|stored_manifest| {
-            // TODO: Do we need to verify that the manifest is still available
-            //       before writing?
-            let mut updated_db_state = stored_manifest.db_state().clone();
-            updated_db_state.checkpoints.push(checkpoint.clone());
-            Ok(Some(updated_db_state))
-        })
-        .await
-    }
-
-    pub(crate) async fn write_new_checkpoint(
-        &mut self,
+        checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let checkpoint_id = Uuid::new_v4();
         self.maybe_apply_db_state_update(|stored_manifest| {
             let checkpoint = stored_manifest.new_checkpoint(checkpoint_id, options)?;
             let mut updated_db_state = stored_manifest.db_state().clone();
@@ -260,6 +244,14 @@ impl StoredManifest {
             .expect("update applied but checkpoint not found")
             .clone();
         Ok(checkpoint)
+    }
+
+    pub(crate) async fn write_new_checkpoint(
+        &mut self,
+        options: &CheckpointOptions,
+    ) -> Result<Checkpoint, SlateDBError> {
+        let checkpoint_id = Uuid::new_v4();
+        self.write_checkpoint(checkpoint_id, options).await
     }
 
     pub(crate) async fn update_db_state(&mut self, core: CoreDbState) -> Result<(), SlateDBError> {
@@ -470,9 +462,7 @@ impl ManifestStore {
         id: u64,
     ) -> Result<Option<Manifest>, SlateDBError> {
         let manifest_path = &self.get_manifest_path(id);
-        let maybe_manifest =self.object_store.get(manifest_path).await;
-        eprintln!("Found manifest {maybe_manifest:?} for id {id}");
-        match maybe_manifest {
+        match self.object_store.get(manifest_path).await {
             Ok(manifest) => match manifest.bytes().await {
                 Ok(bytes) => {
                     let manifest = self.codec.decode(&bytes)?;

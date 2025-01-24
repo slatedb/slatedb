@@ -2,12 +2,14 @@ use crate::config::CheckpointOptions;
 use crate::db::Db;
 use crate::db_state::{CoreDbState, SsTableId};
 use crate::error::SlateDBError;
+use crate::error::SlateDBError::CheckpointMissing;
 use crate::manifest;
 use crate::manifest_store::{ManifestStore, StoredManifest};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use std::error::Error;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 impl Db {
@@ -123,23 +125,36 @@ impl Db {
             return Ok(clone_manifest);
         }
 
-        let checkpoint_id = Uuid::new_v4();
-        let checkpoint_options = CheckpointOptions {
-            lifetime: None,
-            source: *parent_checkpoint_id,
+        let source_checkpoint = if let Some(id) = parent_checkpoint_id {
+            if let Some(checkpoint) = parent_manifest.db_state().find_checkpoint(id) {
+                checkpoint.clone()
+            } else {
+                return Err(CheckpointMissing(*id));
+            }
+        } else {
+            // If no checkpoint is provided, then create an ephemeral checkpoint from
+            // the latest state. This will be used as the source checkpoint when we
+            // write the final checkpoint. Making it ephemeral ensures that it will
+            // get cleaned up if the clone operation fails.
+            parent_manifest
+                .write_new_checkpoint(&CheckpointOptions {
+                    lifetime: Some(Duration::from_secs(300)),
+                    source: *parent_checkpoint_id,
+                })
+                .await?
         };
-        let checkpoint = parent_manifest.new_checkpoint(checkpoint_id, &checkpoint_options)?;
 
+        let final_checkpoint_id = Uuid::new_v4();
         let parent_db = manifest::DbLink {
             path: parent_path.to_string(),
-            checkpoint_id,
+            checkpoint_id: final_checkpoint_id,
         };
 
-        let parent_checkpoint_manifest = if parent_manifest.id() == checkpoint.manifest_id {
+        let parent_checkpoint_manifest = if parent_manifest.id() == source_checkpoint.manifest_id {
             parent_manifest.manifest().clone()
         } else {
             parent_manifest_store
-                .read_manifest(checkpoint.manifest_id)
+                .read_manifest(source_checkpoint.manifest_id)
                 .await?
         };
 
@@ -150,7 +165,15 @@ impl Db {
         )
         .await?;
 
-        parent_manifest.write_checkpoint(checkpoint).await?;
+        parent_manifest
+            .write_checkpoint(
+                final_checkpoint_id,
+                &CheckpointOptions {
+                    lifetime: None,
+                    source: Some(source_checkpoint.id),
+                },
+            )
+            .await?;
 
         Ok(clone_manifest)
     }
@@ -267,7 +290,9 @@ mod tests {
         let parent_db = Db::open(parent_path, Arc::clone(&object_store))
             .await
             .unwrap();
-        test_utils::seed_database(&parent_db, &table, false).await.unwrap();
+        test_utils::seed_database(&parent_db, &table, false)
+            .await
+            .unwrap();
         parent_db.flush().await.unwrap();
         parent_db.close().await.unwrap();
 
@@ -296,15 +321,22 @@ mod tests {
         let parent_db = Db::open(parent_path.clone(), Arc::clone(&object_store))
             .await
             .unwrap();
-        test_utils::seed_database(&parent_db, &checkpoint_table, false).await.unwrap();
-        let checkpoint = parent_db.create_checkpoint(
-            CheckpointScope::All { force_flush: true},
-            &CheckpointOptions::default(),
-        )
+        test_utils::seed_database(&parent_db, &checkpoint_table, false)
+            .await
+            .unwrap();
+        let checkpoint = parent_db
+            .create_checkpoint(
+                CheckpointScope::All { force_flush: true },
+                &CheckpointOptions::default(),
+            )
             .await
             .unwrap();
 
-        test_utils::seed_database(&parent_db, &post_checkpoint_table, false).await.unwrap();
+        // Add some more data so that we can be sure that the clone was created
+        // from the checkpoint and not the latest state.
+        test_utils::seed_database(&parent_db, &post_checkpoint_table, false)
+            .await
+            .unwrap();
         parent_db.flush().await.unwrap();
         parent_db.close().await.unwrap();
 

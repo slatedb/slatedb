@@ -55,7 +55,7 @@ impl MemtableFlusher {
         Ok(CheckpointCreateResult { id, manifest_id })
     }
 
-    giasync fn write_manifest(&mut self) -> Result<(), SlateDBError> {
+    async fn write_manifest(&mut self) -> Result<(), SlateDBError> {
         let core = {
             let rguard_state = self.db_inner.state.read();
             rguard_state.state().core.clone()
