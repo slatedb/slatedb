@@ -109,22 +109,12 @@ impl DbInner {
         let key = key.as_ref();
         let snapshot = self.state.read().snapshot();
 
-        // Temporary function to convert ValueDeletable to Option<Bytes> until
-        // we add proper support for merges.
-        let unwrap_result = |v| match v {
-            ValueDeletable::Value(v) => Ok(Some(v)),
-            ValueDeletable::Merge(_) => {
-                unimplemented!("MergeOperator is not yet fully implemented")
-            }
-            ValueDeletable::Tombstone => Ok(None),
-        };
-
         if matches!(options.read_level, Uncommitted) {
             let maybe_val = std::iter::once(snapshot.wal)
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
             if let Some(val) = maybe_val {
-                return unwrap_result(val.value);
+                return self.get_if_not_expired(val.value, val.expire_ts);
             }
         }
 
@@ -132,7 +122,7 @@ impl DbInner {
             .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
         if let Some(val) = maybe_val {
-            return unwrap_result(val.value);
+            return self.get_if_not_expired(val.value, val.expire_ts);
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -154,7 +144,7 @@ impl DbInner {
 
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return unwrap_result(entry.value);
+                        return self.get_if_not_expired(entry.value, entry.expire_ts);
                     }
                 }
             }
@@ -167,12 +157,35 @@ impl DbInner {
                         .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return unwrap_result(entry.value);
+                        return self.get_if_not_expired(entry.value, entry.expire_ts);
                     }
                 }
             }
         }
         Ok(None)
+    }
+
+    fn get_if_not_expired(
+        &self,
+        value: ValueDeletable,
+        expire_ts: Option<i64>
+    ) -> Result<Option<Bytes>, SlateDBError> {
+
+        // Temporary function to convert ValueDeletable to Option<Bytes> until
+        // we add proper support for merges.
+        let unwrap_result = |v| match v {
+            ValueDeletable::Value(v) => Ok(Some(v)),
+            ValueDeletable::Merge(_) => {
+                unimplemented!("MergeOperator is not yet fully implemented")
+            }
+            ValueDeletable::Tombstone => Ok(None),
+        };
+
+        if expire_ts.is_some_and(|expire_ts: i64| -> bool { expire_ts <= self.mono_clock.now().unwrap() }) {
+            Ok(None)
+        } else {
+            unwrap_result(value)
+        }
     }
 
     pub async fn scan_with_options<'a>(
@@ -217,7 +230,7 @@ impl DbInner {
                 self.table_store.clone(),
                 sst_iter_options,
             )
-            .await?;
+                .await?;
             l0_iters.push_back(iter);
         }
 
@@ -229,7 +242,7 @@ impl DbInner {
                 self.table_store.clone(),
                 sst_iter_options,
             )
-            .await?;
+                .await?;
             sr_iters.push_back(iter);
         }
 
@@ -1354,7 +1367,7 @@ mod tests {
     use super::*;
     use crate::cached_object_store::FsCacheStorage;
     use crate::config::{
-        CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
+        CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions, Ttl
     };
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
@@ -1392,6 +1405,82 @@ mod tests {
         );
         kv_store.delete(key).await.unwrap();
         assert_eq!(None, kv_store.get(key).await.unwrap());
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_with_ttl() {
+        let clock = Arc::new(TestClock::new());
+        let ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(ttl)),
+            object_store,
+        ).await.unwrap();
+
+        let key = b"test_key";
+        let value = b"test_value";
+
+        // insert at t=0
+        kv_store.put(key, value).await.unwrap();
+        kv_store.flush().await.unwrap();
+
+        // advance clock to t=99 --> still returned
+        clock.ticker.store(99, Ordering::SeqCst);
+        assert_eq!(
+            kv_store.get(key).await.unwrap(),
+            Some(Bytes::from_static(value))
+        );
+
+        // advance clock to t=100 --> no longer returned
+        clock.ticker.store(100, Ordering::SeqCst);
+        assert_eq!(None, kv_store.get(key).await.unwrap());
+
+        // insert again at t=100 but override default with row_ttl=50
+        kv_store.put_with_options(
+            key,
+            value,
+            &PutOptions {ttl: Ttl::ExpireAfter(50)},
+            &WriteOptions::default()
+        ).await.unwrap();
+        kv_store.flush().await.unwrap();
+
+        // advance clock to t=149 --> still returned
+        clock.ticker.store(149, Ordering::SeqCst);
+        assert_eq!(
+            kv_store.get(key).await.unwrap(),
+            Some(Bytes::from_static(value))
+        );
+
+        // advance clock to t=150 --> no longer returned
+        clock.ticker.store(150, Ordering::SeqCst);
+        assert_eq!(None, kv_store.get(key).await.unwrap());
+
+        // insert again at t=150 but override default with row_ttl=150
+        // don't flush this time after writing
+        kv_store.put_with_options(
+            key,
+            value,
+            &PutOptions {ttl: Ttl::ExpireAfter(150)},
+            &WriteOptions::default()
+        ).await.unwrap();
+
+        // advance clock to t=299 --> still returned (with read_uncommitted)
+        clock.ticker.store(299, Ordering::SeqCst);
+        assert_eq!(
+            kv_store.get_with_options(key, &ReadOptions {read_level: Uncommitted}).await.unwrap(),
+            Some(Bytes::from_static(value))
+        );
+
+        // advance clock to t=300 --> no longer returned (with read_uncommitted)
+        clock.ticker.store(300, Ordering::SeqCst);
+        assert_eq!(
+            kv_store.get_with_options(key, &ReadOptions {read_level: Uncommitted}).await.unwrap(),
+            None
+        );
+
         kv_store.close().await.unwrap();
     }
 
@@ -3115,6 +3204,22 @@ mod tests {
         compactor_options: Option<CompactorOptions>,
         clock: Arc<TestClock>,
     ) -> DbOptions {
+        test_db_options_with_ttl(
+            min_filter_keys,
+            l0_sst_size_bytes,
+            compactor_options,
+            clock,
+            None
+        )
+    }
+
+    fn test_db_options_with_ttl(
+        min_filter_keys: u32,
+        l0_sst_size_bytes: usize,
+        compactor_options: Option<CompactorOptions>,
+        clock: Arc<TestClock>,
+        ttl: Option<u64>
+    ) -> DbOptions {
         DbOptions {
             flush_interval: Duration::from_millis(100),
             #[cfg(feature = "wal_disable")]
@@ -3131,7 +3236,7 @@ mod tests {
             block_cache: None,
             garbage_collector_options: None,
             clock,
-            default_ttl: None,
+            default_ttl: ttl
         }
     }
 }
