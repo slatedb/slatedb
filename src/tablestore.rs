@@ -841,7 +841,7 @@ mod tests {
             let mut iter = BlockIterator::new(block.clone());
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, expected_item.0);
-            assert_eq!(ValueDeletable::Value(kv.value.into()), expected_item.1);
+            assert_eq!(ValueDeletable::Value(kv.value), expected_item.1);
         }
 
         assert!(block_iter.next().is_none());

@@ -934,7 +934,6 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use bytes::Bytes;
     /// use slatedb::{db::Db, error::SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
@@ -1083,7 +1082,6 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use bytes::Bytes;
     /// use slatedb::{db::Db, config::ScanOptions, config::ReadLevel, error::SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
@@ -1135,7 +1133,6 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use bytes::Bytes;
     /// use slatedb::{db::Db, config::ScanOptions, config::ReadLevel, error::SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
