@@ -45,7 +45,7 @@ table ManifestV1 {
     checkpoints: [Checkpoint] (required);
 
     // The last seq number
-    last_seq: ulong;
+    last_l0_seq: ulong;
 }
 
 table SortedRun {
