@@ -30,6 +30,7 @@ use log::{info, warn};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 
+use crate::mem_table::WritableKVTable;
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::spawn_bg_task;
 use crate::{
@@ -50,37 +51,55 @@ pub(crate) struct WriteBatchRequest {
 }
 
 impl DbInner {
+    fn write_batch_into_table(
+        &self,
+        table: &mut WritableKVTable,
+        batch: WriteBatch,
+        seq: u64,
+        now: i64,
+    ) {
+        for op in batch.ops {
+            match op {
+                WriteOp::Put(key, value, opts) => {
+                    table.put(RowEntry {
+                        key,
+                        value: ValueDeletable::Value(value),
+                        seq,
+                        create_ts: Some(now),
+                        expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
+                    });
+                }
+                WriteOp::Merge(key, value, opts) => {
+                    table.put(RowEntry {
+                        key,
+                        value: ValueDeletable::Merge(value),
+                        seq,
+                        create_ts: Some(now),
+                        expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
+                    });
+                }
+                WriteOp::Delete(key) => {
+                    table.put(RowEntry {
+                        key,
+                        value: ValueDeletable::Tombstone,
+                        seq,
+                        create_ts: Some(now),
+                        expire_ts: None,
+                    });
+                }
+            }
+        }
+    }
+
     #[allow(clippy::panic)]
     async fn write_batch(&self, batch: WriteBatch) -> Result<Arc<KVTable>, SlateDBError> {
         let now = self.mono_clock.now().await?;
+        let mut guard = self.state.write();
+        let seq = guard.increment_seq();
 
         let current_table = if self.wal_enabled() {
-            let mut guard = self.state.write();
-
-            let seq = guard.increment_seq();
             let current_wal = guard.wal();
-            for op in batch.ops {
-                match op {
-                    WriteOp::Put(key, value, opts) => {
-                        current_wal.put(RowEntry {
-                            key,
-                            value: ValueDeletable::Value(value),
-                            create_ts: Some(now),
-                            expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
-                            seq,
-                        });
-                    }
-                    WriteOp::Delete(key) => {
-                        current_wal.put(RowEntry {
-                            key,
-                            value: ValueDeletable::Tombstone,
-                            create_ts: Some(now),
-                            expire_ts: None,
-                            seq,
-                        });
-                    }
-                }
-            }
+            self.write_batch_into_table(current_wal, batch, seq, now);
             let table = current_wal.table().clone();
             self.maybe_freeze_wal(&mut guard)?;
             table
@@ -88,31 +107,8 @@ impl DbInner {
             if cfg!(not(feature = "wal_disable")) {
                 panic!("wal_disabled feature must be enabled");
             }
-            let mut guard = self.state.write();
-            let seq = guard.increment_seq();
             let current_memtable = guard.memtable();
-            for op in batch.ops {
-                match op {
-                    WriteOp::Put(key, value, opts) => {
-                        current_memtable.put(RowEntry {
-                            key,
-                            value: ValueDeletable::Value(value),
-                            create_ts: Some(now),
-                            expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
-                            seq,
-                        });
-                    }
-                    WriteOp::Delete(key) => {
-                        current_memtable.put(RowEntry {
-                            key,
-                            value: ValueDeletable::Tombstone,
-                            create_ts: Some(now),
-                            expire_ts: None,
-                            seq,
-                        });
-                    }
-                }
-            }
+            self.write_batch_into_table(current_memtable, batch, seq, now);
             let table = current_memtable.table().clone();
             let last_wal_id = guard.last_written_wal_id();
             self.maybe_freeze_memtable(&mut guard, last_wal_id)?;

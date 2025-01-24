@@ -168,6 +168,7 @@ use crate::config::GcExecutionMode::Periodic;
 use crate::error::{DbOptionsError, SlateDBError};
 
 use crate::db_cache::DbCache;
+use crate::merge_operator::MergeOperator;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 /// Whether reads see only writes that have been committed durably to the DB.  A
@@ -237,7 +238,7 @@ impl Default for WriteOptions {
 
 /// Configuration for client put operations. `PutOptions` is supplied for each
 /// row inserted. This differs from [`WriteOptions`] in that a write may encompass
-/// multiple puts (such as the case with batched writes)
+/// multiple operations (such as the case with batched writes)
 #[derive(Clone, Default)]
 pub struct PutOptions {
     /// The time-to-live (ttl) for this insertion. If this insert overwrites an existing
@@ -273,7 +274,43 @@ impl PutOptions {
     }
 }
 
-#[non_exhaustive]
+/// Configuration for client merge operations. `MergeOptions` is supplied for each
+/// row inserted. This differs from [`WriteOptions`] in that a write may encompass
+/// multiple operations (such as the case with batched writes)
+#[derive(Clone, Default)]
+pub struct MergeOptions {
+    /// The time-to-live (ttl) for this merge. Merges with different TTLs will only
+    /// be merged together during reada, but will be stored separately to allow them
+    /// to expire independently.
+    pub ttl: Ttl,
+}
+
+impl MergeOptions {
+    pub(crate) fn expire_ts_from(&self, default: Option<u64>, now: i64) -> Option<i64> {
+        match self.ttl {
+            Ttl::Default => match default {
+                None => None,
+                Some(default_ttl) => Self::checked_expire_ts(now, default_ttl),
+            },
+            Ttl::NoExpiry => None,
+            Ttl::ExpireAfter(ttl) => Self::checked_expire_ts(now, ttl),
+        }
+    }
+
+    fn checked_expire_ts(now: i64, ttl: u64) -> Option<i64> {
+        // for overflow, we will just assume no TTL
+        if ttl > i64::MAX as u64 {
+            return None;
+        };
+        let expire_ts = now + (ttl as i64);
+        if expire_ts < now {
+            return None;
+        };
+
+        Some(expire_ts)
+    }
+}
+
 #[derive(Clone, Default)]
 pub enum Ttl {
     #[default]
@@ -476,6 +513,10 @@ pub struct DbOptions {
     ///
     /// Default: no TTL (insertions will remain until deleted)
     pub default_ttl: Option<u64>,
+
+    /// The merge operator to use for the database. If not set, the database will not support merge operations.
+    #[serde(skip)]
+    pub merge_operator: Option<Arc<dyn MergeOperator + Send + Sync>>,
 }
 
 // Implement Debug manually for DbOptions.
@@ -661,6 +702,7 @@ impl Default for DbOptions {
             filter_bits_per_key: 10,
             clock: default_clock(),
             default_ttl: None,
+            merge_operator: None,
         }
     }
 }
