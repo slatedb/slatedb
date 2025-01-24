@@ -1037,7 +1037,7 @@ impl Db {
             .await
     }
 
-    /// Scan a all keys using the default options [`DEFAULT_SCAN_OPTIONS`].
+    /// Scan a all keys using the default options.
     ///
     /// returns a `DbIterator`
     ///
@@ -1067,7 +1067,7 @@ impl Db {
     /// ```
     pub async fn scan_all(&self) -> Result<DbIterator, SlateDBError> {
         self.inner
-            .scan_with_options(BytesRange::from(..), DEFAULT_SCAN_OPTIONS)
+            .scan_with_options(BytesRange::from(..), &ScanOptions::default())
             .await
     }
 
