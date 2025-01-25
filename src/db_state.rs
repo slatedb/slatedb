@@ -231,8 +231,14 @@ pub(crate) struct CoreDbState {
     /// WAL entries will have their latest ticks recovered on replay
     /// into the in-memory state
     pub(crate) last_l0_clock_tick: i64,
-    pub(crate) checkpoints: Vec<Checkpoint>,
+    /// it's persisted in the manifest, and only updated when a new L0
+    /// SST is created in the manifest.
+    pub(crate) last_l0_seq: u64,
+    /// on the start up, we'll load the last_l0_seq from the manifest,
+    /// then read the WALs to get the maximum sequence number. this value
+    /// is incremented whenever a new write is performed.
     pub(crate) last_seq: u64,
+    pub(crate) checkpoints: Vec<Checkpoint>,
 }
 
 impl CoreDbState {
@@ -245,8 +251,9 @@ impl CoreDbState {
             next_wal_sst_id: 1,
             last_compacted_wal_sst_id: 0,
             last_l0_clock_tick: i64::MIN,
-            checkpoints: vec![],
+            last_l0_seq: 0,
             last_seq: 0,
+            checkpoints: vec![],
         }
     }
 
@@ -390,6 +397,8 @@ impl DbState {
                 next_tick: memtable_tick,
             });
         }
+        // update the persisted manifest last_l0_seq as the latest seq
+        state.core.last_l0_seq = self.state.core.last_seq;
 
         self.update_state(state);
         Ok(())
