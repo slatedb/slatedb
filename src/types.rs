@@ -7,17 +7,21 @@ pub struct KeyValue {
     pub value: Bytes,
 }
 
-impl From<(&[u8], &[u8])> for KeyValue {
-    fn from(record: (&[u8], &[u8])) -> Self {
-        let key = Bytes::copy_from_slice(record.0);
-        let value = Bytes::copy_from_slice(record.1);
+impl<K, V> From<(&K, &V)> for KeyValue
+where
+    K: AsRef<[u8]>,
+    V: AsRef<[u8]>,
+{
+    fn from(record: (&K, &V)) -> Self {
+        let key = Bytes::copy_from_slice(record.0.as_ref());
+        let value = Bytes::copy_from_slice(record.1.as_ref());
         KeyValue { key, value }
     }
 }
 
 /// Represents a key-value pair that may be a tombstone.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RowEntry {
+pub(crate) struct RowEntry {
     pub key: Bytes,
     pub value: ValueDeletable,
     pub seq: u64,
