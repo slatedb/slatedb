@@ -471,11 +471,11 @@ mod tests {
         assert_iterator(
             &mut iter,
             vec![
-                RowEntry::new_value(&[1; 16], value, 0)
+                RowEntry::new_value(&[1; 16], value, 4)
                     .with_create_ts(70)
                     .with_expire_ts(150),
-                RowEntry::new_tombstone(&[2; 16], 0).with_create_ts(10),
-                RowEntry::new_value(&[3; 16], value, 0).with_create_ts(30),
+                RowEntry::new_tombstone(&[2; 16], 2).with_create_ts(10),
+                RowEntry::new_value(&[3; 16], value, 3).with_create_ts(30),
             ],
         )
         .await;
