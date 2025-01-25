@@ -39,6 +39,7 @@ mod mem_table_flush;
 mod merge_iterator;
 pub mod merge_operator;
 pub mod metrics;
+mod paths;
 #[cfg(test)]
 mod proptest_util;
 mod row_codec;
