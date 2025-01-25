@@ -40,10 +40,7 @@ use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
-use crate::config::{
-    DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions, DEFAULT_READ_OPTIONS,
-    DEFAULT_SCAN_OPTIONS, DEFAULT_WRITE_OPTIONS,
-};
+use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -103,12 +100,13 @@ impl DbInner {
     }
 
     /// Get the value for a given key.
-    pub async fn get_with_options(
+    pub async fn get_with_options<K: AsRef<[u8]>>(
         &self,
-        key: &[u8],
+        key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.check_error()?;
+        let key = key.as_ref();
         let snapshot = self.state.read().snapshot();
 
         // Temporary function to convert ValueDeletable to Option<Bytes> until
@@ -920,7 +918,6 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use bytes::Bytes;
     /// use slatedb::{db::Db, error::SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
@@ -930,12 +927,14 @@ impl Db {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.put(b"key", b"value").await?;
-    ///     assert_eq!(db.get(b"key").await?, Some(Bytes::from_static(b"value")));
+    ///     assert_eq!(db.get(b"key").await?, Some("value".into()));
     ///     Ok(())
     /// }
     /// ```
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
-        self.inner.get_with_options(key, DEFAULT_READ_OPTIONS).await
+    pub async fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Bytes>, SlateDBError> {
+        self.inner
+            .get_with_options(key, &ReadOptions::default())
+            .await
     }
 
     /// Get a value from the database with custom read options.
@@ -960,7 +959,6 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use bytes::Bytes;
     /// use slatedb::{db::Db, config::ReadOptions, error::SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
@@ -970,19 +968,19 @@ impl Db {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.put(b"key", b"value").await?;
-    ///     assert_eq!(db.get_with_options(b"key", &ReadOptions::default()).await?, Some(Bytes::from_static(b"value")));
+    ///     assert_eq!(db.get_with_options(b"key", &ReadOptions::default()).await?, Some("value".into()));
     ///     Ok(())
     /// }
     /// ```
-    pub async fn get_with_options(
+    pub async fn get_with_options<K: AsRef<[u8]>>(
         &self,
-        key: &[u8],
+        key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.inner.get_with_options(key, options).await
     }
 
-    /// Scan a range of keys using the default options [`DEFAULT_SCAN_OPTIONS`].
+    /// Scan a range of keys using the default scan options.
     ///
     /// returns a `DbIterator`
     ///
@@ -992,7 +990,6 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use bytes::Bytes;
     /// use slatedb::{db::Db, error::SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
@@ -1004,16 +1001,26 @@ impl Db {
     ///     db.put(b"a", b"a_value").await?;
     ///     db.put(b"b", b"b_value").await?;
     ///
-    ///     let mut iter = db.scan(..).await?;
-    ///     assert_eq!(Some((b"a" as &[u8], b"a_value" as &[u8]).into()) , iter.next().await?);
-    ///     assert_eq!(Some((b"b" as &[u8], b"b_value" as &[u8]).into()) , iter.next().await?);
-    ///     assert_eq!(None , iter.next().await?);
+    ///     let mut iter = db.scan("a".."b").await?;
+    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
+    ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan<T: RangeBounds<Bytes>>(&self, range: T) -> Result<DbIterator, SlateDBError> {
+    pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, SlateDBError>
+    where
+        K: AsRef<[u8]>,
+        T: RangeBounds<K>,
+    {
+        let start = range
+            .start_bound()
+            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        let end = range
+            .end_bound()
+            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        let range = (start, end);
         self.inner
-            .scan_with_options(BytesRange::from(range), DEFAULT_SCAN_OPTIONS)
+            .scan_with_options(BytesRange::from(range), &ScanOptions::default())
             .await
     }
 
@@ -1027,7 +1034,6 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use bytes::Bytes;
     /// use slatedb::{db::Db, config::ScanOptions, config::ReadLevel, error::SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
@@ -1039,21 +1045,31 @@ impl Db {
     ///     db.put(b"a", b"a_value").await?;
     ///     db.put(b"b", b"b_value").await?;
     ///
-    ///     let mut iter = db.scan_with_options(.., &ScanOptions {
+    ///     let mut iter = db.scan_with_options("a".."b", &ScanOptions {
     ///         read_level: ReadLevel::Uncommitted,
     ///         ..ScanOptions::default()
     ///     }).await?;
-    ///     assert_eq!(Some((b"a" as &[u8], b"a_value" as &[u8]).into()) , iter.next().await?);
-    ///     assert_eq!(Some((b"b" as &[u8], b"b_value" as &[u8]).into()) , iter.next().await?);
-    ///     assert_eq!(None , iter.next().await?);
+    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
+    ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan_with_options<T: RangeBounds<Bytes>>(
+    pub async fn scan_with_options<K, T>(
         &self,
         range: T,
         options: &ScanOptions,
-    ) -> Result<DbIterator, SlateDBError> {
+    ) -> Result<DbIterator, SlateDBError>
+    where
+        K: AsRef<[u8]>,
+        T: RangeBounds<K>,
+    {
+        let start = range
+            .start_bound()
+            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        let end = range
+            .end_bound()
+            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        let range = (start, end);
         self.inner
             .scan_with_options(BytesRange::from(range), options)
             .await
@@ -1083,7 +1099,11 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), SlateDBError> {
+    pub async fn put<K, V>(&self, key: K, value: V) -> Result<(), SlateDBError>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
         let mut batch = WriteBatch::new();
         batch.put(key, value);
         self.write(batch).await
@@ -1115,13 +1135,17 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn put_with_options(
+    pub async fn put_with_options<K, V>(
         &self,
-        key: &[u8],
-        value: &[u8],
+        key: K,
+        value: V,
         put_opts: &PutOptions,
         write_opts: &WriteOptions,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<(), SlateDBError>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
         let mut batch = WriteBatch::new();
         batch.put_with_options(key, value, put_opts);
         self.write_with_options(batch, write_opts).await
@@ -1150,9 +1174,9 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn delete(&self, key: &[u8]) -> Result<(), SlateDBError> {
+    pub async fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), SlateDBError> {
         let mut batch = WriteBatch::new();
-        batch.delete(key);
+        batch.delete(key.as_ref());
         self.write(batch).await
     }
 
@@ -1180,9 +1204,9 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn delete_with_options(
+    pub async fn delete_with_options<K: AsRef<[u8]>>(
         &self,
-        key: &[u8],
+        key: K,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
         let mut batch = WriteBatch::new();
@@ -1222,7 +1246,8 @@ impl Db {
     /// }
     /// ```
     pub async fn write(&self, batch: WriteBatch) -> Result<(), SlateDBError> {
-        self.write_with_options(batch, DEFAULT_WRITE_OPTIONS).await
+        self.write_with_options(batch, &WriteOptions::default())
+            .await
     }
 
     /// Write a batch of put/delete operations atomically to the database. Batch writes
@@ -1328,7 +1353,6 @@ mod tests {
     use crate::cached_object_store::FsCacheStorage;
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
-        DEFAULT_PUT_OPTIONS,
     };
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
@@ -1776,10 +1800,7 @@ mod tests {
 
         // Read back keys
         assert_eq!(kv_store.get(b"key1").await.unwrap(), None);
-        assert_eq!(
-            kv_store.get(b"key2").await.unwrap(),
-            Some(Bytes::from_static(b"value2"))
-        );
+        assert_eq!(kv_store.get(b"key2").await.unwrap(), Some("value2".into()));
 
         kv_store.close().await.unwrap();
     }
@@ -1853,7 +1874,7 @@ mod tests {
                 tokio::spawn(async move {
                     let mut batch = WriteBatch::new();
                     for key in 1..=NUM_KEYS {
-                        batch.put(&key.to_be_bytes(), &key.to_be_bytes());
+                        batch.put(key.to_be_bytes(), key.to_be_bytes());
                     }
                     store.write(batch).await.expect("write batch failed");
                 })
@@ -1865,7 +1886,7 @@ mod tests {
                     let mut batch = WriteBatch::new();
                     for key in 1..=NUM_KEYS {
                         let value = (key * 2).to_be_bytes();
-                        batch.put(&key.to_be_bytes(), &value);
+                        batch.put(key.to_be_bytes(), value);
                     }
                     store.write(batch).await.expect("write batch failed");
                 })
@@ -1970,7 +1991,7 @@ mod tests {
         db.put_with_options(
             &[b'a'; 32],
             &[b'j'; 32],
-            DEFAULT_PUT_OPTIONS,
+            &PutOptions::default(),
             &write_options,
         )
         .await
@@ -1989,7 +2010,7 @@ mod tests {
         db.put_with_options(
             &[b'c'; 32],
             &[b'l'; 32],
-            DEFAULT_PUT_OPTIONS,
+            &PutOptions::default(),
             &write_options,
         )
         .await
@@ -2336,7 +2357,7 @@ mod tests {
             .put_with_options(
                 "foo".as_bytes(),
                 "bar".as_bytes(),
-                DEFAULT_PUT_OPTIONS,
+                &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
                 },
@@ -2354,7 +2375,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(val, Some(Bytes::from("bar")));
+        assert_eq!(val, Some("bar".into()));
 
         // Validate committed read should still return None
         let val = kv_store.get("foo".as_bytes()).await.unwrap();
@@ -2387,7 +2408,7 @@ mod tests {
             .put_with_options(
                 "foo".as_bytes(),
                 "bla".as_bytes(),
-                DEFAULT_PUT_OPTIONS,
+                &PutOptions::default(),
                 &WriteOptions {
                     await_durable: false,
                 },
@@ -2396,7 +2417,7 @@ mod tests {
             .unwrap();
 
         let val = kv_store.get("foo".as_bytes()).await.unwrap();
-        assert_eq!(val, Some(Bytes::from("bar")));
+        assert_eq!(val, Some("bar".into()));
         let val = kv_store
             .get_with_options(
                 "foo".as_bytes(),
@@ -2406,7 +2427,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(val, Some(Bytes::from("bla")));
+        assert_eq!(val, Some("bla".into()));
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
         kv_store.close().await.unwrap();
@@ -2442,7 +2463,7 @@ mod tests {
             .unwrap();
 
         let val = kv_store.get("foo".as_bytes()).await.unwrap();
-        assert_eq!(val, Some(Bytes::from("bar")));
+        assert_eq!(val, Some("bar".into()));
         let val = kv_store
             .get_with_options(
                 "foo".as_bytes(),
@@ -2479,11 +2500,11 @@ mod tests {
         // write a few keys that will result in memtable flushes
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
-        db.put(&key1, &value1).await.unwrap();
+        db.put(key1, value1).await.unwrap();
         next_wal_id += 1;
         let key2 = [b'c'; 32];
         let value2 = [b'd'; 96];
-        db.put(&key2, &value2).await.unwrap();
+        db.put(key2, value2).await.unwrap();
         next_wal_id += 1;
 
         let reader = Db::open_with_opts(
@@ -2509,11 +2530,11 @@ mod tests {
         assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 2);
         assert_eq!(snapshot.state.core.next_wal_sst_id, next_wal_id);
         assert_eq!(
-            reader.get(&key1).await.unwrap(),
+            reader.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
         );
         assert_eq!(
-            reader.get(&key2).await.unwrap(),
+            reader.get(key2).await.unwrap(),
             Some(Bytes::copy_from_slice(&value2))
         );
 
@@ -2797,7 +2818,7 @@ mod tests {
             db.put_with_options(
                 key,
                 val,
-                DEFAULT_PUT_OPTIONS,
+                &PutOptions::default(),
                 &WriteOptions {
                     await_durable: true,
                 },
@@ -3069,6 +3090,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(db.inner.mono_clock.last_tick.load(Ordering::SeqCst), 11);
+    }
+
+    #[test]
+    fn test_write_option_defaults() {
+        // This is a regression test for a bug where the defaults for WriteOptions were not being
+        // set correctly due to visibility issues.
+        let write_options = WriteOptions::default();
+        assert!(write_options.await_durable);
     }
 
     async fn wait_for_manifest_condition(

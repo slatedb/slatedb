@@ -318,7 +318,8 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
-    use crate::test_utils::TestClock;
+    use crate::test_utils::{assert_iterator, TestClock};
+    use crate::types::RowEntry;
 
     const PATH: &str = "/test/db";
 
@@ -378,9 +379,9 @@ mod tests {
         let compactor_opts = CompactorOptions {
             compaction_scheduler: Arc::new(SizeTieredCompactionSchedulerSupplier::new(
                 SizeTieredCompactionSchedulerOptions {
-                    // compact as soon as we have data
-                    min_compaction_sources: 1,
-                    max_compaction_sources: 10,
+                    // We'll do exactly two flushes in this test, resulting in 2 L0 files.
+                    min_compaction_sources: 2,
+                    max_compaction_sources: 2,
                     include_size_threshold: 4.0,
                 },
             )),
@@ -392,11 +393,13 @@ mod tests {
         };
         let (_, manifest_store, table_store, db) = build_test_db(options).await;
 
+        let value = &[b'a'; 64];
+
         // ticker time = 0, expire time = 10
         insert_clock.ticker.store(0, atomic::Ordering::SeqCst);
         db.put_with_options(
             &[1; 16],
-            &[b'a'; 64],
+            value,
             &PutOptions {
                 ttl: Ttl::ExpireAfter(10),
             },
@@ -409,7 +412,7 @@ mod tests {
         insert_clock.ticker.store(10, atomic::Ordering::SeqCst);
         db.put_with_options(
             &[2; 16],
-            &[b'a'; 64],
+            value,
             &PutOptions { ttl: Ttl::Default },
             &WriteOptions::default(),
         )
@@ -422,7 +425,7 @@ mod tests {
         insert_clock.ticker.store(30, atomic::Ordering::SeqCst);
         db.put_with_options(
             &[3; 16],
-            &[b'a'; 64],
+            value,
             &PutOptions { ttl: Ttl::NoExpiry },
             &WriteOptions::default(),
         )
@@ -434,7 +437,7 @@ mod tests {
         insert_clock.ticker.store(70, atomic::Ordering::SeqCst);
         db.put_with_options(
             &[1; 16],
-            &[b'a'; 64],
+            value,
             &PutOptions {
                 ttl: Ttl::ExpireAfter(80),
             },
@@ -465,20 +468,17 @@ mod tests {
         .await
         .unwrap();
 
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key.as_ref(), &[1; 16]);
-
-        // skip k2 because its expired
-
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key.as_ref(), &[3; 16]);
-
-        let maybe_kv = iter.next().await.unwrap();
-        assert!(
-            maybe_kv.is_none(),
-            "Expected no more entries, but got: {:?}",
-            maybe_kv
-        );
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(&[1; 16], value, 0)
+                    .with_create_ts(70)
+                    .with_expire_ts(150),
+                RowEntry::new_tombstone(&[2; 16], 0).with_create_ts(10),
+                RowEntry::new_value(&[3; 16], value, 0).with_create_ts(30),
+            ],
+        )
+        .await;
     }
 
     #[test]
