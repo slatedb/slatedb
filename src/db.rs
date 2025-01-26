@@ -486,7 +486,7 @@ impl DbInner {
         // load the last seq number from manifest, and use it as the starting seq number.
         // there might have bigger seq number in the WALs, we'd update the last seq number
         // to the max seq number while iterating over the WALs.
-        let mut last_seq = self.state.read().state().core.last_seq;
+        let mut last_seq = self.state.read().state().core.last_l0_seq;
         while let Some((mut sst_iter, sst_id)) = sst_iterators.pop_front() {
             last_sst_id = sst_id;
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order

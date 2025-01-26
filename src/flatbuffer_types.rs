@@ -163,7 +163,6 @@ impl FlatBufferManifestCodec {
             last_compacted_wal_sst_id: manifest.wal_id_last_compacted(),
             last_l0_seq: manifest.last_l0_seq(),
             last_l0_clock_tick: manifest.last_l0_clock_tick(),
-            last_seq: manifest.last_l0_seq(),
             checkpoints,
         };
         Manifest {
