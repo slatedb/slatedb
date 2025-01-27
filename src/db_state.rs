@@ -410,9 +410,8 @@ impl DbState {
 
     /// increment_seq is called whenever a new write is performed.
     pub fn increment_seq(&mut self) -> u64 {
-        let last_seq = self.last_seq;
         self.last_seq += 1;
-        last_seq + 1
+        self.last_seq
     }
 
     /// update_last_seq is called when we replay the WALs to recover the
