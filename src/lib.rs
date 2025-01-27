@@ -51,6 +51,7 @@ mod tablestore;
 mod test_utils;
 mod transactional_object_store;
 mod types;
+pub use types::KeyValue;
 mod utils;
 
 /// Re-export the bytes crate.
