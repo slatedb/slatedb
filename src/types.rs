@@ -1,32 +1,37 @@
 use bytes::Bytes;
 
 /// Represents a key-value pair known not to be a tombstone.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeyValue {
     pub key: Bytes,
     pub value: Bytes,
 }
 
-impl From<(&[u8], &[u8])> for KeyValue {
-    fn from(record: (&[u8], &[u8])) -> Self {
-        let key = Bytes::copy_from_slice(record.0);
-        let value = Bytes::copy_from_slice(record.1);
+impl<K, V> From<(&K, &V)> for KeyValue
+where
+    K: AsRef<[u8]>,
+    V: AsRef<[u8]>,
+{
+    fn from(record: (&K, &V)) -> Self {
+        let key = Bytes::copy_from_slice(record.0.as_ref());
+        let value = Bytes::copy_from_slice(record.1.as_ref());
         KeyValue { key, value }
     }
 }
 
 /// Represents a key-value pair that may be a tombstone.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RowEntry {
-    pub key: Bytes,
-    pub value: ValueDeletable,
-    pub seq: u64,
-    pub create_ts: Option<i64>,
-    pub expire_ts: Option<i64>,
+pub(crate) struct RowEntry {
+    pub(crate) key: Bytes,
+    pub(crate) value: ValueDeletable,
+    pub(crate) seq: u64,
+    pub(crate) create_ts: Option<i64>,
+    pub(crate) expire_ts: Option<i64>,
 }
 
 impl RowEntry {
-    pub fn new(
+    pub(crate) fn new(
         key: Bytes,
         value: ValueDeletable,
         seq: u64,
@@ -42,7 +47,7 @@ impl RowEntry {
         }
     }
     #[cfg(test)]
-    pub fn new_value(key: &[u8], value: &[u8], seq: u64) -> Self {
+    pub(crate) fn new_value(key: &[u8], value: &[u8], seq: u64) -> Self {
         Self {
             key: Bytes::copy_from_slice(key),
             value: ValueDeletable::Value(Bytes::copy_from_slice(value)),
@@ -53,7 +58,7 @@ impl RowEntry {
     }
 
     #[cfg(test)]
-    pub fn new_merge(key: &[u8], value: &[u8], seq: u64) -> Self {
+    pub(crate) fn new_merge(key: &[u8], value: &[u8], seq: u64) -> Self {
         Self {
             key: Bytes::copy_from_slice(key),
             value: ValueDeletable::Merge(Bytes::copy_from_slice(value)),
@@ -64,7 +69,7 @@ impl RowEntry {
     }
 
     #[cfg(test)]
-    pub fn new_tombstone(key: &[u8], seq: u64) -> Self {
+    pub(crate) fn new_tombstone(key: &[u8], seq: u64) -> Self {
         Self {
             key: Bytes::copy_from_slice(key),
             value: ValueDeletable::Tombstone,
@@ -75,7 +80,7 @@ impl RowEntry {
     }
 
     #[cfg(test)]
-    pub fn with_create_ts(&self, create_ts: i64) -> Self {
+    pub(crate) fn with_create_ts(&self, create_ts: i64) -> Self {
         Self {
             key: self.key.clone(),
             value: self.value.clone(),
@@ -86,7 +91,7 @@ impl RowEntry {
     }
 
     #[cfg(test)]
-    pub fn with_expire_ts(&self, expire_ts: i64) -> Self {
+    pub(crate) fn with_expire_ts(&self, expire_ts: i64) -> Self {
         Self {
             key: self.key.clone(),
             value: self.value.clone(),
@@ -99,9 +104,9 @@ impl RowEntry {
 
 /// The metadata associated with a `KeyValueDeletable`
 #[derive(Debug, Clone, PartialEq)]
-pub struct RowAttributes {
-    pub ts: Option<i64>,
-    pub expire_ts: Option<i64>,
+pub(crate) struct RowAttributes {
+    pub(crate) ts: Option<i64>,
+    pub(crate) expire_ts: Option<i64>,
 }
 
 /// Represents a value that may be a tombstone.
@@ -110,14 +115,14 @@ pub struct RowAttributes {
 /// that a key does not exist, and `Tombstone` indicating
 /// that the key exists but has a tombstone value.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ValueDeletable {
+pub(crate) enum ValueDeletable {
     Value(Bytes),
     Merge(Bytes),
     Tombstone,
 }
 
 impl ValueDeletable {
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         match self {
             ValueDeletable::Value(v) | ValueDeletable::Merge(v) => v.len(),
             ValueDeletable::Tombstone => 0,

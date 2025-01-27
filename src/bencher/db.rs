@@ -232,12 +232,7 @@ impl Task {
                 let mut value = vec![0; self.val_len];
                 random.fill_bytes(value.as_mut_slice());
                 self.db
-                    .put_with_options(
-                        key,
-                        value.as_ref(),
-                        &PutOptions::default(),
-                        &self.write_options,
-                    )
+                    .put_with_options(key, value, &PutOptions::default(), &self.write_options)
                     .await
                     .unwrap();
                 puts += 1;

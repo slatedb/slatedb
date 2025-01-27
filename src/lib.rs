@@ -40,6 +40,7 @@ mod mem_table_flush;
 mod merge_iterator;
 pub mod merge_operator;
 pub mod metrics;
+mod paths;
 #[cfg(test)]
 mod proptest_util;
 mod row_codec;
@@ -52,6 +53,7 @@ mod tablestore;
 mod test_utils;
 mod transactional_object_store;
 mod types;
+pub use types::KeyValue;
 mod utils;
 
 /// Re-export the bytes crate.
