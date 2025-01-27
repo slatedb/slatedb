@@ -5,13 +5,13 @@ use crate::error::SlateDBError;
 use crate::error::SlateDBError::CheckpointMissing;
 use crate::manifest;
 use crate::manifest_store::{ManifestStore, StoredManifest};
+use crate::paths::PathResolver;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
-use crate::paths::PathResolver;
 
 impl Db {
     /// Clone a database. If no db already exists at the specified path, then this will create
@@ -144,10 +144,13 @@ impl Db {
             // write the final checkpoint. Making it ephemeral ensures that it will
             // get cleaned up if the clone operation fails.
             parent_manifest
-                .write_checkpoint(Uuid::new_v4(), &CheckpointOptions {
-                    lifetime: Some(Duration::from_secs(300)),
-                    source: *parent_checkpoint_id,
-                })
+                .write_checkpoint(
+                    Uuid::new_v4(),
+                    &CheckpointOptions {
+                        lifetime: Some(Duration::from_secs(300)),
+                        source: *parent_checkpoint_id,
+                    },
+                )
                 .await?
         };
 
@@ -307,7 +310,6 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::RangeFull;
     use crate::config::{CheckpointOptions, CheckpointScope};
     use crate::db::Db;
     use crate::db_state::CoreDbState;
@@ -319,6 +321,7 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use std::ops::RangeFull;
     use std::sync::Arc;
     use uuid::Uuid;
 

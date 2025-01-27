@@ -224,7 +224,9 @@ pub async fn create_checkpoint(
 ) -> Result<CheckpointCreateResult, SlateDBError> {
     let manifest_store = Arc::new(ManifestStore::new(path, object_store));
     let mut stored_manifest = StoredManifest::load(manifest_store).await?;
-    let checkpoint = stored_manifest.write_checkpoint(Uuid::new_v4(), options).await?;
+    let checkpoint = stored_manifest
+        .write_checkpoint(Uuid::new_v4(), options)
+        .await?;
     Ok(CheckpointCreateResult {
         id: checkpoint.id,
         manifest_id: checkpoint.manifest_id,
