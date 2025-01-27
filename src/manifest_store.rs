@@ -246,14 +246,6 @@ impl StoredManifest {
         Ok(checkpoint)
     }
 
-    pub(crate) async fn write_new_checkpoint(
-        &mut self,
-        options: &CheckpointOptions,
-    ) -> Result<Checkpoint, SlateDBError> {
-        let checkpoint_id = Uuid::new_v4();
-        self.write_checkpoint(checkpoint_id, options).await
-    }
-
     pub(crate) async fn rewrite_parent_db(
         &mut self,
         parent_db: ParentDb,
@@ -836,12 +828,12 @@ mod tests {
             .unwrap();
 
         let checkpoint1 = sm
-            .write_new_checkpoint(&CheckpointOptions::default())
+            .write_checkpoint(Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 
         let _ = sm
-            .write_new_checkpoint(&CheckpointOptions::default())
+            .write_checkpoint(Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 

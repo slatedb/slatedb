@@ -65,6 +65,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use std::sync::Arc;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_init_clone_manifest() {
@@ -78,7 +79,7 @@ mod tests {
                 .await
                 .unwrap();
         let checkpoint = parent_manifest
-            .write_new_checkpoint(&CheckpointOptions::default())
+            .write_checkpoint(Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -121,7 +122,7 @@ mod tests {
                 .unwrap();
 
         let checkpoint = manifest
-            .write_new_checkpoint(&CheckpointOptions::default())
+            .write_checkpoint(Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 

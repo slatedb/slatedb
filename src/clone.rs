@@ -143,7 +143,7 @@ impl Db {
             // write the final checkpoint. Making it ephemeral ensures that it will
             // get cleaned up if the clone operation fails.
             parent_manifest
-                .write_new_checkpoint(&CheckpointOptions {
+                .write_checkpoint(Uuid::new_v4(), &CheckpointOptions {
                     lifetime: Some(Duration::from_secs(300)),
                     source: *parent_checkpoint_id,
                 })
