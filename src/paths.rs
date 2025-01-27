@@ -81,10 +81,10 @@ mod tests {
         fn should_serialize_and_deserialize_wal_paths(
             wal_id in any::<u64>(),
         ) {
-            let path_builder = PathResolver::new(Path::from(ROOT));
+            let path_resolver = PathResolver::new(Path::from(ROOT));
             let table_id = SsTableId::Wal(wal_id);
-            let path = path_builder.table_path(&table_id);
-            let parsed_table_id = path_builder.parse_table_id(&path).unwrap();
+            let path = path_resolver.table_path(&table_id);
+            let parsed_table_id = path_resolver.parse_table_id(&path).unwrap();
             assert_eq!(Some(table_id), parsed_table_id);
         }
 
@@ -92,23 +92,23 @@ mod tests {
         fn should_serialize_and_deserialize_compacted_paths(
             compacted_id in any::<u128>(),
         ) {
-            let path_builder = PathResolver::new(Path::from(ROOT));
+            let path_resolver = PathResolver::new(Path::from(ROOT));
             let table_id = SsTableId::Compacted(Ulid::from(compacted_id));
-            let path = path_builder.table_path(&table_id);
-            let parsed_table_id = path_builder.parse_table_id(&path).unwrap();
+            let path = path_resolver.table_path(&table_id);
+            let parsed_table_id = path_resolver.parse_table_id(&path).unwrap();
             assert_eq!(Some(table_id), parsed_table_id);
         }
     }
 
     #[test]
     fn test_parse_id() {
-        let path_builder = PathResolver::new(Path::from(ROOT));
+        let path_resolver = PathResolver::new(Path::from(ROOT));
         let path = Path::from("/root/wal/00000000000000000003.sst");
-        let id = path_builder.parse_table_id(&path).unwrap();
+        let id = path_resolver.parse_table_id(&path).unwrap();
         assert_eq!(id, Some(SsTableId::Wal(3)));
 
         let path = Path::from("/root/compacted/01J79C21YKR31J2BS1EFXJZ7MR.sst");
-        let id = path_builder.parse_table_id(&path).unwrap();
+        let id = path_resolver.parse_table_id(&path).unwrap();
         assert_eq!(
             id,
             Some(SsTableId::Compacted(
@@ -117,7 +117,7 @@ mod tests {
         );
 
         let path = Path::from("/root/invalid/00000000000000000001.sst");
-        let id = path_builder.parse_table_id(&path).unwrap();
+        let id = path_resolver.parse_table_id(&path).unwrap();
         assert_eq!(id, None);
     }
 }

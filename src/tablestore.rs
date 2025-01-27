@@ -29,7 +29,7 @@ use crate::{blob::ReadOnlyBlob, block::Block, db_cache::DbCache};
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,
-    path_builder: PathResolver,
+    path_resolver: PathResolver,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
     transactional_wal_store: Arc<dyn TransactionalObjectStore>,
@@ -96,7 +96,7 @@ impl TableStore {
         Self {
             object_store: object_store.clone(),
             sst_format,
-            path_builder: PathResolver::new(root_path),
+            path_resolver: PathResolver::new(root_path),
             fp_registry,
             transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
                 Path::from("/"),
@@ -117,11 +117,11 @@ impl TableStore {
         id_range: R,
     ) -> Result<Vec<SstFileMetadata>, SlateDBError> {
         let mut wal_list: Vec<SstFileMetadata> = Vec::new();
-        let wal_path = &self.path_builder.wal_path();
+        let wal_path = &self.path_resolver.wal_path();
         let mut files_stream = self.object_store.list(Some(wal_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
-            match self.path_builder.parse_table_id(&file.location) {
+            match self.path_resolver.parse_table_id(&file.location) {
                 Ok(Some(SsTableId::Wal(id))) => {
                     if id_range.contains(&id) {
                         wal_list.push(SstFileMetadata {
@@ -248,11 +248,11 @@ impl TableStore {
         id_range: R,
     ) -> Result<Vec<SstFileMetadata>, SlateDBError> {
         let mut sst_list: Vec<SstFileMetadata> = Vec::new();
-        let compacted_path = self.path_builder.compacted_path();
+        let compacted_path = self.path_resolver.compacted_path();
         let mut files_stream = self.object_store.list(Some(&compacted_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
-            match self.path_builder.parse_table_id(&file.location) {
+            match self.path_resolver.parse_table_id(&file.location) {
                 Ok(Some(SsTableId::Compacted(id))) => {
                     if id_range.contains(&id) {
                         sst_list.push(SstFileMetadata {
@@ -489,7 +489,7 @@ impl TableStore {
     }
 
     fn path(&self, id: &SsTableId) -> Path {
-        self.path_builder.table_path(id)
+        self.path_resolver.table_path(id)
     }
 }
 
