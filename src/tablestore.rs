@@ -18,7 +18,7 @@ use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
-use crate::paths::PathBuilder;
+use crate::paths::PathResolver;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
@@ -29,7 +29,7 @@ use crate::{blob::ReadOnlyBlob, block::Block, db_cache::DbCache};
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,
-    path_builder: PathBuilder,
+    path_builder: PathResolver,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
     transactional_wal_store: Arc<dyn TransactionalObjectStore>,
@@ -96,7 +96,7 @@ impl TableStore {
         Self {
             object_store: object_store.clone(),
             sst_format,
-            path_builder: PathBuilder::new(root_path),
+            path_builder: PathResolver::new(root_path),
             fp_registry,
             transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
                 Path::from("/"),

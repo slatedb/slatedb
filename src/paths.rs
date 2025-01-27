@@ -4,13 +4,13 @@ use crate::error::SlateDBError;
 use object_store::path::Path;
 use ulid::Ulid;
 
-pub(crate) struct PathBuilder {
+pub(crate) struct PathResolver {
     root_path: Path,
     wal_path: &'static str,
     compacted_path: &'static str,
 }
 
-impl PathBuilder {
+impl PathResolver {
     pub(crate) fn new<P: Into<Path>>(root_path: P) -> Self {
         Self {
             root_path: root_path.into(),
@@ -68,7 +68,7 @@ impl PathBuilder {
 #[cfg(test)]
 mod tests {
     use crate::db_state::SsTableId;
-    use crate::paths::PathBuilder;
+    use crate::paths::PathResolver;
     use object_store::path::Path;
     use proptest::arbitrary::any;
     use proptest::proptest;
@@ -81,7 +81,7 @@ mod tests {
         fn should_serialize_and_deserialize_wal_paths(
             wal_id in any::<u64>(),
         ) {
-            let path_builder = PathBuilder::new(Path::from(ROOT));
+            let path_builder = PathResolver::new(Path::from(ROOT));
             let table_id = SsTableId::Wal(wal_id);
             let path = path_builder.table_path(&table_id);
             let parsed_table_id = path_builder.parse_table_id(&path).unwrap();
@@ -92,7 +92,7 @@ mod tests {
         fn should_serialize_and_deserialize_compacted_paths(
             compacted_id in any::<u128>(),
         ) {
-            let path_builder = PathBuilder::new(Path::from(ROOT));
+            let path_builder = PathResolver::new(Path::from(ROOT));
             let table_id = SsTableId::Compacted(Ulid::from(compacted_id));
             let path = path_builder.table_path(&table_id);
             let parsed_table_id = path_builder.parse_table_id(&path).unwrap();
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn test_parse_id() {
-        let path_builder = PathBuilder::new(Path::from(ROOT));
+        let path_builder = PathResolver::new(Path::from(ROOT));
         let path = Path::from("/root/wal/00000000000000000003.sst");
         let id = path_builder.parse_table_id(&path).unwrap();
         assert_eq!(id, Some(SsTableId::Wal(3)));

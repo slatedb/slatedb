@@ -618,7 +618,7 @@ mod tests {
     use crate::config::GcExecutionMode::Once;
     use crate::error::SlateDBError;
     use crate::metrics::Counter;
-    use crate::paths::PathBuilder;
+    use crate::paths::PathResolver;
     use crate::types::RowEntry;
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
@@ -939,7 +939,7 @@ mod tests {
     #[tokio::test]
     async fn test_collect_garbage_wal_ssts() {
         let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
-        let path_builder = PathBuilder::new("/");
+        let path_builder = PathResolver::new("/");
 
         // write a wal sst
         let id1 = SsTableId::Wal(1);
@@ -993,7 +993,7 @@ mod tests {
     #[tokio::test]
     async fn test_do_not_remove_wals_referenced_by_active_checkpoints() {
         let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
-        let path_builder = PathBuilder::new("/");
+        let path_builder = PathResolver::new("/");
 
         let id1 = SsTableId::Wal(1);
         write_sst(table_store.clone(), &id1).await.unwrap();
@@ -1053,7 +1053,7 @@ mod tests {
     #[tokio::test]
     async fn test_collect_garbage_wal_ssts_and_keep_expired_last_compacted() {
         let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
-        let path_builder = PathBuilder::new("/");
+        let path_builder = PathResolver::new("/");
 
         // write a wal sst
         let id1 = SsTableId::Wal(1);
@@ -1139,7 +1139,7 @@ mod tests {
         let active_expired_sst_handle = create_sst(table_store.clone()).await;
         let inactive_expired_sst_handle = create_sst(table_store.clone()).await;
         let inactive_unexpired_sst_handle = create_sst(table_store.clone()).await;
-        let path_builder = PathBuilder::new("");
+        let path_builder = PathResolver::new("");
 
         // Set expiration for the old SSTs
         let now_minus_24h_expired_l0_sst = set_modified(
@@ -1252,7 +1252,7 @@ mod tests {
         let active_sst_handle = create_sst(table_store.clone()).await;
         let active_checkpoint_sst_handle = create_sst(table_store.clone()).await;
         let inactive_sst_handle = create_sst(table_store.clone()).await;
-        let path_builder = PathBuilder::new("");
+        let path_builder = PathResolver::new("");
 
         // Set expiration for all SSTs to make them eligible for deletion
         let all_tables = vec![
