@@ -1,6 +1,7 @@
 use bytes::Bytes;
 
 /// Represents a key-value pair known not to be a tombstone.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeyValue {
     pub key: Bytes,
@@ -90,7 +91,7 @@ impl RowEntry {
     }
 
     #[cfg(test)]
-    pub fn with_expire_ts(&self, expire_ts: i64) -> Self {
+    pub(crate) fn with_expire_ts(&self, expire_ts: i64) -> Self {
         Self {
             key: self.key.clone(),
             value: self.value.clone(),
