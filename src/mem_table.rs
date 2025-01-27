@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -92,6 +92,8 @@ pub(crate) struct KVTable {
     /// this corresponds to the timestamp of the most recent
     /// modifying operation on this KVTable (insertion or deletion)
     last_tick: AtomicI64,
+    /// the sequence number of the most recent operation on this KVTable
+    last_seq: AtomicU64,
 }
 
 pub(crate) struct WritableKVTable {
@@ -236,6 +238,7 @@ impl KVTable {
             size: AtomicUsize::new(0),
             durable: WatchableOnceCell::new(),
             last_tick: AtomicI64::new(i64::MIN),
+            last_seq: AtomicU64::new(0),
         }
     }
 
@@ -249,6 +252,10 @@ impl KVTable {
 
     pub(crate) fn last_tick(&self) -> i64 {
         self.last_tick.load(SeqCst)
+    }
+
+    pub(crate) fn last_seq(&self) -> u64 {
+        self.last_seq.load(SeqCst)
     }
 
     /// Get the value for a given key.
@@ -289,6 +296,8 @@ impl KVTable {
             self.last_tick
                 .fetch_max(create_ts, atomic::Ordering::SeqCst);
         }
+        // update the last seq number
+        self.last_seq.fetch_max(row.seq, Ordering::SeqCst);
 
         self.map.compare_insert(internal_key, row, |previous_row| {
             // Optimistically calculate the size of the previous value.
@@ -326,6 +335,7 @@ mod tests {
         table.put(RowEntry::new_value(b"abc555", b"value5", 3));
         table.put(RowEntry::new_value(b"abc444", b"value4", 4));
         table.put(RowEntry::new_value(b"abc222", b"value2", 5));
+        assert_eq!(table.table().last_seq(), 5);
 
         let mut iter = table.table().iter();
         assert_iterator(

@@ -395,8 +395,8 @@ impl DbState {
                 next_tick: memtable_tick,
             });
         }
-        // update the persisted manifest last_l0_seq as the latest seq
-        state.core.last_l0_seq = self.last_seq;
+        // update the persisted manifest last_l0_seq as the latest seq in the imm
+        state.core.last_l0_seq = cmp::max(state.core.last_l0_seq, imm_memtable.table().last_seq());
 
         self.update_state(state);
         Ok(())
