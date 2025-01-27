@@ -6,7 +6,7 @@ use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestManifestMissing, ManifestMissing,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
-use crate::manifest::{DbLink, Manifest, ManifestCodec};
+use crate::manifest::{Manifest, ManifestCodec, ParentDb};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
@@ -141,7 +141,7 @@ impl StoredManifest {
     /// for the rest of the clone state to be initialized
     pub(crate) async fn load_uninitialized_clone(
         clone_manifest_store: Arc<ManifestStore>,
-        parent_db: DbLink,
+        parent_db: ParentDb,
         parent_manifest: &Manifest,
     ) -> Result<Self, SlateDBError> {
         let manifest = Manifest::cloned(parent_db, parent_manifest);
@@ -252,6 +252,16 @@ impl StoredManifest {
     ) -> Result<Checkpoint, SlateDBError> {
         let checkpoint_id = Uuid::new_v4();
         self.write_checkpoint(checkpoint_id, options).await
+    }
+
+    pub(crate) async fn rewrite_parent_db(
+        &mut self,
+        parent_db: ParentDb,
+    ) -> Result<(), SlateDBError> {
+        let mut manifest = self.manifest.clone();
+        assert!(!manifest.core.initialized);
+        manifest.parent = Some(parent_db);
+        self.update_manifest(manifest).await
     }
 
     pub(crate) async fn update_db_state(&mut self, core: CoreDbState) -> Result<(), SlateDBError> {
@@ -507,6 +517,7 @@ mod tests {
     use crate::db_state::CoreDbState;
     use crate::error;
     use crate::error::SlateDBError;
+    use crate::manifest::{Manifest, ParentDb};
     use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -838,5 +849,37 @@ mod tests {
             ms.delete_manifest(checkpoint1.manifest_id).await,
             Err(SlateDBError::InvalidDeletion)
         ));
+    }
+
+    #[tokio::test]
+    async fn should_safely_rewrite_parent_db() {
+        let parent_path = "/parent/path";
+        let parent_manifest = Manifest::new(CoreDbState::new());
+        let parent_db = ParentDb {
+            path: parent_path.to_string(),
+            checkpoint_id: Uuid::new_v4(),
+        };
+
+        let clone_manifest_store = new_memory_manifest_store();
+        let mut sm = StoredManifest::load_uninitialized_clone(
+            Arc::clone(&clone_manifest_store),
+            parent_db,
+            &parent_manifest,
+        )
+        .await
+        .unwrap();
+
+        let rewrite_checkpoint_id = Uuid::new_v4();
+        let parent_db = ParentDb {
+            path: parent_path.to_string(),
+            checkpoint_id: rewrite_checkpoint_id,
+        };
+        sm.rewrite_parent_db(parent_db).await.unwrap();
+        assert_eq!(2, sm.id());
+        assert!(!sm.db_state().initialized);
+        assert_eq!(
+            Some(rewrite_checkpoint_id),
+            sm.manifest.parent.map(|p| p.checkpoint_id)
+        );
     }
 }

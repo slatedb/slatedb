@@ -114,16 +114,22 @@ impl Db {
         parent_path: &Path,
         parent_checkpoint_id: &Option<Uuid>,
     ) -> Result<StoredManifest, SlateDBError> {
-        if let Some(clone_manifest) = StoredManifest::try_load(clone_manifest_store.clone()).await?
-        {
-            Self::validate_existing_manifest(
-                &clone_manifest,
-                parent_path,
-                parent_manifest,
-                parent_checkpoint_id,
-            )?;
-            return Ok(clone_manifest);
-        }
+        let existing_clone_manifest =
+            match StoredManifest::try_load(Arc::clone(&clone_manifest_store)).await? {
+                // If the checkpoint is valid, just return the manifest as is.
+                // Otherwise, retry checkpoint initialization below.
+                Some(clone_manifest)
+                    if Self::check_valid_checkpoint(
+                        &clone_manifest,
+                        parent_path,
+                        parent_manifest,
+                        parent_checkpoint_id,
+                    )? =>
+                {
+                    return Ok(clone_manifest)
+                }
+                manifest => manifest,
+            };
 
         let source_checkpoint = if let Some(id) = parent_checkpoint_id {
             if let Some(checkpoint) = parent_manifest.db_state().find_checkpoint(id) {
@@ -145,7 +151,7 @@ impl Db {
         };
 
         let final_checkpoint_id = Uuid::new_v4();
-        let parent_db = manifest::DbLink {
+        let parent_db = manifest::ParentDb {
             path: parent_path.to_string(),
             checkpoint_id: final_checkpoint_id,
         };
@@ -158,12 +164,20 @@ impl Db {
                 .await?
         };
 
-        let clone_manifest = StoredManifest::load_uninitialized_clone(
-            Arc::clone(&clone_manifest_store),
-            parent_db,
-            &parent_checkpoint_manifest,
-        )
-        .await?;
+        let clone_manifest = match existing_clone_manifest {
+            Some(mut clone_manifest) => {
+                clone_manifest.rewrite_parent_db(parent_db).await?;
+                clone_manifest
+            }
+            None => {
+                StoredManifest::load_uninitialized_clone(
+                    Arc::clone(&clone_manifest_store),
+                    parent_db,
+                    &parent_checkpoint_manifest,
+                )
+                .await?
+            }
+        };
 
         parent_manifest
             .write_checkpoint(
@@ -178,14 +192,17 @@ impl Db {
         Ok(clone_manifest)
     }
 
-    fn validate_existing_manifest(
+    // For pre-existing manifests, we need to verify that the referenced checkpoint
+    // is valid and consistent with the arguments passed to `create_clone`. This
+    // function returns true if the checkpoint in the clone manifest is still valid
+    // and false if we should retry checkpoint creation. For other errors, such as
+    // an inconsistent `DbParent` path, return an error.
+    fn check_valid_checkpoint(
         clone_manifest: &StoredManifest,
         parent_path: &Path,
         parent_manifest: &StoredManifest,
         parent_checkpoint_id: &Option<Uuid>,
-    ) -> Result<(), SlateDBError> {
-        // The database is already initialized, so we just need to verify that
-        // the parent information is consistent with the arguments passed to clone.
+    ) -> Result<bool, SlateDBError> {
         let Some(parent_db) = &clone_manifest.manifest().parent else {
             return Err(SlateDBError::DatabaseAlreadyExists {
                 msg: "Database exists, but is not attached to a parent database".to_string(),
@@ -195,7 +212,7 @@ impl Db {
         if parent_db.path != parent_path.to_string() {
             return Err(SlateDBError::DatabaseAlreadyExists {
                 msg: format!(
-                    "Database exists, but is attached to a different parent with path {}",
+                    "Database exists, but is attached to a different parent with path '{}'",
                     parent_db.path
                 ),
             });
@@ -205,31 +222,48 @@ impl Db {
             .db_state()
             .find_checkpoint(&parent_db.checkpoint_id)
         else {
-            return Err(SlateDBError::DatabaseAlreadyExists {
-                msg: format!("Database exists, but the checkpoint with id {} is not present in the parent database at path {}",
-                             parent_db.checkpoint_id, parent_db.path),
-            });
+            // If the clone database has not yet been initialized, then we
+            // can reset the checkpoint. Otherwise, we fail the operation.
+            if !clone_manifest.db_state().initialized {
+                return Ok(false);
+            } else {
+                return Err(SlateDBError::DatabaseAlreadyExists {
+                    msg: format!(
+                        "Clone database already exists, but the checkpoint {} \
+                        referred to in the manifest no longer exists in the parent at \
+                        path '{}'",
+                        parent_db.checkpoint_id, parent_path,
+                    ),
+                });
+            }
         };
 
-        if let Some(clone_checkpoint_id) = parent_checkpoint_id {
+        if let Some(expected_checkpoint_id) = parent_checkpoint_id {
             let Some(expected_checkpoint) = parent_manifest
                 .db_state()
-                .find_checkpoint(clone_checkpoint_id)
+                .find_checkpoint(expected_checkpoint_id)
             else {
                 return Err(SlateDBError::DatabaseAlreadyExists {
-                    msg: "Database ".to_string(),
+                    msg: format!(
+                        "Clone database exists, but cannot confirm that it is derived \
+                        from the checkpoint {} since this checkpoint no longer exists",
+                        expected_checkpoint_id
+                    ),
                 });
             };
 
             if expected_checkpoint.manifest_id != actual_checkpoint.manifest_id {
                 return Err(SlateDBError::DatabaseAlreadyExists {
-                    msg: "Database is already initialized, but refers to a different checkpoint"
-                        .to_string(),
+                    msg: format!(
+                        "The clone database already exists, but refers to a different \
+                        checkpoint {} in the parent than the expected one ({})",
+                        actual_checkpoint.id, expected_checkpoint_id
+                    ),
                 });
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     async fn load_initialized_manifest(
@@ -271,12 +305,15 @@ impl Db {
 mod tests {
     use crate::config::{CheckpointOptions, CheckpointScope};
     use crate::db::Db;
+    use crate::manifest::ParentDb;
+    use crate::manifest_store::{ManifestStore, StoredManifest};
     use crate::proptest_util::{rng, sample};
     use crate::test_utils;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
     use std::sync::Arc;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_clone_latest_state() {
@@ -354,6 +391,62 @@ mod tests {
             .unwrap();
         let mut db_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ordered_scan_in_range(&checkpoint_table, .., &mut db_iter).await;
+        clone_db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_retry_clone_creation_if_checkpoint_is_invalid() {
+        let mut rng = rng::new_test_rng(None);
+        let table = sample::table(&mut rng, 5000, 10);
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent");
+        let clone_path = Path::from("/tmp/test_clone");
+
+        // Create a parent db with some state
+        let parent_db = Db::open(parent_path.clone(), Arc::clone(&object_store))
+            .await
+            .unwrap();
+        test_utils::seed_database(&parent_db, &table, false)
+            .await
+            .unwrap();
+        parent_db.flush().await.unwrap();
+        parent_db.close().await.unwrap();
+
+        // Create an uninitialized manifest with an invalid checkpoint id
+        let parent_manifest_store =
+            Arc::new(ManifestStore::new(&parent_path, Arc::clone(&object_store)));
+        let (_, parent_manifest) = parent_manifest_store.read_latest_manifest().await.unwrap();
+
+        let parent_db = ParentDb {
+            path: parent_path.to_string(),
+            checkpoint_id: Uuid::new_v4(),
+        };
+        let clone_manifest_store =
+            Arc::new(ManifestStore::new(&clone_path, Arc::clone(&object_store)));
+        StoredManifest::load_uninitialized_clone(
+            Arc::clone(&clone_manifest_store),
+            parent_db,
+            &parent_manifest,
+        )
+        .await
+        .unwrap();
+
+        // Now retry cloning and assert that the state is copied correctly.
+        Db::create_clone(
+            clone_path.clone(),
+            parent_path.clone(),
+            Arc::clone(&object_store),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let clone_db = Db::open(clone_path, Arc::clone(&object_store))
+            .await
+            .unwrap();
+        let mut db_iter = clone_db.scan(..).await.unwrap();
+        test_utils::assert_ordered_scan_in_range(&table, .., &mut db_iter).await;
         clone_db.close().await.unwrap();
     }
 }

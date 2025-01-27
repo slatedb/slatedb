@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
 pub(crate) struct Manifest {
-    pub(crate) parent: Option<DbLink>,
+    pub(crate) parent: Option<ParentDb>,
     pub(crate) core: CoreDbState,
     pub(crate) writer_epoch: u64,
     pub(crate) compactor_epoch: u64,
@@ -25,7 +25,7 @@ impl Manifest {
     /// Create an initial manifest for a new clone. The returned
     /// manifest will set `initialized=false` to allow for additional
     /// initialization (such as copying wals).
-    pub(crate) fn cloned(parent_db: DbLink, parent_manifest: &Manifest) -> Self {
+    pub(crate) fn cloned(parent_db: ParentDb, parent_manifest: &Manifest) -> Self {
         let clone_core = parent_manifest.core.init_clone_db();
         Self {
             parent: Some(parent_db),
@@ -37,7 +37,7 @@ impl Manifest {
 }
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
-pub(crate) struct DbLink {
+pub(crate) struct ParentDb {
     pub(crate) path: String,
     pub(crate) checkpoint_id: Uuid,
 }
@@ -60,7 +60,7 @@ mod tests {
 
     use crate::config::CheckpointOptions;
     use crate::db_state::CoreDbState;
-    use crate::manifest::DbLink;
+    use crate::manifest::ParentDb;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -82,7 +82,7 @@ mod tests {
             .await
             .unwrap();
 
-        let parent_link = DbLink {
+        let parent_link = ParentDb {
             path: parent_path.to_string(),
             checkpoint_id: checkpoint.id,
         };

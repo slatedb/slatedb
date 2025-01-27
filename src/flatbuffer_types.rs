@@ -27,7 +27,7 @@ use crate::flatbuffer_types::manifest_generated::{
     CompactedSstId, CompactedSstIdArgs, CompressionFormat, DbParent, DbParentArgs, SortedRun,
     SortedRunArgs, Uuid, UuidArgs,
 };
-use crate::manifest::{DbLink, Manifest, ManifestCodec};
+use crate::manifest::{Manifest, ManifestCodec, ParentDb};
 
 /// A wrapper around a `Bytes` buffer containing a FlatBuffer-encoded `SsTableIndex`.
 pub(crate) struct SsTableIndexOwned {
@@ -168,7 +168,7 @@ impl FlatBufferManifestCodec {
             last_l0_clock_tick: manifest.last_l0_clock_tick(),
             checkpoints,
         };
-        let parent = manifest.parent().map(|parent| DbLink {
+        let parent = manifest.parent().map(|parent| ParentDb {
             path: parent.path().to_string(),
             checkpoint_id: Self::decode_uuid(parent.checkpoint()),
         });
@@ -412,7 +412,7 @@ mod tests {
     use crate::checkpoint;
     use crate::db_state::CoreDbState;
     use crate::flatbuffer_types::FlatBufferManifestCodec;
-    use crate::manifest::{DbLink, Manifest, ManifestCodec};
+    use crate::manifest::{Manifest, ManifestCodec, ParentDb};
     use std::time::{Duration, SystemTime};
     use uuid::Uuid;
 
@@ -449,7 +449,7 @@ mod tests {
     fn test_should_encode_decode_manifest_parent() {
         // given:
         let mut manifest = Manifest::new(CoreDbState::new());
-        manifest.parent = Some(DbLink {
+        manifest.parent = Some(ParentDb {
             path: "/path/to/parent".to_string(),
             checkpoint_id: Uuid::new_v4(),
         });
