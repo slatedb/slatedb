@@ -224,18 +224,18 @@ impl Db {
         else {
             // If the clone database has not yet been initialized, then we
             // can reset the checkpoint. Otherwise, we fail the operation.
-            if !clone_manifest.db_state().initialized {
-                return Ok(false);
+            return if !clone_manifest.db_state().initialized {
+                Ok(false)
             } else {
-                return Err(SlateDBError::DatabaseAlreadyExists {
+                Err(SlateDBError::DatabaseAlreadyExists {
                     msg: format!(
-                        "Clone database already exists, but the checkpoint {} \
+                        "Clone database already exists and is initialized, but the checkpoint {} \
                         referred to in the manifest no longer exists in the parent at \
                         path '{}'",
                         parent_db.checkpoint_id, parent_path,
                     ),
-                });
-            }
+                })
+            };
         };
 
         if let Some(expected_checkpoint_id) = parent_checkpoint_id {
@@ -305,7 +305,9 @@ impl Db {
 mod tests {
     use crate::config::{CheckpointOptions, CheckpointScope};
     use crate::db::Db;
-    use crate::manifest::ParentDb;
+    use crate::db_state::CoreDbState;
+    use crate::error::SlateDBError;
+    use crate::manifest::{Manifest, ParentDb};
     use crate::manifest_store::{ManifestStore, StoredManifest};
     use crate::proptest_util::{rng, sample};
     use crate::test_utils;
@@ -448,5 +450,51 @@ mod tests {
         let mut db_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ordered_scan_in_range(&table, .., &mut db_iter).await;
         clone_db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_fail_retry_if_parent_path_is_different() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let original_parent_path = Path::from("/tmp/test_parent");
+        let updated_parent_path = Path::from("/tmp/test_parent/new");
+        let clone_path = Path::from("/tmp/test_clone");
+
+        // Setup an uninitialized manifest pointing to a different parent
+        let parent_manifest = Manifest::new(CoreDbState::new());
+        let parent_db = ParentDb {
+            path: original_parent_path.to_string(),
+            checkpoint_id: Uuid::new_v4(),
+        };
+        let clone_manifest_store =
+            Arc::new(ManifestStore::new(&clone_path, Arc::clone(&object_store)));
+        StoredManifest::load_uninitialized_clone(
+            Arc::clone(&clone_manifest_store),
+            parent_db,
+            &parent_manifest,
+        )
+        .await
+        .unwrap();
+
+        // Initialize the parent at the updated path
+        let parent_db = Db::open(updated_parent_path.clone(), Arc::clone(&object_store))
+            .await
+            .unwrap();
+        parent_db.close().await.unwrap();
+
+        // The clone should fail because of inconsistent parent information
+        let err = Db::create_clone(
+            clone_path.clone(),
+            updated_parent_path.clone(),
+            Arc::clone(&object_store),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        let slate_err = err.downcast_ref::<SlateDBError>().unwrap();
+        assert!(matches!(
+            *slate_err,
+            SlateDBError::DatabaseAlreadyExists { msg: _ }
+        ));
     }
 }
