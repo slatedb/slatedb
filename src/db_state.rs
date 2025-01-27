@@ -5,7 +5,6 @@ use crate::error::SlateDBError;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use bytes::Bytes;
-use object_store::path::Path;
 use serde::Serialize;
 use std::cmp;
 use std::collections::VecDeque;
@@ -95,16 +94,6 @@ impl SsTableId {
         match self {
             Wal(_) => panic!("found WAL id when unwrapping compacted ID"),
             Compacted(ulid) => *ulid,
-        }
-    }
-
-    pub(crate) fn path(&self, root_path: &Path) -> Path {
-        // TODO: Probably need to factor out the directory path
-        match self {
-            Wal(id) => Path::from(format!("{}/wal/{:020}.sst", root_path, id)),
-            Compacted(ulid) => {
-                Path::from(format!("{}/compacted/{}.sst", root_path, ulid.to_string()))
-            }
         }
     }
 }

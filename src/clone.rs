@@ -11,6 +11,7 @@ use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
+use crate::paths::PathResolver;
 
 impl Db {
     /// Clone a database. If no db already exists at the specified path, then this will create
@@ -286,11 +287,14 @@ impl Db {
         parent_path: &Path,
         clone_path: &Path,
     ) -> Result<(), SlateDBError> {
+        let parent_path_resolver = PathResolver::new(parent_path.clone());
+        let clone_path_resolver = PathResolver::new(clone_path.clone());
+
         let mut wal_id = parent_checkpoint_state.last_compacted_wal_sst_id + 1;
         while wal_id < parent_checkpoint_state.next_wal_sst_id {
             let id = SsTableId::Wal(wal_id);
-            let parent_path = id.path(parent_path);
-            let clone_path = id.path(clone_path);
+            let parent_path = parent_path_resolver.table_path(&id);
+            let clone_path = clone_path_resolver.table_path(&id);
             object_store
                 .as_ref()
                 .copy_if_not_exists(&parent_path, &clone_path)
@@ -303,6 +307,7 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::RangeFull;
     use crate::config::{CheckpointOptions, CheckpointScope};
     use crate::db::Db;
     use crate::db_state::CoreDbState;
@@ -342,7 +347,7 @@ mod tests {
         let clone_db = Db::open(clone_path, Arc::clone(&object_store))
             .await
             .unwrap();
-        let mut db_iter = clone_db.scan(..).await.unwrap();
+        let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
         test_utils::assert_ordered_scan_in_range(&table, .., &mut db_iter).await;
         clone_db.close().await.unwrap();
     }
@@ -391,7 +396,7 @@ mod tests {
         let clone_db = Db::open(clone_path, Arc::clone(&object_store))
             .await
             .unwrap();
-        let mut db_iter = clone_db.scan(..).await.unwrap();
+        let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
         test_utils::assert_ordered_scan_in_range(&checkpoint_table, .., &mut db_iter).await;
         clone_db.close().await.unwrap();
     }
@@ -447,7 +452,7 @@ mod tests {
         let clone_db = Db::open(clone_path, Arc::clone(&object_store))
             .await
             .unwrap();
-        let mut db_iter = clone_db.scan(..).await.unwrap();
+        let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
         test_utils::assert_ordered_scan_in_range(&table, .., &mut db_iter).await;
         clone_db.close().await.unwrap();
     }
