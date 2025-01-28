@@ -35,7 +35,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
-use crate::bytes_range::{BytesRange, BytesRefRange};
+use crate::bytes_range::BytesRefRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
@@ -197,10 +197,8 @@ impl DbInner {
             memtables.push_back(memtable.table());
         }
 
-        let mem_iter = VecDequeKeyValueIterator::materialize_range(
-            memtables,
-            range.clone(),
-        ).await?;
+        let mem_iter =
+            VecDequeKeyValueIterator::materialize_range(memtables, range.clone()).await?;
 
         let state = snapshot.state.as_ref().clone();
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
@@ -1017,19 +1015,17 @@ impl Db {
     ///     db.put(b"a", b"a_value").await?;
     ///     db.put(b"b", b"b_value").await?;
     ///
-    ///     let mut iter = db.scan("a".."b").await?;
+    ///     let mut iter = db.scan((b"a" as &[u8])..(b"b" as &[u8])).await?;
     ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
     /// ```
     pub async fn scan<'a, T>(&'a self, range: T) -> Result<DbIterator<'a>, SlateDBError>
-    where T: RangeBounds<&'a [u8]>,
+    where
+        T: RangeBounds<&'a [u8]>,
     {
-        let range = BytesRefRange {
-            start_bound: range.start_bound().cloned(),
-            end_bound: range.end_bound().cloned(),
-        };
+        let range = BytesRefRange::new(range);
         self.inner
             .scan_with_options(range, &ScanOptions::default())
             .await
@@ -1051,12 +1047,13 @@ impl Db {
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), SlateDBError> {
-    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     use std::ops::Range;
+    /// let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.put(b"a", b"a_value").await?;
     ///     db.put(b"b", b"b_value").await?;
     ///
-    ///     let mut iter = db.scan_with_options("a".."b", &ScanOptions {
+    ///     let mut iter = db.scan_with_options((b"a" as &[u8])..(b"b" as &[u8]), &ScanOptions {
     ///         read_level: ReadLevel::Uncommitted,
     ///         ..ScanOptions::default()
     ///     }).await?;
@@ -1070,15 +1067,11 @@ impl Db {
         range: T,
         options: &ScanOptions,
     ) -> Result<DbIterator<'a>, SlateDBError>
-    where T: RangeBounds<&'a [u8]>,
+    where
+        T: RangeBounds<&'a [u8]>,
     {
-        let range = BytesRefRange {
-            start_bound: range.start_bound().cloned(),
-            end_bound: range.end_bound().cloned()
-        };
-        self.inner
-            .scan_with_options(range, options)
-            .await
+        let range = BytesRefRange::new(range);
+        self.inner.scan_with_options(range, options).await
     }
 
     /// Write a value into the database with default `WriteOptions`.
@@ -1366,6 +1359,7 @@ mod tests {
     use crate::sst_iter::SstIterator;
     use crate::test_utils::{gen_attrs, TestClock};
 
+    use crate::bytes_range::BytesRange;
     use crate::{proptest_util, test_utils};
     use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
@@ -1566,7 +1560,7 @@ mod tests {
     async fn assert_empty_scan(db: &Db, range: BytesRange) {
         let mut iter = db
             .inner
-            .scan_with_options(range.as_byte_ref_range(), &ScanOptions::default())
+            .scan_with_options(range.as_ref(), &ScanOptions::default())
             .await
             .unwrap();
         assert_eq!(None, iter.next().await.unwrap());
@@ -1597,7 +1591,7 @@ mod tests {
     ) {
         let mut iter = db
             .inner
-            .scan_with_options(range.as_byte_ref_range(), scan_options)
+            .scan_with_options(range.as_ref(), scan_options)
             .await
             .unwrap();
         assert_ordered_scan_in_range(table, &range, &mut iter).await;
@@ -1734,7 +1728,7 @@ mod tests {
         ) {
             let mut iter = db
                 .inner
-                .scan_with_options(scan_range.as_byte_ref_range(), &ScanOptions::default())
+                .scan_with_options(scan_range.as_ref(), &ScanOptions::default())
                 .await
                 .unwrap();
 

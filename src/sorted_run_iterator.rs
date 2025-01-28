@@ -18,12 +18,8 @@ enum SortedRunView<'a> {
 impl<'a> SortedRunView<'a> {
     fn pop_sst(&mut self) -> Option<SstView<'a>> {
         match self {
-            SortedRunView::Owned(tables) => tables
-                .pop_front()
-                .map(|table| SstView::Owned(table)),
-            SortedRunView::Borrowed(tables) => tables
-                .pop_front()
-                .map(|table| SstView::Borrowed(table))
+            SortedRunView::Owned(tables) => tables.pop_front().map(SstView::Owned),
+            SortedRunView::Borrowed(tables) => tables.pop_front().map(SstView::Borrowed),
         }
     }
 
@@ -81,10 +77,10 @@ impl<'a> SortedRunIterator<'a> {
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
-        let bounds = (range.start_bound().cloned(), range.end_bound().cloned());
-        let tables = sorted_run.into_tables_covering_range(bounds);
+        let range = BytesRefRange::new(range);
+        let tables = sorted_run.into_tables_covering_range(range.clone());
         let view = SortedRunView::Owned(tables);
-        SortedRunIterator::new(view, BytesRefRange::new(range), table_store, sst_iter_options).await
+        SortedRunIterator::new(view, range, table_store, sst_iter_options).await
     }
 
     pub(crate) async fn new_borrowed<T: RangeBounds<&'a [u8]>>(
@@ -93,10 +89,10 @@ impl<'a> SortedRunIterator<'a> {
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
-        let bounds = (range.start_bound().cloned(), range.end_bound().cloned());
-        let tables = sorted_run.tables_covering_range(bounds);
+        let range = BytesRefRange::new(range);
+        let tables = sorted_run.tables_covering_range(range.clone());
         let view = SortedRunView::Borrowed(tables);
-        SortedRunIterator::new(view, BytesRefRange::new(range), table_store, sst_iter_options).await
+        SortedRunIterator::new(view, range, table_store, sst_iter_options).await
     }
 
     pub(crate) async fn for_key(
@@ -111,7 +107,11 @@ impl<'a> SortedRunIterator<'a> {
     async fn advance_table(&mut self) -> Result<(), SlateDBError> {
         self.current_iter = self
             .view
-            .build_next_iter(self.range.clone(), self.table_store.clone(), self.sst_iter_options)
+            .build_next_iter(
+                self.range.clone(),
+                self.table_store.clone(),
+                self.sst_iter_options,
+            )
             .await?;
         Ok(())
     }

@@ -134,7 +134,13 @@ impl<'a> SstIterator<'a> {
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
         let view = SstView::Owned(table);
-        Self::new(view, BytesRefRange::new(range), table_store.clone(), options).await
+        Self::new(
+            view,
+            BytesRefRange::new(range),
+            table_store.clone(),
+            options,
+        )
+        .await
     }
 
     pub(crate) async fn new_borrowed<T: RangeBounds<&'a [u8]>>(
@@ -144,7 +150,13 @@ impl<'a> SstIterator<'a> {
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
         let view = SstView::Borrowed(table);
-        Self::new(view, BytesRefRange::new(range), table_store.clone(), options).await
+        Self::new(
+            view,
+            BytesRefRange::new(range),
+            table_store.clone(),
+            options,
+        )
+        .await
     }
 
     pub(crate) async fn for_key(

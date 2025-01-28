@@ -1,13 +1,7 @@
+#[cfg(test)]
 use bytes::Bytes;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
-
-// TODO: This type is no longer used outside of tests, but still seems useful for tests?
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct BytesRange {
-    start_bound: Bound<Bytes>,
-    end_bound: Bound<Bytes>,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BytesRefRange<'a> {
@@ -42,13 +36,14 @@ impl<'a> RangeBounds<&'a [u8]> for BytesRefRange<'a> {
     }
 }
 
-impl<'a> BytesRefRange<'a> {
+impl BytesRefRange<'_> {
     pub(crate) fn contains(&self, key: &[u8]) -> bool {
         <(Bound<&[u8]>, Bound<&[u8]>) as RangeBounds<[u8]>>::contains::<[u8]>(
-            &(self.start_bound, self.end_bound), key)
+            &(self.start_bound, self.end_bound),
+            key,
+        )
     }
 }
-
 
 // Checks for the annoying case when we have ("prefix", "prefix\0").
 // When both bounds are excluded, the range is empty even though
@@ -61,6 +56,14 @@ pub(crate) fn is_prefix_increment(prefix: &[u8], b: &[u8]) -> bool {
     b[prefix.len()..] == [u8::MIN]
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BytesRange {
+    start_bound: Bound<Bytes>,
+    end_bound: Bound<Bytes>,
+}
+
+#[cfg(test)]
 impl RangeBounds<Bytes> for BytesRange {
     fn start_bound(&self) -> Bound<&Bytes> {
         self.start_bound.as_ref()
@@ -71,6 +74,7 @@ impl RangeBounds<Bytes> for BytesRange {
     }
 }
 
+#[cfg(test)]
 impl BytesRange {
     pub(crate) fn new(start_bound: Bound<Bytes>, end_bound: Bound<Bytes>) -> Self {
         Self {
@@ -83,18 +87,11 @@ impl BytesRange {
         Self::new(range.start_bound().cloned(), range.end_bound().cloned())
     }
 
-    pub(crate) fn as_byte_ref_range(&self) -> BytesRefRange {
+    pub(crate) fn as_ref(&self) -> BytesRefRange {
         BytesRefRange {
             start_bound: self.start_bound.as_ref().map(|b| b.as_ref()),
             end_bound: self.end_bound.as_ref().map(|b| b.as_ref()),
         }
-    }
-
-    pub(crate) fn as_ref(&self) -> (Bound<&[u8]>, Bound<&[u8]>) {
-        (
-            self.start_bound().map(|b| b.as_ref()),
-            self.end_bound().map(|b| b.as_ref()),
-        )
     }
 
     #[cfg(test)]
@@ -104,8 +101,11 @@ impl BytesRange {
 
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
-        let bounds = self.as_ref();
-        is_empty(bounds.0, bounds.1)
+        let BytesRefRange {
+            start_bound,
+            end_bound,
+        } = self.as_ref();
+        is_empty(start_bound, end_bound)
     }
 }
 
@@ -157,12 +157,9 @@ fn max_start_bound<'a>(a: Bound<&'a [u8]>, b: Bound<&'a [u8]>) -> Bound<&'a [u8]
     clamp_bound(a, b, |a, b| a > b)
 }
 
-pub(crate) fn has_nonempty_intersection(
-    r1: (Bound<&[u8]>, Bound<&[u8]>),
-    r2: (Bound<&[u8]>, Bound<&[u8]>),
-) -> bool {
-    let start_bound = max_start_bound(r1.0, r2.0);
-    let end_bound = min_end_bound(r1.1, r2.1);
+pub(crate) fn has_nonempty_intersection(r1: BytesRefRange<'_>, r2: BytesRefRange<'_>) -> bool {
+    let start_bound = max_start_bound(r1.start_bound, r2.start_bound);
+    let end_bound = min_end_bound(r1.end_bound, r2.end_bound);
     !is_empty(start_bound, end_bound)
 }
 

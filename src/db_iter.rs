@@ -87,7 +87,7 @@ impl<'a> DbIterator<'a> {
         let next_key = next_key.as_ref();
         if let Some(error) = self.invalidated_error.clone() {
             Err(SlateDBError::InvalidatedIterator(Box::new(error)))
-        } else if !self.range.contains(&next_key) {
+        } else if !self.range.contains(next_key) {
             Err(SlateDBError::InvalidArgument {
                 msg: format!(
                     "Cannot seek to a key '{:?}' which is outside the iterator range {:?}",
@@ -117,12 +117,11 @@ mod tests {
     use crate::mem_table::VecDequeKeyValueIterator;
     use bytes::Bytes;
     use std::collections::VecDeque;
-    use std::ops::Bound::Unbounded;
 
     #[tokio::test]
     async fn test_invalidated_iterator() {
         let mut iter = DbIterator::new(
-            BytesRefRange { start_bound: Unbounded, end_bound: Unbounded },
+            BytesRefRange::new(..),
             VecDequeKeyValueIterator::new(VecDeque::new()),
             VecDeque::new(),
             VecDeque::new(),
