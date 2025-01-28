@@ -3,7 +3,6 @@ use std::sync::Arc;
 use atomic::{Atomic, Ordering};
 use bytemuck::NoUninit;
 
-#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct Counter {
     pub(crate) value: Arc<Atomic<u64>>,
