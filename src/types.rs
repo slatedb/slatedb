@@ -118,6 +118,8 @@ impl RowEntry {
 }
 
 /// The metadata associated with a `KeyValueDeletable`
+/// TODO: can be removed
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RowAttributes {
     pub(crate) ts: Option<i64>,
