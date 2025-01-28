@@ -99,6 +99,7 @@ pub trait DbCache: Send + Sync {
 /// The key is a tuple of an SSTable ID and a block ID.
 /// The tuple is private to this module, so the implementation details
 /// of the cache are not exposed publicly.
+#[non_exhaustive]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CachedKey(SsTableId, u64);
 
@@ -108,6 +109,7 @@ impl From<(SsTableId, u64)> for CachedKey {
     }
 }
 
+#[non_exhaustive]
 #[derive(Clone)]
 enum CachedItem {
     Block(Arc<Block>),

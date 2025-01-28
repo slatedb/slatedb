@@ -5,7 +5,10 @@
 #![cfg_attr(test, allow(clippy::panic))]
 
 pub mod admin;
-pub mod batch;
+
+mod batch;
+pub use batch::WriteBatch;
+
 mod batch_write;
 mod blob;
 mod block;
@@ -14,19 +17,34 @@ mod block_iterator;
 mod bytes_generator;
 mod bytes_range;
 mod cached_object_store;
-pub mod checkpoint;
+
+mod checkpoint;
+pub use checkpoint::{Checkpoint, CheckpointCreateResult};
+
 #[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;
+
 mod compactor;
 mod compactor_executor;
 mod compactor_state;
+
 pub mod config;
-pub mod db;
+
+mod db;
+pub use db::Db;
+
 pub mod db_cache;
+
 mod db_common;
-pub mod db_iter;
+
+mod db_iter;
+pub use db_iter::DbIterator;
+
 mod db_state;
-pub mod error;
+
+mod error;
+pub use error::{DbOptionsError, SlateDBError};
+
 mod filter;
 mod flatbuffer_types;
 mod flush;
@@ -37,13 +55,19 @@ mod manifest_store;
 mod mem_table;
 mod mem_table_flush;
 mod merge_iterator;
-pub mod merge_operator;
+
+mod merge_operator;
+pub use merge_operator::{MergeOperator, MergeOperatorError};
+
 pub mod metrics;
+
 mod paths;
 #[cfg(test)]
 mod proptest_util;
 mod row_codec;
+
 pub mod size_tiered_compaction;
+
 mod sorted_run_iterator;
 mod sst;
 mod sst_iter;
@@ -51,8 +75,10 @@ mod tablestore;
 #[cfg(test)]
 mod test_utils;
 mod transactional_object_store;
+
 mod types;
 pub use types::KeyValue;
+
 mod utils;
 
 /// Re-export the bytes crate.

@@ -174,6 +174,7 @@ use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 /// write is considered durably committed if all future calls to read are guaranteed
 /// to serve the data written by the write, until some later durably committed write
 /// updates the same key.
+#[non_exhaustive]
 #[derive(Clone, Default)]
 pub enum ReadLevel {
     /// Client reads will only see data that's been committed durably to the DB.
@@ -272,6 +273,7 @@ impl PutOptions {
     }
 }
 
+#[non_exhaustive]
 #[derive(Clone, Default)]
 pub enum Ttl {
     #[default]
@@ -323,10 +325,17 @@ fn default_clock() -> Arc<dyn Clock + Send + Sync> {
 /// flush_interval or reaching l0_sst_size_bytes, respectively. If set to Durable, then the
 /// checkpoint includes only writes that were durable at the time of the call. This will be faster,
 /// but may not include data from recent writes.
+#[non_exhaustive]
 #[derive(Debug, Copy, Clone)]
 pub enum CheckpointScope {
-    All { force_flush: bool },
+    #[non_exhaustive] All { force_flush: bool },
     Durable,
+}
+
+impl CheckpointScope {
+    pub fn all_with_force_flush(force_flush: bool) -> Self {
+        Self::All{force_flush,}
+    }
 }
 
 /// Specify options to provide when creating a checkpoint.
@@ -664,6 +673,7 @@ fn default_block_cache() -> Option<Arc<dyn DbCache>> {
 }
 
 /// The compression algorithm to use for SSTables.
+#[non_exhaustive]
 #[derive(Clone, Copy, Deserialize, PartialEq, Debug, Serialize)]
 pub enum CompressionCodec {
     #[cfg(feature = "snappy")]
