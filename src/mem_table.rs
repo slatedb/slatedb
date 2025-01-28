@@ -8,7 +8,6 @@ use std::sync::atomic::Ordering::SeqCst;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::merge_iterator::MergeIterator;
@@ -51,10 +50,14 @@ impl VecDequeKeyValueIterator {
         Self { rows }
     }
 
-    pub(crate) async fn materialize_range(
+    pub(crate) async fn materialize_range<'a, T: RangeBounds<&'a [u8]>>(
         tables: VecDeque<Arc<KVTable>>,
-        range: BytesRange,
+        range: T,
     ) -> Result<Self, SlateDBError> {
+        let start_bound_bytes = range.start_bound().map(|b| Bytes::copy_from_slice(b));
+        let end_bound_bytes = range.end_bound().map(|b| Bytes::copy_from_slice(b));
+        let range = (start_bound_bytes, end_bound_bytes);
+
         let memtable_iters = tables.iter().map(|t| t.range(range.clone())).collect();
         let mut merge_iter = MergeIterator::new(memtable_iters).await?;
         let mut rows = VecDeque::new();

@@ -2,13 +2,53 @@ use bytes::Bytes;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 
-/// Concrete struct representing a range of Bytes. Gets around much of
-/// the cumbersome work associated with the generic trait RangeBounds<Bytes>
+// TODO: This type is no longer used outside of tests, but still seems useful for tests?
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BytesRange {
     start_bound: Bound<Bytes>,
     end_bound: Bound<Bytes>,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BytesRefRange<'a> {
+    pub(crate) start_bound: Bound<&'a [u8]>,
+    pub(crate) end_bound: Bound<&'a [u8]>,
+}
+
+impl<'a> BytesRefRange<'a> {
+    pub(crate) fn new<T: RangeBounds<&'a [u8]>>(range: T) -> Self {
+        Self {
+            start_bound: range.start_bound().cloned(),
+            end_bound: range.end_bound().cloned(),
+        }
+    }
+
+    pub(crate) fn key_exceeds(&self, key: &[u8]) -> bool {
+        match self.end_bound {
+            Included(end) => key > end,
+            Excluded(end) => key >= end,
+            Unbounded => false,
+        }
+    }
+}
+
+impl<'a> RangeBounds<&'a [u8]> for BytesRefRange<'a> {
+    fn start_bound(&self) -> Bound<&&'a [u8]> {
+        self.start_bound.as_ref()
+    }
+
+    fn end_bound(&self) -> Bound<&&'a [u8]> {
+        self.end_bound.as_ref()
+    }
+}
+
+impl<'a> BytesRefRange<'a> {
+    pub(crate) fn contains(&self, key: &[u8]) -> bool {
+        <(Bound<&[u8]>, Bound<&[u8]>) as RangeBounds<[u8]>>::contains::<[u8]>(
+            &(self.start_bound, self.end_bound), key)
+    }
+}
+
 
 // Checks for the annoying case when we have ("prefix", "prefix\0").
 // When both bounds are excluded, the range is empty even though
@@ -41,6 +81,13 @@ impl BytesRange {
 
     pub(crate) fn from<T: RangeBounds<Bytes>>(range: T) -> Self {
         Self::new(range.start_bound().cloned(), range.end_bound().cloned())
+    }
+
+    pub(crate) fn as_byte_ref_range(&self) -> BytesRefRange {
+        BytesRefRange {
+            start_bound: self.start_bound.as_ref().map(|b| b.as_ref()),
+            end_bound: self.end_bound.as_ref().map(|b| b.as_ref()),
+        }
     }
 
     pub(crate) fn as_ref(&self) -> (Bound<&[u8]>, Bound<&[u8]>) {

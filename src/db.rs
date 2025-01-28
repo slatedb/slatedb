@@ -35,7 +35,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
-use crate::bytes_range::BytesRange;
+use crate::bytes_range::{BytesRange, BytesRefRange};
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
@@ -177,10 +177,11 @@ impl DbInner {
 
     pub async fn scan_with_options<'a>(
         &'a self,
-        range: BytesRange,
+        range: BytesRefRange<'a>,
         options: &ScanOptions,
     ) -> Result<DbIterator<'a>, SlateDBError> {
         self.check_error()?;
+
         let snapshot = Arc::new(self.state.read().snapshot());
         let mut memtables = VecDeque::new();
 
@@ -196,8 +197,10 @@ impl DbInner {
             memtables.push_back(memtable.table());
         }
 
-        let mem_iter =
-            VecDequeKeyValueIterator::materialize_range(memtables, range.clone()).await?;
+        let mem_iter = VecDequeKeyValueIterator::materialize_range(
+            memtables,
+            range.clone(),
+        ).await?;
 
         let state = snapshot.state.as_ref().clone();
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
@@ -233,7 +236,7 @@ impl DbInner {
             sr_iters.push_back(iter);
         }
 
-        DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters).await
+        DbIterator::new(range, mem_iter, l0_iters, sr_iters).await
     }
 
     async fn fence_writers(
@@ -1020,20 +1023,15 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, SlateDBError>
-    where
-        K: AsRef<[u8]>,
-        T: RangeBounds<K>,
+    pub async fn scan<'a, T>(&'a self, range: T) -> Result<DbIterator<'a>, SlateDBError>
+    where T: RangeBounds<&'a [u8]>,
     {
-        let start = range
-            .start_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let end = range
-            .end_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let range = (start, end);
+        let range = BytesRefRange {
+            start_bound: range.start_bound().cloned(),
+            end_bound: range.end_bound().cloned(),
+        };
         self.inner
-            .scan_with_options(BytesRange::from(range), &ScanOptions::default())
+            .scan_with_options(range, &ScanOptions::default())
             .await
     }
 
@@ -1067,24 +1065,19 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan_with_options<K, T>(
-        &self,
+    pub async fn scan_with_options<'a, T>(
+        &'a self,
         range: T,
         options: &ScanOptions,
-    ) -> Result<DbIterator, SlateDBError>
-    where
-        K: AsRef<[u8]>,
-        T: RangeBounds<K>,
+    ) -> Result<DbIterator<'a>, SlateDBError>
+    where T: RangeBounds<&'a [u8]>,
     {
-        let start = range
-            .start_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let end = range
-            .end_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let range = (start, end);
+        let range = BytesRefRange {
+            start_bound: range.start_bound().cloned(),
+            end_bound: range.end_bound().cloned()
+        };
         self.inner
-            .scan_with_options(BytesRange::from(range), options)
+            .scan_with_options(range, options)
             .await
     }
 
@@ -1573,7 +1566,7 @@ mod tests {
     async fn assert_empty_scan(db: &Db, range: BytesRange) {
         let mut iter = db
             .inner
-            .scan_with_options(range.clone(), &ScanOptions::default())
+            .scan_with_options(range.as_byte_ref_range(), &ScanOptions::default())
             .await
             .unwrap();
         assert_eq!(None, iter.next().await.unwrap());
@@ -1604,7 +1597,7 @@ mod tests {
     ) {
         let mut iter = db
             .inner
-            .scan_with_options(range.clone(), scan_options)
+            .scan_with_options(range.as_byte_ref_range(), scan_options)
             .await
             .unwrap();
         assert_ordered_scan_in_range(table, &range, &mut iter).await;
@@ -1674,7 +1667,7 @@ mod tests {
                     runtime.block_on(assert_out_of_bound_seek_returns_invalid_argument(
                         &db,
                         &mut rng,
-                        arbitrary_key,
+                        &arbitrary_key,
                     ));
                     Ok(())
                 },
@@ -1684,14 +1677,14 @@ mod tests {
         async fn assert_out_of_bound_seek_returns_invalid_argument(
             db: &Db,
             rng: &mut TestRng,
-            arbitrary_key: Bytes,
+            arbitrary_key: &[u8],
         ) {
             let mut iter = db
-                .scan_with_options(..arbitrary_key.clone(), &ScanOptions::default())
+                .scan_with_options(..arbitrary_key, &ScanOptions::default())
                 .await
                 .unwrap();
 
-            let lower_bounded_range = BytesRange::from(arbitrary_key.clone()..);
+            let lower_bounded_range = BytesRange::from(Bytes::copy_from_slice(arbitrary_key)..);
             let value = sample::bytes_in_range(rng, &lower_bounded_range);
             assert!(matches!(
                 iter.seek(value).await,
@@ -1699,11 +1692,11 @@ mod tests {
             ));
 
             let mut iter = db
-                .scan_with_options(arbitrary_key.clone().., &ScanOptions::default())
+                .scan_with_options(arbitrary_key.., &ScanOptions::default())
                 .await
                 .unwrap();
 
-            let upper_bounded_range = BytesRange::from(..arbitrary_key.clone());
+            let upper_bounded_range = BytesRange::from(..Bytes::copy_from_slice(arbitrary_key));
             let value = sample::bytes_in_range(rng, &upper_bounded_range);
             assert!(matches!(
                 iter.seek(value).await,
@@ -1741,7 +1734,7 @@ mod tests {
         ) {
             let mut iter = db
                 .inner
-                .scan_with_options(scan_range.clone(), &ScanOptions::default())
+                .scan_with_options(scan_range.as_byte_ref_range(), &ScanOptions::default())
                 .await
                 .unwrap();
 

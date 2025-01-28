@@ -1,4 +1,4 @@
-use crate::bytes_range::BytesRange;
+use crate::bytes_range::BytesRefRange;
 use crate::error::SlateDBError;
 use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::mem_table::VecDequeKeyValueIterator;
@@ -9,7 +9,6 @@ use crate::types::KeyValue;
 
 use bytes::Bytes;
 use std::collections::VecDeque;
-use std::ops::RangeBounds;
 
 type ScanIterator<'a> = TwoMergeIterator<
     VecDequeKeyValueIterator,
@@ -17,7 +16,7 @@ type ScanIterator<'a> = TwoMergeIterator<
 >;
 
 pub struct DbIterator<'a> {
-    range: BytesRange,
+    range: BytesRefRange<'a>,
     iter: ScanIterator<'a>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
@@ -25,7 +24,7 @@ pub struct DbIterator<'a> {
 
 impl<'a> DbIterator<'a> {
     pub(crate) async fn new(
-        range: BytesRange,
+        range: BytesRefRange<'a>,
         mem_iter: VecDequeKeyValueIterator,
         l0_iters: VecDeque<SstIterator<'a>>,
         sr_iters: VecDeque<SortedRunIterator<'a>>,
@@ -112,17 +111,18 @@ impl<'a> DbIterator<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::bytes_range::BytesRange;
+    use crate::bytes_range::BytesRefRange;
     use crate::db_iter::DbIterator;
     use crate::error::SlateDBError;
     use crate::mem_table::VecDequeKeyValueIterator;
     use bytes::Bytes;
     use std::collections::VecDeque;
+    use std::ops::Bound::Unbounded;
 
     #[tokio::test]
     async fn test_invalidated_iterator() {
         let mut iter = DbIterator::new(
-            BytesRange::from(..),
+            BytesRefRange { start_bound: Unbounded, end_bound: Unbounded },
             VecDequeKeyValueIterator::new(VecDeque::new()),
             VecDeque::new(),
             VecDeque::new(),
