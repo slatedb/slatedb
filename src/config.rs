@@ -328,13 +328,16 @@ fn default_clock() -> Arc<dyn Clock + Send + Sync> {
 #[non_exhaustive]
 #[derive(Debug, Copy, Clone)]
 pub enum CheckpointScope {
-    #[non_exhaustive] All { force_flush: bool },
+    #[non_exhaustive]
+    All {
+        force_flush: bool,
+    },
     Durable,
 }
 
 impl CheckpointScope {
     pub fn all_with_force_flush(force_flush: bool) -> Self {
-        Self::All{force_flush,}
+        Self::All { force_flush }
     }
 }
 
