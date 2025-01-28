@@ -618,6 +618,7 @@ mod tests {
     use crate::config::GcExecutionMode::Once;
     use crate::error::SlateDBError;
     use crate::metrics::Counter;
+    use crate::paths::PathResolver;
     use crate::types::RowEntry;
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
@@ -938,6 +939,7 @@ mod tests {
     #[tokio::test]
     async fn test_collect_garbage_wal_ssts() {
         let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+        let path_resolver = PathResolver::new("/");
 
         // write a wal sst
         let id1 = SsTableId::Wal(1);
@@ -949,7 +951,7 @@ mod tests {
         // Set the first WAL SST file to be a day old
         let now_minus_24h = set_modified(
             local_object_store.clone(),
-            &Path::from(format!("wal/{:020}.{}", 1, "sst")),
+            &path_resolver.table_path(&SsTableId::Wal(1)),
             86400,
         );
 
@@ -991,6 +993,7 @@ mod tests {
     #[tokio::test]
     async fn test_do_not_remove_wals_referenced_by_active_checkpoints() {
         let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+        let path_resolver = PathResolver::new("/");
 
         let id1 = SsTableId::Wal(1);
         write_sst(table_store.clone(), &id1).await.unwrap();
@@ -1026,7 +1029,7 @@ mod tests {
         for i in 1..=3 {
             set_modified(
                 local_object_store.clone(),
-                &Path::from(format!("wal/{:020}.{}", i, "sst")),
+                &path_resolver.table_path(&SsTableId::Wal(i)),
                 86400,
             );
         }
@@ -1050,6 +1053,7 @@ mod tests {
     #[tokio::test]
     async fn test_collect_garbage_wal_ssts_and_keep_expired_last_compacted() {
         let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+        let path_resolver = PathResolver::new("/");
 
         // write a wal sst
         let id1 = SsTableId::Wal(1);
@@ -1068,12 +1072,12 @@ mod tests {
         // Set the both WAL SST file to be a day old
         let now_minus_24h_1 = set_modified(
             local_object_store.clone(),
-            &Path::from(format!("wal/{:020}.{}", 1, "sst")),
+            &path_resolver.table_path(&SsTableId::Wal(1)),
             86400,
         );
         let now_minus_24h_2 = set_modified(
             local_object_store.clone(),
-            &Path::from(format!("wal/{:020}.{}", 2, "sst")),
+            &path_resolver.table_path(&SsTableId::Wal(2)),
             86400,
         );
 
@@ -1135,42 +1139,27 @@ mod tests {
         let active_expired_sst_handle = create_sst(table_store.clone()).await;
         let inactive_expired_sst_handle = create_sst(table_store.clone()).await;
         let inactive_unexpired_sst_handle = create_sst(table_store.clone()).await;
+        let path_resolver = PathResolver::new("");
 
         // Set expiration for the old SSTs
         let now_minus_24h_expired_l0_sst = set_modified(
             local_object_store.clone(),
-            &Path::from(format!(
-                "compacted/{:020}.{}",
-                active_expired_l0_sst_handle.id.unwrap_compacted_id(),
-                "sst"
-            )),
+            &path_resolver.table_path(&active_expired_l0_sst_handle.id),
             86400,
         );
         let now_minus_24h_inactive_expired_l0_sst = set_modified(
             local_object_store.clone(),
-            &Path::from(format!(
-                "compacted/{:020}.{}",
-                inactive_expired_l0_sst_handle.id.unwrap_compacted_id(),
-                "sst"
-            )),
+            &path_resolver.table_path(&inactive_expired_l0_sst_handle.id),
             86400,
         );
         let now_minus_24h_active_expired_sst = set_modified(
             local_object_store.clone(),
-            &Path::from(format!(
-                "compacted/{:020}.{}",
-                active_expired_sst_handle.id.unwrap_compacted_id(),
-                "sst"
-            )),
+            &path_resolver.table_path(&active_expired_sst_handle.id),
             86400,
         );
         let now_minus_24h_inactive_expired_sst_id = set_modified(
             local_object_store.clone(),
-            &Path::from(format!(
-                "compacted/{:020}.{}",
-                inactive_expired_sst_handle.id.unwrap_compacted_id(),
-                "sst"
-            )),
+            &path_resolver.table_path(&inactive_expired_sst_handle.id),
             86400,
         );
 
@@ -1263,6 +1252,7 @@ mod tests {
         let active_sst_handle = create_sst(table_store.clone()).await;
         let active_checkpoint_sst_handle = create_sst(table_store.clone()).await;
         let inactive_sst_handle = create_sst(table_store.clone()).await;
+        let path_resolver = PathResolver::new("");
 
         // Set expiration for all SSTs to make them eligible for deletion
         let all_tables = vec![
@@ -1276,11 +1266,7 @@ mod tests {
         for table in &all_tables {
             set_modified(
                 local_object_store.clone(),
-                &Path::from(format!(
-                    "compacted/{:020}.{}",
-                    table.id.unwrap_compacted_id(),
-                    "sst"
-                )),
+                &path_resolver.table_path(&table.id),
                 86400,
             );
         }

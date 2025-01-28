@@ -18,6 +18,7 @@ use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
+use crate::paths::PathResolver;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
@@ -28,9 +29,7 @@ use crate::{blob::ReadOnlyBlob, block::Block, db_cache::DbCache};
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,
-    root_path: Path,
-    wal_path: &'static str,
-    compacted_path: &'static str,
+    path_resolver: PathResolver,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
     transactional_wal_store: Arc<dyn TransactionalObjectStore>,
@@ -97,9 +96,7 @@ impl TableStore {
         Self {
             object_store: object_store.clone(),
             sst_format,
-            root_path: root_path.into(),
-            wal_path: "wal",
-            compacted_path: "compacted",
+            path_resolver: PathResolver::new(root_path),
             fp_registry,
             transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
                 Path::from("/"),
@@ -120,11 +117,11 @@ impl TableStore {
         id_range: R,
     ) -> Result<Vec<SstFileMetadata>, SlateDBError> {
         let mut wal_list: Vec<SstFileMetadata> = Vec::new();
-        let wal_path = &Path::from(format!("{}/{}/", &self.root_path, self.wal_path));
+        let wal_path = &self.path_resolver.wal_path();
         let mut files_stream = self.object_store.list(Some(wal_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
-            match Self::parse_id(&self.root_path, &file.location) {
+            match self.path_resolver.parse_table_id(&file.location) {
                 Ok(Some(SsTableId::Wal(id))) => {
                     if id_range.contains(&id) {
                         wal_list.push(SstFileMetadata {
@@ -251,11 +248,11 @@ impl TableStore {
         id_range: R,
     ) -> Result<Vec<SstFileMetadata>, SlateDBError> {
         let mut sst_list: Vec<SstFileMetadata> = Vec::new();
-        let sst_path = &Path::from(format!("{}/{}/", &self.root_path, self.compacted_path));
-        let mut files_stream = self.object_store.list(Some(sst_path));
+        let compacted_path = self.path_resolver.compacted_path();
+        let mut files_stream = self.object_store.list(Some(&compacted_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
-            match Self::parse_id(&self.root_path, &file.location) {
+            match self.path_resolver.parse_table_id(&file.location) {
                 Ok(Some(SsTableId::Compacted(id))) => {
                     if id_range.contains(&id) {
                         sst_list.push(SstFileMetadata {
@@ -492,41 +489,7 @@ impl TableStore {
     }
 
     fn path(&self, id: &SsTableId) -> Path {
-        match id {
-            SsTableId::Wal(id) => Path::from(format!(
-                "{}/{}/{:020}.sst",
-                &self.root_path, self.wal_path, id
-            )),
-            SsTableId::Compacted(ulid) => Path::from(format!(
-                "{}/{}/{}.sst",
-                &self.root_path,
-                self.compacted_path,
-                ulid.to_string()
-            )),
-        }
-    }
-
-    /// Parses the SsTableId from a given path
-    fn parse_id(root_path: &Path, path: &Path) -> Result<Option<SsTableId>, SlateDBError> {
-        if let Some(mut suffix_iter) = path.prefix_match(root_path) {
-            match suffix_iter.next() {
-                Some(a) if a.as_ref() == "wal" => suffix_iter
-                    .next()
-                    .and_then(|s| s.as_ref().split('.').next().map(|s| s.parse::<u64>()))
-                    .transpose()
-                    .map(|r| r.map(SsTableId::Wal))
-                    .map_err(|_| SlateDBError::InvalidDBState),
-                Some(a) if a.as_ref() == "compacted" => suffix_iter
-                    .next()
-                    .and_then(|s| s.as_ref().split('.').next().map(Ulid::from_string))
-                    .transpose()
-                    .map(|r| r.map(SsTableId::Compacted))
-                    .map_err(|_| SlateDBError::InvalidDBState),
-                _ => Ok(None),
-            }
-        } else {
-            Ok(None)
-        }
+        self.path_resolver.table_path(id)
     }
 }
 
@@ -602,27 +565,6 @@ mod tests {
     };
 
     const ROOT: &str = "/root";
-
-    #[test]
-    fn test_parse_id() {
-        let root = Path::from(ROOT);
-        let path = Path::from("/root/wal/00000000000000000003.sst");
-        let id = TableStore::parse_id(&root, &path).unwrap();
-        assert_eq!(id, Some(SsTableId::Wal(3)));
-
-        let path = Path::from("/root/compacted/01J79C21YKR31J2BS1EFXJZ7MR.sst");
-        let id = TableStore::parse_id(&root, &path).unwrap();
-        assert_eq!(
-            id,
-            Some(SsTableId::Compacted(
-                Ulid::from_string("01J79C21YKR31J2BS1EFXJZ7MR").unwrap()
-            ))
-        );
-
-        let path = Path::from("/root/invalid/00000000000000000001.sst");
-        let id = TableStore::parse_id(&root, &path).unwrap();
-        assert_eq!(id, None);
-    }
 
     #[tokio::test]
     async fn test_sst_writer_should_write_sst() {
