@@ -182,22 +182,6 @@ pub struct CheckpointCreateResult {
 }
 
 impl Db {
-    /// Clone a Db from a checkpoint. If no db already exists at the specified path, then this will create
-    /// a new db under the path that is a clone of the db at parent_path. A clone is a shallow copy of the
-    /// parent database - it starts with a manifest that references the same SSTs, but doesn't actually copy
-    /// those SSTs, except for the WAL. New writes will be written to the newly created db and will not be
-    /// reflected in the parent database. The clone can optionally be created from an existing checkpoint. If
-    /// checkpoint is None, then the manifest referenced by parent_checkpoint is used as the base for
-    /// the clone db's manifest. Otherwise, this method creates a new checkpoint for the current version of
-    /// the parent db.
-    pub async fn create_clone(
-        &self,
-        clone_path: Path,
-        checkpoint: Option<Checkpoint>,
-    ) -> Result<(), SlateDBError> {
-        …
-    }
-
     /// Creates a checkpoint of an opened db using the provided options. Returns the ID of the created
     /// checkpoint and the id of the referenced manifest.
     pub async fn create_checkpoint(
@@ -256,12 +240,12 @@ mod admin {
     /// parent_checkpoint is None, then the manifest referenced by parent_checkpoint is used as the base for
     /// the clone db's manifest. Otherwise, this method creates a new checkpoint for the current version of
     /// the parent db.
-    pub async fn create_clone(
-        clone_path: Path,
+    pub async fn create_clone<P: Into<Path>>(
+        clone_path: P,
+        parent_path: P,
         object_store: Arc<dyn ObjectStore>,
-        parent_path: Path,
         parent_checkpoint: Option<Uuid>,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<(), Box<dyn Error>> {
         …
     }
 }
