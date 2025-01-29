@@ -251,8 +251,22 @@ impl StoredManifest {
         &mut self,
         parent_db: ParentDb,
     ) -> Result<(), SlateDBError> {
+        // Do not allow the parent to be rewritten if the manifest finished initialization.
+        if self.manifest.core.initialized {
+            return Err(InvalidDBState);
+        }
+
+        // Also do not allow the parent path to be changed.
+        let Some(current_parent) = self.manifest.parent.as_ref()
+        else {
+            return Err(InvalidDBState);
+        };
+
+        if current_parent.path != parent_db.path {
+            return Err(InvalidDBState);
+        }
+
         let mut manifest = self.manifest.clone();
-        assert!(!manifest.core.initialized);
         manifest.parent = Some(parent_db);
         self.update_manifest(manifest).await
     }
@@ -517,6 +531,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
     use uuid::Uuid;
+    use crate::error::SlateDBError::InvalidDBState;
 
     const ROOT: &str = "/root/path";
 
@@ -847,20 +862,7 @@ mod tests {
     #[tokio::test]
     async fn should_safely_rewrite_parent_db() {
         let parent_path = "/parent/path";
-        let parent_manifest = Manifest::initial(CoreDbState::new());
-        let parent_db = ParentDb {
-            path: parent_path.to_string(),
-            checkpoint_id: Uuid::new_v4(),
-        };
-
-        let clone_manifest_store = new_memory_manifest_store();
-        let mut sm = StoredManifest::create_uninitialized_clone(
-            Arc::clone(&clone_manifest_store),
-            parent_db,
-            &parent_manifest,
-        )
-        .await
-        .unwrap();
+        let mut sm = create_uninitialized_clone(parent_path).await;
 
         let rewrite_checkpoint_id = Uuid::new_v4();
         let parent_db = ParentDb {
@@ -874,5 +876,72 @@ mod tests {
             Some(rewrite_checkpoint_id),
             sm.manifest.parent.map(|p| p.checkpoint_id)
         );
+    }
+
+    #[tokio::test]
+    async fn should_not_rewrite_parent_for_initialized_clone() {
+        let parent_path = "/parent/path";
+        let mut sm = create_uninitialized_clone(parent_path).await;
+
+        let mut initialized_core = sm.db_state().clone();
+        initialized_core.initialized = true;
+        sm.update_db_state(initialized_core).await.unwrap();
+
+        let parent_db = ParentDb {
+            path: parent_path.to_string(),
+            checkpoint_id: Uuid::new_v4(),
+        };
+        assert!(matches!(sm.rewrite_parent_db(parent_db).await.unwrap_err(), InvalidDBState));
+    }
+
+    #[tokio::test]
+    async fn should_not_rewrite_parent_db_with_different_path() {
+        let initial_parent_path = "/initial/parent/path";
+        let mut sm = create_uninitialized_clone(initial_parent_path).await;
+
+        let mut initialized_core = sm.db_state().clone();
+        initialized_core.initialized = true;
+        sm.update_db_state(initialized_core).await.unwrap();
+
+        let updated_parent_path = "/updated/parent/path";
+        let parent_db = ParentDb {
+            path: updated_parent_path.to_string(),
+            checkpoint_id: Uuid::new_v4(),
+        };
+        assert!(matches!(sm.rewrite_parent_db(parent_db).await.unwrap_err(), InvalidDBState));
+    }
+
+    #[tokio::test]
+    async fn should_not_rewrite_parent_db_for_noncloned_db() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let parent_db = ParentDb {
+            path: "/parent/path".to_string(),
+            checkpoint_id: Uuid::new_v4(),
+        };
+        assert!(matches!(sm.rewrite_parent_db(parent_db).await.unwrap_err(), InvalidDBState));
+    }
+
+    async fn create_uninitialized_clone(
+        parent_path: &str,
+    ) -> StoredManifest {
+        let parent_manifest = Manifest::initial(CoreDbState::new());
+        let parent_db = ParentDb {
+            path: parent_path.to_string(),
+            checkpoint_id: Uuid::new_v4(),
+        };
+
+        let clone_manifest_store = new_memory_manifest_store();
+        StoredManifest::create_uninitialized_clone(
+            Arc::clone(&clone_manifest_store),
+            parent_db,
+            &parent_manifest,
+        )
+            .await
+            .unwrap()
     }
 }
