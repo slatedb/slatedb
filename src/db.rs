@@ -826,7 +826,7 @@ impl Db {
     ) -> Result<FenceableManifest, SlateDBError> {
         let stored_manifest = match latest_stored_manifest {
             Some(manifest) => manifest,
-            None => StoredManifest::init_new_db(manifest_store.clone(), CoreDbState::new()).await?,
+            None => StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new()).await?,
         };
         FenceableManifest::init_writer(stored_manifest).await
     }

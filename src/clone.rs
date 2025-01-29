@@ -174,7 +174,7 @@ impl Db {
                 clone_manifest
             }
             None => {
-                StoredManifest::load_uninitialized_clone(
+                StoredManifest::create_uninitialized_clone(
                     Arc::clone(&clone_manifest_store),
                     parent_db,
                     &parent_checkpoint_manifest,
@@ -434,7 +434,7 @@ mod tests {
         };
         let clone_manifest_store =
             Arc::new(ManifestStore::new(&clone_path, Arc::clone(&object_store)));
-        StoredManifest::load_uninitialized_clone(
+        StoredManifest::create_uninitialized_clone(
             Arc::clone(&clone_manifest_store),
             parent_db,
             &parent_manifest,
@@ -468,14 +468,14 @@ mod tests {
         let clone_path = Path::from("/tmp/test_clone");
 
         // Setup an uninitialized manifest pointing to a different parent
-        let parent_manifest = Manifest::new(CoreDbState::new());
+        let parent_manifest = Manifest::initial(CoreDbState::new());
         let parent_db = ParentDb {
             path: original_parent_path.to_string(),
             checkpoint_id: Uuid::new_v4(),
         };
         let clone_manifest_store =
             Arc::new(ManifestStore::new(&clone_path, Arc::clone(&object_store)));
-        StoredManifest::load_uninitialized_clone(
+        StoredManifest::create_uninitialized_clone(
             Arc::clone(&clone_manifest_store),
             parent_db,
             &parent_manifest,

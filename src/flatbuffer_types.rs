@@ -434,7 +434,7 @@ mod tests {
                 create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
             },
         ];
-        let manifest = Manifest::new(core);
+        let manifest = Manifest::initial(core);
         let codec = FlatBufferManifestCodec {};
 
         // when:
@@ -448,7 +448,7 @@ mod tests {
     #[test]
     fn test_should_encode_decode_manifest_parent() {
         // given:
-        let mut manifest = Manifest::new(CoreDbState::new());
+        let mut manifest = Manifest::initial(CoreDbState::new());
         manifest.parent = Some(ParentDb {
             path: "/path/to/parent".to_string(),
             checkpoint_id: Uuid::new_v4(),

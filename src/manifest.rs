@@ -13,7 +13,7 @@ pub(crate) struct Manifest {
 }
 
 impl Manifest {
-    pub(crate) fn new(core: CoreDbState) -> Self {
+    pub(crate) fn initial(core: CoreDbState) -> Self {
         Self {
             parent: None,
             core,
@@ -30,7 +30,7 @@ impl Manifest {
         Self {
             parent: Some(parent_db),
             core: clone_core,
-            writer_epoch: parent_manifest.writer_epoch + 1,
+            writer_epoch: parent_manifest.writer_epoch,
             compactor_epoch: parent_manifest.compactor_epoch,
         }
     }
@@ -74,7 +74,7 @@ mod tests {
         let parent_manifest_store =
             Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
         let mut parent_manifest =
-            StoredManifest::init_new_db(Arc::clone(&parent_manifest_store), CoreDbState::new())
+            StoredManifest::create_new_db(Arc::clone(&parent_manifest_store), CoreDbState::new())
                 .await
                 .unwrap();
         let checkpoint = parent_manifest
@@ -88,7 +88,7 @@ mod tests {
         };
         let clone_path = Path::from("/tmp/test_clone");
         let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
-        let clone_stored_manifest = StoredManifest::load_uninitialized_clone(
+        let clone_stored_manifest = StoredManifest::create_uninitialized_clone(
             Arc::clone(&clone_manifest_store),
             parent_link.clone(),
             parent_manifest.manifest(),
@@ -100,7 +100,7 @@ mod tests {
         assert_eq!(Some(parent_link), clone_manifest.parent);
         assert!(!clone_manifest.core.initialized);
         assert_eq!(
-            parent_manifest.manifest().writer_epoch + 1,
+            parent_manifest.manifest().writer_epoch,
             clone_manifest.writer_epoch
         );
         assert_eq!(
@@ -116,7 +116,7 @@ mod tests {
         let path = Path::from("/tmp/test_db");
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let mut manifest =
-            StoredManifest::init_new_db(Arc::clone(&manifest_store), CoreDbState::new())
+            StoredManifest::create_new_db(Arc::clone(&manifest_store), CoreDbState::new())
                 .await
                 .unwrap();
 
