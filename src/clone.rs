@@ -129,7 +129,9 @@ async fn create_uninitialized_clone_manifest(
 ) -> Result<StoredManifest, SlateDBError> {
     match existing_clone_manifest {
         Some(mut clone_manifest) => {
-            clone_manifest.rewrite_parent_db(parent_db).await?;
+            clone_manifest
+                .rewrite_parent_db(parent_db, parent_manifest)
+                .await?;
             Ok(clone_manifest)
         }
         None => {

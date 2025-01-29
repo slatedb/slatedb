@@ -251,6 +251,7 @@ impl StoredManifest {
     pub(crate) async fn rewrite_parent_db(
         &mut self,
         parent_db: ParentDb,
+        parent_manifest: &Manifest,
     ) -> Result<(), SlateDBError> {
         // Do not allow the parent to be rewritten if the manifest finished initialization.
         if self.manifest.core.initialized {
@@ -266,8 +267,7 @@ impl StoredManifest {
             return Err(InvalidDBState);
         }
 
-        let mut manifest = self.manifest.clone();
-        manifest.parent = Some(parent_db);
+        let manifest = Manifest::cloned(parent_db, parent_manifest);
         self.update_manifest(manifest).await
     }
 
@@ -521,16 +521,18 @@ impl ManifestStore {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::config::CheckpointOptions;
-    use crate::db_state::CoreDbState;
+    use crate::db_state::{CoreDbState, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error;
     use crate::error::SlateDBError;
     use crate::error::SlateDBError::InvalidDBState;
     use crate::manifest::{Manifest, ParentDb};
     use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
+    use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
+    use ulid::Ulid;
     use uuid::Uuid;
 
     const ROOT: &str = "/root/path";
@@ -864,18 +866,54 @@ mod tests {
         let parent_path = "/parent/path";
         let mut sm = create_uninitialized_clone(parent_path).await;
 
+        // The new manifest and all of its state should be copied over
+        // to the clone manifest
         let rewrite_checkpoint_id = Uuid::new_v4();
+        let mut parent_manifest = Manifest::initial(CoreDbState::new());
+        parent_manifest.core.next_wal_sst_id = 5;
+        parent_manifest.writer_epoch = 2;
+        parent_manifest.compactor_epoch = 3;
+        parent_manifest.core.l0.push_back(create_sst(
+            SsTableId::Compacted(Ulid::new()),
+            Some(Bytes::from("a")),
+        ));
+        parent_manifest.core.l0.push_back(create_sst(
+            SsTableId::Compacted(Ulid::new()),
+            Some(Bytes::from("abc")),
+        ));
+
         let parent_db = ParentDb {
             path: parent_path.to_string(),
             checkpoint_id: rewrite_checkpoint_id,
         };
-        sm.rewrite_parent_db(parent_db).await.unwrap();
+        sm.rewrite_parent_db(parent_db, &parent_manifest)
+            .await
+            .unwrap();
         assert_eq!(2, sm.id());
         assert!(!sm.db_state().initialized);
         assert_eq!(
             Some(rewrite_checkpoint_id),
             sm.manifest.parent.map(|p| p.checkpoint_id)
         );
+        assert_eq!(parent_manifest.writer_epoch, sm.manifest.writer_epoch);
+        assert_eq!(parent_manifest.compactor_epoch, sm.manifest.compactor_epoch);
+        assert_eq!(
+            parent_manifest.core.next_wal_sst_id,
+            sm.manifest.core.next_wal_sst_id
+        );
+        assert_eq!(parent_manifest.core.l0, sm.manifest.core.l0);
+    }
+
+    fn create_sst(id: SsTableId, first_key: Option<Bytes>) -> SsTableHandle {
+        let table_info = SsTableInfo {
+            first_key,
+            index_offset: 0,
+            index_len: 0,
+            filter_offset: 0,
+            filter_len: 0,
+            compression_codec: None,
+        };
+        SsTableHandle::new(id, table_info)
     }
 
     #[tokio::test]
@@ -887,12 +925,15 @@ mod tests {
         initialized_core.initialized = true;
         sm.update_db_state(initialized_core).await.unwrap();
 
+        let parent_manifest = Manifest::initial(CoreDbState::new());
         let parent_db = ParentDb {
             path: parent_path.to_string(),
             checkpoint_id: Uuid::new_v4(),
         };
         assert!(matches!(
-            sm.rewrite_parent_db(parent_db).await.unwrap_err(),
+            sm.rewrite_parent_db(parent_db, &parent_manifest)
+                .await
+                .unwrap_err(),
             InvalidDBState
         ));
     }
@@ -907,12 +948,15 @@ mod tests {
         sm.update_db_state(initialized_core).await.unwrap();
 
         let updated_parent_path = "/updated/parent/path";
+        let parent_manifest = Manifest::initial(CoreDbState::new());
         let parent_db = ParentDb {
             path: updated_parent_path.to_string(),
             checkpoint_id: Uuid::new_v4(),
         };
         assert!(matches!(
-            sm.rewrite_parent_db(parent_db).await.unwrap_err(),
+            sm.rewrite_parent_db(parent_db, &parent_manifest)
+                .await
+                .unwrap_err(),
             InvalidDBState
         ));
     }
@@ -925,12 +969,15 @@ mod tests {
             .await
             .unwrap();
 
+        let parent_manifest = Manifest::initial(CoreDbState::new());
         let parent_db = ParentDb {
             path: "/parent/path".to_string(),
             checkpoint_id: Uuid::new_v4(),
         };
         assert!(matches!(
-            sm.rewrite_parent_db(parent_db).await.unwrap_err(),
+            sm.rewrite_parent_db(parent_db, &parent_manifest)
+                .await
+                .unwrap_err(),
             InvalidDBState
         ));
     }
