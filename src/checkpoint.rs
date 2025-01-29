@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
+#[non_exhaustive]
 #[derive(Clone, PartialEq, Serialize, Debug)]
 pub struct Checkpoint {
     pub id: Uuid,
@@ -18,6 +19,7 @@ pub struct Checkpoint {
     pub create_time: SystemTime,
 }
 
+#[non_exhaustive]
 #[derive(Debug)]
 pub struct CheckpointCreateResult {
     /// The id of the created checkpoint.
