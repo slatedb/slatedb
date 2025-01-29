@@ -145,7 +145,7 @@ impl Db {
             // get cleaned up if the clone operation fails.
             parent_manifest
                 .write_checkpoint(
-                    Uuid::new_v4(),
+                    None,
                     &CheckpointOptions {
                         lifetime: Some(Duration::from_secs(300)),
                         source: *parent_checkpoint_id,
@@ -185,7 +185,7 @@ impl Db {
 
         parent_manifest
             .write_checkpoint(
-                final_checkpoint_id,
+                Some(final_checkpoint_id),
                 &CheckpointOptions {
                     lifetime: None,
                     source: Some(source_checkpoint.id),

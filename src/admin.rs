@@ -15,7 +15,6 @@ use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use tokio::runtime::Handle;
-use uuid::Uuid;
 
 /// read-only access to the latest manifest file
 pub async fn read_manifest(
@@ -224,9 +223,7 @@ pub async fn create_checkpoint(
 ) -> Result<CheckpointCreateResult, SlateDBError> {
     let manifest_store = Arc::new(ManifestStore::new(path, object_store));
     let mut stored_manifest = StoredManifest::load(manifest_store).await?;
-    let checkpoint = stored_manifest
-        .write_checkpoint(Uuid::new_v4(), options)
-        .await?;
+    let checkpoint = stored_manifest.write_checkpoint(None, options).await?;
     Ok(CheckpointCreateResult {
         id: checkpoint.id,
         manifest_id: checkpoint.manifest_id,
