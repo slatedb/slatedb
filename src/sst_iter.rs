@@ -281,7 +281,7 @@ impl<'a> SstIterator<'a> {
                     }
                     FetchTask::Finished(blocks) => {
                         if let Some(block) = blocks.pop_front() {
-                            return Ok(Some(BlockIterator::new(block)));
+                            return Ok(Some(BlockIterator::new_ascending(block)));
                         } else {
                             self.fetch_tasks.pop_front();
                         }

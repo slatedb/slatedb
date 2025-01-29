@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, SeekToKey};
+use crate::iter::{IterationOrder, KeyValueIterator, SeekToKey};
 use crate::merge_iterator::MergeIterator;
 use crate::types::{RowAttributes, RowEntry, ValueDeletable};
 use crate::utils::WatchableOnceCell;
@@ -40,7 +40,10 @@ pub(crate) struct ImmutableWal {
 
 type MemTableRange<'a, T> = Range<'a, Bytes, T, Bytes, ValueWithAttributes>;
 
-pub(crate) struct MemTableIterator<'a, T: RangeBounds<Bytes>>(MemTableRange<'a, T>);
+pub(crate) struct MemTableIterator<'a, T: RangeBounds<Bytes>> {
+    range: MemTableRange<'a, T>,
+    ordering: IterationOrder,
+}
 
 pub(crate) struct VecDequeKeyValueIterator {
     rows: VecDeque<RowEntry>,
@@ -55,7 +58,10 @@ impl VecDequeKeyValueIterator {
         tables: VecDeque<Arc<KVTable>>,
         range: BytesRange,
     ) -> Result<Self, SlateDBError> {
-        let memtable_iters = tables.iter().map(|t| t.range(range.clone())).collect();
+        let memtable_iters = tables
+            .iter()
+            .map(|t| t.range_ascending(range.clone()))
+            .collect();
         let mut merge_iter = MergeIterator::new(memtable_iters).await?;
         let mut rows = VecDeque::new();
 
@@ -100,7 +106,11 @@ impl<T: RangeBounds<Bytes>> KeyValueIterator for MemTableIterator<'_, T> {
 
 impl<T: RangeBounds<Bytes>> MemTableIterator<'_, T> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
-        self.0.next().map(|entry| RowEntry {
+        let next_entry = match self.ordering {
+            IterationOrder::Ascending => self.range.next(),
+            IterationOrder::Descending => self.range.next_back(),
+        };
+        next_entry.map(|entry| RowEntry {
             key: entry.key().clone(),
             value: entry.value().value.clone(),
             seq: 0,
@@ -207,11 +217,22 @@ impl KVTable {
     }
 
     pub(crate) fn iter(&self) -> MemTableIterator<RangeFull> {
-        self.range(..)
+        self.range_ascending(..)
     }
 
-    pub(crate) fn range<T: RangeBounds<Bytes>>(&self, range: T) -> MemTableIterator<T> {
-        MemTableIterator(self.map.range(range))
+    pub(crate) fn range_ascending<T: RangeBounds<Bytes>>(&self, range: T) -> MemTableIterator<T> {
+        self.range(range, IterationOrder::Ascending)
+    }
+
+    pub(crate) fn range<T: RangeBounds<Bytes>>(
+        &self,
+        range: T,
+        ordering: IterationOrder,
+    ) -> MemTableIterator<T> {
+        MemTableIterator {
+            range: self.map.range(range),
+            ordering,
+        }
     }
 
     /// Inserts a value, returning as soon as the value is written to the memtable but before
@@ -264,7 +285,10 @@ fn sizeof_attributes(attrs: &RowAttributes) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::gen_attrs;
+    use crate::{proptest_util, test_utils};
+    use tokio::runtime::Runtime;
 
     #[tokio::test]
     async fn test_memtable_iter() {
@@ -365,7 +389,9 @@ mod tests {
             gen_attrs(5),
         );
 
-        let mut iter = table.table().range(Bytes::from_static(b"abc333")..);
+        let mut iter = table
+            .table()
+            .range_ascending(Bytes::from_static(b"abc333")..);
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc333".as_slice());
         assert_eq!(kv.value, b"value3".as_slice());
@@ -407,7 +433,9 @@ mod tests {
             gen_attrs(5),
         );
 
-        let mut iter = table.table().range(Bytes::from_static(b"abc345")..);
+        let mut iter = table
+            .table()
+            .range_ascending(Bytes::from_static(b"abc345")..);
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc444".as_slice());
         assert_eq!(kv.value, b"value4".as_slice());
@@ -475,5 +503,34 @@ mod tests {
 
         table.delete(Bytes::from_static(b"abc333"), gen_attrs(4));
         assert_eq!(table.table.size(), 47) // 51 - val1(4)
+    }
+
+    #[test]
+    fn should_iterate_arbitrary_range() {
+        let mut runner = proptest_util::runner::new(file!(), None);
+        let runtime = Runtime::new().unwrap();
+        let sample_table = sample::table(runner.rng(), 500, 10);
+
+        let mut kv_table = WritableKVTable::new();
+        for (key, value) in &sample_table {
+            kv_table.put(key.clone(), value.clone(), test_utils::gen_empty_attrs());
+        }
+
+        runner
+            .run(
+                &(arbitrary::nonempty_range(10), arbitrary::iteration_order()),
+                |(range, ordering)| {
+                    let mut kv_iter = kv_table.table.range(range.clone(), ordering);
+
+                    runtime.block_on(test_utils::assert_ordered_scan_in_range(
+                        &sample_table,
+                        &range,
+                        ordering,
+                        &mut kv_iter,
+                    ));
+                    Ok(())
+                },
+            )
+            .unwrap();
     }
 }
