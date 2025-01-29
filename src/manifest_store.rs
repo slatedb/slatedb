@@ -257,8 +257,7 @@ impl StoredManifest {
         }
 
         // Also do not allow the parent path to be changed.
-        let Some(current_parent) = self.manifest.parent.as_ref()
-        else {
+        let Some(current_parent) = self.manifest.parent.as_ref() else {
             return Err(InvalidDBState);
         };
 
@@ -524,6 +523,7 @@ mod tests {
     use crate::db_state::CoreDbState;
     use crate::error;
     use crate::error::SlateDBError;
+    use crate::error::SlateDBError::InvalidDBState;
     use crate::manifest::{Manifest, ParentDb};
     use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
     use object_store::memory::InMemory;
@@ -531,7 +531,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
     use uuid::Uuid;
-    use crate::error::SlateDBError::InvalidDBState;
 
     const ROOT: &str = "/root/path";
 
@@ -891,7 +890,10 @@ mod tests {
             path: parent_path.to_string(),
             checkpoint_id: Uuid::new_v4(),
         };
-        assert!(matches!(sm.rewrite_parent_db(parent_db).await.unwrap_err(), InvalidDBState));
+        assert!(matches!(
+            sm.rewrite_parent_db(parent_db).await.unwrap_err(),
+            InvalidDBState
+        ));
     }
 
     #[tokio::test]
@@ -908,7 +910,10 @@ mod tests {
             path: updated_parent_path.to_string(),
             checkpoint_id: Uuid::new_v4(),
         };
-        assert!(matches!(sm.rewrite_parent_db(parent_db).await.unwrap_err(), InvalidDBState));
+        assert!(matches!(
+            sm.rewrite_parent_db(parent_db).await.unwrap_err(),
+            InvalidDBState
+        ));
     }
 
     #[tokio::test]
@@ -923,12 +928,13 @@ mod tests {
             path: "/parent/path".to_string(),
             checkpoint_id: Uuid::new_v4(),
         };
-        assert!(matches!(sm.rewrite_parent_db(parent_db).await.unwrap_err(), InvalidDBState));
+        assert!(matches!(
+            sm.rewrite_parent_db(parent_db).await.unwrap_err(),
+            InvalidDBState
+        ));
     }
 
-    async fn create_uninitialized_clone(
-        parent_path: &str,
-    ) -> StoredManifest {
+    async fn create_uninitialized_clone(parent_path: &str) -> StoredManifest {
         let parent_manifest = Manifest::initial(CoreDbState::new());
         let parent_db = ParentDb {
             path: parent_path.to_string(),
@@ -941,7 +947,7 @@ mod tests {
             parent_db,
             &parent_manifest,
         )
-            .await
-            .unwrap()
+        .await
+        .unwrap()
     }
 }

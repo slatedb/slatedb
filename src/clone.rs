@@ -1,9 +1,10 @@
+use crate::checkpoint::Checkpoint;
 use crate::config::CheckpointOptions;
 use crate::db::Db;
 use crate::db_state::{CoreDbState, SsTableId};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::CheckpointMissing;
-use crate::manifest;
+use crate::manifest::{Manifest, ParentDb};
 use crate::manifest_store::{ManifestStore, StoredManifest};
 use crate::paths::PathResolver;
 use object_store::path::Path;
@@ -82,7 +83,7 @@ impl Db {
         let mut parent_manifest =
             Self::load_initialized_manifest(Arc::clone(&parent_manifest_store)).await?;
 
-        let mut clone_manifest = Self::load_clone_manifest(
+        let mut clone_manifest = Self::create_clone_manifest(
             Arc::clone(&clone_manifest_store),
             Arc::clone(&parent_manifest_store),
             &mut parent_manifest,
@@ -108,7 +109,7 @@ impl Db {
         Ok(())
     }
 
-    async fn load_clone_manifest(
+    async fn create_clone_manifest(
         clone_manifest_store: Arc<ManifestStore>,
         parent_manifest_store: Arc<ManifestStore>,
         parent_manifest: &mut StoredManifest,
@@ -132,68 +133,96 @@ impl Db {
                 manifest => manifest,
             };
 
-        let source_checkpoint = if let Some(id) = parent_checkpoint_id {
-            if let Some(checkpoint) = parent_manifest.db_state().find_checkpoint(id) {
-                checkpoint.clone()
-            } else {
-                return Err(CheckpointMissing(*id));
-            }
-        } else {
-            // If no checkpoint is provided, then create an ephemeral checkpoint from
-            // the latest state. This will be used as the source checkpoint when we
-            // write the final checkpoint. Making it ephemeral ensures that it will
-            // get cleaned up if the clone operation fails.
-            parent_manifest
-                .write_checkpoint(
-                    None,
-                    &CheckpointOptions {
-                        lifetime: Some(Duration::from_secs(300)),
-                        source: *parent_checkpoint_id,
-                    },
-                )
-                .await?
-        };
+        let (parent_checkpoint, parent_checkpoint_manifest) =
+            Self::get_or_create_parent_checkpoint(
+                Arc::clone(&parent_manifest_store),
+                parent_manifest,
+                &parent_checkpoint_id,
+            )
+            .await?;
 
         let final_checkpoint_id = Uuid::new_v4();
-        let parent_db = manifest::ParentDb {
+        let parent_db = ParentDb {
             path: parent_path.to_string(),
             checkpoint_id: final_checkpoint_id,
         };
 
-        let parent_checkpoint_manifest = if parent_manifest.id() == source_checkpoint.manifest_id {
-            parent_manifest.manifest().clone()
-        } else {
-            parent_manifest_store
-                .read_manifest(source_checkpoint.manifest_id)
-                .await?
-        };
-
-        let clone_manifest = match existing_clone_manifest {
-            Some(mut clone_manifest) => {
-                clone_manifest.rewrite_parent_db(parent_db).await?;
-                clone_manifest
-            }
-            None => {
-                StoredManifest::create_uninitialized_clone(
-                    Arc::clone(&clone_manifest_store),
-                    parent_db,
-                    &parent_checkpoint_manifest,
-                )
-                .await?
-            }
-        };
+        let clone_manifest = Self::create_uninitialized_clone_manifest(
+            Arc::clone(&clone_manifest_store),
+            existing_clone_manifest,
+            parent_db,
+            &parent_checkpoint_manifest,
+        )
+        .await?;
 
         parent_manifest
             .write_checkpoint(
                 Some(final_checkpoint_id),
                 &CheckpointOptions {
                     lifetime: None,
-                    source: Some(source_checkpoint.id),
+                    source: Some(parent_checkpoint.id),
                 },
             )
             .await?;
 
         Ok(clone_manifest)
+    }
+
+    async fn create_uninitialized_clone_manifest(
+        clone_manifest_store: Arc<ManifestStore>,
+        existing_clone_manifest: Option<StoredManifest>,
+        parent_db: ParentDb,
+        parent_manifest: &Manifest,
+    ) -> Result<StoredManifest, SlateDBError> {
+        match existing_clone_manifest {
+            Some(mut clone_manifest) => {
+                clone_manifest.rewrite_parent_db(parent_db).await?;
+                Ok(clone_manifest)
+            }
+            None => {
+                StoredManifest::create_uninitialized_clone(
+                    Arc::clone(&clone_manifest_store),
+                    parent_db,
+                    parent_manifest,
+                )
+                .await
+            }
+        }
+    }
+
+    // Get a checkpoint and the corresponding manifest that will used as the source
+    // for the clone's initial state.
+    //
+    // If `parent_checkpoint_id` is `None`, then create an ephemeral checkpoint from
+    // the latest state.  Making it ephemeral ensures that it will
+    // get cleaned up if the clone operation fails.
+    async fn get_or_create_parent_checkpoint(
+        parent_manifest_store: Arc<ManifestStore>,
+        parent_manifest: &mut StoredManifest,
+        parent_checkpoint_id: &Option<Uuid>,
+    ) -> Result<(Checkpoint, Manifest), SlateDBError> {
+        let checkpoint = if let Some(id) = parent_checkpoint_id {
+            if let Some(checkpoint) = parent_manifest.db_state().find_checkpoint(id) {
+                checkpoint.clone()
+            } else {
+                return Err(CheckpointMissing(*id));
+            }
+        } else {
+            parent_manifest
+                .write_checkpoint(
+                    None,
+                    &CheckpointOptions {
+                        lifetime: Some(Duration::from_secs(300)),
+                        source: None,
+                    },
+                )
+                .await?
+        };
+
+        let checkpoint_manifest = parent_manifest_store
+            .read_manifest(checkpoint.manifest_id)
+            .await?;
+        Ok((checkpoint, checkpoint_manifest))
     }
 
     // For pre-existing manifests, we need to verify that the referenced checkpoint
@@ -504,5 +533,33 @@ mod tests {
             *slate_err,
             SlateDBError::DatabaseAlreadyExists { msg: _ }
         ));
+    }
+
+    #[tokio::test]
+    async fn clone_should_be_idempotent_after_success() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = "/tmp/test_parent";
+        let clone_path = "/tmp/test_clone";
+
+        let parent_db = Db::open(parent_path, Arc::clone(&object_store))
+            .await
+            .unwrap();
+        parent_db.close().await.unwrap();
+
+        Db::create_clone(clone_path, parent_path, Arc::clone(&object_store), None)
+            .await
+            .unwrap();
+
+        let clone_manifest_store =
+            ManifestStore::new(&Path::from(clone_path), Arc::clone(&object_store));
+        let (manifest_id, _) = clone_manifest_store.read_latest_manifest().await.unwrap();
+
+        Db::create_clone(clone_path, parent_path, Arc::clone(&object_store), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            manifest_id,
+            clone_manifest_store.read_latest_manifest().await.unwrap().0
+        )
     }
 }
