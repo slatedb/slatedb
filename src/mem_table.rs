@@ -1,13 +1,12 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
-use parking_lot::Mutex;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 
@@ -94,7 +93,7 @@ pub(crate) struct KVTable {
     /// modifying operation on this KVTable (insertion or deletion)
     last_tick: AtomicI64,
     /// the sequence number of the most recent operation on this KVTable
-    last_seq: Mutex<Option<u64>>,
+    last_seq: AtomicU64,
 }
 
 pub(crate) struct WritableKVTable {
@@ -239,7 +238,7 @@ impl KVTable {
             size: AtomicUsize::new(0),
             durable: WatchableOnceCell::new(),
             last_tick: AtomicI64::new(i64::MIN),
-            last_seq: Mutex::new(None),
+            last_seq: AtomicU64::new(0),
         }
     }
 
@@ -256,7 +255,12 @@ impl KVTable {
     }
 
     pub(crate) fn last_seq(&self) -> Option<u64> {
-        *self.last_seq.lock()
+        if self.is_empty() {
+            None
+        } else {
+            let last_seq = self.last_seq.load(SeqCst);
+            Some(last_seq)
+        }
     }
 
     /// Get the value for a given key.
@@ -298,12 +302,7 @@ impl KVTable {
                 .fetch_max(create_ts, atomic::Ordering::SeqCst);
         }
         // update the last seq number if it is greater than the current last seq
-        {
-            let mut last_seq = self.last_seq.lock();
-            if last_seq.is_none() || row.seq > last_seq.unwrap() {
-                *last_seq = Some(row.seq);
-            }
-        }
+        self.last_seq.fetch_max(row.seq, atomic::Ordering::SeqCst);
 
         self.map.compare_insert(internal_key, row, |previous_row| {
             // Optimistically calculate the size of the previous value.
