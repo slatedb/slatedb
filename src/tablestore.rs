@@ -86,6 +86,42 @@ impl TableStore {
         )
     }
 
+    #[cfg(test)]
+    pub fn dmvk_new(
+        object_store: Arc<dyn ObjectStore>,
+        sst_format: SsTableFormat,
+        path_resolver: PathResolver,
+        block_cache: Option<Arc<dyn DbCache>>,
+    ) -> Self {
+        Self::dmvk_new_with_fp_registry(
+            object_store,
+            sst_format,
+            path_resolver,
+            Arc::new(FailPointRegistry::new()),
+            block_cache,
+        )
+    }
+
+    pub fn dmvk_new_with_fp_registry(
+        object_store: Arc<dyn ObjectStore>,
+        sst_format: SsTableFormat,
+        path_resolver: PathResolver,
+        fp_registry: Arc<FailPointRegistry>,
+        block_cache: Option<Arc<dyn DbCache>>,
+    ) -> Self {
+        Self {
+            object_store: object_store.clone(),
+            sst_format,
+            path_resolver,
+            fp_registry,
+            transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
+                Path::from("/"),
+                object_store.clone(),
+            )),
+            block_cache,
+        }
+    }
+
     pub fn new_with_fp_registry<P: Into<Path>>(
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
@@ -153,15 +189,18 @@ impl TableStore {
             + 1)
     }
 
-    pub(crate) fn table_writer(&self, id: SsTableId) -> EncodedSsTableWriter {
-        let path = self.path(&id);
-        EncodedSsTableWriter {
+    pub(crate) async fn table_writer(
+        &self,
+        id: SsTableId,
+    ) -> Result<EncodedSsTableWriter, SlateDBError> {
+        let path = self.path_resolver.table_path(&id);
+        Ok(EncodedSsTableWriter {
             id,
             builder: self.sst_format.table_builder(),
             writer: BufWriter::new(self.object_store.clone(), path),
             table_store: self,
             blocks_written: 0,
-        }
+        })
     }
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
@@ -196,7 +235,7 @@ impl TableStore {
             data.put_slice(chunk.as_ref())
         }
 
-        let path = self.path(id);
+        let path = self.path_resolver.table_path(id);
         self.transactional_wal_store
             .put_if_not_exists(&path, Bytes::from(data))
             .await
@@ -229,7 +268,7 @@ impl TableStore {
 
     /// Delete an SSTable from the object store.
     pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
-        let path = self.path(id);
+        let path = self.path(id).await?;
         self.object_store
             .delete(&path)
             .await
@@ -280,7 +319,7 @@ impl TableStore {
     }
 
     pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
-        let path = self.path(id);
+        let path = self.path(id).await?;
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
@@ -302,7 +341,7 @@ impl TableStore {
                 return Ok(Some(filter));
             }
         }
-        let path = self.path(&handle.id);
+        let path = self.path(&handle.id).await?;
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
@@ -334,7 +373,7 @@ impl TableStore {
                 return Ok(index);
             }
         }
-        let path = self.path(&handle.id);
+        let path = self.path(&handle.id).await?;
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
@@ -357,7 +396,7 @@ impl TableStore {
         handle: &SsTableHandle,
         blocks: Range<usize>,
     ) -> Result<VecDeque<Block>, SlateDBError> {
-        let path = self.path(&handle.id);
+        let path = self.path(&handle.id).await?;
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
@@ -382,7 +421,7 @@ impl TableStore {
         cache_blocks: bool,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
         // Create a ReadOnlyObject for accessing the SSTable file
-        let path = self.path(&handle.id);
+        let path = self.path(&handle.id).await?;
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
@@ -477,7 +516,7 @@ impl TableStore {
         handle: &SsTableHandle,
         block: usize,
     ) -> Result<Block, SlateDBError> {
-        let path = self.path(&handle.id);
+        let path = self.path(&handle.id).await?;
         let obj = ReadOnlyObject {
             object_store: self.object_store.clone(),
             path,
@@ -488,8 +527,18 @@ impl TableStore {
             .await
     }
 
-    fn path(&self, id: &SsTableId) -> Path {
-        self.path_resolver.table_path(id)
+    async fn path(&self, id: &SsTableId) -> Result<Path, SlateDBError> {
+        let candidates = self.path_resolver.table_path_including_fallbacks(id);
+        for path in candidates {
+            match self.object_store.head(&path).await {
+                Ok(_) => return Ok(path),
+                Err(e) if matches!(&e, object_store::Error::NotFound { .. }) => continue,
+                Err(e) => return Err(SlateDBError::from(e)),
+            }
+        }
+        // let primary_path = self.path_resolver.table_path(id);
+        // TODO better
+        Err(SlateDBError::InvalidDBState)
     }
 }
 
@@ -553,6 +602,7 @@ mod tests {
     use ulid::Ulid;
 
     use crate::error;
+    use crate::paths::PathResolver;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     #[cfg(feature = "moka")]
@@ -579,7 +629,7 @@ mod tests {
         let id = SsTableId::Compacted(Ulid::new());
 
         // when:
-        let mut writer = ts.table_writer(id);
+        let mut writer = ts.table_writer(id).await.unwrap();
         writer
             .add(RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0))
             .await
@@ -666,7 +716,7 @@ mod tests {
 
         // Create and write SST
         let id = SsTableId::Compacted(Ulid::new());
-        let mut writer = ts.table_writer(id);
+        let mut writer = ts.table_writer(id).await.unwrap();
         let mut expected_data = Vec::with_capacity(20);
         for i in 0..20 {
             let key = [i as u8; 16];
@@ -737,7 +787,7 @@ mod tests {
         }
 
         // Replace SST file with an empty file
-        let path = ts.path(&id);
+        let path = ts.path(&id).await.unwrap();
         os.put(&path, Bytes::new().into()).await.unwrap();
 
         // Test 3: All blocks should be in cache after SST file is emptied
@@ -798,7 +848,13 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+        let path_resolver = PathResolver::new(ROOT);
+        let ts = Arc::new(TableStore::dmvk_new(
+            os.clone(),
+            format,
+            path_resolver.clone(),
+            None,
+        ));
 
         // Create id1, id2, and i3 as three random UUIDs that have been sorted ascending.
         // Need to do this because the Ulids are sometimes generated in the same millisecond
@@ -811,9 +867,9 @@ mod tests {
             SsTableId::Compacted(ulids[2]),
         );
 
-        let path1 = ts.path(&id1);
-        let path2 = ts.path(&id2);
-        let path3 = ts.path(&id3);
+        let path1 = path_resolver.table_path(&id1);
+        let path2 = path_resolver.table_path(&id2);
+        let path3 = path_resolver.table_path(&id3);
 
         os.put(&path1, Bytes::new().into()).await.unwrap();
         os.put(&path2, Bytes::new().into()).await.unwrap();
@@ -857,15 +913,21 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+        let path_resolver = PathResolver::new(ROOT);
+        let ts = Arc::new(TableStore::dmvk_new(
+            os.clone(),
+            format,
+            path_resolver.clone(),
+            None,
+        ));
 
         let id1 = SsTableId::Wal(1);
         let id2 = SsTableId::Wal(2);
         let id3 = SsTableId::Wal(3);
 
-        let path1 = ts.path(&id1);
-        let path2 = ts.path(&id2);
-        let path3 = ts.path(&id3);
+        let path1 = path_resolver.table_path(&id1);
+        let path2 = path_resolver.table_path(&id2);
+        let path3 = path_resolver.table_path(&id3);
 
         os.put(&path1, Bytes::new().into()).await.unwrap();
         os.put(&path2, Bytes::new().into()).await.unwrap();
@@ -903,12 +965,19 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+
+        let path_resolver = PathResolver::new(ROOT);
+        let ts = Arc::new(TableStore::dmvk_new(
+            os.clone(),
+            format,
+            path_resolver.clone(),
+            None,
+        ));
 
         let id1 = SsTableId::Compacted(Ulid::new());
         let id2 = SsTableId::Compacted(Ulid::new());
-        let path1 = ts.path(&id1);
-        let path2 = ts.path(&id2);
+        let path1 = path_resolver.table_path(&id1);
+        let path2 = path_resolver.table_path(&id2);
         os.put(&path1, Bytes::new().into()).await.unwrap();
         os.put(&path2, Bytes::new().into()).await.unwrap();
 

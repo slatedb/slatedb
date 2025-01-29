@@ -52,6 +52,7 @@ use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::{VecDequeKeyValueIterator, WritableKVTable};
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::metrics::DbStats;
+use crate::paths::PathResolver;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -715,16 +716,23 @@ impl Db {
             }
         };
 
-        let table_store = Arc::new(TableStore::new_with_fp_registry(
+        let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
+        let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
+
+        let path_resolver = match &latest_manifest {
+            Some(stored_manifest) => {
+                PathResolver::new_with_fallback(path.clone(), stored_manifest.parent_paths().await?)
+            }
+            None => PathResolver::new(path.clone()),
+        };
+
+        let table_store = Arc::new(TableStore::dmvk_new_with_fp_registry(
             maybe_cached_object_store.clone(),
             sst_format.clone(),
-            path.clone(),
+            path_resolver,
             fp_registry.clone(),
             options.block_cache.clone(),
         ));
-
-        let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
-        let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
 
         // get the next wal id before writing manifest.
         let wal_id_last_compacted = match &latest_manifest {

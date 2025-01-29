@@ -614,7 +614,7 @@ mod tests {
         mut key_gen: OrderedBytesGenerator,
         mut val_gen: OrderedBytesGenerator,
     ) -> (SsTableHandle, usize) {
-        let mut writer = ts.table_writer(SsTableId::Wal(0));
+        let mut writer = ts.table_writer(SsTableId::Wal(0)).await.unwrap();
         let mut nkeys = 0usize;
         while writer.blocks_written() < n {
             let entry = RowEntry::new_value(key_gen.next().as_ref(), val_gen.next().as_ref(), 0);

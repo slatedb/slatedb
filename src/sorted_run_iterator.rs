@@ -464,7 +464,10 @@ mod tests {
     ) -> SortedRun {
         let mut ssts = Vec::<SsTableHandle>::new();
         for _ in 0..n {
-            let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+            let mut writer = table_store
+                .table_writer(SsTableId::Compacted(Ulid::new()))
+                .await
+                .unwrap();
             for _ in 0..keys_per_sst {
                 let entry =
                     RowEntry::new_value(key_gen.next().as_ref(), val_gen.next().as_ref(), 0);

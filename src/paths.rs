@@ -4,8 +4,10 @@ use crate::error::SlateDBError;
 use object_store::path::Path;
 use ulid::Ulid;
 
+#[derive(Clone)]
 pub(crate) struct PathResolver {
     root_path: Path,
+    fallback_paths: Vec<Path>,
     wal_path: &'static str,
     compacted_path: &'static str,
 }
@@ -14,6 +16,16 @@ impl PathResolver {
     pub(crate) fn new<P: Into<Path>>(root_path: P) -> Self {
         Self {
             root_path: root_path.into(),
+            fallback_paths: Vec::new(),
+            wal_path: "wal",
+            compacted_path: "compacted",
+        }
+    }
+
+    pub(crate) fn new_with_fallback<P: Into<Path>>(root_path: P, fallback_paths: Vec<P>) -> Self {
+        Self {
+            root_path: root_path.into(),
+            fallback_paths: fallback_paths.into_iter().map(|p| p.into()).collect(),
             wal_path: "wal",
             compacted_path: "compacted",
         }
@@ -49,19 +61,32 @@ impl PathResolver {
         }
     }
 
-    pub(crate) fn table_path(&self, table_id: &SsTableId) -> Path {
+    fn table_path_with_root(&self, table_id: &SsTableId, root_path: &Path) -> Path {
         match table_id {
-            Wal(id) => Path::from(format!(
-                "{}/{}/{:020}.sst",
-                &self.root_path, self.wal_path, id
-            )),
+            Wal(id) => Path::from(format!("{}/{}/{:020}.sst", root_path, self.wal_path, id)),
             Compacted(ulid) => Path::from(format!(
                 "{}/{}/{}.sst",
-                &self.root_path,
+                root_path,
                 self.compacted_path,
                 ulid.to_string()
             )),
         }
+    }
+
+    pub(crate) fn table_path(&self, table_id: &SsTableId) -> Path {
+        self.table_path_with_root(table_id, &self.root_path)
+    }
+
+    pub(crate) fn table_path_including_fallbacks<'a>(
+        &'a self,
+        table_id: &'a SsTableId,
+    ) -> impl Iterator<Item = Path> + 'a {
+        let primary_path = self.table_path(table_id);
+        std::iter::once(primary_path).chain(
+            self.fallback_paths
+                .iter()
+                .map(move |fallback_root| self.table_path_with_root(table_id, fallback_root)),
+        )
     }
 }
 

@@ -304,6 +304,17 @@ impl StoredManifest {
             };
         }
     }
+
+    pub(crate) async fn parent_paths(&self) -> Result<Vec<Path>, SlateDBError> {
+        let paths = match &self.manifest.parent {
+            Some(parent) => {
+                let parent_path = Path::from_url_path(parent.path.clone())?;
+                vec![parent_path]
+            }
+            None => vec![],
+        };
+        Ok(paths)
+    }
 }
 
 /// Represents the metadata of a manifest file stored in the object store.

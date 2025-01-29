@@ -26,6 +26,9 @@ pub enum SlateDBError {
     #[error("Object store error: {0}")]
     ObjectStoreError(#[from] Arc<object_store::Error>),
 
+    #[error("Invalid object store path: {0}")]
+    ObjectStoreInvalidPath(#[from] Arc<object_store::path::Error>),
+
     #[error("Manifest file already exists")]
     ManifestVersionExists,
 
@@ -122,6 +125,12 @@ impl From<std::io::Error> for SlateDBError {
 impl From<object_store::Error> for SlateDBError {
     fn from(value: object_store::Error) -> Self {
         Self::ObjectStoreError(Arc::new(value))
+    }
+}
+
+impl From<object_store::path::Error> for SlateDBError {
+    fn from(value: object_store::path::Error) -> Self {
+        Self::ObjectStoreInvalidPath(Arc::new(value))
     }
 }
 

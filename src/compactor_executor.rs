@@ -134,7 +134,8 @@ impl TokioCompactionExecutorInner {
         let mut output_ssts = Vec::new();
         let mut current_writer = self
             .table_store
-            .table_writer(SsTableId::Compacted(Ulid::new()));
+            .table_writer(SsTableId::Compacted(Ulid::new()))
+            .await?;
         let mut current_size = 0usize;
 
         while let Some(raw_kv) = all_iter.next_entry().await? {
@@ -168,7 +169,8 @@ impl TokioCompactionExecutorInner {
                 let finished_writer = mem::replace(
                     &mut current_writer,
                     self.table_store
-                        .table_writer(SsTableId::Compacted(Ulid::new())),
+                        .table_writer(SsTableId::Compacted(Ulid::new()))
+                        .await?,
                 );
                 output_ssts.push(finished_writer.close().await?);
                 self.db_stats.bytes_compacted.add(current_size as u64);

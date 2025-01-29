@@ -139,7 +139,9 @@ impl CompactionExecuteBench {
         suffix.put_u32(i);
         let mut key_gen =
             OrderedBytesGenerator::new_with_suffix(suffix.as_ref(), key_start.as_slice());
-        let mut sst_writer = table_store.table_writer(CompactionExecuteBench::sst_id(i));
+        let mut sst_writer = table_store
+            .table_writer(CompactionExecuteBench::sst_id(i))
+            .await?;
         for _ in 0..num_keys {
             let mut val = vec![0u8; val_bytes];
             rng.fill_bytes(val.as_mut_slice());
