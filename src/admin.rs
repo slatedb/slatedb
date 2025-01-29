@@ -7,6 +7,7 @@ use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 
+use crate::clone;
 use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -15,6 +16,7 @@ use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use tokio::runtime::Handle;
+use uuid::Uuid;
 
 /// read-only access to the latest manifest file
 pub async fn read_manifest(
@@ -228,6 +230,57 @@ pub async fn create_checkpoint(
         id: checkpoint.id,
         manifest_id: checkpoint.manifest_id,
     })
+}
+
+/// Clone a database. If no db already exists at the specified path, then this will create
+/// a new db under the path that is a clone of the db at parent_path.
+///
+/// A clone is a shallow copy of the parent database - it starts with a manifest that
+/// references the same SSTs, but doesn't actually copy those SSTs, except for the WAL.
+/// New writes will be written to the newly created db and will not be reflected in the
+/// parent database.
+///
+/// The clone can optionally be created from an existing checkpoint. If
+/// `parent_checkpoint` is present, then the referenced manifest is used
+/// as the base for the clone db's manifest. Otherwise, this method creates a new checkpoint
+/// for the current version of the parent db.
+///
+/// # Examples
+///
+/// ```
+/// use slatedb::admin;
+/// use slatedb::db::Db;
+/// use slatedb::object_store::{ObjectStore, memory::InMemory};
+/// use std::error::Error;
+/// use std::sync::Arc;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn Error>> {
+///    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+///    let db = Db::open("parent_path", Arc::clone(&object_store)).await?;
+///    db.put(b"key", b"value").await?;
+///    db.close().await?;
+///
+///     admin::create_clone(
+///       "clone_path",
+///       "parent_path",
+///       object_store,
+///       None,
+///     ).await?;
+///     Ok(())
+/// }
+/// ```
+///
+/// # Errors
+///
+pub async fn create_clone<P: Into<Path>>(
+    clone_path: P,
+    parent_path: P,
+    object_store: Arc<dyn ObjectStore>,
+    parent_checkpoint: Option<Uuid>,
+) -> Result<(), Box<dyn Error>> {
+    clone::create_clone(clone_path, parent_path, object_store, parent_checkpoint).await?;
+    Ok(())
 }
 
 #[cfg(test)]

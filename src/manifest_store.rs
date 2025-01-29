@@ -169,6 +169,7 @@ impl StoredManifest {
         Self::try_load(store).await?.ok_or(LatestManifestMissing)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn id(&self) -> u64 {
         self.id
     }
