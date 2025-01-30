@@ -195,6 +195,7 @@ impl CachedEntry {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use bytes::{BufMut, Bytes, BytesMut};
