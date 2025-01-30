@@ -181,4 +181,76 @@ impl CachedEntry {
             CachedItem::BloomFilter(bloom_filter) => bloom_filter.size(),
         }
     }
+
+    pub fn is_block(&self) -> bool {
+        matches!(self.item, CachedItem::Block(_))
+    }
+
+    pub fn is_filter(&self) -> bool {
+        matches!(self.item, CachedItem::BloomFilter(_))
+    }
+
+    pub fn is_index(&self) -> bool {
+        matches!(self.item, CachedItem::SsTableIndex(_))
+    }
+}
+
+mod tests {
+    use std::sync::Arc;
+    use bytes::{BufMut, Bytes, BytesMut};
+    use crate::block;
+    use crate::db_cache::CachedEntry;
+    use crate::filter::BloomFilter;
+    use crate::flatbuffer_types::SsTableIndexOwned;
+    use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
+    use crate::types::{RowEntry, ValueDeletable};
+
+    #[test]
+    fn test_should_handle_is_block_correctly() {
+        let (_, _, block) = build_sst();
+        let entry = CachedEntry::with_block(Arc::new(block));
+        assert!(entry.is_block());
+        assert!(!entry.is_filter());
+        assert!(!entry.is_index());
+    }
+
+    #[test]
+    fn test_should_handle_is_filter_correctly() {
+        let (_, filter, _) = build_sst();
+        let entry = CachedEntry::with_bloom_filter(filter);
+        assert!(!entry.is_block());
+        assert!(entry.is_filter());
+        assert!(!entry.is_index());
+    }
+
+    #[test]
+    fn test_should_handle_is_index_correctly() {
+        let (index, _, _) = build_sst();
+        let entry = CachedEntry::with_sst_index(Arc::new(index));
+        assert!(!entry.is_block());
+        assert!(!entry.is_filter());
+        assert!(entry.is_index());
+    }
+
+    fn build_sst() -> (SsTableIndexOwned, Arc<BloomFilter>, block::Block) {
+        let format = SsTableFormat::default();
+        let mut builder = format.table_builder();
+        builder.add(RowEntry::new(
+            Bytes::from_static(b"foo"),
+            ValueDeletable::Value(Bytes::from_static(b"bar")),
+            1,
+            None,
+            None
+        )).unwrap();
+        let encoded = builder.build().unwrap();
+        let mut buf = BytesMut::new();
+        for b in encoded.unconsumed_blocks.iter() {
+            buf.put(b.clone())
+        }
+        let buf = buf.freeze();
+        let index = format.read_index_raw(&encoded.info, &buf)
+            .unwrap();
+        let block = format.read_block_raw(&encoded.info, &index, 0, &buf).unwrap();
+        (index, encoded.filter.unwrap().clone(), block)
+    }
 }
