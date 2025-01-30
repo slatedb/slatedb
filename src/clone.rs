@@ -283,8 +283,7 @@ async fn copy_wal_ssts(
     parent_checkpoint_state: &CoreDbState,
     parent_path: &Path,
     clone_path: &Path,
-    #[allow(unused)]
-    fp_registry: Arc<FailPointRegistry>,
+    #[allow(unused)] fp_registry: Arc<FailPointRegistry>,
 ) -> Result<(), SlateDBError> {
     let parent_path_resolver = PathResolver::new(parent_path.clone());
     let clone_path_resolver = PathResolver::new(clone_path.clone());

@@ -8,6 +8,7 @@ use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 
 use crate::clone;
+use fail_parallel::FailPointRegistry;
 use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -15,7 +16,6 @@ use std::env;
 use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
-use fail_parallel::FailPointRegistry;
 use tokio::runtime::Handle;
 use uuid::Uuid;
 
