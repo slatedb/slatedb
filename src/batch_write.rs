@@ -68,7 +68,7 @@ impl DbInner {
                                 ts: Some(now),
                                 expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
                             },
-                        );
+                        )?;
                     }
                     WriteOp::Delete(key) => {
                         current_wal.delete(
@@ -77,7 +77,7 @@ impl DbInner {
                                 ts: Some(now),
                                 expire_ts: None,
                             },
-                        );
+                        )?;
                     }
                 }
             }
@@ -100,7 +100,7 @@ impl DbInner {
                                 ts: Some(now),
                                 expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
                             },
-                        );
+                        )?;
                     }
                     WriteOp::Delete(key) => {
                         current_memtable.delete(
@@ -109,7 +109,7 @@ impl DbInner {
                                 ts: Some(now),
                                 expire_ts: None,
                             },
-                        );
+                        )?;
                     }
                 }
             }

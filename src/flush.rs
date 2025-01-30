@@ -57,7 +57,11 @@ impl DbInner {
         self.flush_imm_table(&wal_id, imm.table()).await
     }
 
-    fn flush_imm_wal_to_memtable(&self, mem_table: &mut WritableKVTable, imm_table: Arc<KVTable>) {
+    fn flush_imm_wal_to_memtable(
+        &self,
+        mem_table: &mut WritableKVTable,
+        imm_table: Arc<KVTable>,
+    ) -> Result<(), SlateDBError> {
         let mut iter = imm_table.iter();
         while let Some(kv) = iter.next_entry_sync() {
             match kv.value {
@@ -69,7 +73,7 @@ impl DbInner {
                             ts: kv.create_ts,
                             expire_ts: kv.expire_ts,
                         },
-                    );
+                    )?;
                 }
                 ValueDeletable::Merge(_) => {
                     todo!()
@@ -81,10 +85,11 @@ impl DbInner {
                             ts: kv.create_ts,
                             expire_ts: kv.expire_ts,
                         },
-                    );
+                    )?;
                 }
             }
         }
+        Ok(())
     }
 
     async fn flush_imm_wals(&self) -> Result<(), SlateDBError> {
@@ -102,7 +107,7 @@ impl DbInner {
             wguard.pop_imm_wal();
             wguard.increment_next_wal_id();
             // flush to the memtable before notifying so that data is available for reads
-            self.flush_imm_wal_to_memtable(wguard.memtable(), imm.table());
+            self.flush_imm_wal_to_memtable(wguard.memtable(), imm.table())?;
             self.maybe_freeze_memtable(&mut wguard, id)?;
             imm.table().notify_durable(Ok(()));
         }

@@ -508,7 +508,7 @@ impl DbInner {
                                     ts: kv.create_ts,
                                     expire_ts: kv.expire_ts,
                                 },
-                            );
+                            )?;
                         }
                         ValueDeletable::Merge(_) => {
                             todo!()
@@ -519,7 +519,7 @@ impl DbInner {
                                 ts: kv.create_ts,
                                 expire_ts: kv.expire_ts,
                             },
-                        ),
+                        )?,
                     }
                 }
                 self.maybe_freeze_memtable(&mut guard, sst_id)?;
@@ -2211,21 +2211,27 @@ mod tests {
 
         let memtable = {
             let mut lock = kv_store.inner.state.write();
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc1111"),
-                Bytes::copy_from_slice(b"value1111"),
-                gen_attrs(1),
-            );
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc2222"),
-                Bytes::copy_from_slice(b"value2222"),
-                gen_attrs(2),
-            );
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc3333"),
-                Bytes::copy_from_slice(b"value3333"),
-                gen_attrs(3),
-            );
+            lock.wal()
+                .put(
+                    Bytes::copy_from_slice(b"abc1111"),
+                    Bytes::copy_from_slice(b"value1111"),
+                    gen_attrs(1),
+                )
+                .unwrap();
+            lock.wal()
+                .put(
+                    Bytes::copy_from_slice(b"abc2222"),
+                    Bytes::copy_from_slice(b"value2222"),
+                    gen_attrs(2),
+                )
+                .unwrap();
+            lock.wal()
+                .put(
+                    Bytes::copy_from_slice(b"abc3333"),
+                    Bytes::copy_from_slice(b"value3333"),
+                    gen_attrs(3),
+                )
+                .unwrap();
             lock.wal().table().clone()
         };
 

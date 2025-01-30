@@ -1,3 +1,10 @@
+use crate::bytes_range::BytesRange;
+use crate::error::SlateDBError;
+use crate::iter::{KeyValueIterator, SeekToKey};
+use crate::merge_iterator::MergeIterator;
+use crate::types::{RowAttributes, RowEntry, ValueDeletable};
+use crate::utils::WatchableOnceCell;
+use crate::SlateDBError::InvalidClockTick;
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
@@ -7,13 +14,6 @@ use std::ops::{RangeBounds, RangeFull};
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
-
-use crate::bytes_range::BytesRange;
-use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, SeekToKey};
-use crate::merge_iterator::MergeIterator;
-use crate::types::{RowAttributes, RowEntry, ValueDeletable};
-use crate::utils::WatchableOnceCell;
 
 pub(crate) struct KVTable {
     map: SkipMap<Bytes, ValueWithAttributes>,
@@ -157,14 +157,19 @@ impl WritableKVTable {
         &self.table
     }
 
-    pub(crate) fn put(&mut self, key: Bytes, value: Bytes, attrs: RowAttributes) {
+    pub(crate) fn put(
+        &mut self,
+        key: Bytes,
+        value: Bytes,
+        attrs: RowAttributes,
+    ) -> Result<(), SlateDBError> {
         self.table
             .put_or_delete(key, ValueDeletable::Value(value), attrs)
     }
 
-    pub(crate) fn delete(&mut self, key: Bytes, attrs: RowAttributes) {
+    pub(crate) fn delete(&mut self, key: Bytes, attrs: RowAttributes) -> Result<(), SlateDBError> {
         self.table
-            .put_or_delete(key, ValueDeletable::Tombstone, attrs);
+            .put_or_delete(key, ValueDeletable::Tombstone, attrs)
     }
 
     pub(crate) fn size(&self) -> usize {
@@ -216,17 +221,30 @@ impl KVTable {
 
     /// Inserts a value, returning as soon as the value is written to the memtable but before
     /// it is flushed to durable storage.
-    fn put_or_delete(&self, key: Bytes, value: ValueDeletable, attrs: RowAttributes) {
+    fn put_or_delete(
+        &self,
+        key: Bytes,
+        value: ValueDeletable,
+        attrs: RowAttributes,
+    ) -> Result<(), SlateDBError> {
         let key_len = key.len();
         self.size.fetch_add(
             key_len + value.len() + sizeof_attributes(&attrs),
             Ordering::Relaxed,
         );
 
-        // it is safe to use fetch_max here to update the last tick
-        // because the monotonicity is enforced when generating the clock tick
-        // (see [crate::utils::MonotonicClock::now])
-        attrs.ts.map(|tick| self.last_tick.fetch_max(tick, SeqCst));
+        if let Some(row_tick) = attrs.ts {
+            let max_tick = self.last_tick.fetch_max(row_tick, SeqCst);
+            // we should never try to insert out of order data because the
+            // monotonicity is enforced when generating the clock tick
+            // (see [crate::utils::MonotonicClock::now])
+            if max_tick > row_tick {
+                return Err(InvalidClockTick {
+                    last_tick: max_tick,
+                    next_tick: row_tick,
+                });
+            }
+        }
 
         let previous_size = Cell::new(None);
         self.map.compare_insert(
@@ -246,6 +264,8 @@ impl KVTable {
         if let Some(size) = previous_size.take() {
             self.size.fetch_sub(size, Ordering::Relaxed);
         }
+
+        Ok(())
     }
 
     pub(crate) async fn await_durable(&self) -> Result<(), SlateDBError> {
@@ -269,31 +289,41 @@ mod tests {
     #[tokio::test]
     async fn test_memtable_iter() {
         let mut table = WritableKVTable::new();
-        table.put(
-            Bytes::from_static(b"abc333"),
-            Bytes::from_static(b"value3"),
-            gen_attrs(1),
-        );
-        table.put(
-            Bytes::from_static(b"abc111"),
-            Bytes::from_static(b"value1"),
-            gen_attrs(2),
-        );
-        table.put(
-            Bytes::from_static(b"abc555"),
-            Bytes::from_static(b"value5"),
-            gen_attrs(3),
-        );
-        table.put(
-            Bytes::from_static(b"abc444"),
-            Bytes::from_static(b"value4"),
-            gen_attrs(4),
-        );
-        table.put(
-            Bytes::from_static(b"abc222"),
-            Bytes::from_static(b"value2"),
-            gen_attrs(5),
-        );
+        table
+            .put(
+                Bytes::from_static(b"abc333"),
+                Bytes::from_static(b"value3"),
+                gen_attrs(1),
+            )
+            .unwrap();
+        table
+            .put(
+                Bytes::from_static(b"abc111"),
+                Bytes::from_static(b"value1"),
+                gen_attrs(2),
+            )
+            .unwrap();
+        table
+            .put(
+                Bytes::from_static(b"abc555"),
+                Bytes::from_static(b"value5"),
+                gen_attrs(3),
+            )
+            .unwrap();
+        table
+            .put(
+                Bytes::from_static(b"abc444"),
+                Bytes::from_static(b"value4"),
+                gen_attrs(4),
+            )
+            .unwrap();
+        table
+            .put(
+                Bytes::from_static(b"abc222"),
+                Bytes::from_static(b"value2"),
+                gen_attrs(5),
+            )
+            .unwrap();
 
         let mut iter = table.table().iter();
         let kv = iter.next().await.unwrap().unwrap();
@@ -317,16 +347,20 @@ mod tests {
     #[tokio::test]
     async fn test_memtable_iter_entry_attrs() {
         let mut table = WritableKVTable::new();
-        table.put(
-            Bytes::from_static(b"abc333"),
-            Bytes::from_static(b"value3"),
-            gen_attrs(1),
-        );
-        table.put(
-            Bytes::from_static(b"abc111"),
-            Bytes::from_static(b"value1"),
-            gen_attrs(2),
-        );
+        table
+            .put(
+                Bytes::from_static(b"abc333"),
+                Bytes::from_static(b"value3"),
+                gen_attrs(1),
+            )
+            .unwrap();
+        table
+            .put(
+                Bytes::from_static(b"abc111"),
+                Bytes::from_static(b"value1"),
+                gen_attrs(2),
+            )
+            .unwrap();
 
         let mut iter = table.table().iter();
         let kv = iter.next_entry().await.unwrap().unwrap();
@@ -339,31 +373,41 @@ mod tests {
     #[tokio::test]
     async fn test_memtable_range_from_existing_key() {
         let mut table = WritableKVTable::new();
-        table.put(
-            Bytes::from_static(b"abc333"),
-            Bytes::from_static(b"value3"),
-            gen_attrs(1),
-        );
-        table.put(
-            Bytes::from_static(b"abc111"),
-            Bytes::from_static(b"value1"),
-            gen_attrs(2),
-        );
-        table.put(
-            Bytes::from_static(b"abc555"),
-            Bytes::from_static(b"value5"),
-            gen_attrs(3),
-        );
-        table.put(
-            Bytes::from_static(b"abc444"),
-            Bytes::from_static(b"value4"),
-            gen_attrs(4),
-        );
-        table.put(
-            Bytes::from_static(b"abc222"),
-            Bytes::from_static(b"value2"),
-            gen_attrs(5),
-        );
+        table
+            .put(
+                Bytes::from_static(b"abc333"),
+                Bytes::from_static(b"value3"),
+                gen_attrs(1),
+            )
+            .unwrap();
+        table
+            .put(
+                Bytes::from_static(b"abc111"),
+                Bytes::from_static(b"value1"),
+                gen_attrs(2),
+            )
+            .unwrap();
+        table
+            .put(
+                Bytes::from_static(b"abc555"),
+                Bytes::from_static(b"value5"),
+                gen_attrs(3),
+            )
+            .unwrap();
+        table
+            .put(
+                Bytes::from_static(b"abc444"),
+                Bytes::from_static(b"value4"),
+                gen_attrs(4),
+            )
+            .unwrap();
+        table
+            .put(
+                Bytes::from_static(b"abc222"),
+                Bytes::from_static(b"value2"),
+                gen_attrs(5),
+            )
+            .unwrap();
 
         let mut iter = table.table().range(Bytes::from_static(b"abc333")..);
         let kv = iter.next().await.unwrap().unwrap();
@@ -381,31 +425,41 @@ mod tests {
     #[tokio::test]
     async fn test_memtable_range_from_nonexisting_key() {
         let mut table = WritableKVTable::new();
-        table.put(
-            Bytes::from_static(b"abc333"),
-            Bytes::from_static(b"value3"),
-            gen_attrs(1),
-        );
-        table.put(
-            Bytes::from_static(b"abc111"),
-            Bytes::from_static(b"value1"),
-            gen_attrs(2),
-        );
-        table.put(
-            Bytes::from_static(b"abc555"),
-            Bytes::from_static(b"value5"),
-            gen_attrs(3),
-        );
-        table.put(
-            Bytes::from_static(b"abc444"),
-            Bytes::from_static(b"value4"),
-            gen_attrs(4),
-        );
-        table.put(
-            Bytes::from_static(b"abc222"),
-            Bytes::from_static(b"value2"),
-            gen_attrs(5),
-        );
+        table
+            .put(
+                Bytes::from_static(b"abc333"),
+                Bytes::from_static(b"value3"),
+                gen_attrs(1),
+            )
+            .unwrap();
+        table
+            .put(
+                Bytes::from_static(b"abc111"),
+                Bytes::from_static(b"value1"),
+                gen_attrs(2),
+            )
+            .unwrap();
+        table
+            .put(
+                Bytes::from_static(b"abc555"),
+                Bytes::from_static(b"value5"),
+                gen_attrs(3),
+            )
+            .unwrap();
+        table
+            .put(
+                Bytes::from_static(b"abc444"),
+                Bytes::from_static(b"value4"),
+                gen_attrs(4),
+            )
+            .unwrap();
+        table
+            .put(
+                Bytes::from_static(b"abc222"),
+                Bytes::from_static(b"value2"),
+                gen_attrs(5),
+            )
+            .unwrap();
 
         let mut iter = table.table().range(Bytes::from_static(b"abc345")..);
         let kv = iter.next().await.unwrap().unwrap();
@@ -420,12 +474,16 @@ mod tests {
     #[tokio::test]
     async fn test_memtable_iter_delete() {
         let mut table = WritableKVTable::new();
-        table.put(
-            Bytes::from_static(b"abc333"),
-            Bytes::from_static(b"value3"),
-            gen_attrs(1),
-        );
-        table.delete(Bytes::from_static(b"abc333"), gen_attrs(2));
+        table
+            .put(
+                Bytes::from_static(b"abc333"),
+                Bytes::from_static(b"value3"),
+                gen_attrs(1),
+            )
+            .unwrap();
+        table
+            .delete(Bytes::from_static(b"abc333"), gen_attrs(2))
+            .unwrap();
 
         let mut iter = table.table().iter();
         assert!(iter.next().await.unwrap().is_none());
@@ -436,44 +494,56 @@ mod tests {
         let mut table = WritableKVTable::new();
 
         assert_eq!(table.table.size(), 0);
-        table.put(
-            Bytes::from_static(b"first"),
-            Bytes::from_static(b"foo"),
-            gen_attrs(1),
-        );
+        table
+            .put(
+                Bytes::from_static(b"first"),
+                Bytes::from_static(b"foo"),
+                gen_attrs(1),
+            )
+            .unwrap();
         assert_eq!(table.table.size(), 16); // first(5) + foo(3) + attrs(8)
 
         // ensure that multiple deletes keep the table size stable
         for ts in 2..5 {
-            table.delete(Bytes::from_static(b"first"), gen_attrs(ts));
+            table
+                .delete(Bytes::from_static(b"first"), gen_attrs(ts))
+                .unwrap();
             assert_eq!(table.table.size(), 13); // first(5) + attrs(8)
         }
 
-        table.put(
-            Bytes::from_static(b"abc333"),
-            Bytes::from_static(b"val1"),
-            gen_attrs(1),
-        );
+        table
+            .put(
+                Bytes::from_static(b"abc333"),
+                Bytes::from_static(b"val1"),
+                gen_attrs(6),
+            )
+            .unwrap();
         assert_eq!(table.table.size(), 31); // 13 + abc333(6) + val1(4) + attrs(8)
 
-        table.put(
-            Bytes::from_static(b"def456"),
-            Bytes::from_static(b"blablabla"),
-            RowAttributes {
-                ts: None,
-                expire_ts: None,
-            },
-        );
+        table
+            .put(
+                Bytes::from_static(b"def456"),
+                Bytes::from_static(b"blablabla"),
+                RowAttributes {
+                    ts: None,
+                    expire_ts: None,
+                },
+            )
+            .unwrap();
         assert_eq!(table.table.size(), 46); // 31 + def456(6) + blablabla(9) + attrs(0)
 
-        table.put(
-            Bytes::from_static(b"def456"),
-            Bytes::from_static(b"blabla"),
-            gen_attrs(3),
-        );
+        table
+            .put(
+                Bytes::from_static(b"def456"),
+                Bytes::from_static(b"blabla"),
+                gen_attrs(7),
+            )
+            .unwrap();
         assert_eq!(table.table.size(), 51); // 46 - blablabla(9) + blabla(6) - attrs(0) + attrs(8)
 
-        table.delete(Bytes::from_static(b"abc333"), gen_attrs(4));
+        table
+            .delete(Bytes::from_static(b"abc333"), gen_attrs(8))
+            .unwrap();
         assert_eq!(table.table.size(), 47) // 51 - val1(4)
     }
 }
