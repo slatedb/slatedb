@@ -18,7 +18,7 @@ pub(crate) async fn create_clone<P: Into<Path>>(
     parent_path: P,
     object_store: Arc<dyn ObjectStore>,
     parent_checkpoint: Option<Uuid>,
-    fp_registry: Option<Arc<FailPointRegistry>>,
+    fp_registry: Arc<FailPointRegistry>,
 ) -> Result<(), SlateDBError> {
     let clone_path = clone_path.into();
     let parent_path = parent_path.into();
@@ -283,18 +283,17 @@ async fn copy_wal_ssts(
     parent_checkpoint_state: &CoreDbState,
     parent_path: &Path,
     clone_path: &Path,
-    fp_registry: Option<Arc<FailPointRegistry>>,
+    #[allow(unused)]
+    fp_registry: Arc<FailPointRegistry>,
 ) -> Result<(), SlateDBError> {
     let parent_path_resolver = PathResolver::new(parent_path.clone());
     let clone_path_resolver = PathResolver::new(clone_path.clone());
 
     let mut wal_id = parent_checkpoint_state.last_compacted_wal_sst_id + 1;
     while wal_id < parent_checkpoint_state.next_wal_sst_id {
-        if let Some(fp_registry) = fp_registry.clone() {
-            fail_point!(fp_registry, "copy-wal-ssts-io-error", |_| Err(
-                SlateDBError::from(std::io::Error::new(std::io::ErrorKind::Other, "oops"))
-            ));
-        }
+        fail_point!(Arc::clone(&fp_registry), "copy-wal-ssts-io-error", |_| Err(
+            SlateDBError::from(std::io::Error::new(std::io::ErrorKind::Other, "oops"))
+        ));
 
         let id = SsTableId::Wal(wal_id);
         let parent_path = parent_path_resolver.table_path(&id);
@@ -350,7 +349,7 @@ mod tests {
             parent_path.clone(),
             Arc::clone(&object_store),
             None,
-            None,
+            Arc::new(FailPointRegistry::new()),
         )
         .await
         .unwrap();
@@ -400,7 +399,7 @@ mod tests {
             parent_path.clone(),
             Arc::clone(&object_store),
             Some(checkpoint.id),
-            None,
+            Arc::new(FailPointRegistry::new()),
         )
         .await
         .unwrap();
@@ -446,7 +445,7 @@ mod tests {
             parent_path.clone(),
             Arc::clone(&object_store),
             None,
-            None,
+            Arc::new(FailPointRegistry::new()),
         )
         .await
         .unwrap();
@@ -499,7 +498,7 @@ mod tests {
             parent_path.clone(),
             Arc::clone(&object_store),
             Some(checkpoint_2.id),
-            None,
+            Arc::new(FailPointRegistry::new()),
         )
         .await
         .unwrap();
@@ -568,7 +567,7 @@ mod tests {
             updated_parent_path.clone(),
             Arc::clone(&object_store),
             None,
-            None,
+            Arc::new(FailPointRegistry::new()),
         )
         .await
         .unwrap_err();
@@ -595,7 +594,7 @@ mod tests {
             parent_path,
             Arc::clone(&object_store),
             None,
-            None,
+            Arc::new(FailPointRegistry::new()),
         )
         .await
         .unwrap();
@@ -609,7 +608,7 @@ mod tests {
             parent_path,
             Arc::clone(&object_store),
             None,
-            None,
+            Arc::new(FailPointRegistry::new()),
         )
         .await
         .unwrap();
@@ -653,7 +652,7 @@ mod tests {
             parent_path.clone(),
             Arc::clone(&object_store),
             None,
-            Some(Arc::clone(&fp_registry)),
+            Arc::clone(&fp_registry),
         )
         .await
         .unwrap_err();
@@ -665,7 +664,7 @@ mod tests {
             parent_path.clone(),
             Arc::clone(&object_store),
             None,
-            Some(Arc::clone(&fp_registry)),
+            Arc::clone(&fp_registry),
         )
         .await
         .unwrap();

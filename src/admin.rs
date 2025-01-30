@@ -15,6 +15,7 @@ use std::env;
 use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
+use fail_parallel::FailPointRegistry;
 use tokio::runtime::Handle;
 use uuid::Uuid;
 
@@ -284,7 +285,7 @@ pub async fn create_clone<P: Into<Path>>(
         parent_path,
         object_store,
         parent_checkpoint,
-        None,
+        Arc::new(FailPointRegistry::new()),
     )
     .await?;
     Ok(())
