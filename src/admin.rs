@@ -279,7 +279,14 @@ pub async fn create_clone<P: Into<Path>>(
     object_store: Arc<dyn ObjectStore>,
     parent_checkpoint: Option<Uuid>,
 ) -> Result<(), Box<dyn Error>> {
-    clone::create_clone(clone_path, parent_path, object_store, parent_checkpoint).await?;
+    clone::create_clone(
+        clone_path,
+        parent_path,
+        object_store,
+        parent_checkpoint,
+        None,
+    )
+    .await?;
     Ok(())
 }
 
