@@ -2,7 +2,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use object_store::{memory::InMemory, path::Path};
 use pprof::criterion::{Output, PProfProfiler};
 use slatedb::config::{PutOptions, WriteOptions};
-use slatedb::{config::DbOptions, db::Db};
+use slatedb::{config::DbOptions, Db};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 

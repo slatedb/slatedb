@@ -7,7 +7,7 @@ use slatedb::config::GcExecutionMode::{Once, Periodic};
 use slatedb::config::{
     CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
-use slatedb::db::Db;
+use slatedb::Db;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;

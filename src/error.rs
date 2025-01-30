@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::merge_operator::MergeOperatorError;
 
+#[non_exhaustive]
 #[derive(Clone, Debug, Error)]
 pub enum SlateDBError {
     #[error("IO error: {0}")]
@@ -129,6 +130,7 @@ impl From<object_store::Error> for SlateDBError {
 ///
 /// This enum encapsulates various error conditions that may arise
 /// when parsing or processing database configuration options.
+#[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum DbOptionsError {
     #[error("Unknown configuration file format: {0}")]

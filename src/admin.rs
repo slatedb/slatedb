@@ -249,7 +249,7 @@ pub async fn create_checkpoint(
 ///
 /// ```
 /// use slatedb::admin;
-/// use slatedb::db::Db;
+/// use slatedb::Db;
 /// use slatedb::object_store::{ObjectStore, memory::InMemory};
 /// use std::error::Error;
 /// use std::sync::Arc;
