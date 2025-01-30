@@ -8,7 +8,7 @@
 //! Basic usage of the `Db` struct:
 //!
 //! ```
-//! use slatedb::{db::Db, error::SlateDBError};
+//! use slatedb::{Db, SlateDBError};
 //! use slatedb::object_store::{ObjectStore, memory::InMemory};
 //! use std::sync::Arc;
 //!
@@ -585,7 +585,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::{Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -619,7 +619,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, config::DbOptions, error::SlateDBError};
+    /// use slatedb::{Db, config::DbOptions, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -661,7 +661,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, config::DbOptions, error::SlateDBError};
+    /// use slatedb::{Db, config::DbOptions, SlateDBError};
     /// use slatedb::fail_parallel::FailPointRegistry;
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
@@ -839,7 +839,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::{Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -931,7 +931,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::{Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -972,7 +972,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, config::ReadOptions, error::SlateDBError};
+    /// use slatedb::{Db, config::ReadOptions, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1003,7 +1003,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::{Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1047,7 +1047,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, config::ScanOptions, config::ReadLevel, error::SlateDBError};
+    /// use slatedb::{Db, config::ScanOptions, config::ReadLevel, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1100,7 +1100,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::{Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1136,7 +1136,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, config::{PutOptions, WriteOptions}, error::SlateDBError};
+    /// use slatedb::{Db, config::{PutOptions, WriteOptions}, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1175,7 +1175,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::{Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1205,7 +1205,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, config::WriteOptions, error::SlateDBError};
+    /// use slatedb::{Db, config::WriteOptions, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1240,7 +1240,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{batch::WriteBatch, db::Db, error::SlateDBError};
+    /// use slatedb::{WriteBatch, Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1277,7 +1277,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{batch::WriteBatch, db::Db, config::WriteOptions, error::SlateDBError};
+    /// use slatedb::{WriteBatch, Db, config::WriteOptions, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1313,7 +1313,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::{Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
