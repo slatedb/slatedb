@@ -52,14 +52,14 @@ impl ReadOnlyBlob for ReadOnlyObject {
     async fn read_range(&self, range: Range<usize>) -> Result<Bytes, SlateDBError> {
         let len = range.end - range.start;
         let bytes = self.object_store.get_range(&self.path, range)
-            .instrument(span!(tracing::Level::INFO, "read-range", len=len, path=self.path.clone().to_string()))
+            .instrument(span!(tracing::Level::TRACE, "read-range", len=len, path=self.path.clone().to_string()))
             .await?;
         Ok(bytes)
     }
 
     async fn read(&self) -> Result<Bytes, SlateDBError> {
         let file = self.object_store.get(&self.path)
-            .instrument(span!(tracing::Level::INFO, "read-obj", path=self.path.clone().to_string()))
+            .instrument(span!(tracing::Level::TRACE, "read-obj", path=self.path.clone().to_string()))
             .await?;
         let bytes = file.bytes().await?;
         Ok(bytes)
@@ -302,13 +302,13 @@ impl TableStore {
         if let Some(cache) = &self.block_cache {
             if let Some(filter) = cache
                 .get((handle.id, handle.info.filter_offset).into())
-                .instrument(span!(tracing::Level::INFO, "lookup filter cache"))
+                .instrument(span!(tracing::Level::TRACE, "lookup filter cache"))
                 .await
                 .and_then(|entry| entry.bloom_filter())
             {
                 return Ok(Some(filter));
             }
-            event!(tracing::Level::INFO, "cache miss");
+            event!(tracing::Level::TRACE, "cache miss");
         }
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
@@ -316,7 +316,7 @@ impl TableStore {
             path,
         };
         let filter = self.sst_format.read_filter(&handle.info, &obj)
-            .instrument(span!(tracing::Level::INFO, "sst-read-filter"))
+            .instrument(span!(tracing::Level::TRACE, "sst-read-filter"))
             .await?;
         if let Some(cache) = &self.block_cache {
             if let Some(filter) = filter.as_ref() {
@@ -325,7 +325,7 @@ impl TableStore {
                         (handle.id, handle.info.filter_offset).into(),
                         CachedEntry::with_bloom_filter(filter.clone()),
                     )
-                    .instrument(span!(tracing::Level::INFO, "insert cache"))
+                    .instrument(span!(tracing::Level::TRACE, "insert cache"))
                     .await;
             }
         }
@@ -339,7 +339,7 @@ impl TableStore {
         if let Some(cache) = &self.block_cache {
             if let Some(index) = cache
                 .get((handle.id, handle.info.index_offset).into())
-                .instrument(span!(tracing::Level::INFO, "cache index lookup"))
+                .instrument(span!(tracing::Level::TRACE, "cache index lookup"))
                 .await
                 .and_then(|entry| entry.sst_index())
             {
@@ -412,7 +412,7 @@ impl TableStore {
                 let offset = block_meta.offset();
                 cache
                     .get((handle.id, offset).into())
-                    .instrument(span!(tracing::Level::INFO, "cache lookup blocks"))
+                    .instrument(span!(tracing::Level::TRACE, "cache lookup blocks"))
                     .await
                     .and_then(|entry| entry.block())
             }))
@@ -451,7 +451,7 @@ impl TableStore {
             async move {
                 self.sst_format
                     .read_blocks(&handle.info, index_ref, range.clone(), obj_ref)
-                    .instrument(span!(tracing::Level::INFO, "sst read blocks"))
+                    .instrument(span!(tracing::Level::TRACE, "sst read blocks"))
                     .await
             }
         }))

@@ -148,15 +148,15 @@ impl DbInner {
 
         for sst in &snapshot.state.core.l0 {
             if self.sst_might_include_key(sst, key, key_hash)
-                .instrument(span!(tracing::Level::INFO, "might_include_key"))
+                .instrument(span!(tracing::Level::TRACE, "might_include_key"))
                 .await? {
                 let mut iter =
                     SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
-                        .instrument(span!(tracing::Level::INFO, "sst_iter_for_key"))
+                        .instrument(span!(tracing::Level::TRACE, "sst_iter_for_key"))
                         .await?;
 
                 if let Some(entry) = iter.next_entry()
-                    .instrument(span!(tracing::Level::INFO, "next_entry"))
+                    .instrument(span!(tracing::Level::TRACE, "next_entry"))
                     .await? {
                     if entry.key == key {
                         return unwrap_result(entry.value);
@@ -167,11 +167,11 @@ impl DbInner {
 
         for sr in &snapshot.state.core.compacted {
             if self.sr_might_include_key(sr, key, key_hash)
-                .instrument(span!(tracing::Level::INFO, "sr_might_include_key"))
+                .instrument(span!(tracing::Level::TRACE, "sr_might_include_key"))
                 .await? {
                 let mut iter =
                     SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
-                        .instrument(span!(tracing::Level::INFO, "sr_iter_for_key"))
+                        .instrument(span!(tracing::Level::TRACE, "sr_iter_for_key"))
                         .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
@@ -290,7 +290,7 @@ impl DbInner {
             return Ok(false);
         }
         if let Some(filter) = self.table_store.read_filter(sst)
-            .instrument(span!(tracing::Level::INFO, "ts_read_filter"))
+            .instrument(span!(tracing::Level::TRACE, "ts_read_filter"))
             .await? {
             return Ok(filter.might_contain(key_hash));
         }
@@ -957,7 +957,7 @@ impl Db {
     pub async fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Bytes>, SlateDBError> {
         self.inner
             .get_with_options(key, &ReadOptions::default())
-            .instrument(span!(tracing::Level::INFO, "get"))
+            .instrument(span!(tracing::Level::TRACE, "get"))
             .await
     }
 
