@@ -1,3 +1,13 @@
+<!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
+
+- [SlateDB Error API](#slatedb-error-api)
+   * [Motivation](#motivation)
+   * [Goals](#goals)
+   * [Principles](#principles)
+   * [Public API](#public-api)
+
+<!-- TOC end -->
+
 # SlateDB Error API
 
 Status: Draft
