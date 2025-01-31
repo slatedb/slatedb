@@ -58,7 +58,7 @@ use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowAttributes, ValueDeletable};
 use crate::utils::MonotonicClock;
-use tracing::{info, warn};
+use tracing::{info, Instrument, span, warn};
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -147,12 +147,17 @@ impl DbInner {
         };
 
         for sst in &snapshot.state.core.l0 {
-            if self.sst_might_include_key(sst, key, key_hash).await? {
+            if self.sst_might_include_key(sst, key, key_hash)
+                .instrument(span!(tracing::Level::INFO, "might_include_key"))
+                .await? {
                 let mut iter =
                     SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
+                        .instrument(span!(tracing::Level::INFO, "sst_iter_for_key"))
                         .await?;
 
-                if let Some(entry) = iter.next_entry().await? {
+                if let Some(entry) = iter.next_entry()
+                    .instrument(span!(tracing::Level::INFO, "next_entry"))
+                    .await? {
                     if entry.key == key {
                         return unwrap_result(entry.value);
                     }
@@ -161,9 +166,12 @@ impl DbInner {
         }
 
         for sr in &snapshot.state.core.compacted {
-            if self.sr_might_include_key(sr, key, key_hash).await? {
+            if self.sr_might_include_key(sr, key, key_hash)
+                .instrument(span!(tracing::Level::INFO, "sr_might_include_key"))
+                .await? {
                 let mut iter =
                     SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
+                        .instrument(span!(tracing::Level::INFO, "sr_iter_for_key"))
                         .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
@@ -281,7 +289,9 @@ impl DbInner {
         if !sst.range_covers_key(key) {
             return Ok(false);
         }
-        if let Some(filter) = self.table_store.read_filter(sst).await? {
+        if let Some(filter) = self.table_store.read_filter(sst)
+            .instrument(span!(tracing::Level::INFO, "ts_read_filter"))
+            .await? {
             return Ok(filter.might_contain(key_hash));
         }
         Ok(true)
@@ -947,6 +957,7 @@ impl Db {
     pub async fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Bytes>, SlateDBError> {
         self.inner
             .get_with_options(key, &ReadOptions::default())
+            .instrument(span!(tracing::Level::INFO, "get"))
             .await
     }
 
