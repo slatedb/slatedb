@@ -8,6 +8,7 @@ use rand::Rng;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
@@ -89,6 +90,7 @@ macro_rules! assert_debug_snapshot {
 }
 
 use crate::db::Db;
+use crate::db_iter::DbIterator;
 pub(crate) use assert_debug_snapshot;
 
 pub(crate) fn decode_codec_entries(
@@ -119,6 +121,28 @@ pub(crate) fn decode_codec_entries(
     }
 
     Ok(entries)
+}
+
+pub(crate) async fn assert_ordered_scan_in_range<T: RangeBounds<Bytes>>(
+    table: &BTreeMap<Bytes, Bytes>,
+    range: T,
+    iter: &mut DbIterator<'_>,
+) {
+    let mut expected = table.range(range);
+
+    loop {
+        match (expected.next(), iter.next().await.unwrap()) {
+            (None, None) => break,
+            (Some((expected_key, expected_value)), Some(actual)) => {
+                assert_eq!(expected_key, &actual.key);
+                assert_eq!(expected_value, &actual.value);
+            }
+            (Some(expected_record), None) => {
+                panic!("Expected record {expected_record:?} missing from scan result")
+            }
+            (None, Some(actual)) => panic!("Unexpected record {actual:?} in scan result"),
+        }
+    }
 }
 
 pub(crate) fn bound_as_option<T>(bound: Bound<&T>) -> Option<&T>
