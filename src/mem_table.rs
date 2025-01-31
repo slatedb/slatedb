@@ -1,26 +1,98 @@
+use std::cell::Cell;
+use std::collections::VecDeque;
+use std::ops::{Bound, RangeBounds};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
-use std::cell::Cell;
-use std::collections::VecDeque;
-use std::ops::{RangeBounds, RangeFull};
+use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
-use std::sync::Arc;
 
 use crate::error::SlateDBError;
 use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::merge_iterator::MergeIterator;
-use crate::types::{RowAttributes, RowEntry, ValueDeletable};
+use crate::types::RowEntry;
 use crate::utils::WatchableOnceCell;
 
+/// Memtable may contains multiple versions of a single user key, with a monotonically increasing sequence number.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct KVTableInternalKey {
+    user_key: Bytes,
+    seq: u64,
+}
+
+impl KVTableInternalKey {
+    pub fn new(user_key: Bytes, seq: u64) -> Self {
+        Self { user_key, seq }
+    }
+}
+
+impl Ord for KVTableInternalKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.user_key
+            .cmp(&other.user_key)
+            .then(self.seq.cmp(&other.seq).reverse())
+    }
+}
+
+impl PartialOrd for KVTableInternalKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct KVTableInternalKeyRange {
+    start_bound: Bound<KVTableInternalKey>,
+    end_bound: Bound<KVTableInternalKey>,
+}
+
+impl RangeBounds<KVTableInternalKey> for KVTableInternalKeyRange {
+    fn start_bound(&self) -> Bound<&KVTableInternalKey> {
+        self.start_bound.as_ref()
+    }
+
+    fn end_bound(&self) -> Bound<&KVTableInternalKey> {
+        self.end_bound.as_ref()
+    }
+}
+
+/// Convert a user key range to a memtable internal key range. The internal key range should contain all the sequence
+/// numbers for the given user key in the range. This is used for iterating over the memtable in [`KVTable::range`].
+///
+/// Please note that the sequence number is ordered in reverse, given a user key range (`key001`..=`key001`), the first
+/// sequence number in this range is u64::MAX, and the last sequence number is 0. The output range should be
+/// `(key001, u64::MAX) ..= (key001, 0)`.
+impl From<BytesRange> for KVTableInternalKeyRange {
+    fn from(range: BytesRange) -> Self {
+        let start_bound = match range.start_bound() {
+            Bound::Included(key) => Bound::Included(KVTableInternalKey::new(key.clone(), u64::MAX)),
+            Bound::Excluded(key) => Bound::Excluded(KVTableInternalKey::new(key.clone(), 0)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let end_bound = match range.end_bound() {
+            Bound::Included(key) => Bound::Included(KVTableInternalKey::new(key.clone(), 0)),
+            Bound::Excluded(key) => Bound::Excluded(KVTableInternalKey::new(key.clone(), u64::MAX)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        Self {
+            start_bound,
+            end_bound,
+        }
+    }
+}
+
 pub(crate) struct KVTable {
-    map: SkipMap<Bytes, ValueWithAttributes>,
+    map: SkipMap<KVTableInternalKey, RowEntry>,
     durable: WatchableOnceCell<Result<(), SlateDBError>>,
     size: AtomicUsize,
     /// this corresponds to the timestamp of the most recent
     /// modifying operation on this KVTable (insertion or deletion)
     last_tick: AtomicI64,
+    /// the sequence number of the most recent operation on this KVTable
+    last_seq: AtomicU64,
 }
 
 pub(crate) struct WritableKVTable {
@@ -37,9 +109,10 @@ pub(crate) struct ImmutableWal {
     table: Arc<KVTable>,
 }
 
-type MemTableRange<'a, T> = Range<'a, Bytes, T, Bytes, ValueWithAttributes>;
-
-pub(crate) struct MemTableIterator<'a, T: RangeBounds<Bytes>>(MemTableRange<'a, T>);
+pub(crate) struct MemTableIterator<'a, T: RangeBounds<KVTableInternalKey>> {
+    /// `inner` is the Iterator impl of SkipMap, which is the underlying data structure of MemTable.
+    inner: Range<'a, KVTableInternalKey, T, KVTableInternalKey, RowEntry>,
+}
 
 pub(crate) struct VecDequeKeyValueIterator {
     rows: VecDeque<RowEntry>,
@@ -89,27 +162,15 @@ impl SeekToKey for VecDequeKeyValueIterator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ValueWithAttributes {
-    pub(crate) value: ValueDeletable,
-    pub(crate) attrs: RowAttributes,
-}
-
-impl<T: RangeBounds<Bytes>> KeyValueIterator for MemTableIterator<'_, T> {
+impl<T: RangeBounds<KVTableInternalKey>> KeyValueIterator for MemTableIterator<'_, T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.next_entry_sync())
     }
 }
 
-impl<T: RangeBounds<Bytes>> MemTableIterator<'_, T> {
+impl<T: RangeBounds<KVTableInternalKey>> MemTableIterator<'_, T> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
-        self.0.next().map(|entry| RowEntry {
-            key: entry.key().clone(),
-            value: entry.value().value.clone(),
-            seq: 0,
-            create_ts: entry.value().attrs.ts,
-            expire_ts: entry.value().attrs.expire_ts,
-        })
+        self.inner.next().map(|entry| entry.value().clone())
     }
 }
 
@@ -160,14 +221,8 @@ impl WritableKVTable {
         &self.table
     }
 
-    pub(crate) fn put(&mut self, key: Bytes, value: Bytes, attrs: RowAttributes) {
-        self.table
-            .put_or_delete(key, ValueDeletable::Value(value), attrs)
-    }
-
-    pub(crate) fn delete(&mut self, key: Bytes, attrs: RowAttributes) {
-        self.table
-            .put_or_delete(key, ValueDeletable::Tombstone, attrs);
+    pub(crate) fn put(&mut self, row: RowEntry) {
+        self.table.put(row);
     }
 
     pub(crate) fn size(&self) -> usize {
@@ -186,6 +241,7 @@ impl KVTable {
             size: AtomicUsize::new(0),
             durable: WatchableOnceCell::new(),
             last_tick: AtomicI64::new(i64::MIN),
+            last_seq: AtomicU64::new(0),
         }
     }
 
@@ -201,51 +257,64 @@ impl KVTable {
         self.last_tick.load(SeqCst)
     }
 
+    pub(crate) fn last_seq(&self) -> Option<u64> {
+        if self.is_empty() {
+            None
+        } else {
+            let last_seq = self.last_seq.load(SeqCst);
+            Some(last_seq)
+        }
+    }
+
     /// Get the value for a given key.
     /// Returns None if the key is not in the memtable at all,
     /// Some(None) if the key is in the memtable but has a tombstone value,
     /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
-    pub(crate) fn get(&self, key: &[u8]) -> Option<ValueWithAttributes> {
-        self.map.get(key).map(|entry| entry.value().clone())
+    pub(crate) fn get(&self, key: &[u8]) -> Option<RowEntry> {
+        let user_key = Bytes::from(key.to_vec());
+        let range = KVTableInternalKeyRange::from(BytesRange::new(
+            Bound::Included(user_key.clone()),
+            Bound::Included(user_key),
+        ));
+        self.map
+            .range(range)
+            .next()
+            .map(|entry| entry.value().clone())
     }
 
-    pub(crate) fn iter(&self) -> MemTableIterator<RangeFull> {
-        self.range(..)
+    pub(crate) fn iter(&self) -> MemTableIterator<KVTableInternalKeyRange> {
+        self.range(BytesRange::from(..))
     }
 
-    pub(crate) fn range<T: RangeBounds<Bytes>>(&self, range: T) -> MemTableIterator<T> {
-        MemTableIterator(self.map.range(range))
+    pub(crate) fn range(&self, range: BytesRange) -> MemTableIterator<KVTableInternalKeyRange> {
+        MemTableIterator {
+            inner: self.map.range(KVTableInternalKeyRange::from(range)),
+        }
     }
 
-    /// Inserts a value, returning as soon as the value is written to the memtable but before
-    /// it is flushed to durable storage.
-    fn put_or_delete(&self, key: Bytes, value: ValueDeletable, attrs: RowAttributes) {
-        let key_len = key.len();
-        self.size.fetch_add(
-            key_len + value.len() + sizeof_attributes(&attrs),
-            Ordering::Relaxed,
-        );
+    fn put(&self, row: RowEntry) {
+        self.size.fetch_add(row.estimated_size(), Ordering::Relaxed);
+        let internal_key = KVTableInternalKey::new(row.key.clone(), row.seq);
+        let previous_size = Cell::new(None);
 
         // it is safe to use fetch_max here to update the last tick
         // because the monotonicity is enforced when generating the clock tick
         // (see [crate::utils::MonotonicClock::now])
-        attrs.ts.map(|tick| self.last_tick.fetch_max(tick, SeqCst));
+        if let Some(create_ts) = row.create_ts {
+            self.last_tick
+                .fetch_max(create_ts, atomic::Ordering::SeqCst);
+        }
+        // update the last seq number if it is greater than the current last seq
+        self.last_seq.fetch_max(row.seq, atomic::Ordering::SeqCst);
 
-        let previous_size = Cell::new(None);
-        self.map.compare_insert(
-            key,
-            ValueWithAttributes { value, attrs },
-            |previous_value| {
-                // Optimistically calculate the size of the previous value.
-                let size =
-                    key_len + previous_value.value.len() + sizeof_attributes(&previous_value.attrs);
-                // `compare_fn` might be called multiple times in case of concurrent
-                // writes to the same key, so we use `Cell` to avoid substracting
-                // the size multiple times. The last call will set the correct size.
-                previous_size.set(Some(size));
-                true
-            },
-        );
+        self.map.compare_insert(internal_key, row, |previous_row| {
+            // Optimistically calculate the size of the previous value.
+            // `compare_fn` might be called multiple times in case of concurrent
+            // writes to the same key, so we use `Cell` to avoid substracting
+            // the size multiple times. The last call will set the correct size.
+            previous_size.set(Some(previous_row.estimated_size()));
+            true
+        });
         if let Some(size) = previous_size.take() {
             self.size.fetch_sub(size, Ordering::Relaxed);
         }
@@ -260,178 +329,118 @@ impl KVTable {
     }
 }
 
-fn sizeof_attributes(attrs: &RowAttributes) -> usize {
-    attrs.ts.map(|_| 8).unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::gen_attrs;
+    use crate::test_utils::assert_iterator;
+    use rstest::rstest;
 
     #[tokio::test]
     async fn test_memtable_iter() {
         let mut table = WritableKVTable::new();
-        table.put(
-            Bytes::from_static(b"abc333"),
-            Bytes::from_static(b"value3"),
-            gen_attrs(1),
-        );
-        table.put(
-            Bytes::from_static(b"abc111"),
-            Bytes::from_static(b"value1"),
-            gen_attrs(2),
-        );
-        table.put(
-            Bytes::from_static(b"abc555"),
-            Bytes::from_static(b"value5"),
-            gen_attrs(3),
-        );
-        table.put(
-            Bytes::from_static(b"abc444"),
-            Bytes::from_static(b"value4"),
-            gen_attrs(4),
-        );
-        table.put(
-            Bytes::from_static(b"abc222"),
-            Bytes::from_static(b"value2"),
-            gen_attrs(5),
-        );
+        table.put(RowEntry::new_value(b"abc333", b"value3", 1));
+        table.put(RowEntry::new_value(b"abc111", b"value1", 2));
+        table.put(RowEntry::new_value(b"abc555", b"value5", 3));
+        table.put(RowEntry::new_value(b"abc444", b"value4", 4));
+        table.put(RowEntry::new_value(b"abc222", b"value2", 5));
+        assert_eq!(table.table().last_seq(), Some(5));
 
         let mut iter = table.table().iter();
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc111".as_slice());
-        assert_eq!(kv.value, b"value1".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc222".as_slice());
-        assert_eq!(kv.value, b"value2".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc333".as_slice());
-        assert_eq!(kv.value, b"value3".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc444".as_slice());
-        assert_eq!(kv.value, b"value4".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc555".as_slice());
-        assert_eq!(kv.value, b"value5".as_slice());
-        assert!(iter.next().await.unwrap().is_none());
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"abc111", b"value1", 2),
+                RowEntry::new_value(b"abc222", b"value2", 5),
+                RowEntry::new_value(b"abc333", b"value3", 1),
+                RowEntry::new_value(b"abc444", b"value4", 4),
+                RowEntry::new_value(b"abc555", b"value5", 3),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_memtable_iter_entry_attrs() {
         let mut table = WritableKVTable::new();
-        table.put(
-            Bytes::from_static(b"abc333"),
-            Bytes::from_static(b"value3"),
-            gen_attrs(1),
-        );
-        table.put(
-            Bytes::from_static(b"abc111"),
-            Bytes::from_static(b"value1"),
-            gen_attrs(2),
-        );
+        table.put(RowEntry::new_value(b"abc333", b"value3", 1));
+        table.put(RowEntry::new_value(b"abc111", b"value1", 2));
 
         let mut iter = table.table().iter();
-        let kv = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc111".as_slice());
-        let kv = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc333".as_slice());
-        assert!(iter.next().await.unwrap().is_none());
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"abc111", b"value1", 2),
+                RowEntry::new_value(b"abc333", b"value3", 1),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_memtable_range_from_existing_key() {
         let mut table = WritableKVTable::new();
-        table.put(
-            Bytes::from_static(b"abc333"),
-            Bytes::from_static(b"value3"),
-            gen_attrs(1),
-        );
-        table.put(
-            Bytes::from_static(b"abc111"),
-            Bytes::from_static(b"value1"),
-            gen_attrs(2),
-        );
-        table.put(
-            Bytes::from_static(b"abc555"),
-            Bytes::from_static(b"value5"),
-            gen_attrs(3),
-        );
-        table.put(
-            Bytes::from_static(b"abc444"),
-            Bytes::from_static(b"value4"),
-            gen_attrs(4),
-        );
-        table.put(
-            Bytes::from_static(b"abc222"),
-            Bytes::from_static(b"value2"),
-            gen_attrs(5),
-        );
+        table.put(RowEntry::new_value(b"abc333", b"value3", 1));
+        table.put(RowEntry::new_value(b"abc111", b"value1", 2));
+        table.put(RowEntry::new_value(b"abc555", b"value5", 3));
+        table.put(RowEntry::new_value(b"abc444", b"value4", 4));
+        table.put(RowEntry::new_value(b"abc222", b"value2", 5));
 
-        let mut iter = table.table().range(Bytes::from_static(b"abc333")..);
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc333".as_slice());
-        assert_eq!(kv.value, b"value3".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc444".as_slice());
-        assert_eq!(kv.value, b"value4".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc555".as_slice());
-        assert_eq!(kv.value, b"value5".as_slice());
-        assert!(iter.next().await.unwrap().is_none());
+        let mut iter = table
+            .table()
+            .range(BytesRange::from(Bytes::from_static(b"abc333")..));
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"abc333", b"value3", 1),
+                RowEntry::new_value(b"abc444", b"value4", 4),
+                RowEntry::new_value(b"abc555", b"value5", 3),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_memtable_range_from_nonexisting_key() {
         let mut table = WritableKVTable::new();
-        table.put(
-            Bytes::from_static(b"abc333"),
-            Bytes::from_static(b"value3"),
-            gen_attrs(1),
-        );
-        table.put(
-            Bytes::from_static(b"abc111"),
-            Bytes::from_static(b"value1"),
-            gen_attrs(2),
-        );
-        table.put(
-            Bytes::from_static(b"abc555"),
-            Bytes::from_static(b"value5"),
-            gen_attrs(3),
-        );
-        table.put(
-            Bytes::from_static(b"abc444"),
-            Bytes::from_static(b"value4"),
-            gen_attrs(4),
-        );
-        table.put(
-            Bytes::from_static(b"abc222"),
-            Bytes::from_static(b"value2"),
-            gen_attrs(5),
-        );
+        table.put(RowEntry::new_value(b"abc333", b"value3", 1));
+        table.put(RowEntry::new_value(b"abc111", b"value1", 2));
+        table.put(RowEntry::new_value(b"abc555", b"value5", 3));
+        table.put(RowEntry::new_value(b"abc444", b"value4", 4));
+        table.put(RowEntry::new_value(b"abc222", b"value2", 5));
 
-        let mut iter = table.table().range(Bytes::from_static(b"abc345")..);
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc444".as_slice());
-        assert_eq!(kv.value, b"value4".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"abc555".as_slice());
-        assert_eq!(kv.value, b"value5".as_slice());
-        assert!(iter.next().await.unwrap().is_none());
+        let mut iter = table
+            .table()
+            .range(BytesRange::from(Bytes::from_static(b"abc334")..));
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"abc444", b"value4", 4),
+                RowEntry::new_value(b"abc555", b"value5", 3),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_memtable_iter_delete() {
         let mut table = WritableKVTable::new();
-        table.put(
-            Bytes::from_static(b"abc333"),
-            Bytes::from_static(b"value3"),
-            gen_attrs(1),
-        );
-        table.delete(Bytes::from_static(b"abc333"), gen_attrs(2));
+        table.put(RowEntry::new_tombstone(b"abc333", 2));
+        table.put(RowEntry::new_value(b"abc333", b"value3", 1));
+        table.put(RowEntry::new_value(b"abc444", b"value4", 4));
 
-        let mut iter = table.table().iter();
-        assert!(iter.next().await.unwrap().is_none());
+        // in merge iterator, it should only return one entry
+        let iter = table.table().iter();
+        let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter]))
+            .await
+            .unwrap();
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_tombstone(b"abc333", 2),
+                RowEntry::new_value(b"abc444", b"value4", 4),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -439,44 +448,96 @@ mod tests {
         let mut table = WritableKVTable::new();
 
         assert_eq!(table.table.size(), 0);
-        table.put(
-            Bytes::from_static(b"first"),
-            Bytes::from_static(b"foo"),
-            gen_attrs(1),
-        );
-        assert_eq!(table.table.size(), 16); // first(5) + foo(3) + attrs(8)
+        table.put(RowEntry::new_value(b"first", b"foo", 1));
+        assert_eq!(table.table.size(), 16);
 
-        // ensure that multiple deletes keep the table size stable
-        for ts in 2..5 {
-            table.delete(Bytes::from_static(b"first"), gen_attrs(ts));
-            assert_eq!(table.table.size(), 13); // first(5) + attrs(8)
+        table.put(RowEntry::new_tombstone(b"first", 2));
+        assert_eq!(table.table.size(), 29);
+
+        table.put(RowEntry::new_tombstone(b"first", 2));
+        assert_eq!(table.table.size(), 29);
+
+        table.put(RowEntry::new_value(b"abc333", b"val1", 1));
+        assert_eq!(table.table.size(), 47);
+
+        table.put(RowEntry::new_value(b"def456", b"blablabla", 2));
+        assert_eq!(table.table.size(), 70);
+
+        table.put(RowEntry::new_value(b"def456", b"blabla", 3));
+        assert_eq!(table.table.size(), 90);
+
+        table.put(RowEntry::new_tombstone(b"abc333", 4));
+        assert_eq!(table.table.size(), 104);
+    }
+
+    #[rstest]
+    #[case(
+        BytesRange::from(..),
+        KVTableInternalKeyRange {
+            start_bound: Bound::Unbounded,
+            end_bound: Bound::Unbounded,
+        },
+        vec![KVTableInternalKey::new(Bytes::from_static(b"abc111"), 1)],
+        vec![]
+    )]
+    #[case(
+        BytesRange::from(Bytes::from_static(b"abc111")..=Bytes::from_static(b"abc333")),
+        KVTableInternalKeyRange {
+            start_bound: Bound::Included(KVTableInternalKey::new(Bytes::from_static(b"abc111"), u64::MAX)),
+            end_bound: Bound::Included(KVTableInternalKey::new(Bytes::from_static(b"abc333"), 0)),
+        },
+        vec![
+            KVTableInternalKey::new(Bytes::from_static(b"abc111"), 1),
+            KVTableInternalKey::new(Bytes::from_static(b"abc222"), 2),
+            KVTableInternalKey::new(Bytes::from_static(b"abc333"), 3),
+            KVTableInternalKey::new(Bytes::from_static(b"abc333"), 0),
+            KVTableInternalKey::new(Bytes::from_static(b"abc333"), u64::MAX),
+        ],
+        vec![KVTableInternalKey::new(Bytes::from_static(b"abc444"), 4)]
+    )]
+    #[case(
+        BytesRange::from(Bytes::from_static(b"abc222")..Bytes::from_static(b"abc444")),
+        KVTableInternalKeyRange {
+            start_bound: Bound::Included(KVTableInternalKey::new(Bytes::from_static(b"abc222"), u64::MAX)),
+            end_bound: Bound::Excluded(KVTableInternalKey::new(Bytes::from_static(b"abc444"), u64::MAX)),
+        },
+        vec![
+            KVTableInternalKey::new(Bytes::from_static(b"abc222"), 1),
+            KVTableInternalKey::new(Bytes::from_static(b"abc333"), 2),
+        ],
+        vec![
+            KVTableInternalKey::new(Bytes::from_static(b"abc444"), 0),
+            KVTableInternalKey::new(Bytes::from_static(b"abc444"), u64::MAX),
+            KVTableInternalKey::new(Bytes::from_static(b"abc555"), u64::MAX),
+        ]
+    )]
+    #[case(
+        BytesRange::from(..=Bytes::from_static(b"abc333")),
+        KVTableInternalKeyRange {
+            start_bound: Bound::Unbounded,
+            end_bound: Bound::Included(KVTableInternalKey::new(Bytes::from_static(b"abc333"), 0)),
+        },
+        vec![
+            KVTableInternalKey::new(Bytes::from_static(b"abc111"), 1),
+            KVTableInternalKey::new(Bytes::from_static(b"abc222"), 2),
+            KVTableInternalKey::new(Bytes::from_static(b"abc333"), 3),
+            KVTableInternalKey::new(Bytes::from_static(b"abc333"), u64::MAX),
+        ],
+        vec![KVTableInternalKey::new(Bytes::from_static(b"abc444"), 4)]
+    )]
+    fn test_from_internal_key_range(
+        #[case] range: BytesRange,
+        #[case] expected: KVTableInternalKeyRange,
+        #[case] should_contains: Vec<KVTableInternalKey>,
+        #[case] should_not_contains: Vec<KVTableInternalKey>,
+    ) {
+        let range = KVTableInternalKeyRange::from(range);
+        assert_eq!(range, expected);
+        for key in should_contains {
+            assert!(range.contains(&key));
         }
-
-        table.put(
-            Bytes::from_static(b"abc333"),
-            Bytes::from_static(b"val1"),
-            gen_attrs(1),
-        );
-        assert_eq!(table.table.size(), 31); // 13 + abc333(6) + val1(4) + attrs(8)
-
-        table.put(
-            Bytes::from_static(b"def456"),
-            Bytes::from_static(b"blablabla"),
-            RowAttributes {
-                ts: None,
-                expire_ts: None,
-            },
-        );
-        assert_eq!(table.table.size(), 46); // 31 + def456(6) + blablabla(9) + attrs(0)
-
-        table.put(
-            Bytes::from_static(b"def456"),
-            Bytes::from_static(b"blabla"),
-            gen_attrs(3),
-        );
-        assert_eq!(table.table.size(), 51); // 46 - blablabla(9) + blabla(6) - attrs(0) + attrs(8)
-
-        table.delete(Bytes::from_static(b"abc333"), gen_attrs(4));
-        assert_eq!(table.table.size(), 47) // 51 - val1(4)
+        for key in should_not_contains {
+            assert!(!range.contains(&key));
+        }
     }
 }

@@ -33,9 +33,9 @@ tokio = "*"
 Then you can use SlateDB in your Rust code:
 
 ```rust
-use slatedb::db::Db;
+use slatedb::Db;
 use slatedb::config::DbOptions;
-use slatedb::error::SlateDBError;
+use slatedb::SlateDBError;
 use slatedb::object_store::{ObjectStore, memory::InMemory};
 use std::sync::Arc;
 

@@ -14,7 +14,7 @@ use object_store::PutResult;
 use slatedb::admin;
 use slatedb::compaction_execute_bench::CompactionExecuteBench;
 use slatedb::config::WriteOptions;
-use slatedb::db::Db;
+use slatedb::Db;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;

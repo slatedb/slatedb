@@ -73,6 +73,8 @@ jobs:
           tool: nextest@0.9.84
       - name: Run Tests
         run: cargo nextest run --all-features --profile ci
+      - name: Run Doc Tests
+        run: cargo test --doc --all-features
 
   microbenchmarks:
     runs-on: ubuntu-latest

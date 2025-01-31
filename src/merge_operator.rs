@@ -10,6 +10,7 @@ use crate::{
     utils::merge_options,
 };
 
+#[non_exhaustive]
 #[derive(Clone, Debug, Error)]
 pub enum MergeOperatorError {}
 
@@ -29,7 +30,7 @@ pub enum MergeOperatorError {}
 /// Here's an example of a counter merge operator:
 /// ```
 /// use bytes::Bytes;
-/// use slatedb::merge_operator::{MergeOperator, MergeOperatorError};
+/// use slatedb::{MergeOperator, MergeOperatorError};
 ///
 /// struct CounterMergeOperator;
 ///

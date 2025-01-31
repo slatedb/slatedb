@@ -5,7 +5,7 @@ use bytemuck::NoUninit;
 
 #[derive(Clone, Debug)]
 pub struct Counter {
-    pub value: Arc<Atomic<u64>>,
+    pub(crate) value: Arc<Atomic<u64>>,
 }
 
 impl Counter {
@@ -71,6 +71,7 @@ impl Gauge<i64> {
     }
 }
 
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct DbStats {
     pub immutable_memtable_flushes: Counter,
