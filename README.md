@@ -28,15 +28,17 @@ Add the following to your `Cargo.toml`:
 [dependencies]
 slatedb = "*"
 tokio = "*"
+bytes = "*"
 ```
 
 Then you can use SlateDB in your Rust code:
 
 ```rust
-use slatedb::Db;
+use slatedb::db::Db;
 use slatedb::config::DbOptions;
-use slatedb::SlateDBError;
+use slatedb::error::SlateDBError;
 use slatedb::object_store::{ObjectStore, memory::InMemory};
+use bytes::Bytes;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -72,7 +74,7 @@ async fn main() -> Result<(), SlateDBError> {
     kv_store.put(b"test_key4", b"test_value4").await?;
 
     // Scan over unbound range
-    let mut iter = kv_store.scan::<Vec<u8>, _>(..).await?;
+    let mut iter = kv_store.scan(..).await?;
     let mut count = 1;
     while let Ok(Some(item)) = iter.next().await {
         assert_eq!(
@@ -87,23 +89,23 @@ async fn main() -> Result<(), SlateDBError> {
     }
 
     // Scan over bound range
-    let mut iter = kv_store.scan("test_key1"..="test_key2").await?;
+    let mut iter = kv_store.scan(Bytes::from("test_key1")..=Bytes::from("test_key2")).await?;
     assert_eq!(
         iter.next().await?,
-        Some((b"test_key1", b"test_value1").into())
+        Some((Bytes::from("test_key1").as_ref(), Bytes::from("test_value1").as_ref()).into())
     );
     assert_eq!(
         iter.next().await?,
-        Some((b"test_key2", b"test_value2").into())
+        Some((Bytes::from("test_key2").as_ref(), Bytes::from("test_value2").as_ref()).into())
     );
 
     // Seek ahead to next key
-    let mut iter = kv_store.scan::<Vec<u8>, _>(..).await?;
-    let next_key = b"test_key4";
+    let mut iter = kv_store.scan(..).await?;
+    let next_key = Bytes::from("test_key4");
     iter.seek(next_key).await?;
     assert_eq!(
         iter.next().await?,
-        Some((b"test_key4", b"test_value4").into())
+        Some((Bytes::from("test_key4").as_ref(), Bytes::from("test_value4").as_ref()).into())
     );
     assert_eq!(iter.next().await?, None);
 
