@@ -321,7 +321,6 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
-    use std::ops::RangeFull;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -356,7 +355,7 @@ mod tests {
         let clone_db = Db::open(clone_path.clone(), Arc::clone(&object_store))
             .await
             .unwrap();
-        let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut db_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ordered_scan_in_range(&table, .., &mut db_iter).await;
         clone_db.close().await.unwrap();
     }
@@ -406,7 +405,7 @@ mod tests {
         let clone_db = Db::open(clone_path.clone(), Arc::clone(&object_store))
             .await
             .unwrap();
-        let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
+        let mut db_iter = clone_db.scan(..).await.unwrap();
         test_utils::assert_ordered_scan_in_range(&checkpoint_table, .., &mut db_iter).await;
         clone_db.close().await.unwrap();
     }

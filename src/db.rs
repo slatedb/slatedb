@@ -1562,7 +1562,7 @@ mod tests {
             .scan_with_options(range.as_ref(), scan_options)
             .await
             .unwrap();
-        test_utils::assert_ordered_scan_in_range(table, range, &mut iter).await;
+        test_utils::assert_ordered_scan_in_range(table, range.clone(), &mut iter).await;
     }
 
     #[test]
