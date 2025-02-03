@@ -932,36 +932,40 @@ impl core::fmt::Debug for Uuid<'_> {
       ds.finish()
   }
 }
-pub enum DbParentOffset {}
+pub enum ExternalDbOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
-pub struct DbParent<'a> {
+pub struct ExternalDb<'a> {
   pub _tab: flatbuffers::Table<'a>,
 }
 
-impl<'a> flatbuffers::Follow<'a> for DbParent<'a> {
-  type Inner = DbParent<'a>;
+impl<'a> flatbuffers::Follow<'a> for ExternalDb<'a> {
+  type Inner = ExternalDb<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
     Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
-impl<'a> DbParent<'a> {
+impl<'a> ExternalDb<'a> {
   pub const VT_PATH: flatbuffers::VOffsetT = 4;
-  pub const VT_CHECKPOINT: flatbuffers::VOffsetT = 6;
+  pub const VT_SOURCE_CHECKPOINT_ID: flatbuffers::VOffsetT = 6;
+  pub const VT_FINAL_CHECKPOINT_ID: flatbuffers::VOffsetT = 8;
+  pub const VT_SST_IDS: flatbuffers::VOffsetT = 10;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
-    DbParent { _tab: table }
+    ExternalDb { _tab: table }
   }
   #[allow(unused_mut)]
   pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
     _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args DbParentArgs<'args>
-  ) -> flatbuffers::WIPOffset<DbParent<'bldr>> {
-    let mut builder = DbParentBuilder::new(_fbb);
-    if let Some(x) = args.checkpoint { builder.add_checkpoint(x); }
+    args: &'args ExternalDbArgs<'args>
+  ) -> flatbuffers::WIPOffset<ExternalDb<'bldr>> {
+    let mut builder = ExternalDbBuilder::new(_fbb);
+    if let Some(x) = args.sst_ids { builder.add_sst_ids(x); }
+    if let Some(x) = args.final_checkpoint_id { builder.add_final_checkpoint_id(x); }
+    if let Some(x) = args.source_checkpoint_id { builder.add_source_checkpoint_id(x); }
     if let Some(x) = args.path { builder.add_path(x); }
     builder.finish()
   }
@@ -972,18 +976,32 @@ impl<'a> DbParent<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(DbParent::VT_PATH, None).unwrap()}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(ExternalDb::VT_PATH, None).unwrap()}
   }
   #[inline]
-  pub fn checkpoint(&self) -> Uuid<'a> {
+  pub fn source_checkpoint_id(&self) -> Uuid<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Uuid>>(DbParent::VT_CHECKPOINT, None).unwrap()}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Uuid>>(ExternalDb::VT_SOURCE_CHECKPOINT_ID, None).unwrap()}
+  }
+  #[inline]
+  pub fn final_checkpoint_id(&self) -> Uuid<'a> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Uuid>>(ExternalDb::VT_FINAL_CHECKPOINT_ID, None).unwrap()}
+  }
+  #[inline]
+  pub fn sst_ids(&self) -> flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSstId<'a>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSstId>>>>(ExternalDb::VT_SST_IDS, None).unwrap()}
   }
 }
 
-impl flatbuffers::Verifiable for DbParent<'_> {
+impl flatbuffers::Verifiable for ExternalDb<'_> {
   #[inline]
   fn run_verifier(
     v: &mut flatbuffers::Verifier, pos: usize
@@ -991,60 +1009,78 @@ impl flatbuffers::Verifiable for DbParent<'_> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
      .visit_field::<flatbuffers::ForwardsUOffset<&str>>("path", Self::VT_PATH, true)?
-     .visit_field::<flatbuffers::ForwardsUOffset<Uuid>>("checkpoint", Self::VT_CHECKPOINT, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<Uuid>>("source_checkpoint_id", Self::VT_SOURCE_CHECKPOINT_ID, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<Uuid>>("final_checkpoint_id", Self::VT_FINAL_CHECKPOINT_ID, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSstId>>>>("sst_ids", Self::VT_SST_IDS, true)?
      .finish();
     Ok(())
   }
 }
-pub struct DbParentArgs<'a> {
+pub struct ExternalDbArgs<'a> {
     pub path: Option<flatbuffers::WIPOffset<&'a str>>,
-    pub checkpoint: Option<flatbuffers::WIPOffset<Uuid<'a>>>,
+    pub source_checkpoint_id: Option<flatbuffers::WIPOffset<Uuid<'a>>>,
+    pub final_checkpoint_id: Option<flatbuffers::WIPOffset<Uuid<'a>>>,
+    pub sst_ids: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSstId<'a>>>>>,
 }
-impl<'a> Default for DbParentArgs<'a> {
+impl<'a> Default for ExternalDbArgs<'a> {
   #[inline]
   fn default() -> Self {
-    DbParentArgs {
+    ExternalDbArgs {
       path: None, // required field
-      checkpoint: None, // required field
+      source_checkpoint_id: None, // required field
+      final_checkpoint_id: None, // required field
+      sst_ids: None, // required field
     }
   }
 }
 
-pub struct DbParentBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+pub struct ExternalDbBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
   fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
   start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
 }
-impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> DbParentBuilder<'a, 'b, A> {
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ExternalDbBuilder<'a, 'b, A> {
   #[inline]
   pub fn add_path(&mut self, path: flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(DbParent::VT_PATH, path);
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ExternalDb::VT_PATH, path);
   }
   #[inline]
-  pub fn add_checkpoint(&mut self, checkpoint: flatbuffers::WIPOffset<Uuid<'b >>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Uuid>>(DbParent::VT_CHECKPOINT, checkpoint);
+  pub fn add_source_checkpoint_id(&mut self, source_checkpoint_id: flatbuffers::WIPOffset<Uuid<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Uuid>>(ExternalDb::VT_SOURCE_CHECKPOINT_ID, source_checkpoint_id);
   }
   #[inline]
-  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> DbParentBuilder<'a, 'b, A> {
+  pub fn add_final_checkpoint_id(&mut self, final_checkpoint_id: flatbuffers::WIPOffset<Uuid<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Uuid>>(ExternalDb::VT_FINAL_CHECKPOINT_ID, final_checkpoint_id);
+  }
+  #[inline]
+  pub fn add_sst_ids(&mut self, sst_ids: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<CompactedSstId<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ExternalDb::VT_SST_IDS, sst_ids);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> ExternalDbBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
-    DbParentBuilder {
+    ExternalDbBuilder {
       fbb_: _fbb,
       start_: start,
     }
   }
   #[inline]
-  pub fn finish(self) -> flatbuffers::WIPOffset<DbParent<'a>> {
+  pub fn finish(self) -> flatbuffers::WIPOffset<ExternalDb<'a>> {
     let o = self.fbb_.end_table(self.start_);
-    self.fbb_.required(o, DbParent::VT_PATH,"path");
-    self.fbb_.required(o, DbParent::VT_CHECKPOINT,"checkpoint");
+    self.fbb_.required(o, ExternalDb::VT_PATH,"path");
+    self.fbb_.required(o, ExternalDb::VT_SOURCE_CHECKPOINT_ID,"source_checkpoint_id");
+    self.fbb_.required(o, ExternalDb::VT_FINAL_CHECKPOINT_ID,"final_checkpoint_id");
+    self.fbb_.required(o, ExternalDb::VT_SST_IDS,"sst_ids");
     flatbuffers::WIPOffset::new(o.value())
   }
 }
 
-impl core::fmt::Debug for DbParent<'_> {
+impl core::fmt::Debug for ExternalDb<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    let mut ds = f.debug_struct("DbParent");
+    let mut ds = f.debug_struct("ExternalDb");
       ds.field("path", &self.path());
-      ds.field("checkpoint", &self.checkpoint());
+      ds.field("source_checkpoint_id", &self.source_checkpoint_id());
+      ds.field("final_checkpoint_id", &self.final_checkpoint_id());
+      ds.field("sst_ids", &self.sst_ids());
       ds.finish()
   }
 }
@@ -1065,7 +1101,7 @@ impl<'a> flatbuffers::Follow<'a> for ManifestV1<'a> {
 
 impl<'a> ManifestV1<'a> {
   pub const VT_MANIFEST_ID: flatbuffers::VOffsetT = 4;
-  pub const VT_PARENT: flatbuffers::VOffsetT = 6;
+  pub const VT_EXTERNAL_DBS: flatbuffers::VOffsetT = 6;
   pub const VT_INITIALIZED: flatbuffers::VOffsetT = 8;
   pub const VT_WRITER_EPOCH: flatbuffers::VOffsetT = 10;
   pub const VT_COMPACTOR_EPOCH: flatbuffers::VOffsetT = 12;
@@ -1099,7 +1135,7 @@ impl<'a> ManifestV1<'a> {
     if let Some(x) = args.compacted { builder.add_compacted(x); }
     if let Some(x) = args.l0 { builder.add_l0(x); }
     if let Some(x) = args.l0_last_compacted { builder.add_l0_last_compacted(x); }
-    if let Some(x) = args.parent { builder.add_parent(x); }
+    if let Some(x) = args.external_dbs { builder.add_external_dbs(x); }
     builder.add_initialized(args.initialized);
     builder.finish()
   }
@@ -1113,11 +1149,11 @@ impl<'a> ManifestV1<'a> {
     unsafe { self._tab.get::<u64>(ManifestV1::VT_MANIFEST_ID, Some(0)).unwrap()}
   }
   #[inline]
-  pub fn parent(&self) -> Option<DbParent<'a>> {
+  pub fn external_dbs(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<ExternalDb<'a>>>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<DbParent>>(ManifestV1::VT_PARENT, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<ExternalDb>>>>(ManifestV1::VT_EXTERNAL_DBS, None)}
   }
   #[inline]
   pub fn initialized(&self) -> bool {
@@ -1206,7 +1242,7 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
      .visit_field::<u64>("manifest_id", Self::VT_MANIFEST_ID, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<DbParent>>("parent", Self::VT_PARENT, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<ExternalDb>>>>("external_dbs", Self::VT_EXTERNAL_DBS, false)?
      .visit_field::<bool>("initialized", Self::VT_INITIALIZED, false)?
      .visit_field::<u64>("writer_epoch", Self::VT_WRITER_EPOCH, false)?
      .visit_field::<u64>("compactor_epoch", Self::VT_COMPACTOR_EPOCH, false)?
@@ -1224,7 +1260,7 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
 }
 pub struct ManifestV1Args<'a> {
     pub manifest_id: u64,
-    pub parent: Option<flatbuffers::WIPOffset<DbParent<'a>>>,
+    pub external_dbs: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<ExternalDb<'a>>>>>,
     pub initialized: bool,
     pub writer_epoch: u64,
     pub compactor_epoch: u64,
@@ -1242,7 +1278,7 @@ impl<'a> Default for ManifestV1Args<'a> {
   fn default() -> Self {
     ManifestV1Args {
       manifest_id: 0,
-      parent: None,
+      external_dbs: None,
       initialized: false,
       writer_epoch: 0,
       compactor_epoch: 0,
@@ -1268,8 +1304,8 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
     self.fbb_.push_slot::<u64>(ManifestV1::VT_MANIFEST_ID, manifest_id, 0);
   }
   #[inline]
-  pub fn add_parent(&mut self, parent: flatbuffers::WIPOffset<DbParent<'b >>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<DbParent>>(ManifestV1::VT_PARENT, parent);
+  pub fn add_external_dbs(&mut self, external_dbs: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<ExternalDb<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_EXTERNAL_DBS, external_dbs);
   }
   #[inline]
   pub fn add_initialized(&mut self, initialized: bool) {
@@ -1337,7 +1373,7 @@ impl core::fmt::Debug for ManifestV1<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut ds = f.debug_struct("ManifestV1");
       ds.field("manifest_id", &self.manifest_id());
-      ds.field("parent", &self.parent());
+      ds.field("external_dbs", &self.external_dbs());
       ds.field("initialized", &self.initialized());
       ds.field("writer_epoch", &self.writer_epoch());
       ds.field("compactor_epoch", &self.compactor_epoch());

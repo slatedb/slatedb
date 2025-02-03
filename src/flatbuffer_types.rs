@@ -24,10 +24,10 @@ use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::manifest_generated::{
     Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable, CompactedSsTableArgs,
-    CompactedSstId, CompactedSstIdArgs, CompressionFormat, DbParent, DbParentArgs, SortedRun,
-    SortedRunArgs, Uuid, UuidArgs,
+    CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun, SortedRunArgs, Uuid,
+    UuidArgs,
 };
-use crate::manifest::{Manifest, ManifestCodec, ParentDb};
+use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
 use crate::utils::clamp_allocated_size_bytes;
 
 /// A wrapper around a `Bytes` buffer containing a FlatBuffer-encoded `SsTableIndex`.
@@ -175,13 +175,20 @@ impl FlatBufferManifestCodec {
             last_l0_clock_tick: manifest.last_l0_clock_tick(),
             checkpoints,
         };
-        let parent = manifest.parent().map(|parent| ParentDb {
-            path: parent.path().to_string(),
-            checkpoint_id: Self::decode_uuid(parent.checkpoint()),
+        let external_dbs = manifest.external_dbs().map(|external_dbs| {
+            external_dbs
+                .iter()
+                .map(|db| ExternalDb {
+                    path: db.path().to_string(),
+                    source_checkpoint_id: Self::decode_uuid(db.source_checkpoint_id()),
+                    final_checkpoint_id: Self::decode_uuid(db.final_checkpoint_id()),
+                    sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
+                })
+                .collect()
         });
 
         Manifest {
-            parent,
+            external_dbs: external_dbs.unwrap_or_default(),
             core,
             writer_epoch: manifest.writer_epoch(),
             compactor_epoch: manifest.compactor_epoch(),
@@ -234,6 +241,20 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let high = (uidu128 >> 64) as u64;
         let low = ((uidu128 << 64) >> 64) as u64;
         CompactedSstId::create(&mut self.builder, &CompactedSstIdArgs { high, low })
+    }
+
+    fn add_compacted_sst_ids<'a, I>(
+        &mut self,
+        sst_ids: I,
+    ) -> WIPOffset<Vector<'b, ForwardsUOffset<CompactedSstId<'b>>>>
+    where
+        I: Iterator<Item = &'a SsTableId>,
+    {
+        let sst_ids: Vec<WIPOffset<CompactedSstId>> = sst_ids
+            .map(|id| id.unwrap_compacted_id())
+            .map(|id| self.add_compacted_sst_id(&id))
+            .collect();
+        self.builder.create_vector(sst_ids.as_ref())
     }
 
     #[allow(clippy::panic)]
@@ -344,19 +365,30 @@ impl<'b> DbFlatBufferBuilder<'b> {
         }
         let compacted = self.add_sorted_runs(&core.compacted);
         let checkpoints = self.add_checkpoints(&core.checkpoints);
-        let parent_db = manifest.parent.as_ref().map(|parent| {
-            let db_parent_args = DbParentArgs {
-                path: Some(self.builder.create_string(&parent.path)),
-                checkpoint: Some(self.add_uuid(parent.checkpoint_id)),
-            };
-            DbParent::create(&mut self.builder, &db_parent_args)
-        });
+        let external_dbs = if manifest.external_dbs.is_empty() {
+            None
+        } else {
+            let external_dbs: Vec<WIPOffset<manifest_generated::ExternalDb>> = manifest
+                .external_dbs
+                .iter()
+                .map(|external_db| {
+                    let db_external_db_args = manifest_generated::ExternalDbArgs {
+                        path: Some(self.builder.create_string(&external_db.path)),
+                        source_checkpoint_id: Some(self.add_uuid(external_db.source_checkpoint_id)),
+                        final_checkpoint_id: Some(self.add_uuid(external_db.final_checkpoint_id)),
+                        sst_ids: Some(self.add_compacted_sst_ids(external_db.sst_ids.iter())),
+                    };
+                    manifest_generated::ExternalDb::create(&mut self.builder, &db_external_db_args)
+                })
+                .collect();
+            Some(self.builder.create_vector(external_dbs.as_ref()))
+        };
 
         let manifest = ManifestV1::create(
             &mut self.builder,
             &ManifestV1Args {
                 manifest_id: 0, // todo: get rid of me
-                parent: parent_db,
+                external_dbs,
                 initialized: core.initialized,
                 writer_epoch: manifest.writer_epoch,
                 compactor_epoch: manifest.compactor_epoch,
@@ -428,14 +460,15 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint;
-    use crate::db_state::CoreDbState;
+    use crate::db_state::{CoreDbState, SsTableId};
     use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
-    use crate::manifest::{Manifest, ManifestCodec, ParentDb};
+    use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
     use std::time::{Duration, SystemTime};
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
     use crate::sst::SsTableFormat;
     use crate::test_utils::build_test_sst;
+    use ulid::Ulid;
     use uuid::Uuid;
 
     #[test]
@@ -468,13 +501,26 @@ mod tests {
     }
 
     #[test]
-    fn test_should_encode_decode_manifest_parent() {
+    fn test_should_encode_decode_external_dbs() {
         // given:
         let mut manifest = Manifest::initial(CoreDbState::new());
-        manifest.parent = Some(ParentDb {
-            path: "/path/to/parent".to_string(),
-            checkpoint_id: Uuid::new_v4(),
-        });
+        manifest.external_dbs = vec![
+            ExternalDb {
+                path: "/path/to/external/first".to_string(),
+                source_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: Uuid::new_v4(),
+                sst_ids: vec![
+                    SsTableId::Compacted(Ulid::new()),
+                    SsTableId::Compacted(Ulid::new()),
+                ],
+            },
+            ExternalDb {
+                path: "/path/to/external/second".to_string(),
+                source_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: Uuid::new_v4(),
+                sst_ids: vec![SsTableId::Compacted(Ulid::new())],
+            },
+        ];
         let codec = FlatBufferManifestCodec {};
 
         // when:
