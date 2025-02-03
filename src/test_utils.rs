@@ -90,6 +90,7 @@ macro_rules! assert_debug_snapshot {
 
 use crate::bytes_range::BytesRange;
 use crate::db::Db;
+use crate::db_iter::DbIterator;
 pub(crate) use assert_debug_snapshot;
 
 pub(crate) fn decode_codec_entries(
@@ -122,6 +123,58 @@ pub(crate) fn decode_codec_entries(
     Ok(entries)
 }
 
+pub(crate) async fn assert_ranged_db_scan<T: RangeBounds<Bytes>>(
+    table: &BTreeMap<Bytes, Bytes>,
+    range: T,
+    iter: &mut DbIterator<'_>,
+) {
+    let mut expected = table.range(range);
+    loop {
+        let expected_next = expected.next();
+        let actual_next = iter.next().await.unwrap();
+        if expected_next.is_none() && actual_next.is_none() {
+            return;
+        }
+        assert_next_kv(expected_next, actual_next);
+    }
+}
+
+pub(crate) async fn assert_ranged_kv_scan<T: KeyValueIterator>(
+    table: &BTreeMap<Bytes, Bytes>,
+    range: &BytesRange,
+    ordering: IterationOrder,
+    iter: &mut T,
+) {
+    let mut expected = table.range((range.start_bound().cloned(), range.end_bound().cloned()));
+
+    loop {
+        let expected_next = match ordering {
+            IterationOrder::Ascending => expected.next(),
+            IterationOrder::Descending => expected.next_back(),
+        };
+        let actual_next = iter.next().await.unwrap();
+        if expected_next.is_none() && actual_next.is_none() {
+            return;
+        }
+
+        assert_next_kv(expected_next, actual_next);
+    }
+}
+
+fn assert_next_kv(expected: Option<(&Bytes, &Bytes)>, actual: Option<KeyValue>) {
+    match (expected, actual) {
+        (None, None) => return,
+        (Some((expected_key, expected_value)), Some(actual)) => {
+            assert_eq!(expected_key, &actual.key);
+            assert_eq!(expected_value, &actual.value);
+        }
+        (Some(expected_record), None) => {
+            panic!("Expected record {expected_record:?} missing from scan result")
+        }
+        (None, Some(actual)) => panic!("Unexpected record {actual:?} in scan result"),
+    }
+}
+
 pub(crate) fn bound_as_option<T>(bound: Bound<&T>) -> Option<&T>
 where
     T: ?Sized,
@@ -146,32 +199,4 @@ pub(crate) async fn seed_database(
     }
 
     Ok(())
-}
-
-pub(crate) async fn assert_ordered_scan_in_range<T: KeyValueIterator>(
-    table: &BTreeMap<Bytes, Bytes>,
-    range: &BytesRange,
-    ordering: IterationOrder,
-    iter: &mut T,
-) {
-    let mut expected = table.range((range.start_bound().cloned(), range.end_bound().cloned()));
-
-    loop {
-        let expected_next = match ordering {
-            IterationOrder::Ascending => expected.next(),
-            IterationOrder::Descending => expected.next_back(),
-        };
-
-        match (expected_next, iter.next().await.unwrap()) {
-            (None, None) => break,
-            (Some((expected_key, expected_value)), Some(actual)) => {
-                assert_eq!(expected_key, &actual.key);
-                assert_eq!(expected_value, &actual.value);
-            }
-            (Some(expected_record), None) => {
-                panic!("Expected record {expected_record:?} missing from scan result")
-            }
-            (None, Some(actual)) => panic!("Unexpected record {actual:?} in scan result"),
-        }
-    }
 }

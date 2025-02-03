@@ -207,6 +207,7 @@ pub(crate) struct DbState {
     memtable: WritableKVTable,
     wal: WritableKVTable,
     state: Arc<COWDbState>,
+    last_seq: u64,
     error: WatchableOnceCell<SlateDBError>,
 }
 
@@ -218,7 +219,7 @@ pub(crate) struct COWDbState {
     pub(crate) core: CoreDbState,
 }
 
-// represents the core db state that we persist in the manifest
+/// represent the in-memory state of the manifest
 #[derive(Clone, PartialEq, Serialize, Debug)]
 pub(crate) struct CoreDbState {
     pub(crate) initialized: bool,
@@ -231,6 +232,9 @@ pub(crate) struct CoreDbState {
     /// WAL entries will have their latest ticks recovered on replay
     /// into the in-memory state
     pub(crate) last_l0_clock_tick: i64,
+    /// it's persisted in the manifest, and only updated when a new L0
+    /// SST is created in the manifest.
+    pub(crate) last_l0_seq: u64,
     pub(crate) checkpoints: Vec<Checkpoint>,
 }
 
@@ -244,8 +248,16 @@ impl CoreDbState {
             next_wal_sst_id: 1,
             last_compacted_wal_sst_id: 0,
             last_l0_clock_tick: i64::MIN,
+            last_l0_seq: 0,
             checkpoints: vec![],
         }
+    }
+
+    pub(crate) fn init_clone_db(&self) -> CoreDbState {
+        let mut clone = self.clone();
+        clone.initialized = false;
+        clone.checkpoints.clear();
+        clone
     }
 
     pub(crate) fn log_db_runs(&self) {
@@ -277,6 +289,7 @@ pub(crate) struct DbStateSnapshot {
 
 impl DbState {
     pub fn new(core_db_state: CoreDbState) -> Self {
+        let last_l0_seq = core_db_state.last_l0_seq;
         Self {
             memtable: WritableKVTable::new(),
             wal: WritableKVTable::new(),
@@ -286,6 +299,7 @@ impl DbState {
                 core: core_db_state,
             }),
             error: WatchableOnceCell::new(),
+            last_seq: last_l0_seq,
         }
     }
 
@@ -388,6 +402,10 @@ impl DbState {
                 next_tick: memtable_tick,
             });
         }
+        // update the persisted manifest last_l0_seq as the latest seq in the imm.
+        if let Some(seq) = imm_memtable.table().last_seq() {
+            state.core.last_l0_seq = seq;
+        }
 
         self.update_state(state);
         Ok(())
@@ -397,6 +415,18 @@ impl DbState {
         let mut state = self.state_copy();
         state.core.next_wal_sst_id += 1;
         self.update_state(state);
+    }
+
+    /// increment_seq is called whenever a new write is performed.
+    pub fn increment_seq(&mut self) -> u64 {
+        self.last_seq += 1;
+        self.last_seq
+    }
+
+    /// update_last_seq is called when we replay the WALs to recover the
+    /// latest sequence number.
+    pub fn update_last_seq(&mut self, seq: u64) {
+        self.last_seq = seq;
     }
 
     pub fn merge_db_state(&mut self, updated_state: &CoreDbState) {

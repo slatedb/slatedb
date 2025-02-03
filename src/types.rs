@@ -46,6 +46,21 @@ impl RowEntry {
             expire_ts,
         }
     }
+
+    pub fn estimated_size(&self) -> usize {
+        let mut size = self.key.len() + self.value.len();
+        // Add size for sequence number
+        size += std::mem::size_of::<u64>();
+        // Add size for timestamps
+        if self.create_ts.is_some() {
+            size += std::mem::size_of::<i64>();
+        }
+        if self.expire_ts.is_some() {
+            size += std::mem::size_of::<i64>();
+        }
+        size
+    }
+
     #[cfg(test)]
     pub(crate) fn new_value(key: &[u8], value: &[u8], seq: u64) -> Self {
         Self {
@@ -103,6 +118,8 @@ impl RowEntry {
 }
 
 /// The metadata associated with a `KeyValueDeletable`
+/// TODO: can be removed
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RowAttributes {
     pub(crate) ts: Option<i64>,

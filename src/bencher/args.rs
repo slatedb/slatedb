@@ -11,7 +11,7 @@ use slatedb::{
         moka::{MokaCache, MokaCacheOptions},
         DbCache,
     },
-    error::DbOptionsError,
+    DbOptionsError,
 };
 
 use crate::db::{FixedSetKeyGenerator, KeyGenerator, RandomKeyGenerator};

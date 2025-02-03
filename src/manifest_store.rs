@@ -6,7 +6,7 @@ use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestManifestMissing, ManifestMissing,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
-use crate::manifest::{Manifest, ManifestCodec};
+use crate::manifest::{Manifest, ManifestCodec, ParentDb};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
@@ -118,21 +118,34 @@ pub(crate) struct StoredManifest {
 }
 
 impl StoredManifest {
-    pub(crate) async fn init_new_db(
-        store: Arc<ManifestStore>,
-        core: CoreDbState,
-    ) -> Result<Self, SlateDBError> {
-        let manifest = Manifest {
-            core,
-            writer_epoch: 0,
-            compactor_epoch: 0,
-        };
+    async fn init(store: Arc<ManifestStore>, manifest: Manifest) -> Result<Self, SlateDBError> {
         store.write_manifest(1, &manifest).await?;
         Ok(Self {
             id: 1,
             manifest,
             manifest_store: store,
         })
+    }
+
+    /// Create the initial manifest for a new database.
+    pub(crate) async fn create_new_db(
+        store: Arc<ManifestStore>,
+        core: CoreDbState,
+    ) -> Result<Self, SlateDBError> {
+        let manifest = Manifest::initial(core);
+        Self::init(store, manifest).await
+    }
+
+    /// Create a new manifest for a new cloned database. The initial manifest
+    /// will be written with the `initialized` field set to false in order to allow
+    /// for the rest of the clone state to be initialized
+    pub(crate) async fn create_uninitialized_clone(
+        clone_manifest_store: Arc<ManifestStore>,
+        parent_db: ParentDb,
+        parent_manifest: &Manifest,
+    ) -> Result<Self, SlateDBError> {
+        let manifest = Manifest::cloned(parent_db, parent_manifest);
+        Self::init(clone_manifest_store, manifest).await
     }
 
     /// Load the current manifest from the supplied manifest store. If there is no db at the
@@ -156,9 +169,13 @@ impl StoredManifest {
         Self::try_load(store).await?.ok_or(LatestManifestMissing)
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn id(&self) -> u64 {
         self.id
+    }
+
+    pub(crate) fn manifest(&self) -> &Manifest {
+        &self.manifest
     }
 
     pub(crate) fn db_state(&self) -> &CoreDbState {
@@ -174,7 +191,7 @@ impl StoredManifest {
         Ok(&self.manifest.core)
     }
 
-    fn next_manifest_id(&self) -> u64 {
+    fn next_id(&self) -> u64 {
         self.id + 1
     }
 
@@ -199,7 +216,7 @@ impl StoredManifest {
                 if !db_state.initialized {
                     return Err(InvalidDBState);
                 }
-                self.next_manifest_id()
+                self.next_id()
             }
         };
         Ok(Checkpoint {
@@ -210,11 +227,12 @@ impl StoredManifest {
         })
     }
 
-    pub(crate) async fn write_new_checkpoint(
+    pub(crate) async fn write_checkpoint(
         &mut self,
+        checkpoint_id: Option<Uuid>,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let checkpoint_id = Uuid::new_v4();
+        let checkpoint_id = checkpoint_id.unwrap_or(Uuid::new_v4());
         self.maybe_apply_db_state_update(|stored_manifest| {
             let checkpoint = stored_manifest.new_checkpoint(checkpoint_id, options)?;
             let mut updated_db_state = stored_manifest.db_state().clone();
@@ -230,8 +248,32 @@ impl StoredManifest {
         Ok(checkpoint)
     }
 
+    pub(crate) async fn rewrite_parent_db(
+        &mut self,
+        parent_db: ParentDb,
+        parent_manifest: &Manifest,
+    ) -> Result<(), SlateDBError> {
+        // Do not allow the parent to be rewritten if the manifest finished initialization.
+        if self.manifest.core.initialized {
+            return Err(InvalidDBState);
+        }
+
+        // Also do not allow the parent path to be changed.
+        let Some(current_parent) = self.manifest.parent.as_ref() else {
+            return Err(InvalidDBState);
+        };
+
+        if current_parent.path != parent_db.path {
+            return Err(InvalidDBState);
+        }
+
+        let manifest = Manifest::cloned(parent_db, parent_manifest);
+        self.update_manifest(manifest).await
+    }
+
     pub(crate) async fn update_db_state(&mut self, core: CoreDbState) -> Result<(), SlateDBError> {
         let manifest = Manifest {
+            parent: self.manifest.parent.clone(),
             core,
             writer_epoch: self.manifest.writer_epoch,
             compactor_epoch: self.manifest.compactor_epoch,
@@ -479,14 +521,18 @@ impl ManifestStore {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::config::CheckpointOptions;
-    use crate::db_state::CoreDbState;
+    use crate::db_state::{CoreDbState, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error;
     use crate::error::SlateDBError;
+    use crate::error::SlateDBError::InvalidDBState;
+    use crate::manifest::{Manifest, ParentDb};
     use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
+    use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
+    use ulid::Ulid;
     use uuid::Uuid;
 
     const ROOT: &str = "/root/path";
@@ -495,7 +541,7 @@ mod tests {
     async fn test_should_fail_write_on_version_conflict() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
@@ -513,7 +559,7 @@ mod tests {
     async fn test_should_write_with_new_version() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         sm.update_db_state(state.clone()).await.unwrap();
@@ -527,7 +573,7 @@ mod tests {
     async fn test_should_update_local_state_on_write() {
         let ms = new_memory_manifest_store();
         let mut state = CoreDbState::new();
-        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         state.next_wal_sst_id = 123;
@@ -540,7 +586,7 @@ mod tests {
     async fn test_should_refresh() {
         let ms = new_memory_manifest_store();
         let mut state = CoreDbState::new();
-        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
@@ -557,7 +603,7 @@ mod tests {
     async fn test_should_bump_writer_epoch() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        StoredManifest::init_new_db(ms.clone(), state.clone())
+        StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         for i in 1..5 {
@@ -572,7 +618,7 @@ mod tests {
     async fn test_should_fail_on_writer_fenced() {
         let ms = new_memory_manifest_store();
         let mut state = CoreDbState::new();
-        let sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+        let sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         let mut writer1 = FenceableManifest::init_writer(sm).await.unwrap();
@@ -593,7 +639,7 @@ mod tests {
     async fn test_should_bump_compactor_epoch() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        StoredManifest::init_new_db(ms.clone(), state.clone())
+        StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         for i in 1..5 {
@@ -608,7 +654,7 @@ mod tests {
     async fn test_should_fail_on_compactor_fenced() {
         let ms = new_memory_manifest_store();
         let mut state = CoreDbState::new();
-        let sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+        let sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         let mut compactor1 = FenceableManifest::init_compactor(sm).await.unwrap();
@@ -631,7 +677,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
 
@@ -650,7 +696,7 @@ mod tests {
     async fn test_list_manifests_unbounded() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         sm.update_db_state(state.clone()).await.unwrap();
@@ -681,7 +727,7 @@ mod tests {
     async fn test_delete_manifest() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         sm.update_db_state(state.clone()).await.unwrap();
@@ -700,7 +746,7 @@ mod tests {
     async fn test_delete_active_manifest_should_fail() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         sm.update_db_state(state.clone()).await.unwrap();
@@ -739,7 +785,7 @@ mod tests {
     async fn test_read_active_manifests_should_consider_checkpoints() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
 
@@ -777,7 +823,7 @@ mod tests {
     async fn test_maybe_apply_state_update() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
 
@@ -795,17 +841,17 @@ mod tests {
     async fn test_deletion_of_manifest_with_checkpoint_reference_not_allowed() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::init_new_db(ms.clone(), state.clone())
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
 
         let checkpoint1 = sm
-            .write_new_checkpoint(&CheckpointOptions::default())
+            .write_checkpoint(None, &CheckpointOptions::default())
             .await
             .unwrap();
 
         let _ = sm
-            .write_new_checkpoint(&CheckpointOptions::default())
+            .write_checkpoint(None, &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -813,5 +859,143 @@ mod tests {
             ms.delete_manifest(checkpoint1.manifest_id).await,
             Err(SlateDBError::InvalidDeletion)
         ));
+    }
+
+    #[tokio::test]
+    async fn should_safely_rewrite_parent_db() {
+        let parent_path = "/parent/path";
+        let mut sm = create_uninitialized_clone(parent_path).await;
+
+        // The new manifest and all of its state should be copied over
+        // to the clone manifest
+        let rewrite_checkpoint_id = Uuid::new_v4();
+        let mut parent_manifest = Manifest::initial(CoreDbState::new());
+        parent_manifest.core.next_wal_sst_id = 5;
+        parent_manifest.writer_epoch = 2;
+        parent_manifest.compactor_epoch = 3;
+        parent_manifest.core.l0.push_back(create_sst(
+            SsTableId::Compacted(Ulid::new()),
+            Some(Bytes::from("a")),
+        ));
+        parent_manifest.core.l0.push_back(create_sst(
+            SsTableId::Compacted(Ulid::new()),
+            Some(Bytes::from("abc")),
+        ));
+
+        let parent_db = ParentDb {
+            path: parent_path.to_string(),
+            checkpoint_id: rewrite_checkpoint_id,
+        };
+        sm.rewrite_parent_db(parent_db, &parent_manifest)
+            .await
+            .unwrap();
+        assert_eq!(2, sm.id());
+        assert!(!sm.db_state().initialized);
+        assert_eq!(
+            Some(rewrite_checkpoint_id),
+            sm.manifest.parent.map(|p| p.checkpoint_id)
+        );
+        assert_eq!(parent_manifest.writer_epoch, sm.manifest.writer_epoch);
+        assert_eq!(parent_manifest.compactor_epoch, sm.manifest.compactor_epoch);
+        assert_eq!(
+            parent_manifest.core.next_wal_sst_id,
+            sm.manifest.core.next_wal_sst_id
+        );
+        assert_eq!(parent_manifest.core.l0, sm.manifest.core.l0);
+    }
+
+    fn create_sst(id: SsTableId, first_key: Option<Bytes>) -> SsTableHandle {
+        let table_info = SsTableInfo {
+            first_key,
+            index_offset: 0,
+            index_len: 0,
+            filter_offset: 0,
+            filter_len: 0,
+            compression_codec: None,
+        };
+        SsTableHandle::new(id, table_info)
+    }
+
+    #[tokio::test]
+    async fn should_not_rewrite_parent_for_initialized_clone() {
+        let parent_path = "/parent/path";
+        let mut sm = create_uninitialized_clone(parent_path).await;
+
+        let mut initialized_core = sm.db_state().clone();
+        initialized_core.initialized = true;
+        sm.update_db_state(initialized_core).await.unwrap();
+
+        let parent_manifest = Manifest::initial(CoreDbState::new());
+        let parent_db = ParentDb {
+            path: parent_path.to_string(),
+            checkpoint_id: Uuid::new_v4(),
+        };
+        assert!(matches!(
+            sm.rewrite_parent_db(parent_db, &parent_manifest)
+                .await
+                .unwrap_err(),
+            InvalidDBState
+        ));
+    }
+
+    #[tokio::test]
+    async fn should_not_rewrite_parent_db_with_different_path() {
+        let initial_parent_path = "/initial/parent/path";
+        let mut sm = create_uninitialized_clone(initial_parent_path).await;
+
+        let mut initialized_core = sm.db_state().clone();
+        initialized_core.initialized = true;
+        sm.update_db_state(initialized_core).await.unwrap();
+
+        let updated_parent_path = "/updated/parent/path";
+        let parent_manifest = Manifest::initial(CoreDbState::new());
+        let parent_db = ParentDb {
+            path: updated_parent_path.to_string(),
+            checkpoint_id: Uuid::new_v4(),
+        };
+        assert!(matches!(
+            sm.rewrite_parent_db(parent_db, &parent_manifest)
+                .await
+                .unwrap_err(),
+            InvalidDBState
+        ));
+    }
+
+    #[tokio::test]
+    async fn should_not_rewrite_parent_db_for_noncloned_db() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let parent_manifest = Manifest::initial(CoreDbState::new());
+        let parent_db = ParentDb {
+            path: "/parent/path".to_string(),
+            checkpoint_id: Uuid::new_v4(),
+        };
+        assert!(matches!(
+            sm.rewrite_parent_db(parent_db, &parent_manifest)
+                .await
+                .unwrap_err(),
+            InvalidDBState
+        ));
+    }
+
+    async fn create_uninitialized_clone(parent_path: &str) -> StoredManifest {
+        let parent_manifest = Manifest::initial(CoreDbState::new());
+        let parent_db = ParentDb {
+            path: parent_path.to_string(),
+            checkpoint_id: Uuid::new_v4(),
+        };
+
+        let clone_manifest_store = new_memory_manifest_store();
+        StoredManifest::create_uninitialized_clone(
+            Arc::clone(&clone_manifest_store),
+            parent_db,
+            &parent_manifest,
+        )
+        .await
+        .unwrap()
     }
 }

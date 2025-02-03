@@ -156,7 +156,7 @@ We’ll make the following changes to the public API to support creating and usi
 /// checkpoint includes only writes that were durable at the time of the call. This will be faster,
 /// but may not include data from recent writes.
 enum CheckpointScope {
-    All{force_flush: bool},
+    All { force_flush: bool },
     Durable
 }
 
@@ -182,23 +182,6 @@ pub struct CheckpointCreateResult {
 }
 
 impl Db {
-    /// Opens a Db from a checkpoint. If no db already exists at the specified path, then this will create
-    /// a new db under the path that is a clone of the db at parent_path. A clone is a shallow copy of the
-    /// parent database - it starts with a manifest that references the same SSTs, but doesn't actually copy
-    /// those SSTs, except for the WAL. New writes will be written to the newly created db and will not be
-    /// reflected in the parent database. The clone can optionally be created from an existing checkpoint. If
-    /// parent_checkpoint is None, then the manifest referenced by parent_checkpoint is used as the base for
-    /// the clone db's manifest. Otherwise, this method creates a new checkpoint for the current version of
-    /// the parent db.
-    pub async fn open_from_checkpoint(
-        path: Path,
-        object_store: Arc<dyn ObjectStore>,
-        parent_path: Path,
-        parent_checkpoint: Option<UUID>,
-    ) -> Result<Self, SlateDBError> {
-        …
-    }
-
     /// Creates a checkpoint of an opened db using the provided options. Returns the ID of the created
     /// checkpoint and the id of the referenced manifest.
     pub async fn create_checkpoint(
@@ -219,7 +202,7 @@ impl Db {
         id: Uuid,
         lifetime: Option<Duration>,
     ) -> Result<(), SlateDBError> {}
-    
+
     /// Deletes the checkpoint with the specified id.
     pub async fn delete_checkpoint(
         path: &Path,
@@ -234,9 +217,9 @@ impl Db {
     /// database. If `soft` is false, then all cleanup will be performed by the call to this
     /// method. If `soft` is false, the destroy will return SlateDbError::InvalidDeletion if
     /// there are any remaining non-expired checkpoints.
-   pub async fn destroy(path: Path, object_store: Arc<dyn ObjectStore>, soft: bool) -> Result<(), SlateDbError> {
-       …
-   }
+    pub async fn destroy(path: Path, object_store: Arc<dyn ObjectStore>, soft: bool) -> Result<(), SlateDbError> {
+        …
+    }
 }
 
 mod admin {
@@ -247,7 +230,24 @@ mod admin {
         path: &Path,
         object_store: Arc<dyn ObjectStore>,
         options: &CheckpointOptions,
-    ) -> Result<CheckpointCreateResult, SlateDBError> {}    
+    ) -> Result<CheckpointCreateResult, SlateDBError> {}
+
+    /// Clone a Db from a checkpoint. If no db already exists at the specified path, then this will create
+    /// a new db under the path that is a clone of the db at parent_path. A clone is a shallow copy of the
+    /// parent database - it starts with a manifest that references the same SSTs, but doesn't actually copy
+    /// those SSTs, except for the WAL. New writes will be written to the newly created db and will not be
+    /// reflected in the parent database. The clone can optionally be created from an existing checkpoint. If
+    /// parent_checkpoint is None, then the manifest referenced by parent_checkpoint is used as the base for
+    /// the clone db's manifest. Otherwise, this method creates a new checkpoint for the current version of
+    /// the parent db.
+    pub async fn create_clone<P: Into<Path>>(
+        clone_path: P,
+        parent_path: P,
+        object_store: Arc<dyn ObjectStore>,
+        parent_checkpoint: Option<Uuid>,
+    ) -> Result<(), Box<dyn Error>> {
+        …
+    }
 }
 
 /// Configuration options for the database reader. These options are set on client startup.
@@ -257,14 +257,12 @@ pub struct DbReaderOptions {
     /// to detect newly compacted data.
     pub manifest_poll_interval: Duration,
 
-
     /// For readers that refresh their checkpoint, this specifies the lifetime to use for the
     /// created checkpoint. The checkpoint’s expire time will be set to the current time plus
     /// this value. If not specified, then the checkpoint will be created with no expiry, and
     /// must be manually removed. This lifetime must always be greater than
     /// manifest_poll_interval x 2
     pub checkpoint_lifetime: Option<Duration>,
-
 
     /// The max size of a single in-memory table used to buffer WAL entries
     /// Defaults to 64MB
@@ -288,10 +286,10 @@ impl DbReader {
         object_store: Arc<dyn ObjectStore>,
         checkpoint: Option<UUID>,
         options: DbReaderOptions
-    ) -> Result<Self, SlateDBError> {...}
+    ) -> Result<Self, SlateDBError> { ... }
 
     /// Read a key an return the read value, if any.
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {...}
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, SlateDBError> { ... }
 }
 
 pub struct GarbageCollectorOptions {
@@ -453,7 +451,10 @@ When initializing the db for the first time (detected by the absence of a manife
 6. If M_p.`destroyed_at_s` is set:
    1. Delete the checkpoint with checkpoint ID from the parent, if any. If CAS fails, go to step 1.
    2. Exit with error.
-7. If `parent_checkpoint` is not None, read it's manifest M_c. Otherwise let M_c be M_p
+7. Compute the source manifest for the clone
+   1. If `parent_checkpoint` is not None, read it's manifest M_c. 
+   2. Otherwise, create a new checkpoint from the latest parent state with a 
+      nonempty lifetime and set M_c to the corresponding manifest.
 8. Write a new manifest M'. If CAS fails, go to step 1. M' fields are set to:
    - parent: set to point to checkpoint ID and initialized set to false
    - writer_epoch: set to the epoch from M_c + 1.
@@ -464,7 +465,8 @@ When initializing the db for the first time (detected by the absence of a manife
    - l0_last_compacted: copied from M_c
    - compacted: copied from M_c
    - checkpoints: empty
-9. Create or update the checkpoint with checkpoint ID pointing to M_c in the parent DB. If CAS fails, go to step 1.
+9. Create or update the checkpoint with checkpoint ID pointing to M_c in the parent DB
+   using the source checkpoint corresponding to M_c. If CAS fails, go to step 1.
 10. Copy over any WAL SSTs between M_c.`last_compacted_wal_id` and M_c.`wal_id_last_seen`.
 11. Update M' with `initialized` set to true. If CAS fails, go to step 1.
 

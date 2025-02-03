@@ -8,7 +8,7 @@
 //! Basic usage of the `Db` struct:
 //!
 //! ```
-//! use slatedb::{db::Db, error::SlateDBError};
+//! use slatedb::{Db, SlateDBError};
 //! use slatedb::object_store::{ObjectStore, memory::InMemory};
 //! use std::sync::Arc;
 //!
@@ -56,7 +56,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
-use crate::types::{RowAttributes, ValueDeletable};
+use crate::types::ValueDeletable;
 use crate::utils::MonotonicClock;
 use tracing::{info, warn};
 
@@ -483,6 +483,10 @@ impl DbInner {
             sst_iterators.push_back(load_sst_iters(self, sst_id).await?);
         }
 
+        // load the last seq number from manifest, and use it as the starting seq number.
+        // there might have bigger seq number in the WALs, we'd update the last seq number
+        // to the max seq number while iterating over the WALs.
+        let mut last_seq = self.state.read().state().core.last_l0_seq;
         while let Some((mut sst_iter, sst_id)) = sst_iterators.pop_front() {
             last_sst_id = sst_id;
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
@@ -499,28 +503,8 @@ impl DbInner {
                         last_tick = cmp::max(last_tick, ts);
                     }
 
-                    match &kv.value {
-                        ValueDeletable::Value(value) => {
-                            guard.memtable().put(
-                                kv.key.clone(),
-                                value.clone(),
-                                RowAttributes {
-                                    ts: kv.create_ts,
-                                    expire_ts: kv.expire_ts,
-                                },
-                            );
-                        }
-                        ValueDeletable::Merge(_) => {
-                            todo!()
-                        }
-                        ValueDeletable::Tombstone => guard.memtable().delete(
-                            kv.key.clone(),
-                            RowAttributes {
-                                ts: kv.create_ts,
-                                expire_ts: kv.expire_ts,
-                            },
-                        ),
-                    }
+                    last_seq = last_seq.max(kv.seq);
+                    guard.memtable().put(kv.clone());
                 }
                 self.maybe_freeze_memtable(&mut guard, sst_id)?;
                 if guard.state().core.next_wal_sst_id == sst_id {
@@ -541,6 +525,9 @@ impl DbInner {
             last_sst_id + 1,
             self.state.read().state().core.next_wal_sst_id
         );
+
+        // restore the last seq number
+        self.state.write().update_last_seq(last_seq);
 
         Ok(())
     }
@@ -585,7 +572,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::{Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -619,7 +606,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, config::DbOptions, error::SlateDBError};
+    /// use slatedb::{Db, config::DbOptions, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -661,7 +648,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, config::DbOptions, error::SlateDBError};
+    /// use slatedb::{Db, config::DbOptions, SlateDBError};
     /// use slatedb::fail_parallel::FailPointRegistry;
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
@@ -826,7 +813,9 @@ impl Db {
     ) -> Result<FenceableManifest, SlateDBError> {
         let stored_manifest = match latest_stored_manifest {
             Some(manifest) => manifest,
-            None => StoredManifest::init_new_db(manifest_store.clone(), CoreDbState::new()).await?,
+            None => {
+                StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new()).await?
+            }
         };
         FenceableManifest::init_writer(stored_manifest).await
     }
@@ -839,7 +828,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::{Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -931,7 +920,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::{Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -972,7 +961,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, config::ReadOptions, error::SlateDBError};
+    /// use slatedb::{Db, config::ReadOptions, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1003,7 +992,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::{Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1047,7 +1036,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, config::ScanOptions, config::ReadLevel, error::SlateDBError};
+    /// use slatedb::{Db, config::ScanOptions, config::ReadLevel, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1100,7 +1089,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::{Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1136,7 +1125,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, config::{PutOptions, WriteOptions}, error::SlateDBError};
+    /// use slatedb::{Db, config::{PutOptions, WriteOptions}, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1175,7 +1164,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::{Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1205,7 +1194,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, config::WriteOptions, error::SlateDBError};
+    /// use slatedb::{Db, config::WriteOptions, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1240,7 +1229,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{batch::WriteBatch, db::Db, error::SlateDBError};
+    /// use slatedb::{WriteBatch, Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1277,7 +1266,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{batch::WriteBatch, db::Db, config::WriteOptions, error::SlateDBError};
+    /// use slatedb::{WriteBatch, Db, config::WriteOptions, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1313,7 +1302,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{db::Db, error::SlateDBError};
+    /// use slatedb::{Db, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -1371,7 +1360,8 @@ mod tests {
     use crate::proptest_util::sample;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
-    use crate::test_utils::{gen_attrs, TestClock};
+    use crate::test_utils::{assert_iterator, TestClock};
+    use crate::types::RowEntry;
 
     use crate::{proptest_util, test_utils};
     use futures::{future::join_all, StreamExt};
@@ -1529,28 +1519,6 @@ mod tests {
         }
     }
 
-    async fn assert_ordered_scan_in_range(
-        table: &BTreeMap<Bytes, Bytes>,
-        range: &BytesRange,
-        iter: &mut DbIterator<'_>,
-    ) {
-        let mut expected = table.range((range.start_bound().cloned(), range.end_bound().cloned()));
-
-        loop {
-            match (expected.next(), iter.next().await.unwrap()) {
-                (None, None) => break,
-                (Some((expected_key, expected_value)), Some(actual)) => {
-                    assert_eq!(expected_key, &actual.key);
-                    assert_eq!(expected_value, &actual.value);
-                }
-                (Some(expected_record), None) => {
-                    panic!("Expected record {expected_record:?} missing from scan result")
-                }
-                (None, Some(actual)) => panic!("Unexpected record {actual:?} in scan result"),
-            }
-        }
-    }
-
     async fn build_database_from_table(
         table: &BTreeMap<Bytes, Bytes>,
         db_options: DbOptions,
@@ -1607,7 +1575,7 @@ mod tests {
             .scan_with_options(range.clone(), scan_options)
             .await
             .unwrap();
-        assert_ordered_scan_in_range(table, &range, &mut iter).await;
+        test_utils::assert_ranged_db_scan(table, range, &mut iter).await;
     }
 
     #[test]
@@ -1749,7 +1717,7 @@ mod tests {
             iter.seek(seek_key.clone()).await.unwrap();
 
             let seek_range = BytesRange::new(Included(seek_key), scan_range.end_bound().cloned());
-            assert_ordered_scan_in_range(table, &seek_range, &mut iter).await;
+            test_utils::assert_ranged_db_scan(table, seek_range, &mut iter).await;
         }
     }
 
@@ -2008,9 +1976,13 @@ mod tests {
         )
         .await
         .unwrap();
-        db.delete_with_options(&[b'b'; 32], &write_options)
+        db.delete_with_options(&[b'b'; 31], &write_options)
             .await
             .unwrap();
+
+        // ensure the memtable's size is greater than l0_sst_size_bytes, or
+        // the memtable will not be flushed to l0, and the test will hang
+        // at this put_with_options call.
         let write_options = WriteOptions {
             await_durable: true,
         };
@@ -2040,9 +2012,9 @@ mod tests {
         assert_iterator(
             &mut iter,
             vec![
-                RowEntry::new_value(&[b'a'; 32], &[b'j'; 32], 0).with_create_ts(0),
-                RowEntry::new_tombstone(&[b'b'; 32], 0).with_create_ts(0),
-                RowEntry::new_value(&[b'c'; 32], &[b'l'; 32], 0).with_create_ts(10),
+                RowEntry::new_value(&[b'a'; 32], &[b'j'; 32], 1).with_create_ts(0),
+                RowEntry::new_tombstone(&[b'b'; 31], 2).with_create_ts(0),
+                RowEntry::new_value(&[b'c'; 32], &[b'l'; 32], 3).with_create_ts(10),
             ],
         )
         .await;
@@ -2211,21 +2183,12 @@ mod tests {
 
         let memtable = {
             let mut lock = kv_store.inner.state.write();
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc1111"),
-                Bytes::copy_from_slice(b"value1111"),
-                gen_attrs(1),
-            );
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc2222"),
-                Bytes::copy_from_slice(b"value2222"),
-                gen_attrs(2),
-            );
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc3333"),
-                Bytes::copy_from_slice(b"value3333"),
-                gen_attrs(3),
-            );
+            lock.wal()
+                .put(RowEntry::new_value(b"abc1111", b"value1111", 1));
+            lock.wal()
+                .put(RowEntry::new_value(b"abc2222", b"value2222", 2));
+            lock.wal()
+                .put(RowEntry::new_value(b"abc3333", b"value3333", 3));
             lock.wal().table().clone()
         };
 
@@ -2312,6 +2275,47 @@ mod tests {
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
         let db_state = stored_manifest.db_state();
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_restore_seq_number() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let db = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        db.put(b"key1", b"val1").await.unwrap();
+        db.put(b"key2", b"val2").await.unwrap();
+        db.put(b"key3", b"val3").await.unwrap();
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        let db_restored = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        let mut state = db_restored.inner.state.write();
+        let memtable = state.memtable();
+        let mut iter = memtable.table().iter();
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"key1", b"val1", 1).with_create_ts(0),
+                RowEntry::new_value(b"key2", b"val2", 2).with_create_ts(0),
+                RowEntry::new_value(b"key3", b"val3", 3).with_create_ts(0),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

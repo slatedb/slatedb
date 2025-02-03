@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::merge_operator::MergeOperatorError;
 
+#[non_exhaustive]
 #[derive(Clone, Debug, Error)]
 pub enum SlateDBError {
     #[error("IO error: {0}")]
@@ -92,7 +93,7 @@ pub enum SlateDBError {
     #[error("Iterator invalidated after unexpected error {0}")]
     InvalidatedIterator(#[from] Box<SlateDBError>),
 
-    #[error("Invalid argument: {msg}")]
+    #[error("Invalid Argument: {msg}")]
     InvalidArgument { msg: String },
 
     #[error("background task panic'd")]
@@ -108,6 +109,9 @@ pub enum SlateDBError {
 
     #[error("Checkpoint {0} missing")]
     CheckpointMissing(Uuid),
+
+    #[error("Database already exists: {msg}")]
+    DatabaseAlreadyExists { msg: String },
 }
 
 impl From<std::io::Error> for SlateDBError {
@@ -126,6 +130,7 @@ impl From<object_store::Error> for SlateDBError {
 ///
 /// This enum encapsulates various error conditions that may arise
 /// when parsing or processing database configuration options.
+#[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum DbOptionsError {
     #[error("Unknown configuration file format: {0}")]

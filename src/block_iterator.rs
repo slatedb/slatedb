@@ -274,7 +274,7 @@ mod tests {
         runner
             .run(&arbitrary::iteration_order(), |ordering| {
                 let mut iter = BlockIterator::new(block.clone(), ordering);
-                runtime.block_on(test_utils::assert_ordered_scan_in_range(
+                runtime.block_on(test_utils::assert_ranged_kv_scan(
                     &sample_table,
                     &BytesRange::from(..),
                     ordering,
