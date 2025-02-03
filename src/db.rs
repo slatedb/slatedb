@@ -814,7 +814,9 @@ impl Db {
     ) -> Result<FenceableManifest, SlateDBError> {
         let stored_manifest = match latest_stored_manifest {
             Some(manifest) => manifest,
-            None => StoredManifest::init_new_db(manifest_store.clone(), CoreDbState::new()).await?,
+            None => {
+                StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new()).await?
+            }
         };
         FenceableManifest::init_writer(stored_manifest).await
     }
@@ -1504,28 +1506,6 @@ mod tests {
         }
     }
 
-    async fn assert_ordered_scan_in_range(
-        table: &BTreeMap<Bytes, Bytes>,
-        range: &BytesRange,
-        iter: &mut DbIterator<'_>,
-    ) {
-        let mut expected = table.range((range.start_bound().cloned(), range.end_bound().cloned()));
-
-        loop {
-            match (expected.next(), iter.next().await.unwrap()) {
-                (None, None) => break,
-                (Some((expected_key, expected_value)), Some(actual)) => {
-                    assert_eq!(expected_key, &actual.key);
-                    assert_eq!(expected_value, &actual.value);
-                }
-                (Some(expected_record), None) => {
-                    panic!("Expected record {expected_record:?} missing from scan result")
-                }
-                (None, Some(actual)) => panic!("Unexpected record {actual:?} in scan result"),
-            }
-        }
-    }
-
     async fn build_database_from_table(
         table: &BTreeMap<Bytes, Bytes>,
         db_options: DbOptions,
@@ -1582,7 +1562,7 @@ mod tests {
             .scan_with_options(range.as_ref(), scan_options)
             .await
             .unwrap();
-        assert_ordered_scan_in_range(table, &range, &mut iter).await;
+        test_utils::assert_ordered_scan_in_range(table, range, &mut iter).await;
     }
 
     #[test]
@@ -1724,7 +1704,7 @@ mod tests {
             iter.seek(seek_key.clone()).await.unwrap();
 
             let seek_range = BytesRange::new(Included(seek_key), scan_range.end_bound().cloned());
-            assert_ordered_scan_in_range(table, &seek_range, &mut iter).await;
+            test_utils::assert_ordered_scan_in_range(table, seek_range, &mut iter).await;
         }
     }
 

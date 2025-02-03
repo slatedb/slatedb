@@ -636,7 +636,7 @@ mod tests {
         // Create a manifest
         let state = CoreDbState::new();
         let mut stored_manifest =
-            StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
                 .await
                 .unwrap();
 
@@ -681,7 +681,7 @@ mod tests {
         // Create a manifest
         let state = CoreDbState::new();
         let mut stored_manifest =
-            StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
                 .await
                 .unwrap();
 
@@ -756,7 +756,7 @@ mod tests {
         // Manifest 1
         let state = CoreDbState::new();
         let mut stored_manifest =
-            StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
                 .await
                 .unwrap();
 
@@ -821,7 +821,7 @@ mod tests {
         // Manifest 1
         let state = CoreDbState::new();
         let mut stored_manifest =
-            StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
                 .await
                 .unwrap();
         // Manifest 2 (active_checkpoint_id -> 1)
@@ -881,7 +881,7 @@ mod tests {
         // Create a manifest
         let state = CoreDbState::new();
         let mut stored_manifest =
-            StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
                 .await
                 .unwrap();
 
@@ -958,7 +958,7 @@ mod tests {
         // Create a manifest
         let mut state = CoreDbState::new();
         state.last_compacted_wal_sst_id = id2.unwrap_wal_id();
-        StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+        StoredManifest::create_new_db(manifest_store.clone(), state.clone())
             .await
             .unwrap();
 
@@ -1009,7 +1009,7 @@ mod tests {
         state.last_compacted_wal_sst_id = 1;
         state.next_wal_sst_id = 4;
         let mut stored_manifest =
-            StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
                 .await
                 .unwrap();
         assert_eq!(1, stored_manifest.id());
@@ -1084,7 +1084,7 @@ mod tests {
         // Create a manifest
         let mut state = CoreDbState::new();
         state.last_compacted_wal_sst_id = id2.unwrap_wal_id();
-        StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+        StoredManifest::create_new_db(manifest_store.clone(), state.clone())
             .await
             .unwrap();
 
@@ -1173,7 +1173,7 @@ mod tests {
             // Don't add inactive_expired_sst_handle
             ssts: vec![active_sst_handle.clone(), active_expired_sst_handle.clone()],
         });
-        StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+        StoredManifest::create_new_db(manifest_store.clone(), state.clone())
             .await
             .unwrap();
 
@@ -1284,7 +1284,7 @@ mod tests {
             ssts: vec![active_checkpoint_sst_handle.clone()],
         });
         let mut stored_manifest =
-            StoredManifest::init_new_db(manifest_store.clone(), state.clone())
+            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
                 .await
                 .unwrap();
 

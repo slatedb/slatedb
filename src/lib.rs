@@ -49,6 +49,7 @@ mod bytes_generator;
 mod bytes_range;
 mod cached_object_store;
 mod checkpoint;
+mod clone;
 mod compactor;
 mod compactor_executor;
 mod compactor_state;
