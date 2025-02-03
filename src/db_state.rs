@@ -1,4 +1,4 @@
-use crate::bytes_range;
+use crate::bytes_range::BytesRefRange;
 use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
@@ -10,7 +10,7 @@ use std::cmp;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::ops::{Bound, Range};
+use std::ops::Range;
 use std::sync::Arc;
 use tracing::debug;
 use ulid::Ulid;
@@ -44,7 +44,7 @@ impl SsTableHandle {
     pub(crate) fn intersects_range(
         &self,
         end_bound_key: Option<Bytes>,
-        range: (Bound<&[u8]>, Bound<&[u8]>),
+        range: BytesRefRange<'_>,
     ) -> bool {
         let start_bound = match &self.info.first_key {
             None => Unbounded,
@@ -56,7 +56,8 @@ impl SsTableHandle {
             Some(key) => Excluded(key.as_ref()),
         };
 
-        bytes_range::has_nonempty_intersection(range, (start_bound, end_bound))
+        let table_range = BytesRefRange::new((start_bound, end_bound));
+        range.has_nonempty_intersection(table_range)
     }
 
     pub(crate) fn estimate_size(&self) -> u64 {
@@ -157,7 +158,7 @@ impl SortedRun {
             .map(|idx| &self.ssts[idx])
     }
 
-    fn table_idx_covering_range(&self, range: (Bound<&[u8]>, Bound<&[u8]>)) -> Range<usize> {
+    fn table_idx_covering_range(&self, range: BytesRefRange<'_>) -> Range<usize> {
         let mut min_idx = None;
         let mut max_idx = 0;
 
@@ -171,7 +172,7 @@ impl SortedRun {
                 None
             };
 
-            if current_sst.intersects_range(upper_bound_key, range) {
+            if current_sst.intersects_range(upper_bound_key, range.clone()) {
                 if min_idx.is_none() {
                     min_idx = Some(idx);
                 }
@@ -188,7 +189,7 @@ impl SortedRun {
 
     pub(crate) fn tables_covering_range(
         &self,
-        range: (Bound<&[u8]>, Bound<&[u8]>),
+        range: BytesRefRange<'_>,
     ) -> VecDeque<&SsTableHandle> {
         let matching_range = self.table_idx_covering_range(range);
         self.ssts[matching_range].iter().collect()
@@ -196,7 +197,7 @@ impl SortedRun {
 
     pub(crate) fn into_tables_covering_range(
         mut self,
-        range: (Bound<&[u8]>, Bound<&[u8]>),
+        range: BytesRefRange<'_>,
     ) -> VecDeque<SsTableHandle> {
         let matching_range = self.table_idx_covering_range(range);
         self.ssts.drain(matching_range).collect()

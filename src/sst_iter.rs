@@ -1,12 +1,11 @@
-use bytes::Bytes;
 use std::cmp::min;
 use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::ops::{Bound, Range, RangeBounds};
+use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
-use crate::bytes_range::BytesRange;
+use crate::bytes_range::BytesRefRange;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
@@ -45,48 +44,15 @@ impl Default for SstIteratorOptions {
 /// needed for [`crate::db::Db::scan`] since it returns the iterator, while [`SstView::Borrowed`]
 /// accommodates access by reference which is useful for [`crate::db::Db::get`].
 pub(crate) enum SstView<'a> {
-    Owned(SsTableHandle, BytesRange),
-    Borrowed(&'a SsTableHandle, (Bound<&'a [u8]>, Bound<&'a [u8]>)),
+    Owned(SsTableHandle),
+    Borrowed(&'a SsTableHandle),
 }
 
 impl SstView<'_> {
-    fn start_key(&self) -> Bound<&[u8]> {
-        match self {
-            SstView::Owned(_, r) => r.start_bound().map(|b| b.as_ref()),
-            SstView::Borrowed(_, (start, _)) => *start,
-        }
-    }
-
-    fn end_key(&self) -> Bound<&[u8]> {
-        match self {
-            SstView::Owned(_, r) => r.end_bound().map(|b| b.as_ref()),
-            SstView::Borrowed(_, (_, end)) => *end,
-        }
-    }
-
     fn table_as_ref(&self) -> &SsTableHandle {
         match self {
-            SstView::Owned(t, _) => t,
-            SstView::Borrowed(t, _) => t,
-        }
-    }
-
-    /// Check whether a key is contained within this view.
-    fn contains(&self, key: &[u8]) -> bool {
-        match self {
-            SstView::Owned(_, r) => r.contains(key),
-            SstView::Borrowed(_, r) => {
-                <(Bound<&[u8]>, Bound<&[u8]>) as RangeBounds<[u8]>>::contains::<[u8]>(r, key)
-            }
-        }
-    }
-
-    /// Check whether a key exceeds the range of this view.
-    fn key_exceeds(&self, key: &[u8]) -> bool {
-        match self.end_key() {
-            Included(end) => key > end,
-            Excluded(end) => key >= end,
-            Unbounded => false,
+            SstView::Owned(t) => t,
+            SstView::Borrowed(t) => t,
         }
     }
 }
@@ -121,6 +87,7 @@ impl IteratorState {
 
 pub(crate) struct SstIterator<'a> {
     view: SstView<'a>,
+    range: BytesRefRange<'a>,
     index: Arc<SsTableIndexOwned>,
     state: IteratorState,
     next_block_idx_to_fetch: usize,
@@ -133,16 +100,18 @@ pub(crate) struct SstIterator<'a> {
 impl<'a> SstIterator<'a> {
     pub(crate) async fn new(
         view: SstView<'a>,
+        range: BytesRefRange<'a>,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
         assert!(options.max_fetch_tasks > 0);
         assert!(options.blocks_to_fetch > 0);
         let index = table_store.read_index(view.table_as_ref()).await?;
-        let block_idx_range = SstIterator::blocks_covering_view(&index.borrow(), &view);
+        let block_idx_range = SstIterator::blocks_covering_range(&index.borrow(), &range);
 
         let mut iter = Self {
             view,
+            range,
             index,
             state: IteratorState::new(),
             next_block_idx_to_fetch: block_idx_range.start,
@@ -158,14 +127,20 @@ impl<'a> SstIterator<'a> {
         Ok(iter)
     }
 
-    pub(crate) async fn new_owned<T: RangeBounds<Bytes>>(
+    pub(crate) async fn new_owned<T: RangeBounds<&'a [u8]>>(
         range: T,
         table: SsTableHandle,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
-        let view = SstView::Owned(table, BytesRange::from(range));
-        Self::new(view, table_store.clone(), options).await
+        let view = SstView::Owned(table);
+        Self::new(
+            view,
+            BytesRefRange::new(range),
+            table_store.clone(),
+            options,
+        )
+        .await
     }
 
     pub(crate) async fn new_borrowed<T: RangeBounds<&'a [u8]>>(
@@ -174,9 +149,14 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
-        let bounds = (range.start_bound().cloned(), range.end_bound().cloned());
-        let view = SstView::Borrowed(table, bounds);
-        Self::new(view, table_store.clone(), options).await
+        let view = SstView::Borrowed(table);
+        Self::new(
+            view,
+            BytesRefRange::new(range),
+            table_store.clone(),
+            options,
+        )
+        .await
     }
 
     pub(crate) async fn for_key(
@@ -216,15 +196,15 @@ impl<'a> SstIterator<'a> {
         found_block_id
     }
 
-    fn blocks_covering_view(index: &SsTableIndex, view: &SstView) -> Range<usize> {
-        let start_block_id = match view.start_key() {
+    fn blocks_covering_range(index: &SsTableIndex, range: &BytesRefRange<'_>) -> Range<usize> {
+        let start_block_id = match range.start_bound {
             Included(k) | Excluded(k) => {
                 Self::first_block_with_data_including_or_after_key(index, k)
             }
             Unbounded => 0,
         };
 
-        let end_block_id_exclusive = match view.end_key() {
+        let end_block_id_exclusive = match range.end_bound {
             Included(k) => Self::first_block_with_data_including_or_after_key(index, k) + 1,
             Excluded(k) => {
                 let block_index = Self::first_block_with_data_including_or_after_key(index, k);
@@ -298,7 +278,7 @@ impl<'a> SstIterator<'a> {
     async fn advance_block(&mut self) -> Result<(), SlateDBError> {
         if !self.state.is_finished() {
             if let Some(mut iter) = self.next_iter().await? {
-                match self.view.start_key() {
+                match self.range.start_bound {
                     Included(start_key) | Excluded(start_key) => iter.seek(start_key).await?,
                     Unbounded => (),
                 }
@@ -328,9 +308,9 @@ impl KeyValueIterator for SstIterator<'_> {
 
             match next_entry {
                 Some(kv) => {
-                    if self.view.contains(&kv.key) {
+                    if self.range.contains(&kv.key) {
                         return Ok(Some(kv));
-                    } else if self.view.key_exceeds(&kv.key) {
+                    } else if self.range.key_exceeds(&kv.key) {
                         self.stop()
                     }
                 }
@@ -343,10 +323,10 @@ impl KeyValueIterator for SstIterator<'_> {
 
 impl SeekToKey for SstIterator<'_> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        if !self.view.contains(next_key) {
+        if !self.range.contains(next_key) {
             return Err(SlateDBError::InvalidArgument {
                 msg: format!("Cannot seek to a key '{:?}' which is outside the iterator range (start: {:?}, end: {:?})",
-                             next_key, self.view.start_key(), self.view.end_key())
+                             next_key, self.range.start_bound, self.range.end_bound)
             });
         }
 
