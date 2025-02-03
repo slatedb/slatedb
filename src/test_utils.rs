@@ -163,7 +163,7 @@ pub(crate) async fn assert_ranged_kv_scan<T: KeyValueIterator>(
 
 fn assert_next_kv(expected: Option<(&Bytes, &Bytes)>, actual: Option<KeyValue>) {
     match (expected, actual) {
-        (None, None) => return,
+        (None, None) => (),
         (Some((expected_key, expected_value)), Some(actual)) => {
             assert_eq!(expected_key, &actual.key);
             assert_eq!(expected_value, &actual.value);
