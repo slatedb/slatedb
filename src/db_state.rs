@@ -1,4 +1,3 @@
-use crate::bytes_range;
 use crate::bytes_range::BytesRefRange;
 use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
@@ -58,7 +57,7 @@ impl SsTableHandle {
         };
 
         let table_range = BytesRefRange::new((start_bound, end_bound));
-        bytes_range::has_nonempty_intersection(range, table_range)
+        range.has_nonempty_intersection(table_range)
     }
 
     pub(crate) fn estimate_size(&self) -> u64 {

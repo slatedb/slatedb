@@ -1,4 +1,3 @@
-#[cfg(test)]
 use bytes::Bytes;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
@@ -22,6 +21,33 @@ impl<'a> BytesRefRange<'a> {
             Included(end) => key > end,
             Excluded(end) => key >= end,
             Unbounded => false,
+        }
+    }
+
+    pub(crate) fn has_nonempty_intersection(&self, other: BytesRefRange<'a>) -> bool {
+        let start_bound = max_start_bound(self.start_bound, other.start_bound);
+        let end_bound = min_end_bound(self.end_bound, other.end_bound);
+        !Self {
+            start_bound,
+            end_bound,
+        }
+        .is_empty()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        match self.end_bound {
+            Unbounded => false,
+            Included(end) => match self.start_bound {
+                Unbounded => false,
+                Included(start) => start > end,
+                Excluded(start) => start >= end,
+            },
+            Excluded(end) => match self.start_bound {
+                Unbounded => end.len() == 0,
+                Included(start_bytes) => start_bytes >= end,
+                Excluded(start) if start >= end => true,
+                Excluded(start) => is_prefix_increment(start, end),
+            },
         }
     }
 }
@@ -56,14 +82,12 @@ pub(crate) fn is_prefix_increment(prefix: &[u8], b: &[u8]) -> bool {
     b[prefix.len()..] == [u8::MIN]
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BytesRange {
     start_bound: Bound<Bytes>,
     end_bound: Bound<Bytes>,
 }
 
-#[cfg(test)]
 impl RangeBounds<Bytes> for BytesRange {
     fn start_bound(&self) -> Bound<&Bytes> {
         self.start_bound.as_ref()
@@ -74,7 +98,6 @@ impl RangeBounds<Bytes> for BytesRange {
     }
 }
 
-#[cfg(test)]
 impl BytesRange {
     pub(crate) fn new(start_bound: Bound<Bytes>, end_bound: Bound<Bytes>) -> Self {
         Self {
@@ -87,6 +110,7 @@ impl BytesRange {
         Self::new(range.start_bound().cloned(), range.end_bound().cloned())
     }
 
+    #[cfg(test)]
     pub(crate) fn as_ref(&self) -> BytesRefRange {
         BytesRefRange {
             start_bound: self.start_bound.as_ref().map(|b| b.as_ref()),
@@ -95,34 +119,13 @@ impl BytesRange {
     }
 
     #[cfg(test)]
-    pub(crate) fn non_empty(&self) -> bool {
-        !self.is_empty()
+    pub(crate) fn is_empty(&self) -> bool {
+        self.as_ref().is_empty()
     }
 
     #[cfg(test)]
-    pub(crate) fn is_empty(&self) -> bool {
-        let BytesRefRange {
-            start_bound,
-            end_bound,
-        } = self.as_ref();
-        is_empty(start_bound, end_bound)
-    }
-}
-
-fn is_empty(start_bound: Bound<&[u8]>, end_bound: Bound<&[u8]>) -> bool {
-    match end_bound {
-        Unbounded => false,
-        Included(end) => match start_bound {
-            Unbounded => false,
-            Included(start) => start > end,
-            Excluded(start) => start >= end,
-        },
-        Excluded(end) => match start_bound {
-            Unbounded => end.len() == 0,
-            Included(start_bytes) => start_bytes >= end,
-            Excluded(start) if start >= end => true,
-            Excluded(start) => is_prefix_increment(start, end),
-        },
+    pub(crate) fn has_nonempty_intersection(&self, other: BytesRange) -> bool {
+        self.as_ref().has_nonempty_intersection(other.as_ref())
     }
 }
 
@@ -157,15 +160,9 @@ fn max_start_bound<'a>(a: Bound<&'a [u8]>, b: Bound<&'a [u8]>) -> Bound<&'a [u8]
     clamp_bound(a, b, |a, b| a > b)
 }
 
-pub(crate) fn has_nonempty_intersection(r1: BytesRefRange<'_>, r2: BytesRefRange<'_>) -> bool {
-    let start_bound = max_start_bound(r1.start_bound, r2.start_bound);
-    let end_bound = min_end_bound(r1.end_bound, r2.end_bound);
-    !is_empty(start_bound, end_bound)
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::bytes_range::{has_nonempty_intersection, BytesRange};
+    use crate::bytes_range::BytesRange;
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
 
@@ -176,7 +173,7 @@ pub(crate) mod tests {
     #[test]
     fn test_arbitrary_range() {
         proptest!(|(range in arbitrary::nonempty_range(10))| {
-            assert!(range.non_empty());
+            assert!(!range.is_empty());
         });
 
         proptest!(|(range in arbitrary::empty_range(10))| {
@@ -190,10 +187,7 @@ pub(crate) mod tests {
             empty_range in arbitrary::empty_range(10),
             non_empty_range in arbitrary::nonempty_range(10),
         )| {
-            assert!(!has_nonempty_intersection(
-                empty_range.as_ref(),
-                non_empty_range.as_ref(),
-            ))
+            assert!(!empty_range.has_nonempty_intersection(non_empty_range))
         });
     }
 
@@ -201,10 +195,7 @@ pub(crate) mod tests {
     fn test_intersection_of_non_empty_and_unbounded_range_is_nonempty() {
         proptest!(|(non_empty_range in arbitrary::nonempty_range(10))| {
             let unbounded_range = BytesRange::new(Unbounded, Unbounded);
-            assert!(has_nonempty_intersection(
-                non_empty_range.as_ref(),
-                unbounded_range.as_ref()
-            ))
+            assert!(non_empty_range.has_nonempty_intersection(unbounded_range))
         });
     }
 
@@ -228,10 +219,7 @@ pub(crate) mod tests {
         proptest!(|(
             (non_empty_1, non_empty_2) in arbitrary::nonempty_intersecting_ranges(10),
         )| {
-            assert!(has_nonempty_intersection(
-                non_empty_1.as_ref(),
-                non_empty_2.as_ref(),
-            ));
+            assert!(non_empty_1.has_nonempty_intersection(non_empty_2))
         });
     }
 }

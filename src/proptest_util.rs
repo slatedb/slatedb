@@ -399,7 +399,7 @@ pub(crate) mod sample {
 
     pub(crate) fn bytes_in_range(rng: &mut TestRng, range: &BytesRange) -> Bytes {
         assert!(
-            range.non_empty(),
+            !range.is_empty(),
             "Cannot choose an arbitrary value from an empty range"
         );
 

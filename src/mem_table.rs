@@ -4,17 +4,17 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use bytes::Bytes;
-use crossbeam_skiplist::map::Range;
-use crossbeam_skiplist::SkipMap;
-use std::sync::atomic::AtomicI64;
-use std::sync::atomic::Ordering::SeqCst;
-
+use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::merge_iterator::MergeIterator;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCell;
+use bytes::Bytes;
+use crossbeam_skiplist::map::Range;
+use crossbeam_skiplist::SkipMap;
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::Ordering::SeqCst;
 
 /// Memtable may contains multiple versions of a single user key, with a monotonically increasing sequence number.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -127,9 +127,9 @@ impl VecDequeKeyValueIterator {
         tables: VecDeque<Arc<KVTable>>,
         range: T,
     ) -> Result<Self, SlateDBError> {
-        let start_bound_bytes = range.start_bound().map(|b| Bytes::copy_from_slice(b));
-        let end_bound_bytes = range.end_bound().map(|b| Bytes::copy_from_slice(b));
-        let range = (start_bound_bytes, end_bound_bytes);
+        let start_bound = range.start_bound().map(|b| Bytes::copy_from_slice(b));
+        let end_bound = range.end_bound().map(|b| Bytes::copy_from_slice(b));
+        let range = BytesRange::new(start_bound, end_bound);
 
         let memtable_iters = tables.iter().map(|t| t.range(range.clone())).collect();
         let mut merge_iter = MergeIterator::new(memtable_iters).await?;
