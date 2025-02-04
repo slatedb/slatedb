@@ -354,6 +354,7 @@ mod tests {
             handle,
             table_store.clone(),
             SstIteratorOptions::default(),
+            None,
         )
         .await
         .unwrap();
@@ -464,6 +465,7 @@ mod tests {
             handle,
             table_store.clone(),
             SstIteratorOptions::default(),
+            None,
         )
         .await
         .unwrap();

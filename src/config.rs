@@ -175,7 +175,7 @@ use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 /// to serve the data written by the write, until some later durably committed write
 /// updates the same key.
 #[non_exhaustive]
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, Copy)]
 pub enum ReadLevel {
     /// Client reads will only see data that's been committed durably to the DB.
     #[default]

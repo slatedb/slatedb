@@ -518,6 +518,7 @@ mod tests {
             kv.0,
             Arc::clone(&table_store),
             SstIteratorOptions::default(),
+            None,
         )
         .await
         .unwrap();

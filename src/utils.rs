@@ -1,10 +1,13 @@
-use crate::config::Clock;
+use crate::config::{Clock, ReadLevel, ReadOptions};
+use crate::config::ReadLevel::{Committed, Uncommitted};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{BackgroundTaskPanic, BackgroundTaskShutdown};
 use std::future::Future;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
+use bytes::Bytes;
+use crate::types::{RowEntry, ValueDeletable};
 
 pub(crate) struct WatchableOnceCell<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
@@ -139,6 +142,44 @@ where
             }
         })
         .expect("failed to create monitor thread")
+}
+
+// Temporary function to convert ValueDeletable to Option<Bytes> until
+// we add proper support for merges.
+pub(crate) fn unwrap_result(
+    value: ValueDeletable,
+) -> Result<Option<Bytes>, SlateDBError> {
+    match value {
+        ValueDeletable::Value(v) => Ok(Some(v)),
+        ValueDeletable::Merge(_) => {
+            Err(unimplemented!("MergeOperator is not yet fully implemented"))
+        }
+        ValueDeletable::Tombstone => Ok(None),
+    }
+}
+
+pub(crate) fn filter_expired(
+    entry: RowEntry,
+    mono_clock: Arc<MonotonicClock>,
+    read_level: ReadLevel
+) -> Result<Option<RowEntry>, SlateDBError> {
+    if entry.expire_ts.is_none() {
+        return Ok(Some(entry));
+    }
+
+    let effective_now = if matches!(read_level, Uncommitted) {
+        mono_clock.now()?
+    } else if matches!(read_level, Committed) {
+        mono_clock.get_last_tick()
+    } else {
+        panic!("Did not recognize configured ReadLevel: {:?}", read_level);
+    };
+
+    if entry.expire_ts.unwrap() <= effective_now {
+        Ok(None)
+    } else {
+        Ok(Some(entry))
+    }
 }
 
 /// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks

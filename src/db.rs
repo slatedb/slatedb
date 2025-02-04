@@ -57,7 +57,7 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
-use crate::utils::MonotonicClock;
+use crate::utils::{filter_expired, unwrap_result, MonotonicClock};
 use tracing::{info, warn};
 
 pub(crate) struct DbInner {
@@ -114,7 +114,7 @@ impl DbInner {
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
             if let Some(entry) = maybe_val {
-                return self.filter_expired(entry.value, entry.expire_ts, self.mono_clock.clone(), options);
+                return unwrap_result(filter_expired(entry, self.mono_clock.clone(), options.read_level)?.unwrap().value);
             }
         }
 
@@ -122,7 +122,7 @@ impl DbInner {
             .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
         if let Some(entry) = maybe_val {
-            return self.filter_expired(entry.value, entry.expire_ts, self.mono_clock.clone(), options);
+            return unwrap_result(filter_expired(entry, self.mono_clock.clone(), options.read_level)?.unwrap().value);
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -133,18 +133,20 @@ impl DbInner {
         let sst_iter_options = SstIteratorOptions {
             cache_blocks: true,
             eager_spawn: true,
+            read_level: options.read_level,
             ..SstIteratorOptions::default()
         };
 
         for sst in &snapshot.state.core.l0 {
             if self.sst_might_include_key(sst, key, key_hash).await? {
                 let mut iter =
-                    SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
+                    SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options, Some(self.mono_clock.clone()))
                         .await?;
 
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return self.filter_expired(entry.value, entry.expire_ts, self.mono_clock.clone(), options);
+                        // sst iterator automatically filters expired entries so just unwrap & return
+                        return unwrap_result(entry.value);
                     }
                 }
             }
@@ -153,51 +155,17 @@ impl DbInner {
         for sr in &snapshot.state.core.compacted {
             if self.sr_might_include_key(sr, key, key_hash).await? {
                 let mut iter =
-                    SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
+                    SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options, Some(self.mono_clock.clone()))
                         .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return self.filter_expired(entry.value, entry.expire_ts, self.mono_clock.clone(), options);
+                        // sst iterator automatically filters expired entries so just unwrap & return
+                        return unwrap_result(entry.value);
                     }
                 }
             }
         }
         Ok(None)
-    }
-
-    fn filter_expired(
-        value: ValueDeletable,
-        expire_ts: Option<i64>,
-        mono_clock: MonotonicClock,
-        read_options: ReadOptions
-    ) -> Result<Option<Bytes>, SlateDBError> {
-        // Temporary function to convert ValueDeletable to Option<Bytes> until
-        // we add proper support for merges.
-        let unwrap_result = |v| match v {
-            ValueDeletable::Value(v) => Ok(Some(v)),
-            ValueDeletable::Merge(_) => {
-                unimplemented!("MergeOperator is not yet fully implemented")
-            }
-            ValueDeletable::Tombstone => Ok(None),
-        };
-
-        if expire_ts.is_some() {
-            return unwrap_result(value);
-        }
-
-        let effective_now = if matches!(read_options.read_level, Uncommitted) {
-            mono_clock.now().unwrap()
-        } else if matches!(read_options.read_level, Committed) {
-            mono_clock.get_last_tick()
-        } else {
-            panic!("Did not recognize configured ReadLevel: {:?}", read_options.read_level);
-        };
-
-        if expire_ts.unwrap() <= effective_now {
-            Ok(None)
-        } else {
-            unwrap_result(value)
-        }
     }
 
     pub async fn scan_with_options<'a>(
@@ -232,6 +200,7 @@ impl DbInner {
             blocks_to_fetch: read_ahead_blocks,
             cache_blocks: options.cache_blocks,
             eager_spawn: true,
+            read_level: options.read_level,
         };
 
         let mut l0_iters = VecDeque::new();
@@ -241,6 +210,7 @@ impl DbInner {
                 sst,
                 self.table_store.clone(),
                 sst_iter_options,
+                Some(self.mono_clock.clone()),
             )
                 .await?;
             l0_iters.push_back(iter);
@@ -253,6 +223,7 @@ impl DbInner {
                 sr,
                 self.table_store.clone(),
                 sst_iter_options,
+                Some(self.mono_clock.clone()),
             )
                 .await?;
             sr_iters.push_back(iter);
@@ -477,9 +448,10 @@ impl DbInner {
                 blocks_to_fetch: 256,
                 cache_blocks: true,
                 eager_spawn: true,
+                read_level: Committed
             };
             let iter =
-                SstIterator::new_owned(.., sst, db_inner.table_store.clone(), sst_iter_options)
+                SstIterator::new_owned(.., sst, db_inner.table_store.clone(), sst_iter_options, None)
                     .await?;
             Ok((iter, id))
         }
@@ -2107,7 +2079,7 @@ mod tests {
 
         let l0 = state.l0.front().unwrap();
         let mut iter =
-            SstIterator::new_borrowed(.., l0, table_store.clone(), SstIteratorOptions::default())
+            SstIterator::new_borrowed(.., l0, table_store.clone(), SstIteratorOptions::default(), None)
                 .await
                 .unwrap();
         assert_iterator(
@@ -2175,7 +2147,7 @@ mod tests {
         for i in 0u8..3u8 {
             let sst1 = l0.get(2 - i as usize).unwrap();
             let mut iter =
-                SstIterator::new_borrowed(.., sst1, table_store.clone(), sst_iter_options)
+                SstIterator::new_borrowed(.., sst1, table_store.clone(), sst_iter_options, None)
                     .await
                     .unwrap();
             let kv = iter.next().await.unwrap().unwrap();

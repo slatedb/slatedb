@@ -603,7 +603,7 @@ mod tests {
             ..SstIteratorOptions::default()
         };
         // then:
-        let mut iter = SstIterator::new_owned(.., sst, ts.clone(), sst_iter_options)
+        let mut iter = SstIterator::new_owned(.., sst, ts.clone(), sst_iter_options, None)
             .await
             .unwrap();
         assert_iterator(

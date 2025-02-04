@@ -15,6 +15,8 @@ use crate::{
     block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, tablestore::TableStore,
     types::RowEntry,
 };
+use crate::config::ReadLevel;
+use crate::utils::{filter_expired, MonotonicClock};
 
 enum FetchTask {
     InFlight(JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
@@ -27,6 +29,7 @@ pub(crate) struct SstIteratorOptions {
     pub(crate) blocks_to_fetch: usize,
     pub(crate) cache_blocks: bool,
     pub(crate) eager_spawn: bool,
+    pub(crate) read_level: ReadLevel,
 }
 
 impl Default for SstIteratorOptions {
@@ -36,6 +39,7 @@ impl Default for SstIteratorOptions {
             blocks_to_fetch: 1,
             cache_blocks: true,
             eager_spawn: false,
+            read_level: ReadLevel::default(),
         }
     }
 }
@@ -128,6 +132,7 @@ pub(crate) struct SstIterator<'a> {
     fetch_tasks: VecDeque<FetchTask>,
     table_store: Arc<TableStore>,
     options: SstIteratorOptions,
+    ttl_clock: Option<Arc<MonotonicClock>>,
 }
 
 impl<'a> SstIterator<'a> {
@@ -135,6 +140,7 @@ impl<'a> SstIterator<'a> {
         view: SstView<'a>,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        ttl_clock: Option<Arc<MonotonicClock>>,
     ) -> Result<Self, SlateDBError> {
         assert!(options.max_fetch_tasks > 0);
         assert!(options.blocks_to_fetch > 0);
@@ -150,6 +156,7 @@ impl<'a> SstIterator<'a> {
             fetch_tasks: VecDeque::new(),
             table_store,
             options,
+            ttl_clock,
         };
 
         if options.eager_spawn {
@@ -163,9 +170,10 @@ impl<'a> SstIterator<'a> {
         table: SsTableHandle,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        ttl_clock: Option<Arc<MonotonicClock>>,
     ) -> Result<Self, SlateDBError> {
         let view = SstView::Owned(table, BytesRange::from(range));
-        Self::new(view, table_store.clone(), options).await
+        Self::new(view, table_store.clone(), options, ttl_clock).await
     }
 
     pub(crate) async fn new_borrowed<T: RangeBounds<&'a [u8]>>(
@@ -173,10 +181,11 @@ impl<'a> SstIterator<'a> {
         table: &'a SsTableHandle,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        ttl_clock: Option<Arc<MonotonicClock>>,
     ) -> Result<Self, SlateDBError> {
         let bounds = (range.start_bound().cloned(), range.end_bound().cloned());
         let view = SstView::Borrowed(table, bounds);
-        Self::new(view, table_store.clone(), options).await
+        Self::new(view, table_store.clone(), options, ttl_clock).await
     }
 
     pub(crate) async fn for_key(
@@ -184,8 +193,9 @@ impl<'a> SstIterator<'a> {
         key: &'a [u8],
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        ttl_clock: Option<Arc<MonotonicClock>>,
     ) -> Result<Self, SlateDBError> {
-        Self::new_borrowed(key..=key, table, table_store, options).await
+        Self::new_borrowed(key..=key, table, table_store, options, ttl_clock).await
     }
 
     fn first_block_with_data_including_or_after_key(index: &SsTableIndex, key: &[u8]) -> usize {
@@ -329,7 +339,7 @@ impl KeyValueIterator for SstIterator<'_> {
             match next_entry {
                 Some(kv) => {
                     if self.view.contains(&kv.key) {
-                        return Ok(Some(kv));
+                        return filter_expired(kv, self.ttl_clock.clone().unwrap(), self.options.read_level);
                     } else if self.view.key_exceeds(&kv.key) {
                         self.stop()
                     }
