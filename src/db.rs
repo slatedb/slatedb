@@ -39,7 +39,7 @@ use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
-use crate::config::ReadLevel::Uncommitted;
+use crate::config::ReadLevel::{Committed, Uncommitted};
 use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
@@ -113,16 +113,16 @@ impl DbInner {
             let maybe_val = std::iter::once(snapshot.wal)
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
-            if let Some(val) = maybe_val {
-                return self.get_if_not_expired(val.value, val.expire_ts);
+            if let Some(entry) = maybe_val {
+                return self.filter_expired(entry.value, entry.expire_ts, self.mono_clock.clone(), options);
             }
         }
 
         let maybe_val = std::iter::once(snapshot.memtable)
             .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
-        if let Some(val) = maybe_val {
-            return self.get_if_not_expired(val.value, val.expire_ts);
+        if let Some(entry) = maybe_val {
+            return self.filter_expired(entry.value, entry.expire_ts, self.mono_clock.clone(), options);
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -144,7 +144,7 @@ impl DbInner {
 
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return self.get_if_not_expired(entry.value, entry.expire_ts);
+                        return self.filter_expired(entry.value, entry.expire_ts, self.mono_clock.clone(), options);
                     }
                 }
             }
@@ -157,7 +157,7 @@ impl DbInner {
                         .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return self.get_if_not_expired(entry.value, entry.expire_ts);
+                        return self.filter_expired(entry.value, entry.expire_ts, self.mono_clock.clone(), options);
                     }
                 }
             }
@@ -165,12 +165,12 @@ impl DbInner {
         Ok(None)
     }
 
-    fn get_if_not_expired(
-        &self,
+    fn filter_expired(
         value: ValueDeletable,
-        expire_ts: Option<i64>
+        expire_ts: Option<i64>,
+        mono_clock: MonotonicClock,
+        read_options: ReadOptions
     ) -> Result<Option<Bytes>, SlateDBError> {
-
         // Temporary function to convert ValueDeletable to Option<Bytes> until
         // we add proper support for merges.
         let unwrap_result = |v| match v {
@@ -181,7 +181,19 @@ impl DbInner {
             ValueDeletable::Tombstone => Ok(None),
         };
 
-        if expire_ts.is_some_and(|expire_ts: i64| -> bool { expire_ts <= self.mono_clock.now().unwrap() }) {
+        if expire_ts.is_some() {
+            return unwrap_result(value);
+        }
+
+        let effective_now = if matches!(read_options.read_level, Uncommitted) {
+            mono_clock.now().unwrap()
+        } else if matches!(read_options.read_level, Committed) {
+            mono_clock.get_last_tick()
+        } else {
+            panic!("Did not recognize configured ReadLevel: {:?}", read_options.read_level);
+        };
+
+        if expire_ts.unwrap() <= effective_now {
             Ok(None)
         } else {
             unwrap_result(value)

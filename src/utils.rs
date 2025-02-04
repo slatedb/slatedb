@@ -2,7 +2,7 @@ use crate::config::Clock;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{BackgroundTaskPanic, BackgroundTaskShutdown};
 use std::future::Future;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
 
@@ -158,6 +158,10 @@ impl MonotonicClock {
 
     pub(crate) fn set_last_tick(&self, tick: i64) -> Result<i64, SlateDBError> {
         self.enforce_monotonic(tick)
+    }
+
+    pub(crate) fn get_last_tick(&self) -> i64 {
+        self.last_tick.load(Ordering::Relaxed)
     }
 
     pub(crate) fn now(&self) -> Result<i64, SlateDBError> {
