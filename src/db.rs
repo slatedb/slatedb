@@ -1486,6 +1486,11 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_with_ttl_committed() {
+        // TODO
+    }
+
+    #[tokio::test]
     async fn test_get_with_object_store_cache_metrics() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut opts = test_db_options(0, 1024, None);
