@@ -1575,7 +1575,7 @@ mod tests {
             .scan_with_options(range.clone(), scan_options)
             .await
             .unwrap();
-        test_utils::assert_ordered_scan_in_range(table, range, &mut iter).await;
+        test_utils::assert_ranged_db_scan(table, range, &mut iter).await;
     }
 
     #[test]
@@ -1717,7 +1717,7 @@ mod tests {
             iter.seek(seek_key.clone()).await.unwrap();
 
             let seek_range = BytesRange::new(Included(seek_key), scan_range.end_bound().cloned());
-            test_utils::assert_ordered_scan_in_range(table, seek_range, &mut iter).await;
+            test_utils::assert_ranged_db_scan(table, seek_range, &mut iter).await;
         }
     }
 
