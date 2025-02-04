@@ -135,6 +135,7 @@ SlateDB is currently in the early stages of development. It is not yet ready for
 - [x] Compaction ([#7](https://github.com/slatedb/slatedb/issues/7))
 - [ ] Transactions
 - [ ] Merge operator ([#328](https://github.com/slatedb/slatedb/issues/328))
+- [ ] Clones ([#49](https://github.com/slatedb/slatedb/issues/49))
 
 ## License
 
