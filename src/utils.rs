@@ -1,4 +1,4 @@
-use crate::config::{Clock, ReadLevel, ReadOptions};
+use crate::config::{Clock, ReadLevel};
 use crate::config::ReadLevel::{Committed, Uncommitted};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{BackgroundTaskPanic, BackgroundTaskShutdown};
@@ -144,7 +144,7 @@ where
         .expect("failed to create monitor thread")
 }
 
-// Temporary function to convert ValueDeletable to Option<Bytes> until
+// Temporary functions to convert ValueDeletable to Option<Bytes> until
 // we add proper support for merges.
 pub(crate) fn unwrap_result(
     value: ValueDeletable,
@@ -167,6 +167,8 @@ pub(crate) fn filter_expired(
         return Ok(Some(entry));
     }
 
+    println!("SOPHIE: in filter, row_entry: {:?} with read_level: {:?}", entry.key, read_level);
+
     let effective_now = if matches!(read_level, Uncommitted) {
         mono_clock.now()?
     } else if matches!(read_level, Committed) {
@@ -183,7 +185,7 @@ pub(crate) fn filter_expired(
 }
 
 /// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
-/// from the underlying implementation are montonoically increasing
+/// from the underlying implementation are monotonically increasing
 pub(crate) struct MonotonicClock {
     pub(crate) last_tick: AtomicI64,
     delegate: Arc<dyn Clock + Send + Sync>,

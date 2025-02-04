@@ -418,7 +418,7 @@ mod tests {
             ..SstIteratorOptions::default()
         };
         let mut iter =
-            SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options)
+            SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options, None)
                 .await
                 .unwrap();
         let kv = iter.next().await.unwrap().unwrap();
@@ -480,7 +480,7 @@ mod tests {
             ..SstIteratorOptions::default()
         };
         let mut iter =
-            SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options)
+            SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options, None)
                 .await
                 .unwrap();
         for i in 0..1000 {
@@ -527,6 +527,7 @@ mod tests {
                 &sst,
                 table_store.clone(),
                 SstIteratorOptions::default(),
+                None,
             )
             .await
             .unwrap();
@@ -570,6 +571,7 @@ mod tests {
             &sst,
             table_store.clone(),
             SstIteratorOptions::default(),
+            None,
         )
         .await
         .unwrap();
@@ -611,6 +613,7 @@ mod tests {
             &sst,
             table_store.clone(),
             SstIteratorOptions::default(),
+            None,
         )
         .await
         .unwrap();

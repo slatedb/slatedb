@@ -201,7 +201,7 @@ mod tests {
         };
 
         let mut iter =
-            SortedRunIterator::new_owned(.., sr, table_store, SstIteratorOptions::default())
+            SortedRunIterator::new_owned(.., sr, table_store, SstIteratorOptions::default(), None)
                 .await
                 .unwrap();
 
@@ -253,6 +253,7 @@ mod tests {
             sr,
             table_store.clone(),
             SstIteratorOptions::default(),
+            None,
         )
         .await
         .unwrap();
@@ -300,6 +301,7 @@ mod tests {
                 &sr,
                 table_store.clone(),
                 SstIteratorOptions::default(),
+                None,
             )
             .await
             .unwrap();
@@ -338,6 +340,7 @@ mod tests {
             &sr,
             table_store.clone(),
             SstIteratorOptions::default(),
+            None,
         )
         .await
         .unwrap();
@@ -375,6 +378,7 @@ mod tests {
             &sr,
             table_store.clone(),
             SstIteratorOptions::default(),
+            None,
         )
         .await
         .unwrap();
@@ -405,6 +409,7 @@ mod tests {
             sr,
             table_store.clone(),
             SstIteratorOptions::default(),
+            None,
         )
         .await
         .unwrap();
