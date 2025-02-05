@@ -75,6 +75,24 @@ impl SsTableFormat {
         Ok(filter)
     }
 
+    #[cfg(test)]
+    pub(crate) fn read_filter_raw(
+        &self,
+        info: &SsTableInfo,
+        sst_bytes: &Bytes,
+    ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
+        if info.filter_len == 0 {
+            return Ok(None);
+        }
+        let filter_end = info.filter_offset + info.filter_len;
+        let filter_offset_range = info.filter_offset as usize..filter_end as usize;
+        let filter_bytes = sst_bytes.slice(filter_offset_range);
+        let compression_codec = info.compression_codec;
+        Ok(Some(Arc::new(
+            self.decode_filter(filter_bytes, compression_codec)?,
+        )))
+    }
+
     pub(crate) fn decode_filter(
         &self,
         bytes: Bytes,

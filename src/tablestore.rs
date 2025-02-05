@@ -13,7 +13,7 @@ use object_store::ObjectStore;
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
-use crate::db_cache::CachedEntry;
+use crate::db_cache::{CachedEntry, DbCacheWrapper};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
@@ -24,7 +24,7 @@ use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
 use crate::types::RowEntry;
-use crate::{blob::ReadOnlyBlob, block::Block, db_cache::DbCache};
+use crate::{blob::ReadOnlyBlob, block::Block};
 
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
@@ -34,7 +34,7 @@ pub struct TableStore {
     fp_registry: Arc<FailPointRegistry>,
     transactional_wal_store: Arc<dyn TransactionalObjectStore>,
     /// In-memory cache for blocks
-    block_cache: Option<Arc<dyn DbCache>>,
+    block_cache: Option<DbCacheWrapper>,
 }
 
 struct ReadOnlyObject {
@@ -78,7 +78,7 @@ impl TableStore {
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
         root_path: P,
-        block_cache: Option<Arc<dyn DbCache>>,
+        block_cache: Option<DbCacheWrapper>,
     ) -> Self {
         Self::new_with_fp_registry(
             object_store,
@@ -94,7 +94,7 @@ impl TableStore {
         sst_format: SsTableFormat,
         root_path: P,
         fp_registry: Arc<FailPointRegistry>,
-        block_cache: Option<Arc<dyn DbCache>>,
+        block_cache: Option<DbCacheWrapper>,
     ) -> Self {
         Self {
             object_store: object_store.clone(),
@@ -298,7 +298,7 @@ impl TableStore {
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(filter) = cache
-                .get((handle.id, handle.info.filter_offset).into())
+                .get_filter((handle.id, handle.info.filter_offset).into())
                 .await
                 .and_then(|entry| entry.bloom_filter())
             {
@@ -330,7 +330,7 @@ impl TableStore {
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(index) = cache
-                .get((handle.id, handle.info.index_offset).into())
+                .get_index((handle.id, handle.info.index_offset).into())
                 .await
                 .and_then(|entry| entry.sst_index())
             {
@@ -402,7 +402,7 @@ impl TableStore {
                 let block_meta = index_borrow.block_meta().get(block_num);
                 let offset = block_meta.offset();
                 cache
-                    .get((handle.id, offset).into())
+                    .get_data_block((handle.id, offset).into())
                     .await
                     .and_then(|entry| entry.block())
             }))
@@ -555,11 +555,13 @@ mod tests {
     use proptest::proptest;
     use ulid::Ulid;
 
+    use crate::db_cache::DbCache;
     use crate::error;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::stats::StatRegistry;
     #[cfg(feature = "moka")]
-    use crate::tablestore::DbCache;
+    use crate::tablestore::DbCacheWrapper;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::{RowEntry, ValueDeletable};
@@ -659,12 +661,14 @@ mod tests {
             ..SsTableFormat::default()
         };
 
+        let stat_registry = StatRegistry::new();
         let block_cache = Arc::new(MokaCache::new());
+        let wrapper = DbCacheWrapper::new(block_cache.clone(), &stat_registry);
         let ts = Arc::new(TableStore::new(
             os.clone(),
             format,
             Path::from("/root"),
-            Some(block_cache.clone()),
+            Some(wrapper),
         ));
 
         // Create and write SST
