@@ -28,6 +28,7 @@ pub use cached_object_store::stats as cached_object_store_stats;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};
 pub use compactor::stats as compactor_stats;
 pub use db::Db;
+pub use db_cache::stats as db_cache_stats;
 pub use db_iter::DbIterator;
 pub use error::{DbOptionsError, SlateDBError};
 pub use garbage_collector::stats as garbage_collector_stats;

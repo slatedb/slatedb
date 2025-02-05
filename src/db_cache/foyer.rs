@@ -102,6 +102,7 @@ impl DbCache for FoyerCache {
     }
 
     fn entry_count(&self) -> u64 {
-        self.inner.usage() as _
+        // foyer cache doesn't support an entry count estimate
+        0
     }
 }

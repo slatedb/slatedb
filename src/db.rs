@@ -42,6 +42,7 @@ use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
+use crate::db_cache::DbCacheWrapper;
 use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::db_stats::DbStats;
@@ -713,7 +714,10 @@ impl Db {
             sst_format.clone(),
             path.clone(),
             fp_registry.clone(),
-            options.block_cache.clone(),
+            options
+                .block_cache
+                .as_ref()
+                .map(|c| DbCacheWrapper::new(c.clone(), stat_registry.as_ref())),
         ));
 
         let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
