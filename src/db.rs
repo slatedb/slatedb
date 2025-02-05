@@ -40,7 +40,7 @@ use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::{Committed, Uncommitted};
-use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
+use crate::config::{DbOptions, PutOptions, ReadLevel, ReadOptions, ScanOptions, WriteOptions};
 use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -58,6 +58,7 @@ use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::utils::{filter_expired, unwrap_result, MonotonicClock};
 use tracing::{info, warn};
+use crate::TtlFilterIterator::TtlFilterIterator;
 use crate::types::RowEntry;
 
 pub(crate) struct DbInner {
@@ -139,33 +140,42 @@ impl DbInner {
 
         for sst in &snapshot.state.core.l0 {
             if self.sst_might_include_key(sst, key, key_hash).await? {
-                let mut iter =
+                let sst_iter =
                     SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options, Some(self.mono_clock.clone()))
                         .await?;
 
-                if let Some(entry) = iter.next_entry().await? {
-                    if entry.key == key {
-                        // sst iterator automatically filters expired entries so just unwrap & return
-                        return unwrap_result(entry.value);
-                    }
+                if let Some(value) = self.find_unexpired_entry(key, sst_iter, options.read_level) {
+                    value
                 }
             }
         }
 
         for sr in &snapshot.state.core.compacted {
             if self.sr_might_include_key(sr, key, key_hash).await? {
-                let mut iter =
+                let iter =
                     SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options, Some(self.mono_clock.clone()))
                         .await?;
-                if let Some(entry) = iter.next_entry().await? {
-                    if entry.key == key {
-                        // sst iterator automatically filters expired entries so just unwrap & return
-                        return unwrap_result(entry.value);
-                    }
+                if let Some(value) = self.find_unexpired_entry(key, iter, options.read_level) {
+                    value
                 }
             }
         }
         Ok(None)
+    }
+
+    async fn find_unexpired_entry<K: AsRef<[u8]>, T: KeyValueIterator>(
+        &self,
+        key: K,
+        iter: T,
+        read_level: ReadLevel,
+    ) -> Result<Option<Bytes>, SlateDBError> {
+        let ttl_iter =
+            TtlFilterIterator::new(iter, self.mono_clock.clone(), read_level);
+        if let Some(entry) = ttl_iter.next_entry().await? {
+            if entry.key == key {
+                unwrap_result(entry.value)
+            }
+        }
     }
 
     fn unwrap_value(
