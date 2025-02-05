@@ -39,8 +39,8 @@ use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
-use crate::config::ReadLevel::{Committed, Uncommitted};
-use crate::config::{DbOptions, PutOptions, ReadLevel, ReadOptions, ScanOptions, WriteOptions};
+use crate::config::ReadLevel::Uncommitted;
+use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -58,7 +58,7 @@ use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::utils::{filter_expired, unwrap_result, MonotonicClock};
 use tracing::{info, warn};
-use crate::TtlFilterIterator::TtlFilterIterator;
+use crate::ttl_filter_iterator::TtlFilterIterator;
 use crate::types::RowEntry;
 
 pub(crate) struct DbInner {
@@ -134,18 +134,21 @@ impl DbInner {
         let sst_iter_options = SstIteratorOptions {
             cache_blocks: true,
             eager_spawn: true,
-            read_level: options.read_level,
             ..SstIteratorOptions::default()
         };
 
         for sst in &snapshot.state.core.l0 {
             if self.sst_might_include_key(sst, key, key_hash).await? {
                 let sst_iter =
-                    SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options, Some(self.mono_clock.clone()))
+                    SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
                         .await?;
 
-                if let Some(value) = self.find_unexpired_entry(key, sst_iter, options.read_level) {
-                    value
+                let mut ttl_iter =
+                    TtlFilterIterator::new(sst_iter, self.mono_clock.clone(), options.read_level).await?;
+                if let Some(entry) = ttl_iter.next_entry().await? {
+                    if entry.key == key {
+                        return unwrap_result(entry.value)
+                    }
                 }
             }
         }
@@ -153,29 +156,18 @@ impl DbInner {
         for sr in &snapshot.state.core.compacted {
             if self.sr_might_include_key(sr, key, key_hash).await? {
                 let iter =
-                    SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options, Some(self.mono_clock.clone()))
-                        .await?;
-                if let Some(value) = self.find_unexpired_entry(key, iter, options.read_level) {
-                    value
+                    SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options).await?;
+
+                let mut ttl_iter =
+                    TtlFilterIterator::new(iter, self.mono_clock.clone(), options.read_level).await?;
+                if let Some(entry) = ttl_iter.next_entry().await? {
+                    if entry.key == key {
+                        return unwrap_result(entry.value)
+                    }
                 }
             }
         }
         Ok(None)
-    }
-
-    async fn find_unexpired_entry<K: AsRef<[u8]>, T: KeyValueIterator>(
-        &self,
-        key: K,
-        iter: T,
-        read_level: ReadLevel,
-    ) -> Result<Option<Bytes>, SlateDBError> {
-        let ttl_iter =
-            TtlFilterIterator::new(iter, self.mono_clock.clone(), read_level);
-        if let Some(entry) = ttl_iter.next_entry().await? {
-            if entry.key == key {
-                unwrap_result(entry.value)
-            }
-        }
     }
 
     fn unwrap_value(
@@ -221,7 +213,6 @@ impl DbInner {
             blocks_to_fetch: read_ahead_blocks,
             cache_blocks: options.cache_blocks,
             eager_spawn: true,
-            read_level: options.read_level,
         };
 
         let mut l0_iters = VecDeque::new();
@@ -231,7 +222,6 @@ impl DbInner {
                 sst,
                 self.table_store.clone(),
                 sst_iter_options,
-                Some(self.mono_clock.clone()),
             )
                 .await?;
             l0_iters.push_back(iter);
@@ -244,7 +234,6 @@ impl DbInner {
                 sr,
                 self.table_store.clone(),
                 sst_iter_options,
-                Some(self.mono_clock.clone()),
             )
                 .await?;
             sr_iters.push_back(iter);
@@ -469,10 +458,9 @@ impl DbInner {
                 blocks_to_fetch: 256,
                 cache_blocks: true,
                 eager_spawn: true,
-                read_level: Committed
             };
             let iter =
-                SstIterator::new_owned(.., sst, db_inner.table_store.clone(), sst_iter_options, None)
+                SstIterator::new_owned(.., sst, db_inner.table_store.clone(), sst_iter_options)
                     .await?;
             Ok((iter, id))
         }
@@ -2111,7 +2099,7 @@ mod tests {
 
         let l0 = state.l0.front().unwrap();
         let mut iter =
-            SstIterator::new_borrowed(.., l0, table_store.clone(), SstIteratorOptions::default(), None)
+            SstIterator::new_borrowed(.., l0, table_store.clone(), SstIteratorOptions::default())
                 .await
                 .unwrap();
         assert_iterator(
@@ -2179,7 +2167,7 @@ mod tests {
         for i in 0u8..3u8 {
             let sst1 = l0.get(2 - i as usize).unwrap();
             let mut iter =
-                SstIterator::new_borrowed(.., sst1, table_store.clone(), sst_iter_options, None)
+                SstIterator::new_borrowed(.., sst1, table_store.clone(), sst_iter_options)
                     .await
                     .unwrap();
             let kv = iter.next().await.unwrap().unwrap();

@@ -9,7 +9,6 @@ use bytes::Bytes;
 use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
-use crate::utils::MonotonicClock;
 
 #[derive(Debug)]
 enum SortedRunView<'a> {
@@ -36,10 +35,9 @@ impl<'a> SortedRunView<'a> {
         &mut self,
         table_store: Arc<TableStore>,
         sst_iterator_options: SstIteratorOptions,
-        ttl_clock: Option<Arc<MonotonicClock>>,
     ) -> Result<Option<SstIterator<'a>>, SlateDBError> {
         let next_iter = if let Some(view) = self.pop_sst() {
-            Some(SstIterator::new(view, table_store.clone(), sst_iterator_options, ttl_clock).await?)
+            Some(SstIterator::new(view, table_store.clone(), sst_iterator_options).await?)
         } else {
             None
         };
@@ -59,7 +57,6 @@ pub(crate) struct SortedRunIterator<'a> {
     sst_iter_options: SstIteratorOptions,
     view: SortedRunView<'a>,
     current_iter: Option<SstIterator<'a>>,
-    ttl_clock: Option<Arc<MonotonicClock>>,
 }
 
 impl<'a> SortedRunIterator<'a> {
@@ -67,14 +64,12 @@ impl<'a> SortedRunIterator<'a> {
         view: SortedRunView<'a>,
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
-        ttl_clock: Option<Arc<MonotonicClock>>,
     ) -> Result<Self, SlateDBError> {
         let mut res = Self {
             table_store,
             sst_iter_options,
             view,
             current_iter: None,
-            ttl_clock,
         };
         res.advance_table().await?;
         Ok(res)
@@ -85,12 +80,11 @@ impl<'a> SortedRunIterator<'a> {
         sorted_run: SortedRun,
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
-        ttl_clock: Option<Arc<MonotonicClock>>,
     ) -> Result<Self, SlateDBError> {
         let range = BytesRange::from(range);
         let tables = sorted_run.into_tables_covering_range(range.as_ref());
         let view = SortedRunView::Owned(tables, range);
-        SortedRunIterator::new(view, table_store, sst_iter_options, ttl_clock).await
+        SortedRunIterator::new(view, table_store, sst_iter_options).await
     }
 
     pub(crate) async fn new_borrowed<T: RangeBounds<&'a [u8]>>(
@@ -98,12 +92,11 @@ impl<'a> SortedRunIterator<'a> {
         sorted_run: &'a SortedRun,
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
-        ttl_clock: Option<Arc<MonotonicClock>>,
     ) -> Result<Self, SlateDBError> {
         let range = (range.start_bound().cloned(), range.end_bound().cloned());
         let tables = sorted_run.tables_covering_range(range);
         let view = SortedRunView::Borrowed(tables, range);
-        SortedRunIterator::new(view, table_store, sst_iter_options, ttl_clock).await
+        SortedRunIterator::new(view, table_store, sst_iter_options).await
     }
 
     pub(crate) async fn for_key(
@@ -111,15 +104,14 @@ impl<'a> SortedRunIterator<'a> {
         key: &'a [u8],
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
-        ttl_clock: Option<Arc<MonotonicClock>>,
     ) -> Result<SortedRunIterator<'a>, SlateDBError> {
-        Self::new_borrowed(key..=key, sorted_run, table_store, sst_iter_options, ttl_clock).await
+        Self::new_borrowed(key..=key, sorted_run, table_store, sst_iter_options).await
     }
 
     async fn advance_table(&mut self) -> Result<(), SlateDBError> {
         self.current_iter = self
             .view
-            .build_next_iter(self.table_store.clone(), self.sst_iter_options, self.ttl_clock.clone())
+            .build_next_iter(self.table_store.clone(), self.sst_iter_options)
             .await?;
         Ok(())
     }
@@ -201,7 +193,7 @@ mod tests {
         };
 
         let mut iter =
-            SortedRunIterator::new_owned(.., sr, table_store, SstIteratorOptions::default(), None)
+            SortedRunIterator::new_owned(.., sr, table_store, SstIteratorOptions::default())
                 .await
                 .unwrap();
 
@@ -253,7 +245,6 @@ mod tests {
             sr,
             table_store.clone(),
             SstIteratorOptions::default(),
-            None,
         )
         .await
         .unwrap();
@@ -301,7 +292,6 @@ mod tests {
                 &sr,
                 table_store.clone(),
                 SstIteratorOptions::default(),
-                None,
             )
             .await
             .unwrap();
@@ -340,7 +330,6 @@ mod tests {
             &sr,
             table_store.clone(),
             SstIteratorOptions::default(),
-            None,
         )
         .await
         .unwrap();
@@ -378,7 +367,6 @@ mod tests {
             &sr,
             table_store.clone(),
             SstIteratorOptions::default(),
-            None,
         )
         .await
         .unwrap();
@@ -409,7 +397,6 @@ mod tests {
             sr,
             table_store.clone(),
             SstIteratorOptions::default(),
-            None,
         )
         .await
         .unwrap();

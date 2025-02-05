@@ -83,4 +83,4 @@ mod transactional_object_store;
 mod types;
 mod utils;
 mod filter_iterator;
-mod TtlFilterIterator;
+mod ttl_filter_iterator;

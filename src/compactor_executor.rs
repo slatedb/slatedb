@@ -23,7 +23,6 @@ use crate::metrics::DbStats;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
 use tracing::error;
-use crate::config::ReadLevel::Committed;
 
 pub(crate) struct CompactionJob {
     pub(crate) destination: u32,
@@ -105,13 +104,12 @@ impl TokioCompactionExecutorInner {
             blocks_to_fetch: 256,
             cache_blocks: false, // don't clobber the cache
             eager_spawn: true,
-            read_level: Committed
         };
 
         let mut l0_iters = VecDeque::new();
         for l0 in compaction.ssts.iter() {
             l0_iters.push_back(
-                SstIterator::new_borrowed(.., l0, self.table_store.clone(), sst_iter_options, None)
+                SstIterator::new_borrowed(.., l0, self.table_store.clone(), sst_iter_options)
                     .await?,
             );
         }
@@ -120,7 +118,7 @@ impl TokioCompactionExecutorInner {
         let mut sr_iters = VecDeque::new();
         for sr in compaction.sorted_runs.iter() {
             let iter =
-                SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), sst_iter_options, None)
+                SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), sst_iter_options)
                     .await?;
             sr_iters.push_back(iter);
         }

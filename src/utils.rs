@@ -163,7 +163,18 @@ pub(crate) fn filter_expired(
     mono_clock: Arc<MonotonicClock>,
     read_level: ReadLevel
 ) -> Result<Option<RowEntry>, SlateDBError> {
+    if is_not_expired(&entry, mono_clock, read_level)? {
+        Ok(Some(entry))
+    } else {
+        Ok(None)
+    }
+}
 
+pub(crate) fn is_not_expired(
+    entry: &RowEntry,
+    mono_clock: Arc<MonotonicClock>,
+    read_level: ReadLevel
+) -> Result<bool, SlateDBError> {
     if let Some(expire_ts) = entry.expire_ts {
         /*
           Note: the semantics of filtering expired records on read differ slightly depending on
@@ -192,12 +203,12 @@ pub(crate) fn filter_expired(
         }
 
         if expire_ts <= effective_now {
-            Ok(None)
+            Ok(false)
         } else {
-            Ok(Some(entry))
+            Ok(true)
         }
     } else {
-        Ok(Some(entry))
+        Ok(true)
     }
 }
 
