@@ -1,13 +1,13 @@
-use crate::config::{Clock, ReadLevel};
 use crate::config::ReadLevel::{Committed, Uncommitted};
+use crate::config::{Clock, ReadLevel};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{BackgroundTaskPanic, BackgroundTaskShutdown};
-use std::future::Future;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::atomic::Ordering::SeqCst;
-use std::sync::{Arc, Mutex};
-use bytes::Bytes;
 use crate::types::{RowEntry, ValueDeletable};
+use bytes::Bytes;
+use std::future::Future;
+use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::AtomicI64;
+use std::sync::{Arc, Mutex};
 
 pub(crate) struct WatchableOnceCell<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
@@ -163,22 +163,39 @@ pub(crate) fn filter_expired(
     mono_clock: Arc<MonotonicClock>,
     read_level: ReadLevel
 ) -> Result<Option<RowEntry>, SlateDBError> {
-    if entry.expire_ts.is_none() {
-        return Ok(Some(entry));
-    }
 
-    println!("SOPHIE: in filter, row_entry: {:?} with read_level: {:?}", entry.key, read_level);
+    if let Some(expire_ts) = entry.expire_ts {
+        /*
+          Note: the semantics of filtering expired records on read differ slightly depending on
+          the configured ReadLevel. For Uncommitted we can just use the actual clock's "now"
+          as this corresponds to the current time seen by uncommitted writes but is not persisted
+          and only enforces monotonicity via the local in-memory MonotonicClock. This means it's
+          possible for the mono_clock.now() to go "backwards" following a crash and recovery, which
+          could result in records that were filtered out before the crash coming back to life and being
+          returned after the crash.
+          If the read level is instead set to Committed, we only use the last_tick of the monotonic
+          clock to filter out expired records, since this corresponds to the highest time of any
+          persisted batch and is thus recoverable following a crash. Since the last tick is the
+          last persisted time we are guaranteed monotonicity of the #get_last_tick function and
+          thus will not see this "time travel" phenomenon -- with Committed, once a record is
+          filtered out due to ttl expiry, it is guaranteed not to be seen again by future Committed
+          reads.
+         */
+        let effective_now;
+        match read_level {
+            Committed => {
+                effective_now = mono_clock.get_last_tick()
+            }
+            Uncommitted => {
+                effective_now = mono_clock.now()?
+            }
+        }
 
-    let effective_now = if matches!(read_level, Uncommitted) {
-        mono_clock.now()?
-    } else if matches!(read_level, Committed) {
-        mono_clock.get_last_tick()
-    } else {
-        panic!("Did not recognize configured ReadLevel: {:?}", read_level);
-    };
-
-    if entry.expire_ts.unwrap() <= effective_now {
-        Ok(None)
+        if expire_ts <= effective_now {
+            Ok(None)
+        } else {
+            Ok(Some(entry))
+        }
     } else {
         Ok(Some(entry))
     }
@@ -204,7 +221,7 @@ impl MonotonicClock {
     }
 
     pub(crate) fn get_last_tick(&self) -> i64 {
-        self.last_tick.load(Ordering::Relaxed)
+        self.last_tick.load(SeqCst)
     }
 
     pub(crate) fn now(&self) -> Result<i64, SlateDBError> {
