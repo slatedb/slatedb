@@ -41,17 +41,15 @@ simply be a local disk masquerading as a highly available logical store.
 
 ### Prioritizing Durability
 Prioritizing durability means that in the event of data corruption, the
-database will immediately become unavailable until the corruption is repaired
-through some form of out-of-band intervention. This approach ensures that the
-database cannot lose data without the operator's knowledge.
+database will immediately cancel the operation that discovered the corruption.
+In this way the database operation is unavailable until the corruption is repaired
+through some form of out-of-band intervention. However, operations which
+do not encounter corruption will continue to operate normally.
 
 ### Prioritizing Availability
-Prioritizing availability means that the database will acknowledge the
-corruption, attempt to recover as much data as possible, and warn the operator,
-while continuing to remain available without requiring out-of-band
-intervention. With this approach, it is the responsibility of the operator
-or the logical system to handle any data loss through mechanisms such as
-replication or backups.
+Prioritizing availability means that the database will continue operation
+by attempting to skip or ignore corruption. This ensures the database will remain
+available even if inconsistent data is returned or data is missing.
 
 ### Determining Availability or Durability
 Determining whether availability or durability is the priority for the operator
@@ -212,20 +210,29 @@ Add a callback function called `DBOptions.on_corruption` which is called when
 SlateDB encounters corruption during operation. The use of a call back allows
 developers to decide their desired behavior when corruption is detected. The
 return value of the callback informs SlateDB of the operators desire to abort
-the current operation with an error, or to continue operation when possible.
+the current operation with an error, or to continue operation ignoring the corruption.
 
 To support developers who value availability, the `on_corruption` callback
 provided by the operator can be designed to log or notify the operator of the
-corruption, but otherwise leaving the database available.
+corruption, but otherwise allowing the operation to continue.
 
 To support developers who value durability, the `on_corruption` callback
 provided by the operator can be designed to log or notify the operator of the
-corruption, then return an error, indicating the operators desire to make the
-database unavailable in order to avoid losing data which may be recoverable.
+corruption, then return an error, indicating the operators desire to cancel the
+database operation in order to avoid losing data which may be recoverable via out
+of band processes.
 
 The intent of the call back function is to communicate corruption to operators
 and logical systems built on top of SlateDB so they can take appropriate action
 to repair and restore corrupted data from replicas or backups.
+
+It is implied that SlateDB may lose or return inconsistent data if the provided
+`on_corruption` callback does not return an error. SlateDB is expected to avoid 
+data loss even while attempting to remain available. However, it may be impossible
+for the operation to continue without accepting some data loss or provide inconsistent
+data which may have been written but is not currently available due to corruption.
+The callback provides information on the nature of the corruption to provide the 
+developer choices on how to respond to different kinds of corruption.
 
 #### Remaining Available during Corruption
 The rationale for keeping the database available during corruption is to
@@ -243,9 +250,9 @@ For instance:
 - If corruption is detected, the operator may wish to remain available for
   reads while corruption repair is taking place.
 - Operators implementing a logical system on top of SlateDB can utilize the
-  `DBOptions.on_corruption` callback to notify other SlateDB read instances of
+  `on_corruption` callback to notify other SlateDB read instances of
   the corruption and take appropriate action.
-- Operators may also use the `DBOptions.on_corruption` callback to signal the
+- Operators may also use the `on_corruption` callback to signal the
   calling system to perform a safe database shutdown.
 
 #### Callback Details
@@ -271,7 +278,7 @@ opts.OnCorruption = func(d corruption.Details) error {
     return errors.New("Detected WAL corruption, database shutdown")
   }
 
-  if d.Kind == corruption.KindSST {
+  if d.Kind == corruption.KindCompacted {
     // Signal bit rot, rebuild the partition from replicas, but allow reads to continue
     if err := signalCorruption(d); err != nil {
       log.Error("while signaling: %s", err)
@@ -313,9 +320,8 @@ let opts = DBOptions {
 let db = Db::open_with_opts("path/to/db", opts, object_store).await;
 ```
 
-If `DBOptions.on_corruption` is not defined, `DBOptions.on_corruption` will default to 
-a function which both logs the error and always returns an error, thus making the 
-database unavailable by default.
+If `on_corruption` is not defined, `on_corruption` will default to 
+a function which both logs and returns the error.
 
 #### Handling WAL Corruption during Recovery
 It is reasonable for a developer to assume that once data is confirmed to be
@@ -338,30 +344,38 @@ Although the probability of both conditions being true is very low, especially
 in the context of durable object storage, it is not impossible.
 
 To address this, I propose that the `DB::open()` function perform WAL
-recovery synchronously and invoke `DBOptions.on_corruption` when WAL corruption
-is detected. If `DBOptions.on_corruption` returns an error, the database open
-operation should be aborted, and an error should be returned from
-`DB::open()`. If `DBOptions.on_corruption` does not return an error,
+recovery synchronously and invoke `on_corruption` when WAL corruption
+is detected. If `on_corruption` returns an error, the database open
+operation should be aborted, and `InternalError` will be returned by
+`DB::open()`. If `on_corruption` does not return an error,
 corrupt entries in the WAL should be skipped until a valid entry is found.
 
-The corruption error returned should be of a distinct type that can easily be identified
-to determine whether the error is due to non-transient corruption or a
-transient issue (such as network connectivity problems).
+> NOTE: If `on_corruption` does not return an error, it is likely that data 
+> loss will occur because the WAL must skip corrupted entries or an entire WAL SST 
+> file to become available. If this is not desirable, the `on_corruption` callback
+> can handle WAL corruption differently from other corruption by inspecting the `kind`
+> field for `CorruptionKind::WAL` and returning an error for this case only, thus
+> aborting the WAL replay.
 
 ##### During MemTable Flush
-If corruption is detected during a MemTable flush and `DBOptions.on_corruption`
+If corruption is detected during a MemTable flush and `on_corruption`
 returns an error, the compaction task will abort, and the database will be
 closed. Subsequent calls to `get` or `put` on a closed database will result in
-a closed database error.
+a closed database error. 
 
-If `DBOptions.on_corruption` does not return an error, the current MemTable
+Since a MemTable flush could occur asynchronously, there is no direct way of
+signaling the user of a flush error. Closing the database provides a safety net 
+for users who have not implemented a `on_corruption` callback and might
+not be aware that corruption has occurred.
+
+If `on_corruption` does not return an error, the current MemTable
 flush will abort, but the database will remain available. MemTable flush
 attempts will continue until the corruption is resolved. Calls to `put` 
 will succeed until the max number of un-flushed key/value pair bytes is reached.
 
 > NOTE: Corruption encountered during MemTable flush is likely to be a corrupted
 > manifest file. If manifest files are corrupted, there is no safe way to recover
-> and continue normal operation. In the case where `DBOptions.on_corruption` does not
+> and continue normal operation. In the case where `on_corruption` does not
 > return an error, we entertained the possibility of reverting to a previous manifest
 > and accepting data loss. However, there is no guarantee a previous manifest exists.
 
@@ -369,115 +383,115 @@ will succeed until the max number of un-flushed key/value pair bytes is reached.
 Compaction is an asynchronous process that may encounter corruption in Manifest
 files, SST files, or missing SST files during operation.
 
-If corruption is detected during compaction `DBOptions.on_corruption` is invoked and 
-compaction will abort. Future compaction runs will continue to be attempted until
-either the corruption is resolved or the database is closed. 
+If corruption is detected during compaction, `on_corruption` is invoked and 
+compaction will abort, or it will skip the corruption depending on the compaction
+strategy implementation. Future compaction runs will continue to be attempted until
+either the corruption is resolved or the compaction is explicitly stopped.
+
+Whether compaction aborts its current run or skips corruption depends on the compaction
+strategy used. In some compaction implementations, it may be possible to skip corrupted
+data without losing any data. The implementation is responsible for determining the best
+approach to remain available while also avoiding data loss. Compaction must never 
+permanently remove or truncate corrupted data.
 
 Since compaction could be run out of band via admin CLI, or on a separate node
-from the writer, our only recourse when encountering corruption is to report it and
-stop the current compaction run. Signaling writer or reader processes of the
-corruption -- which may be running on separate machines -- is out of scope.
+from the writer, our only recourse when encountering corruption is to report the
+corruption and do the right thing to avoid losing data. Signaling writer or reader processes
+of the corruption -- which may be running on separate machines -- is currently out of scope.
 
 > NOTE: Since the database remains available for writes during compaction failures, 
-> calls to `put` will cause an accumulation of SST files in `l0` until the max number
+> calls to `put` could cause an accumulation of SST files in `l0` until the max number
 > of SSTs in l0, or the max number of un-flushed key/value pair bytes is reached.
 
 #### Handling SST Corruption During Get
 If SlateDB detects corruption while searching for a key during a `get` call,
-the `DBOptions.on_corruption` callback is invoked.
+the `on_corruption` callback is invoked.
 
-- If the callback returns an error, the `get` caller will receive a corruption error
+- If the callback returns an error, the `get` caller will receive a `InternalError` error
 - If the callback does not return an error, no error will be returned to the
   `get` caller.
 
-The corruption error returned should be of a distinct type, allowing it to be easily
-identified as either non-transient corruption or a transient error (such as
-network connectivity issues).
+In the case were a compacted SST is corrupted, calls to `get` which do not encounter
+any corruption will continue to operate normally. This allows for partial availability
+even when corruption is encountered else where in the database.
 
 Since `get` calls may be ongoing during corruption, it is possible that the
 callback will be called continuously and by multiple threads. Therefore, the
-`DBOptions.on_corruption` callback must be thread-safe. Additionally, the callback should
+`on_corruption` callback must be thread-safe. Additionally, the callback should
 avoid slow or blocking operations to ensure the database remains available if
 corruption is encountered.
 
-The caller can choose to abort the application if a corruption error is
-returned by `get`. It is the responsibility of the caller to report corruption details
-to operators with detailed information on the corruption.
+If the call to `get` returns an `InternalError`, indicating corruption, the caller can 
+choose to abort the application or close the database. It is the responsibility of the 
+caller to report corruption details to operators with detailed information on the corruption.
 
 #### Handling Manifest Corruption during Open
 If corruption is detected in a manifest when calling `DB::open()`, the
-callback `DBOptions.on_corruption` is invoked. Regardless of the return value
-of the callback, `DB::open()` will return an error, and the database open
+callback `on_corruption` is invoked. Regardless of the return value
+of the callback, `DB::open()` will return an `InternalError`, and the database open
 operation will be aborted. A database without a valid manifest cannot operate.
 
 #### Handling SST Corruption in Cache Files
 If SlateDB detects corruption in a cache file, it should invalidate the cache
-file and remove the corrupt file. SlateDB will not invoke `DBOptions.on_corruption`
+file and remove the corrupt file. SlateDB will not invoke `on_corruption`
 as there is no action for the operator to take.
 
 #### Missing Files
-When SlateDB detects a missing file in the object store that should exist, it treats this as data corruption 
-and triggers the `DBOptions.on_corruption` callback . SlateDB then takes appropriate action based on the 
-specific operation being performed when the corruption was detected. See above subsections for how each 
-operation handles corruption.
+When SlateDB detects a missing file in the object store that should exist, it treats this
+as data corruption and triggers the `on_corruption` callback. SlateDB then takes appropriate
+action based on the specific operation being performed when the corruption was detected. 
 
 #### Object Store Checksum Failures
-It is possible the underlying object store implements checksum verification when retrieving objects from the store.
-If the object store detects a checksum mismatch the `DBOptions.on_corruption` is invoked and appropriate action
-specific operation at hand is taken. See above subsections for how each operation handles corruption.
+It is possible the underlying object store verifies checksums when retrieving
+objects from the store. If the object store detects a checksum mismatch the `on_corruption`
+is invoked and appropriate action specific operation at hand is taken. 
 
-When retrieving objects from the store, the underlying object store may perform checksum verification to ensure 
-data integrity. If a checksum mismatch is detected during retrieval, SlateDB invokes the `DBOptions.on_corruption`
-callback. The system then handles the corruption according to operation-specific procedures defined for each 
-type of operation. See above subsections for how each operation handles corruption. 
+If a checksum mismatch is detected during retrieval, SlateDB invokes the `on_corruption`
+callback. The system then handles the corruption according to operation-specific procedures
+defined for each type of operation.
 
 ### Golang Details
-I propose the creation of a public package called `corruption` which creates a namespace for interacting
-with database corruption.
+Proposed definition of the `CorruptionDetails`.
 ```go
-package corruption
-
-type Kind int
+type CorruptionKind int
 
 // String returns the kind as a string
-func (k Kind) String() string { /*...*/ }
+func (k CorruptionKind) String() string { /*...*/ }
 
 const (
-  // A list of all the possible kinds of corruption
-  KindWAL Type = iota
-  KindSST
-  KindManifest
-  KindFileNotFound
-  KindStoreChecksum
+	// A list of all the possible kinds of corruption
+	KindWAL CorruptionKind = iota
+	KindCompacted
+	KindManifest
+	KindFileNotFound
+	KindStoreChecksum
 )
 
-type Details struct {
-  // Kind is the kind of corruption which occurred
-  Kind Kind
-  // Message is the error message reported when corruption was detected
-  Message string
-  // Path to the file which is corrupted
-  Path string
+type CorruptionDetails struct {
+	// Kind is the kind of corruption which occurred
+	Kind CorruptionKind
+	// Message is the error message reported when corruption was detected
+	Message string
+	// Path to the file which is corrupted
+	Path string
 }
 
 // String returns a string including all the details of the corruption
-func (d Details) String() string { /*...*/ }
+func (d CorruptionDetails) String() string { /*...*/ }
 
-// Error is returned by `open()` and `get()` methods to indicate
+// InternalError is returned by `open()` and `get()` methods to indicate
 // the `DBOptions.on_corruption` callback was invoked and returned an error
-type Error struct { /*...*/ }
+type InternalError struct{ /*...*/ }
 ```
 
 Proposed definition of the `OnCorruption` callback.
 ```go
-import "github.com/slatedb/slatedb-go/corruption"
-
 type DBOptions struct {
   // OnCorruption is an optional callback invoked when SlateDB detects data corruption.
   // If the provided callback returns an error SlateDB cancels the current operation
   // and becomes unavailable. If the provided callback returns nil, SlateDB attempts 
   // to remain available by ignoring the corruption to the best of its ability.
-  OnCorruption func(corruption.Details) error
+  OnCorruption func(CorruptionDetails) error
 }
 ```
 
@@ -486,7 +500,7 @@ type DBOptions struct {
 // A list of all the possible kinds of corruption
 #[derive(Debug)]
 enum CorruptionKind {
-    WAL,
+    Compacted,
     SST,
     Manifest,
     FileNotFound,
@@ -508,20 +522,28 @@ struct CorruptionDetails {
 
 impl std::fmt::Display for CorruptionDetails { /*...*/ }
 
+// Method to convert CorruptionDetails into a string for InternalError
+impl CorruptionDetails {
+  fn to_internal_error(&self) -> InternalError {
+    let message = format!("Corruption detected: {}", self);
+    InternalError { message }
+  }
+}
+
 // Returned by `open()` and `get()` methods to indicate the 
 // `DBOptions.on_corruption` callback was invoked and returned an error
 #[derive(Debug)]
-struct CorruptionError {
-  details: CorruptionDetails,
+struct InternalError {
+  message: String,
 }
 
-impl std::error::Error for CorruptionError {}
+impl std::error::Error for InternalError {}
 
-impl std::fmt::Display for CorruptionError { /*...*/ }
+impl std::fmt::Display for InternalError { /*...*/ }
 ```
 Proposed definition of the `on_corruption` callback.
 ```rust
-type OnCorruptionCallback = dyn Fn(CorruptionDetails) -> Result<(), CorruptionError>;
+type OnCorruptionCallback = dyn Fn(CorruptionDetails) -> Result<(), InternalError>;
 
 struct DBOptions {
   // An optional callback invoked when SlateDB detects data corruption.
