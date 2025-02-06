@@ -248,8 +248,6 @@ fn check_valid_checkpoint(
         // If the database never finished initialization, we can rewrite the checkpoint.
         return if expected_checkpoint.manifest_id == actual_checkpoint.manifest_id {
             Ok(true)
-        } else if !clone_manifest.db_state().initialized {
-            Ok(false)
         } else {
             Err(SlateDBError::DatabaseAlreadyExists {
                 msg: format!(
@@ -309,9 +307,9 @@ async fn copy_wal_ssts(
 #[cfg(test)]
 mod tests {
     use crate::clone::create_clone;
-    use crate::config::{CheckpointOptions, CheckpointScope};
+    use crate::config::{CheckpointOptions, CheckpointScope, DbOptions};
     use crate::db::Db;
-    use crate::db_state::CoreDbState;
+    use crate::db_state::{CoreDbState, SsTableId};
     use crate::error::SlateDBError;
     use crate::manifest::{Manifest, ParentDb};
     use crate::manifest_store::{ManifestStore, StoredManifest};
@@ -320,10 +318,12 @@ mod tests {
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::ObjectStore;
+    use object_store::{ObjectMeta, ObjectStore};
     use std::ops::RangeFull;
     use std::sync::Arc;
+    use futures::StreamExt;
     use uuid::Uuid;
+    use crate::paths::PathResolver;
 
     #[tokio::test]
     async fn should_clone_latest_state_if_no_checkpoint_provided() {
@@ -452,67 +452,6 @@ mod tests {
         // Assert that the clone's checkpoint is valid in the parent manifest
         let _ = sm.refresh().await.unwrap();
         assert_valid_db_parent(Arc::clone(&object_store), &parent_path, sm.manifest()).await;
-    }
-
-    #[tokio::test]
-    async fn should_rewrite_checkpoint_if_uninitialized_checkpoint_differs_from_provided() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let parent_path = Path::from("/tmp/test_parent");
-        let clone_path = Path::from("/tmp/test_clone");
-
-        // Create the parent with empty state
-        let parent_manifest_store =
-            Arc::new(ManifestStore::new(&parent_path, Arc::clone(&object_store)));
-        let mut parent_sm =
-            StoredManifest::create_new_db(Arc::clone(&parent_manifest_store), CoreDbState::new())
-                .await
-                .unwrap();
-        let checkpoint_1 = parent_sm
-            .write_checkpoint(None, &CheckpointOptions::default())
-            .await
-            .unwrap();
-        let checkpoint_2 = parent_sm
-            .write_checkpoint(None, &CheckpointOptions::default())
-            .await
-            .unwrap();
-
-        // Create an uninitialized manifest referring to the first checkpoint
-        let parent_db = ParentDb {
-            path: parent_path.to_string(),
-            checkpoint_id: checkpoint_1.id,
-        };
-        let clone_manifest_store =
-            Arc::new(ManifestStore::new(&clone_path, Arc::clone(&object_store)));
-        let mut clone_sm = StoredManifest::create_uninitialized_clone(
-            Arc::clone(&clone_manifest_store),
-            parent_db,
-            &Manifest::initial(CoreDbState::new()),
-        )
-        .await
-        .unwrap();
-
-        // Cloning with the second checkpoint should succeed
-        create_clone(
-            clone_path.clone(),
-            parent_path.clone(),
-            Arc::clone(&object_store),
-            Some(checkpoint_2.id),
-            Arc::new(FailPointRegistry::new()),
-        )
-        .await
-        .unwrap();
-
-        // Assert that the clone's checkpoint is valid in the parent manifest
-        // and that the associated manifest matches the second checkpoint
-        let _ = clone_sm.refresh().await.unwrap();
-        let _ = parent_sm.refresh().await.unwrap();
-        let created_checkpoint = parent_sm
-            .manifest()
-            .core
-            .find_checkpoint(&clone_sm.manifest().parent.as_ref().unwrap().checkpoint_id)
-            .unwrap();
-        assert_eq!(checkpoint_2.manifest_id, created_checkpoint.manifest_id);
-        assert_valid_db_parent(Arc::clone(&object_store), &parent_path, clone_sm.manifest()).await;
     }
 
     async fn assert_valid_db_parent(
@@ -667,5 +606,81 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_fail_and_write_nothing_on_clone_from_different_checkpoint() {
+        async fn load_wals(object_store: &Arc<dyn ObjectStore>, path: &Path) -> Vec<ObjectMeta>{
+            let path_resolver = PathResolver::new(path.clone());
+            let mut wal_entries = vec![];
+            let mut list_stream = object_store.list(Some(path));
+            while let Some(meta) = list_stream.next().await.transpose().unwrap() {
+                if let Some(table_id) = path_resolver.parse_table_id(&meta.location).unwrap() {
+                    if matches!(table_id, SsTableId::Wal(_)) {
+                        wal_entries.push(meta);
+                    }
+                }
+            }
+            wal_entries
+        }
+
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent");
+        let clone_path = Path::from("/tmp/test_clone");
+        let parent_db_opts = DbOptions {
+            compactor_options: None,
+            ..DbOptions::default()
+        };
+        let parent_db =
+            Db::open_with_opts(parent_path.clone(), parent_db_opts, object_store.clone()).await.unwrap();
+        parent_db.put("first", "foo").await.unwrap();
+        let first_checkpoint = parent_db
+            .create_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        parent_db.put("second", "bar").await.unwrap();
+        let second_checkpoint = parent_db
+            .create_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        parent_db.close().await.unwrap();
+
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "copy-wal-ssts-io-error",
+            "1*off->return",
+        )
+            .unwrap();
+        let err = create_clone(
+            clone_path.clone(),
+            parent_path.clone(),
+            object_store.clone(),
+            Some(second_checkpoint.id),
+            fp_registry.clone(),
+        )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SlateDBError::IoError(_)));
+        let clone_manifest_store = ManifestStore::new(&clone_path, object_store.clone());
+        let clone_manifest = clone_manifest_store.read_latest_manifest().await.unwrap();
+        let wal_entries = load_wals(&object_store, &clone_path).await;
+        assert_eq!(wal_entries.len(), 1);
+
+        // Create clone that moves to earlier checkpoint
+        fail_parallel::cfg(fp_registry.clone(), "copy-wal-ssts-io-error", "off").unwrap();
+        let result = create_clone(
+            clone_path.clone(),
+            parent_path.clone(),
+            object_store.clone(),
+            Some(first_checkpoint.id),
+            fp_registry,
+        )
+            .await;
+        assert!(matches!(result, Err(SlateDBError::DatabaseAlreadyExists {..})));
+        let clone_manifest_end = clone_manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(clone_manifest, clone_manifest_end);
+        let wal_entries_end = load_wals(&object_store, &clone_path).await;
+        assert_eq!(wal_entries, wal_entries_end);
     }
 }
