@@ -148,7 +148,7 @@ mod tests {
         let CheckpointCreateResult {
             id: checkpoint_id,
             manifest_id: checkpoint_manifest_id,
-        } = admin::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
+        } = admin::create_checkpoint(path, object_store.clone(), &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -180,7 +180,7 @@ mod tests {
             id: checkpoint_id,
             manifest_id: _,
         } = admin::create_checkpoint(
-            &path,
+            path,
             object_store.clone(),
             &CheckpointOptions {
                 lifetime: Some(Duration::from_secs(3600)),
@@ -215,15 +215,19 @@ mod tests {
         let CheckpointCreateResult {
             id: source_checkpoint_id,
             manifest_id: source_checkpoint_manifest_id,
-        } = admin::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
-            .await
-            .unwrap();
+        } = admin::create_checkpoint(
+            path.clone(),
+            object_store.clone(),
+            &CheckpointOptions::default(),
+        )
+        .await
+        .unwrap();
 
         let CheckpointCreateResult {
             id: _,
             manifest_id: checkpoint_manifest_id,
         } = admin::create_checkpoint(
-            &path,
+            path,
             object_store.clone(),
             &CheckpointOptions {
                 source: Some(source_checkpoint_id),
@@ -239,15 +243,15 @@ mod tests {
     #[tokio::test]
     async fn test_should_fail_create_checkpoint_from_missing_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
         // open and close the db to init the manifest and trigger another write
-        let _ = Db::open_with_opts(path.clone(), DbOptions::default(), object_store.clone())
+        let _ = Db::open_with_opts(path, DbOptions::default(), object_store.clone())
             .await
             .unwrap();
 
         let source_checkpoint_id = uuid::Uuid::new_v4();
         let result = admin::create_checkpoint(
-            &path,
+            path,
             object_store.clone(),
             &CheckpointOptions {
                 source: Some(source_checkpoint_id),
@@ -265,10 +269,10 @@ mod tests {
     #[tokio::test]
     async fn test_should_fail_create_checkpoint_no_manifest() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
 
         let result =
-            admin::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
+            admin::create_checkpoint(path, object_store.clone(), &CheckpointOptions::default())
                 .await;
 
         assert!(result.is_err());
@@ -286,7 +290,7 @@ mod tests {
             .await
             .unwrap();
         let CheckpointCreateResult { id, manifest_id: _ } = admin::create_checkpoint(
-            &path,
+            path.clone(),
             object_store.clone(),
             &CheckpointOptions {
                 lifetime: Some(Duration::from_secs(100)),
@@ -352,10 +356,13 @@ mod tests {
         let _ = Db::open_with_opts(path.clone(), DbOptions::default(), object_store.clone())
             .await
             .unwrap();
-        let CheckpointCreateResult { id, manifest_id: _ } =
-            admin::create_checkpoint(&path, object_store.clone(), &CheckpointOptions::default())
-                .await
-                .unwrap();
+        let CheckpointCreateResult { id, manifest_id: _ } = admin::create_checkpoint(
+            path.clone(),
+            object_store.clone(),
+            &CheckpointOptions::default(),
+        )
+        .await
+        .unwrap();
 
         Db::delete_checkpoint(&path, object_store.clone(), id)
             .await
