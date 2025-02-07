@@ -1,16 +1,16 @@
 include "sst.fbs";
 
 table Uuid {
-   high: uint64;
-   low: uint64;
+    high: uint64;
+    low: uint64;
 }
 
 table DbParent {
-   // Path to the parent database from which this database was cloned
-   path: string (required);
+    // Path to the parent database from which this database was cloned
+    path: string (required);
 
-   // Parent checkpoint ID that this clone was derived from
-   checkpoint: Uuid (required);
+    // Parent checkpoint ID that this clone was derived from
+    checkpoint: Uuid (required);
 }
 
 // Manifest to persist state of DB.
@@ -65,7 +65,7 @@ table SortedRun {
 }
 
 table WriterCheckpoint {
-   epoch: uint64;
+    epoch: uint64;
 }
 
 union CheckpointMetadata { WriterCheckpoint }
