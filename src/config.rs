@@ -326,7 +326,8 @@ impl Clock for SystemClock {
     }
 
     fn clock_sync_duration(&self, last_tick: i64) -> Duration {
-        Duration::from_millis(cmp::max(0, last_tick - self.now()) as u64)
+        // don't wait more than 30 seconds to correct for clock skew
+        Duration::from_millis(cmp::min(30_000, cmp::max(0, last_tick - self.now()) as u64))
     }
 }
 
