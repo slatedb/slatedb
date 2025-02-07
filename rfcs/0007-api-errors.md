@@ -50,7 +50,7 @@ Each exposed error type will expose a generic documentation string which contain
 of the error and contains any prescriptive guidance (such as indicating whether a failed operation can
 be retried or is fatal).
 
-Each error  type will also expose a custom message field which is used to convey details about the specific
+Each error type will also expose a custom message field which is used to convey details about the specific
 instance of the error that was encountered. Unlike the error type, the message is not part of the 
 public API and can be changed without notice. The intent is to pack as much detail into the message
 for someone to understand the root cause, and if possible, what they should do to resolve it.
