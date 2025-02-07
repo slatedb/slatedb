@@ -217,14 +217,40 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 }
 
 /// Creates a checkpoint of the db stored in the object store at the specified path using the
-/// provided options. Note that the scope option does not impact the behaviour of this method.
-/// The checkpoint will reference the current active manifest of the db.
-pub async fn create_checkpoint(
-    path: &Path,
+/// provided options. The checkpoint will reference the current active manifest of the db.
+///
+/// # Examples
+///
+/// ```
+/// use slatedb::admin;
+/// use slatedb::config::CheckpointOptions;
+/// use slatedb::Db;
+/// use slatedb::object_store::{ObjectStore, memory::InMemory};
+/// use std::error::Error;
+/// use std::sync::Arc;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn Error>> {
+///    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+///    let db = Db::open("parent_path", Arc::clone(&object_store)).await?;
+///    db.put(b"key", b"value").await?;
+///    db.close().await?;
+///
+///    let _ = admin::create_checkpoint(
+///      "parent_path",
+///      object_store,
+///      &CheckpointOptions::default(),
+///    ).await?;
+///
+///    Ok(())
+/// }
+/// ```
+pub async fn create_checkpoint<P: Into<Path>>(
+    path: P,
     object_store: Arc<dyn ObjectStore>,
     options: &CheckpointOptions,
 ) -> Result<CheckpointCreateResult, SlateDBError> {
-    let manifest_store = Arc::new(ManifestStore::new(path, object_store));
+    let manifest_store = Arc::new(ManifestStore::new(&path.into(), object_store));
     let mut stored_manifest = StoredManifest::load(manifest_store).await?;
     let checkpoint = stored_manifest.write_checkpoint(None, options).await?;
     Ok(CheckpointCreateResult {
@@ -262,18 +288,16 @@ pub async fn create_checkpoint(
 ///    db.put(b"key", b"value").await?;
 ///    db.close().await?;
 ///
-///     admin::create_clone(
-///       "clone_path",
-///       "parent_path",
-///       object_store,
-///       None,
-///     ).await?;
-///     Ok(())
+///    admin::create_clone(
+///      "clone_path",
+///      "parent_path",
+///      object_store,
+///      None,
+///    ).await?;
+///
+///    Ok(())
 /// }
 /// ```
-///
-/// # Errors
-///
 pub async fn create_clone<P: Into<Path>>(
     clone_path: P,
     parent_path: P,
