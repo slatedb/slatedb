@@ -160,9 +160,18 @@ impl MonotonicClock {
         self.enforce_monotonic(tick)
     }
 
-    pub(crate) fn now(&self) -> Result<i64, SlateDBError> {
+    pub(crate) async fn now(&self) -> Result<i64, SlateDBError> {
         let tick = self.delegate.now();
-        self.enforce_monotonic(tick)
+        match self.enforce_monotonic(tick) {
+            Err(SlateDBError::InvalidClockTick {
+                last_tick,
+                next_tick: _,
+            }) => {
+                tokio::time::sleep(self.delegate.clock_sync_duration(last_tick)).await;
+                self.enforce_monotonic(self.delegate.now())
+            }
+            result => result,
+        }
     }
 
     fn enforce_monotonic(&self, tick: i64) -> Result<i64, SlateDBError> {
@@ -193,12 +202,15 @@ pub(crate) fn merge_options<T>(
 
 #[cfg(test)]
 mod tests {
+    use crate::config::Clock;
     use crate::error::SlateDBError;
     use crate::test_utils::TestClock;
     use crate::utils::{spawn_bg_task, spawn_bg_thread, MonotonicClock, WatchableOnceCell};
     use parking_lot::Mutex;
+    use std::ops::{Add, Div};
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
+    use std::time::Duration;
 
     struct ErrorCaptor {
         error: Mutex<Option<SlateDBError>>,
@@ -341,22 +353,22 @@ mod tests {
         h.await.unwrap();
     }
 
-    #[test]
-    fn test_monotonicity_enforcement_on_mono_clock() {
+    #[tokio::test]
+    async fn test_monotonicity_enforcement_on_mono_clock() {
         // Given:
         let clock = Arc::new(TestClock::new());
         let mono_clock = MonotonicClock::new(clock.clone(), 0);
 
         // When:
         clock.ticker.store(10, SeqCst);
-        mono_clock.now().unwrap();
+        mono_clock.now().await.unwrap();
         clock.ticker.store(5, SeqCst);
 
         // Then:
         if let Err(SlateDBError::InvalidClockTick {
             last_tick,
             next_tick,
-        }) = mono_clock.now()
+        }) = mono_clock.now().await
         {
             assert_eq!(last_tick, 10);
             assert_eq!(next_tick, 5);
@@ -365,15 +377,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_monotonicity_enforcement_on_mono_clock_set_tick() {
+    #[tokio::test]
+    async fn test_monotonicity_enforcement_on_mono_clock_set_tick() {
         // Given:
         let clock = Arc::new(TestClock::new());
         let mono_clock = MonotonicClock::new(clock.clone(), 0);
 
         // When:
         clock.ticker.store(10, SeqCst);
-        mono_clock.now().unwrap();
+        mono_clock.now().await.unwrap();
 
         // Then:
         if let Err(SlateDBError::InvalidClockTick {
@@ -386,5 +398,43 @@ mod tests {
         } else {
             panic!("Expected InvalidClockTick from mono_clock")
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_await_valid_tick() {
+        // the delegate clock is behind the mono clock by 100ms
+        let delegate_clock = Arc::new(TestClock::new());
+        let mono_clock = MonotonicClock::new(delegate_clock.clone(), 100);
+
+        tokio::spawn({
+            let delegate_clock = delegate_clock.clone();
+            async move {
+                // wait for half the maximum time it would allow a skew
+                let max_await = delegate_clock.clock_sync_duration(100);
+                tokio::time::sleep(max_await.div(2)).await;
+                delegate_clock.ticker.store(101, SeqCst);
+            }
+        });
+
+        let tick_future = mono_clock.now();
+        tokio::time::advance(Duration::from_millis(100)).await;
+
+        let result = tick_future.await;
+        assert_eq!(result.unwrap(), 101);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_await_valid_tick_failure() {
+        // the delegate clock is behind the mono clock by 100ms
+        let delegate_clock = Arc::new(TestClock::new());
+        let mono_clock = MonotonicClock::new(delegate_clock.clone(), 100);
+
+        // wait for 10ms after the maximum time it should accept to wait
+        let max_await = delegate_clock.clock_sync_duration(100);
+        let tick_future = mono_clock.now();
+        tokio::time::advance(max_await.add(Duration::from_millis(10))).await;
+
+        let result = tick_future.await;
+        assert!(result.is_err());
     }
 }

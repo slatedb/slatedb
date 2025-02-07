@@ -159,7 +159,7 @@ use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{str::FromStr, time::Duration};
+use std::{cmp, str::FromStr, time::Duration};
 use tokio::runtime::Handle;
 use uuid::Uuid;
 
@@ -293,6 +293,20 @@ pub trait Clock {
     /// it represents a sequence that can attribute a logical ordering
     /// to actions on the database.
     fn now(&self) -> i64;
+
+    /// SlateDB enforces monotonic clocks, even across restarts, which can result in situations where
+    /// the persisted time (from the manifest or WAL) is ahead of the current time on a machine.
+    /// In such cases, this method calculates how long the system should sleep to allow the clock
+    /// to synchronize with the last persisted time.
+    ///
+    /// # Parameters
+    ///
+    /// - `last_tick`: The last observed persisted clock tick (in milliseconds).
+    ///
+    /// # Returns
+    ///
+    /// A `Duration` representing the amount of system time to sleep to compensate for clock skew.
+    fn clock_sync_duration(&self, last_tick: i64) -> Duration;
 }
 
 /// contains the default implementation of the Clock, and will return the system time
@@ -309,6 +323,10 @@ impl Clock for SystemClock {
         };
         self.last_tick.fetch_max(tick, SeqCst);
         self.last_tick.load(SeqCst)
+    }
+
+    fn clock_sync_duration(&self, last_tick: i64) -> Duration {
+        Duration::from_millis(cmp::max(0, last_tick - self.now()) as u64)
     }
 }
 
