@@ -60,13 +60,28 @@ pub trait MergeOperator {
 
 pub(crate) type MergeOperatorType = Arc<dyn MergeOperator + Send + Sync>;
 
+#[cfg(test)]
+pub(crate) struct AppendingMergeOperator;
+
+#[cfg(test)]
+impl AppendingMergeOperator {
+    pub(crate) fn new() -> Self {
+        AppendingMergeOperator {}
+    }
+}
+
+#[cfg(test)]
+impl MergeOperator for AppendingMergeOperator {
+    fn merge(&self, existing_value: Bytes, value: Bytes) -> Result<Bytes, MergeOperatorError> {
+        let mut merged = value.to_vec();
+        merged.extend_from_slice(&existing_value);
+        Ok(Bytes::from(merged))
+    }
+}
+
 pub(crate) struct MergeOperatorIterator<T: KeyValueIterator> {
-    merge_operator: MergeOperatorType,
+    accummulator: MergeOperatorAccumulator,
     delegate: T,
-    /// Entry from the delegate that we've peeked ahead and buffered.
-    buffered_entry: Option<RowEntry>,
-    /// Whether to merge entries with different expire timestamps.
-    merge_different_expire_ts: bool,
 }
 
 #[allow(unused)]
@@ -77,121 +92,138 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         merge_different_expire_ts: bool,
     ) -> Self {
         Self {
-            merge_operator,
+            // merge_operator,
+            accummulator: MergeOperatorAccumulator::new(merge_operator, merge_different_expire_ts),
             delegate,
-            buffered_entry: None,
-            merge_different_expire_ts,
         }
     }
 }
 
-impl<T: KeyValueIterator> MergeOperatorIterator<T> {
-    async fn merge_with_older_entries(
+pub(crate) struct MergeOperatorAccumulator {
+    /// The merge operator to use.
+    merge_operator: MergeOperatorType,
+    /// Entry from the delegate that we've peeked ahead and buffered.
+    buffered_entry: Option<RowEntry>,
+    /// Whether to merge entries with different expire timestamps. On read path, this
+    /// should be always true and during compactions, this should be false.
+    merge_different_expire_ts: bool,
+}
+
+impl MergeOperatorAccumulator {
+    pub(crate) fn new(merge_operator: MergeOperatorType, merge_different_expire_ts: bool) -> Self {
+        Self {
+            merge_operator,
+            buffered_entry: None,
+            merge_different_expire_ts,
+        }
+    }
+
+    pub(crate) fn maybe_merge(
         &mut self,
-        first_entry: RowEntry,
+        entry: Option<RowEntry>,
     ) -> Result<Option<RowEntry>, SlateDBError> {
-        let mut merged_value = match first_entry.value {
+        match entry {
+            Some(entry) => self.merge(entry),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn merge(&mut self, entry: RowEntry) -> Result<Option<RowEntry>, SlateDBError> {
+        let buffered_entry = match self.flush() {
+            Some(buffered_entry) => {
+                if matches!(buffered_entry.value, ValueDeletable::Merge(_)) {
+                    buffered_entry
+                } else {
+                    self.buffered_entry = Some(entry);
+                    return Ok(Some(buffered_entry));
+                }
+            }
+            None => {
+                if matches!(entry.value, ValueDeletable::Merge(_)) {
+                    self.buffered_entry = Some(entry);
+                    return Ok(None);
+                } else {
+                    return Ok(Some(entry));
+                }
+            }
+        };
+        let buffered_value = match buffered_entry.value {
             ValueDeletable::Merge(ref v) => v.clone(),
             _ => unreachable!("Entry doesn't contain merge operand."),
         };
-        let key = first_entry.key;
-        let mut max_create_ts = first_entry.create_ts;
-        let mut min_expire_ts = first_entry.expire_ts;
-
-        // Keep looking ahead and merging as long as we find mergeable entries
-        loop {
-            let next = self.delegate.next_entry().await?;
-            match next {
-                Some(next_entry)
-                    if key == next_entry.key
-                        && (self.merge_different_expire_ts
-                            || first_entry.expire_ts == next_entry.expire_ts) =>
-                {
-                    // Accumulate timestamps. For create_ts we use the maximum (when the accumulated value has last changed),
-                    // and for expire_ts we use the minimum (when the accumulated becomes invalid).
-                    max_create_ts = merge_options(max_create_ts, next_entry.create_ts, i64::max);
-                    min_expire_ts = merge_options(min_expire_ts, next_entry.expire_ts, i64::min);
-                    // For sequence number, we want to use the maximum. Since all the entries are sorted in descending order,
-                    // we just ensure it keeps decreasing.
-                    if first_entry.seq < next_entry.seq {
-                        return Err(SlateDBError::InvalidDBState);
-                    }
-
-                    match next_entry.value {
-                        ValueDeletable::Value(value) => {
-                            // Final merge with a regular value
-                            let merged_value = self.merge_operator.merge(merged_value, value)?;
-                            return Ok(Some(RowEntry::new(
-                                key,
-                                ValueDeletable::Value(merged_value),
-                                first_entry.seq,
-                                max_create_ts,
-                                min_expire_ts,
-                            )));
-                        }
-                        ValueDeletable::Merge(value) => {
-                            // Continue merging
-                            merged_value = self.merge_operator.merge(merged_value, value)?;
-                            continue;
-                        }
-                        ValueDeletable::Tombstone => {
-                            return Ok(Some(RowEntry::new(
-                                key,
-                                ValueDeletable::Value(merged_value),
-                                first_entry.seq,
-                                max_create_ts,
-                                min_expire_ts,
-                            )));
-                        }
-                    }
-                }
-                Some(next_entry) => {
-                    // Different key or expire timestamp. We need to return both entries ...
-                    let result = RowEntry::new(
-                        key,
-                        ValueDeletable::Merge(merged_value),
-                        first_entry.seq,
-                        max_create_ts,
-                        min_expire_ts,
-                    );
-                    // Store the different key entry in the look-ahead buffer
-                    self.buffered_entry = Some(next_entry);
-                    // And return the accumulated merge
-                    return Ok(Some(result));
-                }
-                None => {
-                    // End of iterator, return accumulated merge
-                    return Ok(Some(RowEntry::new(
-                        key,
-                        ValueDeletable::Merge(merged_value),
-                        first_entry.seq,
-                        max_create_ts,
-                        min_expire_ts,
-                    )));
-                }
+        if buffered_entry.key == entry.key
+            && (self.merge_different_expire_ts || buffered_entry.expire_ts == entry.expire_ts)
+        {
+            // Accumulate timestamps. For create_ts we use the maximum (when the accumulated value has last changed),
+            // and for expire_ts we use the minimum (when the accumulated becomes invalid).
+            let max_create_ts = merge_options(buffered_entry.create_ts, entry.create_ts, i64::max);
+            let min_expire_ts = merge_options(buffered_entry.expire_ts, entry.expire_ts, i64::min);
+            // For sequence number, we want to use the maximum. Since all the entries are sorted in descending order,
+            // we just ensure it keeps decreasing.
+            if buffered_entry.seq < entry.seq {
+                return Err(SlateDBError::InvalidDBState);
             }
+
+            match entry.value {
+                ValueDeletable::Value(value) => {
+                    // Final merge with a regular value
+                    let final_value = self.merge_operator.merge(buffered_value, value)?;
+                    Ok(Some(RowEntry::new(
+                        buffered_entry.key,
+                        ValueDeletable::Value(final_value),
+                        buffered_entry.seq,
+                        max_create_ts,
+                        min_expire_ts,
+                    )))
+                }
+                ValueDeletable::Merge(value) => {
+                    let final_value = self.merge_operator.merge(buffered_value, value)?;
+                    self.buffered_entry = Some(RowEntry::new(
+                        buffered_entry.key,
+                        ValueDeletable::Merge(final_value),
+                        buffered_entry.seq,
+                        max_create_ts,
+                        min_expire_ts,
+                    ));
+                    Ok(None)
+                }
+                ValueDeletable::Tombstone => Ok(Some(RowEntry::new(
+                    buffered_entry.key,
+                    ValueDeletable::Value(buffered_value),
+                    buffered_entry.seq,
+                    max_create_ts,
+                    min_expire_ts,
+                ))),
+            }
+        } else {
+            // Different key or expire timestamp. We need to return both entries ...
+            let final_result = buffered_entry;
+            // Store the different key entry in the look-ahead buffer
+            self.buffered_entry = Some(entry);
+            // And return the accumulated merge
+            Ok(Some(final_result))
         }
+    }
+
+    pub(crate) fn flush(&mut self) -> Option<RowEntry> {
+        self.buffered_entry.take()
     }
 }
 
 impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorIterator<T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        let next_entry = match self.buffered_entry.take() {
-            Some(entry) => Some(entry),
-            None => self.delegate.next_entry().await?,
-        };
-        if let Some(entry) = next_entry {
-            match &entry.value {
-                ValueDeletable::Merge(_) => {
-                    // A mergeable entry, we need to accumulate all mergeable entries
-                    // ahead for the same key and merge them into a single value.
-                    return self.merge_with_older_entries(entry).await;
+        loop {
+            let next = self.delegate.next_entry().await?;
+            match next {
+                Some(next_entry) => match self.accummulator.merge(next_entry)? {
+                    Some(merged) => return Ok(Some(merged)),
+                    None => continue,
+                },
+                None => {
+                    return Ok(self.accummulator.flush());
                 }
-                // Not a mergeable entry, just return it.
-                _ => return Ok(Some(entry)),
             }
         }
-        Ok(None)
     }
 }
 
@@ -205,19 +237,9 @@ mod tests {
 
     use super::*;
 
-    struct MockMergeOperator;
-
-    impl MergeOperator for MockMergeOperator {
-        fn merge(&self, existing_value: Bytes, value: Bytes) -> Result<Bytes, MergeOperatorError> {
-            let mut merged = existing_value.to_vec();
-            merged.extend_from_slice(&value);
-            Ok(Bytes::from(merged))
-        }
-    }
-
     #[tokio::test]
     async fn test_merge_operator_iterator() {
-        let merge_operator = Arc::new(MockMergeOperator {});
+        let merge_operator = Arc::new(AppendingMergeOperator::new());
         let data = vec![
             RowEntry::new_merge(b"key1", b"1", 1),
             RowEntry::new_merge(b"key1", b"2", 2),
@@ -233,9 +255,9 @@ mod tests {
         assert_iterator(
             &mut iterator,
             vec![
-                RowEntry::new_merge(b"key1", b"4321", 4),
+                RowEntry::new_merge(b"key1", b"1234", 4),
                 RowEntry::new_value(b"key2", b"1", 5),
-                RowEntry::new_value(b"key3", b"321", 8),
+                RowEntry::new_value(b"key3", b"123", 8),
             ],
         )
         .await;
@@ -270,9 +292,9 @@ mod tests {
             RowEntry::new_merge(b"key3", b"3", 7).with_expire_ts(2),
         ],
         expected: vec![
-            RowEntry::new_merge(b"key1", b"321", 3).with_expire_ts(1),
+            RowEntry::new_merge(b"key1", b"123", 3).with_expire_ts(1),
             RowEntry::new_value(b"key2", b"1", 4),
-            RowEntry::new_merge(b"key3", b"321", 7).with_expire_ts(1),
+            RowEntry::new_merge(b"key3", b"123", 7).with_expire_ts(1),
         ],
         ..TestCase::default()
     })]
@@ -292,7 +314,7 @@ mod tests {
             RowEntry::new_merge(b"key1", b"1", 1).with_expire_ts(1),
             RowEntry::new_value(b"key2", b"1", 4),
             RowEntry::new_merge(b"key3", b"3", 7).with_expire_ts(2),
-            RowEntry::new_merge(b"key3", b"21", 6).with_expire_ts(1),
+            RowEntry::new_merge(b"key3", b"12", 6).with_expire_ts(1),
         ],
         // On write path (compaction, memtable), we don't merge entries
         // with different expire timestamps to allow per-element expiration.
@@ -309,7 +331,7 @@ mod tests {
         expected: vec![
             // Merge + Tombstone becomes a value to invalidate older entries.
             RowEntry::new_value(b"key1", b"3", 4),
-            RowEntry::new_merge(b"key1", b"21", 2),
+            RowEntry::new_merge(b"key1", b"12", 2),
             RowEntry::new_value(b"key2", b"1", 5)
         ],
         ..TestCase::default()
@@ -327,7 +349,7 @@ mod tests {
     })]
     #[tokio::test]
     async fn test(#[case] test_case: TestCase) {
-        let merge_operator = Arc::new(MockMergeOperator {});
+        let merge_operator = Arc::new(AppendingMergeOperator::new());
         let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
             merge_operator,
             test_case.unsorted_data.into(),
