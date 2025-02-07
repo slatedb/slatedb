@@ -25,7 +25,7 @@ pub(crate) enum WalFlushMsg {
 }
 
 impl DbInner {
-    pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
+    async fn flush(&self) -> Result<(), SlateDBError> {
         self.state.write().freeze_wal()?;
         self.flush_imm_wals().await?;
         Ok(())
@@ -44,6 +44,8 @@ impl DbInner {
 
         let encoded_sst = sst_builder.build()?;
         let handle = self.table_store.write_sst(id, encoded_sst).await?;
+
+        self.mono_clock.set_last_durable_tick(imm_table.last_tick());
         Ok(handle)
     }
 

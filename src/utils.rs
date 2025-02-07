@@ -195,7 +195,7 @@ pub(crate) fn is_not_expired(
         let effective_now;
         match read_level {
             Committed => {
-                effective_now = mono_clock.get_last_committed_tick()
+                effective_now = mono_clock.get_last_durable_tick()
             }
             Uncommitted => {
                 effective_now = mono_clock.now()?
@@ -216,7 +216,7 @@ pub(crate) fn is_not_expired(
 /// from the underlying implementation are monotonically increasing
 pub(crate) struct MonotonicClock {
     pub(crate) last_tick: AtomicI64,
-    last_committed_tick: i64,
+    pub(crate) last_durable_tick: AtomicI64,
     delegate: Arc<dyn Clock + Send + Sync>,
 }
 
@@ -225,7 +225,7 @@ impl MonotonicClock {
         Self {
             delegate,
             last_tick: AtomicI64::new(init_tick),
-            last_committed_tick: init_tick,
+            last_durable_tick: AtomicI64::new(init_tick),
         }
     }
 
@@ -233,17 +233,14 @@ impl MonotonicClock {
         self.enforce_monotonic(tick)
     }
 
-    // TODO: actually call this. Need to think more about where it makes sense to store
-    //  and update the persisted time
-    pub(crate) fn set_last_committed_tick(&mut self, tick: i64) -> i64 {
-        if tick > self.last_committed_tick {
-            self.last_committed_tick = tick;
+    pub(crate) fn set_last_durable_tick(&self, tick: i64) {
+        if tick > self.last_durable_tick.load(SeqCst) {
+            self.last_durable_tick.store(tick, SeqCst);
         }
-        self.last_committed_tick
     }
 
-    pub(crate) fn get_last_committed_tick(&self) -> i64 {
-        self.last_committed_tick
+    pub(crate) fn get_last_durable_tick(&self) -> i64 {
+        self.last_durable_tick.load(SeqCst)
     }
 
     pub(crate) fn now(&self) -> Result<i64, SlateDBError> {
