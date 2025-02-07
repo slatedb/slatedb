@@ -1,10 +1,13 @@
 use crate::config::Clock;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{BackgroundTaskPanic, BackgroundTaskShutdown};
+use std::cmp;
 use std::future::Future;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tracing::info;
 
 pub(crate) struct WatchableOnceCell<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
@@ -167,7 +170,13 @@ impl MonotonicClock {
                 last_tick,
                 next_tick: _,
             }) => {
-                tokio::time::sleep(self.delegate.clock_sync_duration(last_tick)).await;
+                let sync_millis = cmp::min(10_000, 2 * (last_tick - tick).unsigned_abs());
+                info!(
+                    "Clock tick {} is lagging behind the last known tick {}. \
+                    Sleeping {}ms to potentially resolve skew before returning InvalidClockTick.",
+                    tick, last_tick, sync_millis
+                );
+                tokio::time::sleep(Duration::from_millis(sync_millis)).await;
                 self.enforce_monotonic(self.delegate.now())
             }
             result => result,
@@ -202,12 +211,10 @@ pub(crate) fn merge_options<T>(
 
 #[cfg(test)]
 mod tests {
-    use crate::config::Clock;
     use crate::error::SlateDBError;
     use crate::test_utils::TestClock;
     use crate::utils::{spawn_bg_task, spawn_bg_thread, MonotonicClock, WatchableOnceCell};
     use parking_lot::Mutex;
-    use std::ops::{Add, Div};
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
     use std::time::Duration;
@@ -409,9 +416,8 @@ mod tests {
         tokio::spawn({
             let delegate_clock = delegate_clock.clone();
             async move {
-                // wait for half the maximum time it would allow a skew
-                let max_await = delegate_clock.clock_sync_duration(100);
-                tokio::time::sleep(max_await.div(2)).await;
+                // wait for half the time it would wait for
+                tokio::time::sleep(Duration::from_millis(50)).await;
                 delegate_clock.ticker.store(101, SeqCst);
             }
         });
@@ -430,9 +436,8 @@ mod tests {
         let mono_clock = MonotonicClock::new(delegate_clock.clone(), 100);
 
         // wait for 10ms after the maximum time it should accept to wait
-        let max_await = delegate_clock.clock_sync_duration(100);
         let tick_future = mono_clock.now();
-        tokio::time::advance(max_await.add(Duration::from_millis(10))).await;
+        tokio::time::advance(Duration::from_millis(110)).await;
 
         let result = tick_future.await;
         assert!(result.is_err());

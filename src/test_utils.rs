@@ -5,12 +5,10 @@ use crate::row_codec::SstRowCodecV0;
 use crate::types::{KeyValue, RowAttributes, RowEntry};
 use bytes::Bytes;
 use rand::Rng;
-use std::cmp;
 use std::collections::BTreeMap;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::Duration;
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
@@ -70,10 +68,6 @@ impl TestClock {
 impl Clock for TestClock {
     fn now(&self) -> i64 {
         self.ticker.load(Ordering::SeqCst)
-    }
-
-    fn clock_sync_duration(&self, last_tick: i64) -> Duration {
-        Duration::from_millis(cmp::max(0, last_tick - self.ticker.load(Ordering::SeqCst)) as u64)
     }
 }
 
