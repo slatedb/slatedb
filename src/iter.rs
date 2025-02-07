@@ -2,6 +2,13 @@ use crate::error::SlateDBError;
 use crate::types::RowEntry;
 use crate::types::{KeyValue, ValueDeletable};
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum IterationOrder {
+    Ascending,
+    #[allow(dead_code)]
+    Descending,
+}
+
 /// Note: this is intentionally its own trait instead of an Iterator<Item=KeyValue>,
 /// because next will need to be made async to support SSTs, which are loaded over
 /// the network.

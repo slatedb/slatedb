@@ -357,7 +357,7 @@ mod tests {
             .await
             .unwrap();
         let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
-        test_utils::assert_ordered_scan_in_range(&table, .., &mut db_iter).await;
+        test_utils::assert_ranged_db_scan(&table, .., &mut db_iter).await;
         clone_db.close().await.unwrap();
     }
 
@@ -407,7 +407,7 @@ mod tests {
             .await
             .unwrap();
         let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
-        test_utils::assert_ordered_scan_in_range(&checkpoint_table, .., &mut db_iter).await;
+        test_utils::assert_ranged_db_scan(&checkpoint_table, .., &mut db_iter).await;
         clone_db.close().await.unwrap();
     }
 

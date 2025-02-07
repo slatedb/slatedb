@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, SeekToKey};
+use crate::iter::{IterationOrder, KeyValueIterator, SeekToKey};
 use crate::merge_iterator::MergeIterator;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCell;
@@ -66,8 +66,8 @@ impl RangeBounds<KVTableInternalKey> for KVTableInternalKeyRange {
 /// Please note that the sequence number is ordered in reverse, given a user key range (`key001`..=`key001`), the first
 /// sequence number in this range is u64::MAX, and the last sequence number is 0. The output range should be
 /// `(key001, u64::MAX) ..= (key001, 0)`.
-impl From<BytesRange> for KVTableInternalKeyRange {
-    fn from(range: BytesRange) -> Self {
+impl<T: RangeBounds<Bytes>> From<T> for KVTableInternalKeyRange {
+    fn from(range: T) -> Self {
         let start_bound = match range.start_bound() {
             Bound::Included(key) => Bound::Included(KVTableInternalKey::new(key.clone(), u64::MAX)),
             Bound::Excluded(key) => Bound::Excluded(KVTableInternalKey::new(key.clone(), 0)),
@@ -113,6 +113,7 @@ pub(crate) struct ImmutableWal {
 pub(crate) struct MemTableIterator<'a, T: RangeBounds<KVTableInternalKey>> {
     /// `inner` is the Iterator impl of SkipMap, which is the underlying data structure of MemTable.
     inner: Range<'a, KVTableInternalKey, T, KVTableInternalKey, RowEntry>,
+    ordering: IterationOrder,
 }
 
 pub(crate) struct VecDequeKeyValueIterator {
@@ -128,7 +129,10 @@ impl VecDequeKeyValueIterator {
         tables: VecDeque<Arc<KVTable>>,
         range: BytesRange,
     ) -> Result<Self, SlateDBError> {
-        let memtable_iters = tables.iter().map(|t| t.range(range.clone())).collect();
+        let memtable_iters = tables
+            .iter()
+            .map(|t| t.range_ascending(range.clone()))
+            .collect();
         let mut merge_iter = MergeIterator::new(memtable_iters).await?;
         let mut rows = VecDeque::new();
 
@@ -167,7 +171,11 @@ impl<T: RangeBounds<KVTableInternalKey>> KeyValueIterator for MemTableIterator<'
 
 impl<T: RangeBounds<KVTableInternalKey>> MemTableIterator<'_, T> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
-        self.inner.next().map(|entry| entry.value().clone())
+        let next_entry = match self.ordering {
+            IterationOrder::Ascending => self.inner.next(),
+            IterationOrder::Descending => self.inner.next_back(),
+        };
+        next_entry.map(|entry| entry.value().clone())
     }
 }
 
@@ -280,12 +288,24 @@ impl KVTable {
     }
 
     pub(crate) fn iter(&self) -> MemTableIterator<KVTableInternalKeyRange> {
-        self.range(BytesRange::from(..))
+        self.range_ascending(..)
     }
 
-    pub(crate) fn range(&self, range: BytesRange) -> MemTableIterator<KVTableInternalKeyRange> {
+    pub(crate) fn range_ascending<T: RangeBounds<Bytes>>(
+        &self,
+        range: T,
+    ) -> MemTableIterator<KVTableInternalKeyRange> {
+        self.range(range, IterationOrder::Ascending)
+    }
+
+    pub(crate) fn range<T: RangeBounds<Bytes>>(
+        &self,
+        range: T,
+        ordering: IterationOrder,
+    ) -> MemTableIterator<KVTableInternalKeyRange> {
         MemTableIterator {
-            inner: self.map.range(KVTableInternalKeyRange::from(range)),
+            inner: self.map.range(range.into()),
+            ordering,
         }
     }
 
@@ -329,8 +349,11 @@ impl KVTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::assert_iterator;
+    use crate::{proptest_util, test_utils};
     use rstest::rstest;
+    use tokio::runtime::Runtime;
 
     #[tokio::test]
     async fn test_memtable_iter() {
@@ -384,7 +407,7 @@ mod tests {
 
         let mut iter = table
             .table()
-            .range(BytesRange::from(Bytes::from_static(b"abc333")..));
+            .range_ascending(BytesRange::from(Bytes::from_static(b"abc333")..));
         assert_iterator(
             &mut iter,
             vec![
@@ -407,7 +430,7 @@ mod tests {
 
         let mut iter = table
             .table()
-            .range(BytesRange::from(Bytes::from_static(b"abc334")..));
+            .range_ascending(BytesRange::from(Bytes::from_static(b"abc334")..));
         assert_iterator(
             &mut iter,
             vec![
@@ -536,5 +559,37 @@ mod tests {
         for key in should_not_contains {
             assert!(!range.contains(&key));
         }
+    }
+
+    #[test]
+    fn should_iterate_arbitrary_range() {
+        let mut runner = proptest_util::runner::new(file!(), None);
+        let runtime = Runtime::new().unwrap();
+        let sample_table = sample::table(runner.rng(), 500, 10);
+
+        let mut kv_table = WritableKVTable::new();
+        let mut seq = 1;
+        for (key, value) in &sample_table {
+            let row_entry = RowEntry::new_value(key, value, seq);
+            kv_table.put(row_entry);
+            seq += 1;
+        }
+
+        runner
+            .run(
+                &(arbitrary::nonempty_range(10), arbitrary::iteration_order()),
+                |(range, ordering)| {
+                    let mut kv_iter = kv_table.table.range(range.clone(), ordering);
+
+                    runtime.block_on(test_utils::assert_ranged_kv_scan(
+                        &sample_table,
+                        &range,
+                        ordering,
+                        &mut kv_iter,
+                    ));
+                    Ok(())
+                },
+            )
+            .unwrap();
     }
 }

@@ -1,14 +1,13 @@
 use crate::config::{Clock, PutOptions, WriteOptions};
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::row_codec::SstRowCodecV0;
 use crate::types::{KeyValue, RowAttributes, RowEntry};
 use bytes::Bytes;
 use rand::Rng;
 use std::collections::BTreeMap;
-use std::ops::Bound;
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::ops::RangeBounds;
+use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
@@ -89,6 +88,7 @@ macro_rules! assert_debug_snapshot {
     };
 }
 
+use crate::bytes_range::BytesRange;
 use crate::db::Db;
 use crate::db_iter::DbIterator;
 pub(crate) use assert_debug_snapshot;
@@ -123,25 +123,55 @@ pub(crate) fn decode_codec_entries(
     Ok(entries)
 }
 
-pub(crate) async fn assert_ordered_scan_in_range<T: RangeBounds<Bytes>>(
+pub(crate) async fn assert_ranged_db_scan<T: RangeBounds<Bytes>>(
     table: &BTreeMap<Bytes, Bytes>,
     range: T,
     iter: &mut DbIterator<'_>,
 ) {
     let mut expected = table.range(range);
+    loop {
+        let expected_next = expected.next();
+        let actual_next = iter.next().await.unwrap();
+        if expected_next.is_none() && actual_next.is_none() {
+            return;
+        }
+        assert_next_kv(expected_next, actual_next);
+    }
+}
+
+pub(crate) async fn assert_ranged_kv_scan<T: KeyValueIterator>(
+    table: &BTreeMap<Bytes, Bytes>,
+    range: &BytesRange,
+    ordering: IterationOrder,
+    iter: &mut T,
+) {
+    let mut expected = table.range((range.start_bound().cloned(), range.end_bound().cloned()));
 
     loop {
-        match (expected.next(), iter.next().await.unwrap()) {
-            (None, None) => break,
-            (Some((expected_key, expected_value)), Some(actual)) => {
-                assert_eq!(expected_key, &actual.key);
-                assert_eq!(expected_value, &actual.value);
-            }
-            (Some(expected_record), None) => {
-                panic!("Expected record {expected_record:?} missing from scan result")
-            }
-            (None, Some(actual)) => panic!("Unexpected record {actual:?} in scan result"),
+        let expected_next = match ordering {
+            IterationOrder::Ascending => expected.next(),
+            IterationOrder::Descending => expected.next_back(),
+        };
+        let actual_next = iter.next().await.unwrap();
+        if expected_next.is_none() && actual_next.is_none() {
+            return;
         }
+
+        assert_next_kv(expected_next, actual_next);
+    }
+}
+
+fn assert_next_kv(expected: Option<(&Bytes, &Bytes)>, actual: Option<KeyValue>) {
+    match (expected, actual) {
+        (None, None) => (),
+        (Some((expected_key, expected_value)), Some(actual)) => {
+            assert_eq!(expected_key, &actual.key);
+            assert_eq!(expected_value, &actual.value);
+        }
+        (Some(expected_record), None) => {
+            panic!("Expected record {expected_record:?} missing from scan result")
+        }
+        (None, Some(actual)) => panic!("Unexpected record {actual:?} in scan result"),
     }
 }
 
