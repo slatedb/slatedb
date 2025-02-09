@@ -357,6 +357,8 @@ sequenceDiagram
 
 ### Handling No WAL Write
 
+#### Approach 1: Use an in-memory WAL
+
 SlateDB also support a no-WAL mode. In this mode, the write operation directly applied to MemTable without appending to the WAL. And the write operation can await the data to be persisted to storage as the specified durability level.
 
 In the new proposal, the read path need not to be changed, the readers could still read the WAL and Memtable as before.
@@ -396,6 +398,26 @@ sequenceDiagram
 
     MemTable-->>WriteBatch: wake up waiters of last applied position
 ```
+
+#### Approach 2: Add a new `await_l0_flushed` option to `WriteOptions`
+
+The approach 1 might risks introducing a difference between the current design.
+
+In the current design, there's a mindset of "MemTable is a memory buffer", writers can write data to MemTable directly, and will not be blocked by the previous sync write operations.
+
+However, the approach 1 might blocks the alter write with `SyncLevel::Off` to await the previous sync write to be flushed to L0 SST. Before that, the `SyncLevel::Off` write is considered as not committed, and will be invisible to readers. It's because applying the writes to MemTable is considered as sequential, the later writes will be blocked by the previous sync write.
+
+To avoid this, we can consider another approach: add a new `await_l0_flushed: bool` option to `WriteOptions`. And ignore the `SyncLevel` option when this no-WAL mode is set to true.
+
+When `await_l0_flushed` is set to true, the write operation will be blocked until the L0 SST is flushed to storage. Mean while, the other write operations can still be applied to MemTable immediately, and will be considered as committed.
+
+Why not use an enum like `DurabilityLevel` for this? 
+
+The main reason is that, L0 does not have a concept of `DurabilityLevel::Local` or `DurabilityLevel::Memory` like WAL does, it's always persisted to object storage.
+
+A good part of this option is that it does not really tightly coupled with the no-WAL mode. It's also possible to be used in normal mode as well, we can take a unified implementation for this option in both modes without adhoc logic. However, at the time of writing, I still cannot think of a use case where users would want to await the L0 SST to be flushed to storage when the write operation is not in no-WAL mode. I suppose we can hide this `await_l0_flushed` operation by a cfg macro if no-WAL mode is not enabled to reduce the cognitive load for users.
+
+A possible downside of this approach is that it kind of leaked the implementation details of L0 flush to the public API. However, the concept of L0 is well understood by users, and it's unlikely to be removed in the future. Also, it's only exposed in the no-WAL mode, we can consider users whom cares about this option are likely to understand well about what they want.
 
 ### Handling WAL Write Failures
 
