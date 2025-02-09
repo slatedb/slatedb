@@ -3,8 +3,8 @@ use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
 use crate::manifest_store::{ManifestStore, StoredManifest};
-use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
+use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 
 use crate::clone;
@@ -120,13 +120,13 @@ pub async fn run_gc_instance(
     ));
 
     let tokio_handle = Handle::current();
-    let stats = Arc::new(DbStats::new());
+    let stats = Arc::new(StatRegistry::new());
     let collector = GarbageCollector::new(
         manifest_store,
         table_store,
         gc_opts,
         tokio_handle,
-        stats.clone(),
+        stats,
         |_| {},
     )
     .await;

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{fmt::Display, io::SeekFrom};
 
+use crate::cached_object_store::stats::CachedObjectStoreStats;
 use bytes::Bytes;
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
@@ -21,7 +22,6 @@ use tracing::{debug, warn};
 use walkdir::WalkDir;
 
 use crate::cached_object_store::storage::{LocalCacheEntry, LocalCacheHead, LocalCacheStorage};
-use crate::metrics::DbStats;
 
 #[derive(Debug)]
 pub struct FsCacheStorage {
@@ -34,14 +34,14 @@ impl FsCacheStorage {
         root_folder: std::path::PathBuf,
         max_cache_size_bytes: Option<usize>,
         scan_interval: Option<Duration>,
-        db_stats: Arc<DbStats>,
+        stats: Arc<CachedObjectStoreStats>,
     ) -> Self {
         let evictor = max_cache_size_bytes.map(|max_cache_size_bytes| {
             Arc::new(FsCacheEvictor::new(
                 root_folder.clone(),
                 max_cache_size_bytes,
                 scan_interval,
-                db_stats,
+                stats,
             ))
         });
 
@@ -325,7 +325,7 @@ struct FsCacheEvictor {
     rx: Mutex<Option<tokio::sync::mpsc::Receiver<FsCacheEvictorWork>>>,
     background_evict_handle: OnceCell<tokio::task::JoinHandle<()>>,
     background_scan_handle: OnceCell<tokio::task::JoinHandle<()>>,
-    db_stats: Arc<DbStats>,
+    stats: Arc<CachedObjectStoreStats>,
 }
 
 impl FsCacheEvictor {
@@ -333,7 +333,7 @@ impl FsCacheEvictor {
         root_folder: std::path::PathBuf,
         max_cache_size_bytes: usize,
         scan_interval: Option<Duration>,
-        db_stats: Arc<DbStats>,
+        stats: Arc<CachedObjectStoreStats>,
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         Self {
@@ -344,7 +344,7 @@ impl FsCacheEvictor {
             rx: Mutex::new(Some(rx)),
             background_evict_handle: OnceCell::new(),
             background_scan_handle: OnceCell::new(),
-            db_stats,
+            stats,
         }
     }
 
@@ -352,7 +352,7 @@ impl FsCacheEvictor {
         let inner = Arc::new(FsCacheEvictorInner::new(
             self.root_folder.clone(),
             self.max_cache_size_bytes,
-            self.db_stats.clone(),
+            self.stats.clone(),
         ));
 
         let guard = self.rx.lock();
@@ -428,14 +428,14 @@ struct FsCacheEvictorInner {
     track_lock: Mutex<()>,
     cache_entries: Mutex<Trie<std::path::PathBuf, (SystemTime, usize)>>,
     cache_size_bytes: AtomicU64,
-    db_stats: Arc<DbStats>,
+    stats: Arc<CachedObjectStoreStats>,
 }
 
 impl FsCacheEvictorInner {
     pub fn new(
         root_folder: std::path::PathBuf,
         max_cache_size_bytes: usize,
-        db_stats: Arc<DbStats>,
+        stats: Arc<CachedObjectStoreStats>,
     ) -> Self {
         Self {
             root_folder,
@@ -444,7 +444,7 @@ impl FsCacheEvictorInner {
             track_lock: Mutex::new(()),
             cache_entries: Mutex::new(Trie::new()),
             cache_size_bytes: AtomicU64::new(0_u64),
-            db_stats,
+            stats,
         }
     }
 
@@ -507,10 +507,10 @@ impl FsCacheEvictorInner {
         }
 
         // record the metrics
-        self.db_stats
+        self.stats
             .object_store_cache_keys
             .set(self.cache_entries.lock().await.len() as u64);
-        self.db_stats
+        self.stats
             .object_store_cache_bytes
             .set(self.cache_size_bytes.load(Ordering::Relaxed));
 
@@ -573,14 +573,14 @@ impl FsCacheEvictorInner {
         }
 
         // sync the metrics after eviction
-        self.db_stats
+        self.stats
             .object_store_cache_evicted_bytes
             .add(target_bytes as u64);
-        self.db_stats.object_store_cache_evicted_keys.inc();
-        self.db_stats
+        self.stats.object_store_cache_evicted_keys.inc();
+        self.stats
             .object_store_cache_keys
             .set(self.cache_entries.lock().await.len() as u64);
-        self.db_stats
+        self.stats
             .object_store_cache_bytes
             .set(self.cache_size_bytes.load(Ordering::Relaxed));
 
@@ -646,6 +646,7 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stats::StatRegistry;
     use crate::test_utils::gen_rand_bytes;
     use filetime::FileTime;
     use std::{io::Write, sync::atomic::Ordering, time::SystemTime};
@@ -668,11 +669,12 @@ mod tests {
             .prefix("objstore_cache_test_evictor_")
             .tempdir()
             .unwrap();
+        let registry = StatRegistry::new();
 
         let mut evictor = FsCacheEvictorInner::new(
             temp_dir.path().to_path_buf(),
             1024 * 2,
-            Arc::new(DbStats::new()),
+            Arc::new(CachedObjectStoreStats::new(&registry)),
         );
         evictor.batch_factor = 2;
 
@@ -707,11 +709,11 @@ mod tests {
             .prefix("objstore_cache_test_evictor_")
             .tempdir()
             .unwrap();
-
+        let registry = StatRegistry::new();
         let evictor = Arc::new(FsCacheEvictorInner::new(
             temp_dir.path().to_path_buf(),
             1024 * 2,
-            Arc::new(DbStats::new()),
+            Arc::new(CachedObjectStoreStats::new(&registry)),
         ));
 
         let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
@@ -733,11 +735,12 @@ mod tests {
             .prefix("objstore_cache_test_evictor_")
             .tempdir()
             .unwrap();
+        let registry = StatRegistry::new();
 
         let evictor = Arc::new(FsCacheEvictorInner::new(
             temp_dir.path().to_path_buf(),
             1024 * 2,
-            Arc::new(DbStats::new()),
+            Arc::new(CachedObjectStoreStats::new(&registry)),
         ));
 
         gen_rand_file(temp_dir.path(), "file0", 1024);

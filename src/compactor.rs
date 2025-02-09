@@ -8,6 +8,7 @@ use tokio::runtime::Handle;
 use tracing::{error, info, warn};
 use ulid::Ulid;
 
+use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, CompactorState};
@@ -15,7 +16,7 @@ use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
-use crate::metrics::DbStats;
+use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::spawn_bg_thread;
 
@@ -42,12 +43,13 @@ impl Compactor {
         table_store: Arc<TableStore>,
         options: CompactorOptions,
         tokio_handle: Handle,
-        db_stats: Arc<DbStats>,
+        stat_registry: &StatRegistry,
         cleanup_fn: impl FnOnce(&SlateDBError) + Send + 'static,
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let (err_tx, err_rx) = tokio::sync::oneshot::channel();
         let tokio_handle = options.compaction_runtime.clone().unwrap_or(tokio_handle);
+        let stats = Arc::new(CompactionStats::new(stat_registry));
         let main_thread = spawn_bg_thread("slatedb-compactor", cleanup_fn, move || {
             let load_result = CompactorOrchestrator::new(
                 options,
@@ -55,7 +57,7 @@ impl Compactor {
                 table_store.clone(),
                 tokio_handle,
                 external_rx,
-                db_stats,
+                stats,
             );
             let mut orchestrator = match load_result {
                 Ok(orchestrator) => orchestrator,
@@ -94,7 +96,7 @@ struct CompactorOrchestrator {
     executor: Box<dyn CompactionExecutor>,
     external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
     worker_rx: crossbeam_channel::Receiver<WorkerToOrchestratorMsg>,
-    db_stats: Arc<DbStats>,
+    stats: Arc<CompactionStats>,
 }
 
 impl CompactorOrchestrator {
@@ -104,7 +106,7 @@ impl CompactorOrchestrator {
         table_store: Arc<TableStore>,
         tokio_handle: Handle,
         external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
-        db_stats: Arc<DbStats>,
+        stats: Arc<CompactionStats>,
     ) -> Result<Self, SlateDBError> {
         let options = Arc::new(options);
         let stored_manifest =
@@ -118,7 +120,7 @@ impl CompactorOrchestrator {
             options.clone(),
             worker_tx,
             table_store.clone(),
-            db_stats.clone(),
+            stats.clone(),
         );
         let orchestrator = Self {
             options,
@@ -129,7 +131,7 @@ impl CompactorOrchestrator {
             executor: Box::new(executor),
             external_rx,
             worker_rx,
-            db_stats,
+            stats,
         };
         Ok(orchestrator)
     }
@@ -258,7 +260,7 @@ impl CompactorOrchestrator {
         self.log_compaction_state();
         self.write_manifest_safely()?;
         self.maybe_schedule_compactions()?;
-        self.db_stats.last_compaction_ts.set(
+        self.stats.last_compaction_ts.set(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -292,6 +294,41 @@ impl CompactorOrchestrator {
     }
 }
 
+pub mod stats {
+    use crate::stats::{Counter, Gauge, StatRegistry};
+    use std::sync::Arc;
+
+    macro_rules! compactor_stat_name {
+        ($suffix:expr) => {
+            crate::stat_name!("compactor", $suffix)
+        };
+    }
+
+    pub const BYTES_COMPACTED: &str = compactor_stat_name!("bytes_compacted");
+    pub const LAST_COMPACTION_TS_SEC: &str = compactor_stat_name!("last_compaction_timestamp_sec");
+    pub const RUNNING_COMPACTIONS: &str = compactor_stat_name!("running_compactions");
+
+    pub(crate) struct CompactionStats {
+        pub(crate) last_compaction_ts: Arc<Gauge<u64>>,
+        pub(crate) running_compactions: Arc<Gauge<i64>>,
+        pub(crate) bytes_compacted: Arc<Counter>,
+    }
+
+    impl CompactionStats {
+        pub(crate) fn new(stat_registry: &StatRegistry) -> Self {
+            let stats = Self {
+                last_compaction_ts: Arc::new(Gauge::default()),
+                running_compactions: Arc::new(Gauge::default()),
+                bytes_compacted: Arc::new(Counter::default()),
+            };
+            stat_registry.register(LAST_COMPACTION_TS_SEC, stats.last_compaction_ts.clone());
+            stat_registry.register(RUNNING_COMPACTIONS, stats.running_compactions.clone());
+            stat_registry.register(BYTES_COMPACTED, stats.bytes_compacted.clone());
+            stats
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::future::Future;
@@ -304,6 +341,7 @@ mod tests {
     use tokio::runtime::Runtime;
     use ulid::Ulid;
 
+    use crate::compactor::stats::CompactionStats;
     use crate::compactor::{CompactorOptions, CompactorOrchestrator, WorkerToOrchestratorMsg};
     use crate::compactor_state::{Compaction, SourceId};
     use crate::config::{
@@ -501,7 +539,7 @@ mod tests {
             table_store.clone(),
             rt.handle().clone(),
             external_rx,
-            db.metrics(),
+            Arc::new(CompactionStats::new(db.metrics().as_ref())),
         )
         .unwrap();
         let l0_ids_to_compact: Vec<SourceId> = orchestrator
