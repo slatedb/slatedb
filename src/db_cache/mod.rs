@@ -10,7 +10,7 @@
 //! ## Usage
 //!
 //! To use the cache, you need to configure the [DbOptions](crate::config::DbOptions) with the desired cache implementation.
-//!
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -19,13 +19,13 @@ use crate::{
     block::Block, db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned,
 };
 
-/// The default max capacity for the cache. (64MB)
-pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
-
 #[cfg(feature = "foyer")]
 pub mod foyer;
 #[cfg(feature = "moka")]
 pub mod moka;
+
+/// The default max capacity for the cache. (64MB)
+pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 
 /// A trait for in-memory caches.
 ///
@@ -99,6 +99,7 @@ pub trait DbCache: Send + Sync {
 /// The key is a tuple of an SSTable ID and a block ID.
 /// The tuple is private to this module, so the implementation details
 /// of the cache are not exposed publicly.
+#[non_exhaustive]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CachedKey(SsTableId, u64);
 
@@ -108,6 +109,7 @@ impl From<(SsTableId, u64)> for CachedKey {
     }
 }
 
+#[non_exhaustive]
 #[derive(Clone)]
 enum CachedItem {
     Block(Arc<Block>),

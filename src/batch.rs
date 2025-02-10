@@ -40,7 +40,7 @@ impl Default for WriteBatch {
     }
 }
 
-pub enum WriteOp {
+pub(crate) enum WriteOp {
     Put(Bytes, Bytes, PutOptions),
     Delete(Bytes),
 }
@@ -51,12 +51,22 @@ impl WriteBatch {
     }
 
     /// Put a key-value pair into the batch. Keys must not be empty.
-    pub fn put(&mut self, key: &[u8], value: &[u8]) {
+    pub fn put<K, V>(&mut self, key: K, value: V)
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
         self.put_with_options(key, value, &PutOptions::default())
     }
 
     /// Put a key-value pair into the batch. Keys must not be empty.
-    pub fn put_with_options(&mut self, key: &[u8], value: &[u8], options: &PutOptions) {
+    pub fn put_with_options<K, V>(&mut self, key: K, value: V, options: &PutOptions)
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let key = key.as_ref();
+        let value = value.as_ref();
         assert!(!key.is_empty(), "key cannot be empty");
         self.ops.push(WriteOp::Put(
             Bytes::copy_from_slice(key),
@@ -66,7 +76,8 @@ impl WriteBatch {
     }
 
     /// Delete a key-value pair into the batch. Keys must not be empty.
-    pub fn delete(&mut self, key: &[u8]) {
+    pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
+        let key = key.as_ref();
         assert!(!key.is_empty(), "key cannot be empty");
         self.ops.push(WriteOp::Delete(Bytes::copy_from_slice(key)));
     }

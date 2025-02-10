@@ -1,16 +1,21 @@
+use crate::bytes_range;
 use crate::checkpoint::Checkpoint;
-use bytes::Bytes;
-use serde::Serialize;
-use std::collections::VecDeque;
-use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
-use tracing::debug;
-use ulid::Ulid;
-use SsTableId::{Compacted, Wal};
-
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
+use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
+use bytes::Bytes;
+use serde::Serialize;
+use std::cmp;
+use std::collections::VecDeque;
+use std::fmt::{Debug, Formatter};
+use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::{Bound, Range};
+use std::sync::Arc;
+use tracing::debug;
+use ulid::Ulid;
+use uuid::Uuid;
+use SsTableId::{Compacted, Wal};
 
 #[derive(Clone, PartialEq, Serialize)]
 pub(crate) struct SsTableHandle {
@@ -34,6 +39,24 @@ impl SsTableHandle {
             return key >= first_key;
         }
         false
+    }
+
+    pub(crate) fn intersects_range(
+        &self,
+        end_bound_key: Option<Bytes>,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+    ) -> bool {
+        let start_bound = match &self.info.first_key {
+            None => Unbounded,
+            Some(key) => Included(key.as_ref()),
+        };
+
+        let end_bound = match &end_bound_key {
+            None => Unbounded,
+            Some(key) => Excluded(key.as_ref()),
+        };
+
+        bytes_range::has_nonempty_intersection(range, (start_bound, end_bound))
     }
 
     pub(crate) fn estimate_size(&self) -> u64 {
@@ -133,12 +156,59 @@ impl SortedRun {
         self.find_sst_with_range_covering_key_idx(key)
             .map(|idx| &self.ssts[idx])
     }
+
+    fn table_idx_covering_range(&self, range: (Bound<&[u8]>, Bound<&[u8]>)) -> Range<usize> {
+        let mut min_idx = None;
+        let mut max_idx = 0;
+
+        for idx in 0..self.ssts.len() {
+            let current_sst = &self.ssts[idx];
+
+            let upper_bound_key = if idx + 1 < self.ssts.len() {
+                let next_sst = &self.ssts[idx + 1];
+                next_sst.info.first_key.clone()
+            } else {
+                None
+            };
+
+            if current_sst.intersects_range(upper_bound_key, range) {
+                if min_idx.is_none() {
+                    min_idx = Some(idx);
+                }
+
+                max_idx = idx;
+            }
+        }
+
+        match min_idx {
+            Some(min_idx) => min_idx..(max_idx + 1),
+            None => 0..0,
+        }
+    }
+
+    pub(crate) fn tables_covering_range(
+        &self,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+    ) -> VecDeque<&SsTableHandle> {
+        let matching_range = self.table_idx_covering_range(range);
+        self.ssts[matching_range].iter().collect()
+    }
+
+    pub(crate) fn into_tables_covering_range(
+        mut self,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+    ) -> VecDeque<SsTableHandle> {
+        let matching_range = self.table_idx_covering_range(range);
+        self.ssts.drain(matching_range).collect()
+    }
 }
 
 pub(crate) struct DbState {
     memtable: WritableKVTable,
     wal: WritableKVTable,
     state: Arc<COWDbState>,
+    last_seq: u64,
+    error: WatchableOnceCell<SlateDBError>,
 }
 
 // represents the state that is mutated by creating a new copy with the mutations
@@ -149,7 +219,7 @@ pub(crate) struct COWDbState {
     pub(crate) core: CoreDbState,
 }
 
-// represents the core db state that we persist in the manifest
+/// represent the in-memory state of the manifest
 #[derive(Clone, PartialEq, Serialize, Debug)]
 pub(crate) struct CoreDbState {
     pub(crate) initialized: bool,
@@ -158,7 +228,13 @@ pub(crate) struct CoreDbState {
     pub(crate) compacted: Vec<SortedRun>,
     pub(crate) next_wal_sst_id: u64,
     pub(crate) last_compacted_wal_sst_id: u64,
-    pub(crate) last_clock_tick: i64,
+    /// the `last_l0_clock_tick` includes all data in L0 and below --
+    /// WAL entries will have their latest ticks recovered on replay
+    /// into the in-memory state
+    pub(crate) last_l0_clock_tick: i64,
+    /// it's persisted in the manifest, and only updated when a new L0
+    /// SST is created in the manifest.
+    pub(crate) last_l0_seq: u64,
     pub(crate) checkpoints: Vec<Checkpoint>,
 }
 
@@ -171,9 +247,17 @@ impl CoreDbState {
             compacted: vec![],
             next_wal_sst_id: 1,
             last_compacted_wal_sst_id: 0,
-            last_clock_tick: i64::MIN,
+            last_l0_clock_tick: i64::MIN,
+            last_l0_seq: 0,
             checkpoints: vec![],
         }
+    }
+
+    pub(crate) fn init_clone_db(&self) -> CoreDbState {
+        let mut clone = self.clone();
+        clone.initialized = false;
+        clone.checkpoints.clear();
+        clone
     }
 
     pub(crate) fn log_db_runs(&self) {
@@ -189,6 +273,10 @@ impl CoreDbState {
         debug!("{:?}", compacted);
         debug!("-----------------");
     }
+
+    pub(crate) fn find_checkpoint(&self, checkpoint_id: &Uuid) -> Option<&Checkpoint> {
+        self.checkpoints.iter().find(|c| c.id == *checkpoint_id)
+    }
 }
 
 // represents a read-snapshot of the current db state
@@ -201,6 +289,7 @@ pub(crate) struct DbStateSnapshot {
 
 impl DbState {
     pub fn new(core_db_state: CoreDbState) -> Self {
+        let last_l0_seq = core_db_state.last_l0_seq;
         Self {
             memtable: WritableKVTable::new(),
             wal: WritableKVTable::new(),
@@ -209,6 +298,8 @@ impl DbState {
                 imm_wal: VecDeque::new(),
                 core: core_db_state,
             }),
+            error: WatchableOnceCell::new(),
+            last_seq: last_l0_seq,
         }
     }
 
@@ -229,7 +320,14 @@ impl DbState {
         self.state.core.next_wal_sst_id - 1
     }
 
+    pub fn error_reader(&self) -> WatchableOnceCellReader<SlateDBError> {
+        self.error.reader()
+    }
+
     // mutations
+    pub fn record_fatal_error(&mut self, error: SlateDBError) {
+        self.error.write(error);
+    }
 
     pub fn wal(&mut self) -> &mut WritableKVTable {
         &mut self.wal
@@ -247,27 +345,32 @@ impl DbState {
         self.state = Arc::new(state);
     }
 
-    pub fn freeze_memtable(&mut self, wal_id: u64) {
+    pub fn freeze_memtable(&mut self, wal_id: u64) -> Result<(), SlateDBError> {
+        if let Some(err) = self.error.reader().read() {
+            return Err(err.clone());
+        }
         let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
         let mut state = self.state_copy();
         state
             .imm_memtable
             .push_front(Arc::new(ImmutableMemtable::new(old_memtable, wal_id)));
         self.update_state(state);
+        Ok(())
     }
 
-    pub fn freeze_wal(&mut self) -> Option<u64> {
+    pub fn freeze_wal(&mut self) -> Result<(), SlateDBError> {
+        if let Some(err) = self.error.reader().read() {
+            return Err(err.clone());
+        }
         if self.wal.table().is_empty() {
-            return None;
+            return Ok(());
         }
         let old_wal = std::mem::replace(&mut self.wal, WritableKVTable::new());
         let mut state = self.state_copy();
-        let imm_wal = Arc::new(ImmutableWal::new(state.core.next_wal_sst_id, old_wal));
-        let id = imm_wal.id();
+        let imm_wal = Arc::new(ImmutableWal::new(old_wal));
         state.imm_wal.push_front(imm_wal);
-        state.core.next_wal_sst_id += 1;
         self.update_state(state);
-        Some(id)
+        Ok(())
     }
 
     pub fn pop_imm_wal(&mut self) {
@@ -280,7 +383,7 @@ impl DbState {
         &mut self,
         imm_memtable: Arc<ImmutableMemtable>,
         sst_handle: SsTableHandle,
-    ) {
+    ) -> Result<(), SlateDBError> {
         let mut state = self.state_copy();
         let popped = state
             .imm_memtable
@@ -289,7 +392,23 @@ impl DbState {
         assert!(Arc::ptr_eq(&popped, &imm_memtable));
         state.core.l0.push_front(sst_handle);
         state.core.last_compacted_wal_sst_id = imm_memtable.last_wal_id();
+
+        // ensure the persisted manifest tick never goes backwards in time
+        let memtable_tick = imm_memtable.table().last_tick();
+        state.core.last_l0_clock_tick = cmp::max(state.core.last_l0_clock_tick, memtable_tick);
+        if state.core.last_l0_clock_tick != memtable_tick {
+            return Err(SlateDBError::InvalidClockTick {
+                last_tick: state.core.last_l0_clock_tick,
+                next_tick: memtable_tick,
+            });
+        }
+        // update the persisted manifest last_l0_seq as the latest seq in the imm.
+        if let Some(seq) = imm_memtable.table().last_seq() {
+            state.core.last_l0_seq = seq;
+        }
+
         self.update_state(state);
+        Ok(())
     }
 
     pub fn increment_next_wal_id(&mut self) {
@@ -298,49 +417,89 @@ impl DbState {
         self.update_state(state);
     }
 
-    pub fn update_clock_tick(&mut self, tick: i64) -> Result<i64, SlateDBError> {
-        if self.state.core.last_clock_tick > tick {
-            return Err(SlateDBError::InvalidClockTick {
-                last_tick: self.state.core.last_clock_tick,
-                next_tick: tick,
-            });
-        }
-
-        let mut state = self.state_copy();
-        state.core.last_clock_tick = tick;
-        self.update_state(state);
-        Ok(tick)
+    /// increment_seq is called whenever a new write is performed.
+    pub fn increment_seq(&mut self) -> u64 {
+        self.last_seq += 1;
+        self.last_seq
     }
 
-    pub fn refresh_db_state(&mut self, compactor_state: &CoreDbState) {
-        // copy over L0 up to l0_last_compacted
-        let l0_last_compacted = &compactor_state.l0_last_compacted;
-        let mut new_l0 = VecDeque::new();
-        for sst in self.state.core.l0.iter() {
-            if let Some(l0_last_compacted) = l0_last_compacted {
-                if sst.id.unwrap_compacted_id() == *l0_last_compacted {
-                    break;
-                }
-            }
-            new_l0.push_back(sst.clone());
-        }
-        let compacted = compactor_state.compacted.clone();
+    /// update_last_seq is called when we replay the WALs to recover the
+    /// latest sequence number.
+    pub fn update_last_seq(&mut self, seq: u64) {
+        self.last_seq = seq;
+    }
+
+    pub fn merge_db_state(&mut self, updated_state: &CoreDbState) {
+        // The compactor removes tables from l0_last_compacted, so we
+        // only want to keep the tables up to there.
+        let l0_last_compacted = &updated_state.l0_last_compacted;
+        let new_l0 = if let Some(l0_last_compacted) = l0_last_compacted {
+            self.state
+                .core
+                .l0
+                .iter()
+                .cloned()
+                .take_while(|sst| sst.id.unwrap_compacted_id() != *l0_last_compacted)
+                .collect()
+        } else {
+            self.state.core.l0.iter().cloned().collect()
+        };
+
+        let compacted = updated_state.compacted.clone();
         let mut state = self.state_copy();
         state.core.l0_last_compacted.clone_from(l0_last_compacted);
         state.core.l0 = new_l0;
         state.core.compacted = compacted;
+
+        // Checkpoints may also be added externally, so we need to copy them.
+        state
+            .core
+            .checkpoints
+            .clone_from(&updated_state.checkpoints);
+
         self.update_state(state);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::checkpoint::Checkpoint;
+    use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::proptest_util::arbitrary;
+    use crate::test_utils;
+    use bytes::Bytes;
+    use proptest::collection::vec;
+    use proptest::proptest;
+    use std::collections::BTreeSet;
+    use std::collections::Bound::Included;
+    use std::ops::RangeBounds;
+    use std::time::SystemTime;
     use ulid::Ulid;
-
-    use crate::db_state::{CoreDbState, DbState, SsTableHandle, SsTableId, SsTableInfo};
+    use uuid::Uuid;
 
     #[test]
-    fn test_should_refresh_db_state_with_l0s_up_to_last_compacted() {
+    fn test_should_merge_db_state_with_new_checkpoints() {
+        // given:
+        let mut db_state = DbState::new(CoreDbState::new());
+        // mimic an externally added checkpoint
+        let mut updated_state = db_state.state.core.clone();
+        let checkpoint = Checkpoint {
+            id: Uuid::new_v4(),
+            manifest_id: 1,
+            expire_time: None,
+            create_time: SystemTime::now(),
+        };
+        updated_state.checkpoints.push(checkpoint.clone());
+
+        // when:
+        db_state.merge_db_state(&updated_state);
+
+        // then:
+        assert_eq!(vec![checkpoint], db_state.state.core.checkpoints);
+    }
+
+    #[test]
+    fn test_should_merge_db_state_with_l0s_up_to_last_compacted() {
         // given:
         let mut db_state = DbState::new(CoreDbState::new());
         add_l0s_to_dbstate(&mut db_state, 4);
@@ -350,7 +509,7 @@ mod tests {
         compactor_state.l0_last_compacted = Some(last_compacted.id.unwrap_compacted_id());
 
         // when:
-        db_state.refresh_db_state(&compactor_state);
+        db_state.merge_db_state(&compactor_state);
 
         // then:
         let expected: Vec<SsTableId> = compactor_state.l0.iter().map(|l0| l0.id).collect();
@@ -359,14 +518,14 @@ mod tests {
     }
 
     #[test]
-    fn test_should_refresh_db_state_with_all_l0s_if_none_compacted() {
+    fn test_should_merge_db_state_with_all_l0s_if_none_compacted() {
         // given:
         let mut db_state = DbState::new(CoreDbState::new());
         add_l0s_to_dbstate(&mut db_state, 4);
         let l0s = db_state.state.core.l0.clone();
 
         // when:
-        db_state.refresh_db_state(&CoreDbState::new());
+        db_state.merge_db_state(&CoreDbState::new());
 
         // then:
         let expected: Vec<SsTableId> = l0s.iter().map(|l0| l0.id).collect();
@@ -375,18 +534,76 @@ mod tests {
     }
 
     fn add_l0s_to_dbstate(db_state: &mut DbState, n: u32) {
-        let dummy_info = create_sst_info();
+        let dummy_info = create_sst_info(None);
         for i in 0..n {
-            db_state.freeze_memtable(i as u64);
+            db_state
+                .freeze_memtable(i as u64)
+                .expect("db in error state");
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
             let handle = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), dummy_info.clone());
-            db_state.move_imm_memtable_to_l0(imm, handle);
+            db_state.move_imm_memtable_to_l0(imm, handle).unwrap();
         }
     }
 
-    fn create_sst_info() -> SsTableInfo {
+    #[test]
+    fn test_sorted_run_collect_tables_in_range() {
+        let max_bytes_len = 5;
+        proptest!(|(
+            table_first_keys in vec(arbitrary::nonempty_bytes(max_bytes_len), 1..10),
+            range in arbitrary::nonempty_range(max_bytes_len),
+        )| {
+            let sorted_first_keys: BTreeSet<Bytes> = table_first_keys.into_iter().collect();
+            let sorted_run = create_sorted_run(0, &sorted_first_keys);
+            let covering_tables = sorted_run.tables_covering_range(range.as_ref());
+            let first_key = sorted_first_keys.first().unwrap().clone();
+
+            let range_start_key = test_utils::bound_as_option(range.start_bound())
+            .cloned()
+            .unwrap_or_default();
+            let range_end_key = test_utils::bound_as_option(range.end_bound())
+            .cloned()
+            .unwrap_or(vec![u8::MAX; max_bytes_len + 1].into());
+
+            if covering_tables.is_empty() {
+                assert!(range_end_key <= first_key);
+            } else {
+                let covering_first_key = covering_tables.front()
+                .and_then(|t| t.info.first_key.clone())
+                .unwrap();
+
+                if range_start_key < covering_first_key {
+                    assert_eq!(covering_first_key, first_key)
+                }
+
+                let covering_last_key = covering_tables.iter().last()
+                .and_then(|t| t.info.first_key.clone())
+                .unwrap();
+                if covering_last_key == range_end_key {
+                    assert_eq!(Included(range_end_key), range.end_bound().cloned());
+                } else {
+                    assert!(covering_last_key < range_end_key);
+                }
+            }
+        });
+    }
+
+    fn create_sorted_run(id: u32, first_keys: &BTreeSet<Bytes>) -> SortedRun {
+        let mut ssts = Vec::new();
+        for first_key in first_keys {
+            ssts.push(create_compacted_sst_handle(Some(first_key.clone())));
+        }
+        SortedRun { id, ssts }
+    }
+
+    fn create_compacted_sst_handle(first_key: Option<Bytes>) -> SsTableHandle {
+        let sst_info = create_sst_info(first_key);
+        let sst_id = SsTableId::Compacted(Ulid::new());
+        SsTableHandle::new(sst_id, sst_info.clone())
+    }
+
+    fn create_sst_info(first_key: Option<Bytes>) -> SsTableInfo {
         SsTableInfo {
-            first_key: None,
+            first_key,
             index_offset: 0,
             index_len: 0,
             filter_offset: 0,

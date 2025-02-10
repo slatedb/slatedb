@@ -125,15 +125,28 @@ impl BlockBuilder {
     }
 
     #[cfg(test)]
-    pub fn add_kv(
+    pub fn add_value(
         &mut self,
         key: &[u8],
-        value: Option<&[u8]>,
+        value: &[u8],
         attrs: crate::types::RowAttributes,
     ) -> bool {
         let entry = RowEntry::new(
             key.to_vec().into(),
-            value.map(|v| v.to_vec().into()),
+            crate::types::ValueDeletable::Value(Bytes::copy_from_slice(value)),
+            0,
+            attrs.ts,
+            attrs.expire_ts,
+        );
+        self.add(entry)
+    }
+
+    #[allow(dead_code)]
+    #[cfg(test)]
+    pub fn add_tombstone(&mut self, key: &[u8], attrs: crate::types::RowAttributes) -> bool {
+        let entry = RowEntry::new(
+            key.to_vec().into(),
+            crate::types::ValueDeletable::Tombstone,
             0,
             attrs.ts,
             attrs.expire_ts,
@@ -158,46 +171,123 @@ impl BlockBuilder {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
-    use crate::test_utils::{gen_attrs, gen_empty_attrs};
+    use crate::{
+        test_utils::{assert_debug_snapshot, decode_codec_entries},
+        types::ValueDeletable,
+    };
 
-    #[test]
-    fn test_block() {
-        let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
-        assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
-        assert!(builder.add_kv(b"key2", Some(b"value2"), gen_empty_attrs()));
-        let block = builder.build().unwrap();
-        let encoded = block.encode();
-        let decoded = Block::decode(encoded);
-        assert_eq!(block.data, decoded.data);
-        assert_eq!(block.offsets, decoded.offsets);
+    #[derive(Debug)]
+    struct BlockTestCase {
+        name: &'static str,
+        entries: Vec<RowEntry>, // Use RowEntry instead of (key, value)
     }
 
-    #[test]
-    fn test_block_with_tombstone() {
+    fn build_block(test_case: &BlockTestCase) -> Block {
         let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
-        assert!(builder.add_kv(b"key2", None, gen_empty_attrs()));
-        assert!(builder.add_kv(b"key3", Some(b"value3"), gen_empty_attrs()));
-        let block = builder.build().unwrap();
-        let encoded = block.encode();
-        let _decoded = Block::decode(encoded);
+
+        for entry in &test_case.entries {
+            assert!(builder.add(entry.clone()));
+        }
+
+        builder.build().expect("Failed to build block")
     }
 
-    #[test]
-    fn test_block_size() {
-        let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add_kv(b"key1", Some(b"value1"), gen_attrs(1)));
-        assert!(builder.add_kv(b"key2", Some(b"value2"), gen_attrs(1)));
-        let block = builder.build().unwrap();
-        assert_eq!(73, block.size());
+    #[rstest]
+    #[case(BlockTestCase {
+        name: "test_block",
+        entries: vec![
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key1"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value1")),
+                0,
+                Some(0),
+                Some(0),
+            ),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key1"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value1")),
+                0,
+                Some(0),
+                Some(0),
+            ),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key2"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value2")),
+                0,
+                Some(0),
+                Some(0),
+            ),
+        ],
+    })]
+    #[case(BlockTestCase {
+        name: "block_with_tombstone",
+        entries: vec![
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key1"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value1")),
+                0,
+                Some(0),
+                Some(0),
+            ),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key2"),
+                ValueDeletable::Tombstone,
+                0,
+                Some(0),
+                None,
+            ),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key3"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value3")),
+                0,
+                Some(0),
+                Some(0),
+            ),
+        ],
+    })]
+    #[case(BlockTestCase {
+        name: "block_with_merge",
+        entries: vec![
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key1"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value1")),
+                0,
+                Some(0),
+                Some(0),
+            ),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key1"),
+                ValueDeletable::Merge(Bytes::copy_from_slice(b"value1")),
+                0,
+                Some(0),
+                Some(0),
+            ),
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key2"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value2")),
+                0,
+                Some(0),
+                Some(0),
+            ),
+        ],
+    })]
+    fn test_block(#[case] test_case: BlockTestCase) {
+        let block = build_block(&test_case);
+        let encoded = block.encode();
+        let decoded = Block::decode(encoded.clone());
+        let block_data = &block.data;
+        let block_offsets = &block.offsets;
+        // Decode the block data using offsets and validate each decoded entry
+        let decoded_entries = decode_codec_entries(block_data.clone(), block_offsets)
+            .expect("Failed to decode codec entries");
+        assert_eq!(decoded_entries, test_case.entries);
 
-        let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add_kv(b"key1", Some(b"value1"), gen_empty_attrs()));
-        assert!(builder.add_kv(b"key2", Some(b"value2"), gen_empty_attrs()));
-        let block = builder.build().unwrap();
-        assert_eq!(57, block.size());
+        assert_eq!(block_data, &decoded.data);
+        assert_eq!(block_offsets, &decoded.offsets);
+        assert_debug_snapshot!(test_case.name, (block.size(), block.data, block.offsets));
     }
 
     #[test]

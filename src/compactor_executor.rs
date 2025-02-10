@@ -16,7 +16,7 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
 use crate::sorted_run_iterator::SortedRunIterator;
-use crate::sst_iter::SstIterator;
+use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 
 use crate::metrics::DbStats;
@@ -93,23 +93,33 @@ pub(crate) struct TokioCompactionExecutorInner {
 
 impl TokioCompactionExecutorInner {
     async fn load_iterators<'a>(
-        &'a self,
+        &self,
         compaction: &'a CompactionJob,
     ) -> Result<
         TwoMergeIterator<MergeIterator<SstIterator<'a>>, MergeIterator<SortedRunIterator<'a>>>,
         SlateDBError,
     > {
+        let sst_iter_options = SstIteratorOptions {
+            max_fetch_tasks: 4,
+            blocks_to_fetch: 256,
+            cache_blocks: false, // don't clobber the cache
+            eager_spawn: true,
+        };
+
         let mut l0_iters = VecDeque::new();
         for l0 in compaction.ssts.iter() {
-            // block cache is disabled here so that we dont clobber the cache
-            let iter = SstIterator::new_spawn(l0, self.table_store.clone(), 4, 256, false).await?;
-            l0_iters.push_back(iter);
+            l0_iters.push_back(
+                SstIterator::new_borrowed(.., l0, self.table_store.clone(), sst_iter_options)
+                    .await?,
+            );
         }
         let l0_merge_iter = MergeIterator::new(l0_iters).await?;
+
         let mut sr_iters = VecDeque::new();
         for sr in compaction.sorted_runs.iter() {
             let iter =
-                SortedRunIterator::new_spawn(sr, self.table_store.clone(), 16, 256, false).await?;
+                SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), sst_iter_options)
+                    .await?;
             sr_iters.push_back(iter);
         }
         let sr_merge_iter = MergeIterator::new(sr_iters).await?;
@@ -149,10 +159,10 @@ impl TokioCompactionExecutorInner {
             };
 
             // Add to SST
-            let value = kv.value.as_option().cloned();
             let key_len = kv.key.len();
+            let value_len = kv.value.len();
             current_writer.add(kv).await?;
-            current_size += key_len + value.map_or(0, |b| b.len());
+            current_size += key_len + value_len;
             if current_size > self.options.max_sst_size {
                 current_size = 0;
                 let finished_writer = mem::replace(

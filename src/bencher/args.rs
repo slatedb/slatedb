@@ -11,7 +11,7 @@ use slatedb::{
         moka::{MokaCache, MokaCacheOptions},
         DbCache,
     },
-    error::DbOptionsError,
+    DbOptionsError,
 };
 
 use crate::db::{FixedSetKeyGenerator, KeyGenerator, RandomKeyGenerator};
@@ -35,6 +35,13 @@ pub(crate) struct BencherArgs {
         default_value = "/slatedb-bencher"
     )]
     pub(crate) path: String,
+
+    #[arg(
+        long,
+        help = "Clean up object storage files after the benchmark run completes",
+        default_value_t = false
+    )]
+    pub(crate) clean: bool,
 
     #[command(subcommand)]
     pub(crate) command: BencherCommands,

@@ -164,19 +164,17 @@ use tokio::runtime::Handle;
 use uuid::Uuid;
 
 use crate::compactor::CompactionScheduler;
+use crate::config::GcExecutionMode::Periodic;
 use crate::error::{DbOptionsError, SlateDBError};
 
 use crate::db_cache::DbCache;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
-pub const DEFAULT_READ_OPTIONS: &ReadOptions = &ReadOptions::default();
-pub const DEFAULT_WRITE_OPTIONS: &WriteOptions = &WriteOptions::default();
-pub const DEFAULT_PUT_OPTIONS: &PutOptions = &PutOptions::default();
-
 /// Whether reads see only writes that have been committed durably to the DB.  A
 /// write is considered durably committed if all future calls to read are guaranteed
 /// to serve the data written by the write, until some later durably committed write
 /// updates the same key.
+#[non_exhaustive]
 #[derive(Clone, Default)]
 pub enum ReadLevel {
     /// Client reads will only see data that's been committed durably to the DB.
@@ -196,27 +194,41 @@ pub struct ReadOptions {
     pub read_level: ReadLevel,
 }
 
-impl ReadOptions {
-    /// Create a new `ReadOptions` with `read_level` set to `Commited`.
-    const fn default() -> Self {
+#[derive(Clone)]
+pub struct ScanOptions {
+    /// The read commit level for read operations
+    pub read_level: ReadLevel,
+    /// The number of bytes to read ahead. The value is rounded up to the nearest
+    /// block size when fetching from object storage. The default is 1, which
+    /// rounds up to one block.
+    pub read_ahead_bytes: usize,
+    /// Whether or not fetched blocks should be cached
+    pub cache_blocks: bool,
+}
+
+impl Default for ScanOptions {
+    /// Create a new ScanOptions with `read_level` set to [`ReadLevel::Commited`].
+    fn default() -> Self {
         Self {
             read_level: ReadLevel::Commited,
+            read_ahead_bytes: 1,
+            cache_blocks: false,
         }
     }
 }
 
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct WriteOptions {
     /// Whether `put` calls should block until the write has been durably committed
     /// to the DB.
     pub await_durable: bool,
 }
 
-impl WriteOptions {
+impl Default for WriteOptions {
     /// Create a new `WriteOptions`` with `await_durable` set to `true`.
-    const fn default() -> Self {
+    fn default() -> Self {
         Self {
             await_durable: true,
         }
@@ -236,10 +248,6 @@ pub struct PutOptions {
 }
 
 impl PutOptions {
-    const fn default() -> Self {
-        Self { ttl: Ttl::Default }
-    }
-
     pub(crate) fn expire_ts_from(&self, default: Option<u64>, now: i64) -> Option<i64> {
         match self.ttl {
             Ttl::Default => match default {
@@ -265,6 +273,7 @@ impl PutOptions {
     }
 }
 
+#[non_exhaustive]
 #[derive(Clone, Default)]
 pub enum Ttl {
     #[default]
@@ -295,8 +304,8 @@ impl Clock for SystemClock {
     fn now(&self) -> i64 {
         // since SystemTime is not guaranteed to be monotonic, we enforce it here
         let tick = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(duration) => duration.as_secs() as i64, // Time is after the epoch
-            Err(e) => -(e.duration().as_secs() as i64), // Time is before the epoch, return negative
+            Ok(duration) => duration.as_millis() as i64, // Time is after the epoch
+            Err(e) => -(e.duration().as_millis() as i64), // Time is before the epoch, return negative
         };
         self.last_tick.fetch_max(tick, SeqCst);
         self.last_tick.load(SeqCst)
@@ -316,16 +325,25 @@ fn default_clock() -> Arc<dyn Clock + Send + Sync> {
 /// flush_interval or reaching l0_sst_size_bytes, respectively. If set to Durable, then the
 /// checkpoint includes only writes that were durable at the time of the call. This will be faster,
 /// but may not include data from recent writes.
+#[non_exhaustive]
+#[derive(Debug, Copy, Clone)]
 pub enum CheckpointScope {
-    All { force_flush: bool },
+    #[non_exhaustive]
+    All {
+        force_flush: bool,
+    },
     Durable,
 }
 
-/// Specify options to provide when creating a checkpoint.
-pub struct CheckpointOptions {
-    /// Specifies the scope targeted by the checkpoint (see above)
-    pub scope: CheckpointScope,
+impl CheckpointScope {
+    pub fn all_with_force_flush(force_flush: bool) -> Self {
+        Self::All { force_flush }
+    }
+}
 
+/// Specify options to provide when creating a checkpoint.
+#[derive(Debug, Clone, Default)]
+pub struct CheckpointOptions {
     /// Optionally specifies the lifetime of the checkpoint to create. The expire time will be
     /// set to the current wallclock time plus the specified lifetime. If lifetime is None, then
     /// the checkpoint is created without an expiry time.
@@ -335,16 +353,6 @@ pub struct CheckpointOptions {
     /// is useful for users to establish checkpoints from existing checkpoints, but with a different
     /// lifecycle and/or metadata.
     pub source: Option<Uuid>,
-}
-
-impl Default for CheckpointOptions {
-    fn default() -> Self {
-        Self {
-            scope: CheckpointScope::Durable,
-            lifetime: None,
-            source: None,
-        }
-    }
 }
 
 /// Configuration options for the database. These options are set on client startup.
@@ -467,7 +475,41 @@ pub struct DbOptions {
     pub default_ttl: Option<u64>,
 }
 
+// Implement Debug manually for DbOptions.
+// This is needed because DbOptions contains several boxed trait objects
+// which doesn't implement Debug.
+impl std::fmt::Debug for DbOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut data = f.debug_struct("DbOptions");
+        data.field("flush_interval", &self.flush_interval);
+        #[cfg(feature = "wal_disable")]
+        {
+            data.field("wal_enabled", &self.wal_enabled);
+        }
+        data.field("manifest_poll_interval", &self.manifest_poll_interval)
+            .field("min_filter_keys", &self.min_filter_keys)
+            .field("max_unflushed_bytes", &self.max_unflushed_bytes)
+            .field("l0_sst_size_bytes", &self.l0_sst_size_bytes)
+            .field("l0_max_ssts", &self.l0_max_ssts)
+            .field("compactor_options", &self.compactor_options)
+            .field("compression_codec", &self.compression_codec)
+            .field(
+                "object_store_cache_options",
+                &self.object_store_cache_options,
+            )
+            .field("garbage_collector_options", &self.garbage_collector_options)
+            .field("filter_bits_per_key", &self.filter_bits_per_key)
+            .field("default_ttl", &self.default_ttl)
+            .finish()
+    }
+}
+
 impl DbOptions {
+    /// Converts the DbOptions to a JSON string representation
+    pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
     /// Loads DbOptions from a file.
     ///
     /// This function attempts to read and parse a configuration file to create a DbOptions instance.
@@ -634,6 +676,7 @@ fn default_block_cache() -> Option<Arc<dyn DbCache>> {
 }
 
 /// The compression algorithm to use for SSTables.
+#[non_exhaustive]
 #[derive(Clone, Copy, Deserialize, PartialEq, Debug, Serialize)]
 pub enum CompressionCodec {
     #[cfg(feature = "snappy")]
@@ -717,6 +760,22 @@ impl Default for CompactorOptions {
     }
 }
 
+// Implement Debug manually for CompactorOptions.
+// This is needed because CompactorOptions contains a boxed trait object
+// (`Arc<dyn CompactionSchedulerSupplier>`), which doesn't implement Debug.
+impl std::fmt::Debug for CompactorOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompactorOptions")
+            .field("poll_interval", &self.poll_interval)
+            .field("max_sst_size", &self.max_sst_size)
+            .field(
+                "max_concurrent_compactions",
+                &self.max_concurrent_compactions,
+            )
+            .finish()
+    }
+}
+
 /// Returns the default compaction scheduler supplier.
 ///
 /// This function creates and returns an `Arc<dyn CompactionSchedulerSupplier>` containing
@@ -757,7 +816,7 @@ impl Default for SizeTieredCompactionSchedulerOptions {
 }
 
 /// Garbage collector options.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GarbageCollectorOptions {
     /// Garbage collection options for the manifest directory.
     pub manifest_options: Option<GarbageCollectorDirectoryOptions>,
@@ -777,19 +836,30 @@ pub struct GarbageCollectorOptions {
 impl Default for GarbageCollectorDirectoryOptions {
     fn default() -> Self {
         Self {
-            poll_interval: Duration::from_secs(300),
+            execution_mode: Periodic(Duration::from_secs(300)),
             min_age: Duration::from_secs(86_400),
         }
     }
 }
 
+#[derive(Clone, Copy, Deserialize, Serialize, Debug)]
+#[serde(tag = "mode", content = "config")]
+pub enum GcExecutionMode {
+    /// Run garbage collection once.
+    Once,
+
+    /// Run garbage collection periodically.
+    Periodic(
+        #[serde(deserialize_with = "deserialize_duration")]
+        #[serde(serialize_with = "serialize_duration")]
+        Duration,
+    ),
+}
+
 /// Garbage collector options for a directory.
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct GarbageCollectorDirectoryOptions {
-    /// The interval at which the garbage collector checks for files to garbage collect.
-    #[serde(deserialize_with = "deserialize_duration")]
-    #[serde(serialize_with = "serialize_duration")]
-    pub poll_interval: Duration,
+    pub execution_mode: GcExecutionMode,
 
     /// The minimum age of a file before it can be garbage collected.
     #[serde(deserialize_with = "deserialize_duration")]
@@ -806,7 +876,7 @@ impl Default for GarbageCollectorOptions {
         Self {
             manifest_options: Some(Default::default()),
             wal_options: Some(GarbageCollectorDirectoryOptions {
-                poll_interval: Duration::from_secs(60),
+                execution_mode: Periodic(Duration::from_secs(60)),
                 min_age: Duration::from_secs(60),
             }),
             compacted_options: Some(Default::default()),

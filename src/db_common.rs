@@ -3,8 +3,8 @@ use parking_lot::RwLockWriteGuard;
 use crate::db::DbInner;
 use crate::db_state::DbState;
 use crate::error::SlateDBError;
-use crate::flush::WalFlushThreadMsg;
-use crate::mem_table_flush::MemtableFlushThreadMsg;
+use crate::flush::WalFlushMsg;
+use crate::mem_table_flush::MemtableFlushMsg;
 
 impl DbInner {
     pub(crate) fn maybe_freeze_memtable(
@@ -15,9 +15,9 @@ impl DbInner {
         if guard.memtable().size() < self.options.l0_sst_size_bytes {
             return Ok(());
         }
-        guard.freeze_memtable(wal_id);
+        guard.freeze_memtable(wal_id)?;
         self.memtable_flush_notifier
-            .send((None, MemtableFlushThreadMsg::FlushImmutableMemtables))
+            .send(MemtableFlushMsg::FlushImmutableMemtables { sender: None })
             .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         Ok(())
     }
@@ -33,9 +33,9 @@ impl DbInner {
         if guard.wal().size() < self.options.l0_sst_size_bytes {
             return Ok(());
         }
-        guard.freeze_wal();
+        guard.freeze_wal()?;
         self.wal_flush_notifier
-            .send((None, WalFlushThreadMsg::FlushImmutableWals))
+            .send(WalFlushMsg::FlushImmutableWals { sender: None })
             .map_err(|_| SlateDBError::WalFlushChannelError)?;
         Ok(())
     }

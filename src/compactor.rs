@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,6 +17,7 @@ use crate::error::SlateDBError;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::metrics::DbStats;
 use crate::tablestore::TableStore;
+use crate::utils::spawn_bg_thread;
 
 pub trait CompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
@@ -33,7 +33,7 @@ pub(crate) enum WorkerToOrchestratorMsg {
 
 pub(crate) struct Compactor {
     main_tx: crossbeam_channel::Sender<CompactorMainMsg>,
-    main_thread: Option<JoinHandle<()>>,
+    main_thread: Option<JoinHandle<Result<(), SlateDBError>>>,
 }
 
 impl Compactor {
@@ -43,11 +43,12 @@ impl Compactor {
         options: CompactorOptions,
         tokio_handle: Handle,
         db_stats: Arc<DbStats>,
+        cleanup_fn: impl FnOnce(&SlateDBError) + Send + 'static,
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let (err_tx, err_rx) = tokio::sync::oneshot::channel();
         let tokio_handle = options.compaction_runtime.clone().unwrap_or(tokio_handle);
-        let main_thread = thread::spawn(move || {
+        let main_thread = spawn_bg_thread("slatedb-compactor", cleanup_fn, move || {
             let load_result = CompactorOrchestrator::new(
                 options,
                 manifest_store.clone(),
@@ -60,11 +61,11 @@ impl Compactor {
                 Ok(orchestrator) => orchestrator,
                 Err(err) => {
                     err_tx.send(Err(err)).expect("err channel failure");
-                    return;
+                    return Ok(());
                 }
             };
             err_tx.send(Ok(())).expect("err channel failure");
-            orchestrator.run();
+            orchestrator.run()
         });
         err_rx.await.expect("err channel failure")?;
         Ok(Self {
@@ -76,9 +77,10 @@ impl Compactor {
     pub(crate) async fn close(mut self) {
         if let Some(main_thread) = self.main_thread.take() {
             self.main_tx.send(Shutdown).expect("main tx disconnected");
-            main_thread
+            let result = main_thread
                 .join()
                 .expect("failed to stop main compactor thread");
+            info!("compactor thread exited with: {:?}", result)
         }
     }
 }
@@ -107,9 +109,6 @@ impl CompactorOrchestrator {
         let options = Arc::new(options);
         let stored_manifest =
             tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;
-        let Some(stored_manifest) = stored_manifest else {
-            return Err(SlateDBError::InvalidDBState);
-        };
         let manifest = tokio_handle.block_on(FenceableManifest::init_compactor(stored_manifest))?;
         let state = Self::load_state(&manifest)?;
         let scheduler = Self::load_compaction_scheduler(options.as_ref());
@@ -144,7 +143,7 @@ impl CompactorOrchestrator {
         Ok(CompactorState::new(db_state.clone()))
     }
 
-    fn run(&mut self) {
+    fn run(&mut self) -> Result<(), SlateDBError> {
         let ticker = crossbeam_channel::tick(self.options.poll_interval);
         let db_runs_log_ticker = crossbeam_channel::tick(Duration::from_secs(10));
 
@@ -175,6 +174,7 @@ impl CompactorOrchestrator {
                 }
             }
         }
+        Ok(())
     }
 
     fn load_manifest(&mut self) -> Result<(), SlateDBError> {
@@ -247,7 +247,7 @@ impl CompactorOrchestrator {
             destination: compaction.destination,
             ssts,
             sorted_runs,
-            compaction_ts: db_state.last_clock_tick,
+            compaction_ts: db_state.last_l0_clock_tick,
         });
     }
 
@@ -278,7 +278,7 @@ impl CompactorOrchestrator {
     }
 
     fn refresh_db_state(&mut self) -> Result<(), SlateDBError> {
-        self.state.refresh_db_state(self.manifest.db_state()?);
+        self.state.merge_db_state(self.manifest.db_state()?);
         self.maybe_schedule_compactions()?;
         Ok(())
     }
@@ -316,9 +316,10 @@ mod tests {
     use crate::manifest_store::{ManifestStore, StoredManifest};
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
-    use crate::sst_iter::SstIterator;
+    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
-    use crate::test_utils::TestClock;
+    use crate::test_utils::{assert_iterator, TestClock};
+    use crate::types::RowEntry;
 
     const PATH: &str = "/test/db";
 
@@ -347,9 +348,15 @@ mod tests {
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
-        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1, false)
-            .await
-            .unwrap();
+
+        let mut iter = SstIterator::new_borrowed(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap();
         for i in 0..4 {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), &[b'a' + i as u8; 16]);
@@ -372,9 +379,9 @@ mod tests {
         let compactor_opts = CompactorOptions {
             compaction_scheduler: Arc::new(SizeTieredCompactionSchedulerSupplier::new(
                 SizeTieredCompactionSchedulerOptions {
-                    // compact as soon as we have data
-                    min_compaction_sources: 1,
-                    max_compaction_sources: 10,
+                    // We'll do exactly two flushes in this test, resulting in 2 L0 files.
+                    min_compaction_sources: 2,
+                    max_compaction_sources: 2,
                     include_size_threshold: 4.0,
                 },
             )),
@@ -386,11 +393,13 @@ mod tests {
         };
         let (_, manifest_store, table_store, db) = build_test_db(options).await;
 
+        let value = &[b'a'; 64];
+
         // ticker time = 0, expire time = 10
         insert_clock.ticker.store(0, atomic::Ordering::SeqCst);
         db.put_with_options(
             &[1; 16],
-            &[b'a'; 64],
+            value,
             &PutOptions {
                 ttl: Ttl::ExpireAfter(10),
             },
@@ -403,7 +412,7 @@ mod tests {
         insert_clock.ticker.store(10, atomic::Ordering::SeqCst);
         db.put_with_options(
             &[2; 16],
-            &[b'a'; 64],
+            value,
             &PutOptions { ttl: Ttl::Default },
             &WriteOptions::default(),
         )
@@ -416,7 +425,7 @@ mod tests {
         insert_clock.ticker.store(30, atomic::Ordering::SeqCst);
         db.put_with_options(
             &[3; 16],
-            &[b'a'; 64],
+            value,
             &PutOptions { ttl: Ttl::NoExpiry },
             &WriteOptions::default(),
         )
@@ -428,7 +437,7 @@ mod tests {
         insert_clock.ticker.store(70, atomic::Ordering::SeqCst);
         db.put_with_options(
             &[1; 16],
-            &[b'a'; 64],
+            value,
             &PutOptions {
                 ttl: Ttl::ExpireAfter(80),
             },
@@ -446,28 +455,30 @@ mod tests {
         let db_state = db_state.expect("db was not compacted");
         assert!(db_state.l0_last_compacted.is_some());
         assert_eq!(db_state.compacted.len(), 1);
-        assert_eq!(db_state.last_clock_tick, 70);
+        assert_eq!(db_state.last_l0_clock_tick, 70);
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
-        let mut iter = SstIterator::new(handle, table_store.clone(), 1, 1, false)
-            .await
-            .unwrap();
+        let mut iter = SstIterator::new_borrowed(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap();
 
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key.as_ref(), &[1; 16]);
-
-        // skip k2 because its expired
-
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key.as_ref(), &[3; 16]);
-
-        let maybe_kv = iter.next().await.unwrap();
-        assert!(
-            maybe_kv.is_none(),
-            "Expected no more entries, but got: {:?}",
-            maybe_kv
-        );
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(&[1; 16], value, 4)
+                    .with_create_ts(70)
+                    .with_expire_ts(150),
+                RowEntry::new_tombstone(&[2; 16], 2).with_create_ts(10),
+                RowEntry::new_value(&[3; 16], value, 3).with_create_ts(30),
+            ],
+        )
+        .await;
     }
 
     #[test]
@@ -480,7 +491,6 @@ mod tests {
         let (os, manifest_store, table_store, db) = rt.block_on(build_test_db(options.clone()));
         let mut stored_manifest = rt
             .block_on(StoredManifest::load(manifest_store.clone()))
-            .unwrap()
             .unwrap();
         rt.block_on(db.put(&[b'a'; 32], &[b'b'; 96])).unwrap();
         rt.block_on(db.close()).unwrap();
@@ -538,7 +548,10 @@ mod tests {
         assert!(!compacted_l0s.contains(&l0_id));
         assert_eq!(
             db_state.l0_last_compacted.unwrap(),
-            l0_ids_to_compact.first().unwrap().unwrap_sst()
+            l0_ids_to_compact
+                .first()
+                .and_then(|id| id.maybe_unwrap_sst())
+                .unwrap()
         );
     }
 
@@ -594,10 +607,7 @@ mod tests {
 
     async fn await_compaction(manifest_store: Arc<ManifestStore>) -> Option<CoreDbState> {
         run_for(Duration::from_secs(10), || async {
-            let stored_manifest = StoredManifest::load(manifest_store.clone())
-                .await
-                .unwrap()
-                .unwrap();
+            let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
             let db_state = stored_manifest.db_state();
             if db_state.l0_last_compacted.is_some() {
                 return Some(db_state.clone());
