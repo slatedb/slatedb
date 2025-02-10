@@ -62,6 +62,7 @@ use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
 use crate::utils::{bg_task_result_into_err, MonotonicClock};
 use tracing::{info, warn};
+use crate::db::SstFilterResult::{FilterNegative, FilterPositive, RangeNegative, RangePositive};
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -153,7 +154,8 @@ impl DbInner {
         };
 
         for sst in &snapshot.state.core.l0 {
-            if self.sst_might_include_key(sst, key, key_hash).await? {
+            let filter_result = self.sst_might_include_key(sst, key, key_hash).await?;
+            if filter_result.might_contain_key() {
                 let mut iter =
                     SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
                         .await?;
@@ -163,11 +165,15 @@ impl DbInner {
                         return unwrap_result(entry.value);
                     }
                 }
+                if matches!(filter_result, FilterPositive) {
+                    self.db_stats.filter_false_positives.inc();
+                }
             }
         }
 
         for sr in &snapshot.state.core.compacted {
-            if self.sr_might_include_key(sr, key, key_hash).await? {
+            let filter_result = self.sr_might_include_key(sr, key, key_hash).await?;
+            if filter_result.might_contain_key() {
                 let mut iter =
                     SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
                         .await?;
@@ -175,6 +181,9 @@ impl DbInner {
                     if entry.key == key {
                         return unwrap_result(entry.value);
                     }
+                }
+                if matches!(filter_result, FilterPositive) {
+                    self.db_stats.filter_false_positives.inc();
                 }
             }
         }
@@ -283,14 +292,20 @@ impl DbInner {
         sst: &SsTableHandle,
         key: &[u8],
         key_hash: u64,
-    ) -> Result<bool, SlateDBError> {
+    ) -> Result<SstFilterResult, SlateDBError> {
         if !sst.range_covers_key(key) {
-            return Ok(false);
+            return Ok(RangeNegative);
         }
         if let Some(filter) = self.table_store.read_filter(sst).await? {
-            return Ok(filter.might_contain(key_hash));
+            return if filter.might_contain(key_hash) {
+                self.db_stats.filter_positives.inc();
+                Ok(FilterPositive)
+            } else {
+                self.db_stats.filter_negatives.inc();
+                Ok(FilterNegative)
+            };
         }
-        Ok(true)
+        Ok(RangePositive)
     }
 
     /// Check if the given key might be in the range of the sorted run (SR). Checks if the key
@@ -306,14 +321,18 @@ impl DbInner {
         sr: &SortedRun,
         key: &[u8],
         key_hash: u64,
-    ) -> Result<bool, SlateDBError> {
-        if let Some(sst) = sr.find_sst_with_range_covering_key(key) {
-            if let Some(filter) = self.table_store.read_filter(sst).await? {
-                return Ok(filter.might_contain(key_hash));
+    ) -> Result<SstFilterResult, SlateDBError> {
+        let Some(sst) = sr.find_sst_with_range_covering_key(key) else {
+            return Ok(RangeNegative);
+        };
+        if let Some(filter) = self.table_store.read_filter(sst).await? {
+            return if filter.might_contain(key_hash) {
+                Ok(FilterPositive)
+            } else {
+                Ok(FilterNegative)
             }
-            return Ok(true);
         }
-        Ok(false)
+        Ok(RangePositive)
     }
 
     pub(crate) fn wal_enabled(&self) -> bool {
@@ -549,6 +568,22 @@ impl DbInner {
             return Err(error.clone());
         }
         Ok(())
+    }
+}
+
+enum SstFilterResult {
+    RangeNegative,
+    RangePositive,
+    FilterPositive,
+    FilterNegative,
+}
+
+impl SstFilterResult {
+    fn might_contain_key(&self) -> bool {
+        match self {
+            RangeNegative | FilterNegative => false,
+            RangePositive | FilterPositive => true
+        }
     }
 }
 
