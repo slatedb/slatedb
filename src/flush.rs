@@ -89,7 +89,7 @@ impl DbInner {
         self: &Arc<Self>,
         mut rx: UnboundedReceiver<WalFlushMsg>,
         tokio_handle: &Handle,
-    ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
+    ) -> tokio::task::JoinHandle<Result<(), SlateDBError>> {
         let this = Arc::clone(self);
         async fn core_flush_loop(
             this: &Arc<DbInner>,
@@ -146,7 +146,7 @@ impl DbInner {
         };
 
         let this = Arc::clone(self);
-        Some(spawn_bg_task(
+        spawn_bg_task(
             tokio_handle,
             move |err| {
                 warn!("flush task exited with {:?}", err);
@@ -161,7 +161,7 @@ impl DbInner {
                 }
             },
             fut,
-        ))
+        )
     }
 
     async fn close_and_drain_receiver(

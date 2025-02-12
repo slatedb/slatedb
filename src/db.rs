@@ -435,7 +435,7 @@ impl DbInner {
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
-        async fn load_sst_iters(
+        async fn load_sst_iter(
             db_inner: &DbInner,
             sst_id: u64,
         ) -> Result<(SstIterator<'_>, u64), SlateDBError> {
@@ -480,7 +480,7 @@ impl DbInner {
         // Load the first N ssts and instantiate their iterators
         let mut sst_iterators = VecDeque::new();
         for sst_id in wal_sst_list {
-            sst_iterators.push_back(load_sst_iters(self, sst_id).await?);
+            sst_iterators.push_back(load_sst_iter(self, sst_id).await?);
         }
 
         // load the last seq number from manifest, and use it as the starting seq number.
@@ -514,7 +514,7 @@ impl DbInner {
 
             // feed the remaining SstIterators into the vecdeque
             if let Some(sst_id) = remaining_sst_iter.next() {
-                sst_iterators.push_back(load_sst_iters(self, *sst_id).await?);
+                sst_iterators.push_back(load_sst_iter(self, *sst_id).await?);
             }
         }
 
@@ -744,7 +744,7 @@ impl Db {
         inner.replay_wal().await?;
         let tokio_handle = Handle::current();
         let flush_task = if inner.wal_enabled() {
-            inner.spawn_flush_task(wal_flush_rx, &tokio_handle)
+            Some(inner.spawn_flush_task(wal_flush_rx, &tokio_handle))
         } else {
             None
         };

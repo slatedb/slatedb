@@ -3,15 +3,24 @@ use std::time::Duration;
 use bytes::Bytes;
 use object_store::ObjectStore;
 use object_store::path::Path;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::config::ReadOptions;
+use crate::Checkpoint;
+use crate::config::{CheckpointOptions, ReadOptions};
+use crate::db_cache::DbCache;
 use crate::error::SlateDBError;
+use crate::manifest_store::{ManifestStore, StoredManifest};
+use crate::sst::SsTableFormat;
+use crate::tablestore::TableStore;
 
 /// Read-only
 struct DbReader {
-
+    pub(crate) manifest: StoredManifest,
+    pub(crate) table_store: Arc<TableStore>,
+    pub(crate) options: DbReaderOptions,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
 struct DbReaderOptions {
     /// How frequently to poll for new manifest files. Refreshing the manifest file allows readers
     /// to detect newly compacted data.
@@ -26,7 +35,10 @@ struct DbReaderOptions {
 
     /// The max size of a single in-memory table used to buffer WAL entries
     /// Defaults to 64MB
-    pub max_memtable_bytes: u64
+    pub max_memtable_bytes: u64,
+
+    #[serde(skip)]
+    pub block_cache: Option<Arc<dyn DbCache>>,
 }
 
 pub trait Reader {
@@ -110,7 +122,6 @@ pub trait Reader {
     ) -> Result<Option<Bytes>, SlateDBError>;
 }
 
-
 impl DbReader {
     /// Creates a database reader that can read the contents of a database (but cannot write any
     /// data). The caller can provide an optional checkpoint. If the checkpoint is provided, the
@@ -118,26 +129,69 @@ impl DbReader {
     /// checkpoint. Otherwise, the reader creates a new checkpoint pointing to the current manifest
     /// and refreshes it periodically as specified in the options. It also removes the previous
     /// checkpoint once any ongoing reads have completed.
-    pub async fn open<P: Into<Path>>(
-        _path: P,
-        _object_store: Arc<dyn ObjectStore>,
-        _checkpoint: Option<Uuid>,
-        _options: DbReaderOptions,
+    pub async fn open(
+        path: Path,
+        object_store: Arc<dyn ObjectStore>,
+        checkpoint: Option<Uuid>,
+        options: DbReaderOptions,
     ) -> Result<Self, SlateDBError> {
-        unimplemented!()
+        let table_store = Arc::new(TableStore::new(
+            Arc::clone(&object_store),
+            SsTableFormat::default(),
+            path.clone(),
+            options.block_cache.clone(),
+        ));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &path,
+            Arc::clone(&object_store),
+        ));
+        let mut manifest = StoredManifest::load(
+            Arc::clone(&manifest_store),
+        ).await?;
+
+        let checkpoint = if let Some(checkpoint_id) = checkpoint  {
+            manifest.db_state().find_checkpoint(&checkpoint_id)
+                .ok_or(SlateDBError::CheckpointMissing(checkpoint_id))?
+                .clone()
+        } else {
+            // Create a new checkpoint from the latest state
+            let options = CheckpointOptions {
+                lifetime: options.checkpoint_lifetime.clone(),
+                ..CheckpointOptions::default()
+            };
+            manifest.write_checkpoint(None, &options).await?
+        };
+
+        Ok(Self {
+            manifest,
+            table_store,
+            options,
+        })
+    }
+
+    fn establish_checkpoint(checkpoint: &Checkpoint) {
+        // Read checkpoint WALs into a memtable
+    }
+
+    fn spawn_manifest_poller(&mut self) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
+        let fut = async move {
+            ()
+        };
+        None
     }
 
     pub async fn close(&self) -> Result<(), SlateDBError> {
         unimplemented!()
     }
+
 }
 
 impl Reader for DbReader {
     async fn get(&self, _key: &[u8]) -> Result<Option<Bytes>, SlateDBError> {
-        todo!()
+        unimplemented!()
     }
 
     async fn get_with_options(&self, key: &[u8], options: &ReadOptions) -> Result<Option<Bytes>, SlateDBError> {
-        todo!()
+        unimplemented!()
     }
 }
