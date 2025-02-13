@@ -42,9 +42,8 @@ use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db_iter::DbIterator;
-use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
+use crate::db_state::{CoreDbState, DbState, SsTableId};
 use crate::error::SlateDBError;
-use crate::filter;
 use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
@@ -52,12 +51,13 @@ use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::{VecDequeKeyValueIterator, WritableKVTable};
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::metrics::DbStats;
+use crate::reader::Reader;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
-use crate::types::ValueDeletable;
 use crate::utils::MonotonicClock;
+use crate::{filter, wal_replay};
 use tracing::{info, warn};
 
 pub(crate) struct DbInner {
@@ -109,22 +109,12 @@ impl DbInner {
         let key = key.as_ref();
         let snapshot = self.state.read().snapshot();
 
-        // Temporary function to convert ValueDeletable to Option<Bytes> until
-        // we add proper support for merges.
-        let unwrap_result = |v| match v {
-            ValueDeletable::Value(v) => Ok(Some(v)),
-            ValueDeletable::Merge(_) => {
-                unimplemented!("MergeOperator is not yet fully implemented")
-            }
-            ValueDeletable::Tombstone => Ok(None),
-        };
-
         if matches!(options.read_level, Uncommitted) {
             let maybe_val = std::iter::once(snapshot.wal)
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
             if let Some(val) = maybe_val {
-                return unwrap_result(val.value);
+                return Ok(val.value.bytes());
             }
         }
 
@@ -132,7 +122,7 @@ impl DbInner {
             .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
         if let Some(val) = maybe_val {
-            return unwrap_result(val.value);
+            return Ok(val.value.bytes());
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -147,27 +137,35 @@ impl DbInner {
         };
 
         for sst in &snapshot.state.core.l0 {
-            if self.sst_might_include_key(sst, key, key_hash).await? {
+            if self
+                .table_store
+                .sst_might_include_key(sst, key, key_hash)
+                .await?
+            {
                 let mut iter =
                     SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
                         .await?;
 
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return unwrap_result(entry.value);
+                        return Ok(entry.value.bytes());
                     }
                 }
             }
         }
 
         for sr in &snapshot.state.core.compacted {
-            if self.sr_might_include_key(sr, key, key_hash).await? {
+            if self
+                .table_store
+                .sr_might_include_key(sr, key, key_hash)
+                .await?
+            {
                 let mut iter =
                     SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
                         .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return unwrap_result(entry.value);
+                        return Ok(entry.value.bytes());
                     }
                 }
             }
@@ -262,52 +260,6 @@ impl DbInner {
                 }
             }
         }
-    }
-
-    /// Check if the given key might be in the range of the SST. Checks if the key is
-    /// in the range of the sst and if the filter might contain the key.
-    /// ## Arguments
-    /// - `sst`: the sst to check
-    /// - `key`: the key to check
-    /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
-    /// ## Returns
-    /// - `true` if the key is in the range of the sst.
-    async fn sst_might_include_key(
-        &self,
-        sst: &SsTableHandle,
-        key: &[u8],
-        key_hash: u64,
-    ) -> Result<bool, SlateDBError> {
-        if !sst.range_covers_key(key) {
-            return Ok(false);
-        }
-        if let Some(filter) = self.table_store.read_filter(sst).await? {
-            return Ok(filter.might_contain(key_hash));
-        }
-        Ok(true)
-    }
-
-    /// Check if the given key might be in the range of the sorted run (SR). Checks if the key
-    /// is in the range of the SSTs in the run and if the SST's filter might contain the key.
-    /// ## Arguments
-    /// - `sr`: the sorted run to check
-    /// - `key`: the key to check
-    /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
-    /// ## Returns
-    /// - `true` if the key is in the range of the sst.
-    async fn sr_might_include_key(
-        &self,
-        sr: &SortedRun,
-        key: &[u8],
-        key_hash: u64,
-    ) -> Result<bool, SlateDBError> {
-        if let Some(sst) = sr.find_sst_with_range_covering_key(key) {
-            if let Some(filter) = self.table_store.read_filter(sst).await? {
-                return Ok(filter.might_contain(key_hash));
-            }
-            return Ok(true);
-        }
-        Ok(false)
     }
 
     pub(crate) fn wal_enabled(&self) -> bool {
@@ -435,36 +387,12 @@ impl DbInner {
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
-        async fn load_sst_iter(
-            db_inner: &DbInner,
-            sst_id: u64,
-        ) -> Result<(SstIterator<'_>, u64), SlateDBError> {
-            let sst = db_inner
-                .table_store
-                .open_sst(&SsTableId::Wal(sst_id))
-                .await?;
-            let id = match &sst.id {
-                SsTableId::Wal(id) => *id,
-                SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
-            };
-            let sst_iter_options = SstIteratorOptions {
-                max_fetch_tasks: 1,
-                blocks_to_fetch: 256,
-                cache_blocks: true,
-                eager_spawn: true,
-            };
-            let iter =
-                SstIterator::new_owned(.., sst, db_inner.table_store.clone(), sst_iter_options)
-                    .await?;
-            Ok((iter, id))
-        }
-
         let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
         let mut wal_sst_list = self
             .table_store
             .list_wal_ssts((wal_id_last_compacted + 1)..)
             .await?
-            .into_iter()
+            .iter()
             .map(|wal_sst| wal_sst.id.unwrap_wal_id())
             .collect::<Vec<_>>();
         let mut last_sst_id = wal_id_last_compacted;
@@ -480,7 +408,8 @@ impl DbInner {
         // Load the first N ssts and instantiate their iterators
         let mut sst_iterators = VecDeque::new();
         for sst_id in wal_sst_list {
-            sst_iterators.push_back(load_sst_iter(self, sst_id).await?);
+            let sst_iter = wal_replay::load_wal_iter(Arc::clone(&self.table_store), sst_id).await?;
+            sst_iterators.push_back((sst_iter, sst_id));
         }
 
         // load the last seq number from manifest, and use it as the starting seq number.
@@ -514,7 +443,9 @@ impl DbInner {
 
             // feed the remaining SstIterators into the vecdeque
             if let Some(sst_id) = remaining_sst_iter.next() {
-                sst_iterators.push_back(load_sst_iter(self, *sst_id).await?);
+                let sst_iter =
+                    wal_replay::load_wal_iter(Arc::clone(&self.table_store), *sst_id).await?;
+                sst_iterators.push_back((sst_iter, *sst_id));
             }
         }
 
@@ -899,184 +830,6 @@ impl Db {
         Ok(())
     }
 
-    /// Get a value from the database with default read options.
-    ///
-    /// The `Bytes` object returned contains a slice of an entire
-    /// 4 KiB block. The block will be held in memory as long as the
-    /// caller holds a reference to the `Bytes` object. Consider
-    /// copying the data if you need to hold it for a long time.
-    ///
-    /// ## Arguments
-    /// - `key`: the key to get
-    ///
-    /// ## Returns
-    /// - `Result<Option<Bytes>, SlateDBError>`:
-    ///     - `Some(Bytes)`: the value if it exists
-    ///     - `None`: if the value does not exist
-    ///
-    /// ## Errors
-    /// - `SlateDBError`: if there was an error getting the value
-    ///
-    /// ## Examples
-    ///
-    /// ```
-    /// use slatedb::{Db, SlateDBError};
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
-    /// use std::sync::Arc;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
-    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.put(b"key", b"value").await?;
-    ///     assert_eq!(db.get(b"key").await?, Some("value".into()));
-    ///     Ok(())
-    /// }
-    /// ```
-    pub async fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Bytes>, SlateDBError> {
-        self.inner
-            .get_with_options(key, &ReadOptions::default())
-            .await
-    }
-
-    /// Get a value from the database with custom read options.
-    ///
-    /// The `Bytes` object returned contains a slice of an entire
-    /// 4 KiB block. The block will be held in memory as long as the
-    /// caller holds a reference to the `Bytes` object. Consider
-    /// copying the data if you need to hold it for a long time.
-    ///
-    /// ## Arguments
-    /// - `key`: the key to get
-    /// - `options`: the read options to use
-    ///
-    /// ## Returns
-    /// - `Result<Option<Bytes>, SlateDBError>`:
-    ///     - `Some(Bytes)`: the value if it exists
-    ///     - `None`: if the value does not exist
-    ///
-    /// ## Errors
-    /// - `SlateDBError`: if there was an error getting the value
-    ///
-    /// ## Examples
-    ///
-    /// ```
-    /// use slatedb::{Db, config::ReadOptions, SlateDBError};
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
-    /// use std::sync::Arc;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
-    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.put(b"key", b"value").await?;
-    ///     assert_eq!(db.get_with_options(b"key", &ReadOptions::default()).await?, Some("value".into()));
-    ///     Ok(())
-    /// }
-    /// ```
-    pub async fn get_with_options<K: AsRef<[u8]>>(
-        &self,
-        key: K,
-        options: &ReadOptions,
-    ) -> Result<Option<Bytes>, SlateDBError> {
-        self.inner.get_with_options(key, options).await
-    }
-
-    /// Scan a range of keys using the default scan options.
-    ///
-    /// returns a `DbIterator`
-    ///
-    /// ## Errors
-    /// - `SlateDBError`: if there was an error scanning the range of keys
-    ///
-    /// ## Examples
-    ///
-    /// ```
-    /// use slatedb::{Db, SlateDBError};
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
-    /// use std::sync::Arc;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
-    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.put(b"a", b"a_value").await?;
-    ///     db.put(b"b", b"b_value").await?;
-    ///
-    ///     let mut iter = db.scan("a".."b").await?;
-    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
-    ///     assert_eq!(None, iter.next().await?);
-    ///     Ok(())
-    /// }
-    /// ```
-    pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, SlateDBError>
-    where
-        K: AsRef<[u8]>,
-        T: RangeBounds<K>,
-    {
-        let start = range
-            .start_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let end = range
-            .end_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let range = (start, end);
-        self.inner
-            .scan_with_options(BytesRange::from(range), &ScanOptions::default())
-            .await
-    }
-
-    /// Scan a range of keys with the provided options.
-    ///
-    /// returns a `DbIterator`
-    ///
-    /// ## Errors
-    /// - `SlateDBError`: if there was an error scanning the range of keys
-    ///
-    /// ## Examples
-    ///
-    /// ```
-    /// use slatedb::{Db, config::ScanOptions, config::ReadLevel, SlateDBError};
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
-    /// use std::sync::Arc;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
-    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.put(b"a", b"a_value").await?;
-    ///     db.put(b"b", b"b_value").await?;
-    ///
-    ///     let mut iter = db.scan_with_options("a".."b", &ScanOptions {
-    ///         read_level: ReadLevel::Uncommitted,
-    ///         ..ScanOptions::default()
-    ///     }).await?;
-    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
-    ///     assert_eq!(None, iter.next().await?);
-    ///     Ok(())
-    /// }
-    /// ```
-    pub async fn scan_with_options<K, T>(
-        &self,
-        range: T,
-        options: &ScanOptions,
-    ) -> Result<DbIterator, SlateDBError>
-    where
-        K: AsRef<[u8]>,
-        T: RangeBounds<K>,
-    {
-        let start = range
-            .start_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let end = range
-            .end_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let range = (start, end);
-        self.inner
-            .scan_with_options(BytesRange::from(range), options)
-            .await
-    }
-
     /// Write a value into the database with default `WriteOptions`.
     ///
     /// ## Arguments
@@ -1341,6 +1094,37 @@ impl Db {
 
     pub fn metrics(&self) -> Arc<DbStats> {
         self.inner.db_stats.clone()
+    }
+}
+
+impl Reader for Db {
+    async fn get_with_options<K: AsRef<[u8]>>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<Bytes>, SlateDBError> {
+        self.inner.get_with_options(key, options).await
+    }
+
+    async fn scan_with_options<K, T>(
+        &self,
+        range: T,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, SlateDBError>
+    where
+        K: AsRef<[u8]>,
+        T: RangeBounds<K>,
+    {
+        let start = range
+            .start_bound()
+            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        let end = range
+            .end_bound()
+            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        let range = (start, end);
+        self.inner
+            .scan_with_options(BytesRange::from(range), options)
+            .await
     }
 }
 

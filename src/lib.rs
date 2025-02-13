@@ -27,8 +27,10 @@ pub use batch::WriteBatch;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};
 pub use db::Db;
 pub use db_iter::DbIterator;
+pub use db_reader::{DbReader, DbReaderOptions};
 pub use error::{DbOptionsError, SlateDBError};
 pub use merge_operator::{MergeOperator, MergeOperatorError};
+pub use reader::Reader;
 pub use types::KeyValue;
 
 pub mod admin;
@@ -73,6 +75,7 @@ mod merge_operator;
 mod paths;
 #[cfg(test)]
 mod proptest_util;
+mod reader;
 mod row_codec;
 mod sorted_run_iterator;
 mod sst;
@@ -83,3 +86,4 @@ mod test_utils;
 mod transactional_object_store;
 mod types;
 mod utils;
+mod wal_replay;

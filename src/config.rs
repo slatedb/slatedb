@@ -293,9 +293,16 @@ pub trait Clock {
     /// it represents a sequence that can attribute a logical ordering
     /// to actions on the database.
     fn now(&self) -> i64;
+
+    fn now_systime(&self) -> SystemTime {
+        chrono::DateTime::from_timestamp_millis(self.now())
+            .map(|dt| SystemTime::from(dt))
+            .expect("Failed to convert Clock time to SystemTime")
+    }
 }
 
 /// contains the default implementation of the Clock, and will return the system time
+#[derive(Default)]
 pub struct SystemClock {
     last_tick: AtomicI64,
 }
@@ -312,7 +319,7 @@ impl Clock for SystemClock {
     }
 }
 
-fn default_clock() -> Arc<dyn Clock + Send + Sync> {
+pub(crate) fn default_clock() -> Arc<dyn Clock + Send + Sync> {
     Arc::new(SystemClock {
         last_tick: AtomicI64::new(i64::MIN),
     })

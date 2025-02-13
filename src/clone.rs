@@ -316,6 +316,7 @@ mod tests {
     use crate::manifest::{Manifest, ParentDb};
     use crate::manifest_store::{ManifestStore, StoredManifest};
     use crate::proptest_util::{rng, sample};
+    use crate::reader::Reader;
     use crate::test_utils;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;

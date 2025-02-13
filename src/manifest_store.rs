@@ -1,5 +1,5 @@
 use crate::checkpoint::Checkpoint;
-use crate::config::CheckpointOptions;
+use crate::config::{CheckpointOptions, Clock, SystemClock};
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{
@@ -19,7 +19,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::Duration;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -202,7 +202,9 @@ impl StoredManifest {
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let expire_time = options.lifetime.map(|l| SystemTime::now() + l);
+        let expire_time = options
+            .lifetime
+            .map(|l| self.manifest_store.clock.now_systime() + l);
         let db_state = self.db_state();
         let manifest_id = match options.source {
             Some(source_checkpoint_id) => {
@@ -223,7 +225,7 @@ impl StoredManifest {
             id: checkpoint_id,
             manifest_id,
             expire_time,
-            create_time: SystemTime::now(),
+            create_time: self.manifest_store.clock.now_systime(),
         })
     }
 
@@ -237,6 +239,85 @@ impl StoredManifest {
             let checkpoint = stored_manifest.new_checkpoint(checkpoint_id, options)?;
             let mut updated_db_state = stored_manifest.db_state().clone();
             updated_db_state.checkpoints.push(checkpoint);
+            Ok(Some(updated_db_state))
+        })
+        .await?;
+        let checkpoint = self
+            .db_state()
+            .find_checkpoint(&checkpoint_id)
+            .expect("update applied but checkpoint not found")
+            .clone();
+        Ok(checkpoint)
+    }
+
+    pub(crate) async fn delete_checkpoint(
+        &mut self,
+        checkpoint_id: Uuid,
+    ) -> Result<(), SlateDBError> {
+        self.maybe_apply_db_state_update(|stored_manifest| {
+            let mut updated_db_state = stored_manifest.db_state().clone();
+            if updated_db_state.find_checkpoint(&checkpoint_id).is_none() {
+                Ok(None)
+            } else {
+                updated_db_state.checkpoints = updated_db_state
+                    .checkpoints
+                    .into_iter()
+                    .filter(|cp| cp.id != checkpoint_id)
+                    .collect();
+                Ok(Some(updated_db_state))
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Replace an existing checkpoint with a new checkpoint. If the old checkpoint
+    /// is no longer present, then the new checkpoint will still be added.
+    /// This is useful when establishing a new checkpoint (e.g. in a reader) in
+    /// order to avoid two manifest updates.
+    pub(crate) async fn replace_checkpoint(
+        &mut self,
+        old_checkpoint_id: Uuid,
+        new_checkpoint_options: &CheckpointOptions,
+    ) -> Result<Checkpoint, SlateDBError> {
+        let new_checkpoint_id = Uuid::new_v4();
+        self.maybe_apply_db_state_update(|stored_manifest| {
+            let new_checkpoint =
+                stored_manifest.new_checkpoint(new_checkpoint_id, new_checkpoint_options)?;
+            let mut updated_db_state = stored_manifest.db_state().clone();
+            updated_db_state.checkpoints = updated_db_state
+                .checkpoints
+                .into_iter()
+                .filter(|cp| cp.id != old_checkpoint_id)
+                .collect();
+            updated_db_state.checkpoints.push(new_checkpoint);
+            Ok(Some(updated_db_state))
+        })
+        .await?;
+        let new_checkpoint = self
+            .db_state()
+            .find_checkpoint(&new_checkpoint_id)
+            .expect("update applied but checkpoint not found")
+            .clone();
+        Ok(new_checkpoint)
+    }
+
+    pub(crate) async fn refresh_checkpoint(
+        &mut self,
+        checkpoint_id: Uuid,
+        new_lifetime: Duration,
+    ) -> Result<Checkpoint, SlateDBError> {
+        let clock = self.manifest_store.clock.clone();
+        self.maybe_apply_db_state_update(|stored_manifest| {
+            let mut updated_db_state = stored_manifest.db_state().clone();
+            let checkpoint = updated_db_state
+                .checkpoints
+                .iter_mut()
+                .find(|c| c.id == checkpoint_id)
+                .ok_or(CheckpointMissing(checkpoint_id))?;
+            let expire_time = clock.now_systime() + new_lifetime;
+            println!("Setting expire time: {expire_time:?}");
+            checkpoint.expire_time = Some(clock.now_systime() + new_lifetime);
             Ok(Some(updated_db_state))
         })
         .await?;
@@ -343,10 +424,19 @@ pub(crate) struct ManifestStore {
     object_store: Box<dyn TransactionalObjectStore>,
     codec: Box<dyn ManifestCodec>,
     manifest_suffix: &'static str,
+    clock: Arc<dyn Clock + Send + Sync>,
 }
 
 impl ManifestStore {
     pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
+        Self::new_with_clock(root_path, object_store, Arc::new(SystemClock::default()))
+    }
+
+    pub(crate) fn new_with_clock(
+        root_path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        clock: Arc<dyn Clock + Send + Sync>,
+    ) -> Self {
         Self {
             object_store: Box::new(DelegatingTransactionalObjectStore::new(
                 root_path.child("manifest"),
@@ -354,6 +444,7 @@ impl ManifestStore {
             )),
             codec: Box::new(FlatBufferManifestCodec {}),
             manifest_suffix: "manifest",
+            clock,
         }
     }
 
@@ -980,6 +1071,132 @@ mod tests {
                 .unwrap_err(),
             InvalidDBState
         ));
+    }
+
+    #[tokio::test]
+    async fn should_refresh_checkpoint() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let options = CheckpointOptions {
+            lifetime: Some(Duration::from_secs(100)),
+            ..CheckpointOptions::default()
+        };
+
+        let checkpoint = sm.write_checkpoint(None, &options).await.unwrap();
+        let expire_time = checkpoint.expire_time.unwrap();
+
+        let refreshed_checkpoint = sm
+            .refresh_checkpoint(checkpoint.id, Duration::from_secs(500))
+            .await
+            .unwrap();
+        let refreshed_expire_time = refreshed_checkpoint.expire_time.unwrap();
+        assert!(refreshed_expire_time > expire_time);
+
+        assert_eq!(
+            Some(&refreshed_checkpoint),
+            sm.manifest.core.find_checkpoint(&checkpoint.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn should_fail_refresh_if_checkpoint_missing() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let checkpoint_id = Uuid::new_v4();
+        let result = sm
+            .refresh_checkpoint(checkpoint_id, Duration::from_secs(100))
+            .await;
+
+        if let Err(SlateDBError::CheckpointMissing(missing_id)) = result {
+            assert_eq!(checkpoint_id, missing_id);
+        } else {
+            panic!("Unexpected result {result:?}")
+        }
+    }
+
+    #[tokio::test]
+    async fn should_replace_checkpoint() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let checkpoint = sm
+            .write_checkpoint(None, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        let replaced_checkpoint = sm
+            .replace_checkpoint(checkpoint.id, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        assert_ne!(checkpoint.id, replaced_checkpoint.id);
+        assert_eq!(None, sm.manifest.core.find_checkpoint(&checkpoint.id));
+        assert_eq!(
+            Some(&replaced_checkpoint),
+            sm.manifest.core.find_checkpoint(&replaced_checkpoint.id),
+        );
+    }
+
+    #[tokio::test]
+    async fn should_ignore_missing_checkpoint_if_replacing() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let missing_checkpoint_id = Uuid::new_v4();
+        let replaced_checkpoint = sm
+            .replace_checkpoint(missing_checkpoint_id, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            Some(&replaced_checkpoint),
+            sm.manifest.core.find_checkpoint(&replaced_checkpoint.id),
+        );
+    }
+
+    #[tokio::test]
+    async fn should_delete_checkpoint() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let checkpoint = sm
+            .write_checkpoint(None, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        sm.delete_checkpoint(checkpoint.id).await.unwrap();
+        assert_eq!(None, sm.manifest.core.find_checkpoint(&checkpoint.id));
+    }
+
+    #[tokio::test]
+    async fn should_ignore_missing_checkpoint_if_deleting() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let checkpoint_id = Uuid::new_v4();
+        let manifest_id = sm.id;
+        sm.delete_checkpoint(checkpoint_id).await.unwrap();
+        sm.refresh().await.unwrap();
+        assert_eq!(manifest_id, sm.id);
     }
 
     async fn create_uninitialized_clone(parent_path: &str) -> StoredManifest {

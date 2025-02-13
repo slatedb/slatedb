@@ -68,6 +68,7 @@ impl MemtableFlusher {
         options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
         loop {
+            eprintln!("Creating checkpoint");
             self.load_manifest().await?;
             let result = self.write_checkpoint(options).await;
             if matches!(result, Err(SlateDBError::ManifestVersionExists)) {
@@ -106,6 +107,7 @@ impl MemtableFlusher {
             }
         } {
             let id = SsTableId::Compacted(Ulid::new());
+            eprintln!("Flushing imm_memtable {id:?}");
             let sst_handle = self
                 .db_inner
                 .flush_imm_table(&id, imm_memtable.table())
