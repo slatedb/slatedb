@@ -1084,15 +1084,8 @@ impl Db {
         K: AsRef<[u8]>,
         T: RangeBounds<K>,
     {
-        let start = range
-            .start_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let end = range
-            .end_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let range = (start, end);
         self.inner
-            .scan_with_options(BytesRange::from(range), &ScanOptions::default())
+            .scan_with_options(BytesRange::from_ref(range), &ScanOptions::default())
             .await
     }
 
@@ -1135,15 +1128,8 @@ impl Db {
         K: AsRef<[u8]>,
         T: RangeBounds<K>,
     {
-        let start = range
-            .start_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let end = range
-            .end_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let range = (start, end);
         self.inner
-            .scan_with_options(BytesRange::from(range), options)
+            .scan_with_options(BytesRange::from_ref(range), options)
             .await
     }
 

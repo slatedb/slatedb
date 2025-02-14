@@ -1,4 +1,4 @@
-use crate::bytes_range;
+use crate::bytes_range::{self, BytesRange};
 use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
@@ -40,6 +40,22 @@ impl SsTableHandle {
             return key >= first_key;
         }
         false
+    }
+
+    pub(crate) fn has_nonempty_intersection(
+        &self,
+        next_handle: Option<&SsTableHandle>,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+    ) -> bool {
+        if let Some(first_key) = self.info.first_key.as_ref() {
+            let sst_range = match next_handle.and_then(|handle| handle.info.first_key.as_ref()) {
+                Some(next_first_key) => BytesRange::from(first_key..next_first_key),
+                None => BytesRange::from(first_key..),
+            };
+            bytes_range::has_nonempty_intersection(sst_range.as_ref(), range)
+        } else {
+            false
+        }
     }
 
     pub(crate) fn intersects_range(

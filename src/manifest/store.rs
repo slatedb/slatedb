@@ -6,7 +6,7 @@ use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestManifestMissing, ManifestMissing,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
-use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
+use crate::manifest::{ExternalDb, Manifest, ManifestCodec, Projection};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
@@ -30,6 +30,7 @@ pub(crate) struct DirtyManifest {
     id: u64,
     next_id: u64,
     external_dbs: Vec<ExternalDb>,
+    projections: Vec<Projection>,
     pub(crate) core: CoreDbState,
     writer_epoch: u64,
     compactor_epoch: u64,
@@ -39,6 +40,7 @@ impl From<DirtyManifest> for Manifest {
     fn from(manifest: DirtyManifest) -> Manifest {
         Manifest {
             external_dbs: manifest.external_dbs,
+            projections: manifest.projections,
             core: manifest.core,
             writer_epoch: manifest.writer_epoch,
             compactor_epoch: manifest.compactor_epoch,
@@ -52,6 +54,7 @@ impl DirtyManifest {
             id,
             next_id,
             external_dbs: manifest.external_dbs,
+            projections: manifest.projections,
             core: manifest.core,
             writer_epoch: manifest.writer_epoch,
             compactor_epoch: manifest.compactor_epoch,
@@ -221,7 +224,10 @@ pub(crate) struct StoredManifest {
 }
 
 impl StoredManifest {
-    async fn init(store: Arc<ManifestStore>, manifest: Manifest) -> Result<Self, SlateDBError> {
+    pub(crate) async fn init(
+        store: Arc<ManifestStore>,
+        manifest: Manifest,
+    ) -> Result<Self, SlateDBError> {
         store.write_manifest(1, &manifest).await?;
         Ok(Self {
             id: 1,

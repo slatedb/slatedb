@@ -1,13 +1,35 @@
 use bytes::Bytes;
+use serde::Serialize;
+use std::cmp::{max, min, Ordering};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 
 /// Concrete struct representing a range of Bytes. Gets around much of
 /// the cumbersome work associated with the generic trait RangeBounds<Bytes>
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
 pub(crate) struct BytesRange {
     start_bound: Bound<Bytes>,
     end_bound: Bound<Bytes>,
+}
+
+impl Ord for BytesRange {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let (this_start, other_start) = (
+            ComparableBound::from(self.start_bound.clone()),
+            ComparableBound::from(other.start_bound.clone()),
+        );
+        let (this_end, other_end) = (
+            ComparableBound::from(self.end_bound.clone()),
+            ComparableBound::from(other.end_bound.clone()),
+        );
+        this_start.cmp(&other_start).then(this_end.cmp(&other_end))
+    }
+}
+
+impl PartialOrd for BytesRange {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 // Checks for the annoying case when we have ("prefix", "prefix\0").
@@ -41,6 +63,23 @@ impl BytesRange {
 
     pub(crate) fn from<T: RangeBounds<Bytes>>(range: T) -> Self {
         Self::new(range.start_bound().cloned(), range.end_bound().cloned())
+    }
+
+    pub(crate) fn from_ref<K, T>(range: T) -> Self
+    where
+        K: AsRef<[u8]>,
+        T: RangeBounds<K>,
+    {
+        let start = range
+            .start_bound()
+            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        let end = range
+            .end_bound()
+            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        Self {
+            start_bound: start,
+            end_bound: end,
+        }
     }
 
     pub(crate) fn as_ref(&self) -> (Bound<&[u8]>, Bound<&[u8]>) {
@@ -110,6 +149,110 @@ fn max_start_bound<'a>(a: Bound<&'a [u8]>, b: Bound<&'a [u8]>) -> Bound<&'a [u8]
     clamp_bound(a, b, |a, b| a > b)
 }
 
+pub(crate) fn intersect(r1: &BytesRange, r2: &BytesRange) -> Option<BytesRange> {
+    // &BytesRange::from_ref(..="f"),
+    // &BytesRange::from_ref("d".."e")
+    let max_start_bound = max(
+        ComparableBound::from(r1.start_bound()),
+        ComparableBound::from(r2.start_bound()),
+    );
+    let min_end_bound = min(
+        ComparableBound::from(r1.end_bound()),
+        ComparableBound::from(r2.end_bound()),
+    );
+    // Included(b"d") Excluded(b"e")
+    println!("{:?} {:?}", max_start_bound.inner, min_end_bound.inner);
+    if max_start_bound <= min_end_bound {
+        Some(BytesRange {
+            start_bound: max_start_bound.inner.cloned(),
+            end_bound: min_end_bound.inner.cloned(),
+        })
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Eq)]
+struct ComparableBound<T: Ord> {
+    inner: Bound<T>,
+}
+
+impl<T: Ord> From<Bound<T>> for ComparableBound<T> {
+    fn from(bound: Bound<T>) -> Self {
+        Self { inner: bound }
+    }
+}
+
+impl<T: Ord> From<ComparableBound<T>> for Bound<T> {
+    fn from(bound: ComparableBound<T>) -> Self {
+        bound.inner
+    }
+}
+
+impl<T: Ord> PartialEq for ComparableBound<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl<T: Ord> Ord for ComparableBound<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (&self.inner, &other.inner) {
+            (Bound::Included(a), Bound::Included(b)) => a.cmp(b),
+            (Bound::Excluded(a), Bound::Excluded(b)) => a.cmp(b),
+            (Bound::Included(a), Bound::Excluded(b)) => match a.cmp(b) {
+                Ordering::Equal => Ordering::Greater,
+                other => other,
+            },
+            (Bound::Excluded(a), Bound::Included(b)) => match a.cmp(b) {
+                Ordering::Equal => Ordering::Less,
+                other => other,
+            },
+            (Bound::Unbounded, Bound::Unbounded) => Ordering::Equal,
+            (Bound::Unbounded, _) => Ordering::Less,
+            (_, Bound::Unbounded) => Ordering::Greater,
+        }
+    }
+}
+
+impl<T: Ord> PartialOrd for ComparableBound<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+pub(crate) fn merge(r1: &BytesRange, r2: &BytesRange) -> Option<BytesRange> {
+    let (first_range, second_range) = if r1 < r2 { (r1, r2) } else { (r2, r1) };
+    let first_end_bound = ComparableBound::from(first_range.end_bound.clone());
+    let second_start_bound = ComparableBound::from(second_range.start_bound.clone());
+    let second_end_bound = ComparableBound::from(second_range.end_bound.clone());
+    println!(
+        "Merge: {:?} {:?}",
+        first_end_bound.inner, second_start_bound.inner
+    );
+    if first_end_bound >= second_start_bound
+        || are_contiguous(&first_end_bound, &second_start_bound)
+    {
+        Some(BytesRange {
+            start_bound: first_range.start_bound.clone(),
+            end_bound: max(first_end_bound, second_end_bound).into(),
+        })
+    } else {
+        None
+    }
+}
+
+fn are_contiguous(first: &ComparableBound<Bytes>, second: &ComparableBound<Bytes>) -> bool {
+    if first == second {
+        return true;
+    }
+    match (&first.inner, &second.inner) {
+        (Bound::Included(a), Bound::Excluded(b)) => a == b,
+        (Bound::Excluded(a), Bound::Included(b)) => a == b,
+        _ => false,
+    }
+}
+
 pub(crate) fn has_nonempty_intersection(
     r1: (Bound<&[u8]>, Bound<&[u8]>),
     r2: (Bound<&[u8]>, Bound<&[u8]>),
@@ -121,12 +264,14 @@ pub(crate) fn has_nonempty_intersection(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::bytes_range::{has_nonempty_intersection, BytesRange};
+    use crate::bytes_range::{
+        has_nonempty_intersection, intersect, merge, BytesRange, ComparableBound,
+    };
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
 
     use proptest::proptest;
-    use std::ops::Bound::Unbounded;
+    use std::ops::Bound::{self, Unbounded};
     use std::ops::RangeBounds;
 
     #[test]
@@ -189,5 +334,93 @@ pub(crate) mod tests {
                 non_empty_2.as_ref(),
             ));
         });
+    }
+
+    #[test]
+    fn test_bytes_intersection() {
+        assert_eq!(
+            intersect(
+                &BytesRange::from_ref("a".."d"),
+                &BytesRange::from_ref("d".."e")
+            ),
+            None
+        );
+        assert_eq!(
+            intersect(
+                &BytesRange::from_ref("a"..="d"),
+                &BytesRange::from_ref("d".."e")
+            ),
+            Some(BytesRange::from_ref("d"..="d"))
+        );
+        assert_eq!(
+            intersect(
+                &BytesRange::from_ref(..="f"),
+                &BytesRange::from_ref("d".."e")
+            ),
+            Some(BytesRange::from_ref("d".."e"))
+        );
+    }
+
+    #[test]
+    fn test_bytes_merge() {
+        assert_eq!(
+            merge(
+                &BytesRange::from_ref("a".."d"),
+                &BytesRange::from_ref("d".."e")
+            ),
+            Some(BytesRange::from_ref("a".."e"))
+        );
+        assert_eq!(
+            merge(
+                &BytesRange::from_ref("a".."d"),
+                &BytesRange::from_ref("e".."f")
+            ),
+            None
+        );
+        assert_eq!(
+            merge(
+                &BytesRange::from_ref("a"..="d"),
+                &BytesRange::from_ref("d".."e")
+            ),
+            Some(BytesRange::from_ref("a".."e"))
+        );
+        assert_eq!(
+            merge(
+                &BytesRange::from_ref(..="f"),
+                &BytesRange::from_ref("d".."e")
+            ),
+            Some(BytesRange::from_ref(..="f"))
+        );
+        assert_eq!(
+            merge(
+                &BytesRange::from_ref("f".."m"),
+                &BytesRange::from_ref("a".."g")
+            ),
+            Some(BytesRange::from_ref("a".."m"))
+        );
+    }
+
+    #[test]
+    fn test_comparable_bound() {
+        assert!(
+            ComparableBound::from(Bound::Included(1)) == ComparableBound::from(Bound::Included(1))
+        );
+        assert!(
+            ComparableBound::from(Bound::Excluded(1)) == ComparableBound::from(Bound::Excluded(1))
+        );
+        assert!(
+            ComparableBound::from(Bound::Included(1)) > ComparableBound::from(Bound::Excluded(1))
+        );
+        assert!(
+            ComparableBound::from(Bound::Excluded(1)) < ComparableBound::from(Bound::Included(1))
+        );
+        assert!(
+            ComparableBound::from(Bound::Excluded("d"))
+                < ComparableBound::from(Bound::Included("e"))
+        );
+        assert!(
+            ComparableBound::from(Bound::Included("d"))
+                > ComparableBound::from(Bound::Excluded("d"))
+        );
     }
 }

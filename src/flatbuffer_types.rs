@@ -189,6 +189,7 @@ impl FlatBufferManifestCodec {
 
         Manifest {
             external_dbs: external_dbs.unwrap_or_default(),
+            projections: vec![],
             core,
             writer_epoch: manifest.writer_epoch(),
             compactor_epoch: manifest.compactor_epoch(),
