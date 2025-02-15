@@ -148,13 +148,17 @@ impl DbInner {
         let this = Arc::clone(self);
         Some(spawn_bg_task(
             tokio_handle,
-            move |err| {
-                match err {
-                    SlateDBError::BackgroundTaskShutdown => {
+            move |result| {
+                let err = match result {
+                    Ok(()) => {
                         info!("write task shutdown complete");
+                        SlateDBError::BackgroundTaskShutdown
                     }
-                    _ => warn!("write task exited with {:?}", err),
-                }
+                    Err(err) => {
+                        warn!("write task exited with {:?}", err);
+                        err.clone()
+                    }
+                };
                 // notify any waiters about the failure
                 let mut state = this.state.write();
                 state.record_fatal_error(err.clone());

@@ -1,6 +1,6 @@
 use crate::config::Clock;
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::{BackgroundTaskPanic, BackgroundTaskShutdown};
+use crate::error::SlateDBError::BackgroundTaskPanic;
 use std::cmp;
 use std::future::Future;
 use std::sync::atomic::AtomicI64;
@@ -58,9 +58,8 @@ impl<T: Clone> WatchableOnceCellReader<T> {
 
 /// Spawn a monitored background tokio task. The task must return a Result<T, SlateDBError>.
 /// The task is spawned by a monitor task. When the task exits, the monitor task
-/// calls a provided cleanup fn with the returned error, or Err(BackgroundTaskShutdown)
-/// if the task exited with Ok. If the spawned task panics, the cleanup fn is called with
-/// Err(BackgroundTaskFailed).
+/// calls a provided cleanup fn with a reference to the returned result. If the spawned task
+/// panics, the cleanup fn is called with Err(BackgroundTaskFailed).
 pub(crate) fn spawn_bg_task<F, T, C>(
     handle: &tokio::runtime::Handle,
     cleanup_fn: C,
@@ -69,30 +68,26 @@ pub(crate) fn spawn_bg_task<F, T, C>(
 where
     F: Future<Output = Result<T, SlateDBError>> + Send + 'static,
     T: Send + 'static,
-    C: FnOnce(&SlateDBError) + Send + 'static,
+    C: FnOnce(&Result<T, SlateDBError>) + Send + 'static,
 {
     let inner_handle = handle.clone();
     handle.spawn(async move {
         let jh = inner_handle.spawn(future);
         match jh.await {
-            Ok(Err(err)) => {
-                // task exited with an error
-                cleanup_fn(&err);
-                Err(err)
-            }
             Ok(result) => {
-                cleanup_fn(&BackgroundTaskShutdown);
+                // task exited with an error
+                cleanup_fn(&result);
                 result
             }
             Err(join_err) => {
                 // task panic'd or was cancelled
-                let err = BackgroundTaskPanic(Arc::new(Mutex::new(
+                let err = Err(BackgroundTaskPanic(Arc::new(Mutex::new(
                     join_err
                         .try_into_panic()
                         .unwrap_or_else(|_| Box::new("background task was aborted")),
-                )));
+                ))));
                 cleanup_fn(&err);
-                Err(err)
+                err
             }
         }
     })
@@ -100,9 +95,8 @@ where
 
 /// Spawn a monitored background os thread. The thread must return a Result<T, SlateDBError>.
 /// The thread is spawned by a monitor thread. When the thread exits, the monitor thread
-/// calls a provided cleanup fn with the returned error, or Err(BackgroundTaskShutdown)
-/// if the thread exited with Ok. If the spawned thread panics, the cleanup fn is called with
-/// Err(BackgroundTaskFailed).
+/// calls a provided cleanup fn with the returned result. If the spawned thread panics, the
+/// cleanup fn is called with Err(BackgroundTaskFailed).
 pub(crate) fn spawn_bg_thread<F, T, C>(
     name: &str,
     cleanup_fn: C,
@@ -111,7 +105,7 @@ pub(crate) fn spawn_bg_thread<F, T, C>(
 where
     F: FnOnce() -> Result<T, SlateDBError> + Send + 'static,
     T: Send + 'static,
-    C: FnOnce(&SlateDBError) + Send + 'static,
+    C: FnOnce(&Result<T, SlateDBError>) + Send + 'static,
 {
     let monitored_name = String::from(name);
     let monitor_name = format!("{}-monitor", name);
@@ -126,22 +120,25 @@ where
             match result {
                 Err(err) => {
                     // the thread panic'd
-                    let err = BackgroundTaskPanic(Arc::new(Mutex::new(err)));
+                    let err = Err(BackgroundTaskPanic(Arc::new(Mutex::new(err))));
                     cleanup_fn(&err);
-                    Err(err)
+                    err
                 }
-                Ok(Err(err)) => {
+                Ok(result) => {
                     // thread exited with an error
-                    cleanup_fn(&err);
-                    Err(err)
-                }
-                Ok(r) => {
-                    cleanup_fn(&BackgroundTaskShutdown);
-                    r
+                    cleanup_fn(&result);
+                    result
                 }
             }
         })
         .expect("failed to create monitor thread")
+}
+
+pub(crate) fn bg_task_result_into_err(result: &Result<(), SlateDBError>) -> SlateDBError {
+    match result {
+        Ok(_) => SlateDBError::BackgroundTaskShutdown,
+        Err(err) => err.clone(),
+    }
 }
 
 /// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
@@ -219,31 +216,31 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    struct ErrorCaptor {
-        error: Mutex<Option<SlateDBError>>,
+    struct ResultCaptor<T: Clone> {
+        error: Mutex<Option<Result<T, SlateDBError>>>,
     }
 
-    impl ErrorCaptor {
+    impl<T: Clone> ResultCaptor<T> {
         fn new() -> Self {
             Self {
                 error: Mutex::new(None),
             }
         }
 
-        fn capture(&self, error: &SlateDBError) {
+        fn capture(&self, result: &Result<T, SlateDBError>) {
             let mut guard = self.error.lock();
-            let prev = guard.replace(error.clone());
+            let prev = guard.replace(result.clone());
             assert!(prev.is_none());
         }
 
-        fn captured(&self) -> Option<SlateDBError> {
+        fn captured(&self) -> Option<Result<T, SlateDBError>> {
             self.error.lock().clone()
         }
     }
 
     #[tokio::test]
     async fn test_should_cleanup_when_task_exits_with_error() {
-        let captor = Arc::new(ErrorCaptor::new());
+        let captor = Arc::new(ResultCaptor::new());
         let handle = tokio::runtime::Handle::current();
         let captor2 = captor.clone();
 
@@ -253,7 +250,7 @@ mod tests {
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
         assert!(matches!(result, Err(SlateDBError::Fenced)));
-        assert!(matches!(captor.captured(), Some(SlateDBError::Fenced)));
+        assert!(matches!(captor.captured(), Some(Err(SlateDBError::Fenced))));
     }
 
     #[tokio::test]
@@ -261,7 +258,7 @@ mod tests {
         let monitored = async {
             panic!("oops");
         };
-        let captor = Arc::new(ErrorCaptor::new());
+        let captor = Arc::new(ResultCaptor::new());
         let handle = tokio::runtime::Handle::current();
         let captor2 = captor.clone();
 
@@ -271,13 +268,13 @@ mod tests {
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
         assert!(matches!(
             captor.captured(),
-            Some(SlateDBError::BackgroundTaskPanic(_))
+            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
         ));
     }
 
     #[tokio::test]
     async fn test_should_cleanup_when_task_exits() {
-        let captor = Arc::new(ErrorCaptor::new());
+        let captor = Arc::new(ResultCaptor::new());
         let handle = tokio::runtime::Handle::current();
         let captor2 = captor.clone();
 
@@ -285,15 +282,12 @@ mod tests {
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
         assert!(matches!(result, Ok(())));
-        assert!(matches!(
-            captor.captured(),
-            Some(SlateDBError::BackgroundTaskShutdown)
-        ));
+        assert!(matches!(captor.captured(), Some(Ok(()))));
     }
 
     #[test]
     fn test_should_cleanup_when_thread_exits_with_error() {
-        let captor = Arc::new(ErrorCaptor::new());
+        let captor = Arc::new(ResultCaptor::new());
         let captor2 = captor.clone();
 
         let thread = spawn_bg_thread(
@@ -304,12 +298,12 @@ mod tests {
 
         let result: Result<(), SlateDBError> = thread.join().expect("join failure");
         assert!(matches!(result, Err(SlateDBError::Fenced)));
-        assert!(matches!(captor.captured(), Some(SlateDBError::Fenced)));
+        assert!(matches!(captor.captured(), Some(Err(SlateDBError::Fenced))));
     }
 
     #[test]
     fn test_should_cleanup_when_thread_panics() {
-        let captor = Arc::new(ErrorCaptor::new());
+        let captor = Arc::new(ResultCaptor::new());
         let captor2 = captor.clone();
 
         let thread = spawn_bg_thread("test", move |err| captor2.capture(err), || panic!("oops"));
@@ -318,23 +312,20 @@ mod tests {
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
         assert!(matches!(
             captor.captured(),
-            Some(SlateDBError::BackgroundTaskPanic(_))
+            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
         ));
     }
 
     #[test]
     fn test_should_cleanup_when_thread_exits() {
-        let captor = Arc::new(ErrorCaptor::new());
+        let captor = Arc::new(ResultCaptor::new());
         let captor2 = captor.clone();
 
         let thread = spawn_bg_thread("test", move |err| captor2.capture(err), || Ok(()));
 
         let result: Result<(), SlateDBError> = thread.join().expect("join failure");
         assert!(matches!(result, Ok(())));
-        assert!(matches!(
-            captor.captured(),
-            Some(SlateDBError::BackgroundTaskShutdown)
-        ));
+        assert!(matches!(captor.captured(), Some(Ok(()))));
     }
 
     #[tokio::test]
