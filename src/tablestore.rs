@@ -43,12 +43,15 @@ struct ReadOnlyObject {
 }
 
 impl ReadOnlyBlob for ReadOnlyObject {
-    async fn len(&self) -> Result<usize, SlateDBError> {
+    async fn len(&self) -> Result<u64, SlateDBError> {
         let object_metadata = self.object_store.head(&self.path).await?;
-        Ok(object_metadata.size)
+        Ok(object_metadata.size as u64)
     }
 
-    async fn read_range(&self, range: Range<usize>) -> Result<Bytes, SlateDBError> {
+    async fn read_range(&self, range: Range<u64>) -> Result<Bytes, SlateDBError> {
+        // This will go away when we upgrade object store, which now takes u64's
+        // See https://github.com/apache/arrow-rs/issues/5351
+        let range = range.start as usize..range.end as usize;
         let bytes = self.object_store.get_range(&self.path, range).await?;
         Ok(bytes)
     }
