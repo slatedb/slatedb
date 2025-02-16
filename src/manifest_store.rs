@@ -91,6 +91,16 @@ impl FenceableManifest {
         self.stored_manifest.new_checkpoint(checkpoint_id, options)
     }
 
+    pub(crate) async fn write_checkpoint(
+        &mut self,
+        checkpoint_id: Option<Uuid>,
+        options: &CheckpointOptions,
+    ) -> Result<Checkpoint, SlateDBError> {
+        self.stored_manifest
+            .write_checkpoint(checkpoint_id, options)
+            .await
+    }
+
     #[allow(clippy::panic)]
     fn check_epoch(&self) -> Result<(), SlateDBError> {
         let stored_epoch = (self.stored_epoch)(&self.stored_manifest.manifest);
