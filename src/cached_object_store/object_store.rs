@@ -1,3 +1,4 @@
+use crate::cached_object_store::stats::CachedObjectStoreStats;
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
@@ -7,14 +8,13 @@ use std::{ops::Range, sync::Arc};
 
 use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
 use crate::error::SlateDBError;
-use crate::metrics::DbStats;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
     pub(crate) part_size_bytes: usize, // expected to be aligned with mb or kb
     pub(crate) cache_storage: Arc<dyn LocalCacheStorage>,
-    db_stats: Arc<DbStats>,
+    stats: Arc<CachedObjectStoreStats>,
 }
 
 impl CachedObjectStore {
@@ -22,7 +22,7 @@ impl CachedObjectStore {
         object_store: Arc<dyn ObjectStore>,
         cache_storage: Arc<dyn LocalCacheStorage>,
         part_size_bytes: usize,
-        db_stats: Arc<DbStats>,
+        stats: Arc<CachedObjectStoreStats>,
     ) -> Result<Arc<Self>, SlateDBError> {
         if part_size_bytes == 0 || part_size_bytes % 1024 != 0 {
             return Err(SlateDBError::InvalidCachePartSize);
@@ -32,7 +32,7 @@ impl CachedObjectStore {
             object_store,
             part_size_bytes,
             cache_storage,
-            db_stats,
+            stats,
         }))
     }
 
@@ -217,7 +217,7 @@ impl CachedObjectStore {
         let object_store = self.object_store.clone();
         let location = location.clone();
         let entry = self.cache_storage.entry(&location, self.part_size_bytes);
-        let db_stats = self.db_stats.clone();
+        let db_stats = self.stats.clone();
         Box::pin(async move {
             db_stats.object_store_cache_part_access.inc();
 
@@ -437,9 +437,10 @@ mod tests {
     use rand::Rng;
 
     use super::CachedObjectStore;
+    use crate::cached_object_store::stats::CachedObjectStoreStats;
     use crate::cached_object_store::storage_fs::FsCacheStorage;
     use crate::cached_object_store::{storage::PartID, storage_fs::FsCacheEntry};
-    use crate::metrics::DbStats;
+    use crate::stats::StatRegistry;
     use crate::test_utils::gen_rand_bytes;
 
     fn new_test_cache_folder() -> std::path::PathBuf {
@@ -457,7 +458,8 @@ mod tests {
         let payload = gen_rand_bytes(1024 * 3 + 32);
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let db_stats = Arc::new(DbStats::new());
+        let stats_registry = StatRegistry::new();
+        let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         object_store
             .put(
                 &Path::from("/data/testfile1"),
@@ -471,13 +473,12 @@ mod tests {
             test_cache_folder.clone(),
             None,
             None,
-            db_stats.clone(),
+            stats.clone(),
         ));
 
         let part_size = 1024;
         let cached_store =
-            CachedObjectStore::new(object_store.clone(), cache_storage, part_size, db_stats)
-                .unwrap();
+            CachedObjectStore::new(object_store.clone(), cache_storage, part_size, stats).unwrap();
         let entry = cached_store.cache_storage.entry(&location, 1024);
 
         let object_size_hint = cached_store.save_result(get_result).await?;
@@ -526,7 +527,8 @@ mod tests {
         let payload = gen_rand_bytes(1024 * 3);
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let db_stats = Arc::new(DbStats::new());
+        let stats_registry = StatRegistry::new();
+        let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         object_store
             .put(
                 &Path::from("/data/testfile1"),
@@ -541,11 +543,11 @@ mod tests {
             test_cache_folder.clone(),
             None,
             None,
-            db_stats.clone(),
+            stats.clone(),
         ));
 
         let cached_store =
-            CachedObjectStore::new(object_store, cache_storage, part_size, db_stats).unwrap();
+            CachedObjectStore::new(object_store, cache_storage, part_size, stats).unwrap();
         let entry = cached_store.cache_storage.entry(&location, part_size);
         let object_size_hint = cached_store.save_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3);
@@ -578,16 +580,17 @@ mod tests {
     fn test_split_range_into_parts() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let db_stats = Arc::new(DbStats::new());
+        let stats_registry = StatRegistry::new();
+        let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
             test_cache_folder.clone(),
             None,
             None,
-            db_stats.clone(),
+            stats.clone(),
         ));
 
         let cached_store =
-            CachedObjectStore::new(object_store, cache_storage, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, cache_storage, 1024, stats).unwrap();
 
         struct Test {
             input: (Option<GetRange>, usize),
@@ -665,15 +668,16 @@ mod tests {
     fn test_align_range() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let db_stats = Arc::new(DbStats::new());
+        let stats_registry = StatRegistry::new();
+        let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
             test_cache_folder.clone(),
             None,
             None,
-            db_stats.clone(),
+            stats.clone(),
         ));
         let cached_store =
-            CachedObjectStore::new(object_store, cache_storage, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, cache_storage, 1024, stats).unwrap();
 
         let aligned = cached_store.align_range(&(9..1025), 1024);
         assert_eq!(aligned, 0..2048);
@@ -685,15 +689,16 @@ mod tests {
     fn test_align_get_range() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let db_stats = Arc::new(DbStats::new());
+        let stats_registry = StatRegistry::new();
+        let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
             test_cache_folder.clone(),
             None,
             None,
-            db_stats.clone(),
+            stats.clone(),
         ));
         let cached_store =
-            CachedObjectStore::new(object_store, cache_storage, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store, cache_storage, 1024, stats).unwrap();
 
         let aligned = cached_store.align_get_range(&GetRange::Bounded(9..1025));
         assert_eq!(aligned, GetRange::Bounded(0..2048));
@@ -713,15 +718,16 @@ mod tests {
     async fn test_cached_object_store_impl_object_store() -> object_store::Result<()> {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let db_stats = Arc::new(DbStats::new());
+        let stats_registry = StatRegistry::new();
+        let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
             test_cache_folder.clone(),
             None,
             None,
-            db_stats.clone(),
+            stats.clone(),
         ));
         let cached_store =
-            CachedObjectStore::new(object_store.clone(), cache_storage, 1024, db_stats).unwrap();
+            CachedObjectStore::new(object_store.clone(), cache_storage, 1024, stats).unwrap();
 
         let test_path = Path::from("/data/testdata1");
         let test_payload = gen_rand_bytes(1024 * 3 + 2);

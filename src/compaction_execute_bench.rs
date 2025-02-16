@@ -15,6 +15,7 @@ use tracing::{error, info};
 use ulid::Ulid;
 
 use crate::bytes_generator::OrderedBytesGenerator;
+use crate::compactor::stats::CompactionStats;
 use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, SourceId};
@@ -22,8 +23,8 @@ use crate::config::{CompactorOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::manifest_store::{ManifestStore, StoredManifest};
-use crate::metrics::DbStats;
 use crate::sst::SsTableFormat;
+use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable;
@@ -273,13 +274,14 @@ impl CompactionExecuteBench {
         });
         let (tx, rx) = crossbeam_channel::unbounded();
         let compactor_options = CompactorOptions::default();
-        let db_stats = Arc::new(DbStats::new());
+        let registry = StatRegistry::new();
+        let stats = Arc::new(CompactionStats::new(&registry));
         let executor = TokioCompactionExecutor::new(
             Handle::current(),
             Arc::new(compactor_options),
             tx,
             table_store.clone(),
-            db_stats.clone(),
+            stats.clone(),
         );
         let os = self.object_store.clone();
         info!("load compaction job");

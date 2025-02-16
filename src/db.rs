@@ -36,6 +36,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
+use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
@@ -43,6 +44,7 @@ use crate::config::ReadLevel::Uncommitted;
 use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
+use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::filter;
 use crate::flush::WalFlushMsg;
@@ -51,10 +53,10 @@ use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::{VecDequeKeyValueIterator, WritableKVTable};
 use crate::mem_table_flush::MemtableFlushMsg;
-use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
+use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
 use crate::utils::MonotonicClock;
@@ -67,7 +69,8 @@ pub(crate) struct DbInner {
     pub(crate) wal_flush_notifier: UnboundedSender<WalFlushMsg>,
     pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
-    pub(crate) db_stats: Arc<DbStats>,
+    pub(crate) db_stats: DbStats,
+    pub(crate) stat_registry: Arc<StatRegistry>,
     pub(crate) mono_clock: Arc<MonotonicClock>,
 }
 
@@ -79,13 +82,14 @@ impl DbInner {
         wal_flush_notifier: UnboundedSender<WalFlushMsg>,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
-        db_stats: Arc<DbStats>,
+        stat_registry: Arc<StatRegistry>,
     ) -> Result<Self, SlateDBError> {
         let mono_clock = Arc::new(MonotonicClock::new(
             options.clock.clone(),
             core_db_state.last_l0_clock_tick,
         ));
         let state = DbState::new(core_db_state);
+        let db_stats = DbStats::new(stat_registry.as_ref());
         let db_inner = Self {
             state: Arc::new(RwLock::new(state)),
             options,
@@ -95,6 +99,7 @@ impl DbInner {
             write_notifier,
             db_stats,
             mono_clock,
+            stat_registry,
         };
         Ok(db_inner)
     }
@@ -674,7 +679,7 @@ impl Db {
             tracing::info!(?path, ?options, "Opening SlateDB database");
         }
 
-        let db_stats = Arc::new(DbStats::new());
+        let stat_registry = Arc::new(StatRegistry::new());
         let sst_format = SsTableFormat {
             min_filter_keys: options.min_filter_keys,
             filter_bits_per_key: options.filter_bits_per_key,
@@ -684,18 +689,19 @@ impl Db {
         let maybe_cached_object_store = match &options.object_store_cache_options.root_folder {
             None => object_store.clone(),
             Some(cache_root_folder) => {
+                let stats = Arc::new(CachedObjectStoreStats::new(stat_registry.as_ref()));
                 let cache_storage = Arc::new(FsCacheStorage::new(
                     cache_root_folder.clone(),
                     options.object_store_cache_options.max_cache_size_bytes,
                     options.object_store_cache_options.scan_interval,
-                    db_stats.clone(),
+                    stats.clone(),
                 ));
 
                 let cached_object_store = CachedObjectStore::new(
                     object_store.clone(),
                     cache_storage,
                     options.object_store_cache_options.part_size_bytes,
-                    db_stats.clone(),
+                    stats.clone(),
                 )?;
                 cached_object_store.start_evictor().await;
                 cached_object_store
@@ -734,7 +740,7 @@ impl Db {
                 wal_flush_tx,
                 memtable_flush_tx,
                 write_tx,
-                db_stats,
+                stat_registry,
             )
             .await?,
         );
@@ -768,7 +774,7 @@ impl Db {
                     uncached_table_store.clone(),
                     compactor_options.clone(),
                     Handle::current(),
-                    inner.db_stats.clone(),
+                    inner.stat_registry.as_ref(),
                     move |err: &SlateDBError| {
                         warn!("compactor thread exited with {:?}", err);
                         let mut state = cleanup_inner.state.write();
@@ -787,7 +793,7 @@ impl Db {
                     table_store.clone(),
                     gc_options.clone(),
                     Handle::current(),
-                    inner.db_stats.clone(),
+                    inner.stat_registry.clone(),
                     move |err| {
                         warn!("GC thread exited with {:?}", err);
                         let mut state = cleanup_inner.state.write();
@@ -1339,8 +1345,8 @@ impl Db {
         table.await_durable().await
     }
 
-    pub fn metrics(&self) -> Arc<DbStats> {
-        self.inner.db_stats.clone()
+    pub fn metrics(&self) -> Arc<StatRegistry> {
+        self.inner.stat_registry.clone()
     }
 }
 
@@ -1363,6 +1369,10 @@ mod tests {
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
 
+    use crate::cached_object_store::stats::{
+        OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
+    };
+    use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::{proptest_util, test_utils};
     use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
@@ -1414,18 +1424,33 @@ mod tests {
         .await
         .unwrap();
 
-        let access_count0 = kv_store.metrics().object_store_cache_part_access.get();
+        let access_count0 = kv_store
+            .metrics()
+            .lookup(OBJECT_STORE_CACHE_PART_ACCESS)
+            .unwrap()
+            .get();
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
         kv_store.flush().await.unwrap();
 
         let got = kv_store.get(key).await.unwrap();
-        let access_count1 = kv_store.metrics().object_store_cache_part_access.get();
+        let access_count1 = kv_store
+            .metrics()
+            .lookup(OBJECT_STORE_CACHE_PART_ACCESS)
+            .unwrap()
+            .get();
         assert_eq!(got, Some(Bytes::from_static(value)));
         assert!(access_count1 > 0);
         assert!(access_count1 >= access_count0);
-        assert!(kv_store.metrics().object_store_cache_part_hits.get() >= 1);
+        assert!(
+            kv_store
+                .metrics()
+                .lookup(OBJECT_STORE_CACHE_PART_HITS)
+                .unwrap()
+                .get()
+                >= 1
+        );
     }
 
     #[tokio::test]
@@ -1436,20 +1461,21 @@ mod tests {
             .prefix("objstore_cache_test_")
             .tempdir()
             .unwrap();
-        let db_stats = Arc::new(DbStats::new());
+        let stats_registry = StatRegistry::new();
+        let cache_stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let part_size = 1024;
         let cache_storage = Arc::new(FsCacheStorage::new(
             temp_dir.path().to_path_buf(),
             None,
             None,
-            db_stats.clone(),
+            cache_stats.clone(),
         ));
 
         let cached_object_store = CachedObjectStore::new(
             object_store.clone(),
             cache_storage,
             part_size,
-            db_stats.clone(),
+            cache_stats.clone(),
         )
         .unwrap();
 
@@ -2086,7 +2112,14 @@ mod tests {
             let kv = iter.next().await.unwrap();
             assert!(kv.is_none());
         }
-        assert!(kv_store.metrics().immutable_memtable_flushes.get() > 0);
+        assert!(
+            kv_store
+                .metrics()
+                .lookup(IMMUTABLE_MEMTABLE_FLUSHES)
+                .unwrap()
+                .get()
+                > 0
+        );
     }
 
     // 2 threads so we can can wait on the write_with_options (main) thread
