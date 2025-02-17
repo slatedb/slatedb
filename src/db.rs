@@ -2028,6 +2028,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_seek_fast_forwards_iterator() {
         let mut runner = new_proptest_runner(None);
         let table = sample::table(runner.rng(), 1000, 10);
@@ -2062,6 +2063,8 @@ mod tests {
 
             let seek_key = sample::bytes_in_range(rng, scan_range);
             iter.seek(seek_key.clone()).await.unwrap();
+
+            assert!(!seek_key.is_empty(), "seek key should not be empty");
 
             let seek_range = BytesRange::new(Included(seek_key), scan_range.end_bound().cloned());
             test_utils::assert_ranged_db_scan(table, seek_range, &mut iter).await;

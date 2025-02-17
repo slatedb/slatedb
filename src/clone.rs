@@ -1,4 +1,4 @@
-use crate::bytes_range::{self, BytesRange};
+use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::config::CheckpointOptions;
 use crate::db_state::{CoreDbState, SsTableId};
@@ -43,7 +43,7 @@ fn validate_sources_are_non_overlapping(
     for idx in 1..sorted.len() {
         let (previous_idx, previous_range) = &sorted[idx - 1];
         let (current_idx, current_range) = &sorted[idx];
-        if bytes_range::has_nonempty_intersection(previous_range.as_ref(), current_range.as_ref()) {
+        if previous_range.intersect(current_range).is_some() {
             let previous_path = &sources[*previous_idx].path;
             let current_path = &sources[*current_idx].path;
             return Err(SlateDBError::InvalidArgument {

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use crate::bytes_range::{self, BytesRange};
+use crate::bytes_range::BytesRange;
 use crate::db_state::{CoreDbState, SsTableId};
 use crate::error::SlateDBError;
 use bytes::Bytes;
@@ -80,7 +80,7 @@ impl Manifest {
 
         let mut projected_ssts = HashMap::new();
         for source_projection in &source_manifest.projections {
-            let intersection = bytes_range::intersect(&source_projection.visible_range, &range);
+            let intersection = source_projection.visible_range.intersect(&range);
             for sst_id in &source_projection.sst_ids {
                 projected_ssts.insert(*sst_id, intersection.clone());
             }
@@ -101,7 +101,7 @@ impl Manifest {
             };
 
             let next_handle = projected.core.l0.get(idx + 1);
-            if current_handle.has_nonempty_intersection(next_handle, range_for_handle.as_ref()) {
+            if current_handle.has_nonempty_intersection(next_handle, &range_for_handle) {
                 // We need to keep this SST because it has a non-empty intersection with the new and previous projections.
                 l0_filtered.push_back(current_handle.clone());
                 new_projections
@@ -116,7 +116,7 @@ impl Manifest {
         let mut sst_ids: Vec<SsTableId> = vec![];
         for (current_range, current_sst_ids) in new_projections.iter() {
             if let Some(previous_range) = previous {
-                if let Some(merged_range) = bytes_range::merge(&previous_range, current_range) {
+                if let Some(merged_range) = previous_range.union(current_range) {
                     previous = Some(merged_range);
                     sst_ids.extend(current_sst_ids);
                 } else {
