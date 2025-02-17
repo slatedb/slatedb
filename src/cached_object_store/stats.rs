@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 macro_rules! oscache_stat_name {
     ($suffix:expr) => {
-        crate::stat_name!("gc", $suffix)
+        crate::stat_name!("oscache", $suffix)
     };
 }
 
