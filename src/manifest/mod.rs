@@ -321,6 +321,25 @@ mod tests {
             ProjectionEntry { range: "m".."p", sst_aliases: vec!["bar"]},
         ],
     })]
+    #[case::distinct_ranges(ProjectionTestCase {
+        existing_l0: vec![
+            SstEntry { sst_alias: "foo", first_key: "a" },
+            SstEntry { sst_alias: "bar", first_key: "k" },
+        ],
+        existing_projections: vec![
+            ProjectionEntry { range: "a".."d", sst_aliases: vec!["foo"]},
+            ProjectionEntry { range: "f".."z", sst_aliases: vec!["foo", "bar"]},
+        ],
+        new_range: "c".."p",
+        new_l0: vec![
+            SstEntry { sst_alias: "foo", first_key: "a" },
+            SstEntry { sst_alias: "bar", first_key: "k" },
+        ],
+        new_projections: vec![
+            ProjectionEntry { range: "c".."d", sst_aliases: vec!["foo"]},
+            ProjectionEntry { range: "f".."p", sst_aliases: vec!["foo", "bar"]},
+        ],
+    })]
     fn test_projected(#[case] test_case: ProjectionTestCase) {
         let mut core = CoreDbState::new();
 
