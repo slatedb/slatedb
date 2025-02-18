@@ -3,10 +3,11 @@ use crate::config::GcExecutionMode::Periodic;
 use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions, GcExecutionMode};
 use crate::db_state::{CoreDbState, SsTableId};
 use crate::error::SlateDBError;
+use crate::garbage_collector::stats::GcStats;
 use crate::garbage_collector::GarbageCollectorMessage::*;
 use crate::manifest::Manifest;
 use crate::manifest_store::{ManifestStore, StoredManifest};
-use crate::metrics::DbStats;
+use crate::stats::StatRegistry;
 use crate::tablestore::{SstFileMetadata, TableStore};
 use crate::utils::spawn_bg_thread;
 use chrono::{DateTime, Utc};
@@ -41,7 +42,7 @@ impl GarbageCollector {
     /// * `table_store` - The table store to use
     /// * `options` - The options for the garbage collector
     /// * `tokio_handle` - The tokio runtime handle to use if no custom runtime is provided
-    /// * `db_stats` - The database stats to use
+    /// * `stat_registry` - The stat registry to add gc stats to
     /// # Returns
     /// A new garbage collector
     pub(crate) async fn new(
@@ -49,12 +50,14 @@ impl GarbageCollector {
         table_store: Arc<TableStore>,
         options: GarbageCollectorOptions,
         tokio_handle: Handle,
-        db_stats: Arc<DbStats>,
-        cleanup_fn: impl FnOnce(&SlateDBError) + Send + 'static,
+        stat_registry: Arc<StatRegistry>,
+        cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
     ) -> Self {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let tokio_handle = options.gc_runtime.clone().unwrap_or(tokio_handle);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let stats = Arc::new(GcStats::new(stat_registry));
 
         let gc_main = move || {
             let orchestrator = GarbageCollectorOrchestrator {
@@ -62,7 +65,7 @@ impl GarbageCollector {
                 table_store,
                 options,
                 external_rx,
-                db_stats,
+                stats,
             };
             tokio_handle.block_on(orchestrator.run());
 
@@ -130,7 +133,7 @@ struct GarbageCollectorOrchestrator {
     table_store: Arc<TableStore>,
     options: GarbageCollectorOptions,
     external_rx: crossbeam_channel::Receiver<GarbageCollectorMessage>,
-    db_stats: Arc<DbStats>,
+    stats: Arc<GcStats>,
 }
 
 trait GcTask {
@@ -142,7 +145,7 @@ trait GcTask {
 
 struct ManifestGcTask {
     manifest_store: Arc<ManifestStore>,
-    db_stats: Arc<DbStats>,
+    stats: Arc<GcStats>,
     manifest_options: Option<GarbageCollectorDirectoryOptions>,
     status: DirGcStatus,
 }
@@ -150,12 +153,12 @@ struct ManifestGcTask {
 impl ManifestGcTask {
     fn new(
         manifest_store: Arc<ManifestStore>,
-        db_stats: Arc<DbStats>,
+        stats: Arc<GcStats>,
         manifest_options: Option<GarbageCollectorDirectoryOptions>,
     ) -> Self {
         ManifestGcTask {
             manifest_store,
-            db_stats,
+            stats,
             manifest_options,
             status: DirGcStatus::new(manifest_options.as_ref()),
         }
@@ -206,7 +209,7 @@ impl GcTask for ManifestGcTask {
                 {
                     error!("Error deleting manifest: {}", e);
                 } else {
-                    self.db_stats.gc_manifest_count.inc();
+                    self.stats.gc_manifest_count.inc();
                 }
             }
         }
@@ -230,7 +233,7 @@ impl GcTask for ManifestGcTask {
 struct WalGcTask {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
-    db_stats: Arc<DbStats>,
+    stats: Arc<GcStats>,
     wal_options: Option<GarbageCollectorDirectoryOptions>,
     status: DirGcStatus,
 }
@@ -239,13 +242,13 @@ impl WalGcTask {
     fn new(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
-        db_stats: Arc<DbStats>,
+        stats: Arc<GcStats>,
         wal_options: Option<GarbageCollectorDirectoryOptions>,
     ) -> Self {
         WalGcTask {
             manifest_store,
             table_store,
-            db_stats,
+            stats,
             wal_options,
             status: DirGcStatus::new(wal_options.as_ref()),
         }
@@ -310,7 +313,7 @@ impl GcTask for WalGcTask {
             if let Err(e) = self.table_store.delete_sst(&id).await {
                 error!("Error deleting WAL SST: {}", e);
             } else {
-                self.db_stats.gc_wal_count.inc();
+                self.stats.gc_wal_count.inc();
             }
         }
 
@@ -333,7 +336,7 @@ impl GcTask for WalGcTask {
 struct CompactedGcTask {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
-    db_stats: Arc<DbStats>,
+    stats: Arc<GcStats>,
     compacted_options: Option<GarbageCollectorDirectoryOptions>,
     status: DirGcStatus,
 }
@@ -342,13 +345,13 @@ impl CompactedGcTask {
     fn new(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
-        db_stats: Arc<DbStats>,
+        stats: Arc<GcStats>,
         compacted_options: Option<GarbageCollectorDirectoryOptions>,
     ) -> Self {
         CompactedGcTask {
             manifest_store,
             table_store,
-            db_stats,
+            stats,
             compacted_options,
             status: DirGcStatus::new(compacted_options.as_ref()),
         }
@@ -401,7 +404,7 @@ impl GcTask for CompactedGcTask {
             if let Err(e) = self.table_store.delete_sst(&id).await {
                 error!("Error deleting SST: {}", e);
             } else {
-                self.db_stats.gc_compacted_count.inc();
+                self.stats.gc_compacted_count.inc();
             }
         }
 
@@ -464,18 +467,18 @@ impl GarbageCollectorOrchestrator {
         let mut wal_gc_task = WalGcTask::new(
             self.manifest_store.clone(),
             self.table_store.clone(),
-            self.db_stats.clone(),
+            self.stats.clone(),
             self.options.wal_options,
         );
         let mut compacted_gc_task = CompactedGcTask::new(
             self.manifest_store.clone(),
             self.table_store.clone(),
-            self.db_stats.clone(),
+            self.stats.clone(),
             self.options.compacted_options,
         );
         let mut manifest_gc_task = ManifestGcTask::new(
             self.manifest_store.clone(),
-            self.db_stats.clone(),
+            self.stats.clone(),
             self.options.manifest_options,
         );
 
@@ -494,9 +497,9 @@ impl GarbageCollectorOrchestrator {
             crossbeam_channel::select! {
                 recv(log_ticker) -> _ => {
                    debug!("GC has collected {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
-                        self.db_stats.gc_manifest_count.value.load(Ordering::SeqCst),
-                        self.db_stats.gc_wal_count.value.load(Ordering::SeqCst),
-                        self.db_stats.gc_compacted_count.value.load(Ordering::SeqCst)
+                        self.stats.gc_manifest_count.value.load(Ordering::SeqCst),
+                        self.stats.gc_wal_count.value.load(Ordering::SeqCst),
+                        self.stats.gc_compacted_count.value.load(Ordering::SeqCst)
                     );
                 },
                 recv(manifest_ticker) -> _ => { self.run_gc_task(&mut manifest_gc_task).await; },
@@ -515,7 +518,7 @@ impl GarbageCollectorOrchestrator {
                     }
                 },
             }
-            self.db_stats.gc_count.inc();
+            self.stats.gc_count.inc();
             if manifest_gc_task.status().is_done()
                 && wal_gc_task.status().is_done()
                 && compacted_gc_task.status().is_done()
@@ -527,12 +530,9 @@ impl GarbageCollectorOrchestrator {
 
         info!(
             "GC shutdown after collecting {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
-            self.db_stats.gc_manifest_count.value.load(Ordering::SeqCst),
-            self.db_stats.gc_wal_count.value.load(Ordering::SeqCst),
-            self.db_stats
-                .gc_compacted_count
-                .value
-                .load(Ordering::SeqCst)
+            self.stats.gc_manifest_count.value.load(Ordering::SeqCst),
+            self.stats.gc_wal_count.value.load(Ordering::SeqCst),
+            self.stats.gc_compacted_count.value.load(Ordering::SeqCst)
         );
     }
 
@@ -603,6 +603,45 @@ impl fmt::Display for DirGcStatus {
     }
 }
 
+pub mod stats {
+    use crate::stats::{Counter, StatRegistry};
+    use std::sync::Arc;
+
+    macro_rules! gc_stat_name {
+        ($suffix:expr) => {
+            crate::stat_name!("gc", $suffix)
+        };
+    }
+
+    pub const GC_MANIFEST_COUNT: &str = gc_stat_name!("manifest_count");
+    pub const GC_WAL_COUNT: &str = gc_stat_name!("wal_count");
+    pub const GC_COMPACTED_COUNT: &str = gc_stat_name!("compacted_count");
+    pub const GC_COUNT: &str = gc_stat_name!("count");
+
+    pub(super) struct GcStats {
+        pub(super) gc_manifest_count: Arc<Counter>,
+        pub(super) gc_wal_count: Arc<Counter>,
+        pub(super) gc_compacted_count: Arc<Counter>,
+        pub(super) gc_count: Arc<Counter>,
+    }
+
+    impl GcStats {
+        pub(super) fn new(registry: Arc<StatRegistry>) -> Self {
+            let stats = Self {
+                gc_manifest_count: Arc::new(Counter::default()),
+                gc_wal_count: Arc::new(Counter::default()),
+                gc_compacted_count: Arc::new(Counter::default()),
+                gc_count: Arc::new(Counter::default()),
+            };
+            registry.register(GC_MANIFEST_COUNT, stats.gc_manifest_count.clone());
+            registry.register(GC_WAL_COUNT, stats.gc_wal_count.clone());
+            registry.register(GC_COMPACTED_COUNT, stats.gc_compacted_count.clone());
+            registry.register(GC_COUNT, stats.gc_count.clone());
+            stats
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -617,21 +656,22 @@ mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::config::GcExecutionMode::Once;
     use crate::error::SlateDBError;
-    use crate::metrics::Counter;
     use crate::paths::PathResolver;
+    use crate::stats::{ReadableStat, StatRegistry};
     use crate::types::RowEntry;
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
         garbage_collector::GarbageCollector,
         manifest_store::{ManifestStore, StoredManifest},
-        metrics::DbStats,
         sst::SsTableFormat,
         tablestore::TableStore,
     };
 
+    use crate::garbage_collector::stats::GC_COUNT;
+
     #[tokio::test]
     async fn test_collect_garbage_manifest() {
-        let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+        let (manifest_store, table_store, local_object_store) = build_objects();
 
         // Create a manifest
         let state = CoreDbState::new();
@@ -661,12 +701,7 @@ mod tests {
         assert_eq!(manifests[0].last_modified, now_minus_24h);
 
         // Start the garbage collector
-        run_gc_once(
-            manifest_store.clone(),
-            table_store.clone(),
-            db_stats.clone(),
-        )
-        .await;
+        run_gc_once(manifest_store.clone(), table_store.clone()).await;
 
         // Verify that the first manifest was deleted
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -676,7 +711,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_garbage_only_recent_manifests() {
-        let (manifest_store, table_store, _, db_stats) = build_objects();
+        let (manifest_store, table_store, _) = build_objects();
 
         // Create a manifest
         let state = CoreDbState::new();
@@ -698,12 +733,7 @@ mod tests {
         assert_eq!(manifests[1].id, 2);
 
         // Start the garbage collector
-        run_gc_once(
-            manifest_store.clone(),
-            table_store.clone(),
-            db_stats.clone(),
-        )
-        .await;
+        run_gc_once(manifest_store.clone(), table_store.clone()).await;
 
         // Verify that no manifests were deleted
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -751,7 +781,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_expired_checkpoints() {
-        let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+        let (manifest_store, table_store, local_object_store) = build_objects();
 
         // Manifest 1
         let state = CoreDbState::new();
@@ -787,12 +817,7 @@ mod tests {
         }
 
         // Start the garbage collector
-        run_gc_once(
-            manifest_store.clone(),
-            table_store.clone(),
-            db_stats.clone(),
-        )
-        .await;
+        run_gc_once(manifest_store.clone(), table_store.clone()).await;
 
         // The GC should create a new manifest version 4 with the expired
         // checkpoint removed.
@@ -816,7 +841,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collector_should_not_clean_manifests_referenced_by_checkpoints() {
-        let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+        let (manifest_store, table_store, local_object_store) = build_objects();
 
         // Manifest 1
         let state = CoreDbState::new();
@@ -851,12 +876,7 @@ mod tests {
         assert_eq!(manifests.len(), 4);
 
         // Start the garbage collector
-        run_gc_once(
-            manifest_store.clone(),
-            table_store.clone(),
-            db_stats.clone(),
-        )
-        .await;
+        run_gc_once(manifest_store.clone(), table_store.clone()).await;
 
         // Verify that the latest manifest version is still 4 with the active checkpoint
         let (latest_manifest_id, latest_manifest) =
@@ -876,7 +896,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_garbage_old_active_manifest() {
-        let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+        let (manifest_store, table_store, local_object_store) = build_objects();
 
         // Create a manifest
         let state = CoreDbState::new();
@@ -912,12 +932,7 @@ mod tests {
         assert_eq!(manifests[1].last_modified, now_minus_24h_2);
 
         // Start the garbage collector
-        run_gc_once(
-            manifest_store.clone(),
-            table_store.clone(),
-            db_stats.clone(),
-        )
-        .await;
+        run_gc_once(manifest_store.clone(), table_store.clone()).await;
 
         // Verify that the first manifest was deleted, but the second is still safe
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -938,7 +953,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_garbage_wal_ssts() {
-        let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+        let (manifest_store, table_store, local_object_store) = build_objects();
         let path_resolver = PathResolver::new("/");
 
         // write a wal sst
@@ -977,12 +992,7 @@ mod tests {
         );
 
         // Start the garbage collector
-        run_gc_once(
-            manifest_store.clone(),
-            table_store.clone(),
-            db_stats.clone(),
-        )
-        .await;
+        run_gc_once(manifest_store.clone(), table_store.clone()).await;
 
         // Verify that the first WAL was deleted and the second is kept
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
@@ -992,7 +1002,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_do_not_remove_wals_referenced_by_active_checkpoints() {
-        let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+        let (manifest_store, table_store, local_object_store) = build_objects();
         let path_resolver = PathResolver::new("/");
 
         let id1 = SsTableId::Wal(1);
@@ -1035,12 +1045,7 @@ mod tests {
         }
 
         // Start the garbage collector
-        run_gc_once(
-            manifest_store.clone(),
-            table_store.clone(),
-            db_stats.clone(),
-        )
-        .await;
+        run_gc_once(manifest_store.clone(), table_store.clone()).await;
 
         // Only the first table is deleted. The second is eligible,
         // but the reference in the checkpoint is still active.
@@ -1052,7 +1057,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_garbage_wal_ssts_and_keep_expired_last_compacted() {
-        let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+        let (manifest_store, table_store, local_object_store) = build_objects();
         let path_resolver = PathResolver::new("/");
 
         // write a wal sst
@@ -1104,12 +1109,7 @@ mod tests {
         );
 
         // Start the garbage collector
-        run_gc_once(
-            manifest_store.clone(),
-            table_store.clone(),
-            db_stats.clone(),
-        )
-        .await;
+        run_gc_once(manifest_store.clone(), table_store.clone()).await;
 
         // Verify that the first WAL was deleted and the second is kept even though it's expired
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
@@ -1130,7 +1130,7 @@ mod tests {
     /// are deleted.
     #[tokio::test]
     async fn test_collect_garbage_compacted_ssts() {
-        let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+        let (manifest_store, table_store, local_object_store) = build_objects();
         let l0_sst_handle = create_sst(table_store.clone()).await;
         let active_expired_l0_sst_handle = create_sst(table_store.clone()).await;
         let inactive_expired_l0_sst_handle = create_sst(table_store.clone()).await;
@@ -1212,12 +1212,7 @@ mod tests {
         assert_eq!(current_manifest.core.compacted[0].ssts.len(), 2);
 
         // Start the garbage collector
-        run_gc_once(
-            manifest_store.clone(),
-            table_store.clone(),
-            db_stats.clone(),
-        )
-        .await;
+        run_gc_once(manifest_store.clone(), table_store.clone()).await;
 
         // Verify that the first WAL was deleted and the second is kept
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
@@ -1245,7 +1240,7 @@ mod tests {
     /// are deleted.
     #[tokio::test]
     async fn test_collect_garbage_compacted_ssts_respects_checkpoint_references() {
-        let (manifest_store, table_store, local_object_store, db_stats) = build_objects();
+        let (manifest_store, table_store, local_object_store) = build_objects();
         let active_l0_sst_handle = create_sst(table_store.clone()).await;
         let active_checkpoint_l0_sst_handle = create_sst(table_store.clone()).await;
         let inactive_l0_sst_handle = create_sst(table_store.clone()).await;
@@ -1299,12 +1294,7 @@ mod tests {
         stored_manifest.update_db_state(state).await.unwrap();
 
         // Start the garbage collector
-        run_gc_once(
-            manifest_store.clone(),
-            table_store.clone(),
-            db_stats.clone(),
-        )
-        .await;
+        run_gc_once(manifest_store.clone(), table_store.clone()).await;
 
         // Only the first table is deleted. The second is eligible,
         // but the reference in the checkpoint is still active.
@@ -1321,12 +1311,7 @@ mod tests {
             .unwrap();
 
         // Start the garbage collector
-        run_gc_once(
-            manifest_store.clone(),
-            table_store.clone(),
-            db_stats.clone(),
-        )
-        .await;
+        run_gc_once(manifest_store.clone(), table_store.clone()).await;
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
         assert_eq!(compacted_ssts.len(), 2);
         assert_eq!(compacted_ssts[0].id, active_l0_sst_handle.id);
@@ -1337,12 +1322,7 @@ mod tests {
     /// # Returns
     /// A tuple containing the manifest store, table store, local object store,
     /// and database stats
-    fn build_objects() -> (
-        Arc<ManifestStore>,
-        Arc<TableStore>,
-        Arc<LocalFileSystem>,
-        Arc<DbStats>,
-    ) {
+    fn build_objects() -> (Arc<ManifestStore>, Arc<TableStore>, Arc<LocalFileSystem>) {
         let tempdir = tempfile::tempdir().unwrap().into_path();
         let local_object_store = Arc::new(
             LocalFileSystem::new_with_prefix(tempdir)
@@ -1358,9 +1338,8 @@ mod tests {
             path.clone(),
             None,
         ));
-        let db_stats = Arc::new(DbStats::new());
 
-        (manifest_store, table_store, local_object_store, db_stats)
+        (manifest_store, table_store, local_object_store)
     }
 
     /// Build a garbage collector for testing. The garbage collector is started
@@ -1373,7 +1352,7 @@ mod tests {
     async fn build_garbage_collector(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
-        db_stats: Arc<DbStats>,
+        stats: Arc<StatRegistry>,
     ) -> GarbageCollector {
         GarbageCollector::new(
             manifest_store.clone(),
@@ -1394,7 +1373,7 @@ mod tests {
                 gc_runtime: None,
             },
             tokio::runtime::Handle::current(),
-            db_stats.clone(),
+            stats.clone(),
             |_| {},
         )
         .await
@@ -1443,9 +1422,9 @@ mod tests {
     /// # Arguments
     /// * `counter` - The counter to wait for. Could be the manifest, WAL, or
     ///   compacted counter.
-    fn wait_for_gc(counter: Counter) {
-        let current = counter.get();
-        while counter.get() == current {
+    fn wait_for_gc(gc_count_reader: Arc<dyn ReadableStat>) {
+        let current = gc_count_reader.get();
+        while gc_count_reader.get() == current {
             info!("Waiting for garbage collector to run");
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
@@ -1491,21 +1470,15 @@ mod tests {
         }
     }
 
-    async fn run_gc_once(
-        manifest_store: Arc<ManifestStore>,
-        table_store: Arc<TableStore>,
-        db_stats: Arc<DbStats>,
-    ) {
+    async fn run_gc_once(manifest_store: Arc<ManifestStore>, table_store: Arc<TableStore>) {
         // Start the garbage collector
-        let garbage_collector = build_garbage_collector(
-            manifest_store.clone(),
-            table_store.clone(),
-            db_stats.clone(),
-        )
-        .await;
+        let stats = Arc::new(StatRegistry::new());
+        let garbage_collector =
+            build_garbage_collector(manifest_store.clone(), table_store.clone(), stats.clone())
+                .await;
 
         // Wait for the garbage collector to run
-        wait_for_gc(db_stats.gc_count.clone());
+        wait_for_gc(stats.lookup(GC_COUNT).unwrap());
 
         garbage_collector.await_shutdown().await;
 

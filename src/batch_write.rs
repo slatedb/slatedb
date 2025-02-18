@@ -52,7 +52,7 @@ pub(crate) struct WriteBatchRequest {
 impl DbInner {
     #[allow(clippy::panic)]
     async fn write_batch(&self, batch: WriteBatch) -> Result<Arc<KVTable>, SlateDBError> {
-        let now = self.mono_clock.now()?;
+        let now = self.mono_clock.now().await?;
 
         let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
@@ -148,13 +148,17 @@ impl DbInner {
         let this = Arc::clone(self);
         Some(spawn_bg_task(
             tokio_handle,
-            move |err| {
-                match err {
-                    SlateDBError::BackgroundTaskShutdown => {
+            move |result| {
+                let err = match result {
+                    Ok(()) => {
                         info!("write task shutdown complete");
+                        SlateDBError::BackgroundTaskShutdown
                     }
-                    _ => warn!("write task exited with {:?}", err),
-                }
+                    Err(err) => {
+                        warn!("write task exited with {:?}", err);
+                        err.clone()
+                    }
+                };
                 // notify any waiters about the failure
                 let mut state = this.state.write();
                 state.record_fatal_error(err.clone());

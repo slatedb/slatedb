@@ -24,10 +24,13 @@ pub use fail_parallel;
 pub use object_store;
 
 pub use batch::WriteBatch;
+pub use cached_object_store::stats as cached_object_store_stats;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};
+pub use compactor::stats as compactor_stats;
 pub use db::Db;
 pub use db_iter::DbIterator;
 pub use error::{DbOptionsError, SlateDBError};
+pub use garbage_collector::stats as garbage_collector_stats;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use types::KeyValue;
 
@@ -36,8 +39,9 @@ pub mod admin;
 pub mod compaction_execute_bench;
 pub mod config;
 pub mod db_cache;
-pub mod metrics;
+pub mod db_stats;
 pub mod size_tiered_compaction;
+pub mod stats;
 
 mod batch;
 mod batch_write;
