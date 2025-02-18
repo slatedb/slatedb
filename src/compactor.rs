@@ -21,6 +21,33 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::spawn_bg_thread;
 
+/// The compactor is responsible for taking groups of sorted runs (this doc uses the term
+/// sorted run to refer to both sorted runs and l0 ssts) and compacting them together to
+/// reduce space amplification (by removing old versions of rows that have been updated/deleted)
+/// and read amplification (by reducing the number of sorted runs that need to be searched on
+/// a read). It's made up of a few different components:
+///
+/// The Orchestrator is responsible for orchestrating the ongoing process of compacting
+/// the db. It periodically polls the manifest for changes, calls into the Scheduler
+/// to discover compactions that should be performed, schedules those compactions on the
+/// Executor, and when they are completed, updates the manifest. The Orchestrator is made
+/// up of [`CompactorOrchestrator`] and [`CompactorEventHandler`]. [`CompactorOrchestrator`]
+/// runs the main event loop on a background thread. The event loop listens on the manifest
+/// poll ticker to react to manifest poll ticks, the executor worker channel to react to
+/// updates about running compactions, and the shutdown channel to discover when it should
+/// terminate. It doesn't actually implement the logic for reacting to these events. This
+/// is implemented by [`CompactorEventHandler`].
+///
+/// The Scheduler is responsible for deciding what sorted runs should be compacted together.
+/// It implements the [`CompactionScheduler`] trait. The implementation is specified by providing
+/// an implementation of [`crate::config::CompactionSchedulerSupplier`] so different scheduling
+/// policies can be plugged into slatedb. Currently, the only implemented policy is the size-tiered
+/// scheduler supplied by [`crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier`]
+///
+/// The Executor does the actual work of compacting sorted runs by sort-merging them into a new
+/// sorted run. It implements the [`CompactionExecutor`] trait. Currently, the only implementation
+/// is the [`TokioCompactionExecutor`] which runs compaction on a local tokio runtime.
+
 pub trait CompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
 }

@@ -59,7 +59,7 @@ impl<T: Clone> WatchableOnceCellReader<T> {
 /// Spawn a monitored background tokio task. The task must return a Result<T, SlateDBError>.
 /// The task is spawned by a monitor task. When the task exits, the monitor task
 /// calls a provided cleanup fn with a reference to the returned result. If the spawned task
-/// panics, the cleanup fn is called with Err(BackgroundTaskFailed).
+/// panics, the cleanup fn is called with Err(BackgroundTaskPanic).
 pub(crate) fn spawn_bg_task<F, T, C>(
     handle: &tokio::runtime::Handle,
     cleanup_fn: C,
@@ -75,7 +75,6 @@ where
         let jh = inner_handle.spawn(future);
         match jh.await {
             Ok(result) => {
-                // task exited with an error
                 cleanup_fn(&result);
                 result
             }
@@ -96,7 +95,7 @@ where
 /// Spawn a monitored background os thread. The thread must return a Result<T, SlateDBError>.
 /// The thread is spawned by a monitor thread. When the thread exits, the monitor thread
 /// calls a provided cleanup fn with the returned result. If the spawned thread panics, the
-/// cleanup fn is called with Err(BackgroundTaskFailed).
+/// cleanup fn is called with Err(BackgroundTaskPanic).
 pub(crate) fn spawn_bg_thread<F, T, C>(
     name: &str,
     cleanup_fn: C,
@@ -125,7 +124,6 @@ where
                     err
                 }
                 Ok(result) => {
-                    // thread exited with an error
                     cleanup_fn(&result);
                     result
                 }
