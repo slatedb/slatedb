@@ -51,7 +51,7 @@ impl GarbageCollector {
         options: GarbageCollectorOptions,
         tokio_handle: Handle,
         stat_registry: Arc<StatRegistry>,
-        cleanup_fn: impl FnOnce(&SlateDBError) + Send + 'static,
+        cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
     ) -> Self {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let tokio_handle = options.gc_runtime.clone().unwrap_or(tokio_handle);

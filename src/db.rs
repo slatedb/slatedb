@@ -59,7 +59,7 @@ use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
-use crate::utils::MonotonicClock;
+use crate::utils::{bg_task_result_into_err, MonotonicClock};
 use tracing::{info, warn};
 
 pub(crate) struct DbInner {
@@ -775,7 +775,8 @@ impl Db {
                     compactor_options.clone(),
                     Handle::current(),
                     inner.stat_registry.as_ref(),
-                    move |err: &SlateDBError| {
+                    move |result: &Result<(), SlateDBError>| {
+                        let err = bg_task_result_into_err(result);
                         warn!("compactor thread exited with {:?}", err);
                         let mut state = cleanup_inner.state.write();
                         state.record_fatal_error(err.clone())
@@ -794,7 +795,8 @@ impl Db {
                     gc_options.clone(),
                     Handle::current(),
                     inner.stat_registry.clone(),
-                    move |err| {
+                    move |result| {
+                        let err = bg_task_result_into_err(result);
                         warn!("GC thread exited with {:?}", err);
                         let mut state = cleanup_inner.state.write();
                         state.record_fatal_error(err.clone())

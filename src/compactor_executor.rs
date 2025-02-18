@@ -22,9 +22,12 @@ use crate::tablestore::TableStore;
 use crate::compactor::stats::CompactionStats;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
+use crate::utils::spawn_bg_task;
 use tracing::error;
+use uuid::Uuid;
 
 pub(crate) struct CompactionJob {
+    pub(crate) id: Uuid,
     pub(crate) destination: u32,
     pub(crate) ssts: Vec<SsTableHandle>,
     pub(crate) sorted_runs: Vec<SortedRun>,
@@ -78,7 +81,7 @@ impl CompactionExecutor for TokioCompactionExecutor {
 }
 
 struct TokioCompactionTask {
-    task: JoinHandle<()>,
+    task: JoinHandle<Result<SortedRun, SlateDBError>>,
 }
 
 pub(crate) struct TokioCompactionExecutorInner {
@@ -192,17 +195,25 @@ impl TokioCompactionExecutorInner {
         let dst = compaction.destination;
         self.stats.running_compactions.inc();
         assert!(!tasks.contains_key(&dst));
+
+        let id = compaction.id;
+
         let this = self.clone();
-        let task = self.handle.spawn(async move {
-            let dst = compaction.destination;
-            let result = this.execute_compaction(compaction).await;
-            this.worker_tx
-                .send(CompactionFinished(result))
-                .expect("failed to send compaction finished msg");
-            let mut tasks = this.tasks.lock();
-            tasks.remove(&dst);
-            this.stats.running_compactions.dec();
-        });
+        let this_cleanup = self.clone();
+        let task = spawn_bg_task(
+            &self.handle,
+            move |result| {
+                let result = result.clone();
+                this_cleanup
+                    .worker_tx
+                    .send(CompactionFinished { id, result })
+                    .expect("failed to send compaction finished msg");
+                let mut tasks = this_cleanup.tasks.lock();
+                tasks.remove(&dst);
+                this_cleanup.stats.running_compactions.dec();
+            },
+            async move { this.execute_compaction(compaction).await },
+        );
         tasks.insert(dst, TokioCompactionTask { task });
     }
 
