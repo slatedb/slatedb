@@ -21,6 +21,21 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::spawn_bg_thread;
 
+pub trait CompactionScheduler {
+    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
+}
+
+enum CompactorMainMsg {
+    Shutdown,
+}
+
+pub(crate) enum WorkerToOrchestratorMsg {
+    CompactionFinished {
+        id: Uuid,
+        result: Result<SortedRun, SlateDBError>,
+    },
+}
+
 /// The compactor is responsible for taking groups of sorted runs (this doc uses the term
 /// sorted run to refer to both sorted runs and l0 ssts) and compacting them together to
 /// reduce space amplification (by removing old versions of rows that have been updated/deleted)
@@ -47,22 +62,6 @@ use crate::utils::spawn_bg_thread;
 /// The Executor does the actual work of compacting sorted runs by sort-merging them into a new
 /// sorted run. It implements the [`CompactionExecutor`] trait. Currently, the only implementation
 /// is the [`TokioCompactionExecutor`] which runs compaction on a local tokio runtime.
-
-pub trait CompactionScheduler {
-    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
-}
-
-enum CompactorMainMsg {
-    Shutdown,
-}
-
-pub(crate) enum WorkerToOrchestratorMsg {
-    CompactionFinished {
-        id: Uuid,
-        result: Result<SortedRun, SlateDBError>,
-    },
-}
-
 pub(crate) struct Compactor {
     main_tx: crossbeam_channel::Sender<CompactorMainMsg>,
     main_thread: Option<JoinHandle<Result<(), SlateDBError>>>,
