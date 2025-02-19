@@ -1,6 +1,7 @@
 use crate::error::SlateDBError;
 use crate::row_codec::{SstRowCodecV0, SstRowEntry};
 use crate::types::RowEntry;
+use crate::utils::clamp_allocated_size_bytes;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
@@ -39,6 +40,13 @@ impl Block {
         Self {
             data: bytes,
             offsets,
+        }
+    }
+
+    pub(crate) fn clamp_allocated_size(&self) -> Self {
+        Self {
+            data: clamp_allocated_size_bytes(&self.data),
+            offsets: self.offsets.clone(),
         }
     }
 
@@ -174,6 +182,8 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::block_iterator::BlockIterator;
+    use crate::test_utils::assert_iterator;
     use crate::{
         test_utils::{assert_debug_snapshot, decode_codec_entries},
         types::ValueDeletable,
@@ -295,5 +305,56 @@ mod tests {
         assert_eq!(compute_prefix(b"1", b"11"), 1);
         assert_eq!(compute_prefix(b"222", b"111"), 0);
         assert_eq!(compute_prefix(b"1234567", b"123456789"), 7);
+    }
+
+    fn row_entries(n: u64) -> Vec<RowEntry> {
+        (0..n)
+            .map(|i| {
+                RowEntry::new(
+                    Bytes::copy_from_slice(format!("key{}", i).as_bytes()),
+                    ValueDeletable::Value(Bytes::copy_from_slice(format!("value{}", i).as_bytes())),
+                    i,
+                    Some(100 + i as i64),
+                    Some(200 + i as i64),
+                )
+            })
+            .collect()
+    }
+
+    struct ClampAllocTestCase {
+        entries: Vec<RowEntry>,
+        extra_bytes: usize,
+    }
+
+    #[rstest]
+    #[case(ClampAllocTestCase {
+        entries: row_entries(3),
+        extra_bytes: 100
+    })]
+    #[case(ClampAllocTestCase {
+        entries: row_entries(3),
+        extra_bytes: 0
+    })]
+    #[tokio::test]
+    async fn test_should_clamp_allocated_size(#[case] case: ClampAllocTestCase) {
+        let mut builder = BlockBuilder::new(4096);
+        for e in case.entries.iter() {
+            assert!(builder.add(e.clone()));
+        }
+        let block = builder.build().unwrap();
+        let encoded = block.encode();
+        let mut extended_data = BytesMut::with_capacity(encoded.len() + case.extra_bytes);
+        extended_data.put(encoded.as_ref());
+        extended_data.put_bytes(0u8, case.extra_bytes);
+        let extended_data = extended_data.freeze();
+        let block_extended = Block::decode(extended_data.slice(..encoded.len()));
+
+        let block_clamped = block_extended.clamp_allocated_size();
+
+        assert_eq!(block.data, block_clamped.data);
+        assert_eq!(block.offsets, block_clamped.offsets);
+        assert_ne!(block.data.as_ptr(), block_clamped.data.as_ptr());
+        let mut iter = BlockIterator::new_ascending(block_clamped);
+        assert_iterator(&mut iter, case.entries).await;
     }
 }

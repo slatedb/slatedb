@@ -1,5 +1,6 @@
 use std::mem::size_of;
 
+use crate::utils::clamp_allocated_size_bytes;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use siphasher::sip::SipHasher13;
 
@@ -79,6 +80,13 @@ impl BloomFilter {
             }
         }
         true
+    }
+
+    pub(crate) fn clamp_allocated_size(&self) -> Self {
+        Self {
+            num_probes: self.num_probes,
+            buffer: clamp_allocated_size_bytes(&self.buffer),
+        }
     }
 
     /// Returns the size of the bloom filter in bytes.
@@ -273,5 +281,27 @@ mod tests {
             filter.buffer.len(),
             "Size should match buffer length"
         );
+    }
+
+    #[test]
+    fn test_should_clamp_allocated_bytes() {
+        let mut builder = BloomFilterBuilder::new(10);
+        for i in 0..100 {
+            builder.add_key(format!("{}", i).as_bytes());
+        }
+        let filter = builder.build();
+        let mut extended_buf = BytesMut::with_capacity(filter.size() + 100);
+        extended_buf.put(filter.buffer.as_ref());
+        extended_buf.put_bytes(0u8, 100);
+        let filter = BloomFilter {
+            buffer: extended_buf.freeze().slice(0..filter.buffer.len()),
+            ..filter
+        };
+
+        let clamped = filter.clamp_allocated_size();
+
+        assert_eq!(clamped.buffer, filter.buffer);
+        assert_eq!(clamped.num_probes, filter.num_probes);
+        assert!(clamped.buffer.as_ptr() != filter.buffer.as_ptr());
     }
 }

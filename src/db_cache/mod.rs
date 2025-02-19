@@ -219,6 +219,18 @@ impl CachedEntry {
             CachedItem::BloomFilter(bloom_filter) => bloom_filter.size(),
         }
     }
+
+    pub fn clamp_allocated_size(&self) -> Self {
+        match &self.item {
+            CachedItem::Block(block) => Self::with_block(Arc::new(block.clamp_allocated_size())),
+            CachedItem::SsTableIndex(sst_index) => {
+                Self::with_sst_index(Arc::new(sst_index.clamp_allocated_size()))
+            }
+            CachedItem::BloomFilter(bloom_filter) => {
+                Self::with_bloom_filter(Arc::new(bloom_filter.clamp_allocated_size()))
+            }
+        }
+    }
 }
 
 pub struct DbCacheWrapper {
@@ -256,7 +268,7 @@ impl DbCache for DbCacheWrapper {
     }
 
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
-        self.cache.insert(key, value).await
+        self.cache.insert(key, value.clamp_allocated_size()).await
     }
 
     #[allow(dead_code)]
@@ -320,6 +332,7 @@ pub mod stats {
 mod tests {
     use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, GetTarget};
     use crate::db_state::SsTableId;
+    use crate::flatbuffer_types::test_utils::assert_index_clamped;
     use crate::sst::SsTableFormat;
     use crate::stats::{ReadableStat, StatRegistry};
     use crate::test_utils::{build_test_sst, SstData};
@@ -396,6 +409,27 @@ mod tests {
             assert_eq!(0, cache.stats.index_miss.get());
             assert_eq!(i, cache.stats.index_hit.get());
         }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_should_clamp_entries_to_cache(
+        cache: DbCacheWrapper,
+        sst_format: SsTableFormat,
+        sst: SstData,
+    ) {
+        // given:
+        let index = Arc::new(sst_format.read_index_raw(&sst.info, &sst.data).unwrap());
+        let key = CachedKey::from((SST_ID, 12345u64));
+        cache
+            .insert(key.clone(), CachedEntry::with_sst_index(index.clone()))
+            .await;
+
+        // when:
+        let cached = cache.get(key, GetTarget::SsTableIndex).await.unwrap();
+
+        // then:
+        assert_index_clamped(index.as_ref(), cached.sst_index().unwrap().as_ref());
     }
 
     #[rstest]
