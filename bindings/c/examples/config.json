@@ -1,0 +1,6 @@
+{
+    "flush_interval": "1s",
+    "object_store_cache_options": {
+        "root_folder": "/tmp/slatedb-root"
+    }
+}
