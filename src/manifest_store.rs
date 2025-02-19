@@ -26,7 +26,7 @@ use uuid::Uuid;
 pub(crate) struct FenceableManifest {
     stored_manifest: StoredManifest,
     local_epoch: u64,
-    stored_epoch: Box<dyn Fn(&Manifest) -> u64 + Send>,
+    stored_epoch: fn(&Manifest) -> u64,
 }
 
 // This type wraps StoredManifest, and fences other conflicting writers by incrementing
@@ -34,25 +34,29 @@ pub(crate) struct FenceableManifest {
 // fenced and fails all operations with SlateDBError::Fenced.
 impl FenceableManifest {
     pub(crate) async fn init_writer(stored_manifest: StoredManifest) -> Result<Self, SlateDBError> {
-        Self::init(stored_manifest, Box::new(|m| m.writer_epoch), |m, e| {
-            m.writer_epoch = e
-        })
+        Self::init(
+            stored_manifest,
+            |m| m.writer_epoch,
+            |m, e| m.writer_epoch = e,
+        )
         .await
     }
 
     pub(crate) async fn init_compactor(
         stored_manifest: StoredManifest,
     ) -> Result<Self, SlateDBError> {
-        Self::init(stored_manifest, Box::new(|m| m.compactor_epoch), |m, e| {
-            m.compactor_epoch = e
-        })
+        Self::init(
+            stored_manifest,
+            |m| m.compactor_epoch,
+            |m, e| m.compactor_epoch = e,
+        )
         .await
     }
 
     async fn init(
         mut stored_manifest: StoredManifest,
-        stored_epoch: Box<dyn Fn(&Manifest) -> u64 + Send>,
-        set_epoch: impl Fn(&mut Manifest, u64),
+        stored_epoch: fn(&Manifest) -> u64,
+        set_epoch: fn(&mut Manifest, u64),
     ) -> Result<Self, SlateDBError> {
         let mut manifest = stored_manifest.manifest.clone();
         let local_epoch = stored_epoch(&manifest) + 1;
@@ -96,18 +100,59 @@ impl FenceableManifest {
         checkpoint_id: Option<Uuid>,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
+        let checkpoint_id = checkpoint_id.unwrap_or(Uuid::new_v4());
+        self.maybe_apply_db_state_update(|stored_manifest| {
+            stored_manifest
+                .apply_new_checkpoint_to_db_state(checkpoint_id, options)
+                .map(Some)
+        })
+        .await?;
+        let checkpoint = self
+            .db_state()?
+            .find_checkpoint(&checkpoint_id)
+            .expect("update applied but checkpoint not found")
+            .clone();
+        Ok(checkpoint)
+    }
+
+    pub(crate) async fn maybe_apply_db_state_update<F>(
+        &mut self,
+        mutator: F,
+    ) -> Result<(), SlateDBError>
+    where
+        F: Fn(&StoredManifest) -> Result<Option<CoreDbState>, SlateDBError>,
+    {
         self.stored_manifest
-            .write_checkpoint(checkpoint_id, options)
+            .maybe_apply_db_state_update(|sm| {
+                Self::check_epoch_against_manifest(
+                    self.local_epoch,
+                    self.stored_epoch,
+                    &sm.manifest,
+                )?;
+                mutator(sm)
+            })
             .await
     }
 
-    #[allow(clippy::panic)]
     fn check_epoch(&self) -> Result<(), SlateDBError> {
-        let stored_epoch = (self.stored_epoch)(&self.stored_manifest.manifest);
-        if self.local_epoch < stored_epoch {
+        Self::check_epoch_against_manifest(
+            self.local_epoch,
+            self.stored_epoch,
+            &self.stored_manifest.manifest,
+        )
+    }
+
+    #[allow(clippy::panic)]
+    fn check_epoch_against_manifest(
+        local_epoch: u64,
+        stored_epoch: fn(&Manifest) -> u64,
+        manifest: &Manifest,
+    ) -> Result<(), SlateDBError> {
+        let stored_epoch = stored_epoch(manifest);
+        if local_epoch < stored_epoch {
             return Err(SlateDBError::Fenced);
         }
-        if self.local_epoch > stored_epoch {
+        if local_epoch > stored_epoch {
             panic!("the stored epoch is lower than the local epoch")
         }
         Ok(())
@@ -205,6 +250,19 @@ impl StoredManifest {
         self.id + 1
     }
 
+    /// Creates a new checkpoint from the latest manifest state, and
+    /// applies it to db_state
+    fn apply_new_checkpoint_to_db_state(
+        &self,
+        checkpoint_id: Uuid,
+        options: &CheckpointOptions,
+    ) -> Result<CoreDbState, SlateDBError> {
+        let checkpoint = self.new_checkpoint(checkpoint_id, options)?;
+        let mut updated_db_state = self.db_state().clone();
+        updated_db_state.checkpoints.push(checkpoint);
+        Ok(updated_db_state)
+    }
+
     /// Create a new checkpoint from the latest manifest state. This only creates
     /// the checkpoint struct, but does not persist it in the manifest.
     pub(crate) fn new_checkpoint(
@@ -244,10 +302,9 @@ impl StoredManifest {
     ) -> Result<Checkpoint, SlateDBError> {
         let checkpoint_id = checkpoint_id.unwrap_or(Uuid::new_v4());
         self.maybe_apply_db_state_update(|stored_manifest| {
-            let checkpoint = stored_manifest.new_checkpoint(checkpoint_id, options)?;
-            let mut updated_db_state = stored_manifest.db_state().clone();
-            updated_db_state.checkpoints.push(checkpoint);
-            Ok(Some(updated_db_state))
+            stored_manifest
+                .apply_new_checkpoint_to_db_state(checkpoint_id, options)
+                .map(Some)
         })
         .await?;
         let checkpoint = self
@@ -679,6 +736,53 @@ mod tests {
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
         let refreshed = compactor2.refresh().await.unwrap();
         assert_eq!(refreshed.next_wal_sst_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_should_fail_write_checkpoint_when_fenced() {
+        let ms = new_memory_manifest_store();
+        let sm = StoredManifest::create_new_db(ms.clone(), CoreDbState::new())
+            .await
+            .unwrap();
+        let mut compactor1 = FenceableManifest::init_compactor(sm).await.unwrap();
+        let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
+        let mut compactor2 = FenceableManifest::init_compactor(sm2).await.unwrap();
+
+        let result = compactor1
+            .write_checkpoint(None, &CheckpointOptions::default())
+            .await;
+
+        assert!(matches!(result, Err(error::SlateDBError::Fenced)));
+        assert_state_not_updated(&mut compactor2).await;
+    }
+
+    #[tokio::test]
+    async fn test_should_fail_state_update_when_fenced() {
+        let ms = new_memory_manifest_store();
+        let sm = StoredManifest::create_new_db(ms.clone(), CoreDbState::new())
+            .await
+            .unwrap();
+        let mut fm1 = FenceableManifest::init_writer(sm).await.unwrap();
+        let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
+        let mut fm2 = FenceableManifest::init_writer(sm2).await.unwrap();
+
+        let result = fm1
+            .maybe_apply_db_state_update(|sm| {
+                let mut dbstate = sm.manifest.core.clone();
+                dbstate.last_l0_seq += 1;
+                Ok(Some(dbstate))
+            })
+            .await;
+
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
+        assert_state_not_updated(&mut fm2).await;
+    }
+
+    async fn assert_state_not_updated(fm: &mut FenceableManifest) {
+        let original_db_state = fm.db_state().unwrap().clone();
+        fm.refresh().await.unwrap();
+        let refreshed_db_state = fm.db_state().unwrap().clone();
+        assert_eq!(refreshed_db_state, original_db_state);
     }
 
     #[tokio::test]

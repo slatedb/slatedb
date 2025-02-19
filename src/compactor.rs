@@ -281,6 +281,8 @@ impl CompactorEventHandler {
                 ..CheckpointOptions::default()
             },
         ))?;
+        // make sure to merge it before applying the local updates (TODO: make this safer
+        // by tracking the expected version id in core db state)
         self.state.merge_db_state(self.manifest.db_state()?);
         let core = self.state.db_state().clone();
         self.tokio_handle
