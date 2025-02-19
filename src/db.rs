@@ -42,6 +42,7 @@ use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
+use crate::db::SstFilterResult::{FilterNegative, FilterPositive, RangeNegative, RangePositive};
 use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::db_stats::DbStats;
@@ -61,7 +62,6 @@ use crate::tablestore::TableStore;
 use crate::types::ValueDeletable;
 use crate::utils::MonotonicClock;
 use tracing::{info, warn};
-use crate::db::SstFilterResult::{FilterNegative, FilterPositive, RangeNegative, RangePositive};
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -331,7 +331,7 @@ impl DbInner {
             } else {
                 self.db_stats.filter_negatives.inc();
                 Ok(FilterNegative)
-            }
+            };
         }
         Ok(RangePositive)
     }
@@ -583,7 +583,7 @@ impl SstFilterResult {
     fn might_contain_key(&self) -> bool {
         match self {
             RangeNegative | FilterNegative => false,
-            RangePositive | FilterPositive => true
+            RangePositive | FilterPositive => true,
         }
     }
 }

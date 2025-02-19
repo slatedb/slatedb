@@ -12,7 +12,6 @@ pub const FILTER_FALSE_POSITIVES: &str = db_stat_name!("filter_false_positives")
 pub const FILTER_POSITIVES: &str = db_stat_name!("filter_positives");
 pub const FILTER_NEGATIVES: &str = db_stat_name!("filter_negatives");
 
-
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub(crate) struct DbStats {
@@ -30,7 +29,10 @@ impl DbStats {
             filter_positives: Arc::new(Counter::default()),
             filter_negatives: Arc::new(Counter::default()),
         };
-        registry.register(IMMUTABLE_MEMTABLE_FLUSHES, stats.immutable_memtable_flushes.clone());
+        registry.register(
+            IMMUTABLE_MEMTABLE_FLUSHES,
+            stats.immutable_memtable_flushes.clone(),
+        );
         registry.register(FILTER_FALSE_POSITIVES, stats.filter_false_positives.clone());
         registry.register(FILTER_POSITIVES, stats.filter_positives.clone());
         registry.register(FILTER_NEGATIVES, stats.filter_negatives.clone());
