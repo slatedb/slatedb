@@ -396,7 +396,7 @@ pub(crate) struct ManifestFileMetadata {
     pub(crate) location: Path,
     pub(crate) last_modified: chrono::DateTime<Utc>,
     #[allow(dead_code)]
-    pub(crate) size: usize,
+    pub(crate) size: u32,
 }
 
 fn serialize_path<S>(path: &Path, serializer: S) -> Result<S::Ok, S::Error>
@@ -488,7 +488,7 @@ impl ManifestStore {
                         id,
                         location: file.location,
                         last_modified: file.last_modified,
-                        size: file.size,
+                        size: file.size as u32,
                     });
                 }
                 Err(_) => warn!("Unknown file in manifest directory: {:?}", file.location),
