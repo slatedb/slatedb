@@ -58,9 +58,9 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::{bg_task_result_into_err, filter_expired, unwrap_result, MonotonicClock};
+use crate::utils::{bg_task_result_into_err, filter_expired, get_now_for_ttl, unwrap_result, MonotonicClock};
 use tracing::{info, warn};
-use crate::ttl_filter_iterator::TtlFilterIterator;
+use crate::filter_iterator::FilterIterator;
 use crate::types::RowEntry;
 
 pub(crate) struct DbInner {
@@ -114,13 +114,14 @@ impl DbInner {
         self.check_error()?;
         let key = key.as_ref();
         let snapshot = self.state.read().snapshot();
+        let ttl_now = get_now_for_ttl(self.mono_clock.clone(), options.read_level).await?;
 
         if matches!(options.read_level, Uncommitted) {
             let maybe_val = std::iter::once(snapshot.wal)
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
             if let Some(entry) = maybe_val {
-                return self.unwrap_value(filter_expired(entry, self.mono_clock.clone(), options.read_level)?);
+                return self.unwrap_value(filter_expired(entry, ttl_now));
             }
         }
 
@@ -128,7 +129,7 @@ impl DbInner {
             .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
         if let Some(entry) = maybe_val {
-            return self.unwrap_value(filter_expired(entry, self.mono_clock.clone(), options.read_level)?);
+            return self.unwrap_value(filter_expired(entry, ttl_now));
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -149,7 +150,7 @@ impl DbInner {
                         .await?;
 
                 let mut ttl_iter =
-                    TtlFilterIterator::new(sst_iter, self.mono_clock.clone(), options.read_level).await?;
+                    FilterIterator::wrap_ttl_filter_iterator(sst_iter, ttl_now);
                 if let Some(entry) = ttl_iter.next_entry().await? {
                     if entry.key == key {
                         return unwrap_result(entry.value)
@@ -164,7 +165,7 @@ impl DbInner {
                     SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options).await?;
 
                 let mut ttl_iter =
-                    TtlFilterIterator::new(iter, self.mono_clock.clone(), options.read_level).await?;
+                    FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
                 if let Some(entry) = ttl_iter.next_entry().await? {
                     if entry.key == key {
                         return unwrap_result(entry.value)

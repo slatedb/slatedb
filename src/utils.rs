@@ -149,57 +149,60 @@ pub(crate) fn unwrap_result(
     }
 }
 
-pub(crate) fn filter_expired(
-    entry: RowEntry,
+pub(crate) async fn get_now_for_ttl(
     mono_clock: Arc<MonotonicClock>,
     read_level: ReadLevel
-) -> Result<Option<RowEntry>, SlateDBError> {
-    if is_not_expired(&entry, mono_clock, read_level)? {
-        Ok(Some(entry))
-    } else {
-        Ok(None)
+) -> Result<i64, SlateDBError> {
+    /*
+      Note: the semantics of filtering expired records on read differ slightly depending on
+      the configured ReadLevel. For Uncommitted we can just use the actual clock's "now"
+      as this corresponds to the current time seen by uncommitted writes but is not persisted
+      and only enforces monotonicity via the local in-memory MonotonicClock. This means it's
+      possible for the mono_clock.now() to go "backwards" following a crash and recovery, which
+      could result in records that were filtered out before the crash coming back to life and being
+      returned after the crash.
+      If the read level is instead set to Committed, we only use the last_tick of the monotonic
+      clock to filter out expired records, since this corresponds to the highest time of any
+      persisted batch and is thus recoverable following a crash. Since the last tick is the
+      last persisted time we are guaranteed monotonicity of the #get_last_tick function and
+      thus will not see this "time travel" phenomenon -- with Committed, once a record is
+      filtered out due to ttl expiry, it is guaranteed not to be seen again by future Committed
+      reads.
+     */
+    match read_level {
+        Committed => {
+            Ok(mono_clock.get_max_durable_tick())
+        }
+        Uncommitted => {
+            mono_clock.now().await
+        }
     }
 }
 
+pub(crate) fn filter_expired(
+    entry: RowEntry,
+    now: i64,
+) -> Option<RowEntry> {
+    if is_not_expired(&entry, now) {
+        Some(entry)
+    } else {
+        None
+    }
+}
+
+
 pub(crate) fn is_not_expired(
     entry: &RowEntry,
-    mono_clock: Arc<MonotonicClock>,
-    read_level: ReadLevel
-) -> Result<bool, SlateDBError> {
+    now: i64,
+) -> bool {
     if let Some(expire_ts) = entry.expire_ts {
-        /*
-          Note: the semantics of filtering expired records on read differ slightly depending on
-          the configured ReadLevel. For Uncommitted we can just use the actual clock's "now"
-          as this corresponds to the current time seen by uncommitted writes but is not persisted
-          and only enforces monotonicity via the local in-memory MonotonicClock. This means it's
-          possible for the mono_clock.now() to go "backwards" following a crash and recovery, which
-          could result in records that were filtered out before the crash coming back to life and being
-          returned after the crash.
-          If the read level is instead set to Committed, we only use the last_tick of the monotonic
-          clock to filter out expired records, since this corresponds to the highest time of any
-          persisted batch and is thus recoverable following a crash. Since the last tick is the
-          last persisted time we are guaranteed monotonicity of the #get_last_tick function and
-          thus will not see this "time travel" phenomenon -- with Committed, once a record is
-          filtered out due to ttl expiry, it is guaranteed not to be seen again by future Committed
-          reads.
-         */
-        let effective_now;
-        match read_level {
-            Committed => {
-                effective_now = mono_clock.get_last_durable_tick()
-            }
-            Uncommitted => {
-                effective_now = mono_clock.now().await?
-            }
-        }
-
-        if expire_ts <= effective_now {
-            Ok(false)
+        if expire_ts <= now {
+            false
         } else {
-            Ok(true)
+            true
         }
     } else {
-        Ok(true)
+        true
     }
 }
 
@@ -214,7 +217,7 @@ pub(crate) fn bg_task_result_into_err(result: &Result<(), SlateDBError>) -> Slat
 /// from the underlying implementation are monotonically increasing
 pub(crate) struct MonotonicClock {
     pub(crate) last_tick: AtomicI64,
-    pub(crate) last_durable_tick: AtomicI64,
+    pub(crate) max_durable_tick: AtomicI64,
     delegate: Arc<dyn Clock + Send + Sync>,
 }
 
@@ -223,7 +226,7 @@ impl MonotonicClock {
         Self {
             delegate,
             last_tick: AtomicI64::new(init_tick),
-            last_durable_tick: AtomicI64::new(init_tick),
+            max_durable_tick: AtomicI64::new(init_tick),
         }
     }
 
@@ -231,14 +234,12 @@ impl MonotonicClock {
         self.enforce_monotonic(tick)
     }
 
-    pub(crate) fn set_last_durable_tick(&self, tick: i64) {
-        if tick > self.last_durable_tick.load(SeqCst) {
-            self.last_durable_tick.store(tick, SeqCst);
-        }
+    pub(crate) fn fetch_max_durable_tick(&self, tick: i64) -> i64 {
+        self.max_durable_tick.fetch_max(tick, SeqCst)
     }
 
-    pub(crate) fn get_last_durable_tick(&self) -> i64 {
-        self.last_durable_tick.load(SeqCst)
+    pub(crate) fn get_max_durable_tick(&self) -> i64 {
+        self.max_durable_tick.load(SeqCst)
     }
 
     pub(crate) async fn now(&self) -> Result<i64, SlateDBError> {
