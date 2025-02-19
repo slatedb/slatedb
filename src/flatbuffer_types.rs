@@ -28,6 +28,7 @@ use crate::flatbuffer_types::manifest_generated::{
     SortedRunArgs, Uuid, UuidArgs,
 };
 use crate::manifest::{Manifest, ManifestCodec, ParentDb};
+use crate::utils::clamp_allocated_size_bytes;
 
 /// A wrapper around a `Bytes` buffer containing a FlatBuffer-encoded `SsTableIndex`.
 pub(crate) struct SsTableIndexOwned {
@@ -43,6 +44,11 @@ impl SsTableIndexOwned {
     pub fn borrow(&self) -> SsTableIndex<'_> {
         let raw = &self.data;
         unsafe { flatbuffers::root_unchecked::<SsTableIndex>(raw) }
+    }
+
+    pub(crate) fn clamp_allocated_size(&self) -> Self {
+        Self::new(clamp_allocated_size_bytes(&self.data))
+            .expect("clamped buffer could not be decoded to index")
     }
 
     /// Returns the size of the SSTable index in bytes.
@@ -410,12 +416,26 @@ impl From<CompressionFormat> for Option<CompressionCodec> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_utils {
+    use crate::flatbuffer_types::SsTableIndexOwned;
+
+    pub(crate) fn assert_index_clamped(index1: &SsTableIndexOwned, index2: &SsTableIndexOwned) {
+        assert_eq!(index1.data, index2.data);
+        assert_ne!(index1.data.as_ptr(), index2.data.as_ptr());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use crate::checkpoint;
     use crate::db_state::CoreDbState;
-    use crate::flatbuffer_types::FlatBufferManifestCodec;
+    use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
     use crate::manifest::{Manifest, ManifestCodec, ParentDb};
     use std::time::{Duration, SystemTime};
+
+    use crate::flatbuffer_types::test_utils::assert_index_clamped;
+    use crate::sst::SsTableFormat;
+    use crate::test_utils::build_test_sst;
     use uuid::Uuid;
 
     #[test]
@@ -463,5 +483,19 @@ mod tests {
 
         // then:
         assert_eq!(manifest, decoded);
+    }
+
+    #[test]
+    fn test_should_clamp_index_alloc() {
+        let format = SsTableFormat::default();
+        let sst = build_test_sst(&format, 3);
+        let start_off = sst.info.index_offset as usize;
+        let end_off = sst.info.index_offset as usize + sst.info.index_len as usize;
+        let index_bytes = sst.data.slice(start_off..end_off);
+        let index = SsTableIndexOwned::new(index_bytes).unwrap();
+
+        let clamped = index.clamp_allocated_size();
+
+        assert_index_clamped(&clamped, &index);
     }
 }
