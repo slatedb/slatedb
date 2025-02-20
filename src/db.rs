@@ -165,7 +165,7 @@ impl DbInner {
                     }
                 }
                 if matches!(filter_result, FilterPositive) {
-                    self.db_stats.filter_false_positives.inc();
+                    self.db_stats.sst_filter_false_positives.inc();
                 }
             }
         }
@@ -182,7 +182,7 @@ impl DbInner {
                     }
                 }
                 if matches!(filter_result, FilterPositive) {
-                    self.db_stats.filter_false_positives.inc();
+                    self.db_stats.sst_filter_false_positives.inc();
                 }
             }
         }
@@ -297,10 +297,10 @@ impl DbInner {
         }
         if let Some(filter) = self.table_store.read_filter(sst).await? {
             return if filter.might_contain(key_hash) {
-                self.db_stats.filter_positives.inc();
+                self.db_stats.sst_filter_positives.inc();
                 Ok(FilterPositive)
             } else {
-                self.db_stats.filter_negatives.inc();
+                self.db_stats.sst_filter_negatives.inc();
                 Ok(FilterNegative)
             };
         }
@@ -326,10 +326,10 @@ impl DbInner {
         };
         if let Some(filter) = self.table_store.read_filter(sst).await? {
             return if filter.might_contain(key_hash) {
-                self.db_stats.filter_positives.inc();
+                self.db_stats.sst_filter_positives.inc();
                 Ok(FilterPositive)
             } else {
-                self.db_stats.filter_negatives.inc();
+                self.db_stats.sst_filter_negatives.inc();
                 Ok(FilterNegative)
             };
         }
