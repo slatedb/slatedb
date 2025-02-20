@@ -1,7 +1,9 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Debug;
+use std::ops::RangeBounds;
 
 use crate::bytes_range::BytesRange;
-use crate::db_state::{CoreDbState, SsTableId};
+use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use bytes::Bytes;
 use serde::Serialize;
@@ -78,71 +80,165 @@ impl Manifest {
     pub(crate) fn projected(source_manifest: &Manifest, range: BytesRange) -> Manifest {
         let mut projected = source_manifest.clone();
 
-        let mut projected_ssts = HashMap::new();
+        // Intersect any existing projections with the new range
+        let mut existing_projections = HashMap::new();
         for source_projection in &source_manifest.projections {
             let intersection = source_projection.visible_range.intersect(&range);
             for sst_id in &source_projection.sst_ids {
-                projected_ssts.insert(*sst_id, intersection.clone());
+                let sst_ranges = existing_projections.entry(*sst_id).or_insert(vec![]);
+                if let Some(intersection) = &intersection {
+                    sst_ranges.push(intersection.clone());
+                }
             }
         }
 
         let mut new_projections = BTreeMap::new();
-        let mut l0_filtered = VecDeque::new();
-        for (idx, current_handle) in projected.core.l0.iter().enumerate() {
-            let range_for_handle = match projected_ssts.get(&current_handle.id) {
-                Some(existing_projection) => match existing_projection {
-                    Some(range) => range.clone(),
-                    None => {
-                        // We need to filter out this SST because it has been projected out.
-                        continue;
-                    }
-                },
-                None => range.clone(),
-            };
-
-            let next_handle = projected.core.l0.get(idx + 1);
-            if current_handle.has_nonempty_intersection(next_handle, &range_for_handle) {
-                // We need to keep this SST because it has a non-empty intersection with the new and previous projections.
-                l0_filtered.push_back(current_handle.clone());
-                new_projections
-                    .entry(range_for_handle.clone())
-                    .or_insert(vec![])
-                    .push(current_handle.id);
-            }
-        }
-
-        let mut merged_projections = vec![];
-        let mut previous: Option<BytesRange> = None;
-        let mut sst_ids: Vec<SsTableId> = vec![];
-        for (current_range, current_sst_ids) in new_projections.iter() {
-            if let Some(previous_range) = previous {
-                if let Some(merged_range) = previous_range.union(current_range) {
-                    previous = Some(merged_range);
-                    sst_ids.extend(current_sst_ids);
-                } else {
-                    merged_projections.push(Projection {
-                        visible_range: previous_range,
-                        sst_ids: sst_ids.clone(),
-                    });
-                    previous = None;
-                    sst_ids.clear();
-                }
-            } else {
-                previous = Some(current_range.clone());
-                sst_ids.extend(current_sst_ids);
-            }
-        }
-        if let Some(previous_range) = previous {
-            merged_projections.push(Projection {
-                visible_range: previous_range,
-                sst_ids: sst_ids.clone(),
+        let l0_filtered = Self::filter_sst_handles(
+            projected.core.l0,
+            &range,
+            &existing_projections,
+            &mut new_projections,
+        );
+        let mut sorter_runs_filtered = vec![];
+        for sorter_run in &projected.core.compacted {
+            sorter_runs_filtered.push(SortedRun {
+                id: sorter_run.id,
+                ssts: Self::filter_sst_handles(
+                    sorter_run.ssts.clone(),
+                    &range,
+                    &existing_projections,
+                    &mut new_projections,
+                ),
             });
         }
 
-        // merge overlapping ranges
-        projected.projections = merged_projections;
-        projected.core.l0 = l0_filtered;
+        projected.projections = Self::compact_projections(&new_projections);
+        projected.core.l0 = l0_filtered.into();
+        projected.core.compacted = sorter_runs_filtered;
         projected
+    }
+
+    fn filter_sst_handles<T>(
+        handles: T,
+        range: &BytesRange,
+        existing_projections: &HashMap<SsTableId, Vec<BytesRange>>,
+        new_projections: &mut BTreeMap<BytesRange, Vec<SsTableId>>,
+    ) -> Vec<SsTableHandle>
+    where
+        T: IntoIterator<Item = SsTableHandle>,
+    {
+        let mut iter = handles.into_iter().peekable();
+        let mut filtered_handles = vec![];
+
+        while let Some(current_handle) = iter.next() {
+            // Calculate all valid distinct ranges for this SST
+            let range_candidates = match existing_projections.get(&current_handle.id) {
+                Some(existing_projection) => {
+                    if existing_projection.is_empty() {
+                        // We need to filter out this SST because it doesn't fall into any projected range.
+                        continue;
+                    } else {
+                        existing_projection.clone()
+                    }
+                }
+                None => vec![range.clone()],
+            };
+
+            let next_handle = iter.peek();
+            let mut kept = false;
+            // Check if SST interesects with any of the cadidates. If yes, keep the SST and add the intersection as a new projection.
+            for range_for_handle in &range_candidates {
+                if current_handle.has_nonempty_intersection(next_handle, &range_for_handle) {
+                    if !kept {
+                        filtered_handles.push(current_handle.clone());
+                        kept = true;
+                    }
+                    new_projections
+                        .entry(range_for_handle.clone())
+                        .or_insert(vec![])
+                        .push(current_handle.id);
+                }
+            }
+        }
+        filtered_handles
+    }
+
+    /// Compacts a set of projections into a minimal set of non-overlapping projections.
+    ///
+    /// Given a set of projections, this method will merge any overlapping projections into a single
+    /// projection. The result will be a set of non-overlapping projections covering the same range as
+    /// the input projections.
+    ///
+    /// For example, given the following projections:
+    ///
+    /// | Range          | SST IDs |
+    /// | -------------- | ------- |
+    /// | [0, 10)        | [A, B]  |
+    /// | [10, 15)       | [B, C]  |
+    /// | [12, 20)       | [C, D]  |
+    /// | [30, 40)       | [D, F]  |
+    ///
+    /// The resulting compacted projections will be:
+    ///
+    /// | Range          | SST IDs      |
+    /// | -------------- | ------------ |
+    /// | [0, 20)        | [A, B, C, D] |
+    /// | [30, 40)       | [D, F]       |
+    ///
+    /// Note that the order of the SST IDs in the resulting projections does not matter.
+    ///
+    /// This method is idempotent, meaning that calling it multiple times on the same input will
+    /// result in the same output.
+    pub(crate) fn compact_projections(
+        projections: &BTreeMap<BytesRange, Vec<SsTableId>>,
+    ) -> Vec<Projection> {
+        let mut final_projections = vec![];
+
+        let mut candidate_range: Option<BytesRange> = None;
+        let mut candidate_ssts_unordered = HashSet::new();
+        let mut candidate_ssts_ordered: Vec<SsTableId> = vec![];
+
+        macro_rules! reset_candidate {
+            ($range: expr, $sst_ids: expr) => {
+                candidate_ssts_unordered.clear();
+                candidate_ssts_ordered.clear();
+                candidate_range = Some($range);
+                candidate_ssts_unordered.extend($sst_ids);
+                candidate_ssts_ordered.extend($sst_ids);
+            };
+        }
+
+        for (current_range, current_sst_ids) in projections.iter() {
+            if let Some(range) = candidate_range {
+                if let Some(compacted_range) = range.union(current_range) {
+                    candidate_range = Some(compacted_range);
+                    for sst_id in current_sst_ids {
+                        if candidate_ssts_unordered.insert(*sst_id) {
+                            candidate_ssts_ordered.push(*sst_id);
+                        }
+                    }
+                } else {
+                    // The current range does not overlap with the candidate range, so we promote
+                    // the candidate to the final projections and create a new candidate.
+                    final_projections.push(Projection {
+                        visible_range: range,
+                        sst_ids: candidate_ssts_ordered.clone(),
+                    });
+                    reset_candidate!(current_range.clone(), current_sst_ids);
+                }
+            } else {
+                // The current range is the first range, so we set it as the candidate.
+                reset_candidate!(current_range.clone(), current_sst_ids);
+            }
+        }
+        // Promote the final candidate, if any.
+        if let Some(range) = candidate_range {
+            final_projections.push(Projection {
+                visible_range: range,
+                sst_ids: candidate_ssts_ordered.clone(),
+            });
+        }
+        final_projections
     }
 
     pub(crate) fn merged(_manifests: Vec<Manifest>) -> Manifest {
@@ -158,10 +254,27 @@ pub(crate) struct ExternalDb {
     pub(crate) sst_ids: Vec<SsTableId>,
 }
 
-#[derive(Clone, Serialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, PartialEq)]
 pub(crate) struct Projection {
     pub(crate) visible_range: BytesRange,
     pub(crate) sst_ids: Vec<SsTableId>,
+}
+
+impl Debug for Projection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Projection")
+            .field("start_bound", &self.visible_range.start_bound())
+            .field("end_bound", &self.visible_range.end_bound())
+            .field(
+                "sst_ids",
+                &self
+                    .sst_ids
+                    .iter()
+                    .map(|id| id.unwrap_compacted_id().to_string())
+                    .collect::<Vec<String>>(),
+            )
+            .finish()
+    }
 }
 
 pub(crate) trait ManifestCodec: Send + Sync {
@@ -182,7 +295,7 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
 
     use crate::config::CheckpointOptions;
-    use crate::db_state::{CoreDbState, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::Projection;
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -274,107 +387,198 @@ mod tests {
         first_key: &'static str,
     }
 
+    impl SstEntry {
+        fn new(sst_alias: &'static str, first_key: &'static str) -> Self {
+            Self {
+                sst_alias,
+                first_key,
+            }
+        }
+    }
+
+    struct SimpleManifest {
+        projections: Vec<ProjectionEntry>,
+        l0: Vec<SstEntry>,
+        sorted_runs: Vec<Vec<SstEntry>>,
+    }
+
     struct ProjectionEntry {
         range: Range<&'static str>,
         sst_aliases: Vec<&'static str>,
     }
 
     struct ProjectionTestCase {
-        existing_l0: Vec<SstEntry>,
-        existing_projections: Vec<ProjectionEntry>,
-        new_range: Range<&'static str>,
-        new_l0: Vec<SstEntry>,
-        new_projections: Vec<ProjectionEntry>,
+        visible_range: Range<&'static str>,
+        existing_manifest: SimpleManifest,
+        expected_manifest: SimpleManifest,
     }
 
     #[rstest]
     #[case(ProjectionTestCase {
-        existing_l0: vec![
-            SstEntry { sst_alias: "first", first_key: "a" },
-            SstEntry { sst_alias: "second", first_key: "f" },
-            SstEntry { sst_alias: "third", first_key: "m" },
-        ],
-        existing_projections: vec![
-            ProjectionEntry { range: "m".."p", sst_aliases: vec!["third"] },
-        ],
-        new_range: "h".."o",
-        new_l0: vec![
-            SstEntry { sst_alias: "second", first_key: "f" },
-            SstEntry { sst_alias: "third", first_key: "m" },
-        ],
-        new_projections: vec![
-            ProjectionEntry { range: "h".."o", sst_aliases: vec!["second", "third"] },
-        ],
+        visible_range: "h".."o",
+        existing_manifest: SimpleManifest {
+            projections: vec![],
+            l0: vec![
+                SstEntry::new("first", "a"),
+                SstEntry::new("second", "f"),
+                SstEntry::new("third", "m"),
+            ],
+            sorted_runs: vec![
+                vec![
+                    SstEntry::new("sr0_first", "a"),
+                ],
+                vec![
+                    SstEntry::new("sr1_first", "a"),
+                    SstEntry::new("sr1_second", "f"),
+                    SstEntry::new("sr1_third", "m"),
+                ],
+            ],
+        },
+        expected_manifest: SimpleManifest {
+            projections: vec![
+                ProjectionEntry { range: "h".."o", sst_aliases: vec!["second", "third", "sr0_first", "sr1_second", "sr1_third"] },
+            ],
+            l0: vec![
+                SstEntry::new("second", "f"),
+                SstEntry::new("third", "m"),
+            ],
+            sorted_runs: vec![
+                vec![
+                    // We can't filter this one out, because we don't know the
+                    // end key, so it might still fall within the range
+                    SstEntry::new("sr0_first", "a"),
+                ],
+                vec![
+                    SstEntry::new("sr1_second", "f"),
+                    SstEntry::new("sr1_third", "m"),
+                ],
+            ],
+        },
     })]
     #[case(ProjectionTestCase {
-        existing_l0: vec![
-            SstEntry { sst_alias: "foo", first_key: "a" },
-            SstEntry { sst_alias: "bar", first_key: "m" },
-            SstEntry { sst_alias: "baz", first_key: "p" },
-        ],
-        existing_projections: vec![],
-        new_range: "m".."p",
-        new_l0: vec![
-            SstEntry { sst_alias: "bar", first_key: "m" },
-        ],
-        new_projections: vec![
-            ProjectionEntry { range: "m".."p", sst_aliases: vec!["bar"]},
-        ],
+        visible_range: "m".."p",
+        existing_manifest: SimpleManifest {
+            projections: vec![],
+            l0: vec![
+                SstEntry::new("foo", "a"),
+                SstEntry::new("bar", "m"),
+                SstEntry::new("baz", "p"),
+            ],
+            sorted_runs: vec![],
+        },
+        expected_manifest: SimpleManifest {
+            projections: vec![
+                ProjectionEntry { range: "m".."p", sst_aliases: vec!["bar"]}
+            ],
+            l0: vec![
+                SstEntry::new("bar", "m"),
+            ],
+            sorted_runs: vec![],
+        },
     })]
     #[case::distinct_ranges(ProjectionTestCase {
-        existing_l0: vec![
-            SstEntry { sst_alias: "foo", first_key: "a" },
-            SstEntry { sst_alias: "bar", first_key: "k" },
-        ],
-        existing_projections: vec![
-            ProjectionEntry { range: "a".."d", sst_aliases: vec!["foo"]},
-            ProjectionEntry { range: "f".."z", sst_aliases: vec!["foo", "bar"]},
-        ],
-        new_range: "c".."p",
-        new_l0: vec![
-            SstEntry { sst_alias: "foo", first_key: "a" },
-            SstEntry { sst_alias: "bar", first_key: "k" },
-        ],
-        new_projections: vec![
-            ProjectionEntry { range: "c".."d", sst_aliases: vec!["foo"]},
-            ProjectionEntry { range: "f".."p", sst_aliases: vec!["foo", "bar"]},
-        ],
+        visible_range: "c".."p",
+        existing_manifest: SimpleManifest {
+            projections: vec![
+                ProjectionEntry { range: "a".."d", sst_aliases: vec!["foo"]},
+                ProjectionEntry { range: "f".."z", sst_aliases: vec!["foo", "bar"]},
+            ],
+            l0: vec![
+                SstEntry::new("foo", "a"),
+                SstEntry::new("bar", "k"),
+            ],
+            sorted_runs: vec![],
+        },
+        expected_manifest: SimpleManifest {
+            projections: vec![
+                ProjectionEntry { range: "c".."d", sst_aliases: vec!["foo"]},
+                ProjectionEntry { range: "f".."p", sst_aliases: vec!["foo", "bar"]},
+            ],
+            l0: vec![
+                SstEntry::new("foo", "a"),
+                SstEntry::new("bar", "k"),
+            ],
+            sorted_runs: vec![],
+        },
+    })]
+    #[case::adjacent_ranges(ProjectionTestCase {
+        visible_range: "d".."n",
+        existing_manifest: SimpleManifest {
+            projections: vec![
+                ProjectionEntry { range: "a".."g", sst_aliases: vec!["foo"]},
+                ProjectionEntry { range: "g".."p", sst_aliases: vec!["foo", "bar"]},
+            ],
+            l0: vec![
+                SstEntry::new("foo", "a"),
+                SstEntry::new("bar", "m"),
+            ],
+            sorted_runs: vec![],
+        },
+        expected_manifest: SimpleManifest {
+            projections: vec![
+                ProjectionEntry { range: "d".."n", sst_aliases: vec!["foo", "bar"]},
+            ],
+            l0: vec![
+                SstEntry::new("foo", "a"),
+                SstEntry::new("bar", "m"),
+            ],
+            sorted_runs: vec![],
+        },
     })]
     fn test_projected(#[case] test_case: ProjectionTestCase) {
         let mut core = CoreDbState::new();
 
         let mut sst_ids = HashMap::new();
-        for entry in test_case.existing_l0 {
+        for entry in test_case.existing_manifest.l0 {
             let sst_id = SsTableId::Compacted(Ulid::new());
             if let Some(_) = sst_ids.insert(entry.sst_alias, sst_id) {
-                unreachable!("duplicate sst alias")
+                unreachable!("duplicate sst alias: {}", entry.sst_alias);
             }
             core.l0.push_back(SsTableHandle::new(
                 sst_id,
                 SsTableInfo {
                     first_key: Some(Bytes::from_static(entry.first_key.as_bytes())),
-                    index_offset: 0,
-                    index_len: 0,
-                    filter_offset: 0,
-                    filter_len: 0,
-                    compression_codec: None,
+                    ..SsTableInfo::default()
                 },
             ));
         }
+        for (idx, sorted_run) in test_case.existing_manifest.sorted_runs.iter().enumerate() {
+            let mut sorted_run_ssts = Vec::new();
+            for entry in sorted_run {
+                let sst_id = SsTableId::Compacted(Ulid::new());
+                if let Some(_) = sst_ids.insert(entry.sst_alias, sst_id) {
+                    unreachable!("duplicate sst alias")
+                }
+                sorted_run_ssts.push(SsTableHandle::new(
+                    sst_id,
+                    SsTableInfo {
+                        first_key: Some(Bytes::from_static(entry.first_key.as_bytes())),
+                        ..SsTableInfo::default()
+                    },
+                ));
+            }
+            core.compacted.push(SortedRun {
+                id: idx as u32,
+                ssts: sorted_run_ssts,
+            });
+        }
 
         let mut initial_manifest = Manifest::initial(core);
-        for entry in test_case.existing_projections {
+        for entry in test_case.existing_manifest.projections {
             initial_manifest.projections.push(Projection {
                 visible_range: BytesRange::from_ref(entry.range),
                 sst_ids: to_sst_ids(&entry.sst_aliases, &sst_ids),
             });
         }
 
-        let projected =
-            Manifest::projected(&initial_manifest, BytesRange::from_ref(test_case.new_range));
+        let projected = Manifest::projected(
+            &initial_manifest,
+            BytesRange::from_ref(test_case.visible_range),
+        );
 
         let expected_projections: Vec<Projection> = test_case
-            .new_projections
+            .expected_manifest
+            .projections
             .iter()
             .map(|entry| Projection {
                 visible_range: BytesRange::from_ref(entry.range.clone()),
@@ -383,32 +587,58 @@ mod tests {
             .collect();
 
         let expected_l0: Vec<SsTableHandle> = test_case
-            .new_l0
+            .expected_manifest
+            .l0
             .iter()
             .map(|entry| {
                 SsTableHandle::new(
                     sst_ids.get(entry.sst_alias).unwrap().clone(),
                     SsTableInfo {
                         first_key: Some(Bytes::from_static(entry.first_key.as_bytes())),
-                        index_offset: 0,
-                        index_len: 0,
-                        filter_offset: 0,
-                        filter_len: 0,
-                        compression_codec: None,
+                        ..SsTableInfo::default()
                     },
                 )
             })
             .collect();
 
-        assert_eq!(projected.projections, expected_projections);
-        assert_eq!(projected.core.l0, expected_l0);
+        let expected_sorted_runs: Vec<SortedRun> = test_case
+            .expected_manifest
+            .sorted_runs
+            .iter()
+            .enumerate()
+            .map(|(idx, sst_entries)| SortedRun {
+                id: idx as u32,
+                ssts: sst_entries
+                    .iter()
+                    .map(|entry| {
+                        SsTableHandle::new(
+                            sst_ids.get(entry.sst_alias).unwrap().clone(),
+                            SsTableInfo {
+                                first_key: Some(Bytes::from_static(entry.first_key.as_bytes())),
+                                ..SsTableInfo::default()
+                            },
+                        )
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        assert_eq!(
+            projected.projections, expected_projections,
+            "Projections do not match."
+        );
+        assert_eq!(projected.core.l0, expected_l0, "L0 do not match.");
+        assert_eq!(
+            projected.core.compacted, expected_sorted_runs,
+            "Sorted runs do not match."
+        );
     }
 
     fn to_sst_ids(
-        entries: &Vec<&'static str>,
+        aliases: &Vec<&'static str>,
         lookup_table: &HashMap<&'static str, SsTableId>,
     ) -> Vec<SsTableId> {
-        entries
+        aliases
             .iter()
             .map(|entry| lookup_table.get(*entry).unwrap().clone())
             .collect()
