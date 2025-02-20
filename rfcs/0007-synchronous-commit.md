@@ -245,6 +245,8 @@ For reads in a transaction, it's possible to allow users specify the watermark a
 
 In conclusion, the difference between the current model and this proposal is adding a "Committed" watermark. And as it does not make sense to use `DurabilityLevel` to contain it, we propose to use `ReadWatermark` to identify the positions of the commit history for read operations.
 
+In most of the use cases, users do not need to care about this `ReadWatermark` option. `ReadWatermark::LastCommitted` is the default and the most commonly used value, all the read are safely committed, and the read operations will never block each other. At some mission critical use cases (like using SlateDB as a Kafka-like at-least-once data bus), users may do not want to touch any unpersisted data which risks data loss, and they can set the watermark as `ReadWatermark::LastLocalPersisted` or `ReadWatermark::LastRemotePersisted` to achieve this goal.
+
 In the earlier draft, I've put a `ReadWatermark::LastCommitting` in the `ReadWatermark` enum. But after several discussions, we gradually reached a consensus that it's not a good idea to keep it, because it doesn't improve the performance of read operations, but only allows reading data that might be rolled back later, which might violate the semantics of conflict checking, and also introduce more corner cases to handle.
 
 ### Sync Commit
