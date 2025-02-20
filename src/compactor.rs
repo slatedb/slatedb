@@ -13,7 +13,7 @@ use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, CompactorState};
-use crate::config::CompactorOptions;
+use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -266,6 +266,24 @@ impl CompactorEventHandler {
     }
 
     fn write_manifest(&mut self) -> Result<(), SlateDBError> {
+        // write the checkpoint first so that it points to the manifest with the ssts
+        // being removed
+        self.tokio_handle.block_on(self.manifest.write_checkpoint(
+            None,
+            &CheckpointOptions {
+                // TODO(rohan): for now, just write a checkpoint with 15-minute expiry
+                //              so that it's extremely unlikely for the gc to delete ssts
+                //              out from underneath the writer. In a follow up, we'll write
+                //              a checkpoint with no expiry and with metadata indicating its
+                //              a compactor checkpoint. Then, the gc will delete the checkpoint
+                //              based on a configurable timeout
+                lifetime: Some(Duration::from_secs(900)),
+                ..CheckpointOptions::default()
+            },
+        ))?;
+        // make sure to merge it before applying the local updates (TODO: make this safer
+        // by tracking the expected version id in core db state)
+        self.state.merge_db_state(self.manifest.db_state()?);
         let core = self.state.db_state().clone();
         self.tokio_handle
             .block_on(self.manifest.update_db_state(core))
@@ -615,6 +633,7 @@ mod tests {
     struct CompactorEventHandlerTestFixture {
         rt: Runtime,
         manifest: StoredManifest,
+        manifest_store: Arc<ManifestStore>,
         options: DbOptions,
         db: Db,
         scheduler: Box<MockScheduler>,
@@ -658,6 +677,7 @@ mod tests {
             Self {
                 rt,
                 manifest,
+                manifest_store,
                 options,
                 db,
                 scheduler,
@@ -832,6 +852,36 @@ mod tests {
 
         // then:
         assert_eq!(0, fixture.executor.pop_jobs().len())
+    }
+
+    #[test]
+    fn test_should_leave_checkpoint_when_removing_ssts_after_compaction() {
+        // given:
+        let mut fixture = CompactorEventHandlerTestFixture::new();
+        fixture.write_l0();
+        let compaction = fixture.build_l0_compaction();
+        fixture.scheduler.inject_compaction(compaction.clone());
+        fixture.handler.handle_ticker();
+        fixture.assert_and_forward_compactions(1);
+        let msg = fixture.real_executor_rx.recv().unwrap();
+
+        // when:
+        fixture.handler.handle_worker_rx(msg);
+
+        // then:
+        let current_dbstate = fixture.latest_db_state();
+        let checkpoint = current_dbstate.checkpoints.last().unwrap();
+        let old_manifest = fixture
+            .rt
+            .block_on(fixture.manifest_store.read_manifest(checkpoint.manifest_id))
+            .unwrap();
+        let l0_ids: Vec<SourceId> = old_manifest
+            .core
+            .l0
+            .iter()
+            .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+            .collect();
+        assert_eq!(l0_ids, compaction.sources);
     }
 
     fn build_runtime() -> Runtime {
