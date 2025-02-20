@@ -5,24 +5,18 @@ use crate::SlateDBError;
 
 pub(crate) struct FilterIterator<T: KeyValueIterator> {
     iterator: T,
-    predicate: Box<dyn Fn(&RowEntry) -> bool>
+    predicate: Box<dyn Fn(&RowEntry) -> bool>,
 }
 
 impl<T: KeyValueIterator> FilterIterator<T> {
-    pub(crate) fn new(
-        iterator: T,
-        predicate: Box<dyn Fn(&RowEntry) -> bool>
-    ) -> Self {
-         Self {
+    pub(crate) fn new(iterator: T, predicate: Box<dyn Fn(&RowEntry) -> bool>) -> Self {
+        Self {
             predicate,
-            iterator
+            iterator,
         }
     }
 
-    pub(crate) fn wrap_ttl_filter_iterator(
-        iterator: T,
-        now: i64,
-    ) -> Self {
+    pub(crate) fn wrap_ttl_filter_iterator(iterator: T, now: i64) -> Self {
         let filter_entry = move |entry: &RowEntry| is_not_expired(entry, now);
         Self::new(iterator, Box::new(filter_entry))
     }

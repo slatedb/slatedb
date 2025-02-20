@@ -47,6 +47,7 @@ use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId}
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::filter;
+use crate::filter_iterator::FilterIterator;
 use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
@@ -58,10 +59,11 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::{bg_task_result_into_err, filter_expired, get_now_for_ttl, unwrap_result, MonotonicClock};
-use tracing::{info, warn};
-use crate::filter_iterator::FilterIterator;
 use crate::types::RowEntry;
+use crate::utils::{
+    bg_task_result_into_err, filter_expired, get_now_for_ttl, unwrap_result, MonotonicClock,
+};
+use tracing::{info, warn};
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -149,11 +151,10 @@ impl DbInner {
                     SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
                         .await?;
 
-                let mut ttl_iter =
-                    FilterIterator::wrap_ttl_filter_iterator(sst_iter, ttl_now);
+                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(sst_iter, ttl_now);
                 if let Some(entry) = ttl_iter.next_entry().await? {
                     if entry.key == key {
-                        return unwrap_result(entry.value)
+                        return unwrap_result(entry.value);
                     }
                 }
             }
@@ -162,13 +163,13 @@ impl DbInner {
         for sr in &snapshot.state.core.compacted {
             if self.sr_might_include_key(sr, key, key_hash).await? {
                 let iter =
-                    SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options).await?;
+                    SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
+                        .await?;
 
-                let mut ttl_iter =
-                    FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
+                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
                 if let Some(entry) = ttl_iter.next_entry().await? {
                     if entry.key == key {
-                        return unwrap_result(entry.value)
+                        return unwrap_result(entry.value);
                     }
                 }
             }
@@ -176,10 +177,7 @@ impl DbInner {
         Ok(None)
     }
 
-    fn unwrap_value(
-        &self,
-        entry: Option<RowEntry>
-    ) -> Result<Option<Bytes>, SlateDBError> {
+    fn unwrap_value(&self, entry: Option<RowEntry>) -> Result<Option<Bytes>, SlateDBError> {
         if entry.is_none() {
             Ok(None)
         } else {
@@ -229,7 +227,7 @@ impl DbInner {
                 self.table_store.clone(),
                 sst_iter_options,
             )
-                .await?;
+            .await?;
             l0_iters.push_back(iter);
         }
 
@@ -241,7 +239,7 @@ impl DbInner {
                 self.table_store.clone(),
                 sst_iter_options,
             )
-                .await?;
+            .await?;
             sr_iters.push_back(iter);
         }
 
@@ -1369,7 +1367,7 @@ mod tests {
     use super::*;
     use crate::cached_object_store::FsCacheStorage;
     use crate::config::{
-        CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions, Ttl
+        CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions, Ttl,
     };
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
@@ -1381,6 +1379,7 @@ mod tests {
     use crate::cached_object_store::stats::{
         OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
     };
+    use crate::config::ReadLevel::Committed;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::{proptest_util, test_utils};
     use futures::{future::join_all, StreamExt};
@@ -1389,7 +1388,6 @@ mod tests {
     use proptest::test_runner::{TestRng, TestRunner};
     use tokio::runtime::Runtime;
     use tracing::info;
-    use crate::config::ReadLevel::Committed;
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -1425,7 +1423,9 @@ mod tests {
             Path::from("/tmp/test_kv_store"),
             test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(ttl)),
             object_store,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let key = b"test_key";
         let value = b"test_value";
@@ -1436,59 +1436,117 @@ mod tests {
         // advance clock to t=99 --> still returned
         clock.ticker.store(99, Ordering::SeqCst);
         assert_eq!(
-            kv_store.get_with_options(key, &ReadOptions {read_level: Uncommitted}).await.unwrap(),
-            Some(Bytes::from_static(value))
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Uncommitted
+                    }
+                )
+                .await
+                .unwrap(),
         );
 
         // advance clock to t=100 --> no longer returned
         clock.ticker.store(100, Ordering::SeqCst);
         assert_eq!(
             None,
-            kv_store.get_with_options(key, &ReadOptions {read_level: Uncommitted}).await.unwrap(),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Uncommitted
+                    }
+                )
+                .await
+                .unwrap(),
         );
 
         // insert again at t=100 but override default with row_ttl=50
-        kv_store.put_with_options(
-            key,
-            value,
-            &PutOptions {ttl: Ttl::ExpireAfter(50)},
-            &WriteOptions::default()
-        ).await.unwrap();
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions {
+                    ttl: Ttl::ExpireAfter(50),
+                },
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=149 --> still returned
         clock.ticker.store(149, Ordering::SeqCst);
         assert_eq!(
-            kv_store.get_with_options(key, &ReadOptions {read_level: Uncommitted}).await.unwrap(),
-            Some(Bytes::from_static(value))
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Uncommitted
+                    }
+                )
+                .await
+                .unwrap(),
         );
 
         // advance clock to t=150 --> no longer returned
         clock.ticker.store(150, Ordering::SeqCst);
         assert_eq!(
             None,
-            kv_store.get_with_options(key, &ReadOptions {read_level: Uncommitted}).await.unwrap()
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Uncommitted
+                    }
+                )
+                .await
+                .unwrap(),
         );
 
         // insert again at t=150 but override default with row_ttl=150
-        kv_store.put_with_options(
-            key,
-            value,
-            &PutOptions {ttl: Ttl::ExpireAfter(150)},
-            &WriteOptions::default()
-        ).await.unwrap();
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions {
+                    ttl: Ttl::ExpireAfter(150),
+                },
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=299 --> still returned
         clock.ticker.store(299, Ordering::SeqCst);
         assert_eq!(
-            kv_store.get_with_options(key, &ReadOptions {read_level: Uncommitted}).await.unwrap(),
-            Some(Bytes::from_static(value))
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Uncommitted
+                    }
+                )
+                .await
+                .unwrap(),
         );
 
         // advance clock to t=300 --> no longer returned
         clock.ticker.store(300, Ordering::SeqCst);
         assert_eq!(
-            kv_store.get_with_options(key, &ReadOptions {read_level: Uncommitted}).await.unwrap(),
-            None
+            None,
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Uncommitted
+                    }
+                )
+                .await
+                .unwrap(),
         );
 
         kv_store.close().await.unwrap();
@@ -1504,7 +1562,9 @@ mod tests {
             Path::from("/tmp/test_kv_store"),
             test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(ttl)),
             object_store,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let key = b"test_key";
         let key_other = b"time_advancing_key";
@@ -1519,8 +1579,16 @@ mod tests {
         kv_store.flush().await.unwrap();
 
         assert_eq!(
-            kv_store.get_with_options(key, &ReadOptions {read_level: Committed}).await.unwrap(),
-            Some(Bytes::from_static(value))
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
         );
 
         // advance clock to t=100 --> no longer returned
@@ -1530,16 +1598,29 @@ mod tests {
 
         assert_eq!(
             None,
-            kv_store.get_with_options(key, &ReadOptions {read_level: Committed}).await.unwrap(),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
         );
 
         // insert again at t=100 but override default with row_ttl=50
-        kv_store.put_with_options(
-            key,
-            value,
-            &PutOptions {ttl: Ttl::ExpireAfter(50)},
-            &WriteOptions::default()
-        ).await.unwrap();
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions {
+                    ttl: Ttl::ExpireAfter(50),
+                },
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=149 --> still returned
         clock.ticker.store(149, Ordering::SeqCst);
@@ -1547,8 +1628,16 @@ mod tests {
         kv_store.flush().await.unwrap();
 
         assert_eq!(
-            kv_store.get_with_options(key, &ReadOptions {read_level: Committed}).await.unwrap(),
-            Some(Bytes::from_static(value))
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
         );
 
         // advance clock to t=150 --> no longer returned
@@ -1558,16 +1647,29 @@ mod tests {
 
         assert_eq!(
             None,
-            kv_store.get_with_options(key, &ReadOptions {read_level: Committed}).await.unwrap()
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
         );
 
         // insert again at t=150 but override default with row_ttl=150
-        kv_store.put_with_options(
-            key,
-            value,
-            &PutOptions {ttl: Ttl::ExpireAfter(150)},
-            &WriteOptions::default()
-        ).await.unwrap();
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions {
+                    ttl: Ttl::ExpireAfter(150),
+                },
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=299 --> still returned
         clock.ticker.store(299, Ordering::SeqCst);
@@ -1575,8 +1677,16 @@ mod tests {
         kv_store.flush().await.unwrap();
 
         assert_eq!(
-            kv_store.get_with_options(key, &ReadOptions {read_level: Committed}).await.unwrap(),
-            Some(Bytes::from_static(value))
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
         );
 
         // advance clock to t=300 --> no longer returned
@@ -1585,8 +1695,16 @@ mod tests {
         kv_store.flush().await.unwrap();
 
         assert_eq!(
-            kv_store.get_with_options(key, &ReadOptions {read_level: Committed}).await.unwrap(),
-            None
+            None,
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
         );
 
         kv_store.close().await.unwrap();
@@ -3340,7 +3458,7 @@ mod tests {
             l0_sst_size_bytes,
             compactor_options,
             clock,
-            None
+            None,
         )
     }
 
@@ -3349,7 +3467,7 @@ mod tests {
         l0_sst_size_bytes: usize,
         compactor_options: Option<CompactorOptions>,
         clock: Arc<TestClock>,
-        ttl: Option<u64>
+        ttl: Option<u64>,
     ) -> DbOptions {
         DbOptions {
             flush_interval: Duration::from_millis(100),
@@ -3367,7 +3485,7 @@ mod tests {
             block_cache: None,
             garbage_collector_options: None,
             clock,
-            default_ttl: ttl
+            default_ttl: ttl,
         }
     }
 }

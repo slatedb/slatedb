@@ -329,7 +329,7 @@ impl KeyValueIterator for SstIterator<'_> {
             match next_entry {
                 Some(kv) => {
                     if self.view.contains(&kv.key) {
-                        return Ok(Some(kv))
+                        return Ok(Some(kv));
                     } else if self.view.key_exceeds(&kv.key) {
                         self.stop()
                     }

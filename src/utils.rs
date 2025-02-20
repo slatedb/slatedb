@@ -6,8 +6,8 @@ use crate::types::{RowEntry, ValueDeletable};
 use bytes::Bytes;
 use std::cmp;
 use std::future::Future;
-use std::sync::atomic::Ordering::SeqCst;
 use std::sync::atomic::AtomicI64;
+use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::info;
@@ -137,13 +137,11 @@ where
 
 // Temporary functions to convert ValueDeletable to Option<Bytes> until
 // we add proper support for merges.
-pub(crate) fn unwrap_result(
-    value: ValueDeletable,
-) -> Result<Option<Bytes>, SlateDBError> {
+pub(crate) fn unwrap_result(value: ValueDeletable) -> Result<Option<Bytes>, SlateDBError> {
     match value {
         ValueDeletable::Value(v) => Ok(Some(v)),
         ValueDeletable::Merge(_) => {
-            Err(unimplemented!("MergeOperator is not yet fully implemented"))
+            unimplemented!("MergeOperator is not yet fully implemented")
         }
         ValueDeletable::Tombstone => Ok(None),
     }
@@ -151,38 +149,31 @@ pub(crate) fn unwrap_result(
 
 pub(crate) async fn get_now_for_ttl(
     mono_clock: Arc<MonotonicClock>,
-    read_level: ReadLevel
+    read_level: ReadLevel,
 ) -> Result<i64, SlateDBError> {
     /*
-      Note: the semantics of filtering expired records on read differ slightly depending on
-      the configured ReadLevel. For Uncommitted we can just use the actual clock's "now"
-      as this corresponds to the current time seen by uncommitted writes but is not persisted
-      and only enforces monotonicity via the local in-memory MonotonicClock. This means it's
-      possible for the mono_clock.now() to go "backwards" following a crash and recovery, which
-      could result in records that were filtered out before the crash coming back to life and being
-      returned after the crash.
-      If the read level is instead set to Committed, we only use the last_tick of the monotonic
-      clock to filter out expired records, since this corresponds to the highest time of any
-      persisted batch and is thus recoverable following a crash. Since the last tick is the
-      last persisted time we are guaranteed monotonicity of the #get_last_tick function and
-      thus will not see this "time travel" phenomenon -- with Committed, once a record is
-      filtered out due to ttl expiry, it is guaranteed not to be seen again by future Committed
-      reads.
-     */
+     Note: the semantics of filtering expired records on read differ slightly depending on
+     the configured ReadLevel. For Uncommitted we can just use the actual clock's "now"
+     as this corresponds to the current time seen by uncommitted writes but is not persisted
+     and only enforces monotonicity via the local in-memory MonotonicClock. This means it's
+     possible for the mono_clock.now() to go "backwards" following a crash and recovery, which
+     could result in records that were filtered out before the crash coming back to life and being
+     returned after the crash.
+     If the read level is instead set to Committed, we only use the last_tick of the monotonic
+     clock to filter out expired records, since this corresponds to the highest time of any
+     persisted batch and is thus recoverable following a crash. Since the last tick is the
+     last persisted time we are guaranteed monotonicity of the #get_last_tick function and
+     thus will not see this "time travel" phenomenon -- with Committed, once a record is
+     filtered out due to ttl expiry, it is guaranteed not to be seen again by future Committed
+     reads.
+    */
     match read_level {
-        Committed => {
-            Ok(mono_clock.get_last_durable_tick())
-        }
-        Uncommitted => {
-            mono_clock.now().await
-        }
+        Committed => Ok(mono_clock.get_last_durable_tick()),
+        Uncommitted => mono_clock.now().await,
     }
 }
 
-pub(crate) fn filter_expired(
-    entry: RowEntry,
-    now: i64,
-) -> Option<RowEntry> {
+pub(crate) fn filter_expired(entry: RowEntry, now: i64) -> Option<RowEntry> {
     if is_not_expired(&entry, now) {
         Some(entry)
     } else {
@@ -190,17 +181,9 @@ pub(crate) fn filter_expired(
     }
 }
 
-
-pub(crate) fn is_not_expired(
-    entry: &RowEntry,
-    now: i64,
-) -> bool {
+pub(crate) fn is_not_expired(entry: &RowEntry, now: i64) -> bool {
     if let Some(expire_ts) = entry.expire_ts {
-        if expire_ts <= now {
-            false
-        } else {
-            true
-        }
+        expire_ts > now
     } else {
         true
     }
