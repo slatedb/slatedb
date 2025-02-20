@@ -211,14 +211,13 @@ Let's assume we have a sequence of writes like this:
 
 While "Committed" is distinct from the "DurabilityLevel" concept, both the "Committed" and "Persisted" positions can be tracked using separate watermarks in the commit history of sequence number.
 
-It doesn't make sense to set the "Committed" watermark under the notion of `DurabilityLevel`. We need to define a better name that contains all the "Memory", "Committed", and "Persisted" positions.
+A "Committed" data is not necessarily a "Persisted" data. It doesn't make sense to set the "Committed" watermark under the notion of `DurabilityLevel`. We need to define a better name that contains all the "Committed" and "Persisted" positions.
 
 Let's call it `ReadWatermark`.
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ReadWatermark {
-    LastCommitting,
     #[default]
     LastCommitted,
     LastLocalPersisted,
@@ -229,7 +228,7 @@ enum ReadWatermark {
 The read operation may look like this:
 
 ```rust
-let opts = ReadOptions::new().with_watermark(ReadWatermark::LastCommitting);
+let opts = ReadOptions::new().with_watermark(ReadWatermark::LastCommitted);
 db.get(key, opts).await?;
 ```
 
@@ -237,21 +236,16 @@ The biggest semantic difference between `ReadWatermark` and `DurabilityLevel` is
 
 These watermarks have the following relationships:
 
-- The "last committing watermark"'s position (in term of sequence number) is always greater than or equal to the "last committed watermark"
-- The "last committed watermark"'s position is always greater than or equal to the "last local persisted watermark"
+- The "last committed watermark"'s position (in term of sequence number) is always greater than or equal to the "last local persisted watermark"
 - The "last local persisted watermark"'s position is always greater than or equal to the "last remote persisted watermark"
 
 If we successfully write a key that succesfully persisted to S3, at this point, all these watermarks will point to the same position. 
 
-It's important to note the difference between "LastCommitting" and "LastCommitted" watermarks: with high durability commits, writes are first appended to the WAL before being persisted to storage. During this window, using the "LastCommitting" watermark allows reading data that could potentially be rolled back if persistence fails, while "LastCommitted" only shows data that has been fully committed. SlateDB allows the read path to access the WAL data which is not applied to MemTable yet. This is useful for users who want to read the latest writes as soon as possible and don't mind if the data might be rolled back.
-
-I think `ReadWatermark::LastCommitting` should be used with caution. `ReadWatermark::LastCommitted` is considered as a safer option, since it only shows data that has been fully committed.
-
 For reads in a transaction, it's possible to allow users specify the watermark as `ReadWatermark::LastRemotePersisted` or `ReadWatermark::LastLocalPersisted`. This might let users read an older version of the data, but it won't violate the semantics of conflict checking: if there exists a newer version of the same key, this transaction could be rolled back on commit.
 
-But it does not make sense to allow users to read `ReadWatermark::LastCommitting` in a transaction. It'll definitely violate the SSI semantics. As it read data which is possible to be rolled back later. Let's not do that by restricting the read watermark to be at least `ReadWatermark::LastCommitted`.
-
 In conclusion, the difference between the current model and this proposal is adding a "Committed" watermark. And as it does not make sense to use `DurabilityLevel` to contain it, we propose to use `ReadWatermark` to identify the positions of the commit history for read operations.
+
+In the earlier draft, I've put a `ReadWatermark::LastCommitting` in the `ReadWatermark` enum. But after several discussions, we gradually reached a consensus that it's not a good idea to keep it, because it doesn't improve the performance of read operations, but only allows reading data that might be rolled back later, which might violate the semantics of conflict checking, and also introduce more corner cases to handle.
 
 ### Sync Commit
 
@@ -308,16 +302,22 @@ For example, when a write has `Sync::Off` set, it is considered to enter the Com
 
 However, at some point this data will still be eventually flushed to storage if the DB keeps running. If you want to subscribe or wait for when this `sync:Off` write becomes durably persisted, you can still use `await_durable` to achieve this goal.
 
-`await_durable` and `sync` can be used together:
+Also, when using `sync` commit, it's possible to queue the later Non-Sync writes to be queued in the WAL buffer, delaying them later to be applied to MemTable and visible to readers.
+
+Sometimes, user might hope to always allow the writes to be visible to readers immediately, while still waiting for the data to be durably persisted. `await_durable` and `sync` can be used together to achieve this goal:
 
 ```rust
 let opts = WriteOptions::new()
-  .with_sync(SyncLevel::Off) // this write becomes visible for readers as soon as persisted in local wal
-  .with_await_durable(DurableLevel::Remote) // on the writer side, i still await this until it's persisted in remote
-db.put_with_options(opts)
+  .with_sync(SyncLevel::Off) // this write becomes visible for readers immediately
+  .with_await_durable(DurabilityLevel::Remote) // on the writer side, i still await this until it's persisted in remote
+db.put_with_options("key", "val", opts)
 ```
 
-In the no-WAL mode, WAL is disabled, so the `sync` option is not meaningful. At this point, users can only use `await_durable` to wait for the write to be durably persisted.
+When WAL is disabled (no-WAL mode), the `sync` option has no effect since there is no WAL to sync. In this case, users should use `await_durable` to ensure their writes are persisted durably.
+
+While `SyncLevel` and `DurabilityLevel` may appear similar, they serve distinct purposes. `SyncLevel` controls when writes become visible to readers by determining the commit semantics, while `DurabilityLevel` focuses on the durability of the write.
+
+In my opinion, keeping these as separate enums follows the Single Responsibility Principle, as each enum has a distinct purpose. They are not necessarily to have to be the same thing in the future. For example, in the PostgreSQL example, the option `remote_apply` is not really about the durability of the write, but the application of the commit. We have no plan to support it in SlateDB at the time of writing, but it might be a good example to distinguish the concept difference between `SyncLevel` and `DurabilityLevel`.
 
 ## Implementation
 
@@ -381,67 +381,11 @@ sequenceDiagram
 
 ### Handling No WAL Write
 
-#### Approach 1: Use an in-memory WAL
+It's not possible to have Sync Commit when WAL is disabled. So let's not allow users to enable `sync` when WAL is disabled.
 
-SlateDB also support a no-WAL mode. In this mode, the write operation directly applied to MemTable without appending to the WAL. And the write operation can await the data to be persisted to storage as the specified durability level.
+When `sync` is not possible to set, all the writes will be considered as Committed immediately, and become visible to readers in the MemTable.
 
-In the new proposal, the read path need not to be changed, the readers could still read the WAL and Memtable as before.
-
-The write path needs some adjustments. The no-WAL mode will still maintain an in-memory WAL, but it's never flushed to storage.
-
-For `SyncLevel::Off`, the write operation could be considered as apply to MemTable immediately, and will be considered as committed.
-
-For `SyncLevel::Remote`, the write operation could be considered as append to an in-memory WAL, and directly flush them to L0 SST after the WAL buffer + MemTable reaches the memtable's L0 size threshold.
-
-The sequence diagram is like this:
-
-```mermaid
-sequenceDiagram
-    participant WriteBatch
-    participant WAL
-    participant MemTable
-    participant Flusher
-
-    WriteBatch->>WAL: append write op to current WAL
-    Note over WAL: become visible to readers with ReadWatermark::LastCommitting
-
-    WAL->>WAL: Maybe trigger a flush
-    Note over WAL: When the WAL buffer + MemTable reaches the memtable's L0 size threshold, trigger a flush.
-
-    WAL->>MemTable: Flush L0 SST
-    MemTable->>Flusher: Flush L0 SST
-
-    Flusher-->>MemTable: ack Flush L0 SST message, increment last L0 flushed position
-
-    MemTable->>MemTable: apply write op to MemTable, and freeze it into IMM
-    Note over MemTable: become visible to readers with ReadWaterMark::LastCommitted 
-
-    alt sync is Remote
-        WriteBatch->>WAL: await last applied position
-    end
-
-    MemTable-->>WriteBatch: wake up waiters of last applied position
-```
-
-#### Approach 2: Add a new `await_l0_flushed` option to `WriteOptions`
-
-The approach 1 might risks introducing a difference between the current design.
-
-In the current design, there's a mindset of "MemTable is a memory buffer", writers can write data to MemTable directly, and will not be blocked by the previous sync write operations.
-
-However, the approach 1 might blocks the alter write with `SyncLevel::Off` to await the previous sync write to be flushed to L0 SST. Before that, the `SyncLevel::Off` write is considered as not committed, and will be invisible to readers. It's because applying the writes to MemTable is considered as sequential, the later writes will be blocked by the previous sync write.
-
-To avoid this, we can consider another approach: add a new `await_l0_flushed: bool` option to `WriteOptions`. And ignore the `SyncLevel` option when this no-WAL mode is set to true.
-
-When `await_l0_flushed` is set to true, the write operation will be blocked until the L0 SST is flushed to storage. Mean while, the other write operations can still be applied to MemTable immediately, and will be considered as committed.
-
-Why not use an enum like `DurabilityLevel` for this? 
-
-The main reason is that, L0 does not have a concept of `DurabilityLevel::Local` or `DurabilityLevel::Memory` like WAL does, it's always persisted to object storage.
-
-A good part of this option is that it does not really tightly coupled with the no-WAL mode. It's also possible to be used in normal mode as well, we can take a unified implementation for this option in both modes without adhoc logic. However, at the time of writing, I still cannot think of a use case where users would want to await the L0 SST to be flushed to storage when the write operation is not in no-WAL mode. I suppose we can hide this `await_l0_flushed` operation by a cfg macro if no-WAL mode is not enabled to reduce the cognitive load for users.
-
-A possible downside of this approach is that it kind of leaked the implementation details of L0 flush to the public API. However, the concept of L0 is well understood by users, and it's unlikely to be removed in the future. Also, it's only exposed in the no-WAL mode, we can consider users whom cares about this option are likely to understand well about what they want.
+Users can still use `await_durable` to wait for the write to be durably persisted on the writer side.
 
 ### Handling WAL Write Failures
 
