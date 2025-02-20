@@ -295,6 +295,30 @@ The benefits of this naming change are:
 
 The inner implementation of the write side do not need to change, it's still just await the data to be persisted to storage as the specified durability level, then return. All we put into discussion here is the naming stuff.
 
+### Difference between "await_durable" and "sync"
+
+`await_durable` and `sync` appear to have similar behaviors - on the write side, both wait until data reaches a persistent state before returning.
+
+However, there are subtle semantic differences between them:
+
+1. `sync` determines when data enters the committed state and returns after data is committed.
+2. `await_durable` only waits for the data's durability state.
+
+For example, when a write has `Sync::Off` set, it is considered to enter the Committed state immediately, this write will become visible to readers with `LastCommitted` immediately.
+
+However, at some point this data will still be eventually flushed to storage if the DB keeps running. If you want to subscribe or wait for when this `sync:Off` write becomes durably persisted, you can still use `await_durable` to achieve this goal.
+
+`await_durable` and `sync` can be used together:
+
+```rust
+let opts = WriteOptions::new()
+  .with_sync(SyncLevel::Off) // this write becomes visible for readers as soon as persisted in local wal
+  .with_await_durable(DurableLevel::Remote) // on the writer side, i still await this until it's persisted in remote
+db.put_with_options(opts)
+```
+
+In the no-WAL mode, WAL is disabled, so the `sync` option is not meaningful. At this point, users can only use `await_durable` to wait for the write to be durably persisted.
+
 ## Implementation
 
 The key change is to seperate "Append to WAL" and "Commit to make it visible" into two different steps.
@@ -466,3 +490,7 @@ type memTable struct {
 It makes sense to put the manager of the WAL buffer inside the memtable struct, as WAL is closely related to the memtable, it actually make a good encapsulation: put the complexities behind some simple `put()` / `get()` interface.
 
 However, it's a different codebase, it would be better to keep code structure changes minimal with each iteration. It'll make more sense to have several small PoC PRs. Introducing a `WALManager` might be a good first step to encapsulate the WAL buffer, flushing, and synchronous commit functionality. This would allow us to have more detailed discussions about code structure as we develop these PoCs.
+
+## Updates
+
+- 2025-02-20: added the comparision between `sync` and `await_durable`
