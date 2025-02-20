@@ -1414,7 +1414,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_with_ttl_uncommitted() {
+    async fn test_get_with_default_ttl_and_read_uncommitted() {
         let clock = Arc::new(TestClock::new());
         let ttl = 100;
 
@@ -1463,7 +1463,27 @@ mod tests {
                 .unwrap(),
         );
 
-        // insert again at t=100 but override default with row_ttl=50
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_with_row_override_ttl_and_read_uncommitted() {
+        let clock = Arc::new(TestClock::new());
+        let default_ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(default_ttl)),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let key = b"test_key";
+        let value = b"test_value";
+
+        // insert at t=0 with row-level override of 50 for ttl
         kv_store
             .put_with_options(
                 key,
@@ -1476,8 +1496,8 @@ mod tests {
             .await
             .unwrap();
 
-        // advance clock to t=149 --> still returned
-        clock.ticker.store(149, Ordering::SeqCst);
+        // advance clock to t=49 --> still returned
+        clock.ticker.store(49, Ordering::SeqCst);
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
@@ -1491,51 +1511,8 @@ mod tests {
                 .unwrap(),
         );
 
-        // advance clock to t=150 --> no longer returned
-        clock.ticker.store(150, Ordering::SeqCst);
-        assert_eq!(
-            None,
-            kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        read_level: Uncommitted
-                    }
-                )
-                .await
-                .unwrap(),
-        );
-
-        // insert again at t=150 but override default with row_ttl=150
-        kv_store
-            .put_with_options(
-                key,
-                value,
-                &PutOptions {
-                    ttl: Ttl::ExpireAfter(150),
-                },
-                &WriteOptions::default(),
-            )
-            .await
-            .unwrap();
-
-        // advance clock to t=299 --> still returned
-        clock.ticker.store(299, Ordering::SeqCst);
-        assert_eq!(
-            Some(Bytes::from_static(value)),
-            kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        read_level: Uncommitted
-                    }
-                )
-                .await
-                .unwrap(),
-        );
-
-        // advance clock to t=300 --> no longer returned
-        clock.ticker.store(300, Ordering::SeqCst);
+        // advance clock to t=50 --> no longer returned
+        clock.ticker.store(50, Ordering::SeqCst);
         assert_eq!(
             None,
             kv_store
@@ -1553,7 +1530,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_with_ttl_committed() {
+    async fn test_get_with_default_ttl_and_read_committed() {
         let clock = Arc::new(TestClock::new());
         let ttl = 100;
 
@@ -1609,7 +1586,28 @@ mod tests {
                 .unwrap(),
         );
 
-        // insert again at t=100 but override default with row_ttl=50
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_with_row_override_ttl_and_read_committed() {
+        let clock = Arc::new(TestClock::new());
+        let ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(ttl)),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let key = b"test_key";
+        let key_other = b"time_advancing_key";
+        let value = b"test_value";
+
+        // insert at t=0 with row-level override of 50 for ttl
         kv_store
             .put_with_options(
                 key,
@@ -1622,8 +1620,8 @@ mod tests {
             .await
             .unwrap();
 
-        // advance clock to t=149 --> still returned
-        clock.ticker.store(149, Ordering::SeqCst);
+        // advance clock to t=49 --> still returned
+        clock.ticker.store(49, Ordering::SeqCst);
         kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
@@ -1640,57 +1638,8 @@ mod tests {
                 .unwrap(),
         );
 
-        // advance clock to t=150 --> no longer returned
-        clock.ticker.store(150, Ordering::SeqCst);
-        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
-        kv_store.flush().await.unwrap();
-
-        assert_eq!(
-            None,
-            kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        read_level: Committed
-                    }
-                )
-                .await
-                .unwrap(),
-        );
-
-        // insert again at t=150 but override default with row_ttl=150
-        kv_store
-            .put_with_options(
-                key,
-                value,
-                &PutOptions {
-                    ttl: Ttl::ExpireAfter(150),
-                },
-                &WriteOptions::default(),
-            )
-            .await
-            .unwrap();
-
-        // advance clock to t=299 --> still returned
-        clock.ticker.store(299, Ordering::SeqCst);
-        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
-        kv_store.flush().await.unwrap();
-
-        assert_eq!(
-            Some(Bytes::from_static(value)),
-            kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        read_level: Committed
-                    }
-                )
-                .await
-                .unwrap(),
-        );
-
-        // advance clock to t=300 --> no longer returned
-        clock.ticker.store(300, Ordering::SeqCst);
+        // advance clock to t=50 --> no longer returned
+        clock.ticker.store(50, Ordering::SeqCst);
         kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
