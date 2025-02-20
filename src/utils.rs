@@ -171,7 +171,7 @@ pub(crate) async fn get_now_for_ttl(
      */
     match read_level {
         Committed => {
-            Ok(mono_clock.get_max_durable_tick())
+            Ok(mono_clock.get_last_durable_tick())
         }
         Uncommitted => {
             mono_clock.now().await
@@ -217,7 +217,7 @@ pub(crate) fn bg_task_result_into_err(result: &Result<(), SlateDBError>) -> Slat
 /// from the underlying implementation are monotonically increasing
 pub(crate) struct MonotonicClock {
     pub(crate) last_tick: AtomicI64,
-    pub(crate) max_durable_tick: AtomicI64,
+    pub(crate) last_durable_tick: AtomicI64,
     delegate: Arc<dyn Clock + Send + Sync>,
 }
 
@@ -226,7 +226,7 @@ impl MonotonicClock {
         Self {
             delegate,
             last_tick: AtomicI64::new(init_tick),
-            max_durable_tick: AtomicI64::new(init_tick),
+            last_durable_tick: AtomicI64::new(init_tick),
         }
     }
 
@@ -234,12 +234,12 @@ impl MonotonicClock {
         self.enforce_monotonic(tick)
     }
 
-    pub(crate) fn fetch_max_durable_tick(&self, tick: i64) -> i64 {
-        self.max_durable_tick.fetch_max(tick, SeqCst)
+    pub(crate) fn fetch_max_last_durable_tick(&self, tick: i64) -> i64 {
+        self.last_durable_tick.fetch_max(tick, SeqCst)
     }
 
-    pub(crate) fn get_max_durable_tick(&self) -> i64 {
-        self.max_durable_tick.load(SeqCst)
+    pub(crate) fn get_last_durable_tick(&self) -> i64 {
+        self.last_durable_tick.load(SeqCst)
     }
 
     pub(crate) async fn now(&self) -> Result<i64, SlateDBError> {

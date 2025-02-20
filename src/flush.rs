@@ -45,7 +45,7 @@ impl DbInner {
         let encoded_sst = sst_builder.build()?;
         let handle = self.table_store.write_sst(id, encoded_sst).await?;
 
-        self.mono_clock.fetch_max_durable_tick(imm_table.last_tick());
+        self.mono_clock.fetch_max_last_durable_tick(imm_table.last_tick());
         Ok(handle)
     }
 
