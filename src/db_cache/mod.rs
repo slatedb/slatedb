@@ -41,7 +41,7 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 /// use object_store::local::LocalFileSystem;
 /// use slatedb::Db;
 /// use slatedb::config::DbOptions;
-/// use slatedb::db_cache::{DbCache, CachedEntry, CachedKey};
+/// use slatedb::db_cache::{DbCache, CachedEntry, CachedKey, GetTarget};
 /// use std::collections::HashMap;
 /// use std::sync::{Arc, Mutex};
 ///
@@ -71,8 +71,9 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 ///
 /// #[async_trait]
 /// impl DbCache for MyCache {
-///     async fn get(&self, key: CachedKey) -> Option<CachedEntry> {
-///         let guard = self.inner.lock().unwrap();
+///     async fn get(&self, key: CachedKey, _target: GetTarget) -> Option<CachedEntry> {
+///         use slatedb::db_cache::GetTarget;
+/// let guard = self.inner.lock().unwrap();
 ///         guard.data.get(&key).cloned()
 ///     }
 ///
@@ -113,12 +114,22 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 /// ```
 #[async_trait]
 pub trait DbCache: Send + Sync {
-    async fn get(&self, key: CachedKey) -> Option<CachedEntry>;
+    async fn get(&self, key: CachedKey, target: GetTarget) -> Option<CachedEntry>;
     async fn insert(&self, key: CachedKey, value: CachedEntry);
     #[allow(dead_code)]
     async fn remove(&self, key: CachedKey);
     #[allow(dead_code)]
     fn entry_count(&self) -> u64;
+}
+
+/// A hint to the cache about what data is being fetched on a get. Can be used to
+/// track statistics.
+#[non_exhaustive]
+#[derive(Clone, Copy)]
+pub enum GetTarget {
+    Block,
+    SsTableIndex,
+    BloomFilter,
 }
 
 /// A key used to identify a cached entry.
@@ -222,44 +233,39 @@ impl DbCacheWrapper {
             cache,
         }
     }
+}
 
-    pub(crate) async fn get_filter(&self, key: CachedKey) -> Option<CachedEntry> {
-        let result = self.cache.get(key).await;
+#[async_trait]
+impl DbCache for DbCacheWrapper {
+    async fn get(&self, key: CachedKey, target: GetTarget) -> Option<CachedEntry> {
+        let result = self.cache.get(key, target).await;
         if result.is_some() {
-            self.stats.filter_hit.inc();
+            match target {
+                GetTarget::Block => self.stats.data_block_hit.inc(),
+                GetTarget::SsTableIndex => self.stats.index_hit.inc(),
+                GetTarget::BloomFilter => self.stats.filter_hit.inc(),
+            };
         } else {
-            self.stats.filter_miss.inc();
+            match target {
+                GetTarget::Block => self.stats.data_block_miss.inc(),
+                GetTarget::SsTableIndex => self.stats.index_miss.inc(),
+                GetTarget::BloomFilter => self.stats.filter_miss.inc(),
+            };
         }
         result
     }
 
-    pub(crate) async fn get_index(&self, key: CachedKey) -> Option<CachedEntry> {
-        let result = self.cache.get(key).await;
-        if result.is_some() {
-            self.stats.index_hit.inc();
-        } else {
-            self.stats.index_miss.inc();
-        }
-        result
-    }
-
-    pub(crate) async fn get_data_block(&self, key: CachedKey) -> Option<CachedEntry> {
-        let result = self.cache.get(key).await;
-        if result.is_some() {
-            self.stats.data_block_hit.inc();
-        } else {
-            self.stats.data_block_miss.inc();
-        }
-        result
-    }
-
-    pub(crate) async fn insert(&self, key: CachedKey, value: CachedEntry) {
+    async fn insert(&self, key: CachedKey, value: CachedEntry) {
         self.cache.insert(key, value).await
     }
 
     #[allow(dead_code)]
-    pub(crate) async fn remove(&self, key: CachedKey) {
+    async fn remove(&self, key: CachedKey) {
         self.cache.remove(key).await
+    }
+
+    fn entry_count(&self) -> u64 {
+        self.cache.entry_count()
     }
 }
 
@@ -312,7 +318,7 @@ pub mod stats {
 
 #[cfg(test)]
 mod tests {
-    use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper};
+    use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, GetTarget};
     use crate::db_state::SsTableId;
     use crate::sst::SsTableFormat;
     use crate::stats::{ReadableStat, StatRegistry};
@@ -344,7 +350,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get_filter(key.clone()).await;
+            let _ = cache.get(key.clone(), GetTarget::BloomFilter).await;
 
             // then:
             assert_eq!(0, cache.stats.filter_miss.get());
@@ -360,7 +366,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get_filter(key.clone()).await;
+            let _ = cache.get(key.clone(), GetTarget::BloomFilter).await;
 
             // then:
             assert_eq!(i, cache.stats.filter_miss.get());
@@ -384,7 +390,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get_index(key.clone()).await;
+            let _ = cache.get(key.clone(), GetTarget::SsTableIndex).await;
 
             // then:
             assert_eq!(0, cache.stats.index_miss.get());
@@ -400,7 +406,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get_index(key.clone()).await;
+            let _ = cache.get(key.clone(), GetTarget::SsTableIndex).await;
 
             // then:
             assert_eq!(i, cache.stats.index_miss.get());
@@ -427,7 +433,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get_data_block(key.clone()).await;
+            let _ = cache.get(key.clone(), GetTarget::Block).await;
 
             // then:
             assert_eq!(0, cache.stats.data_block_miss.get());
@@ -443,7 +449,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get_data_block(key.clone()).await;
+            let _ = cache.get(key.clone(), GetTarget::Block).await;
 
             // then:
             assert_eq!(i, cache.stats.data_block_miss.get());
@@ -484,7 +490,7 @@ mod tests {
 
     #[async_trait]
     impl DbCache for TestCache {
-        async fn get(&self, key: CachedKey) -> Option<CachedEntry> {
+        async fn get(&self, key: CachedKey, _target: GetTarget) -> Option<CachedEntry> {
             let guard = self.items.lock().unwrap();
             guard.get(&key).cloned()
         }
