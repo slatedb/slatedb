@@ -50,9 +50,9 @@ mod tests {
             .with_entry(b"ffff", b"6666", 0)
             .with_entry(b"g", b"7", 0);
 
-        let filter_entry = move |entry: &RowEntry| -> bool{
-            entry.key.len() == 4 && entry.value.len() == 4
-        };
+        let filter_entry =
+            move |entry: &RowEntry| -> bool { entry.key.len() == 4 && entry.value.len() == 4 };
+
         let mut filter_iter = FilterIterator::new(iter, Box::new(filter_entry));
 
         assert_iterator(
@@ -73,9 +73,9 @@ mod tests {
             .with_entry(b"b", b"2", 0)
             .with_entry(b"c", b"3", 0);
 
-        let filter_entry = move |entry: &RowEntry| -> bool {
-            entry.key.len() == 4 && entry.value.len() == 4
-        };
+        let filter_entry =
+            move |entry: &RowEntry| -> bool { entry.key.len() == 4 && entry.value.len() == 4 };
+
         let mut filter_iter = FilterIterator::new(iter, Box::new(filter_entry));
 
         assert_eq!(filter_iter.next().await.unwrap(), None);
