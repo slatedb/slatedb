@@ -1,6 +1,6 @@
 use crate::config::Clock;
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::{BackgroundTaskPanic};
+use crate::error::SlateDBError::BackgroundTaskPanic;
 use bytes::{BufMut, Bytes};
 use std::cmp;
 use std::future::Future;
