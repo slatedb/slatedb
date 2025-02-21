@@ -5,11 +5,11 @@ use crate::SlateDBError;
 
 pub(crate) struct FilterIterator<T: KeyValueIterator> {
     iterator: T,
-    predicate: Box<dyn Fn(&RowEntry) -> bool>,
+    predicate: Box<dyn Fn(&RowEntry) -> bool + Send>,
 }
 
 impl<T: KeyValueIterator> FilterIterator<T> {
-    pub(crate) fn new(iterator: T, predicate: Box<dyn Fn(&RowEntry) -> bool>) -> Self {
+    pub(crate) fn new(iterator: T, predicate: Box<dyn Fn(&RowEntry) -> bool + Send>) -> Self {
         Self {
             predicate,
             iterator,
@@ -50,8 +50,8 @@ mod tests {
             .with_entry(b"ffff", b"6666", 0)
             .with_entry(b"g", b"7", 0);
 
-        let filter_entry = move |entry: &RowEntry| {
-            return entry.key.len() == 4 && entry.value.len() == 4;
+        let filter_entry = move |entry: &RowEntry| -> bool{
+            entry.key.len() == 4 && entry.value.len() == 4
         };
         let mut filter_iter = FilterIterator::new(iter, Box::new(filter_entry));
 
@@ -73,8 +73,8 @@ mod tests {
             .with_entry(b"b", b"2", 0)
             .with_entry(b"c", b"3", 0);
 
-        let filter_entry = move |entry: &RowEntry| {
-            return entry.key.len() == 4 && entry.value.len() == 4;
+        let filter_entry = move |entry: &RowEntry| -> bool {
+            entry.key.len() == 4 && entry.value.len() == 4
         };
         let mut filter_iter = FilterIterator::new(iter, Box::new(filter_entry));
 

@@ -187,10 +187,10 @@ impl DbInner {
     }
 
     fn unwrap_value(&self, entry: Option<RowEntry>) -> Result<Option<Bytes>, SlateDBError> {
-        if entry.is_none() {
-            Ok(None)
+        if let Some(unwrapped) = entry {
+            unwrap_result(unwrapped.value)
         } else {
-            unwrap_result(entry.unwrap().value)
+            Ok(None)
         }
     }
 
