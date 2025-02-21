@@ -30,7 +30,7 @@
 //! }
 //! ```
 //!
-use crate::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
+use crate::db_cache::{CachedEntry, CachedKey, DbCache, GetTarget, DEFAULT_MAX_CAPACITY};
 use async_trait::async_trait;
 
 /// The options for the Foyer cache.
@@ -89,7 +89,7 @@ impl Default for FoyerCache {
 
 #[async_trait]
 impl DbCache for FoyerCache {
-    async fn get(&self, key: CachedKey) -> Option<CachedEntry> {
+    async fn get(&self, key: CachedKey, _target: GetTarget) -> Option<CachedEntry> {
         self.inner.get(&key).map(|entry| entry.value().clone())
     }
 
@@ -102,6 +102,7 @@ impl DbCache for FoyerCache {
     }
 
     fn entry_count(&self) -> u64 {
-        self.inner.usage() as _
+        // foyer cache doesn't support an entry count estimate
+        0
     }
 }
