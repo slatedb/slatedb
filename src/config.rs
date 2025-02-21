@@ -175,11 +175,11 @@ use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 /// to serve the data written by the write, until some later durably committed write
 /// updates the same key.
 #[non_exhaustive]
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug, Copy)]
 pub enum ReadLevel {
     /// Client reads will only see data that's been committed durably to the DB.
     #[default]
-    Commited,
+    Committed,
 
     /// Clients will see all writes, including those not yet durably committed to the
     /// DB.
@@ -207,10 +207,10 @@ pub struct ScanOptions {
 }
 
 impl Default for ScanOptions {
-    /// Create a new ScanOptions with `read_level` set to [`ReadLevel::Commited`].
+    /// Create a new ScanOptions with `read_level` set to [`ReadLevel::Committed`].
     fn default() -> Self {
         Self {
-            read_level: ReadLevel::Commited,
+            read_level: ReadLevel::Committed,
             read_ahead_bytes: 1,
             cache_blocks: false,
         }

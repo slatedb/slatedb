@@ -49,6 +49,7 @@ use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId}
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::filter;
+use crate::filter_iterator::FilterIterator;
 use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
@@ -60,8 +61,10 @@ use crate::sst::SsTableFormat;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::types::ValueDeletable;
-use crate::utils::{bg_task_result_into_err, MonotonicClock};
+use crate::types::RowEntry;
+use crate::utils::{
+    bg_task_result_into_err, filter_expired, get_now_for_read, unwrap_result, MonotonicClock,
+};
 use tracing::{info, warn};
 
 pub(crate) struct DbInner {
@@ -115,31 +118,22 @@ impl DbInner {
         self.check_error()?;
         let key = key.as_ref();
         let snapshot = self.state.read().snapshot();
-
-        // Temporary function to convert ValueDeletable to Option<Bytes> until
-        // we add proper support for merges.
-        let unwrap_result = |v| match v {
-            ValueDeletable::Value(v) => Ok(Some(v)),
-            ValueDeletable::Merge(_) => {
-                unimplemented!("MergeOperator is not yet fully implemented")
-            }
-            ValueDeletable::Tombstone => Ok(None),
-        };
+        let ttl_now = get_now_for_read(self.mono_clock.clone(), options.read_level).await?;
 
         if matches!(options.read_level, Uncommitted) {
             let maybe_val = std::iter::once(snapshot.wal)
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
-            if let Some(val) = maybe_val {
-                return unwrap_result(val.value);
+            if let Some(entry) = maybe_val {
+                return self.unwrap_value(filter_expired(entry, ttl_now));
             }
         }
 
         let maybe_val = std::iter::once(snapshot.memtable)
             .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
-        if let Some(val) = maybe_val {
-            return unwrap_result(val.value);
+        if let Some(entry) = maybe_val {
+            return self.unwrap_value(filter_expired(entry, ttl_now));
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -156,11 +150,12 @@ impl DbInner {
         for sst in &snapshot.state.core.l0 {
             let filter_result = self.sst_might_include_key(sst, key, key_hash).await?;
             if filter_result.might_contain_key() {
-                let mut iter =
+                let iter =
                     SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
                         .await?;
 
-                if let Some(entry) = iter.next_entry().await? {
+                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
+                if let Some(entry) = ttl_iter.next_entry().await? {
                     if entry.key == key {
                         return unwrap_result(entry.value);
                     }
@@ -174,10 +169,12 @@ impl DbInner {
         for sr in &snapshot.state.core.compacted {
             let filter_result = self.sr_might_include_key(sr, key, key_hash).await?;
             if filter_result.might_contain_key() {
-                let mut iter =
+                let iter =
                     SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
                         .await?;
-                if let Some(entry) = iter.next_entry().await? {
+
+                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
+                if let Some(entry) = ttl_iter.next_entry().await? {
                     if entry.key == key {
                         return unwrap_result(entry.value);
                     }
@@ -188,6 +185,14 @@ impl DbInner {
             }
         }
         Ok(None)
+    }
+
+    fn unwrap_value(&self, entry: Option<RowEntry>) -> Result<Option<Bytes>, SlateDBError> {
+        if let Some(unwrapped) = entry {
+            unwrap_result(unwrapped.value)
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn scan_with_options<'a>(
@@ -1402,7 +1407,7 @@ mod tests {
     use super::*;
     use crate::cached_object_store::FsCacheStorage;
     use crate::config::{
-        CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
+        CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions, Ttl,
     };
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
@@ -1414,6 +1419,7 @@ mod tests {
     use crate::cached_object_store::stats::{
         OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
     };
+    use crate::config::ReadLevel::Committed;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::{proptest_util, test_utils};
     use futures::{future::join_all, StreamExt};
@@ -1444,6 +1450,276 @@ mod tests {
         );
         kv_store.delete(key).await.unwrap();
         assert_eq!(None, kv_store.get(key).await.unwrap());
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_with_default_ttl_and_read_uncommitted() {
+        let clock = Arc::new(TestClock::new());
+        let ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(ttl)),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let key = b"test_key";
+        let value = b"test_value";
+
+        // insert at t=0
+        kv_store.put(key, value).await.unwrap();
+
+        // advance clock to t=99 --> still returned
+        clock.ticker.store(99, Ordering::SeqCst);
+        assert_eq!(
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Uncommitted
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance clock to t=100 --> no longer returned
+        clock.ticker.store(100, Ordering::SeqCst);
+        assert_eq!(
+            None,
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Uncommitted
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_with_row_override_ttl_and_read_uncommitted() {
+        let clock = Arc::new(TestClock::new());
+        let default_ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(default_ttl)),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let key = b"test_key";
+        let value = b"test_value";
+
+        // insert at t=0 with row-level override of 50 for ttl
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions {
+                    ttl: Ttl::ExpireAfter(50),
+                },
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        // advance clock to t=49 --> still returned
+        clock.ticker.store(49, Ordering::SeqCst);
+        assert_eq!(
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Uncommitted
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance clock to t=50 --> no longer returned
+        clock.ticker.store(50, Ordering::SeqCst);
+        assert_eq!(
+            None,
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Uncommitted
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_with_default_ttl_and_read_committed() {
+        let clock = Arc::new(TestClock::new());
+        let ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(ttl)),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let key = b"test_key";
+        let key_other = b"time_advancing_key";
+        let value = b"test_value";
+
+        // insert at t=0
+        kv_store.put(key, value).await.unwrap();
+
+        // advance clock to t=99 --> still returned
+        clock.ticker.store(99, Ordering::SeqCst);
+        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store.flush().await.unwrap();
+        assert_eq!(
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance clock to t=100 without flushing --> still returned
+        clock.ticker.store(100, Ordering::SeqCst);
+        assert_eq!(
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance durable clock time to t=100 by flushing -- no longer returned
+        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store.flush().await.unwrap();
+        assert_eq!(
+            None,
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_with_row_override_ttl_and_read_committed() {
+        let clock = Arc::new(TestClock::new());
+        let ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(ttl)),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let key = b"test_key";
+        let key_other = b"time_advancing_key";
+        let value = b"test_value";
+
+        // insert at t=0 with row-level override of 50 for ttl
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions {
+                    ttl: Ttl::ExpireAfter(50),
+                },
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        // advance clock to t=49 --> still returned
+        clock.ticker.store(49, Ordering::SeqCst);
+        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store.flush().await.unwrap();
+        assert_eq!(
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance clock to t=50 without flushing --> still returned
+        clock.ticker.store(50, Ordering::SeqCst);
+        assert_eq!(
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance durable clock time to t=100 by flushing -- no longer returned
+        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store.flush().await.unwrap();
+        assert_eq!(
+            None,
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
         kv_store.close().await.unwrap();
     }
 
@@ -3190,6 +3466,22 @@ mod tests {
         compactor_options: Option<CompactorOptions>,
         clock: Arc<TestClock>,
     ) -> DbOptions {
+        test_db_options_with_ttl(
+            min_filter_keys,
+            l0_sst_size_bytes,
+            compactor_options,
+            clock,
+            None,
+        )
+    }
+
+    fn test_db_options_with_ttl(
+        min_filter_keys: u32,
+        l0_sst_size_bytes: usize,
+        compactor_options: Option<CompactorOptions>,
+        clock: Arc<TestClock>,
+        ttl: Option<u64>,
+    ) -> DbOptions {
         DbOptions {
             flush_interval: Duration::from_millis(100),
             #[cfg(feature = "wal_disable")]
@@ -3206,7 +3498,7 @@ mod tests {
             block_cache: None,
             garbage_collector_options: None,
             clock,
-            default_ttl: None,
+            default_ttl: ttl,
         }
     }
 }

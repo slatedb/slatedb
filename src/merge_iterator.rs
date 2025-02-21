@@ -284,10 +284,9 @@ impl<T: KeyValueIterator + SeekToKey> SeekToKey for MergeIterator<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::error::SlateDBError;
-    use crate::iter::{KeyValueIterator, SeekToKey};
+    use crate::iter::SeekToKey;
     use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
-    use crate::test_utils::{assert_iterator, assert_next_entry};
+    use crate::test_utils::{assert_iterator, assert_next_entry, TestIterator};
     use crate::types::RowEntry;
     use std::collections::VecDeque;
     use std::vec;
@@ -502,46 +501,5 @@ mod tests {
             ],
         )
         .await;
-    }
-
-    struct TestIterator {
-        entries: VecDeque<Result<RowEntry, SlateDBError>>,
-    }
-
-    impl TestIterator {
-        fn new() -> Self {
-            Self {
-                entries: VecDeque::new(),
-            }
-        }
-
-        fn with_entry(mut self, key: &'static [u8], val: &'static [u8], seq: u64) -> Self {
-            let entry = RowEntry::new_value(key, val, seq);
-            self.entries.push_back(Ok(entry));
-            self
-        }
-    }
-
-    impl KeyValueIterator for TestIterator {
-        async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-            self.entries.pop_front().map_or(Ok(None), |e| match e {
-                Ok(kv) => Ok(Some(kv)),
-                Err(err) => Err(err),
-            })
-        }
-    }
-
-    impl SeekToKey for TestIterator {
-        async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-            while let Some(entry_result) = self.entries.front() {
-                let entry = entry_result.clone()?;
-                if entry.key < next_key {
-                    self.entries.pop_front();
-                } else {
-                    break;
-                }
-            }
-            Ok(())
-        }
     }
 }

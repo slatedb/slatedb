@@ -64,6 +64,7 @@ mod db_iter;
 mod db_state;
 mod error;
 mod filter;
+mod filter_iterator;
 mod flatbuffer_types;
 mod flush;
 mod garbage_collector;
