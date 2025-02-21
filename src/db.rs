@@ -61,7 +61,7 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::utils::{
-    bg_task_result_into_err, filter_expired, get_now_for_ttl, unwrap_result, MonotonicClock,
+    bg_task_result_into_err, filter_expired, get_now_for_read, unwrap_result, MonotonicClock,
 };
 use tracing::{info, warn};
 
@@ -116,7 +116,7 @@ impl DbInner {
         self.check_error()?;
         let key = key.as_ref();
         let snapshot = self.state.read().snapshot();
-        let ttl_now = get_now_for_ttl(self.mono_clock.clone(), options.read_level).await?;
+        let ttl_now = get_now_for_read(self.mono_clock.clone(), options.read_level).await?;
 
         if matches!(options.read_level, Uncommitted) {
             let maybe_val = std::iter::once(snapshot.wal)

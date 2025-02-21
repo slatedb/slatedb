@@ -147,7 +147,7 @@ pub(crate) fn unwrap_result(value: ValueDeletable) -> Result<Option<Bytes>, Slat
     }
 }
 
-pub(crate) async fn get_now_for_ttl(
+pub(crate) async fn get_now_for_read(
     mono_clock: Arc<MonotonicClock>,
     read_level: ReadLevel,
 ) -> Result<i64, SlateDBError> {
