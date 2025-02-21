@@ -1,6 +1,7 @@
 use crate::config::Clock;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
+use bytes::{BufMut, Bytes};
 use std::cmp;
 use std::future::Future;
 use std::sync::atomic::AtomicI64;
@@ -204,11 +205,26 @@ pub(crate) fn merge_options<T>(
     }
 }
 
+fn bytes_into_minimal_vec(bytes: &Bytes) -> Vec<u8> {
+    let mut clamped = Vec::new();
+    clamped.reserve_exact(bytes.len());
+    clamped.put_slice(bytes.as_ref());
+    clamped
+}
+
+pub(crate) fn clamp_allocated_size_bytes(bytes: &Bytes) -> Bytes {
+    bytes_into_minimal_vec(bytes).into()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::error::SlateDBError;
     use crate::test_utils::TestClock;
-    use crate::utils::{spawn_bg_task, spawn_bg_thread, MonotonicClock, WatchableOnceCell};
+    use crate::utils::{
+        bytes_into_minimal_vec, clamp_allocated_size_bytes, spawn_bg_task, spawn_bg_thread,
+        MonotonicClock, WatchableOnceCell,
+    };
+    use bytes::{BufMut, BytesMut};
     use parking_lot::Mutex;
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
@@ -430,5 +446,34 @@ mod tests {
 
         let result = tick_future.await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_should_clamp_bytes_to_minimal_vec() {
+        let mut bytes = BytesMut::with_capacity(2048);
+        bytes.put_bytes(0u8, 2048);
+        let bytes = bytes.freeze();
+        let slice = bytes.slice(100..1124);
+
+        let clamped = bytes_into_minimal_vec(&slice);
+
+        assert_eq!(slice.as_ref(), clamped.as_slice());
+        assert_eq!(clamped.capacity(), 1024);
+    }
+
+    #[test]
+    fn test_should_clamp_bytes_and_preserve_data() {
+        let mut bytes = BytesMut::with_capacity(2048);
+        bytes.put_bytes(0u8, 2048);
+        let bytes = bytes.freeze();
+        let slice = bytes.slice(100..1124);
+
+        let clamped = clamp_allocated_size_bytes(&slice);
+
+        assert_eq!(clamped, slice);
+        // It doesn't seem to be possible to assert that the clamped block's data is actually
+        // a buffer of the minimal size, as Bytes doesn't expose the underlying buffer's
+        // capacity. The best we can do is assert it allocated a new buffer.
+        assert_ne!(clamped.as_ptr(), slice.as_ptr());
     }
 }
