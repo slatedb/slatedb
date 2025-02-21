@@ -1591,7 +1591,6 @@ mod tests {
         clock.ticker.store(99, Ordering::SeqCst);
         kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
-
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
@@ -1605,11 +1604,24 @@ mod tests {
                 .unwrap(),
         );
 
-        // advance clock to t=100 --> no longer returned
+        // advance clock to t=100 without flushing --> still returned
         clock.ticker.store(100, Ordering::SeqCst);
+        assert_eq!(
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance durable clock time to t=100 by flushing -- no longer returned
         kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
-
         assert_eq!(
             None,
             kv_store
@@ -1661,7 +1673,6 @@ mod tests {
         clock.ticker.store(49, Ordering::SeqCst);
         kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
-
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
@@ -1675,11 +1686,24 @@ mod tests {
                 .unwrap(),
         );
 
-        // advance clock to t=50 --> no longer returned
+        // advance clock to t=50 without flushing --> still returned
         clock.ticker.store(50, Ordering::SeqCst);
+        assert_eq!(
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance durable clock time to t=100 by flushing -- no longer returned
         kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
-
         assert_eq!(
             None,
             kv_store
