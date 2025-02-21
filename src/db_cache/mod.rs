@@ -1,6 +1,6 @@
 //! # DB Cache
 //!
-//! This module provides an in-memory caching solution for storing and retrieving
+//! This module provides a pluggable caching solution for storing and retrieving
 //! cached blocks, index and bloom filters associated with SSTable IDs.
 //!
 //! There are currently two built-in cache implementations:
@@ -15,6 +15,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::db_cache::stats::DbCacheStats;
+use crate::stats::StatRegistry;
 use crate::{
     block::Block, db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned,
 };
@@ -27,71 +29,107 @@ pub mod moka;
 /// The default max capacity for the cache. (64MB)
 pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 
-/// A trait for in-memory caches.
+/// A trait for slatedb's block cache.
 ///
-/// This trait defines the interface for an in-memory cache,
+/// This trait defines the interface for a block cache,
 /// which is used to store and retrieve cached blocks associated with SSTable IDs.
 ///
 /// Example:
 ///
-/// ```rust,no_run,compile_fail
+/// ```rust,no_run
 /// use async_trait::async_trait;
 /// use object_store::local::LocalFileSystem;
-/// use slatedb::db::Db;
+/// use slatedb::Db;
 /// use slatedb::config::DbOptions;
-/// use slatedb::db_cache::{DbCache, CachedEntry, CachedKey};
-/// use ssc::HashMap;
-/// use std::sync::Arc;
+/// use slatedb::db_cache::{DbCache, CachedEntry, CachedKey, GetTarget};
+/// use std::collections::HashMap;
+/// use std::sync::{Arc, Mutex};
 ///
 /// struct MyCache {
-///     inner: HashMap<CachedKey, CachedEntry>,
+///     inner: Mutex<MyCacheInner>,
+/// }
+///
+/// struct MyCacheInner {
+///     data: HashMap<CachedKey, CachedEntry>,
+///     usage: u64,
+///     capacity: u64
 /// }
 ///
 /// impl MyCache {
-///     pub fn new() -> Self {
+///     pub fn new(capacity: u64) -> Self {
 ///         Self {
-///             inner: HashMap::new(),
+///             inner: Mutex::new(
+///                 MyCacheInner{
+///                     data: HashMap::new(),
+///                     usage: 0,
+///                     capacity,
+///                 }
+///             )
 ///         }
 ///     }
 /// }
 ///
 /// #[async_trait]
 /// impl DbCache for MyCache {
-///     async fn get(&self, key: CachedKey) -> Option<CachedEntry> {
-///         self.inner.get_async(&key).await.cloned()
+///     async fn get(&self, key: CachedKey, _target: GetTarget) -> Option<CachedEntry> {
+///         use slatedb::db_cache::GetTarget;
+/// let guard = self.inner.lock().unwrap();
+///         guard.data.get(&key).cloned()
 ///     }
 ///
 ///     async fn insert(&self, key: CachedKey, value: CachedEntry) {
-///         self.inner.insert_async(key, value).await;
+///         let mut guard = self.inner.lock().unwrap();
+///         guard.usage += value.size() as u64;
+///         if let Some(v) = guard.data.insert(key, value) {
+///             guard.usage -= v.size() as u64;
+///         }
 ///     }
 ///
 ///     async fn remove(&self, key: CachedKey) {
-///         self.inner.remove_async(&key).await;
+///         let mut guard = self.inner.lock().unwrap();
+///         if let Some(v) = guard.data.remove(&key) {
+///             guard.usage -= v.size() as u64;
+///         }
 ///     }
 ///
 ///     fn entry_count(&self) -> u64 {
-///         self.inner.len() as u64
+///         let mut guard = self.inner.lock().unwrap();
+///         guard.capacity
 ///     }
 /// }
 ///
 /// #[::tokio::main]
 /// async fn main() {
+///     use object_store::path::Path;
+///     use slatedb::db_cache::DbCacheWrapper;
 ///     let object_store = Arc::new(LocalFileSystem::new());
+///     let cache = Arc::new(MyCache::new(128u64 * 1024 * 1024));
 ///     let options = DbOptions {
-///         block_cache: Some(Arc::new(MyCache::new())),
+///         block_cache: Some(cache),
 ///         ..Default::default()
 ///     };
-///     let db = Db::open_with_opts("path/to/db".into(), options, object_store).await;
+///     let path = Path::from("/path/to/db");
+///     let db = Db::open_with_opts(path, options, object_store).await;
 /// }
 /// ```
 #[async_trait]
 pub trait DbCache: Send + Sync {
-    async fn get(&self, key: CachedKey) -> Option<CachedEntry>;
+    async fn get(&self, key: CachedKey, target: GetTarget) -> Option<CachedEntry>;
     async fn insert(&self, key: CachedKey, value: CachedEntry);
     #[allow(dead_code)]
     async fn remove(&self, key: CachedKey);
     #[allow(dead_code)]
     fn entry_count(&self) -> u64;
+}
+
+/// A hint to the cache about what data is being fetched on a get. Can be used to
+/// track statistics.
+#[non_exhaustive]
+#[derive(Clone, Copy)]
+pub enum GetTarget {
+    Block,
+    SsTableIndex,
+    BloomFilter,
 }
 
 /// A key used to identify a cached entry.
@@ -179,6 +217,297 @@ impl CachedEntry {
             CachedItem::Block(block) => block.size(),
             CachedItem::SsTableIndex(sst_index) => sst_index.size(),
             CachedItem::BloomFilter(bloom_filter) => bloom_filter.size(),
+        }
+    }
+}
+
+pub struct DbCacheWrapper {
+    stats: DbCacheStats,
+    cache: Arc<dyn DbCache>,
+}
+
+impl DbCacheWrapper {
+    pub fn new(cache: Arc<dyn DbCache>, stats_registry: &StatRegistry) -> Self {
+        Self {
+            stats: DbCacheStats::new(stats_registry),
+            cache,
+        }
+    }
+}
+
+#[async_trait]
+impl DbCache for DbCacheWrapper {
+    async fn get(&self, key: CachedKey, target: GetTarget) -> Option<CachedEntry> {
+        let result = self.cache.get(key, target).await;
+        if result.is_some() {
+            match target {
+                GetTarget::Block => self.stats.data_block_hit.inc(),
+                GetTarget::SsTableIndex => self.stats.index_hit.inc(),
+                GetTarget::BloomFilter => self.stats.filter_hit.inc(),
+            };
+        } else {
+            match target {
+                GetTarget::Block => self.stats.data_block_miss.inc(),
+                GetTarget::SsTableIndex => self.stats.index_miss.inc(),
+                GetTarget::BloomFilter => self.stats.filter_miss.inc(),
+            };
+        }
+        result
+    }
+
+    async fn insert(&self, key: CachedKey, value: CachedEntry) {
+        self.cache.insert(key, value).await
+    }
+
+    #[allow(dead_code)]
+    async fn remove(&self, key: CachedKey) {
+        self.cache.remove(key).await
+    }
+
+    fn entry_count(&self) -> u64 {
+        self.cache.entry_count()
+    }
+}
+
+pub mod stats {
+    use crate::stats::{Counter, StatRegistry};
+    use std::sync::Arc;
+
+    macro_rules! dbcache_stat_name {
+        ($suffix:expr) => {
+            crate::stat_name!("dbcache", $suffix)
+        };
+    }
+
+    pub const DB_CACHE_FILTER_HIT: &str = dbcache_stat_name!("filter_hit");
+    pub const DB_CACHE_FILTER_MISS: &str = dbcache_stat_name!("filter_miss");
+    pub const DB_CACHE_INDEX_HIT: &str = dbcache_stat_name!("index_hit");
+    pub const DB_CACHE_INDEX_MISS: &str = dbcache_stat_name!("index_miss");
+    pub const DB_CACHE_DATA_BLOCK_HIT: &str = dbcache_stat_name!("data_block_hit");
+    pub const DB_CACHE_DATA_BLOCK_MISS: &str = dbcache_stat_name!("data_block_miss");
+
+    pub(super) struct DbCacheStats {
+        pub(super) filter_hit: Arc<Counter>,
+        pub(super) filter_miss: Arc<Counter>,
+        pub(super) index_hit: Arc<Counter>,
+        pub(super) index_miss: Arc<Counter>,
+        pub(super) data_block_hit: Arc<Counter>,
+        pub(super) data_block_miss: Arc<Counter>,
+    }
+
+    impl DbCacheStats {
+        pub(super) fn new(registry: &StatRegistry) -> Self {
+            let stats = Self {
+                filter_hit: Arc::new(Counter::default()),
+                filter_miss: Arc::new(Counter::default()),
+                index_hit: Arc::new(Counter::default()),
+                index_miss: Arc::new(Counter::default()),
+                data_block_hit: Arc::new(Counter::default()),
+                data_block_miss: Arc::new(Counter::default()),
+            };
+            registry.register(DB_CACHE_FILTER_HIT, stats.filter_hit.clone());
+            registry.register(DB_CACHE_FILTER_MISS, stats.filter_miss.clone());
+            registry.register(DB_CACHE_INDEX_HIT, stats.index_hit.clone());
+            registry.register(DB_CACHE_INDEX_MISS, stats.index_miss.clone());
+            registry.register(DB_CACHE_DATA_BLOCK_HIT, stats.data_block_hit.clone());
+            registry.register(DB_CACHE_DATA_BLOCK_MISS, stats.data_block_miss.clone());
+            stats
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, GetTarget};
+    use crate::db_state::SsTableId;
+    use crate::sst::SsTableFormat;
+    use crate::stats::{ReadableStat, StatRegistry};
+    use crate::test_utils::{build_test_sst, SstData};
+    use async_trait::async_trait;
+    use rstest::{fixture, rstest};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use ulid::Ulid;
+
+    const SST_ID: SsTableId = SsTableId::Compacted(Ulid::from_parts(0u64, 0u128));
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_should_count_filter_hits(
+        cache: DbCacheWrapper,
+        sst_format: SsTableFormat,
+        sst: SstData,
+    ) {
+        // given:
+        let filter = sst_format
+            .read_filter_raw(&sst.info, &sst.data)
+            .unwrap()
+            .unwrap();
+        let key = CachedKey::from((SST_ID, 12345u64));
+        cache
+            .insert(key.clone(), CachedEntry::with_bloom_filter(filter))
+            .await;
+
+        for i in 1..4 {
+            // when:
+            let _ = cache.get(key.clone(), GetTarget::BloomFilter).await;
+
+            // then:
+            assert_eq!(0, cache.stats.filter_miss.get());
+            assert_eq!(i, cache.stats.filter_hit.get());
+        }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_should_count_filter_misses(cache: DbCacheWrapper) {
+        // given:
+        let key = CachedKey::from((SST_ID, 12345u64));
+
+        for i in 1..4 {
+            // when:
+            let _ = cache.get(key.clone(), GetTarget::BloomFilter).await;
+
+            // then:
+            assert_eq!(i, cache.stats.filter_miss.get());
+            assert_eq!(0, cache.stats.filter_hit.get());
+        }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_should_count_index_hits(
+        cache: DbCacheWrapper,
+        sst_format: SsTableFormat,
+        sst: SstData,
+    ) {
+        // given:
+        let index = sst_format.read_index_raw(&sst.info, &sst.data).unwrap();
+        let key = CachedKey::from((SST_ID, 12345u64));
+        cache
+            .insert(key.clone(), CachedEntry::with_sst_index(Arc::new(index)))
+            .await;
+
+        for i in 1..4 {
+            // when:
+            let _ = cache.get(key.clone(), GetTarget::SsTableIndex).await;
+
+            // then:
+            assert_eq!(0, cache.stats.index_miss.get());
+            assert_eq!(i, cache.stats.index_hit.get());
+        }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_should_count_index_misses(cache: DbCacheWrapper) {
+        // given:
+        let key = CachedKey::from((SST_ID, 12345u64));
+
+        for i in 1..4 {
+            // when:
+            let _ = cache.get(key.clone(), GetTarget::SsTableIndex).await;
+
+            // then:
+            assert_eq!(i, cache.stats.index_miss.get());
+            assert_eq!(0, cache.stats.index_hit.get());
+        }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_should_count_data_block_hits(
+        cache: DbCacheWrapper,
+        sst_format: SsTableFormat,
+        sst: SstData,
+    ) {
+        // given:
+        let index = sst_format.read_index_raw(&sst.info, &sst.data).unwrap();
+        let block = sst_format
+            .read_block_raw(&sst.info, &index, 0, &sst.data)
+            .unwrap();
+        let key = CachedKey::from((SST_ID, 12345u64));
+        cache
+            .insert(key.clone(), CachedEntry::with_block(Arc::new(block)))
+            .await;
+
+        for i in 1..4 {
+            // when:
+            let _ = cache.get(key.clone(), GetTarget::Block).await;
+
+            // then:
+            assert_eq!(0, cache.stats.data_block_miss.get());
+            assert_eq!(i, cache.stats.data_block_hit.get());
+        }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_should_count_data_block_misses(cache: DbCacheWrapper) {
+        // given:
+        let key = CachedKey::from((SST_ID, 12345u64));
+
+        for i in 1..4 {
+            // when:
+            let _ = cache.get(key.clone(), GetTarget::Block).await;
+
+            // then:
+            assert_eq!(i, cache.stats.data_block_miss.get());
+            assert_eq!(0, cache.stats.data_block_hit.get());
+        }
+    }
+
+    #[fixture]
+    fn cache() -> DbCacheWrapper {
+        let registry = StatRegistry::new();
+        DbCacheWrapper::new(Arc::new(TestCache::new()), &registry)
+    }
+
+    #[fixture]
+    fn sst_format() -> SsTableFormat {
+        SsTableFormat {
+            block_size: 128,
+            ..SsTableFormat::default()
+        }
+    }
+
+    #[fixture]
+    fn sst(sst_format: SsTableFormat) -> SstData {
+        build_test_sst(&sst_format, 1)
+    }
+
+    struct TestCache {
+        items: Mutex<HashMap<CachedKey, CachedEntry>>,
+    }
+
+    impl TestCache {
+        fn new() -> Self {
+            Self {
+                items: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DbCache for TestCache {
+        async fn get(&self, key: CachedKey, _target: GetTarget) -> Option<CachedEntry> {
+            let guard = self.items.lock().unwrap();
+            guard.get(&key).cloned()
+        }
+
+        async fn insert(&self, key: CachedKey, value: CachedEntry) {
+            let mut guard = self.items.lock().unwrap();
+            guard.insert(key, value);
+        }
+
+        async fn remove(&self, key: CachedKey) {
+            let mut guard = self.items.lock().unwrap();
+            guard.remove(&key);
+        }
+
+        fn entry_count(&self) -> u64 {
+            let guard = self.items.lock().unwrap();
+            guard.iter().count() as u64
         }
     }
 }
