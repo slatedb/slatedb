@@ -215,8 +215,7 @@ impl CompactorEventHandler {
         let stored_manifest =
             tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;
         let manifest = tokio_handle.block_on(FenceableManifest::init_compactor(stored_manifest))?;
-        let db_state = manifest.db_state()?;
-        let state = CompactorState::new(db_state.clone());
+        let state = CompactorState::new(manifest.prepare_dirty()?);
         Ok(Self {
             tokio_handle,
             state,
@@ -281,12 +280,11 @@ impl CompactorEventHandler {
                 ..CheckpointOptions::default()
             },
         ))?;
-        // make sure to merge it before applying the local updates (TODO: make this safer
-        // by tracking the expected version id in core db state)
-        self.state.merge_db_state(self.manifest.db_state()?);
-        let core = self.state.db_state().clone();
+        self.state
+            .merge_remote_manifest(self.manifest.prepare_dirty()?);
+        let dirty = self.state.manifest().clone();
         self.tokio_handle
-            .block_on(self.manifest.update_db_state(core))
+            .block_on(self.manifest.update_manifest(dirty))
     }
 
     fn write_manifest_safely(&mut self) -> Result<(), SlateDBError> {
@@ -382,7 +380,8 @@ impl CompactorEventHandler {
     }
 
     fn refresh_db_state(&mut self) -> Result<(), SlateDBError> {
-        self.state.merge_db_state(self.manifest.db_state()?);
+        self.state
+            .merge_remote_manifest(self.manifest.prepare_dirty()?);
         self.maybe_schedule_compactions()?;
         Ok(())
     }
@@ -690,22 +689,26 @@ mod tests {
         }
 
         fn latest_db_state(&mut self) -> CoreDbState {
-            self.rt.block_on(self.manifest.refresh()).unwrap().clone()
+            self.rt
+                .block_on(self.manifest.refresh())
+                .unwrap()
+                .core
+                .clone()
         }
 
         fn write_l0(&mut self) {
             let fut = async {
                 let mut rng = rng::new_test_rng(None);
-                let state = self.manifest.refresh().await.unwrap();
-                let l0s = state.l0.len();
+                let manifest = self.manifest.refresh().await.unwrap();
+                let l0s = manifest.core.l0.len();
                 // TODO: add an explicit flush_memtable fn to db and use that instead
                 let mut k = vec![0u8; self.options.l0_sst_size_bytes];
                 rng.fill_bytes(&mut k);
                 self.db.put(&k, &[b'x'; 10]).await.unwrap();
                 self.db.flush().await.unwrap();
                 loop {
-                    let state = self.manifest.refresh().await.unwrap().clone();
-                    if state.l0.len() > l0s {
+                    let manifest = self.manifest.refresh().await.unwrap().clone();
+                    if manifest.core.l0.len() > l0s {
                         break;
                     }
                 }

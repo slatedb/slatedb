@@ -58,9 +58,9 @@ pub(crate) async fn create_clone<P: Into<Path>>(
         )
         .await?;
 
-        let mut initialized_db_state = clone_manifest.db_state().clone();
-        initialized_db_state.initialized = true;
-        clone_manifest.update_db_state(initialized_db_state).await?;
+        let mut dirty = clone_manifest.prepare_dirty();
+        dirty.core.initialized = true;
+        clone_manifest.update_manifest(dirty).await?;
     }
 
     Ok(())

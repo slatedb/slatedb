@@ -69,10 +69,10 @@ impl Db {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
-            .maybe_apply_db_state_update(|stored_manifest| {
-                let mut db_state = stored_manifest.db_state().clone();
+            .maybe_apply_manifest_update(|stored_manifest| {
+                let mut dirty = stored_manifest.prepare_dirty();
                 let expire_time = lifetime.map(|l| SystemTime::now() + l);
-                let Some(_) = db_state.checkpoints.iter_mut().find_map(|c| {
+                let Some(_) = dirty.core.checkpoints.iter_mut().find_map(|c| {
                     if c.id == id {
                         c.expire_time = expire_time;
                         return Some(());
@@ -81,7 +81,7 @@ impl Db {
                 }) else {
                     return Err(SlateDBError::InvalidDBState);
                 };
-                Ok(Some(db_state))
+                Ok(Some(dirty))
             })
             .await
     }
@@ -95,16 +95,17 @@ impl Db {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
-            .maybe_apply_db_state_update(|stored_manifest| {
-                let mut db_state = stored_manifest.db_state().clone();
-                let checkpoints: Vec<Checkpoint> = db_state
+            .maybe_apply_manifest_update(|stored_manifest| {
+                let mut dirty = stored_manifest.prepare_dirty();
+                let checkpoints: Vec<Checkpoint> = dirty
+                    .core
                     .checkpoints
                     .iter()
                     .filter(|c| c.id != id)
                     .cloned()
                     .collect();
-                db_state.checkpoints = checkpoints;
-                Ok(Some(db_state))
+                dirty.core.checkpoints = checkpoints;
+                Ok(Some(dirty))
             })
             .await
     }

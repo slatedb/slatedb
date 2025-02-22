@@ -74,7 +74,7 @@ impl DbInner {
                 .imm_wal
                 .back()
                 .cloned()
-                .map(|imm| (imm, state.core.next_wal_sst_id))
+                .map(|imm| (imm, state.core().next_wal_sst_id))
         } {
             self.flush_imm_wal(id, imm.clone()).await?;
             let mut wguard = self.state.write();
