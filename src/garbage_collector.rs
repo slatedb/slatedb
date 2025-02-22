@@ -5,8 +5,8 @@ use crate::db_state::{CoreDbState, SsTableId};
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
 use crate::garbage_collector::GarbageCollectorMessage::*;
+use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
-use crate::manifest_store::{ManifestStore, StoredManifest};
 use crate::stats::StatRegistry;
 use crate::tablestore::{SstFileMetadata, TableStore};
 use crate::utils::spawn_bg_thread;
@@ -662,7 +662,7 @@ mod tests {
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
         garbage_collector::GarbageCollector,
-        manifest_store::{ManifestStore, StoredManifest},
+        manifest::store::{ManifestStore, StoredManifest},
         sst::SsTableFormat,
         tablestore::TableStore,
     };

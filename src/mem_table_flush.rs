@@ -4,7 +4,7 @@ use crate::db::DbInner;
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskShutdown;
-use crate::manifest_store::FenceableManifest;
+use crate::manifest::store::FenceableManifest;
 use crate::utils::{bg_task_result_into_err, spawn_bg_task};
 use std::sync::Arc;
 use tokio::runtime::Handle;

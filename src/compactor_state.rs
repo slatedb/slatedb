@@ -265,7 +265,7 @@ mod tests {
     use crate::config::DbOptions;
     use crate::db::Db;
     use crate::db_state::SsTableId;
-    use crate::manifest_store::{ManifestStore, StoredManifest};
+    use crate::manifest::store::{ManifestStore, StoredManifest};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;

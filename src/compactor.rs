@@ -16,7 +16,7 @@ use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
-use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::spawn_bg_thread;
@@ -458,7 +458,7 @@ mod tests {
     use crate::db::Db;
     use crate::db_state::CoreDbState;
     use crate::iter::KeyValueIterator;
-    use crate::manifest_store::{ManifestStore, StoredManifest};
+    use crate::manifest::store::{ManifestStore, StoredManifest};
 
     use crate::proptest_util::rng;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
