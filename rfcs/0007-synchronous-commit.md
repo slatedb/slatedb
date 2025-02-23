@@ -347,7 +347,7 @@ sequenceDiagram
 
 In this proposal, "Commit to make it visible" effectively means "applying the changes to the MemTable", whenever the change is applied to MemTable, it's considered as committed.
 
-The changes to the read path are minimal. Readers with `ReadWatermark::LastCommitting` will continue to read data from the WAL before accessing the MemTable. For reads with `ReadWatermark::LastCommitted`, `ReadWatermark::LastLocalPersisted`, or `ReadWatermark::LastRemotePersisted`, readers will first check the MemTable, using different sequence numbers as watermarks to determine visibility.
+The changes to the read path are minimal. For reads with `ReadWatermark::LastCommitted`, `ReadWatermark::LastLocalPersisted`, or `ReadWatermark::LastRemotePersisted`, readers will first check the MemTable, using different sequence numbers as watermarks to determine visibility.
 
 On the write side, after the data is appended to the WAL, it'll be applied to MemTable as soon as possible to make the change to be visible to readers.
 
@@ -361,7 +361,6 @@ sequenceDiagram
     participant Flusher
 
     WriteBatch->>WAL: append write op to current WAL
-    Note over WAL: become visible to readers with ReadWatermark::LastCommitting
 
     WAL->>WAL: Maybe trigger a flush
     Note over WAL: when it reaches flush.interval or flush.size
@@ -401,7 +400,7 @@ In this case, we can still buffer the WAL in memory as long as possible. When th
 
 However, the memory is limited, and we can't buffer the WAL in memory forever. We already have a threshold setting `max_unflushed_bytes` for this. When this threshold is reached, we can't buffer the WAL anymore, and we have to mark the db into an read-only state.
 
-When the WAL fails to be flushed to storage, the write operation with `SyncLevel::Remote` should be failed with an `IOError`, and considered as not committed. This write operation is ok to be visible to readers with `ReadWatermark::LastCommitting`, but should be invisible to readers with read watermark higher than `ReadWatermark::LastCommitted`.
+When the WAL fails to be flushed to storage, the write operation with `SyncLevel::Remote` should be failed with an `IOError` (or a concrete error type), and considered as not committed. This write operation should be invisible to all of the readers.
 
 ### Possible Code Changes
 
