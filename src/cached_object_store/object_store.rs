@@ -138,10 +138,11 @@ impl CachedObjectStore {
     /// save the GetResult to the disk cache, a GetResult may be transformed into multiple part
     /// files and a meta file. please note that the `range` in the GetResult is expected to be
     /// aligned with the part size.
-    async fn save_result(&self, result: GetResult) -> object_store::Result<usize> {
-        assert!(result.range.start % self.part_size_bytes == 0);
+    async fn save_result(&self, result: GetResult) -> object_store::Result<u64> {
+        let part_size_bytes_u64 = self.part_size_bytes as u64;
+        assert!(result.range.start % part_size_bytes_u64 == 0);
         assert!(
-            result.range.end % self.part_size_bytes == 0 || result.range.end == result.meta.size
+            result.range.end % part_size_bytes_u64 == 0 || result.range.end == result.meta.size
         );
 
         let entry = self
@@ -150,7 +151,8 @@ impl CachedObjectStore {
         entry.save_head((&result.meta, &result.attributes)).await?;
 
         let mut buffer = BytesMut::new();
-        let mut part_number = result.range.start / self.part_size_bytes;
+        let mut part_number = usize::try_from(result.range.start / part_size_bytes_u64)
+            .expect("Part number exceeds u32 on a 32-bit system. Try increasing part size.");
         let object_size = result.meta.size;
 
         let mut stream = result.into_stream();
@@ -175,14 +177,15 @@ impl CachedObjectStore {
     }
 
     // split the range into parts, and return the part id and the range inside the part.
-    fn split_range_into_parts(&self, range: Range<usize>) -> Vec<(PartID, Range<usize>)> {
+    fn split_range_into_parts(&self, range: Range<u64>) -> Vec<(PartID, Range<usize>)> {
+        let part_size_bytes_u64 = self.part_size_bytes as u64;
         let range_aligned = self.align_range(&range, self.part_size_bytes);
-        let start_part = range_aligned.start / self.part_size_bytes;
-        let end_part = range_aligned.end / self.part_size_bytes;
+        let start_part = range_aligned.start / part_size_bytes_u64;
+        let end_part = range_aligned.end / part_size_bytes_u64;
         let mut parts: Vec<_> = (start_part..end_part)
             .map(|part_id| {
                 (
-                    part_id,
+                    usize::try_from(part_id).expect("Number of parts exceeds usize"),
                     Range {
                         start: 0,
                         end: self.part_size_bytes,
@@ -194,11 +197,13 @@ impl CachedObjectStore {
             return vec![];
         }
         if let Some(first_part) = parts.first_mut() {
-            first_part.1.start = range.start % self.part_size_bytes;
+            first_part.1.start = usize::try_from(range.start % part_size_bytes_u64)
+                .expect("Part size is too large to fit in a usize");
         }
         if let Some(last_part) = parts.last_mut() {
-            if range.end % self.part_size_bytes != 0 {
-                last_part.1.end = range.end % self.part_size_bytes;
+            if range.end % part_size_bytes_u64 != 0 {
+                last_part.1.end = usize::try_from(range.end % part_size_bytes_u64)
+                    .expect("Part size is too large to fit in a usize");
             }
         }
         parts
@@ -230,8 +235,8 @@ impl CachedObjectStore {
             // the object stores is expected to return the result whenever the `start` of the range
             // is not out of the object size.
             let range = Range {
-                start: part_id * part_size,
-                end: (part_id + 1) * part_size,
+                start: (part_id * part_size) as u64,
+                end: ((part_id + 1) * part_size) as u64,
             };
             let get_result = object_store
                 .get_opts(
@@ -259,8 +264,8 @@ impl CachedObjectStore {
     fn canonicalize_range(
         &self,
         range: Option<GetRange>,
-        object_size: usize,
-    ) -> object_store::Result<Range<usize>> {
+        object_size: u64,
+    ) -> object_store::Result<Range<u64>> {
         let (start_offset, end_offset) = match range {
             None => (0, object_size),
             Some(range) => match range {
@@ -317,13 +322,14 @@ impl CachedObjectStore {
                 GetRange::Suffix(suffix_aligned)
             }
             GetRange::Offset(offset) => {
-                let offset_aligned = *offset - *offset % self.part_size_bytes;
+                let offset_aligned = *offset - *offset % self.part_size_bytes as u64;
                 GetRange::Offset(offset_aligned)
             }
         }
     }
 
-    fn align_range(&self, range: &Range<usize>, alignment: usize) -> Range<usize> {
+    fn align_range(&self, range: &Range<u64>, alignment: usize) -> Range<u64> {
+        let alignment = alignment as u64;
         let start_aligned = range.start - range.start % alignment;
         let end_aligned = range.end.div_ceil(alignment) * alignment;
         Range {
@@ -387,7 +393,7 @@ impl ObjectStore for CachedObjectStore {
         self.object_store.delete(location).await
     }
 
-    fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, object_store::Result<ObjectMeta>> {
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
         self.object_store.list(prefix)
     }
 
@@ -395,7 +401,7 @@ impl ObjectStore for CachedObjectStore {
         &self,
         prefix: Option<&Path>,
         offset: &Path,
-    ) -> BoxStream<'_, object_store::Result<ObjectMeta>> {
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
         self.object_store.list_with_offset(prefix, offset)
     }
 
@@ -423,10 +429,10 @@ impl ObjectStore for CachedObjectStore {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum InvalidGetRange {
     #[error("Range start too large, requested: {requested}, length: {length}")]
-    StartTooLarge { requested: usize, length: usize },
+    StartTooLarge { requested: u64, length: u64 },
 
     #[error("Range started at {start} and ended at {end}")]
-    Inconsistent { start: usize, end: usize },
+    Inconsistent { start: u64, end: u64 },
 }
 
 #[cfg(test)]
@@ -657,7 +663,7 @@ mod tests {
 
         for t in tests.iter() {
             let range = cached_store
-                .canonicalize_range(t.input.0.clone(), t.input.1)
+                .canonicalize_range(t.input.0.clone(), t.input.1 as u64)
                 .unwrap();
             let parts = cached_store.split_range_into_parts(range);
             assert_eq!(parts, t.expect, "input: {:?}", t.input);

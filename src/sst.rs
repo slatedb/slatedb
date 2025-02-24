@@ -209,18 +209,25 @@ impl SsTableFormat {
             return Ok(VecDeque::new());
         }
         let range = self.block_range(blocks.clone(), info, &index);
-        let start_offset = range.start as usize;
+        let start_range = range.start;
         let bytes: Bytes = obj.read_range(range).await?;
         let mut decoded_blocks = VecDeque::new();
         let compression_codec = info.compression_codec;
         for block in blocks {
             let block_meta = index.block_meta().get(block);
-            let block_bytes_start = block_meta.offset() as usize - start_offset;
+            let block_bytes_start = usize::try_from(block_meta.offset() - start_range).expect(
+                "attempted to read byte data with size \
+                larger than 32 bits on a 32-bit system",
+            );
             let block_bytes = if block == index.block_meta().len() - 1 {
                 bytes.slice(block_bytes_start..)
             } else {
                 let next_block_meta = index.block_meta().get(block + 1);
-                let block_bytes_end = next_block_meta.offset() as usize - start_offset;
+                let block_bytes_end = usize::try_from(next_block_meta.offset() - start_range)
+                    .expect(
+                        "attempted to read byte data with size \
+                        larger than 32 bits on a 32-bit system",
+                    );
                 bytes.slice(block_bytes_start..block_bytes_end)
             };
             decoded_blocks.push_back(self.decode_block(block_bytes, compression_codec)?);
