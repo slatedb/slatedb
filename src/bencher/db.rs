@@ -43,7 +43,7 @@ use bytes::Bytes;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use slatedb::config::{PutOptions, WriteOptions};
-use slatedb::Db;
+use slatedb::{Db, Reader};
 use tokio::time::Instant;
 use tracing::info;
 

@@ -1097,8 +1097,9 @@ impl Db {
     }
 }
 
+#[async_trait::async_trait]
 impl Reader for Db {
-    async fn get_with_options<K: AsRef<[u8]>>(
+    async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
         options: &ReadOptions,
@@ -1112,8 +1113,8 @@ impl Reader for Db {
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError>
     where
-        K: AsRef<[u8]>,
-        T: RangeBounds<K>,
+        K: AsRef<[u8]> + Send,
+        T: RangeBounds<K> + Send,
     {
         let start = range
             .start_bound()
@@ -1664,7 +1665,7 @@ mod tests {
             let mut all_key2 = true;
 
             for key in 1..=NUM_KEYS {
-                let value = kv_store.get(&key.to_be_bytes()).await.unwrap();
+                let value = kv_store.get(key.to_be_bytes()).await.unwrap();
                 let value = value.expect("Value should exist");
 
                 if value.as_ref() != key.to_be_bytes() {
@@ -2043,13 +2044,13 @@ mod tests {
         next_wal_id += 1;
 
         for i in 0..l0_count {
-            let val = kv_store_restored.get(&[b'a' + i as u8; 16]).await.unwrap();
+            let val = kv_store_restored.get([b'a' + i as u8; 16]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[b'b' + i as u8; 48])));
-            let val = kv_store_restored.get(&[b'j' + i as u8; 16]).await.unwrap();
+            let val = kv_store_restored.get([b'j' + i as u8; 16]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[b'k' + i as u8; 48])));
         }
         for i in 0..sst_count {
-            let val = kv_store_restored.get(&i.to_be_bytes()).await.unwrap();
+            let val = kv_store_restored.get(i.to_be_bytes()).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&i.to_be_bytes())));
         }
         kv_store_restored.close().await.unwrap();
@@ -2371,7 +2372,7 @@ mod tests {
 
         assert_eq!(snapshot.state.core.next_wal_sst_id, 4);
         assert_eq!(
-            db.get(&key1).await.unwrap(),
+            db.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
         );
     }
@@ -2487,9 +2488,9 @@ mod tests {
         db.put(&[b'a'; 32], &[128u8; 32]).await.unwrap();
         db.put(&[b'm'; 32], &[129u8; 32]).await.unwrap();
 
-        let val = db.get(&[b'a'; 32]).await.unwrap();
+        let val = db.get([b'a'; 32]).await.unwrap();
         assert_eq!(val, Some(Bytes::copy_from_slice(&[128u8; 32])));
-        let val = db.get(&[b'm'; 32]).await.unwrap();
+        let val = db.get([b'm'; 32]).await.unwrap();
         assert_eq!(val, Some(Bytes::copy_from_slice(&[129u8; 32])));
         for i in 1..4 {
             info!(
@@ -2497,15 +2498,15 @@ mod tests {
                 db.inner.state.read().state().core.l0.len(),
                 db.inner.state.read().state().core.compacted.len()
             );
-            let val = db.get(&[b'a' + i; 32]).await.unwrap();
+            let val = db.get([b'a' + i; 32]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[1u8 + i; 32])));
-            let val = db.get(&[b'm' + i; 32]).await.unwrap();
+            let val = db.get([b'm' + i; 32]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[13u8 + i; 32])));
         }
         for i in 0..4 {
-            let val = db.get(&[b'f' + i; 32]).await.unwrap();
+            let val = db.get([b'f' + i; 32]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[6u8 + i; 32])));
-            let val = db.get(&[b's' + i; 32]).await.unwrap();
+            let val = db.get([b's' + i; 32]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[19u8 + i; 32])));
         }
         let neg_lookup = db.get(b"abc").await;

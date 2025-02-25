@@ -21,9 +21,9 @@ use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::ops::{Add, RangeBounds, Sub};
+use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use std::{cmp, mem};
 use tokio::runtime::Handle;
 use tokio::select;
@@ -177,13 +177,14 @@ impl DbReaderInner {
     ) -> Result<(), SlateDBError> {
         let checkpoint = self.state.read().checkpoint.clone();
         if let Some(checkpoint_lifetime) = self.options.checkpoint_lifetime {
-            let half_lifetime = checkpoint_lifetime.checked_div(2).unwrap();
+            let half_lifetime = checkpoint_lifetime
+                .checked_div(2)
+                .expect("Failed to divide checkpoint lifetime");
             let refresh_deadline = checkpoint
                 .expire_time
                 .expect("Expected checkpoint expiration time to be set")
                 .sub(half_lifetime);
             if self.options.clock.now_systime() > refresh_deadline {
-                println!("Refreshing checkpoint");
                 let refreshed_checkpoint = stored_manifest
                     .refresh_checkpoint(checkpoint.id, checkpoint_lifetime)
                     .await?;
@@ -197,7 +198,7 @@ impl DbReaderInner {
     }
 
     fn spawn_manifest_poller(self: &Arc<Self>) -> Result<ManifestPoller, SlateDBError> {
-        let this = Arc::clone(&self);
+        let this = Arc::clone(self);
         async fn core_poll_loop(
             this: Arc<DbReaderInner>,
             thread_rx: &mut UnboundedReceiver<ManifestPollerMsg>,
@@ -305,6 +306,28 @@ impl DbReaderInner {
 }
 
 impl DbReader {
+    fn validate_options(options: &DbReaderOptions) -> Result<(), SlateDBError> {
+        if let Some(lifetime) = options.checkpoint_lifetime {
+            if lifetime.as_millis() < 1000 {
+                return Err(SlateDBError::InvalidArgument {
+                    msg: "Checkpoint lifetime must be at least 1s".to_string(),
+                });
+            }
+
+            let double_poll_interval = options.manifest_poll_interval.checked_mul(2).ok_or(
+                SlateDBError::InvalidArgument {
+                    msg: "Manifest poll interval is too large".to_string(),
+                },
+            )?;
+            if lifetime < double_poll_interval {
+                return Err(SlateDBError::InvalidArgument {
+                    msg: "Checkpoint lifetime must be at least 1s".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Creates a database reader that can read the contents of a database (but cannot write any
     /// data). The caller can provide an optional checkpoint. If the checkpoint is provided, the
     /// reader will read using the specified checkpoint and will not periodically refresh the
@@ -317,6 +340,8 @@ impl DbReader {
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
     ) -> Result<Self, SlateDBError> {
+        Self::validate_options(&options)?;
+
         let path = path.into();
         let manifest_store = Arc::new(ManifestStore::new_with_clock(
             &path,
@@ -371,7 +396,7 @@ impl DbReader {
         } else {
             // Create a new checkpoint from the latest state
             let options = CheckpointOptions {
-                lifetime: options.checkpoint_lifetime.clone(),
+                lifetime: options.checkpoint_lifetime,
                 ..CheckpointOptions::default()
             };
             manifest.write_checkpoint(None, &options).await?
@@ -387,15 +412,16 @@ impl DbReader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{DbReader, SlateDBError};
+    /// use slatedb::{Db, DbReader, DbReaderOptions, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), SlateDBError> {
-    ///     use slatedb::DbReaderOptions;let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store.clone()).await?;
     ///     let options = DbReaderOptions::default();
-    ///     let reader = DbReader::open("test_db", object_store, None, options).await?;
+    ///     let reader = DbReader::open("test_db", object_store.clone(), None, options).await?;
     ///     reader.close().await?;
     ///     Ok(())
     /// }
@@ -404,7 +430,10 @@ impl DbReader {
     pub async fn close(&self) -> Result<(), SlateDBError> {
         if let Some(poller) = &self.manifest_poller {
             poller.thread_tx.send(Shutdown).ok();
-            if let Some(join_handle) = poller.join_handle.lock().take() {
+            if let Some(join_handle) = {
+                let mut guard = poller.join_handle.lock();
+                guard.take()
+            } {
                 let result = join_handle.await.expect("Failed to join manifest poller");
                 info!("Manifest poller exited with {:?}", result);
             }
@@ -413,8 +442,9 @@ impl DbReader {
     }
 }
 
+#[async_trait::async_trait]
 impl Reader for DbReader {
-    async fn get_with_options<K: AsRef<[u8]>>(
+    async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
         _options: &ReadOptions,
@@ -493,8 +523,8 @@ impl Reader for DbReader {
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError>
     where
-        K: AsRef<[u8]>,
-        T: RangeBounds<K>,
+        K: AsRef<[u8]> + Send,
+        T: RangeBounds<K> + Send,
     {
         let start = range
             .start_bound()
@@ -769,7 +799,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
 
-        let db = Db::open_with_opts(
+        let _db = Db::open_with_opts(
             path.clone(),
             DbOptions::default(),
             Arc::clone(&object_store),
@@ -778,8 +808,8 @@ mod tests {
         .unwrap();
 
         let reader_options = DbReaderOptions {
-            manifest_poll_interval: Duration::from_millis(50),
-            checkpoint_lifetime: Some(Duration::from_millis(100)),
+            manifest_poll_interval: Duration::from_millis(500),
+            checkpoint_lifetime: Some(Duration::from_millis(1000)),
             clock: Arc::new(TokioClock::new()),
             ..DbReaderOptions::default()
         };
@@ -803,9 +833,10 @@ mod tests {
         assert_eq!(1, initial_manifest.core.checkpoints.len());
         let initial_reader_checkpoint = initial_manifest.core.checkpoints.first().unwrap().clone();
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(5000)).await;
 
         let updated_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
+        assert_eq!(1, updated_manifest.core.checkpoints.len());
         let updated_reader_checkpoint = updated_manifest.core.checkpoints.first().unwrap().clone();
         assert_eq!(initial_reader_checkpoint.id, updated_reader_checkpoint.id);
         assert!(

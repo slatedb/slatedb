@@ -3,6 +3,7 @@ use crate::{DbIterator, SlateDBError};
 use bytes::Bytes;
 use std::ops::RangeBounds;
 
+#[async_trait::async_trait]
 pub trait Reader {
     /// Get a value from the database with default read options.
     ///
@@ -25,7 +26,7 @@ pub trait Reader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::{Db, Reader, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -38,7 +39,7 @@ pub trait Reader {
     ///     Ok(())
     /// }
     /// ```
-    async fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Bytes>, SlateDBError> {
+    async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, SlateDBError> {
         self.get_with_options(key, &ReadOptions::default()).await
     }
 
@@ -64,7 +65,7 @@ pub trait Reader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, config::ReadOptions, SlateDBError};
+    /// use slatedb::{Db, config::ReadOptions, Reader, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -77,7 +78,7 @@ pub trait Reader {
     ///     Ok(())
     /// }
     /// ```
-    async fn get_with_options<K: AsRef<[u8]>>(
+    async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
         options: &ReadOptions,
@@ -93,7 +94,7 @@ pub trait Reader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::{Db, Reader, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -112,8 +113,8 @@ pub trait Reader {
     /// ```
     async fn scan<K, T>(&self, range: T) -> Result<DbIterator, SlateDBError>
     where
-        K: AsRef<[u8]>,
-        T: RangeBounds<K>,
+        K: AsRef<[u8]> + Send,
+        T: RangeBounds<K> + Send,
     {
         self.scan_with_options(range, &ScanOptions::default()).await
     }
@@ -128,7 +129,7 @@ pub trait Reader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, config::ScanOptions, config::ReadLevel, SlateDBError};
+    /// use slatedb::{Db, config::ScanOptions, config::ReadLevel, Reader, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -154,6 +155,6 @@ pub trait Reader {
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError>
     where
-        K: AsRef<[u8]>,
-        T: RangeBounds<K>;
+        K: AsRef<[u8]> + Send,
+        T: RangeBounds<K> + Send;
 }

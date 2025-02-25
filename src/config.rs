@@ -296,7 +296,7 @@ pub trait Clock {
 
     fn now_systime(&self) -> SystemTime {
         chrono::DateTime::from_timestamp_millis(self.now())
-            .map(|dt| SystemTime::from(dt))
+            .map(SystemTime::from)
             .expect("Failed to convert Clock time to SystemTime")
     }
 }

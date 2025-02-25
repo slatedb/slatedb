@@ -259,11 +259,9 @@ impl StoredManifest {
             if updated_db_state.find_checkpoint(&checkpoint_id).is_none() {
                 Ok(None)
             } else {
-                updated_db_state.checkpoints = updated_db_state
+                updated_db_state
                     .checkpoints
-                    .into_iter()
-                    .filter(|cp| cp.id != checkpoint_id)
-                    .collect();
+                    .retain(|cp| cp.id != checkpoint_id);
                 Ok(Some(updated_db_state))
             }
         })
@@ -285,11 +283,9 @@ impl StoredManifest {
             let new_checkpoint =
                 stored_manifest.new_checkpoint(new_checkpoint_id, new_checkpoint_options)?;
             let mut updated_db_state = stored_manifest.db_state().clone();
-            updated_db_state.checkpoints = updated_db_state
+            updated_db_state
                 .checkpoints
-                .into_iter()
-                .filter(|cp| cp.id != old_checkpoint_id)
-                .collect();
+                .retain(|cp| cp.id != old_checkpoint_id);
             updated_db_state.checkpoints.push(new_checkpoint);
             Ok(Some(updated_db_state))
         })
@@ -315,8 +311,6 @@ impl StoredManifest {
                 .iter_mut()
                 .find(|c| c.id == checkpoint_id)
                 .ok_or(CheckpointMissing(checkpoint_id))?;
-            let expire_time = clock.now_systime() + new_lifetime;
-            println!("Setting expire time: {expire_time:?}");
             checkpoint.expire_time = Some(clock.now_systime() + new_lifetime);
             Ok(Some(updated_db_state))
         })
