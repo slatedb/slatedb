@@ -334,12 +334,12 @@ pub mod stats {
 
 #[cfg(test)]
 mod tests {
-    use crate::block::Block;
-    use crate::db_cache::{CachedEntry, CachedItem, CachedKey, DbCache, DbCacheWrapper};
+
+    use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper};
     use crate::db_state::SsTableId;
-    use crate::filter::BloomFilter;
+
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
-    use crate::flatbuffer_types::SsTableIndexOwned;
+
     use crate::sst::SsTableFormat;
     use crate::stats::{ReadableStat, StatRegistry};
     use crate::test_utils::{build_test_sst, SstData};

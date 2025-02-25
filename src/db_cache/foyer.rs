@@ -30,14 +30,8 @@
 //! }
 //! ```
 //!
-use std::sync::Arc;
 
-use crate::{
-    block::Block,
-    db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY},
-    filter::BloomFilter,
-    flatbuffer_types::SsTableIndexOwned,
-};
+use crate::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
 use async_trait::async_trait;
 
 /// The options for the Foyer cache.

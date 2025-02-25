@@ -30,14 +30,9 @@
 //! }
 //! ```
 //!
-use crate::{
-    block::Block,
-    db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY},
-    filter::BloomFilter,
-    flatbuffer_types::SsTableIndexOwned,
-};
+use crate::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
 use async_trait::async_trait;
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 /// The options for the Moka cache.
 #[derive(Clone, Copy, Debug)]
