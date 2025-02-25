@@ -41,7 +41,7 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 /// use object_store::local::LocalFileSystem;
 /// use slatedb::Db;
 /// use slatedb::config::DbOptions;
-/// use slatedb::db_cache::{DbCache, CachedEntry, CachedKey, GetTarget};
+/// use slatedb::db_cache::{DbCache, CachedEntry, CachedKey};
 /// use std::collections::HashMap;
 /// use std::sync::{Arc, Mutex};
 ///
@@ -71,9 +71,18 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 ///
 /// #[async_trait]
 /// impl DbCache for MyCache {
-///     async fn get(&self, key: CachedKey, _target: GetTarget) -> Option<CachedEntry> {
-///         use slatedb::db_cache::GetTarget;
-/// let guard = self.inner.lock().unwrap();
+///     async fn get_block(&self, key: CachedKey) -> Option<CachedEntry> {
+///         let guard = self.inner.lock().unwrap();
+///         guard.data.get(&key).cloned()
+///     }
+///
+///     async fn get_index(&self, key: CachedKey) -> Option<CachedEntry> {
+///         let guard = self.inner.lock().unwrap();
+///         guard.data.get(&key).cloned()
+///     }
+///
+///     async fn get_filter(&self, key: CachedKey) -> Option<CachedEntry> {
+///         let guard = self.inner.lock().unwrap();
 ///         guard.data.get(&key).cloned()
 ///     }
 ///
