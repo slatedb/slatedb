@@ -30,9 +30,14 @@
 //! }
 //! ```
 //!
-use crate::db_cache::{CachedEntry, CachedKey, DbCache, GetTarget, DEFAULT_MAX_CAPACITY};
+use crate::{
+    block::Block,
+    db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY},
+    filter::BloomFilter,
+    flatbuffer_types::SsTableIndexOwned,
+};
 use async_trait::async_trait;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 /// The options for the Moka cache.
 #[derive(Clone, Copy, Debug)]
@@ -103,7 +108,15 @@ impl Default for MokaCache {
 
 #[async_trait]
 impl DbCache for MokaCache {
-    async fn get(&self, key: CachedKey, _target: GetTarget) -> Option<CachedEntry> {
+    async fn get_block(&self, key: CachedKey) -> Option<CachedEntry> {
+        self.inner.get(&key).await
+    }
+
+    async fn get_index(&self, key: CachedKey) -> Option<CachedEntry> {
+        self.inner.get(&key).await
+    }
+
+    async fn get_filter(&self, key: CachedKey) -> Option<CachedEntry> {
         self.inner.get(&key).await
     }
 

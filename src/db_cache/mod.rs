@@ -114,22 +114,14 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 /// ```
 #[async_trait]
 pub trait DbCache: Send + Sync {
-    async fn get(&self, key: CachedKey, target: GetTarget) -> Option<CachedEntry>;
+    async fn get_block(&self, key: CachedKey) -> Option<CachedEntry>;
+    async fn get_index(&self, key: CachedKey) -> Option<CachedEntry>;
+    async fn get_filter(&self, key: CachedKey) -> Option<CachedEntry>;
     async fn insert(&self, key: CachedKey, value: CachedEntry);
     #[allow(dead_code)]
     async fn remove(&self, key: CachedKey);
     #[allow(dead_code)]
     fn entry_count(&self) -> u64;
-}
-
-/// A hint to the cache about what data is being fetched on a get. Can be used to
-/// track statistics.
-#[non_exhaustive]
-#[derive(Clone, Copy)]
-pub enum GetTarget {
-    Block,
-    SsTableIndex,
-    BloomFilter,
 }
 
 /// A key used to identify a cached entry.
@@ -249,22 +241,34 @@ impl DbCacheWrapper {
 
 #[async_trait]
 impl DbCache for DbCacheWrapper {
-    async fn get(&self, key: CachedKey, target: GetTarget) -> Option<CachedEntry> {
-        let result = self.cache.get(key, target).await;
-        if result.is_some() {
-            match target {
-                GetTarget::Block => self.stats.data_block_hit.inc(),
-                GetTarget::SsTableIndex => self.stats.index_hit.inc(),
-                GetTarget::BloomFilter => self.stats.filter_hit.inc(),
-            };
+    async fn get_block(&self, key: CachedKey) -> Option<CachedEntry> {
+        let entry = self.cache.get_block(key).await;
+        if entry.is_some() {
+            self.stats.data_block_hit.inc();
         } else {
-            match target {
-                GetTarget::Block => self.stats.data_block_miss.inc(),
-                GetTarget::SsTableIndex => self.stats.index_miss.inc(),
-                GetTarget::BloomFilter => self.stats.filter_miss.inc(),
-            };
+            self.stats.data_block_miss.inc();
         }
-        result
+        entry
+    }
+
+    async fn get_index(&self, key: CachedKey) -> Option<CachedEntry> {
+        let entry = self.cache.get_index(key).await;
+        if entry.is_some() {
+            self.stats.index_hit.inc();
+        } else {
+            self.stats.index_miss.inc();
+        }
+        entry
+    }
+
+    async fn get_filter(&self, key: CachedKey) -> Option<CachedEntry> {
+        let entry = self.cache.get_filter(key).await;
+        if entry.is_some() {
+            self.stats.filter_hit.inc();
+        } else {
+            self.stats.filter_miss.inc();
+        }
+        entry
     }
 
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
@@ -330,9 +334,12 @@ pub mod stats {
 
 #[cfg(test)]
 mod tests {
-    use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, GetTarget};
+    use crate::block::Block;
+    use crate::db_cache::{CachedEntry, CachedItem, CachedKey, DbCache, DbCacheWrapper};
     use crate::db_state::SsTableId;
+    use crate::filter::BloomFilter;
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
+    use crate::flatbuffer_types::SsTableIndexOwned;
     use crate::sst::SsTableFormat;
     use crate::stats::{ReadableStat, StatRegistry};
     use crate::test_utils::{build_test_sst, SstData};
@@ -363,7 +370,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get(key.clone(), GetTarget::BloomFilter).await;
+            let _ = cache.get_filter(key.clone()).await;
 
             // then:
             assert_eq!(0, cache.stats.filter_miss.get());
@@ -379,7 +386,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get(key.clone(), GetTarget::BloomFilter).await;
+            let _ = cache.get_filter(key.clone()).await;
 
             // then:
             assert_eq!(i, cache.stats.filter_miss.get());
@@ -403,7 +410,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get(key.clone(), GetTarget::SsTableIndex).await;
+            let _ = cache.get_index(key.clone()).await;
 
             // then:
             assert_eq!(0, cache.stats.index_miss.get());
@@ -426,7 +433,7 @@ mod tests {
             .await;
 
         // when:
-        let cached = cache.get(key, GetTarget::SsTableIndex).await.unwrap();
+        let cached = cache.get_index(key).await.unwrap();
 
         // then:
         assert_index_clamped(index.as_ref(), cached.sst_index().unwrap().as_ref());
@@ -440,7 +447,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get(key.clone(), GetTarget::SsTableIndex).await;
+            let _ = cache.get_index(key.clone()).await;
 
             // then:
             assert_eq!(i, cache.stats.index_miss.get());
@@ -467,7 +474,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get(key.clone(), GetTarget::Block).await;
+            let _ = cache.get_block(key.clone()).await;
 
             // then:
             assert_eq!(0, cache.stats.data_block_miss.get());
@@ -483,7 +490,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get(key.clone(), GetTarget::Block).await;
+            let _ = cache.get_block(key.clone()).await;
 
             // then:
             assert_eq!(i, cache.stats.data_block_miss.get());
@@ -524,7 +531,17 @@ mod tests {
 
     #[async_trait]
     impl DbCache for TestCache {
-        async fn get(&self, key: CachedKey, _target: GetTarget) -> Option<CachedEntry> {
+        async fn get_block(&self, key: CachedKey) -> Option<CachedEntry> {
+            let guard = self.items.lock().unwrap();
+            guard.get(&key).cloned()
+        }
+
+        async fn get_index(&self, key: CachedKey) -> Option<CachedEntry> {
+            let guard = self.items.lock().unwrap();
+            guard.get(&key).cloned()
+        }
+
+        async fn get_filter(&self, key: CachedKey) -> Option<CachedEntry> {
             let guard = self.items.lock().unwrap();
             guard.get(&key).cloned()
         }
