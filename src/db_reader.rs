@@ -820,7 +820,7 @@ mod tests {
             Arc::clone(&reader_options.clock),
         ));
 
-        let _reader = DbReader::open(
+        let reader = DbReader::open(
             path.clone(),
             Arc::clone(&object_store),
             None,
@@ -843,5 +843,10 @@ mod tests {
             updated_reader_checkpoint.expire_time.unwrap()
                 > initial_reader_checkpoint.expire_time.unwrap()
         );
+
+        // The checkpoint is removed on shutdown
+        reader.close().await.unwrap();
+        let updated_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
+        assert_eq!(0, updated_manifest.core.checkpoints.len());
     }
 }
