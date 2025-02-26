@@ -46,41 +46,58 @@ into the error message, which will not be considered part of the public API.
 Publicly exposed errors will be maintained in `slatedb::Error`. Each new error type must be documented
 in this RFC. All public APIs will document the complete set of errors that may be returned. 
 
-Each exposed error type will expose a generic documentation string which contains a general description
-of the error and contains any prescriptive guidance (such as indicating whether a failed operation can
-be retried or is fatal).
+Each exposed error type will expose documentation which contains a general description
+of the error and contains any prescriptive guidance (such as indicating whether a failed 
+operation can  be retried or is fatal).
 
 Each error type will also expose a custom message field which is used to convey details about the specific
 instance of the error that was encountered. Unlike the error type, the message is not part of the 
 public API and can be changed without notice. The intent is to pack as much detail into the message
 for someone to understand the root cause, and if possible, what they should do to resolve it.
 
+The complete set of public error types are listed below:
+
 ```rust
 mod slatedb {
-    pub trait Error {
-        /// General description of the error and prescriptive actions
-        fn doc(&self) -> &str;
-        /// Custom message for specific instance details to identify the root cause 
-        fn message(&self) -> String;
-    }
+  use std::time::Duration;
+
+  #[derive(Clone, Debug, Error)]
+  pub enum Error {
+    /// the user attempted an invalid operation or an operation with an
+    /// invalid parameter (including misconfiguration).
+    #[error("API Error: {msg}")]
+    ApiError { msg: String },
+
+    /// Reserved for unexpected cases such as invalid internal database states.
+    /// This error is fatal (i.e. the database must be closed).
+    #[error("System Error: {msg}")]
+    SystemError { msg: String },
+
+    /// Invalid persistent state (e.g. corrupted data files). The state must 
+    /// be repaired before the database can be restarted.
+    #[error("Persistent Error: {msg}")]
+    PersistentError { msg: String },
+    
+    /// Failed access database resources (e.g. remote storage) due to some 
+    /// kind of authentication or authorization error. The operation can be 
+    /// retried after the permission issue is resolved.
+    #[error("Permission Error: {msg}")]
+    PermissionError { msg: String },
+
+    /// The operation failed due to a transient error (such as IO unavailability). 
+    /// The operation can be retried after backing off.
+    #[error("Transient Error: {msg}. Backoff {backoff} before retrying.")]
+    TransientError { msg: String, backoff: Duration },
+
+    /// An operation failed during a transaction. The transaction can be aborted
+    /// and the operation can be retried.
+    #[error("Transaction Error: {msg}")]
+    TransactionError { msg: String },
+  }
 }
 ```
 
-The complete set of public error types are listed below:
-
-- `Error::ApiError`: the user attempted an invalid operation or an operation with an
-invalid parameter (including misconfiguration).
-- `Error::SystemError`: Reserved for unexpected cases such as invalid internal database states.
-This error is fatal (i.e. the database must be closed).
-- `Error::PersistentError`: Invalid persistent state (e.g. corrupted data files). The state must 
-be repaired before the database can be restarted.
-- `Error::PermissionError`: Failed access database resources (e.g. remote storage) due 
-to some kind of auth error.
-- `Error::TransientError(backoff)`: The operation failed due to a transient error
-(such as IO unavailability). The operation can be retried after backing off.
-- `Error::TransactionError`: An operation failed during a transaction. It can be retried
-after aborting the transaction.
-
-Public errors can be removed through semantic versioning. Typically, the need to remove an error
-suggests that some part of the internal implementation has been inadvertently leaked, so such
-cases should be rare if the exposed errors follow the principles above.
+New errors can be added by updating this RFC. Existing errors can be removed through semantic 
+versioning. Typically, the need to remove an error suggests that some part of the internal 
+implementation has been inadvertently leaked, so such cases should be rare if the exposed 
+errors follow the principles above.
