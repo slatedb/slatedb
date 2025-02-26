@@ -1,5 +1,5 @@
 use crate::bytes_range::BytesRange;
-use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
+use crate::config::{CheckpointOptions, Clock, DbReaderOptions, ReadOptions, ScanOptions, SystemClock};
 use crate::db_reader::ManifestPollerMsg::Shutdown;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
@@ -39,6 +39,7 @@ struct DbReaderInner {
     table_store: Arc<TableStore>,
     options: DbReaderOptions,
     state: Arc<RwLock<CheckpointState>>,
+    clock: Arc<dyn Clock + Sync + Send>,
 }
 
 struct ManifestPoller {
@@ -63,6 +64,7 @@ impl DbReaderInner {
         table_store: Arc<TableStore>,
         options: DbReaderOptions,
         checkpoint: Checkpoint,
+        clock: Arc<dyn Clock + Send + Sync>
     ) -> Result<Self, SlateDBError> {
         let initial_state = Self::build_checkpoint_state(
             Arc::clone(&manifest_store),
@@ -77,6 +79,7 @@ impl DbReaderInner {
             table_store,
             options,
             state: Arc::new(RwLock::new(initial_state)),
+            clock,
         })
     }
 
@@ -141,7 +144,7 @@ impl DbReaderInner {
                 .expire_time
                 .expect("Expected checkpoint expiration time to be set")
                 .sub(half_lifetime);
-            if self.options.clock.now_systime() > refresh_deadline {
+            if self.clock.now_systime() > refresh_deadline {
                 let refreshed_checkpoint = stored_manifest
                     .refresh_checkpoint(checkpoint.id, checkpoint_lifetime)
                     .await?;
@@ -297,13 +300,29 @@ impl DbReader {
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
     ) -> Result<Self, SlateDBError> {
+        Self::open_with_clock(
+            path,
+            object_store,
+            checkpoint_id,
+            options,
+            Arc::new(SystemClock::default()),
+        ).await
+    }
+
+    pub async fn open_with_clock<P: Into<Path>>(
+        path: P,
+        object_store: Arc<dyn ObjectStore>,
+        checkpoint_id: Option<Uuid>,
+        options: DbReaderOptions,
+        clock: Arc<dyn Clock + Send + Sync>,
+    ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
         let path = path.into();
         let manifest_store = Arc::new(ManifestStore::new_with_clock(
             &path,
             Arc::clone(&object_store),
-            Arc::clone(&options.clock),
+            Arc::clone(&clock),
         ));
 
         let table_store = Arc::new(TableStore::new(
@@ -321,8 +340,13 @@ impl DbReader {
         let checkpoint =
             Self::get_or_create_checkpoint(&mut manifest, checkpoint_id, &options).await?;
 
-        let inner =
-            Arc::new(DbReaderInner::new(manifest_store, table_store, options, checkpoint).await?);
+        let inner = Arc::new(DbReaderInner::new(
+            manifest_store,
+            table_store,
+            options,
+            checkpoint,
+            clock,
+        ).await?);
 
         // If no checkpoint was provided, then we have established a new checkpoint
         // from the latest state, and we need to refresh it according to the params
@@ -542,7 +566,7 @@ impl Reader for DbReader {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{CheckpointOptions, CheckpointScope, DbOptions};
+    use crate::config::{CheckpointOptions, CheckpointScope, Clock, DbOptions};
     use crate::db_reader::{DbReader, DbReaderOptions};
     use crate::db_state::CoreDbState;
     use crate::manifest::Manifest;
@@ -767,21 +791,23 @@ mod tests {
         let reader_options = DbReaderOptions {
             manifest_poll_interval: Duration::from_millis(500),
             checkpoint_lifetime: Some(Duration::from_millis(1000)),
-            clock: Arc::new(TokioClock::new()),
             ..DbReaderOptions::default()
         };
+
+        let clock = Arc::new(TokioClock::new()) as Arc<dyn Clock + Send + Sync>;
 
         let manifest_store = Arc::new(ManifestStore::new_with_clock(
             &path,
             Arc::clone(&object_store),
-            Arc::clone(&reader_options.clock),
+            Arc::clone(&clock),
         ));
 
-        let reader = DbReader::open(
+        let reader = DbReader::open_with_clock(
             path.clone(),
             Arc::clone(&object_store),
             None,
             reader_options,
+            Arc::clone(&clock),
         )
         .await
         .unwrap();

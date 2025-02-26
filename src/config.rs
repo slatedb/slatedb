@@ -688,13 +688,6 @@ pub struct DbReaderOptions {
 
     #[serde(skip)]
     pub block_cache: Option<Arc<dyn DbCache>>,
-
-    /// The Clock to use for manifest polling and checkpoint lifetime maintenance.
-    ///
-    /// Default: the default clock uses the local system time on the machine
-    #[serde(skip)]
-    #[serde(default = "crate::config::default_clock")]
-    pub clock: Arc<dyn Clock + Send + Sync>,
 }
 
 impl Default for DbReaderOptions {
@@ -704,7 +697,6 @@ impl Default for DbReaderOptions {
             checkpoint_lifetime: None,
             max_memtable_bytes: 4096,
             block_cache: default_block_cache(),
-            clock: Arc::new(SystemClock::default()),
         }
     }
 }
