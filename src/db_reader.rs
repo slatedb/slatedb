@@ -1,6 +1,5 @@
 use crate::bytes_range::BytesRange;
-use crate::config::{CheckpointOptions, Clock, ReadOptions, ScanOptions, SystemClock};
-use crate::db_cache::DbCache;
+use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
 use crate::db_reader::ManifestPollerMsg::Shutdown;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
@@ -19,11 +18,9 @@ use log::{info, warn};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
-use std::time::Duration;
 use std::{cmp, mem};
 use tokio::runtime::Handle;
 use tokio::select;
@@ -54,50 +51,10 @@ enum ManifestPollerMsg {
 }
 
 #[derive(Clone)]
-pub(crate) struct CheckpointState {
+struct CheckpointState {
     pub(crate) checkpoint: Checkpoint,
     pub(crate) manifest: Manifest,
     pub(crate) imm_memtables: Vec<Arc<ImmutableMemtable>>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct DbReaderOptions {
-    /// How frequently to poll for new manifest files. Refreshing the manifest file allows readers
-    /// to detect newly compacted data.
-    pub manifest_poll_interval: Duration,
-
-    /// For readers that refresh their checkpoint, this specifies the lifetime to use for the
-    /// created checkpoint. The checkpoint’s expire time will be set to the current time plus
-    /// this value. If not specified, then the checkpoint will be created with no expiry, and
-    /// must be manually removed. This lifetime must always be greater than
-    /// manifest_poll_interval x 2
-    pub checkpoint_lifetime: Option<Duration>,
-
-    /// The max size of a single in-memory table used to buffer WAL entries
-    /// Defaults to 64MB
-    pub max_memtable_bytes: u64,
-
-    #[serde(skip)]
-    pub block_cache: Option<Arc<dyn DbCache>>,
-
-    /// The Clock to use for manifest polling and checkpoint lifetime maintenance.
-    ///
-    /// Default: the default clock uses the local system time on the machine
-    #[serde(skip)]
-    #[serde(default = "crate::config::default_clock")]
-    pub clock: Arc<dyn Clock + Send + Sync>,
-}
-
-impl Default for DbReaderOptions {
-    fn default() -> Self {
-        Self {
-            manifest_poll_interval: Duration::from_secs(10),
-            checkpoint_lifetime: None,
-            max_memtable_bytes: 4096,
-            block_cache: None,
-            clock: Arc::new(SystemClock::default()),
-        }
-    }
 }
 
 impl DbReaderInner {
@@ -412,7 +369,7 @@ impl DbReader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, DbReaderOptions, SlateDBError};
+    /// use slatedb::{Db, DbReader, config::DbReaderOptions, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///

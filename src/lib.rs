@@ -27,7 +27,7 @@ pub use batch::WriteBatch;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};
 pub use db::Db;
 pub use db_iter::DbIterator;
-pub use db_reader::{DbReader, DbReaderOptions};
+pub use db_reader::DbReader;
 pub use error::{DbOptionsError, SlateDBError};
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use reader::Reader;
