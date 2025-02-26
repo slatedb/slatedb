@@ -68,13 +68,18 @@ mod slatedb {
 
 The complete set of public error types are listed below:
 
-- `Error::InvalidArgument`: One of the arguments passed by the user is invalid. This must be raised 
-before an operation is allowed to produce any side effects. The operation can be retried
-once the error has been addressed.
-- `Error::IoError`: There was an error accessing storage or other IO resources. The operation
-can be safely retried.
-- `Error::InternalError`: Reserved for unexpected cases such as invalid internal database states. 
-This error should be considered fatal (i.e. the database must be closed).
+- `Error::ApiError`: the user attempted an invalid operation or an operation with an
+invalid parameter (including misconfiguration).
+- `Error::SystemError`: Reserved for unexpected cases such as invalid internal database states.
+This error is fatal (i.e. the database must be closed).
+- `Error::PersistentError`: Invalid persistent state (e.g. corrupted data files). The state must 
+be repaired before the database can be restarted.
+- `Error::PermissionError`: Failed access database resources (e.g. remote storage) due 
+to some kind of auth error.
+- `Error::TransientError(backoff)`: The operation failed due to a transient error
+(such as IO unavailability). The operation can be retried after backing off.
+- `Error::TransactionError`: An operation failed during a transaction. It can be retried
+after aborting the transaction.
 
 Public errors can be removed through semantic versioning. Typically, the need to remove an error
 suggests that some part of the internal implementation has been inadvertently leaked, so such
