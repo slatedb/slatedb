@@ -45,15 +45,14 @@ impl SsTableFormat {
         obj: &impl ReadOnlyBlob,
     ) -> Result<SsTableInfo, SlateDBError> {
         let len = obj.len().await?;
-        if len <= 4 {
+        if len <= 8 {
             return Err(SlateDBError::EmptySSTable);
         }
         // Get the size of the metadata
-        let sst_metadata_offset_range = (len - 4)..len;
-        let sst_metadata_offset =
-            obj.read_range(sst_metadata_offset_range).await?.get_u32() as usize;
-        // Get the metadata. Last 4 bytes are the offset of SsTableInfo
-        let sst_metadata_range = sst_metadata_offset..len - 4;
+        let sst_metadata_offset_range = (len - 8)..len;
+        let sst_metadata_offset = obj.read_range(sst_metadata_offset_range).await?.get_u64();
+        // Get the metadata. Last 8 bytes are the offset of SsTableInfo
+        let sst_metadata_range = sst_metadata_offset..len - 8;
         let sst_metadata_bytes = obj.read_range(sst_metadata_range).await?;
         SsTableInfo::decode(sst_metadata_bytes, &*self.sst_codec)
     }
@@ -66,7 +65,7 @@ impl SsTableFormat {
         let mut filter = None;
         if info.filter_len > 0 {
             let filter_end = info.filter_offset + info.filter_len;
-            let filter_offset_range = info.filter_offset as usize..filter_end as usize;
+            let filter_offset_range = info.filter_offset..filter_end;
             let filter_bytes = obj.read_range(filter_offset_range).await?;
             let compression_codec = info.compression_codec;
             filter = Some(Arc::new(
@@ -74,6 +73,24 @@ impl SsTableFormat {
             ));
         }
         Ok(filter)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read_filter_raw(
+        &self,
+        info: &SsTableInfo,
+        sst_bytes: &Bytes,
+    ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
+        if info.filter_len == 0 {
+            return Ok(None);
+        }
+        let filter_end = info.filter_offset + info.filter_len;
+        let filter_offset_range = info.filter_offset as usize..filter_end as usize;
+        let filter_bytes = sst_bytes.slice(filter_offset_range);
+        let compression_codec = info.compression_codec;
+        Ok(Some(Arc::new(
+            self.decode_filter(filter_bytes, compression_codec)?,
+        )))
     }
 
     pub(crate) fn decode_filter(
@@ -94,8 +111,8 @@ impl SsTableFormat {
         info: &SsTableInfo,
         obj: &impl ReadOnlyBlob,
     ) -> Result<SsTableIndexOwned, SlateDBError> {
-        let index_off = info.index_offset as usize;
-        let index_end = index_off + info.index_len as usize;
+        let index_off = info.index_offset;
+        let index_end = index_off + info.index_len;
         let index_bytes = obj.read_range(index_off..index_end).await?;
         let compression_codec = info.compression_codec;
         self.decode_index(index_bytes, compression_codec)
@@ -168,13 +185,13 @@ impl SsTableFormat {
         blocks: Range<usize>,
         info: &SsTableInfo,
         index: &SsTableIndex,
-    ) -> Range<usize> {
-        let mut end_offset = info.filter_offset as usize;
+    ) -> Range<u64> {
+        let mut end_offset = info.filter_offset;
         if blocks.end < index.block_meta().len() {
             let next_block_meta = index.block_meta().get(blocks.end);
-            end_offset = next_block_meta.offset() as usize;
+            end_offset = next_block_meta.offset();
         }
-        let start_offset = index.block_meta().get(blocks.start).offset() as usize;
+        let start_offset = index.block_meta().get(blocks.start).offset();
         start_offset..end_offset
     }
 
@@ -192,7 +209,7 @@ impl SsTableFormat {
             return Ok(VecDeque::new());
         }
         let range = self.block_range(blocks.clone(), info, &index);
-        let start_offset = range.start;
+        let start_offset = range.start as usize;
         let bytes: Bytes = obj.read_range(range).await?;
         let mut decoded_blocks = VecDeque::new();
         let compression_codec = info.compression_codec;
@@ -248,7 +265,9 @@ impl SsTableFormat {
         sst_bytes: &Bytes,
     ) -> Result<Block, SlateDBError> {
         let index = index_owned.borrow();
-        let bytes: Bytes = sst_bytes.slice(self.block_range(block..block + 1, info, &index));
+        let range = self.block_range(block..block + 1, info, &index);
+        let range = range.start as usize..range.end as usize;
+        let bytes: Bytes = sst_bytes.slice(range);
         let compression_codec = info.compression_codec;
         self.decode_block(bytes, compression_codec)
     }
@@ -315,7 +334,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
     sst_first_key: Option<Bytes>,
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'a>>>,
-    current_len: usize,
+    current_len: u64,
     blocks: VecDeque<Bytes>,
     block_size: usize,
     min_filter_keys: u32,
@@ -398,7 +417,7 @@ impl EncodedSsTableBuilder<'_> {
         if !self.builder.add(entry.clone()) {
             // Create a new block builder and append block data
             if let Some(block) = self.finish_block()? {
-                self.current_len += block.len();
+                self.current_len += block.len() as u64;
                 self.blocks.push_back(Bytes::from(block));
             }
 
@@ -452,7 +471,7 @@ impl EncodedSsTableBuilder<'_> {
         let block_meta = BlockMeta::create(
             &mut self.index_builder,
             &BlockMetaArgs {
-                offset: self.current_len as u64,
+                offset: self.current_len,
                 first_key: self.first_key,
             },
         );
@@ -466,11 +485,40 @@ impl EncodedSsTableBuilder<'_> {
         Ok(Some(block))
     }
 
+    /// Builds the SST from the current state.
+    ///
+    /// # Format
+    ///
+    /// +---------------------------------------------------+
+    /// |                Data Blocks                        |
+    /// |    (raw bytes produced by finish_block)           |
+    /// +---------------------------------------------------+
+    /// |                Filter Block*                      |
+    /// |  +---------------------------------------------+  |
+    /// |  | Filter Data (compressed encoded filter)     |  |
+    /// |  +---------------------------------------------+  |
+    /// |  | 4-byte Checksum (CRC32 of filter data)      |  |
+    /// |  +---------------------------------------------+  |
+    /// +---------------------------------------------------+
+    /// |                Index Block                        |
+    /// |  +---------------------------------------------+  |
+    /// |  | Index Data (compressed index block)         |  |
+    /// |  +---------------------------------------------+  |
+    /// |  | 4-byte Checksum (CRC32 of index data)       |  |
+    /// |  +---------------------------------------------+  |
+    /// +---------------------------------------------------+
+    /// |                Metadata Block                     |
+    /// |    (SsTableInfo encoded with FlatBuffers)         |
+    /// +---------------------------------------------------+
+    /// |             8-byte Metadata Offset                |
+    /// +---------------------------------------------------+
+    /// * Only present if num_keys >= min_filter_keys.
+    ///
     pub fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
         let mut buf = self.finish_block()?.unwrap_or(Vec::new());
         let mut maybe_filter = None;
         let mut filter_len = 0;
-        let filter_offset = self.current_len + buf.len();
+        let filter_offset = self.current_len + buf.len() as u64;
         if self.num_keys >= self.min_filter_keys {
             let filter = Arc::new(self.filter_builder.build());
             let encoded_filter = filter.encode();
@@ -500,17 +548,17 @@ impl EncodedSsTableBuilder<'_> {
             Some(c) => Self::compress(index_block, c)?,
         };
         let checksum = crc32fast::hash(&index_block);
-        let index_offset = self.current_len + buf.len();
+        let index_offset = self.current_len + buf.len() as u64;
         let index_len = index_block.len() + std::mem::size_of::<u32>();
         buf.put(index_block);
         buf.put_u32(checksum);
 
-        let meta_offset = self.current_len + buf.len();
+        let meta_offset = self.current_len + buf.len() as u64;
         let info = SsTableInfo {
             first_key: self.sst_first_key,
-            index_offset: index_offset as u64,
+            index_offset,
             index_len: index_len as u64,
-            filter_offset: filter_offset as u64,
+            filter_offset,
             filter_len: filter_len as u64,
             compression_codec: self.compression_codec,
         };
@@ -518,7 +566,7 @@ impl EncodedSsTableBuilder<'_> {
 
         // write the metadata offset at the end of the file. FlatBuffer internal
         // representation is not intended to be used directly.
-        buf.put_u32(meta_offset as u32);
+        buf.put_u64(meta_offset);
         self.blocks.push_back(Bytes::from(buf));
         Ok(EncodedSsTable {
             info,
@@ -972,12 +1020,12 @@ mod tests {
     }
 
     impl ReadOnlyBlob for BytesBlob {
-        async fn len(&self) -> Result<usize, SlateDBError> {
-            Ok(self.bytes.len())
+        async fn len(&self) -> Result<u64, SlateDBError> {
+            Ok(self.bytes.len() as u64)
         }
 
-        async fn read_range(&self, range: Range<usize>) -> Result<Bytes, SlateDBError> {
-            Ok(self.bytes.slice(range))
+        async fn read_range(&self, range: Range<u64>) -> Result<Bytes, SlateDBError> {
+            Ok(self.bytes.slice(range.start as usize..range.end as usize))
         }
 
         async fn read(&self) -> Result<Bytes, SlateDBError> {

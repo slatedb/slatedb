@@ -451,7 +451,7 @@ impl Reader for DbReader {
             .iter()
             .find_map(|memtable| memtable.table().get(key));
         if let Some(val) = maybe_val {
-            return Ok(val.value.bytes());
+            return Ok(val.value.as_bytes());
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -465,12 +465,8 @@ impl Reader for DbReader {
         };
 
         for sst in &snapshot.manifest.core.l0 {
-            if self
-                .inner
-                .table_store
-                .sst_might_include_key(sst, key, key_hash)
-                .await?
-            {
+            let filter_result = self.inner.table_store.sst_might_include_key(sst, key, key_hash).await?;
+            if filter_result.might_contain_key() {
                 let mut iter = SstIterator::for_key(
                     sst,
                     key,
@@ -481,19 +477,15 @@ impl Reader for DbReader {
 
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return Ok(entry.value.bytes());
+                        return Ok(entry.value.as_bytes());
                     }
                 }
             }
         }
 
         for sr in &snapshot.manifest.core.compacted {
-            if self
-                .inner
-                .table_store
-                .sr_might_include_key(sr, key, key_hash)
-                .await?
-            {
+            let filter_result = self.inner.table_store.sr_might_include_key(sr, key, key_hash).await?;
+            if filter_result.might_contain_key() {
                 let mut iter = SortedRunIterator::for_key(
                     sr,
                     key,
@@ -503,7 +495,7 @@ impl Reader for DbReader {
                 .await?;
                 if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return Ok(entry.value.bytes());
+                        return Ok(entry.value.as_bytes());
                     }
                 }
             }

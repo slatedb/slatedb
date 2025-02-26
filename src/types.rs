@@ -146,7 +146,7 @@ impl ValueDeletable {
         }
     }
 
-    pub(crate) fn bytes(&self) -> Option<Bytes> {
+    pub(crate) fn as_bytes(&self) -> Option<Bytes> {
         match self {
             ValueDeletable::Value(v) => Some(v.clone()),
             ValueDeletable::Merge(_) => {

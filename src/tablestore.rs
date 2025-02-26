@@ -13,7 +13,7 @@ use object_store::ObjectStore;
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
-use crate::db_cache::CachedEntry;
+use crate::db_cache::{CachedEntry, DbCache, GetTarget};
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
@@ -24,8 +24,24 @@ use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
 use crate::types::RowEntry;
-use crate::{blob::ReadOnlyBlob, block::Block, db_cache::DbCache};
+use crate::{blob::ReadOnlyBlob, block::Block};
+use crate::tablestore::SstFilterResult::{FilterNegative, FilterPositive, RangeNegative, RangePositive};
 
+pub(crate) enum SstFilterResult {
+    RangeNegative,
+    RangePositive,
+    FilterPositive,
+    FilterNegative,
+}
+
+impl SstFilterResult {
+    pub(crate) fn might_contain_key(&self) -> bool {
+        match self {
+            RangeNegative | FilterNegative => false,
+            RangePositive | FilterPositive => true,
+        }
+    }
+}
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,
@@ -43,12 +59,15 @@ struct ReadOnlyObject {
 }
 
 impl ReadOnlyBlob for ReadOnlyObject {
-    async fn len(&self) -> Result<usize, SlateDBError> {
+    async fn len(&self) -> Result<u64, SlateDBError> {
         let object_metadata = self.object_store.head(&self.path).await?;
-        Ok(object_metadata.size)
+        Ok(object_metadata.size as u64)
     }
 
-    async fn read_range(&self, range: Range<usize>) -> Result<Bytes, SlateDBError> {
+    async fn read_range(&self, range: Range<u64>) -> Result<Bytes, SlateDBError> {
+        // This will go away when we upgrade object store, which now takes u64's
+        // See https://github.com/apache/arrow-rs/issues/5351
+        let range = range.start as usize..range.end as usize;
         let bytes = self.object_store.get_range(&self.path, range).await?;
         Ok(bytes)
     }
@@ -301,7 +320,10 @@ impl TableStore {
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(filter) = cache
-                .get((handle.id, handle.info.filter_offset).into())
+                .get(
+                    (handle.id, handle.info.filter_offset).into(),
+                    GetTarget::BloomFilter,
+                )
                 .await
                 .and_then(|entry| entry.bloom_filter())
             {
@@ -333,7 +355,10 @@ impl TableStore {
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(index) = cache
-                .get((handle.id, handle.info.index_offset).into())
+                .get(
+                    (handle.id, handle.info.index_offset).into(),
+                    GetTarget::SsTableIndex,
+                )
                 .await
                 .and_then(|entry| entry.sst_index())
             {
@@ -405,7 +430,7 @@ impl TableStore {
                 let block_meta = index_borrow.block_meta().get(block_num);
                 let offset = block_meta.offset();
                 cache
-                    .get((handle.id, offset).into())
+                    .get((handle.id, offset).into(), GetTarget::Block)
                     .await
                     .and_then(|entry| entry.block())
             }))
@@ -505,20 +530,18 @@ impl TableStore {
     /// - `key`: the key to check
     /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
     /// ## Returns
-    /// - `true` if the key is in the range of the sst.
+    /// - `SstFilterResult` indicating whether the key was found or was not in range
     pub(crate) async fn sst_might_include_key(
         &self,
         sst: &SsTableHandle,
         key: &[u8],
         key_hash: u64,
-    ) -> Result<bool, SlateDBError> {
+    ) -> Result<SstFilterResult, SlateDBError> {
         if !sst.range_covers_key(key) {
-            return Ok(false);
+            Ok(RangeNegative)
+        } else {
+            self.apply_filter(sst, key_hash).await
         }
-        if let Some(filter) = self.read_filter(sst).await? {
-            return Ok(filter.might_contain(key_hash));
-        }
-        Ok(true)
     }
 
     /// Check if the given key might be in the range of the sorted run (SR). Checks if the key
@@ -528,20 +551,32 @@ impl TableStore {
     /// - `key`: the key to check
     /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
     /// ## Returns
-    /// - `true` if the key is in the range of the sst.
+    /// - `SstFilterResult` indicating whether the key was found or was not in range
     pub(crate) async fn sr_might_include_key(
         &self,
         sr: &SortedRun,
         key: &[u8],
         key_hash: u64,
-    ) -> Result<bool, SlateDBError> {
-        if let Some(sst) = sr.find_sst_with_range_covering_key(key) {
-            if let Some(filter) = self.read_filter(sst).await? {
-                return Ok(filter.might_contain(key_hash));
-            }
-            return Ok(true);
+    ) -> Result<SstFilterResult, SlateDBError> {
+        let Some(sst) = sr.find_sst_with_range_covering_key(key) else {
+            return Ok(RangeNegative);
+        };
+        self.apply_filter(sst, key_hash).await
+    }
+
+    async fn apply_filter(
+        &self,
+        sst: &SsTableHandle,
+        key_hash: u64
+    ) -> Result<SstFilterResult, SlateDBError> {
+        if let Some(filter) = self.read_filter(sst).await? {
+            return if filter.might_contain(key_hash) {
+                Ok(FilterPositive)
+            } else {
+                Ok(FilterNegative)
+            };
         }
-        Ok(false)
+        Ok(RangePositive)
     }
 }
 
@@ -604,11 +639,12 @@ mod tests {
     use proptest::proptest;
     use ulid::Ulid;
 
+    use crate::db_cache::{DbCache, DbCacheWrapper, GetTarget};
     use crate::error;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::stats::StatRegistry;
     #[cfg(feature = "moka")]
-    use crate::tablestore::DbCache;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::{RowEntry, ValueDeletable};
@@ -708,12 +744,14 @@ mod tests {
             ..SsTableFormat::default()
         };
 
+        let stat_registry = StatRegistry::new();
         let block_cache = Arc::new(MokaCache::new());
+        let wrapper = Arc::new(DbCacheWrapper::new(block_cache.clone(), &stat_registry));
         let ts = Arc::new(TableStore::new(
             os.clone(),
             format,
             Path::from("/root"),
-            Some(block_cache.clone()),
+            Some(wrapper),
         ));
 
         // Create and write SST
@@ -750,7 +788,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset).into())
+                    .get((handle.id, offset).into(), GetTarget::Block)
                     .await
                     .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache",
@@ -780,7 +818,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset).into())
+                    .get((handle.id, offset).into(), GetTarget::Block)
                     .await
                     .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache after partial hit",
@@ -804,7 +842,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset).into())
+                    .get((handle.id, offset).into(), GetTarget::Block)
                     .await
                     .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache after SST emptying",

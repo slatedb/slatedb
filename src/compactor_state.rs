@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 
 use tracing::info;
 use ulid::Ulid;
+use uuid::Uuid;
 
 use crate::compactor_state::CompactionStatus::Submitted;
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
@@ -87,7 +88,7 @@ impl Compaction {
 
 pub struct CompactorState {
     db_state: CoreDbState,
-    compactions: HashMap<u32, Compaction>,
+    compactions: HashMap<Uuid, Compaction>,
 }
 
 impl CompactorState {
@@ -106,14 +107,21 @@ impl CompactorState {
     pub(crate) fn new(db_state: CoreDbState) -> Self {
         Self {
             db_state,
-            compactions: HashMap::<u32, Compaction>::new(),
+            compactions: HashMap::<Uuid, Compaction>::new(),
         }
     }
 
-    pub(crate) fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
+    pub(crate) fn submit_compaction(
+        &mut self,
+        compaction: Compaction,
+    ) -> Result<Uuid, SlateDBError> {
         // todo: validate the compaction here
         //       https://github.com/slatedb/slatedb/issues/96
-        if self.compactions.contains_key(&compaction.destination) {
+        if self
+            .compactions
+            .values()
+            .any(|c| c.destination == compaction.destination)
+        {
             // we already have an ongoing compaction for this destination
             return Err(SlateDBError::InvalidCompaction);
         }
@@ -132,8 +140,9 @@ impl CompactorState {
             }
         }
         info!("accepted submitted compaction: {:?}", compaction);
-        self.compactions.insert(compaction.destination, compaction);
-        Ok(())
+        let id = Uuid::new_v4();
+        self.compactions.insert(id, compaction);
+        Ok(id)
     }
 
     pub(crate) fn merge_db_state(&mut self, updated_state: &CoreDbState) {
@@ -170,8 +179,12 @@ impl CompactorState {
         self.db_state = merged;
     }
 
-    pub(crate) fn finish_compaction(&mut self, output_sr: SortedRun) {
-        if let Some(compaction) = self.compactions.get(&output_sr.id) {
+    pub(crate) fn finish_failed_compaction(&mut self, id: Uuid) {
+        self.compactions.remove(&id);
+    }
+
+    pub(crate) fn finish_compaction(&mut self, id: Uuid, output_sr: SortedRun) {
+        if let Some(compaction) = self.compactions.get(&id) {
             info!("finished compaction: {:?}", compaction);
             // reconstruct l0
             let compaction_l0s: HashSet<Ulid> = compaction
@@ -226,7 +239,7 @@ impl CompactorState {
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
             self.db_state = db_state;
-            self.compactions.remove(&output_sr.id);
+            self.compactions.remove(&id);
         }
     }
 
@@ -284,7 +297,7 @@ mod tests {
         let (_, _, mut state) = build_test_state(rt.handle());
         let before_compaction = state.db_state().clone();
         let compaction = build_l0_compaction(&before_compaction.l0, 0);
-        state.submit_compaction(compaction).unwrap();
+        let id = state.submit_compaction(compaction).unwrap();
 
         // when:
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
@@ -292,7 +305,7 @@ mod tests {
             id: 0,
             ssts: compacted_ssts,
         };
-        state.finish_compaction(sr.clone());
+        state.finish_compaction(id, sr.clone());
 
         // then:
         assert_eq!(
@@ -329,7 +342,7 @@ mod tests {
         let (_, _, mut state) = build_test_state(rt.handle());
         let before_compaction = state.db_state().clone();
         let compaction = build_l0_compaction(&before_compaction.l0, 0);
-        state.submit_compaction(compaction).unwrap();
+        let id = state.submit_compaction(compaction).unwrap();
 
         // when:
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
@@ -337,7 +350,7 @@ mod tests {
             id: 0,
             ssts: compacted_ssts,
         };
-        state.finish_compaction(sr.clone());
+        state.finish_compaction(id, sr.clone());
 
         // then:
         assert_eq!(state.compactions().len(), 0)
@@ -381,16 +394,19 @@ mod tests {
         let (os, mut sm, mut state) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
-        state
+        let id = state
             .submit_compaction(Compaction::new(
                 vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
                 0,
             ))
             .unwrap();
-        state.finish_compaction(SortedRun {
-            id: 0,
-            ssts: vec![original_l0s.back().unwrap().clone()],
-        });
+        state.finish_compaction(
+            id,
+            SortedRun {
+                id: 0,
+                ssts: vec![original_l0s.back().unwrap().clone()],
+            },
+        );
         // open a new db and write another l0
         let db = build_db(os.clone(), rt.handle());
         rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48])).unwrap();
@@ -435,7 +451,7 @@ mod tests {
         let (os, mut sm, mut state) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
-        state
+        let id = state
             .submit_compaction(Compaction::new(
                 original_l0s
                     .iter()
@@ -444,10 +460,13 @@ mod tests {
                 0,
             ))
             .unwrap();
-        state.finish_compaction(SortedRun {
-            id: 0,
-            ssts: original_l0s.clone().into(),
-        });
+        state.finish_compaction(
+            id,
+            SortedRun {
+                id: 0,
+                ssts: original_l0s.clone().into(),
+            },
+        );
         assert_eq!(state.db_state().l0.len(), 0);
         // open a new db and write another l0
         let db = build_db(os.clone(), rt.handle());

@@ -5,7 +5,7 @@ use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::manifest_store::FenceableManifest;
-use crate::utils::spawn_bg_task;
+use crate::utils::{bg_task_result_into_err, spawn_bg_task};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -221,7 +221,8 @@ impl DbInner {
         let this = Arc::clone(self);
         Some(spawn_bg_task(
             tokio_handle,
-            move |err| {
+            move |result| {
+                let err = bg_task_result_into_err(result);
                 warn!("memtable flush task exited with {:?}", err);
                 // notify any waiters that the task has exited
                 let mut state = this.state.write();

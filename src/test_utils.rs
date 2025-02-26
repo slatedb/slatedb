@@ -1,11 +1,11 @@
 use crate::config::{Clock, PutOptions, WriteOptions};
 use crate::error::SlateDBError;
-use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::iter::{IterationOrder, KeyValueIterator, SeekToKey};
 use crate::row_codec::SstRowCodecV0;
-use crate::types::{KeyValue, RowAttributes, RowEntry};
-use bytes::Bytes;
-use rand::Rng;
-use std::collections::BTreeMap;
+use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
+use bytes::{BufMut, Bytes, BytesMut};
+use rand::{Rng, RngCore};
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -51,6 +51,47 @@ pub(crate) fn gen_empty_attrs() -> RowAttributes {
     RowAttributes {
         ts: None,
         expire_ts: None,
+    }
+}
+
+pub(crate) struct TestIterator {
+    entries: VecDeque<Result<RowEntry, SlateDBError>>,
+}
+
+impl TestIterator {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+        }
+    }
+
+    pub(crate) fn with_entry(mut self, key: &'static [u8], val: &'static [u8], seq: u64) -> Self {
+        let entry = RowEntry::new_value(key, val, seq);
+        self.entries.push_back(Ok(entry));
+        self
+    }
+}
+
+impl KeyValueIterator for TestIterator {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        self.entries.pop_front().map_or(Ok(None), |e| match e {
+            Ok(kv) => Ok(Some(kv)),
+            Err(err) => Err(err),
+        })
+    }
+}
+
+impl SeekToKey for TestIterator {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        while let Some(entry_result) = self.entries.front() {
+            let entry = entry_result.clone()?;
+            if entry.key < next_key {
+                self.entries.pop_front();
+            } else {
+                break;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -115,9 +156,12 @@ macro_rules! assert_debug_snapshot {
     };
 }
 
+use crate::bytes_generator::OrderedBytesGenerator;
 use crate::bytes_range::BytesRange;
 use crate::db::Db;
 use crate::db_iter::DbIterator;
+use crate::db_state::SsTableInfo;
+use crate::sst::SsTableFormat;
 pub(crate) use assert_debug_snapshot;
 
 pub(crate) fn decode_codec_entries(
@@ -226,4 +270,37 @@ pub(crate) async fn seed_database(
     }
 
     Ok(())
+}
+
+pub(crate) struct SstData {
+    pub(crate) info: SsTableInfo,
+    pub(crate) data: Bytes,
+}
+
+pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> SstData {
+    let mut rng = rand::thread_rng();
+    let mut keygen = OrderedBytesGenerator::new_with_suffix(&[], &[0u8; 16]);
+    let mut encoded_sst_builder = format.table_builder();
+    let mut blocks = 0;
+    let mut data = BytesMut::with_capacity(num_blocks * (format.block_size + 1));
+    while blocks < num_blocks {
+        let k = keygen.next();
+        let mut val = BytesMut::with_capacity(32);
+        val.put_bytes(0u8, 32);
+        rng.fill_bytes(&mut val);
+        let row = RowEntry::new(k, ValueDeletable::Value(val.freeze()), 0u64, None, None);
+        encoded_sst_builder.add(row).unwrap();
+        if let Some(block) = encoded_sst_builder.next_block() {
+            data.put(block);
+            blocks += 1;
+        }
+    }
+    let mut encoded_table = encoded_sst_builder.build().unwrap();
+    while let Some(block) = encoded_table.unconsumed_blocks.pop_front() {
+        data.put(block);
+    }
+    SstData {
+        info: encoded_table.info,
+        data: data.freeze(),
+    }
 }

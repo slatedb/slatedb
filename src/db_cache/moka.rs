@@ -30,7 +30,7 @@
 //! }
 //! ```
 //!
-use crate::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
+use crate::db_cache::{CachedEntry, CachedKey, DbCache, GetTarget, DEFAULT_MAX_CAPACITY};
 use async_trait::async_trait;
 use std::time::Duration;
 
@@ -103,7 +103,7 @@ impl Default for MokaCache {
 
 #[async_trait]
 impl DbCache for MokaCache {
-    async fn get(&self, key: CachedKey) -> Option<CachedEntry> {
+    async fn get(&self, key: CachedKey, _target: GetTarget) -> Option<CachedEntry> {
         self.inner.get(&key).await
     }
 
