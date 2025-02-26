@@ -63,13 +63,12 @@ mod slatedb {
 
   #[derive(Clone, Debug, Error)]
   pub enum Error {
-    /// the user attempted an invalid operation or an operation with an
+    /// The application attempted an invalid operation or an operation with an
     /// invalid parameter (including misconfiguration).
     #[error("API Error: {msg}")]
     ApiError { msg: String },
 
-    /// Reserved for unexpected cases such as invalid internal database states.
-    /// This error is fatal (i.e. the database must be closed).
+    /// Unexpected internal error. This error is fatal (i.e. the database must be closed).
     #[error("System Error: {msg}")]
     SystemError { msg: String },
 
