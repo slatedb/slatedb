@@ -256,12 +256,13 @@ impl StoredManifest {
     ) -> Result<(), SlateDBError> {
         self.maybe_apply_db_state_update(|stored_manifest| {
             let mut updated_db_state = stored_manifest.db_state().clone();
-            if updated_db_state.find_checkpoint(&checkpoint_id).is_none() {
+            let initial_len = updated_db_state.checkpoints.len();
+            updated_db_state
+                .checkpoints
+                .retain(|cp| cp.id != checkpoint_id);
+            if initial_len == updated_db_state.checkpoints.len() {
                 Ok(None)
             } else {
-                updated_db_state
-                    .checkpoints
-                    .retain(|cp| cp.id != checkpoint_id);
                 Ok(Some(updated_db_state))
             }
         })
