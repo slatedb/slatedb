@@ -112,6 +112,12 @@ impl TableStore {
         bytes.div_ceil(self.sst_format.block_size)
     }
 
+    pub(crate) async fn last_seen_wal_id(&self) -> Result<Option<u64>, SlateDBError> {
+        let wal_ssts = self.list_wal_ssts(..).await?;
+        let last_wal_id = wal_ssts.last().map(|md| md.id.unwrap_wal_id());
+        Ok(last_wal_id)
+    }
+
     pub(crate) async fn list_wal_ssts<R: RangeBounds<u64>>(
         &self,
         id_range: R,

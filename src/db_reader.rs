@@ -1,5 +1,7 @@
 use crate::bytes_range::BytesRange;
-use crate::config::{CheckpointOptions, Clock, DbReaderOptions, ReadOptions, ScanOptions, SystemClock};
+use crate::config::{
+    CheckpointOptions, Clock, DbReaderOptions, ReadOptions, ScanOptions, SystemClock,
+};
 use crate::db_reader::ManifestPollerMsg::Shutdown;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
@@ -64,7 +66,7 @@ impl DbReaderInner {
         table_store: Arc<TableStore>,
         options: DbReaderOptions,
         checkpoint: Checkpoint,
-        clock: Arc<dyn Clock + Send + Sync>
+        clock: Arc<dyn Clock + Send + Sync>,
     ) -> Result<Self, SlateDBError> {
         let initial_state = Self::build_checkpoint_state(
             Arc::clone(&manifest_store),
@@ -306,7 +308,8 @@ impl DbReader {
             checkpoint_id,
             options,
             Arc::new(SystemClock::default()),
-        ).await
+        )
+        .await
     }
 
     pub async fn open_with_clock<P: Into<Path>>(
@@ -337,16 +340,17 @@ impl DbReader {
             return Err(SlateDBError::InvalidDBState);
         }
 
-        let checkpoint =
-            Self::get_or_create_checkpoint(&mut manifest, checkpoint_id, &options).await?;
+        let checkpoint = Self::get_or_create_checkpoint(
+            &mut manifest,
+            checkpoint_id,
+            &options,
+            Arc::clone(&table_store),
+        )
+        .await?;
 
-        let inner = Arc::new(DbReaderInner::new(
-            manifest_store,
-            table_store,
-            options,
-            checkpoint,
-            clock,
-        ).await?);
+        let inner = Arc::new(
+            DbReaderInner::new(manifest_store, table_store, options, checkpoint, clock).await?,
+        );
 
         // If no checkpoint was provided, then we have established a new checkpoint
         // from the latest state, and we need to refresh it according to the params
@@ -367,6 +371,7 @@ impl DbReader {
         manifest: &mut StoredManifest,
         checkpoint_id: Option<Uuid>,
         options: &DbReaderOptions,
+        table_store: Arc<TableStore>,
     ) -> Result<Checkpoint, SlateDBError> {
         let checkpoint = if let Some(checkpoint_id) = checkpoint_id {
             manifest
@@ -375,12 +380,21 @@ impl DbReader {
                 .ok_or(SlateDBError::CheckpointMissing(checkpoint_id))?
                 .clone()
         } else {
-            // Create a new checkpoint from the latest state
+            // Create a new checkpoint from the latest state.
+            // Include persisted WALs which may not be present in the latest manifest.
+            let last_compacted_wal_id = manifest.db_state().last_compacted_wal_sst_id;
+            let last_wal_id = table_store
+                .last_seen_wal_id()
+                .await?
+                .unwrap_or(last_compacted_wal_id);
+
             let options = CheckpointOptions {
                 lifetime: options.checkpoint_lifetime,
                 ..CheckpointOptions::default()
             };
-            manifest.write_checkpoint(None, &options).await?
+            manifest
+                .write_checkpoint_with_latest_wals(last_wal_id, &options)
+                .await?
         };
         Ok(checkpoint)
     }
