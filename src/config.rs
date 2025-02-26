@@ -671,16 +671,16 @@ impl Default for DbOptions {
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct DbReaderOptions {
-    /// How frequently to poll for new manifest files. Refreshing the manifest file allows readers
-    /// to detect newly compacted data.
+    /// How frequently to poll for new manifest files. Refreshing the manifest
+    /// file allows readers to detect newly compacted data. If the reader is
+    /// using an explicit checkpoint, then the manifest will not be polled.
     pub manifest_poll_interval: Duration,
 
-    /// For readers that refresh their checkpoint, this specifies the lifetime to use for the
-    /// created checkpoint. The checkpoint’s expire time will be set to the current time plus
-    /// this value. If not specified, then the checkpoint will be created with no expiry, and
-    /// must be manually removed. This lifetime must always be greater than
-    /// manifest_poll_interval x 2
-    pub checkpoint_lifetime: Option<Duration>,
+    /// For readers that do not provide an explicit checkpoint, the client will
+    /// maintain its own checkpoint against the latest database state. The checkpoint’s
+    /// expire time will be set to the current time plus this value. This lifetime
+    /// must always be greater than manifest_poll_interval x 2.
+    pub checkpoint_lifetime: Duration,
 
     /// The max size of a single in-memory table used to buffer WAL entries
     /// Defaults to 64MB
@@ -694,8 +694,8 @@ impl Default for DbReaderOptions {
     fn default() -> Self {
         Self {
             manifest_poll_interval: Duration::from_secs(10),
-            checkpoint_lifetime: None,
-            max_memtable_bytes: 4096,
+            checkpoint_lifetime: Duration::from_secs(10 * 60),
+            max_memtable_bytes: 64 * 1024 * 1024,
             block_cache: default_block_cache(),
         }
     }

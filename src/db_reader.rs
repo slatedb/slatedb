@@ -96,7 +96,7 @@ impl DbReaderInner {
     ) -> Result<Checkpoint, SlateDBError> {
         let current_checkpoint_id = self.state.read().checkpoint.id;
         let options = CheckpointOptions {
-            lifetime: self.options.checkpoint_lifetime,
+            lifetime: Some(self.options.checkpoint_lifetime),
             ..CheckpointOptions::default()
         };
         stored_manifest
@@ -138,23 +138,23 @@ impl DbReaderInner {
         stored_manifest: &mut StoredManifest,
     ) -> Result<(), SlateDBError> {
         let checkpoint = self.state.read().checkpoint.clone();
-        if let Some(checkpoint_lifetime) = self.options.checkpoint_lifetime {
-            let half_lifetime = checkpoint_lifetime
-                .checked_div(2)
-                .expect("Failed to divide checkpoint lifetime");
-            let refresh_deadline = checkpoint
-                .expire_time
-                .expect("Expected checkpoint expiration time to be set")
-                .sub(half_lifetime);
-            if self.clock.now_systime() > refresh_deadline {
-                let refreshed_checkpoint = stored_manifest
-                    .refresh_checkpoint(checkpoint.id, checkpoint_lifetime)
-                    .await?;
-                info!(
-                    "Refreshed checkpoint {} to expire at {:?}",
-                    checkpoint.id, refreshed_checkpoint.expire_time
-                )
-            }
+        let half_lifetime = self
+            .options
+            .checkpoint_lifetime
+            .checked_div(2)
+            .expect("Failed to divide checkpoint lifetime");
+        let refresh_deadline = checkpoint
+            .expire_time
+            .expect("Expected checkpoint expiration time to be set")
+            .sub(half_lifetime);
+        if self.clock.now_systime() > refresh_deadline {
+            let refreshed_checkpoint = stored_manifest
+                .refresh_checkpoint(checkpoint.id, self.options.checkpoint_lifetime)
+                .await?;
+            info!(
+                "Refreshed checkpoint {} to expire at {:?}",
+                checkpoint.id, refreshed_checkpoint.expire_time
+            )
         }
         Ok(())
     }
@@ -269,23 +269,23 @@ impl DbReaderInner {
 
 impl DbReader {
     fn validate_options(options: &DbReaderOptions) -> Result<(), SlateDBError> {
-        if let Some(lifetime) = options.checkpoint_lifetime {
-            if lifetime.as_millis() < 1000 {
-                return Err(SlateDBError::InvalidArgument {
-                    msg: "Checkpoint lifetime must be at least 1s".to_string(),
-                });
-            }
+        if options.checkpoint_lifetime.as_millis() < 1000 {
+            return Err(SlateDBError::InvalidArgument {
+                msg: "Checkpoint lifetime must be at least 1s".to_string(),
+            });
+        }
 
-            let double_poll_interval = options.manifest_poll_interval.checked_mul(2).ok_or(
-                SlateDBError::InvalidArgument {
+        let double_poll_interval =
+            options
+                .manifest_poll_interval
+                .checked_mul(2)
+                .ok_or(SlateDBError::InvalidArgument {
                     msg: "Manifest poll interval is too large".to_string(),
-                },
-            )?;
-            if lifetime < double_poll_interval {
-                return Err(SlateDBError::InvalidArgument {
-                    msg: "Checkpoint lifetime must be at least 1s".to_string(),
-                });
-            }
+                })?;
+        if options.checkpoint_lifetime < double_poll_interval {
+            return Err(SlateDBError::InvalidArgument {
+                msg: "Checkpoint lifetime must be at least 1s".to_string(),
+            });
         }
         Ok(())
     }
@@ -389,7 +389,7 @@ impl DbReader {
                 .unwrap_or(last_compacted_wal_id);
 
             let options = CheckpointOptions {
-                lifetime: options.checkpoint_lifetime,
+                lifetime: Some(options.checkpoint_lifetime),
                 ..CheckpointOptions::default()
             };
             manifest
@@ -804,7 +804,7 @@ mod tests {
 
         let reader_options = DbReaderOptions {
             manifest_poll_interval: Duration::from_millis(500),
-            checkpoint_lifetime: Some(Duration::from_millis(1000)),
+            checkpoint_lifetime: Duration::from_millis(1000),
             ..DbReaderOptions::default()
         };
 
