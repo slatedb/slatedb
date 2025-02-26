@@ -465,7 +465,11 @@ impl Reader for DbReader {
         };
 
         for sst in &snapshot.manifest.core.l0 {
-            let filter_result = self.inner.table_store.sst_might_include_key(sst, key, key_hash).await?;
+            let filter_result = self
+                .inner
+                .table_store
+                .sst_might_include_key(sst, key, key_hash)
+                .await?;
             if filter_result.might_contain_key() {
                 let mut iter = SstIterator::for_key(
                     sst,
@@ -484,7 +488,11 @@ impl Reader for DbReader {
         }
 
         for sr in &snapshot.manifest.core.compacted {
-            let filter_result = self.inner.table_store.sr_might_include_key(sr, key, key_hash).await?;
+            let filter_result = self
+                .inner
+                .table_store
+                .sr_might_include_key(sr, key, key_hash)
+                .await?;
             if filter_result.might_contain_key() {
                 let mut iter = SortedRunIterator::for_key(
                     sr,

@@ -20,12 +20,14 @@ use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::paths::PathResolver;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
+use crate::tablestore::SstFilterResult::{
+    FilterNegative, FilterPositive, RangeNegative, RangePositive,
+};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
 use crate::types::RowEntry;
 use crate::{blob::ReadOnlyBlob, block::Block};
-use crate::tablestore::SstFilterResult::{FilterNegative, FilterPositive, RangeNegative, RangePositive};
 
 pub(crate) enum SstFilterResult {
     RangeNegative,
@@ -551,7 +553,7 @@ impl TableStore {
     /// - `key`: the key to check
     /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
     /// ## Returns
-    /// - `SstFilterResult` indicating whether the key was found or was not in range
+    /// - `SstFilterResult` indicating whether the key was found or not
     pub(crate) async fn sr_might_include_key(
         &self,
         sr: &SortedRun,
@@ -567,7 +569,7 @@ impl TableStore {
     async fn apply_filter(
         &self,
         sst: &SsTableHandle,
-        key_hash: u64
+        key_hash: u64,
     ) -> Result<SstFilterResult, SlateDBError> {
         if let Some(filter) = self.read_filter(sst).await? {
             return if filter.might_contain(key_hash) {

@@ -60,13 +60,13 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::stats::StatRegistry;
+use crate::tablestore::SstFilterResult::FilterPositive;
 use crate::tablestore::{SstFilterResult, TableStore};
-use crate::wal_replay;
 use crate::types::RowEntry;
 use crate::utils::{bg_task_result_into_err, get_now_for_read, is_not_expired, MonotonicClock};
+use crate::wal_replay;
 use tracing::{info, warn};
 use SstFilterResult::FilterNegative;
-use crate::tablestore::SstFilterResult::FilterPositive;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -126,7 +126,7 @@ impl DbInner {
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
             if let Some(val) = maybe_val {
-                return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now))
+                return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
             }
         }
 
@@ -134,7 +134,7 @@ impl DbInner {
             .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
         if let Some(val) = maybe_val {
-            return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now))
+            return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -149,7 +149,10 @@ impl DbInner {
         };
 
         for sst in &snapshot.state.core.l0 {
-            let filter_result = self.table_store.sst_might_include_key(sst, key, key_hash).await?;
+            let filter_result = self
+                .table_store
+                .sst_might_include_key(sst, key, key_hash)
+                .await?;
             self.record_filter_result(&filter_result);
 
             if filter_result.might_contain_key() {
@@ -170,7 +173,10 @@ impl DbInner {
         }
 
         for sr in &snapshot.state.core.compacted {
-            let filter_result = self.table_store.sr_might_include_key(sr, key, key_hash).await?;
+            let filter_result = self
+                .table_store
+                .sr_might_include_key(sr, key, key_hash)
+                .await?;
             self.record_filter_result(&filter_result);
 
             if filter_result.might_contain_key() {
@@ -192,7 +198,6 @@ impl DbInner {
         Ok(None)
     }
 
-
     fn record_filter_result(&self, result: &SstFilterResult) {
         if matches!(result, FilterPositive) {
             self.db_stats.sst_filter_positives.inc();
@@ -201,14 +206,11 @@ impl DbInner {
         }
     }
 
-    fn unwrap_value_if_not_expired(
-        entry: &RowEntry,
-        now_ttl: i64,
-    ) -> Option<Bytes> {
-        if is_not_expired(&entry, now_ttl) {
-            None
-        } else {
+    fn unwrap_value_if_not_expired(entry: &RowEntry, now_ttl: i64) -> Option<Bytes> {
+        if is_not_expired(entry, now_ttl) {
             entry.value.as_bytes()
+        } else {
+            None
         }
     }
 

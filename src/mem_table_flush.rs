@@ -107,7 +107,6 @@ impl MemtableFlusher {
             }
         } {
             let id = SsTableId::Compacted(Ulid::new());
-            eprintln!("Flushing imm_memtable {id:?}");
             let sst_handle = self
                 .db_inner
                 .flush_imm_table(&id, imm_memtable.table())
