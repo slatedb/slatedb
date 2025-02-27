@@ -8,7 +8,7 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::manifest::Manifest;
 use crate::manifest_store::{ManifestStore, StoredManifest};
-use crate::mem_table::{ImmutableMemtable, VecDequeKeyValueIterator, WritableKVTable};
+use crate::mem_table::{ImmutableMemtable, VecDequeKeyValueIterator};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -22,7 +22,6 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
 use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
-use std::{cmp, mem};
 use tokio::runtime::Handle;
 use tokio::select;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -443,40 +442,13 @@ impl DbReaderInner {
             return Ok(wal_id_end);
         }
 
-        let wal_id_range = wal_id_start..=wal_id_end;
-        let mut last_tick = manifest.core.last_l0_clock_tick;
+        let new_tables = wal_replay::replay(
+            wal_id_start..(wal_id_end + 1),
+            Arc::clone(&table_store),
+            reader_options.max_memtable_bytes,
+        ).await?;
 
-        // load the last seq number from manifest, and use it as the starting seq number.
-        // there might have bigger seq number in the WALs, we'd update the last seq number
-        // to the max seq number while iterating over the WALs.
-        let mut last_seq = manifest.core.last_l0_seq;
-        let mut curr_memtable = WritableKVTable::new();
-        for wal_id in wal_id_range {
-            let mut sst_iter = wal_replay::load_wal_iter(Arc::clone(&table_store), wal_id).await?;
-
-            while let Some(kv) = sst_iter.next_entry().await? {
-                if let Some(ts) = kv.create_ts {
-                    last_tick = cmp::max(last_tick, ts);
-                }
-
-                last_seq = last_seq.max(kv.seq);
-                curr_memtable.put(kv.clone());
-
-                // TODO: We are allowing the memtable to exceed the limit
-                //  Maybe we can drop the last inserted key and insert
-                //  it into the next table instead
-                if curr_memtable.size() as u64 > reader_options.max_memtable_bytes {
-                    let completed_memtable =
-                        mem::replace(&mut curr_memtable, WritableKVTable::new());
-                    into_tables.push(Arc::new(ImmutableMemtable::new(completed_memtable, wal_id)));
-                }
-            }
-        }
-
-        if !curr_memtable.is_empty() {
-            into_tables.push(Arc::new(ImmutableMemtable::new(curr_memtable, wal_id_end)));
-        }
-
+        into_tables.extend(new_tables);
         Ok(wal_id_end)
     }
 }
