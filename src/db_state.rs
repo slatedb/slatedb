@@ -277,12 +277,6 @@ impl CoreDbState {
     pub(crate) fn find_checkpoint(&self, checkpoint_id: &Uuid) -> Option<&Checkpoint> {
         self.checkpoints.iter().find(|c| c.id == *checkpoint_id)
     }
-
-    pub(crate) fn list_noncompacted_wal_ids(&self) -> Range<u64> {
-        let first_wal_id = self.last_compacted_wal_sst_id + 1;
-        let last_wal_id = self.next_wal_sst_id;
-        first_wal_id..last_wal_id
-    }
 }
 
 // represents a read-snapshot of the current db state

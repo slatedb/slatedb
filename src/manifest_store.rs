@@ -309,7 +309,8 @@ impl StoredManifest {
                 .map(Some)
         })
         .await?;
-        Ok(self.db_state()
+        Ok(self
+            .db_state()
             .find_checkpoint(&checkpoint_id)
             .expect("update applied but checkpoint not found")
             .clone())
