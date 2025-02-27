@@ -902,4 +902,47 @@ mod tests {
         let updated_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
         assert_eq!(0, updated_manifest.core.checkpoints.len());
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn should_replay_new_wals() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+
+        let db = Db::open_with_opts(
+            path.clone(),
+            DbOptions::default(),
+            Arc::clone(&object_store),
+        )
+        .await
+        .unwrap();
+
+        let reader_options = DbReaderOptions {
+            manifest_poll_interval: Duration::from_millis(500),
+            checkpoint_lifetime: Duration::from_millis(1000),
+            ..DbReaderOptions::default()
+        };
+
+        let clock = Arc::new(TokioClock::new()) as Arc<dyn Clock + Send + Sync>;
+
+        let reader = DbReader::open_with_clock(
+            path.clone(),
+            Arc::clone(&object_store),
+            None,
+            reader_options,
+            Arc::clone(&clock),
+        )
+        .await
+        .unwrap();
+
+        let key = b"test_key";
+        let value = b"test_value";
+        db.put(key, value).await.unwrap();
+        db.flush().await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            reader.get(key).await.unwrap(),
+            Some(Bytes::from_static(value))
+        );
+    }
 }
