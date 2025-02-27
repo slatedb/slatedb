@@ -117,6 +117,120 @@ impl DbReaderInner {
         Ok(checkpoint)
     }
 
+    async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, SlateDBError> {
+        let key = key.as_ref();
+        let snapshot = self.state.read().clone();
+        let maybe_val = snapshot
+            .imm_memtables
+            .iter()
+            .find_map(|memtable| memtable.table().get(key));
+        if let Some(val) = maybe_val {
+            return Ok(val.value.as_bytes());
+        }
+
+        // Since the key remains unchanged during the point query, we only need to compute
+        // the hash value once and pass it to the filter to avoid unnecessary hash computation
+        let key_hash = filter::filter_hash(key);
+
+        let sst_iter_options = SstIteratorOptions {
+            cache_blocks: true,
+            eager_spawn: true,
+            ..SstIteratorOptions::default()
+        };
+
+        for sst in &snapshot.manifest.core.l0 {
+            let filter_result = self
+                .table_store
+                .sst_might_include_key(sst, key, key_hash)
+                .await?;
+            if filter_result.might_contain_key() {
+                let mut iter =
+                    SstIterator::for_key(sst, key, Arc::clone(&self.table_store), sst_iter_options)
+                        .await?;
+
+                if let Some(entry) = iter.next_entry().await? {
+                    if entry.key == key {
+                        return Ok(entry.value.as_bytes());
+                    }
+                }
+            }
+        }
+
+        for sr in &snapshot.manifest.core.compacted {
+            let filter_result = self
+                .table_store
+                .sr_might_include_key(sr, key, key_hash)
+                .await?;
+            if filter_result.might_contain_key() {
+                let mut iter = SortedRunIterator::for_key(
+                    sr,
+                    key,
+                    Arc::clone(&self.table_store),
+                    sst_iter_options,
+                )
+                .await?;
+                if let Some(entry) = iter.next_entry().await? {
+                    if entry.key == key {
+                        return Ok(entry.value.as_bytes());
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn scan_with_options(
+        &self,
+        range: BytesRange,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, SlateDBError> {
+        let snapshot = self.state.read().clone();
+
+        let mut memtables = VecDeque::new();
+        for memtable in &snapshot.imm_memtables {
+            memtables.push_back(memtable.table());
+        }
+
+        let mem_iter =
+            VecDequeKeyValueIterator::materialize_range(memtables, range.clone()).await?;
+
+        let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
+
+        let sst_iter_options = SstIteratorOptions {
+            max_fetch_tasks: 1,
+            blocks_to_fetch: read_ahead_blocks,
+            cache_blocks: options.cache_blocks,
+            eager_spawn: true,
+        };
+
+        let mut l0_iters = VecDeque::new();
+        for sst in snapshot.manifest.core.l0 {
+            let iter = SstIterator::new_owned(
+                range.clone(),
+                sst,
+                Arc::clone(&self.table_store),
+                sst_iter_options,
+            )
+            .await?;
+            l0_iters.push_back(iter);
+        }
+
+        let mut sr_iters = VecDeque::new();
+        for sr in snapshot.manifest.core.compacted {
+            let iter = SortedRunIterator::new_owned(
+                range.clone(),
+                sr,
+                Arc::clone(&self.table_store),
+                sst_iter_options,
+            )
+            .await?;
+            sr_iters.push_back(iter);
+        }
+
+        DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters).await
+    }
+
     fn should_reestablish_checkpoint(&self, latest: &CoreDbState) -> bool {
         let read_guard = self.state.read();
         let current_state = &read_guard.manifest.core;
@@ -495,79 +609,18 @@ impl DbReader {
 
 #[async_trait::async_trait]
 impl Reader for DbReader {
+    /// Note that [`ReadOptions::read_level`] has no effect for readers, which
+    /// can only observe committed state.
     async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
         _options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        let key = key.as_ref();
-        let snapshot = self.inner.state.read().clone();
-        let maybe_val = snapshot
-            .imm_memtables
-            .iter()
-            .find_map(|memtable| memtable.table().get(key));
-        if let Some(val) = maybe_val {
-            return Ok(val.value.as_bytes());
-        }
-
-        // Since the key remains unchanged during the point query, we only need to compute
-        // the hash value once and pass it to the filter to avoid unnecessary hash computation
-        let key_hash = filter::filter_hash(key);
-
-        let sst_iter_options = SstIteratorOptions {
-            cache_blocks: true,
-            eager_spawn: true,
-            ..SstIteratorOptions::default()
-        };
-
-        for sst in &snapshot.manifest.core.l0 {
-            let filter_result = self
-                .inner
-                .table_store
-                .sst_might_include_key(sst, key, key_hash)
-                .await?;
-            if filter_result.might_contain_key() {
-                let mut iter = SstIterator::for_key(
-                    sst,
-                    key,
-                    Arc::clone(&self.inner.table_store),
-                    sst_iter_options,
-                )
-                .await?;
-
-                if let Some(entry) = iter.next_entry().await? {
-                    if entry.key == key {
-                        return Ok(entry.value.as_bytes());
-                    }
-                }
-            }
-        }
-
-        for sr in &snapshot.manifest.core.compacted {
-            let filter_result = self
-                .inner
-                .table_store
-                .sr_might_include_key(sr, key, key_hash)
-                .await?;
-            if filter_result.might_contain_key() {
-                let mut iter = SortedRunIterator::for_key(
-                    sr,
-                    key,
-                    Arc::clone(&self.inner.table_store),
-                    sst_iter_options,
-                )
-                .await?;
-                if let Some(entry) = iter.next_entry().await? {
-                    if entry.key == key {
-                        return Ok(entry.value.as_bytes());
-                    }
-                }
-            }
-        }
-
-        Ok(None)
+        self.inner.get(key).await
     }
 
+    /// Note that [`ReadOptions::read_level`] has no effect for readers, which
+    /// can only observe committed state.
     async fn scan_with_options<K, T>(
         &self,
         range: T,
@@ -584,53 +637,7 @@ impl Reader for DbReader {
             .end_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = BytesRange::from((start, end));
-        let snapshot = self.inner.state.read().clone();
-
-        let mut memtables = VecDeque::new();
-        for memtable in &snapshot.imm_memtables {
-            memtables.push_back(memtable.table());
-        }
-
-        let mem_iter =
-            VecDequeKeyValueIterator::materialize_range(memtables, range.clone()).await?;
-
-        let read_ahead_blocks = self
-            .inner
-            .table_store
-            .bytes_to_blocks(options.read_ahead_bytes);
-
-        let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 1,
-            blocks_to_fetch: read_ahead_blocks,
-            cache_blocks: options.cache_blocks,
-            eager_spawn: true,
-        };
-
-        let mut l0_iters = VecDeque::new();
-        for sst in snapshot.manifest.core.l0 {
-            let iter = SstIterator::new_owned(
-                range.clone(),
-                sst,
-                Arc::clone(&self.inner.table_store),
-                sst_iter_options,
-            )
-            .await?;
-            l0_iters.push_back(iter);
-        }
-
-        let mut sr_iters = VecDeque::new();
-        for sr in snapshot.manifest.core.compacted {
-            let iter = SortedRunIterator::new_owned(
-                range.clone(),
-                sr,
-                Arc::clone(&self.inner.table_store),
-                sst_iter_options,
-            )
-            .await?;
-            sr_iters.push_back(iter);
-        }
-
-        DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters).await
+        self.inner.scan_with_options(range, options).await
     }
 }
 
