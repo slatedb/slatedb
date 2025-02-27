@@ -34,7 +34,6 @@ pub use db_reader::DbReader;
 pub use error::{DbOptionsError, SlateDBError};
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
-pub use reader::Reader;
 pub use types::KeyValue;
 
 pub mod admin;
@@ -81,7 +80,6 @@ mod merge_operator;
 mod paths;
 #[cfg(test)]
 mod proptest_util;
-mod reader;
 mod row_codec;
 mod sorted_run_iterator;
 mod sst;

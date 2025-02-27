@@ -37,7 +37,6 @@ use slatedb::Db;
 use slatedb::config::DbOptions;
 use slatedb::SlateDBError;
 use slatedb::object_store::{ObjectStore, memory::InMemory};
-use slatedb::Reader;
 use std::sync::Arc;
 
 #[tokio::main]
