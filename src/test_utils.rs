@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
@@ -109,6 +110,32 @@ impl TestClock {
 impl Clock for TestClock {
     fn now(&self) -> i64 {
         self.ticker.load(Ordering::SeqCst)
+    }
+}
+
+pub(crate) struct TokioClock {
+    initial_ts: u128,
+    initial_instant: tokio::time::Instant,
+}
+
+impl TokioClock {
+    pub(crate) fn new() -> Self {
+        let ts_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+
+        Self {
+            initial_ts: ts_millis,
+            initial_instant: tokio::time::Instant::now(),
+        }
+    }
+}
+
+impl Clock for TokioClock {
+    fn now(&self) -> i64 {
+        let elapsed = tokio::time::Instant::now().duration_since(self.initial_instant);
+        (self.initial_ts + elapsed.as_millis()) as i64
     }
 }
 
