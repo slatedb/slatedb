@@ -344,7 +344,6 @@ impl DbReader {
             &mut manifest,
             checkpoint_id,
             &options,
-            Arc::clone(&table_store),
         )
         .await?;
 
@@ -371,7 +370,6 @@ impl DbReader {
         manifest: &mut StoredManifest,
         checkpoint_id: Option<Uuid>,
         options: &DbReaderOptions,
-        table_store: Arc<TableStore>,
     ) -> Result<Checkpoint, SlateDBError> {
         let checkpoint = if let Some(checkpoint_id) = checkpoint_id {
             manifest
@@ -380,20 +378,12 @@ impl DbReader {
                 .ok_or(SlateDBError::CheckpointMissing(checkpoint_id))?
                 .clone()
         } else {
-            // Create a new checkpoint from the latest state.
-            // Include persisted WALs which may not be present in the latest manifest.
-            let last_compacted_wal_id = manifest.db_state().last_compacted_wal_sst_id;
-            let last_wal_id = table_store
-                .last_seen_wal_id()
-                .await?
-                .unwrap_or(last_compacted_wal_id);
-
             let options = CheckpointOptions {
                 lifetime: Some(options.checkpoint_lifetime),
                 ..CheckpointOptions::default()
             };
             manifest
-                .write_checkpoint_with_latest_wals(last_wal_id, &options)
+                .write_checkpoint(None, &options)
                 .await?
         };
         Ok(checkpoint)

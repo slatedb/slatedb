@@ -133,6 +133,7 @@ impl TableStore {
         bytes.div_ceil(self.sst_format.block_size)
     }
 
+    #[allow(dead_code)] // TODO: May still reuse this when implementing wal watching
     pub(crate) async fn last_seen_wal_id(&self) -> Result<Option<u64>, SlateDBError> {
         let wal_ssts = self.list_wal_ssts(..).await?;
         let last_wal_id = wal_ssts.last().map(|md| md.id.unwrap_wal_id());

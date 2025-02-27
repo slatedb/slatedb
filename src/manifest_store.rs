@@ -297,31 +297,6 @@ impl StoredManifest {
         })
     }
 
-    pub(crate) async fn write_checkpoint_with_latest_wals(
-        &mut self,
-        last_seen_wal_id: u64,
-        options: &CheckpointOptions,
-    ) -> Result<Checkpoint, SlateDBError> {
-        let checkpoint_id = Uuid::new_v4();
-        self.maybe_apply_db_state_update(|stored_manifest| {
-            let checkpoint = stored_manifest.new_checkpoint(checkpoint_id, options)?;
-            let mut updated_db_state = stored_manifest.db_state().clone();
-            updated_db_state.checkpoints.push(checkpoint);
-            updated_db_state.next_wal_sst_id =
-                updated_db_state.next_wal_sst_id.max(last_seen_wal_id + 1);
-            Ok(Some(updated_db_state))
-        })
-        .await?;
-        Ok(self.expect_checkpoint(&checkpoint_id, "update applied but checkpoint not found"))
-    }
-
-    fn expect_checkpoint(&self, checkpoint_id: &Uuid, msg: &str) -> Checkpoint {
-        self.db_state()
-            .find_checkpoint(checkpoint_id)
-            .expect(msg)
-            .clone()
-    }
-
     pub(crate) async fn write_checkpoint(
         &mut self,
         checkpoint_id: Option<Uuid>,
@@ -334,7 +309,10 @@ impl StoredManifest {
                 .map(Some)
         })
         .await?;
-        Ok(self.expect_checkpoint(&checkpoint_id, "update applied but checkpoint not found"))
+        Ok(self.db_state()
+            .find_checkpoint(&checkpoint_id)
+            .expect("update applied but checkpoint not found")
+            .clone())
     }
 
     pub(crate) async fn delete_checkpoint(

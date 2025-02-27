@@ -68,7 +68,6 @@ impl MemtableFlusher {
         options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
         loop {
-            eprintln!("Creating checkpoint");
             self.load_manifest().await?;
             let result = self.write_checkpoint(options).await;
             if matches!(result, Err(SlateDBError::ManifestVersionExists)) {
