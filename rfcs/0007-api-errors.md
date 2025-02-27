@@ -65,8 +65,8 @@ mod slatedb {
   pub enum Error {
     /// The application attempted an invalid operation or an operation with an
     /// invalid parameter (including misconfiguration).
-    #[error("API Error: {msg}")]
-    ApiError { msg: String },
+    #[error("Operation Error: {msg}")]
+    OperationError { msg: String },
 
     /// Unexpected internal error. This error is fatal (i.e. the database must be closed).
     #[error("System Error: {msg}")]
@@ -76,7 +76,7 @@ mod slatedb {
     /// be repaired before the database can be restarted.
     #[error("Persistent Error: {msg}")]
     PersistentError { msg: String },
-    
+
     /// Failed access database resources (e.g. remote storage) due to some 
     /// kind of authentication or authorization error. The operation can be 
     /// retried after the permission issue is resolved.
