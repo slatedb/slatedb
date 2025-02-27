@@ -13,7 +13,7 @@ use object_store::ObjectStore;
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
-use crate::db_cache::CachedEntry;
+use crate::db_cache::{CachedEntry, DbCache, GetTarget};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
@@ -24,7 +24,7 @@ use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
 use crate::types::RowEntry;
-use crate::{blob::ReadOnlyBlob, block::Block, db_cache::DbCache};
+use crate::{blob::ReadOnlyBlob, block::Block};
 
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
@@ -43,12 +43,15 @@ struct ReadOnlyObject {
 }
 
 impl ReadOnlyBlob for ReadOnlyObject {
-    async fn len(&self) -> Result<usize, SlateDBError> {
+    async fn len(&self) -> Result<u64, SlateDBError> {
         let object_metadata = self.object_store.head(&self.path).await?;
-        Ok(object_metadata.size)
+        Ok(object_metadata.size as u64)
     }
 
-    async fn read_range(&self, range: Range<usize>) -> Result<Bytes, SlateDBError> {
+    async fn read_range(&self, range: Range<u64>) -> Result<Bytes, SlateDBError> {
+        // This will go away when we upgrade object store, which now takes u64's
+        // See https://github.com/apache/arrow-rs/issues/5351
+        let range = range.start as usize..range.end as usize;
         let bytes = self.object_store.get_range(&self.path, range).await?;
         Ok(bytes)
     }
@@ -295,7 +298,10 @@ impl TableStore {
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(filter) = cache
-                .get((handle.id, handle.info.filter_offset).into())
+                .get(
+                    (handle.id, handle.info.filter_offset).into(),
+                    GetTarget::BloomFilter,
+                )
                 .await
                 .and_then(|entry| entry.bloom_filter())
             {
@@ -327,7 +333,10 @@ impl TableStore {
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(index) = cache
-                .get((handle.id, handle.info.index_offset).into())
+                .get(
+                    (handle.id, handle.info.index_offset).into(),
+                    GetTarget::SsTableIndex,
+                )
                 .await
                 .and_then(|entry| entry.sst_index())
             {
@@ -399,7 +408,7 @@ impl TableStore {
                 let block_meta = index_borrow.block_meta().get(block_num);
                 let offset = block_meta.offset();
                 cache
-                    .get((handle.id, offset).into())
+                    .get((handle.id, offset).into(), GetTarget::Block)
                     .await
                     .and_then(|entry| entry.block())
             }))
@@ -552,11 +561,12 @@ mod tests {
     use proptest::proptest;
     use ulid::Ulid;
 
+    use crate::db_cache::{DbCache, DbCacheWrapper, GetTarget};
     use crate::error;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::stats::StatRegistry;
     #[cfg(feature = "moka")]
-    use crate::tablestore::DbCache;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::{RowEntry, ValueDeletable};
@@ -656,12 +666,14 @@ mod tests {
             ..SsTableFormat::default()
         };
 
+        let stat_registry = StatRegistry::new();
         let block_cache = Arc::new(MokaCache::new());
+        let wrapper = Arc::new(DbCacheWrapper::new(block_cache.clone(), &stat_registry));
         let ts = Arc::new(TableStore::new(
             os.clone(),
             format,
             Path::from("/root"),
-            Some(block_cache.clone()),
+            Some(wrapper),
         ));
 
         // Create and write SST
@@ -698,7 +710,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset).into())
+                    .get((handle.id, offset).into(), GetTarget::Block)
                     .await
                     .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache",
@@ -728,7 +740,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset).into())
+                    .get((handle.id, offset).into(), GetTarget::Block)
                     .await
                     .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache after partial hit",
@@ -752,7 +764,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset).into())
+                    .get((handle.id, offset).into(), GetTarget::Block)
                     .await
                     .is_some_and(|entry| entry.block().is_some()),
                 "Block with offset {} should be in cache after SST emptying",
@@ -780,7 +792,7 @@ mod tests {
         let mut expected_iter = expected.iter();
 
         while let (Some(block), Some(expected_item)) = (block_iter.next(), expected_iter.next()) {
-            let mut iter = BlockIterator::new(block.clone());
+            let mut iter = BlockIterator::new_ascending(block.clone());
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, expected_item.0);
             assert_eq!(ValueDeletable::Value(kv.value), expected_item.1);

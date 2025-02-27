@@ -30,7 +30,7 @@ use log::{info, warn};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 
-use crate::types::RowAttributes;
+use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::spawn_bg_task;
 use crate::{
     batch::{WriteBatch, WriteOp},
@@ -52,32 +52,32 @@ pub(crate) struct WriteBatchRequest {
 impl DbInner {
     #[allow(clippy::panic)]
     async fn write_batch(&self, batch: WriteBatch) -> Result<Arc<KVTable>, SlateDBError> {
-        let now = self.mono_clock.now()?;
+        let now = self.mono_clock.now().await?;
 
         let current_table = if self.wal_enabled() {
             let mut guard = self.state.write();
 
+            let seq = guard.increment_seq();
             let current_wal = guard.wal();
             for op in batch.ops {
                 match op {
                     WriteOp::Put(key, value, opts) => {
-                        current_wal.put(
+                        current_wal.put(RowEntry {
                             key,
-                            value,
-                            RowAttributes {
-                                ts: Some(now),
-                                expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
-                            },
-                        );
+                            value: ValueDeletable::Value(value),
+                            create_ts: Some(now),
+                            expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
+                            seq,
+                        });
                     }
                     WriteOp::Delete(key) => {
-                        current_wal.delete(
+                        current_wal.put(RowEntry {
                             key,
-                            RowAttributes {
-                                ts: Some(now),
-                                expire_ts: None,
-                            },
-                        );
+                            value: ValueDeletable::Tombstone,
+                            create_ts: Some(now),
+                            expire_ts: None,
+                            seq,
+                        });
                     }
                 }
             }
@@ -89,27 +89,27 @@ impl DbInner {
                 panic!("wal_disabled feature must be enabled");
             }
             let mut guard = self.state.write();
+            let seq = guard.increment_seq();
             let current_memtable = guard.memtable();
             for op in batch.ops {
                 match op {
                     WriteOp::Put(key, value, opts) => {
-                        current_memtable.put(
+                        current_memtable.put(RowEntry {
                             key,
-                            value,
-                            RowAttributes {
-                                ts: Some(now),
-                                expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
-                            },
-                        );
+                            value: ValueDeletable::Value(value),
+                            create_ts: Some(now),
+                            expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
+                            seq,
+                        });
                     }
                     WriteOp::Delete(key) => {
-                        current_memtable.delete(
+                        current_memtable.put(RowEntry {
                             key,
-                            RowAttributes {
-                                ts: Some(now),
-                                expire_ts: None,
-                            },
-                        );
+                            value: ValueDeletable::Tombstone,
+                            create_ts: Some(now),
+                            expire_ts: None,
+                            seq,
+                        });
                     }
                 }
             }
@@ -148,13 +148,17 @@ impl DbInner {
         let this = Arc::clone(self);
         Some(spawn_bg_task(
             tokio_handle,
-            move |err| {
-                match err {
-                    SlateDBError::BackgroundTaskShutdown => {
+            move |result| {
+                let err = match result {
+                    Ok(()) => {
                         info!("write task shutdown complete");
+                        SlateDBError::BackgroundTaskShutdown
                     }
-                    _ => warn!("write task exited with {:?}", err),
-                }
+                    Err(err) => {
+                        warn!("write task exited with {:?}", err);
+                        err.clone()
+                    }
+                };
                 // notify any waiters about the failure
                 let mut state = this.state.write();
                 state.record_fatal_error(err.clone());

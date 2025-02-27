@@ -36,28 +36,35 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
+use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
+use crate::db::SstFilterResult::{FilterNegative, FilterPositive, RangeNegative, RangePositive};
+use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
+use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::filter;
+use crate::filter_iterator::FilterIterator;
 use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::{VecDequeKeyValueIterator, WritableKVTable};
 use crate::mem_table_flush::MemtableFlushMsg;
-use crate::metrics::DbStats;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
+use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::types::{RowAttributes, ValueDeletable};
-use crate::utils::MonotonicClock;
+use crate::types::RowEntry;
+use crate::utils::{
+    bg_task_result_into_err, filter_expired, get_now_for_read, unwrap_result, MonotonicClock,
+};
 use tracing::{info, warn};
 
 pub(crate) struct DbInner {
@@ -67,7 +74,8 @@ pub(crate) struct DbInner {
     pub(crate) wal_flush_notifier: UnboundedSender<WalFlushMsg>,
     pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
-    pub(crate) db_stats: Arc<DbStats>,
+    pub(crate) db_stats: DbStats,
+    pub(crate) stat_registry: Arc<StatRegistry>,
     pub(crate) mono_clock: Arc<MonotonicClock>,
 }
 
@@ -79,13 +87,14 @@ impl DbInner {
         wal_flush_notifier: UnboundedSender<WalFlushMsg>,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
-        db_stats: Arc<DbStats>,
+        stat_registry: Arc<StatRegistry>,
     ) -> Result<Self, SlateDBError> {
         let mono_clock = Arc::new(MonotonicClock::new(
             options.clock.clone(),
             core_db_state.last_l0_clock_tick,
         ));
         let state = DbState::new(core_db_state);
+        let db_stats = DbStats::new(stat_registry.as_ref());
         let db_inner = Self {
             state: Arc::new(RwLock::new(state)),
             options,
@@ -95,6 +104,7 @@ impl DbInner {
             write_notifier,
             db_stats,
             mono_clock,
+            stat_registry,
         };
         Ok(db_inner)
     }
@@ -108,31 +118,22 @@ impl DbInner {
         self.check_error()?;
         let key = key.as_ref();
         let snapshot = self.state.read().snapshot();
-
-        // Temporary function to convert ValueDeletable to Option<Bytes> until
-        // we add proper support for merges.
-        let unwrap_result = |v| match v {
-            ValueDeletable::Value(v) => Ok(Some(v)),
-            ValueDeletable::Merge(_) => {
-                unimplemented!("MergeOperator is not yet fully implemented")
-            }
-            ValueDeletable::Tombstone => Ok(None),
-        };
+        let ttl_now = get_now_for_read(self.mono_clock.clone(), options.read_level).await?;
 
         if matches!(options.read_level, Uncommitted) {
             let maybe_val = std::iter::once(snapshot.wal)
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
-            if let Some(val) = maybe_val {
-                return unwrap_result(val.value);
+            if let Some(entry) = maybe_val {
+                return self.unwrap_value(filter_expired(entry, ttl_now));
             }
         }
 
         let maybe_val = std::iter::once(snapshot.memtable)
             .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
-        if let Some(val) = maybe_val {
-            return unwrap_result(val.value);
+        if let Some(entry) = maybe_val {
+            return self.unwrap_value(filter_expired(entry, ttl_now));
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -147,32 +148,51 @@ impl DbInner {
         };
 
         for sst in &snapshot.state.core.l0 {
-            if self.sst_might_include_key(sst, key, key_hash).await? {
-                let mut iter =
+            let filter_result = self.sst_might_include_key(sst, key, key_hash).await?;
+            if filter_result.might_contain_key() {
+                let iter =
                     SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
                         .await?;
 
-                if let Some(entry) = iter.next_entry().await? {
+                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
+                if let Some(entry) = ttl_iter.next_entry().await? {
                     if entry.key == key {
                         return unwrap_result(entry.value);
                     }
+                }
+                if matches!(filter_result, FilterPositive) {
+                    self.db_stats.sst_filter_false_positives.inc();
                 }
             }
         }
 
         for sr in &snapshot.state.core.compacted {
-            if self.sr_might_include_key(sr, key, key_hash).await? {
-                let mut iter =
+            let filter_result = self.sr_might_include_key(sr, key, key_hash).await?;
+            if filter_result.might_contain_key() {
+                let iter =
                     SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
                         .await?;
-                if let Some(entry) = iter.next_entry().await? {
+
+                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
+                if let Some(entry) = ttl_iter.next_entry().await? {
                     if entry.key == key {
                         return unwrap_result(entry.value);
                     }
                 }
+                if matches!(filter_result, FilterPositive) {
+                    self.db_stats.sst_filter_false_positives.inc();
+                }
             }
         }
         Ok(None)
+    }
+
+    fn unwrap_value(&self, entry: Option<RowEntry>) -> Result<Option<Bytes>, SlateDBError> {
+        if let Some(unwrapped) = entry {
+            unwrap_result(unwrapped.value)
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn scan_with_options<'a>(
@@ -277,14 +297,20 @@ impl DbInner {
         sst: &SsTableHandle,
         key: &[u8],
         key_hash: u64,
-    ) -> Result<bool, SlateDBError> {
+    ) -> Result<SstFilterResult, SlateDBError> {
         if !sst.range_covers_key(key) {
-            return Ok(false);
+            return Ok(RangeNegative);
         }
         if let Some(filter) = self.table_store.read_filter(sst).await? {
-            return Ok(filter.might_contain(key_hash));
+            return if filter.might_contain(key_hash) {
+                self.db_stats.sst_filter_positives.inc();
+                Ok(FilterPositive)
+            } else {
+                self.db_stats.sst_filter_negatives.inc();
+                Ok(FilterNegative)
+            };
         }
-        Ok(true)
+        Ok(RangePositive)
     }
 
     /// Check if the given key might be in the range of the sorted run (SR). Checks if the key
@@ -300,14 +326,20 @@ impl DbInner {
         sr: &SortedRun,
         key: &[u8],
         key_hash: u64,
-    ) -> Result<bool, SlateDBError> {
-        if let Some(sst) = sr.find_sst_with_range_covering_key(key) {
-            if let Some(filter) = self.table_store.read_filter(sst).await? {
-                return Ok(filter.might_contain(key_hash));
-            }
-            return Ok(true);
+    ) -> Result<SstFilterResult, SlateDBError> {
+        let Some(sst) = sr.find_sst_with_range_covering_key(key) else {
+            return Ok(RangeNegative);
+        };
+        if let Some(filter) = self.table_store.read_filter(sst).await? {
+            return if filter.might_contain(key_hash) {
+                self.db_stats.sst_filter_positives.inc();
+                Ok(FilterPositive)
+            } else {
+                self.db_stats.sst_filter_negatives.inc();
+                Ok(FilterNegative)
+            };
         }
-        Ok(false)
+        Ok(RangePositive)
     }
 
     pub(crate) fn wal_enabled(&self) -> bool {
@@ -483,6 +515,10 @@ impl DbInner {
             sst_iterators.push_back(load_sst_iters(self, sst_id).await?);
         }
 
+        // load the last seq number from manifest, and use it as the starting seq number.
+        // there might have bigger seq number in the WALs, we'd update the last seq number
+        // to the max seq number while iterating over the WALs.
+        let mut last_seq = self.state.read().state().core.last_l0_seq;
         while let Some((mut sst_iter, sst_id)) = sst_iterators.pop_front() {
             last_sst_id = sst_id;
             // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
@@ -499,28 +535,8 @@ impl DbInner {
                         last_tick = cmp::max(last_tick, ts);
                     }
 
-                    match &kv.value {
-                        ValueDeletable::Value(value) => {
-                            guard.memtable().put(
-                                kv.key.clone(),
-                                value.clone(),
-                                RowAttributes {
-                                    ts: kv.create_ts,
-                                    expire_ts: kv.expire_ts,
-                                },
-                            );
-                        }
-                        ValueDeletable::Merge(_) => {
-                            todo!()
-                        }
-                        ValueDeletable::Tombstone => guard.memtable().delete(
-                            kv.key.clone(),
-                            RowAttributes {
-                                ts: kv.create_ts,
-                                expire_ts: kv.expire_ts,
-                            },
-                        ),
-                    }
+                    last_seq = last_seq.max(kv.seq);
+                    guard.memtable().put(kv.clone());
                 }
                 self.maybe_freeze_memtable(&mut guard, sst_id)?;
                 if guard.state().core.next_wal_sst_id == sst_id {
@@ -542,6 +558,9 @@ impl DbInner {
             self.state.read().state().core.next_wal_sst_id
         );
 
+        // restore the last seq number
+        self.state.write().update_last_seq(last_seq);
+
         Ok(())
     }
 
@@ -556,6 +575,22 @@ impl DbInner {
             return Err(error.clone());
         }
         Ok(())
+    }
+}
+
+enum SstFilterResult {
+    RangeNegative,
+    RangePositive,
+    FilterPositive,
+    FilterNegative,
+}
+
+impl SstFilterResult {
+    fn might_contain_key(&self) -> bool {
+        match self {
+            RangeNegative | FilterNegative => false,
+            RangePositive | FilterPositive => true,
+        }
     }
 }
 
@@ -687,7 +722,7 @@ impl Db {
             tracing::info!(?path, ?options, "Opening SlateDB database");
         }
 
-        let db_stats = Arc::new(DbStats::new());
+        let stat_registry = Arc::new(StatRegistry::new());
         let sst_format = SsTableFormat {
             min_filter_keys: options.min_filter_keys,
             filter_bits_per_key: options.filter_bits_per_key,
@@ -697,18 +732,19 @@ impl Db {
         let maybe_cached_object_store = match &options.object_store_cache_options.root_folder {
             None => object_store.clone(),
             Some(cache_root_folder) => {
+                let stats = Arc::new(CachedObjectStoreStats::new(stat_registry.as_ref()));
                 let cache_storage = Arc::new(FsCacheStorage::new(
                     cache_root_folder.clone(),
                     options.object_store_cache_options.max_cache_size_bytes,
                     options.object_store_cache_options.scan_interval,
-                    db_stats.clone(),
+                    stats.clone(),
                 ));
 
                 let cached_object_store = CachedObjectStore::new(
                     object_store.clone(),
                     cache_storage,
                     options.object_store_cache_options.part_size_bytes,
-                    db_stats.clone(),
+                    stats.clone(),
                 )?;
                 cached_object_store.start_evictor().await;
                 cached_object_store
@@ -720,7 +756,9 @@ impl Db {
             sst_format.clone(),
             path.clone(),
             fp_registry.clone(),
-            options.block_cache.clone(),
+            options.block_cache.as_ref().map(|c| {
+                Arc::new(DbCacheWrapper::new(c.clone(), stat_registry.as_ref())) as Arc<dyn DbCache>
+            }),
         ));
 
         let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
@@ -747,7 +785,7 @@ impl Db {
                 wal_flush_tx,
                 memtable_flush_tx,
                 write_tx,
-                db_stats,
+                stat_registry,
             )
             .await?,
         );
@@ -781,8 +819,9 @@ impl Db {
                     uncached_table_store.clone(),
                     compactor_options.clone(),
                     Handle::current(),
-                    inner.db_stats.clone(),
-                    move |err: &SlateDBError| {
+                    inner.stat_registry.as_ref(),
+                    move |result: &Result<(), SlateDBError>| {
+                        let err = bg_task_result_into_err(result);
                         warn!("compactor thread exited with {:?}", err);
                         let mut state = cleanup_inner.state.write();
                         state.record_fatal_error(err.clone())
@@ -800,8 +839,9 @@ impl Db {
                     table_store.clone(),
                     gc_options.clone(),
                     Handle::current(),
-                    inner.db_stats.clone(),
-                    move |err| {
+                    inner.stat_registry.clone(),
+                    move |result| {
+                        let err = bg_task_result_into_err(result);
                         warn!("GC thread exited with {:?}", err);
                         let mut state = cleanup_inner.state.write();
                         state.record_fatal_error(err.clone())
@@ -826,7 +866,9 @@ impl Db {
     ) -> Result<FenceableManifest, SlateDBError> {
         let stored_manifest = match latest_stored_manifest {
             Some(manifest) => manifest,
-            None => StoredManifest::init_new_db(manifest_store.clone(), CoreDbState::new()).await?,
+            None => {
+                StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new()).await?
+            }
         };
         FenceableManifest::init_writer(stored_manifest).await
     }
@@ -1350,8 +1392,8 @@ impl Db {
         table.await_durable().await
     }
 
-    pub fn metrics(&self) -> Arc<DbStats> {
-        self.inner.db_stats.clone()
+    pub fn metrics(&self) -> Arc<StatRegistry> {
+        self.inner.stat_registry.clone()
     }
 }
 
@@ -1365,14 +1407,20 @@ mod tests {
     use super::*;
     use crate::cached_object_store::FsCacheStorage;
     use crate::config::{
-        CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions,
+        CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions, Ttl,
     };
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::SstIterator;
-    use crate::test_utils::{gen_attrs, TestClock};
+    use crate::test_utils::{assert_iterator, TestClock};
+    use crate::types::RowEntry;
 
+    use crate::cached_object_store::stats::{
+        OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
+    };
+    use crate::config::ReadLevel::Committed;
+    use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::{proptest_util, test_utils};
     use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
@@ -1406,6 +1454,276 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_with_default_ttl_and_read_uncommitted() {
+        let clock = Arc::new(TestClock::new());
+        let ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(ttl)),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let key = b"test_key";
+        let value = b"test_value";
+
+        // insert at t=0
+        kv_store.put(key, value).await.unwrap();
+
+        // advance clock to t=99 --> still returned
+        clock.ticker.store(99, Ordering::SeqCst);
+        assert_eq!(
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Uncommitted
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance clock to t=100 --> no longer returned
+        clock.ticker.store(100, Ordering::SeqCst);
+        assert_eq!(
+            None,
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Uncommitted
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_with_row_override_ttl_and_read_uncommitted() {
+        let clock = Arc::new(TestClock::new());
+        let default_ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(default_ttl)),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let key = b"test_key";
+        let value = b"test_value";
+
+        // insert at t=0 with row-level override of 50 for ttl
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions {
+                    ttl: Ttl::ExpireAfter(50),
+                },
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        // advance clock to t=49 --> still returned
+        clock.ticker.store(49, Ordering::SeqCst);
+        assert_eq!(
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Uncommitted
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance clock to t=50 --> no longer returned
+        clock.ticker.store(50, Ordering::SeqCst);
+        assert_eq!(
+            None,
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Uncommitted
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_with_default_ttl_and_read_committed() {
+        let clock = Arc::new(TestClock::new());
+        let ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(ttl)),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let key = b"test_key";
+        let key_other = b"time_advancing_key";
+        let value = b"test_value";
+
+        // insert at t=0
+        kv_store.put(key, value).await.unwrap();
+
+        // advance clock to t=99 --> still returned
+        clock.ticker.store(99, Ordering::SeqCst);
+        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store.flush().await.unwrap();
+        assert_eq!(
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance clock to t=100 without flushing --> still returned
+        clock.ticker.store(100, Ordering::SeqCst);
+        assert_eq!(
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance durable clock time to t=100 by flushing -- no longer returned
+        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store.flush().await.unwrap();
+        assert_eq!(
+            None,
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_with_row_override_ttl_and_read_committed() {
+        let clock = Arc::new(TestClock::new());
+        let ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(ttl)),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let key = b"test_key";
+        let key_other = b"time_advancing_key";
+        let value = b"test_value";
+
+        // insert at t=0 with row-level override of 50 for ttl
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions {
+                    ttl: Ttl::ExpireAfter(50),
+                },
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        // advance clock to t=49 --> still returned
+        clock.ticker.store(49, Ordering::SeqCst);
+        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store.flush().await.unwrap();
+        assert_eq!(
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance clock to t=50 without flushing --> still returned
+        clock.ticker.store(50, Ordering::SeqCst);
+        assert_eq!(
+            Some(Bytes::from_static(value)),
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance durable clock time to t=100 by flushing -- no longer returned
+        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store.flush().await.unwrap();
+        assert_eq!(
+            None,
+            kv_store
+                .get_with_options(
+                    key,
+                    &ReadOptions {
+                        read_level: Committed
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_get_with_object_store_cache_metrics() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut opts = test_db_options(0, 1024, None);
@@ -1424,18 +1742,33 @@ mod tests {
         .await
         .unwrap();
 
-        let access_count0 = kv_store.metrics().object_store_cache_part_access.get();
+        let access_count0 = kv_store
+            .metrics()
+            .lookup(OBJECT_STORE_CACHE_PART_ACCESS)
+            .unwrap()
+            .get();
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
         kv_store.flush().await.unwrap();
 
         let got = kv_store.get(key).await.unwrap();
-        let access_count1 = kv_store.metrics().object_store_cache_part_access.get();
+        let access_count1 = kv_store
+            .metrics()
+            .lookup(OBJECT_STORE_CACHE_PART_ACCESS)
+            .unwrap()
+            .get();
         assert_eq!(got, Some(Bytes::from_static(value)));
         assert!(access_count1 > 0);
         assert!(access_count1 >= access_count0);
-        assert!(kv_store.metrics().object_store_cache_part_hits.get() >= 1);
+        assert!(
+            kv_store
+                .metrics()
+                .lookup(OBJECT_STORE_CACHE_PART_HITS)
+                .unwrap()
+                .get()
+                >= 1
+        );
     }
 
     #[tokio::test]
@@ -1446,20 +1779,21 @@ mod tests {
             .prefix("objstore_cache_test_")
             .tempdir()
             .unwrap();
-        let db_stats = Arc::new(DbStats::new());
+        let stats_registry = StatRegistry::new();
+        let cache_stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let part_size = 1024;
         let cache_storage = Arc::new(FsCacheStorage::new(
             temp_dir.path().to_path_buf(),
             None,
             None,
-            db_stats.clone(),
+            cache_stats.clone(),
         ));
 
         let cached_object_store = CachedObjectStore::new(
             object_store.clone(),
             cache_storage,
             part_size,
-            db_stats.clone(),
+            cache_stats.clone(),
         )
         .unwrap();
 
@@ -1529,28 +1863,6 @@ mod tests {
         }
     }
 
-    async fn assert_ordered_scan_in_range(
-        table: &BTreeMap<Bytes, Bytes>,
-        range: &BytesRange,
-        iter: &mut DbIterator<'_>,
-    ) {
-        let mut expected = table.range((range.start_bound().cloned(), range.end_bound().cloned()));
-
-        loop {
-            match (expected.next(), iter.next().await.unwrap()) {
-                (None, None) => break,
-                (Some((expected_key, expected_value)), Some(actual)) => {
-                    assert_eq!(expected_key, &actual.key);
-                    assert_eq!(expected_value, &actual.value);
-                }
-                (Some(expected_record), None) => {
-                    panic!("Expected record {expected_record:?} missing from scan result")
-                }
-                (None, Some(actual)) => panic!("Unexpected record {actual:?} in scan result"),
-            }
-        }
-    }
-
     async fn build_database_from_table(
         table: &BTreeMap<Bytes, Bytes>,
         db_options: DbOptions,
@@ -1607,7 +1919,7 @@ mod tests {
             .scan_with_options(range.clone(), scan_options)
             .await
             .unwrap();
-        assert_ordered_scan_in_range(table, &range, &mut iter).await;
+        test_utils::assert_ranged_db_scan(table, range, &mut iter).await;
     }
 
     #[test]
@@ -1749,7 +2061,7 @@ mod tests {
             iter.seek(seek_key.clone()).await.unwrap();
 
             let seek_range = BytesRange::new(Included(seek_key), scan_range.end_bound().cloned());
-            assert_ordered_scan_in_range(table, &seek_range, &mut iter).await;
+            test_utils::assert_ranged_db_scan(table, seek_range, &mut iter).await;
         }
     }
 
@@ -2008,9 +2320,13 @@ mod tests {
         )
         .await
         .unwrap();
-        db.delete_with_options(&[b'b'; 32], &write_options)
+        db.delete_with_options(&[b'b'; 31], &write_options)
             .await
             .unwrap();
+
+        // ensure the memtable's size is greater than l0_sst_size_bytes, or
+        // the memtable will not be flushed to l0, and the test will hang
+        // at this put_with_options call.
         let write_options = WriteOptions {
             await_durable: true,
         };
@@ -2040,9 +2356,9 @@ mod tests {
         assert_iterator(
             &mut iter,
             vec![
-                RowEntry::new_value(&[b'a'; 32], &[b'j'; 32], 0).with_create_ts(0),
-                RowEntry::new_tombstone(&[b'b'; 32], 0).with_create_ts(0),
-                RowEntry::new_value(&[b'c'; 32], &[b'l'; 32], 0).with_create_ts(10),
+                RowEntry::new_value(&[b'a'; 32], &[b'j'; 32], 1).with_create_ts(0),
+                RowEntry::new_tombstone(&[b'b'; 31], 2).with_create_ts(0),
+                RowEntry::new_value(&[b'c'; 32], &[b'l'; 32], 3).with_create_ts(10),
             ],
         )
         .await;
@@ -2114,7 +2430,14 @@ mod tests {
             let kv = iter.next().await.unwrap();
             assert!(kv.is_none());
         }
-        assert!(kv_store.metrics().immutable_memtable_flushes.get() > 0);
+        assert!(
+            kv_store
+                .metrics()
+                .lookup(IMMUTABLE_MEMTABLE_FLUSHES)
+                .unwrap()
+                .get()
+                > 0
+        );
     }
 
     // 2 threads so we can can wait on the write_with_options (main) thread
@@ -2211,21 +2534,12 @@ mod tests {
 
         let memtable = {
             let mut lock = kv_store.inner.state.write();
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc1111"),
-                Bytes::copy_from_slice(b"value1111"),
-                gen_attrs(1),
-            );
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc2222"),
-                Bytes::copy_from_slice(b"value2222"),
-                gen_attrs(2),
-            );
-            lock.wal().put(
-                Bytes::copy_from_slice(b"abc3333"),
-                Bytes::copy_from_slice(b"value3333"),
-                gen_attrs(3),
-            );
+            lock.wal()
+                .put(RowEntry::new_value(b"abc1111", b"value1111", 1));
+            lock.wal()
+                .put(RowEntry::new_value(b"abc2222", b"value2222", 2));
+            lock.wal()
+                .put(RowEntry::new_value(b"abc3333", b"value3333", 3));
             lock.wal().table().clone()
         };
 
@@ -2312,6 +2626,47 @@ mod tests {
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
         let db_state = stored_manifest.db_state();
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_restore_seq_number() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let db = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        db.put(b"key1", b"val1").await.unwrap();
+        db.put(b"key2", b"val2").await.unwrap();
+        db.put(b"key3", b"val3").await.unwrap();
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        let db_restored = Db::open_with_opts(
+            path.clone(),
+            test_db_options(0, 128, None),
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+
+        let mut state = db_restored.inner.state.write();
+        let memtable = state.memtable();
+        let mut iter = memtable.table().iter();
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"key1", b"val1", 1).with_create_ts(0),
+                RowEntry::new_value(b"key2", b"val2", 2).with_create_ts(0),
+                RowEntry::new_value(b"key3", b"val3", 3).with_create_ts(0),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3111,6 +3466,22 @@ mod tests {
         compactor_options: Option<CompactorOptions>,
         clock: Arc<TestClock>,
     ) -> DbOptions {
+        test_db_options_with_ttl(
+            min_filter_keys,
+            l0_sst_size_bytes,
+            compactor_options,
+            clock,
+            None,
+        )
+    }
+
+    fn test_db_options_with_ttl(
+        min_filter_keys: u32,
+        l0_sst_size_bytes: usize,
+        compactor_options: Option<CompactorOptions>,
+        clock: Arc<TestClock>,
+        ttl: Option<u64>,
+    ) -> DbOptions {
         DbOptions {
             flush_interval: Duration::from_millis(100),
             #[cfg(feature = "wal_disable")]
@@ -3127,7 +3498,7 @@ mod tests {
             block_cache: None,
             garbage_collector_options: None,
             clock,
-            default_ttl: None,
+            default_ttl: ttl,
         }
     }
 }

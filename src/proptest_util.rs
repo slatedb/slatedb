@@ -17,6 +17,7 @@ pub(crate) mod runner {
 pub(crate) mod arbitrary {
     use crate::bytes_range;
     use crate::bytes_range::BytesRange;
+    use crate::iter::IterationOrder;
     use crate::proptest_util::{rng, sample};
     use bytes::{BufMut, Bytes, BytesMut};
     use proptest::arbitrary::any;
@@ -25,6 +26,13 @@ pub(crate) mod arbitrary {
     use proptest::prop_oneof;
     use proptest::test_runner::TestRng;
     use std::ops::Bound::{Excluded, Included, Unbounded};
+
+    pub(crate) fn iteration_order() -> impl Strategy<Value = IterationOrder> {
+        prop_oneof![
+            Just(IterationOrder::Ascending),
+            Just(IterationOrder::Descending),
+        ]
+    }
 
     pub(crate) fn bytes(size: usize) -> impl Strategy<Value = Bytes> {
         vec(any::<u8>(), 0..size).prop_map(Bytes::from)

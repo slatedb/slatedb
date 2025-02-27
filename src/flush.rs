@@ -14,8 +14,7 @@ use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
-use crate::types::{RowAttributes, ValueDeletable};
-use crate::utils::spawn_bg_task;
+use crate::utils::{bg_task_result_into_err, spawn_bg_task};
 
 #[derive(Debug)]
 pub(crate) enum WalFlushMsg {
@@ -26,7 +25,7 @@ pub(crate) enum WalFlushMsg {
 }
 
 impl DbInner {
-    pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
+    async fn flush(&self) -> Result<(), SlateDBError> {
         self.state.write().freeze_wal()?;
         self.flush_imm_wals().await?;
         Ok(())
@@ -45,6 +44,9 @@ impl DbInner {
 
         let encoded_sst = sst_builder.build()?;
         let handle = self.table_store.write_sst(id, encoded_sst).await?;
+
+        self.mono_clock
+            .fetch_max_last_durable_tick(imm_table.last_tick());
         Ok(handle)
     }
 
@@ -60,30 +62,7 @@ impl DbInner {
     fn flush_imm_wal_to_memtable(&self, mem_table: &mut WritableKVTable, imm_table: Arc<KVTable>) {
         let mut iter = imm_table.iter();
         while let Some(kv) = iter.next_entry_sync() {
-            match kv.value {
-                ValueDeletable::Value(v) => {
-                    mem_table.put(
-                        kv.key,
-                        v,
-                        RowAttributes {
-                            ts: kv.create_ts,
-                            expire_ts: kv.expire_ts,
-                        },
-                    );
-                }
-                ValueDeletable::Merge(_) => {
-                    todo!()
-                }
-                ValueDeletable::Tombstone => {
-                    mem_table.delete(
-                        kv.key,
-                        RowAttributes {
-                            ts: kv.create_ts,
-                            expire_ts: kv.expire_ts,
-                        },
-                    );
-                }
-            }
+            mem_table.put(kv);
         }
     }
 
@@ -172,7 +151,8 @@ impl DbInner {
         let this = Arc::clone(self);
         Some(spawn_bg_task(
             tokio_handle,
-            move |err| {
+            move |result| {
+                let err = bg_task_result_into_err(result);
                 warn!("flush task exited with {:?}", err);
                 // notify any waiters about the failure
                 let mut state = this.state.write();
