@@ -112,7 +112,7 @@ impl WalReplayIterator<'_> {
     /// unless it is the final table replayed from the WAL. The final table may
     /// even be empty since writers use an empty WAL to fence zombie writers.
     /// The empty table must still be returned so that replay logic can account for
-g    /// the latest WAL ID.
+    /// the latest WAL ID.
     pub(crate) async fn next(&mut self) -> Result<Option<ReplayedMemtable>, SlateDBError> {
         if self.next_iters.is_empty() {
             return Ok(None);

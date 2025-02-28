@@ -486,11 +486,7 @@ impl DbInner {
                 .await?;
 
         while let Some(replayed_table) = replay_iter.next().await? {
-            let mut guard = self.state.write();
-            guard.set_next_wal_id(replayed_table.last_wal_id + 1);
-            guard.update_last_seq(replayed_table.last_seq);
-            self.mono_clock.set_last_tick(replayed_table.last_tick)?;
-            self.replay_memtable(&mut guard, replayed_table)?;
+            self.replay_memtable(replayed_table)?;
         }
 
         Ok(())

@@ -25,12 +25,15 @@ impl DbInner {
 
     pub(crate) fn replay_memtable(
         &self,
-        guard: &mut RwLockWriteGuard<'_, DbState>,
         replayed_memtable: ReplayedMemtable,
     ) -> Result<(), SlateDBError> {
+        let mut guard = self.state.write();
         let last_wal_id = replayed_memtable.last_wal_id;
+        guard.set_next_wal_id(last_wal_id + 1);
+        guard.update_last_seq(replayed_memtable.last_seq);
+        self.mono_clock.set_last_tick(replayed_memtable.last_tick)?;
         guard.replace_memtable(replayed_memtable.table)?;
-        self.maybe_freeze_memtable(guard, last_wal_id)
+        self.maybe_freeze_memtable(&mut guard, last_wal_id)
     }
 
     pub(crate) fn maybe_freeze_wal(
