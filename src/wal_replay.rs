@@ -100,11 +100,12 @@ impl WalReplayIterator<'_> {
         Ok(true)
     }
 
-    /// Get the
-    /// Note that the final table returned may be empty since writers use an empty
-    /// WAL to fence zombie writers. The empty table must still be returned so that replay
-    /// logic can account for the latest WAL ID.
-    ///
+    /// Get the next table replayed from the WAL. The next table is guaranteed to
+    /// have a size at least as large as [`WalReplayOptions::min_memtable_bytes`]
+    /// unless it is the final table replayed from the WAL. The final table may
+    /// even be empty since writers use an empty WAL to fence zombie writers.
+    /// The empty table must still be returned so that replay logic can account for
+g    /// the latest WAL ID.
     pub(crate) async fn next(&mut self) -> Result<Option<ReplayedMemtable>, SlateDBError> {
         if self.next_iters.is_empty() {
             return Ok(None);
