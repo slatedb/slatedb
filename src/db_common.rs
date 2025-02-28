@@ -5,6 +5,7 @@ use crate::db_state::DbState;
 use crate::error::SlateDBError;
 use crate::flush::WalFlushMsg;
 use crate::mem_table_flush::MemtableFlushMsg;
+use crate::wal_replay::ReplayedMemtable;
 
 impl DbInner {
     pub(crate) fn maybe_freeze_memtable(
@@ -20,6 +21,16 @@ impl DbInner {
             .send(MemtableFlushMsg::FlushImmutableMemtables { sender: None })
             .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         Ok(())
+    }
+
+    pub(crate) fn replay_memtable(
+        &self,
+        guard: &mut RwLockWriteGuard<'_, DbState>,
+        replayed_memtable: ReplayedMemtable,
+    ) -> Result<(), SlateDBError> {
+        let last_wal_id = replayed_memtable.last_wal_id;
+        guard.replace_memtable(replayed_memtable.table)?;
+        self.maybe_freeze_memtable(guard, last_wal_id)
     }
 
     pub(crate) fn maybe_freeze_wal(

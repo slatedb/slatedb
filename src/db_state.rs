@@ -16,6 +16,7 @@ use tracing::debug;
 use ulid::Ulid;
 use uuid::Uuid;
 use SsTableId::{Compacted, Wal};
+use crate::wal_replay::ReplayedMemtable;
 
 #[derive(Clone, PartialEq, Serialize)]
 pub(crate) struct SsTableHandle {
@@ -355,6 +356,18 @@ impl DbState {
             .imm_memtable
             .push_front(Arc::new(ImmutableMemtable::new(old_memtable, wal_id)));
         self.update_state(state);
+        Ok(())
+    }
+
+    pub(crate) fn replace_memtable(
+        &mut self,
+        memtable: WritableKVTable,
+    ) -> Result<(), SlateDBError> {
+        if let Some(err) = self.error.reader().read() {
+            return Err(err.clone());
+        }
+        assert!(self.memtable.is_empty());
+        let _ = std::mem::replace(&mut self.memtable, memtable);
         Ok(())
     }
 

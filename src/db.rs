@@ -66,6 +66,7 @@ use crate::utils::{
     bg_task_result_into_err, filter_expired, get_now_for_read, unwrap_result, MonotonicClock,
 };
 use tracing::{info, warn};
+use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -467,6 +468,46 @@ impl DbInner {
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
+        let sst_iter_options = SstIteratorOptions {
+            max_fetch_tasks: 1,
+            blocks_to_fetch: 256,
+            cache_blocks: true,
+            eager_spawn: true,
+        };
+
+        let replay_options = WalReplayOptions {
+            sst_batch_size: 4,
+            min_memtable_bytes: self.options.l0_sst_size_bytes,
+            sst_iter_options,
+        };
+
+        let db_state = self.state.read().state().core.clone();
+        let mut replay_iter = WalReplayIterator::new(
+            &db_state,
+            replay_options,
+            Arc::clone(&self.table_store)
+        ).await?;
+
+        while let Some(replayed_table) = replay_iter.next().await? {
+            let mut guard = self.state.write();
+            let last_tick = replayed_table.last_tick;
+            let last_seq = replayed_table.last_seq;
+            let last_wal_id = replayed_table.last_wal_id;
+
+            self.replay_memtable(&mut guard, replayed_table)?;
+            guard.update_last_seq(last_seq);
+
+            if guard.state().core.next_wal_sst_id == last_wal_id {
+                guard.increment_next_wal_id();
+            }
+
+            self.mono_clock.set_last_tick(last_tick)?;
+        }
+
+        Ok(())
+    }
+
+    async fn replay_wall(&self) -> Result<(), SlateDBError> {
         async fn load_sst_iters(
             db_inner: &DbInner,
             sst_id: u64,
