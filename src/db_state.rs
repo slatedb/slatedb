@@ -16,7 +16,6 @@ use tracing::debug;
 use ulid::Ulid;
 use uuid::Uuid;
 use SsTableId::{Compacted, Wal};
-use crate::wal_replay::ReplayedMemtable;
 
 #[derive(Clone, PartialEq, Serialize)]
 pub(crate) struct SsTableHandle {
@@ -427,6 +426,12 @@ impl DbState {
     pub fn increment_next_wal_id(&mut self) {
         let mut state = self.state_copy();
         state.core.next_wal_sst_id += 1;
+        self.update_state(state);
+    }
+
+    pub fn set_next_wal_id(&mut self, next_wal_id: u64) {
+        let mut state = self.state_copy();
+        state.core.next_wal_sst_id = next_wal_id;
         self.update_state(state);
     }
 

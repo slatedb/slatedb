@@ -214,7 +214,7 @@ impl TableStore {
                     SsTableId::Wal(_) => {
                         println!("Path {path} already exists");
                         SlateDBError::Fenced
-                    },
+                    }
                     SsTableId::Compacted(_) => SlateDBError::from(e),
                 },
                 _ => SlateDBError::from(e),

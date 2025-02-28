@@ -20,7 +20,6 @@
 //! }
 //! ```
 
-use std::cmp;
 use std::collections::VecDeque;
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -65,8 +64,8 @@ use crate::types::RowEntry;
 use crate::utils::{
     bg_task_result_into_err, filter_expired, get_now_for_read, unwrap_result, MonotonicClock,
 };
-use tracing::{info, warn};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
+use tracing::{info, warn};
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -482,125 +481,17 @@ impl DbInner {
         };
 
         let db_state = self.state.read().state().core.clone();
-        let mut replay_iter = WalReplayIterator::new(
-            &db_state,
-            replay_options,
-            Arc::clone(&self.table_store)
-        ).await?;
+        let mut replay_iter =
+            WalReplayIterator::new(&db_state, replay_options, Arc::clone(&self.table_store))
+                .await?;
 
         while let Some(replayed_table) = replay_iter.next().await? {
             let mut guard = self.state.write();
-            let last_tick = replayed_table.last_tick;
-            let last_seq = replayed_table.last_seq;
-            let last_wal_id = replayed_table.last_wal_id;
-
+            guard.set_next_wal_id(replayed_table.last_wal_id + 1);
+            guard.update_last_seq(replayed_table.last_seq);
+            self.mono_clock.set_last_tick(replayed_table.last_tick)?;
             self.replay_memtable(&mut guard, replayed_table)?;
-            guard.update_last_seq(last_seq);
-
-            if guard.state().core.next_wal_sst_id == last_wal_id {
-                guard.increment_next_wal_id();
-            }
-
-            self.mono_clock.set_last_tick(last_tick)?;
         }
-
-        Ok(())
-    }
-
-    async fn replay_wall(&self) -> Result<(), SlateDBError> {
-        async fn load_sst_iters(
-            db_inner: &DbInner,
-            sst_id: u64,
-        ) -> Result<(SstIterator<'_>, u64), SlateDBError> {
-            let sst = db_inner
-                .table_store
-                .open_sst(&SsTableId::Wal(sst_id))
-                .await?;
-            let id = match &sst.id {
-                SsTableId::Wal(id) => *id,
-                SsTableId::Compacted(_) => return Err(SlateDBError::InvalidDBState),
-            };
-            let sst_iter_options = SstIteratorOptions {
-                max_fetch_tasks: 1,
-                blocks_to_fetch: 256,
-                cache_blocks: true,
-                eager_spawn: true,
-            };
-            let iter =
-                SstIterator::new_owned(.., sst, db_inner.table_store.clone(), sst_iter_options)
-                    .await?;
-            Ok((iter, id))
-        }
-
-        let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
-        let mut wal_sst_list = self
-            .table_store
-            .list_wal_ssts((wal_id_last_compacted + 1)..)
-            .await?
-            .into_iter()
-            .map(|wal_sst| wal_sst.id.unwrap_wal_id())
-            .collect::<Vec<_>>();
-        let mut last_sst_id = wal_id_last_compacted;
-        let mut last_tick = self.state.read().state().core.last_l0_clock_tick;
-        let sst_batch_size = 4;
-
-        let mut remaining_sst_list = Vec::new();
-        if wal_sst_list.len() > sst_batch_size {
-            remaining_sst_list = wal_sst_list.split_off(sst_batch_size);
-        }
-        let mut remaining_sst_iter = remaining_sst_list.iter();
-
-        // Load the first N ssts and instantiate their iterators
-        let mut sst_iterators = VecDeque::new();
-        for sst_id in wal_sst_list {
-            sst_iterators.push_back(load_sst_iters(self, sst_id).await?);
-        }
-
-        // load the last seq number from manifest, and use it as the starting seq number.
-        // there might have bigger seq number in the WALs, we'd update the last seq number
-        // to the max seq number while iterating over the WALs.
-        let mut last_seq = self.state.read().state().core.last_l0_seq;
-        while let Some((mut sst_iter, sst_id)) = sst_iterators.pop_front() {
-            last_sst_id = sst_id;
-            // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
-            // buffer the WAL entries to bulk replay them into the memtable.
-            let mut wal_replay_buf = Vec::new();
-            while let Some(kv) = sst_iter.next_entry().await? {
-                wal_replay_buf.push(kv);
-            }
-            // Build the memtable
-            {
-                let mut guard = self.state.write();
-                for kv in wal_replay_buf.iter() {
-                    if let Some(ts) = kv.create_ts {
-                        last_tick = cmp::max(last_tick, ts);
-                    }
-
-                    last_seq = last_seq.max(kv.seq);
-                    guard.memtable().put(kv.clone());
-                }
-                self.maybe_freeze_memtable(&mut guard, sst_id)?;
-                if guard.state().core.next_wal_sst_id == sst_id {
-                    guard.increment_next_wal_id();
-                }
-            }
-
-            // feed the remaining SstIterators into the vecdeque
-            if let Some(sst_id) = remaining_sst_iter.next() {
-                sst_iterators.push_back(load_sst_iters(self, *sst_id).await?);
-            }
-        }
-
-        self.mono_clock.set_last_tick(last_tick)?;
-
-        // assert that we didn't have any gaps in the wal
-        assert_eq!(
-            last_sst_id + 1,
-            self.state.read().state().core.next_wal_sst_id
-        );
-
-        // restore the last seq number
-        self.state.write().update_last_seq(last_seq);
 
         Ok(())
     }
