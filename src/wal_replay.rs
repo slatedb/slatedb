@@ -10,8 +10,14 @@ use std::ops::Range;
 use std::sync::Arc;
 
 pub(crate) struct WalReplayOptions {
+    /// The number of SSTs to preload while replaying
     pub(crate) sst_batch_size: usize,
+
+    /// The minimum number of bytes in each returned table
+    /// (save the final table, which may be arbitrarily small).
     pub(crate) min_memtable_bytes: usize,
+
+    /// Options to pass through to underlying SST iterators
     pub(crate) sst_iter_options: SstIteratorOptions,
 }
 
@@ -69,6 +75,7 @@ impl WalReplayIterator<'_> {
         };
 
         for _ in 0..sst_batch_size {
+            // TODO: Do we need to postpone awaiting to get a benefit from this?
             if !replay_iter.load_next_sst_iter().await? {
                 break;
             }
