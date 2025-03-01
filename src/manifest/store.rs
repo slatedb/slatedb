@@ -395,16 +395,16 @@ impl StoredManifest {
         &mut self,
         manifest: DirtyManifest,
     ) -> Result<(), SlateDBError> {
-        let new_id = self.next_id();
-        if manifest.next_id() != new_id {
+        let next_id = self.next_id();
+        if manifest.next_id() != next_id {
             return Err(ManifestVersionExists);
         }
         let manifest = manifest.into();
         self.manifest_store
-            .write_manifest(self.next_id(), &manifest)
+            .write_manifest(next_id, &manifest)
             .await?;
         self.manifest = manifest;
-        self.id = new_id;
+        self.id = next_id;
         Ok(())
     }
 
