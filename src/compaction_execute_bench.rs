@@ -23,7 +23,7 @@ use crate::compactor_state::{Compaction, SourceId};
 use crate::config::{CompactorOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
-use crate::manifest_store::{ManifestStore, StoredManifest};
+use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;

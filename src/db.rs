@@ -53,7 +53,7 @@ use crate::filter_iterator::FilterIterator;
 use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
-use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::{VecDequeKeyValueIterator, WritableKVTable};
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::sorted_run_iterator::SortedRunIterator;

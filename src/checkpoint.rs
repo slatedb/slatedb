@@ -1,7 +1,7 @@
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
-use crate::manifest_store::{ManifestStore, StoredManifest};
+use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::mem_table_flush::MemtableFlushMsg;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -119,8 +119,8 @@ mod tests {
     use crate::db_state::SsTableId;
     use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
+    use crate::manifest::store::ManifestStore;
     use crate::manifest::Manifest;
-    use crate::manifest_store::ManifestStore;
     use crate::proptest_util::{rng, sample};
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};

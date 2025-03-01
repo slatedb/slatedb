@@ -424,11 +424,7 @@ impl ManifestStore {
         }
     }
 
-    pub(crate) async fn write_manifest(
-        &self,
-        id: u64,
-        manifest: &Manifest,
-    ) -> Result<(), SlateDBError> {
+    async fn write_manifest(&self, id: u64, manifest: &Manifest) -> Result<(), SlateDBError> {
         let manifest_path = &self.get_manifest_path(id);
 
         self.object_store
@@ -592,8 +588,8 @@ mod tests {
     use crate::error;
     use crate::error::SlateDBError;
     use crate::error::SlateDBError::InvalidDBState;
+    use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::{Manifest, ParentDb};
-    use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
