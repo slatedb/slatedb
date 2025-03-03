@@ -101,13 +101,11 @@ async fn create_clone_manifest(
                 .read_manifest(parent_checkpoint.manifest_id)
                 .await?;
 
-            let final_checkpoint_id = Uuid::new_v4();
             StoredManifest::create_uninitialized_clone(
                 clone_manifest_store,
+                &parent_manifest_at_checkpoint,
                 parent_path.clone(),
                 parent_checkpoint.id,
-                final_checkpoint_id,
-                &parent_manifest_at_checkpoint,
             )
             .await?
         }
@@ -426,13 +424,11 @@ mod tests {
         let clone_manifest_store =
             Arc::new(ManifestStore::new(&clone_path, Arc::clone(&object_store)));
         let non_existent_source_checkpoint_id = Uuid::new_v4();
-        let final_checkpoint_id = Uuid::new_v4();
         StoredManifest::create_uninitialized_clone(
             clone_manifest_store,
+            &Manifest::initial(CoreDbState::new()),
             parent_path.to_string(),
             non_existent_source_checkpoint_id,
-            final_checkpoint_id,
-            &Manifest::initial(CoreDbState::new()),
         )
         .await
         .unwrap();
@@ -477,13 +473,11 @@ mod tests {
 
         // Create an uninitialized manifest referring to the first checkpoint
         let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
-        let final_checkpoint_id = Uuid::new_v4();
         StoredManifest::create_uninitialized_clone(
             clone_manifest_store,
+            &Manifest::initial(CoreDbState::new()),
             parent_path.to_string(),
             checkpoint_1.id,
-            final_checkpoint_id,
-            &Manifest::initial(CoreDbState::new()),
         )
         .await
         .unwrap();
@@ -515,10 +509,9 @@ mod tests {
             Arc::new(ManifestStore::new(&clone_path, Arc::clone(&object_store)));
         StoredManifest::create_uninitialized_clone(
             Arc::clone(&clone_manifest_store),
+            &parent_manifest,
             original_parent_path.to_string(),
             Uuid::new_v4(),
-            Uuid::new_v4(),
-            &parent_manifest,
         )
         .await
         .unwrap();

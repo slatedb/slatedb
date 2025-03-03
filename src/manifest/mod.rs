@@ -30,10 +30,9 @@ impl Manifest {
     /// manifest will set `initialized=false` to allow for additional
     /// initialization (such as copying wals).
     pub(crate) fn cloned(
+        parent_manifest: &Manifest,
         parent_path: String,
         source_checkpoint_id: Uuid,
-        final_checkpoint_id: Uuid,
-        parent_manifest: &Manifest,
     ) -> Self {
         let mut parent_external_sst_ids = HashSet::<SsTableId>::new();
         let mut clone_external_dbs = vec![];
@@ -43,7 +42,7 @@ impl Manifest {
             clone_external_dbs.push(ExternalDb {
                 path: parent_external_db.path.clone(),
                 source_checkpoint_id: parent_external_db.source_checkpoint_id,
-                final_checkpoint_id: Some(final_checkpoint_id),
+                final_checkpoint_id: Some(Uuid::new_v4()),
                 sst_ids: parent_external_db.sst_ids.clone(),
             });
         }
@@ -60,7 +59,7 @@ impl Manifest {
         clone_external_dbs.push(ExternalDb {
             path: parent_path,
             source_checkpoint_id,
-            final_checkpoint_id: Some(final_checkpoint_id),
+            final_checkpoint_id: Some(Uuid::new_v4()),
             sst_ids: parent_owned_sst_ids,
         });
 
@@ -103,7 +102,6 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use std::sync::Arc;
-    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_init_clone_manifest() {
@@ -123,13 +121,11 @@ mod tests {
 
         let clone_path = Path::from("/tmp/test_clone");
         let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
-        let final_checkpoint_id = Uuid::new_v4();
         let clone_stored_manifest = StoredManifest::create_uninitialized_clone(
             Arc::clone(&clone_manifest_store),
+            parent_manifest.manifest(),
             parent_path.to_string(),
             checkpoint.id,
-            final_checkpoint_id,
-            parent_manifest.manifest(),
         )
         .await
         .unwrap();
@@ -143,10 +139,7 @@ mod tests {
             clone_manifest.external_dbs[0].source_checkpoint_id,
             checkpoint.id
         );
-        assert_eq!(
-            clone_manifest.external_dbs[0].final_checkpoint_id,
-            Some(final_checkpoint_id)
-        );
+        assert!(clone_manifest.external_dbs[0].final_checkpoint_id.is_some());
 
         // The clone manifest should not be initialized
         assert!(!clone_manifest.core.initialized);
