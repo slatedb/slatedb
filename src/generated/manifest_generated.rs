@@ -986,11 +986,11 @@ impl<'a> ExternalDb<'a> {
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Uuid>>(ExternalDb::VT_SOURCE_CHECKPOINT_ID, None).unwrap()}
   }
   #[inline]
-  pub fn final_checkpoint_id(&self) -> Uuid<'a> {
+  pub fn final_checkpoint_id(&self) -> Option<Uuid<'a>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Uuid>>(ExternalDb::VT_FINAL_CHECKPOINT_ID, None).unwrap()}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Uuid>>(ExternalDb::VT_FINAL_CHECKPOINT_ID, None)}
   }
   #[inline]
   pub fn sst_ids(&self) -> flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSstId<'a>>> {
@@ -1010,7 +1010,7 @@ impl flatbuffers::Verifiable for ExternalDb<'_> {
     v.visit_table(pos)?
      .visit_field::<flatbuffers::ForwardsUOffset<&str>>("path", Self::VT_PATH, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<Uuid>>("source_checkpoint_id", Self::VT_SOURCE_CHECKPOINT_ID, true)?
-     .visit_field::<flatbuffers::ForwardsUOffset<Uuid>>("final_checkpoint_id", Self::VT_FINAL_CHECKPOINT_ID, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<Uuid>>("final_checkpoint_id", Self::VT_FINAL_CHECKPOINT_ID, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSstId>>>>("sst_ids", Self::VT_SST_IDS, true)?
      .finish();
     Ok(())
@@ -1028,7 +1028,7 @@ impl<'a> Default for ExternalDbArgs<'a> {
     ExternalDbArgs {
       path: None, // required field
       source_checkpoint_id: None, // required field
-      final_checkpoint_id: None, // required field
+      final_checkpoint_id: None,
       sst_ids: None, // required field
     }
   }
@@ -1068,7 +1068,6 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ExternalDbBuilder<'a, 'b, A> {
     let o = self.fbb_.end_table(self.start_);
     self.fbb_.required(o, ExternalDb::VT_PATH,"path");
     self.fbb_.required(o, ExternalDb::VT_SOURCE_CHECKPOINT_ID,"source_checkpoint_id");
-    self.fbb_.required(o, ExternalDb::VT_FINAL_CHECKPOINT_ID,"final_checkpoint_id");
     self.fbb_.required(o, ExternalDb::VT_SST_IDS,"sst_ids");
     flatbuffers::WIPOffset::new(o.value())
   }
