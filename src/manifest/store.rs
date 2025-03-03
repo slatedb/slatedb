@@ -244,17 +244,11 @@ impl StoredManifest {
     /// for the rest of the clone state to be initialized
     pub(crate) async fn create_uninitialized_clone(
         clone_manifest_store: Arc<ManifestStore>,
+        parent_manifest: &Manifest,
         parent_path: String,
         source_checkpoint_id: Uuid,
-        final_checkpoint_id: Uuid,
-        parent_manifest: &Manifest,
     ) -> Result<Self, SlateDBError> {
-        let manifest = Manifest::cloned(
-            parent_path,
-            source_checkpoint_id,
-            final_checkpoint_id,
-            parent_manifest,
-        );
+        let manifest = Manifest::cloned(parent_manifest, parent_path, source_checkpoint_id);
         Self::init(clone_manifest_store, manifest).await
     }
 
