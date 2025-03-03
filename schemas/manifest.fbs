@@ -16,7 +16,7 @@ table ExternalDb {
     // Checkpoint ID this database has placed on the external database that prevents referenced
     // data files from being GC'd. Both final_checkpoint_id and source_checkpoint_id should resolve
     // to the same manifest_id as long as they both still exist.
-    final_checkpoint_id: Uuid (required);
+    final_checkpoint_id: Uuid;
 
     // Compacted SST IDs belonging to external DB that are currently being referenced.
     sst_ids: [CompactedSstId] (required);

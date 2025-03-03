@@ -43,7 +43,7 @@ impl Manifest {
             clone_external_dbs.push(ExternalDb {
                 path: parent_external_db.path.clone(),
                 source_checkpoint_id: parent_external_db.source_checkpoint_id,
-                final_checkpoint_id,
+                final_checkpoint_id: Some(final_checkpoint_id),
                 sst_ids: parent_external_db.sst_ids.clone(),
             });
         }
@@ -60,7 +60,7 @@ impl Manifest {
         clone_external_dbs.push(ExternalDb {
             path: parent_path,
             source_checkpoint_id,
-            final_checkpoint_id,
+            final_checkpoint_id: Some(final_checkpoint_id),
             sst_ids: parent_owned_sst_ids,
         });
 
@@ -77,7 +77,7 @@ impl Manifest {
 pub(crate) struct ExternalDb {
     pub(crate) path: String,
     pub(crate) source_checkpoint_id: Uuid,
-    pub(crate) final_checkpoint_id: Uuid,
+    pub(crate) final_checkpoint_id: Option<Uuid>,
     pub(crate) sst_ids: Vec<SsTableId>,
 }
 
@@ -145,7 +145,7 @@ mod tests {
         );
         assert_eq!(
             clone_manifest.external_dbs[0].final_checkpoint_id,
-            final_checkpoint_id
+            Some(final_checkpoint_id)
         );
 
         // The clone manifest should not be initialized

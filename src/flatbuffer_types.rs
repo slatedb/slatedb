@@ -181,7 +181,7 @@ impl FlatBufferManifestCodec {
                 .map(|db| ExternalDb {
                     path: db.path().to_string(),
                     source_checkpoint_id: Self::decode_uuid(db.source_checkpoint_id()),
-                    final_checkpoint_id: Self::decode_uuid(db.final_checkpoint_id()),
+                    final_checkpoint_id: db.final_checkpoint_id().map(|id| Self::decode_uuid(id)),
                     sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
                 })
                 .collect()
@@ -375,7 +375,9 @@ impl<'b> DbFlatBufferBuilder<'b> {
                     let db_external_db_args = manifest_generated::ExternalDbArgs {
                         path: Some(self.builder.create_string(&external_db.path)),
                         source_checkpoint_id: Some(self.add_uuid(external_db.source_checkpoint_id)),
-                        final_checkpoint_id: Some(self.add_uuid(external_db.final_checkpoint_id)),
+                        final_checkpoint_id: external_db
+                            .final_checkpoint_id
+                            .map(|id| self.add_uuid(id)),
                         sst_ids: Some(self.add_compacted_sst_ids(external_db.sst_ids.iter())),
                     };
                     manifest_generated::ExternalDb::create(&mut self.builder, &db_external_db_args)
@@ -508,7 +510,7 @@ mod tests {
             ExternalDb {
                 path: "/path/to/external/first".to_string(),
                 source_checkpoint_id: Uuid::new_v4(),
-                final_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: Some(Uuid::new_v4()),
                 sst_ids: vec![
                     SsTableId::Compacted(Ulid::new()),
                     SsTableId::Compacted(Ulid::new()),
@@ -517,7 +519,7 @@ mod tests {
             ExternalDb {
                 path: "/path/to/external/second".to_string(),
                 source_checkpoint_id: Uuid::new_v4(),
-                final_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: Some(Uuid::new_v4()),
                 sst_ids: vec![SsTableId::Compacted(Ulid::new())],
             },
         ];

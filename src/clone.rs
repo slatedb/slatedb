@@ -115,6 +115,10 @@ async fn create_clone_manifest(
 
     // Ensure all external databases contain the final checkpoint.
     for external_db in &clone_manifest.manifest().external_dbs {
+        let Some(final_checkpoint_id) = external_db.final_checkpoint_id else {
+            // If the final checkpoint id is not set, we can skip this check
+            continue;
+        };
         let external_db_manifest_store = if external_db.path == parent_path {
             parent_manifest_store.clone()
         } else {
@@ -125,14 +129,15 @@ async fn create_clone_manifest(
         };
         let mut external_db_manifest =
             load_initialized_manifest(external_db_manifest_store).await?;
+
         if external_db_manifest
             .db_state()
-            .find_checkpoint(&external_db.final_checkpoint_id)
+            .find_checkpoint(&final_checkpoint_id)
             .is_none()
         {
             external_db_manifest
                 .write_checkpoint(
-                    Some(external_db.final_checkpoint_id),
+                    Some(final_checkpoint_id),
                     &CheckpointOptions {
                         lifetime: None,
                         source: Some(external_db.source_checkpoint_id),
@@ -217,6 +222,10 @@ async fn validate_external_dbs_contain_final_checkpoint(
 ) -> Result<(), SlateDBError> {
     // Validate external dbs all contain the final checkpoint
     for external_db in &clone_manifest.manifest().external_dbs {
+        let Some(final_checkpoint_id) = external_db.final_checkpoint_id else {
+            // If the final checkpoint id is not set, we can skip this check
+            continue;
+        };
         let external_manifest_store = if external_db.path == parent_path {
             parent_manifest_store.clone()
         } else {
@@ -228,7 +237,7 @@ async fn validate_external_dbs_contain_final_checkpoint(
         let external_manifest = external_manifest_store.read_latest_manifest().await?.1;
         if external_manifest
             .core
-            .find_checkpoint(&external_db.final_checkpoint_id)
+            .find_checkpoint(&final_checkpoint_id)
             .is_none()
         {
             return Err(SlateDBError::DatabaseAlreadyExists {
@@ -236,7 +245,7 @@ async fn validate_external_dbs_contain_final_checkpoint(
                     "Cloned database already exists and is initialized, but the final checkpoint [{}] \
                         referred to in the manifest no longer exists in the external database at \
                         path [{}]",
-                    external_db.final_checkpoint_id, external_db.path,
+                    final_checkpoint_id, external_db.path,
                 ),
             });
         }
