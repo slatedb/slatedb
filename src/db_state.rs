@@ -1,4 +1,4 @@
-use crate::bytes_range;
+use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
@@ -11,7 +11,7 @@ use std::cmp;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::ops::{Bound, Range};
+use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 use tracing::debug;
 use ulid::Ulid;
@@ -42,6 +42,22 @@ impl SsTableHandle {
         false
     }
 
+    pub(crate) fn has_nonempty_intersection(
+        &self,
+        next_handle: Option<&SsTableHandle>,
+        range: &BytesRange,
+    ) -> bool {
+        if let Some(first_key) = self.info.first_key.as_ref() {
+            let sst_range = match next_handle.and_then(|handle| handle.info.first_key.as_ref()) {
+                Some(next_first_key) => BytesRange::from(first_key..next_first_key),
+                None => BytesRange::from(first_key..),
+            };
+            sst_range.intersect(range).is_some()
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn intersects_range(
         &self,
         end_bound_key: Option<Bytes>,
@@ -49,15 +65,21 @@ impl SsTableHandle {
     ) -> bool {
         let start_bound = match &self.info.first_key {
             None => Unbounded,
-            Some(key) => Included(key.as_ref()),
+            Some(key) => Included(key),
         };
 
         let end_bound = match &end_bound_key {
             None => Unbounded,
-            Some(key) => Excluded(key.as_ref()),
+            Some(key) => Excluded(key),
         };
 
-        bytes_range::has_nonempty_intersection(range, (start_bound, end_bound))
+        // todo better
+        BytesRange::from((
+            range.start_bound().map(Bytes::copy_from_slice),
+            range.end_bound().map(Bytes::copy_from_slice),
+        ))
+        .intersect(&BytesRange::from((start_bound, end_bound)))
+        .is_some()
     }
 
     pub(crate) fn estimate_size(&self) -> u64 {
@@ -99,7 +121,7 @@ impl SsTableId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Default)]
 pub(crate) struct SsTableInfo {
     pub(crate) first_key: Option<Bytes>,
     pub(crate) index_offset: u64,
