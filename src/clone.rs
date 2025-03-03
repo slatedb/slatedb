@@ -70,7 +70,7 @@ async fn create_clone_manifest(
 ) -> Result<StoredManifest, SlateDBError> {
     let clone_manifest = match StoredManifest::try_load(clone_manifest_store.clone()).await? {
         Some(initialized_clone_manifest) if initialized_clone_manifest.db_state().initialized => {
-            validate_attached_to_parent(
+            validate_attached_to_external_db(
                 parent_path.clone(),
                 parent_checkpoint_id,
                 &initialized_clone_manifest,
@@ -85,7 +85,7 @@ async fn create_clone_manifest(
             return Ok(initialized_clone_manifest);
         }
         Some(uninitialized_clone_manifest) => {
-            validate_attached_to_parent(
+            validate_attached_to_external_db(
                 parent_path.clone(),
                 parent_checkpoint_id,
                 &uninitialized_clone_manifest,
@@ -180,15 +180,10 @@ async fn get_or_create_parent_checkpoint(
     Ok(checkpoint)
 }
 
-// For pre-existing manifests, we need to verify that the referenced checkpoint
-// is valid and consistent with the arguments passed to `create_clone`. This
-// function returns true if the checkpoint in the clone manifest is still valid
-// and false if we should retry checkpoint creation. For other errors, such as
-// an inconsistent `DbParent` path, return an error.
-
-fn validate_attached_to_parent(
-    parent_path: String,
-    parent_checkpoint_id: Option<Uuid>,
+// Validate that the manifest is attached to an external database at specific checkpoint.
+fn validate_attached_to_external_db(
+    path: String,
+    checkpoint_id: Option<Uuid>,
     clone_manifest: &StoredManifest,
 ) -> Result<(), SlateDBError> {
     let external_dbs = &clone_manifest.manifest().external_dbs;
@@ -198,16 +193,16 @@ fn validate_attached_to_parent(
         });
     }
     if !external_dbs.iter().any(|external_db| {
-        parent_path == external_db.path
-            && parent_checkpoint_id
+        path == external_db.path
+            && checkpoint_id
                 .map(|id| id == external_db.source_checkpoint_id)
                 .unwrap_or(true)
     }) {
         return Err(SlateDBError::DatabaseAlreadyExists {
             msg: format!(
-                "Database exists, but is not attached to expected external database at [{}] with checkpoint [{}]",
-                parent_path,
-                parent_checkpoint_id.map(|id| id.to_string()).unwrap_or("<any>".to_string()),
+                "Database exists, but is not attached to external database at [{}] with checkpoint [{}]",
+                path,
+                checkpoint_id.map(|id| id.to_string()).unwrap_or("<any>".to_string()),
             ),
         });
     };
