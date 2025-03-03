@@ -7,7 +7,9 @@ use crate::SlateDBError;
 use std::cmp;
 use std::collections::VecDeque;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use tokio::task;
+use tokio::task::JoinHandle;
 
 pub(crate) struct WalReplayOptions {
     /// The number of SSTs to preload while replaying
@@ -42,7 +44,7 @@ pub(crate) struct WalReplayIterator<'a> {
     options: WalReplayOptions,
     wal_id_range: Range<u64>,
     table_store: Arc<TableStore>,
-    next_iters: VecDeque<SstIterator<'a>>,
+    next_iters: VecDeque<JoinHandle<Result<SstIterator<'a>, SlateDBError>>>,
     last_tick: i64,
     last_seq: u64,
     next_wal_id: u64,
@@ -75,8 +77,7 @@ impl WalReplayIterator<'_> {
         };
 
         for _ in 0..sst_batch_size {
-            // TODO: Do we need to postpone awaiting to get a benefit from this?
-            if !replay_iter.load_next_sst_iter().await? {
+            if !replay_iter.maybe_load_next_iter() {
                 break;
             }
         }
@@ -84,27 +85,30 @@ impl WalReplayIterator<'_> {
         Ok(replay_iter)
     }
 
-    async fn load_next_sst_iter(&mut self) -> Result<bool, SlateDBError> {
+    fn maybe_load_next_iter(&mut self) -> bool {
         if !self.wal_id_range.contains(&self.next_wal_id) {
-            return Ok(false);
+            return false;
         }
 
         let next_wal_id = self.next_wal_id;
         self.next_wal_id += 1;
 
-        let sst = self
-            .table_store
-            .open_sst(&SsTableId::Wal(next_wal_id))
-            .await?;
-        let sst_iter = SstIterator::new_owned(
-            ..,
-            sst,
-            Arc::clone(&self.table_store),
+        async fn load_iter<'a>(
+            wal_id: u64,
+            sst_iter_options: SstIteratorOptions,
+            table_store: Arc<TableStore>,
+        ) -> Result<SstIterator<'a>, SlateDBError> {
+            let sst = table_store.open_sst(&SsTableId::Wal(wal_id)).await?;
+            SstIterator::new_owned(.., sst, Arc::clone(&table_store), sst_iter_options).await
+        }
+
+        let handle = task::spawn(load_iter(
+            next_wal_id,
             self.options.sst_iter_options,
-        )
-        .await?;
-        self.next_iters.push_back(sst_iter);
-        Ok(true)
+            Arc::clone(&self.table_store),
+        ));
+        self.next_iters.push_back(handle);
+        true
     }
 
     /// Get the next table replayed from the WAL. The next table is guaranteed to
@@ -123,7 +127,19 @@ impl WalReplayIterator<'_> {
         let mut last_seq = self.last_seq;
         let mut last_wal_id = 0;
 
-        while let Some(mut sst_iter) = self.next_iters.pop_front() {
+        while let Some(join_handle) = self.next_iters.pop_front() {
+            let mut sst_iter = match join_handle.await {
+                Ok(Ok(sst_iter)) => sst_iter,
+                Ok(Err(slate_err)) => return Err(slate_err),
+                Err(join_err) => {
+                    return Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
+                        join_err
+                            .try_into_panic()
+                            .unwrap_or_else(|_| Box::new("Load of SST iterator was cancelled")),
+                    ))))
+                }
+            };
+
             last_wal_id = sst_iter.table_id().unwrap_wal_id();
 
             while let Some(row_entry) = sst_iter.next_entry().await? {
@@ -134,7 +150,7 @@ impl WalReplayIterator<'_> {
                 table.put(row_entry);
             }
 
-            self.load_next_sst_iter().await?;
+            self.maybe_load_next_iter();
 
             if table.size() > self.options.min_memtable_bytes {
                 break;
