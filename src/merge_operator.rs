@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     error::SlateDBError,
-    iter::KeyValueIterator,
+    iters::KeyValueIterator,
     types::{RowEntry, ValueDeletable},
     utils::merge_options,
 };

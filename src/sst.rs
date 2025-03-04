@@ -589,10 +589,10 @@ mod tests {
     use object_store::ObjectStore;
 
     use super::*;
-    use crate::block_iterator::BlockIterator;
     use crate::db_state::SsTableId;
     use crate::filter::filter_hash;
-    use crate::iter::IterationOrder::Ascending;
+    use crate::iters::BlockIterator;
+    use crate::iters::IterationOrder::Ascending;
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, gen_attrs, gen_empty_attrs};
 

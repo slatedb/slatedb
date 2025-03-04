@@ -119,12 +119,12 @@ mod tests {
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::error::SlateDBError;
-    use crate::iter::KeyValueIterator;
+    use crate::iters::KeyValueIterator;
+    use crate::iters::{SstIterator, SstIteratorOptions};
     use crate::manifest::store::ManifestStore;
     use crate::manifest::Manifest;
     use crate::proptest_util::{rng, sample};
     use crate::sst::SsTableFormat;
-    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
     use crate::{admin, test_utils};
     use bytes::Bytes;

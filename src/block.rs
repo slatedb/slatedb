@@ -182,7 +182,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::block_iterator::BlockIterator;
+    use crate::iters::BlockIterator;
     use crate::test_utils::assert_iterator;
     use crate::{
         test_utils::{assert_debug_snapshot, decode_codec_entries},

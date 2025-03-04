@@ -13,10 +13,10 @@ use crate::compactor::WorkerToOrchestratorMsg::CompactionFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
-use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
-use crate::sorted_run_iterator::SortedRunIterator;
-use crate::sst_iter::{SstIterator, SstIteratorOptions};
+use crate::iters::KeyValueIterator;
+use crate::iters::SortedRunIterator;
+use crate::iters::{MergeIterator, TwoMergeIterator};
+use crate::iters::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 
 use crate::compactor::stats::CompactionStats;

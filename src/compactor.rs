@@ -456,13 +456,13 @@ mod tests {
     };
     use crate::db::Db;
     use crate::db_state::CoreDbState;
-    use crate::iter::KeyValueIterator;
+    use crate::iters::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
 
+    use crate::iters::{SstIterator, SstIteratorOptions};
     use crate::proptest_util::rng;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
-    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, TestClock};

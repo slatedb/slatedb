@@ -17,7 +17,7 @@ pub(crate) mod runner {
 pub(crate) mod arbitrary {
     use crate::bytes_range;
     use crate::bytes_range::BytesRange;
-    use crate::iter::IterationOrder;
+    use crate::iters::IterationOrder;
     use crate::proptest_util::{rng, sample};
     use bytes::{BufMut, Bytes, BytesMut};
     use proptest::arbitrary::any;

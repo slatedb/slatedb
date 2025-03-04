@@ -563,16 +563,14 @@ mod tests {
 
     use crate::db_cache::{DbCache, DbCacheWrapper, GetTarget};
     use crate::error;
+    use crate::iters::{SstIterator, SstIteratorOptions};
     use crate::sst::SsTableFormat;
-    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     #[cfg(feature = "moka")]
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::{RowEntry, ValueDeletable};
-    use crate::{
-        block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
-    };
+    use crate::{block::Block, db_state::SsTableId, iters::BlockIterator, iters::KeyValueIterator};
 
     const ROOT: &str = "/root";
 

@@ -12,8 +12,8 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
-use crate::iter::{IterationOrder, KeyValueIterator, SeekToKey};
-use crate::merge_iterator::MergeIterator;
+use crate::iters::MergeIterator;
+use crate::iters::{IterationOrder, KeyValueIterator, SeekToKey};
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCell;
 

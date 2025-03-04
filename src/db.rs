@@ -44,21 +44,21 @@ use crate::config::ReadLevel::Uncommitted;
 use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db::SstFilterResult::{FilterNegative, FilterPositive, RangeNegative, RangePositive};
 use crate::db_cache::{DbCache, DbCacheWrapper};
-use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::filter;
-use crate::filter_iterator::FilterIterator;
 use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
-use crate::iter::KeyValueIterator;
+use crate::iters::DbIterator;
+use crate::iters::FilterIterator;
+use crate::iters::KeyValueIterator;
+use crate::iters::SortedRunIterator;
+use crate::iters::{SstIterator, SstIteratorOptions};
 use crate::manifest::store::{DirtyManifest, FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::{VecDequeKeyValueIterator, WritableKVTable};
 use crate::mem_table_flush::MemtableFlushMsg;
-use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
-use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
@@ -1411,10 +1411,10 @@ mod tests {
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions, Ttl,
     };
+    use crate::iters::SstIterator;
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
-    use crate::sst_iter::SstIterator;
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
 

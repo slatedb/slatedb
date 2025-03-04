@@ -29,9 +29,9 @@ pub use checkpoint::{Checkpoint, CheckpointCreateResult};
 pub use compactor::stats as compactor_stats;
 pub use db::Db;
 pub use db_cache::stats as db_cache_stats;
-pub use db_iter::DbIterator;
 pub use error::{DbOptionsError, SlateDBError};
 pub use garbage_collector::stats as garbage_collector_stats;
+pub use iters::DbIterator;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use types::KeyValue;
 
@@ -48,7 +48,6 @@ mod batch;
 mod batch_write;
 mod blob;
 mod block;
-mod block_iterator;
 #[cfg(any(test, feature = "bencher"))]
 mod bytes_generator;
 mod bytes_range;
@@ -60,27 +59,22 @@ mod compactor_executor;
 mod compactor_state;
 mod db;
 mod db_common;
-mod db_iter;
 mod db_state;
 mod error;
 mod filter;
-mod filter_iterator;
 mod flatbuffer_types;
 mod flush;
 mod garbage_collector;
-mod iter;
+mod iters;
 mod manifest;
 mod mem_table;
 mod mem_table_flush;
-mod merge_iterator;
 mod merge_operator;
 mod paths;
 #[cfg(test)]
 mod proptest_util;
 mod row_codec;
-mod sorted_run_iterator;
 mod sst;
-mod sst_iter;
 mod tablestore;
 #[cfg(test)]
 mod test_utils;

@@ -1,6 +1,6 @@
 use crate::config::{Clock, PutOptions, WriteOptions};
 use crate::error::SlateDBError;
-use crate::iter::{IterationOrder, KeyValueIterator, SeekToKey};
+use crate::iters::{IterationOrder, KeyValueIterator, SeekToKey};
 use crate::row_codec::SstRowCodecV0;
 use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
 use bytes::{BufMut, Bytes, BytesMut};
@@ -132,8 +132,8 @@ macro_rules! assert_debug_snapshot {
 use crate::bytes_generator::OrderedBytesGenerator;
 use crate::bytes_range::BytesRange;
 use crate::db::Db;
-use crate::db_iter::DbIterator;
 use crate::db_state::SsTableInfo;
+use crate::iters::DbIterator;
 use crate::sst::SsTableFormat;
 pub(crate) use assert_debug_snapshot;
 

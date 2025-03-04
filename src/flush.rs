@@ -12,7 +12,7 @@ use crate::db_state;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskShutdown;
-use crate::iter::KeyValueIterator;
+use crate::iters::KeyValueIterator;
 use crate::mem_table::{ImmutableWal, KVTable, WritableKVTable};
 use crate::utils::{bg_task_result_into_err, spawn_bg_task};
 
