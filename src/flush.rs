@@ -98,7 +98,12 @@ impl DbInner {
             this: &Arc<DbInner>,
             rx: &mut UnboundedReceiver<WalFlushMsg>,
         ) -> Result<(), SlateDBError> {
-            let mut ticker = tokio::time::interval(this.options.flush_interval);
+            let Some(period) = this.options.flush_interval else {
+                // If flush_interval is not set, we do not start the flush task.
+                return Ok(())
+            };
+
+            let mut ticker = tokio::time::interval(period);
             let mut err_reader = this.state.read().error_reader();
             loop {
                 select! {

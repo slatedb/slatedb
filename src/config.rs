@@ -375,9 +375,12 @@ pub struct DbOptions {
     /// Keep in mind that the flush interval does not include the network latency. A
     /// 100ms flush interval will result in a 100ms + the time it takes to send the
     /// bytes to object storage.
-    #[serde(deserialize_with = "deserialize_duration")]
-    #[serde(serialize_with = "serialize_duration")]
-    pub flush_interval: Duration,
+    /// 
+    /// If this value is None, automatic flushing will be disabled. The application
+    /// can flush by calling `Db::flush()` manually, and by closing the database.
+    #[serde(deserialize_with = "deserialize_option_duration")]
+    #[serde(serialize_with = "serialize_option_duration")]
+    pub flush_interval: Option<Duration>,
 
     /// If set to false, SlateDB will disable the WAL and write directly into the memtable
     #[cfg(feature = "wal_disable")]
@@ -642,7 +645,7 @@ impl Provider for DbOptions {
 impl Default for DbOptions {
     fn default() -> Self {
         Self {
-            flush_interval: Duration::from_millis(100),
+            flush_interval: Some(Duration::from_millis(100)),
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
             manifest_poll_interval: Duration::from_secs(1),
@@ -974,7 +977,7 @@ mod tests {
 
             let options = DbOptions::from_env("SLATEDB_")
                 .expect("failed to load db options from environment");
-            assert_eq!(Duration::from_secs(1), options.flush_interval);
+            assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -1002,7 +1005,7 @@ mod tests {
 
             let options = DbOptions::from_file("config.json")
                 .expect("failed to load db options from environment");
-            assert_eq!(Duration::from_secs(1), options.flush_interval);
+            assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -1026,7 +1029,7 @@ root_folder = "/tmp/slatedb-root"
 
             let options = DbOptions::from_file("config.toml")
                 .expect("failed to load db options from environment");
-            assert_eq!(Duration::from_secs(1), options.flush_interval);
+            assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -1050,7 +1053,7 @@ object_store_cache_options:
 
             let options = DbOptions::from_file("config.yaml")
                 .expect("failed to load db options from environment");
-            assert_eq!(Duration::from_secs(1), options.flush_interval);
+            assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -1074,7 +1077,7 @@ object_store_cache_options:
             .expect("failed to create db options config file");
 
             let options = DbOptions::load().expect("failed to load db options from environment");
-            assert_eq!(Duration::from_secs(1), options.flush_interval);
+            assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
