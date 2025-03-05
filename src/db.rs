@@ -1957,7 +1957,7 @@ mod tests {
 
         let runtime = Runtime::new().unwrap();
         let mut db_options = test_db_options(0, 1024, None);
-        db_options.flush_interval = Duration::from_secs(5);
+        db_options.flush_interval = Some(Duration::from_secs(5));
         let db = runtime.block_on(build_database_from_table(&table, db_options, false));
 
         runner
@@ -3276,7 +3276,7 @@ mod tests {
 
         let db_options = DbOptions {
             wal_enabled: false,
-            flush_interval: Duration::from_secs(10),
+            flush_interval: Some(Duration::from_secs(10)),
             ..DbOptions::default()
         };
 
@@ -3485,7 +3485,7 @@ mod tests {
         ttl: Option<u64>,
     ) -> DbOptions {
         DbOptions {
-            flush_interval: Duration::from_millis(100),
+            flush_interval: Some(Duration::from_millis(100)),
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),
