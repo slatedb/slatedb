@@ -100,7 +100,7 @@ impl DbInner {
         ) -> Result<(), SlateDBError> {
             let Some(period) = this.options.flush_interval else {
                 // If flush_interval is not set, we do not start the flush task.
-                return Ok(())
+                return Ok(());
             };
 
             let mut ticker = tokio::time::interval(period);

@@ -375,7 +375,7 @@ pub struct DbOptions {
     /// Keep in mind that the flush interval does not include the network latency. A
     /// 100ms flush interval will result in a 100ms + the time it takes to send the
     /// bytes to object storage.
-    /// 
+    ///
     /// If this value is None, automatic flushing will be disabled. The application
     /// can flush by calling `Db::flush()` manually, and by closing the database.
     #[serde(deserialize_with = "deserialize_option_duration")]
