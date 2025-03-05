@@ -3276,7 +3276,7 @@ mod tests {
 
         let db_options = DbOptions {
             wal_enabled: false,
-            flush_interval: Duration::from_secs(10),
+            flush_interval: Some(Duration::from_secs(10)),
             ..DbOptions::default()
         };
 
