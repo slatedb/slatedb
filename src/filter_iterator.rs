@@ -1,7 +1,8 @@
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::types::RowEntry;
 use crate::utils::is_not_expired;
 use crate::SlateDBError;
+use crate::sst_iter::SstIterator;
 
 pub(crate) struct FilterIterator<T: KeyValueIterator> {
     iterator: T,
@@ -30,6 +31,12 @@ impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
             }
         }
         Ok(None)
+    }
+}
+
+impl SeekToKey for SstIterator<'_> {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        if iterator
     }
 }
 

@@ -10,10 +10,11 @@ use crate::types::KeyValue;
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::ops::RangeBounds;
+use crate::filter_iterator::FilterIterator;
 
 type ScanIterator<'a> = TwoMergeIterator<
     VecDequeKeyValueIterator,
-    TwoMergeIterator<MergeIterator<SstIterator<'a>>, MergeIterator<SortedRunIterator<'a>>>,
+    TwoMergeIterator<MergeIterator<FilterIterator<SstIterator<'a>>>, MergeIterator<FilterIterator<SortedRunIterator<'a>>>>,
 >;
 
 pub struct DbIterator<'a> {
@@ -27,8 +28,8 @@ impl<'a> DbIterator<'a> {
     pub(crate) async fn new(
         range: BytesRange,
         mem_iter: VecDequeKeyValueIterator,
-        l0_iters: VecDeque<SstIterator<'a>>,
-        sr_iters: VecDeque<SortedRunIterator<'a>>,
+        l0_iters: VecDeque<FilterIterator<SstIterator<'a>>>,
+        sr_iters: VecDeque<FilterIterator<SortedRunIterator<'a>>>,
     ) -> Result<Self, SlateDBError> {
         let (l0_iter, sr_iter) =
             tokio::join!(MergeIterator::new(l0_iters), MergeIterator::new(sr_iters),);

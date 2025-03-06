@@ -203,6 +203,7 @@ impl DbInner {
         self.check_error()?;
         let snapshot = Arc::new(self.state.read().snapshot());
         let mut memtables = VecDeque::new();
+        let ttl_now = get_now_for_read(self.mono_clock.clone(), options.read_level).await?;
 
         if matches!(options.read_level, Uncommitted) {
             memtables.push_back(snapshot.wal.clone());
@@ -231,25 +232,29 @@ impl DbInner {
 
         let mut l0_iters = VecDeque::new();
         for sst in state.manifest.core.l0 {
-            let iter = SstIterator::new_owned(
-                range.clone(),
-                sst,
-                self.table_store.clone(),
-                sst_iter_options,
-            )
-            .await?;
+            let iter = FilterIterator::wrap_ttl_filter_iterator(
+                SstIterator::new_owned(
+                    range.clone(),
+                    sst,
+                    self.table_store.clone(),
+                    sst_iter_options,
+                )
+                .await?,
+                ttl_now);
             l0_iters.push_back(iter);
         }
 
         let mut sr_iters = VecDeque::new();
         for sr in state.manifest.core.compacted {
-            let iter = SortedRunIterator::new_owned(
-                range.clone(),
-                sr,
-                self.table_store.clone(),
-                sst_iter_options,
-            )
-            .await?;
+            let iter = FilterIterator::wrap_ttl_filter_iterator(
+                SortedRunIterator::new_owned(
+                    range.clone(),
+                    sr,
+                    self.table_store.clone(),
+                    sst_iter_options,
+                )
+                .await?,
+                ttl_now);
             sr_iters.push_back(iter);
         }
 
