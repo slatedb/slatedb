@@ -4,6 +4,8 @@ use bytes::Bytes;
 use serde::Serialize;
 use uuid::Uuid;
 
+pub(crate) mod store;
+
 #[derive(Clone, Serialize, PartialEq, Debug)]
 pub(crate) struct Manifest {
     pub(crate) parent: Option<ParentDb>,
@@ -56,7 +58,7 @@ impl Manifest {
 
 #[cfg(test)]
 mod tests {
-    use crate::manifest_store::{ManifestStore, StoredManifest};
+    use crate::manifest::store::{ManifestStore, StoredManifest};
 
     use crate::config::CheckpointOptions;
     use crate::db_state::CoreDbState;

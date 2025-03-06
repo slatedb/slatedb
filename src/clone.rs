@@ -3,8 +3,8 @@ use crate::config::CheckpointOptions;
 use crate::db_state::{CoreDbState, SsTableId};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::CheckpointMissing;
+use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::{Manifest, ParentDb};
-use crate::manifest_store::{ManifestStore, StoredManifest};
 use crate::paths::PathResolver;
 use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
@@ -58,9 +58,9 @@ pub(crate) async fn create_clone<P: Into<Path>>(
         )
         .await?;
 
-        let mut initialized_db_state = clone_manifest.db_state().clone();
-        initialized_db_state.initialized = true;
-        clone_manifest.update_db_state(initialized_db_state).await?;
+        let mut dirty = clone_manifest.prepare_dirty();
+        dirty.core.initialized = true;
+        clone_manifest.update_manifest(dirty).await?;
     }
 
     Ok(())
@@ -313,8 +313,8 @@ mod tests {
     use crate::db::Db;
     use crate::db_state::CoreDbState;
     use crate::error::SlateDBError;
+    use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::{Manifest, ParentDb};
-    use crate::manifest_store::{ManifestStore, StoredManifest};
     use crate::proptest_util::{rng, sample};
     use crate::test_utils;
     use fail_parallel::FailPointRegistry;

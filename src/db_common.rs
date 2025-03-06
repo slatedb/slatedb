@@ -13,22 +13,12 @@ impl DbInner {
         guard: &mut RwLockWriteGuard<'_, DbState>,
         wal_id: u64,
     ) -> Result<(), SlateDBError> {
-        if guard.memtable().size() < self.options.l0_sst_size_bytes {
-            Ok(())
-        } else {
-            self.freeze_memtable(guard, wal_id)
+        if guard.memtable().size() >= self.options.l0_sst_size_bytes {
+            guard.freeze_memtable(wal_id)?;
+            self.memtable_flush_notifier
+                .send(MemtableFlushMsg::FlushImmutableMemtables { sender: None })
+                .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         }
-    }
-
-    pub(crate) fn freeze_memtable(
-        &self,
-        guard: &mut RwLockWriteGuard<'_, DbState>,
-        wal_id: u64,
-    ) -> Result<(), SlateDBError> {
-        guard.freeze_memtable(wal_id)?;
-        self.memtable_flush_notifier
-            .send(MemtableFlushMsg::FlushImmutableMemtables { sender: None })
-            .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         Ok(())
     }
 
@@ -42,7 +32,7 @@ impl DbInner {
         guard.update_last_seq(replayed_memtable.last_seq);
         self.mono_clock.set_last_tick(replayed_memtable.last_tick)?;
         guard.replace_memtable(replayed_memtable.table)?;
-        self.freeze_memtable(&mut guard, last_wal_id)
+        self.maybe_freeze_memtable(&mut guard, last_wal_id)
     }
 
     pub(crate) fn maybe_freeze_wal(

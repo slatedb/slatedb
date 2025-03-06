@@ -70,7 +70,6 @@ mod flush;
 mod garbage_collector;
 mod iter;
 mod manifest;
-mod manifest_store;
 mod mem_table;
 mod mem_table_flush;
 mod merge_iterator;
