@@ -450,22 +450,24 @@ impl DbInner {
         rx.await?
     }
 
-    fn freeze_memtable(&self) -> Result<(), SlateDBError> {
-        let mut guard = self.state.write();
-        if guard.memtable().is_empty() {
-            return Ok(());
-        }
-        let wal_id = guard.last_written_wal_id();
-        guard.freeze_memtable(wal_id)
-    }
-
     // use to manually flush memtables
-    async fn flush_memtables(&self) -> Result<(), SlateDBError> {
+    async fn flush_immutable_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
             .send(MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) })
             .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
         rx.await?
+    }
+
+    async fn flush_memtables(&self) -> Result<(), SlateDBError> {
+        {
+            let mut guard = self.state.write();
+            if !guard.memtable().is_empty() {
+                let last_wal_id = guard.last_written_wal_id();
+                guard.freeze_memtable(last_wal_id)?;
+            }
+        }
+        self.flush_immutable_memtables().await
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
@@ -1301,7 +1303,6 @@ impl Db {
         if self.inner.wal_enabled() {
             self.inner.flush_wals().await
         } else {
-            self.inner.freeze_memtable()?;
             self.inner.flush_memtables().await
         }
     }
@@ -2831,7 +2832,7 @@ mod tests {
         let result = db.put(&key1, &value1).await;
         assert!(result.is_ok(), "Failed to write key1");
 
-        let flush_result = db.inner.flush_memtables().await;
+        let flush_result = db.inner.flush_immutable_memtables().await;
         assert!(flush_result.is_err());
         db.close().await.unwrap();
 
