@@ -1,42 +1,59 @@
+use std::collections::HashMap;
+
 use crate::db_state::SsTableId;
 use crate::db_state::SsTableId::{Compacted, Wal};
 use crate::error::SlateDBError;
 use object_store::path::Path;
 use ulid::Ulid;
 
+const WAL_PATH: &str = "wal";
+const COMPACTED_PATH: &str = "compacted";
+
+#[derive(Clone, Debug)]
 pub(crate) struct PathResolver {
     root_path: Path,
-    wal_path: &'static str,
-    compacted_path: &'static str,
+    external_ssts: HashMap<SsTableId, Path>,
 }
 
 impl PathResolver {
     pub(crate) fn new<P: Into<Path>>(root_path: P) -> Self {
         Self {
             root_path: root_path.into(),
-            wal_path: "wal",
-            compacted_path: "compacted",
+            external_ssts: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn new_with_external_ssts<P: Into<Path>>(
+        root_path: P,
+        external_ssts: HashMap<SsTableId, P>,
+    ) -> Self {
+        Self {
+            root_path: root_path.into(),
+            external_ssts: external_ssts
+                .into_iter()
+                .map(|(k, v)| (k, v.into()))
+                .collect(),
         }
     }
 
     pub(crate) fn wal_path(&self) -> Path {
-        Path::from(format!("{}/{}/", &self.root_path, self.wal_path))
+        Path::from(format!("{}/{}/", &self.root_path, WAL_PATH))
     }
 
     pub(crate) fn compacted_path(&self) -> Path {
-        Path::from(format!("{}/{}/", &self.root_path, self.compacted_path))
+        Path::from(format!("{}/{}/", &self.root_path, COMPACTED_PATH))
     }
 
     pub(crate) fn parse_table_id(&self, path: &Path) -> Result<Option<SsTableId>, SlateDBError> {
         if let Some(mut suffix_iter) = path.prefix_match(&self.root_path) {
             match suffix_iter.next() {
-                Some(a) if a.as_ref() == self.wal_path => suffix_iter
+                Some(a) if a.as_ref() == WAL_PATH => suffix_iter
                     .next()
                     .and_then(|s| s.as_ref().split('.').next().map(|s| s.parse::<u64>()))
                     .transpose()
                     .map(|r| r.map(SsTableId::Wal))
                     .map_err(|_| SlateDBError::InvalidDBState),
-                Some(a) if a.as_ref() == self.compacted_path => suffix_iter
+                Some(a) if a.as_ref() == COMPACTED_PATH => suffix_iter
                     .next()
                     .and_then(|s| s.as_ref().split('.').next().map(Ulid::from_string))
                     .transpose()
@@ -50,15 +67,16 @@ impl PathResolver {
     }
 
     pub(crate) fn table_path(&self, table_id: &SsTableId) -> Path {
+        let root_path = match self.external_ssts.get(table_id) {
+            Some(external_path) => external_path,
+            None => &self.root_path,
+        };
         match table_id {
-            Wal(id) => Path::from(format!(
-                "{}/{}/{:020}.sst",
-                &self.root_path, self.wal_path, id
-            )),
+            Wal(id) => Path::from(format!("{}/{}/{:020}.sst", root_path, WAL_PATH, id)),
             Compacted(ulid) => Path::from(format!(
                 "{}/{}/{}.sst",
-                &self.root_path,
-                self.compacted_path,
+                root_path,
+                COMPACTED_PATH,
                 ulid.to_string()
             )),
         }
