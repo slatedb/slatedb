@@ -114,7 +114,8 @@ impl DbInner {
                 }
             }
             let table = current_memtable.table().clone();
-            self.maybe_freeze_memtable(&mut guard)?;
+            let last_wal_id = guard.last_written_wal_id();
+            self.maybe_freeze_memtable(&mut guard, last_wal_id)?;
             table
         };
 
