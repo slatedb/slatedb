@@ -133,9 +133,9 @@ impl WalReplayIterator<'_> {
                 Ok(Err(slate_err)) => return Err(slate_err),
                 Err(join_err) => {
                     return Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
-                        join_err
-                            .try_into_panic()
-                            .unwrap_or_else(|_| Box::new("Load of SST iterator was cancelled")),
+                        join_err.try_into_panic().unwrap_or_else(|_| {
+                            Box::new("Load of SST iterator panicked or was cancelled")
+                        }),
                     ))))
                 }
             };
