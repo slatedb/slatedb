@@ -256,6 +256,8 @@ impl DbInner {
         DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters).await
     }
 
+    /// Fences all writers with an older epoch than the provided `manifest` by flushing an empty WAL file that acts
+    /// as a barrier. Any parallel old writers will fail with `SlateDBError::Fenced` when trying to "re-write" this file.
     async fn fence_writers(
         &self,
         manifest: &mut FenceableManifest,
