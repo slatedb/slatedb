@@ -80,6 +80,7 @@ mod merge_operator;
 mod paths;
 #[cfg(test)]
 mod proptest_util;
+mod reader;
 mod row_codec;
 mod sorted_run_iterator;
 mod sst;

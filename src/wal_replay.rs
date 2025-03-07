@@ -1,12 +1,12 @@
-use std::mem;
-use std::ops::Range;
 use crate::db_state::SsTableId;
+use crate::iter::KeyValueIterator;
+use crate::mem_table::{ImmutableMemtable, WritableKVTable};
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::SlateDBError;
+use std::mem;
+use std::ops::Range;
 use std::sync::Arc;
-use crate::iter::KeyValueIterator;
-use crate::mem_table::{ImmutableMemtable, WritableKVTable};
 
 pub(crate) async fn load_wal_iter(
     table_store: Arc<TableStore>,
@@ -29,7 +29,7 @@ pub(crate) async fn replay(
 ) -> Result<Vec<Arc<ImmutableMemtable>>, SlateDBError> {
     let mut tables = Vec::new();
     let mut curr_memtable = WritableKVTable::new();
-    let mut last_wal_id= 0;
+    let mut last_wal_id = 0;
 
     for wal_id in wal_id_range {
         last_wal_id = wal_id;
@@ -42,9 +42,11 @@ pub(crate) async fn replay(
             //  Maybe we can drop the last inserted key and insert
             //  it into the next table instead
             if curr_memtable.size() as u64 > max_memtable_bytes {
-                let completed_memtable =
-                    mem::replace(&mut curr_memtable, WritableKVTable::new());
-                tables.push(Arc::new(ImmutableMemtable::new(completed_memtable, last_wal_id)));
+                let completed_memtable = mem::replace(&mut curr_memtable, WritableKVTable::new());
+                tables.push(Arc::new(ImmutableMemtable::new(
+                    completed_memtable,
+                    last_wal_id,
+                )));
             }
         }
     }

@@ -40,32 +40,25 @@ use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
-use crate::config::ReadLevel::Uncommitted;
 use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_iter::DbIterator;
-use crate::db_state::{CoreDbState, DbState, SsTableId};
+use crate::db_state::{CoreDbState, DbState, DbStateSnapshot, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::filter;
-use crate::filter_iterator::FilterIterator;
 use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
 use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
-use crate::mem_table::{VecDequeKeyValueIterator, WritableKVTable};
+use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushMsg;
-use crate::sorted_run_iterator::SortedRunIterator;
+use crate::reader::{Reader, ReaderStateSupplier};
 use crate::sst::SsTableFormat;
-use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::stats::StatRegistry;
-use crate::tablestore::SstFilterResult::FilterPositive;
-use crate::tablestore::{SstFilterResult, TableStore};
-use crate::types::RowEntry;
-use crate::utils::{bg_task_result_into_err, get_now_for_read, is_not_expired, MonotonicClock};
+use crate::tablestore::TableStore;
+use crate::utils::{bg_task_result_into_err, MonotonicClock};
 use crate::wal_replay;
 use tracing::{info, warn};
-use SstFilterResult::FilterNegative;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -77,6 +70,7 @@ pub(crate) struct DbInner {
     pub(crate) db_stats: DbStats,
     pub(crate) stat_registry: Arc<StatRegistry>,
     pub(crate) mono_clock: Arc<MonotonicClock>,
+    pub(crate) reader: Reader,
 }
 
 impl DbInner {
@@ -93,10 +87,19 @@ impl DbInner {
             options.clock.clone(),
             core_db_state.last_l0_clock_tick,
         ));
-        let state = DbState::new(core_db_state);
+        let state = Arc::new(RwLock::new(DbState::new(core_db_state)));
         let db_stats = DbStats::new(stat_registry.as_ref());
+        let state_supplier = Arc::clone(&state) as Arc<dyn ReaderStateSupplier + Send + Sync>;
+
+        let reader = Reader {
+            supplier: state_supplier,
+            table_store: Arc::clone(&table_store),
+            db_stats: db_stats.clone(),
+            mono_clock: Arc::clone(&mono_clock),
+        };
+
         let db_inner = Self {
-            state: Arc::new(RwLock::new(state)),
+            state,
             options,
             table_store,
             wal_flush_notifier,
@@ -105,6 +108,7 @@ impl DbInner {
             db_stats,
             mono_clock,
             stat_registry,
+            reader,
         };
         Ok(db_inner)
     }
@@ -116,101 +120,7 @@ impl DbInner {
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.check_error()?;
-        let key = key.as_ref();
-        let snapshot = self.state.read().snapshot();
-        let ttl_now = get_now_for_read(self.mono_clock.clone(), options.read_level).await?;
-
-        if matches!(options.read_level, Uncommitted) {
-            let maybe_val = std::iter::once(snapshot.wal)
-                .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
-                .find_map(|memtable| memtable.get(key));
-            if let Some(val) = maybe_val {
-                return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
-            }
-        }
-
-        let maybe_val = std::iter::once(snapshot.memtable)
-            .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
-            .find_map(|memtable| memtable.get(key));
-        if let Some(val) = maybe_val {
-            return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
-        }
-
-        // Since the key remains unchanged during the point query, we only need to compute
-        // the hash value once and pass it to the filter to avoid unnecessary hash computation
-        let key_hash = filter::filter_hash(key);
-
-        // cache blocks that are being read
-        let sst_iter_options = SstIteratorOptions {
-            cache_blocks: true,
-            eager_spawn: true,
-            ..SstIteratorOptions::default()
-        };
-
-        for sst in &snapshot.state.core.l0 {
-            let filter_result = self
-                .table_store
-                .sst_might_include_key(sst, key, key_hash)
-                .await?;
-            self.record_filter_result(&filter_result);
-
-            if filter_result.might_contain_key() {
-                let iter =
-                    SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
-                        .await?;
-
-                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
-                if let Some(entry) = ttl_iter.next_entry().await? {
-                    if entry.key == key {
-                        return Ok(entry.value.as_bytes());
-                    }
-                }
-                if matches!(filter_result, FilterPositive) {
-                    self.db_stats.sst_filter_false_positives.inc();
-                }
-            }
-        }
-
-        for sr in &snapshot.state.core.compacted {
-            let filter_result = self
-                .table_store
-                .sr_might_include_key(sr, key, key_hash)
-                .await?;
-            self.record_filter_result(&filter_result);
-
-            if filter_result.might_contain_key() {
-                let iter =
-                    SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
-                        .await?;
-
-                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
-                if let Some(entry) = ttl_iter.next_entry().await? {
-                    if entry.key == key {
-                        return Ok(entry.value.as_bytes());
-                    }
-                }
-                if matches!(filter_result, FilterPositive) {
-                    self.db_stats.sst_filter_false_positives.inc();
-                }
-            }
-        }
-        Ok(None)
-    }
-
-    fn record_filter_result(&self, result: &SstFilterResult) {
-        if matches!(result, FilterPositive) {
-            self.db_stats.sst_filter_positives.inc();
-        } else if matches!(result, FilterNegative) {
-            self.db_stats.sst_filter_negatives.inc();
-        }
-    }
-
-    fn unwrap_value_if_not_expired(entry: &RowEntry, now_ttl: i64) -> Option<Bytes> {
-        if is_not_expired(entry, now_ttl) {
-            entry.value.as_bytes()
-        } else {
-            None
-        }
+        self.reader.get_with_options(key, options).await
     }
 
     pub async fn scan_with_options<'a>(
@@ -219,59 +129,7 @@ impl DbInner {
         options: &ScanOptions,
     ) -> Result<DbIterator<'a>, SlateDBError> {
         self.check_error()?;
-        let snapshot = Arc::new(self.state.read().snapshot());
-        let mut memtables = VecDeque::new();
-
-        if matches!(options.read_level, Uncommitted) {
-            memtables.push_back(snapshot.wal.clone());
-            for imm_wal in &snapshot.state.imm_wal {
-                memtables.push_back(imm_wal.table());
-            }
-        }
-
-        memtables.push_back(snapshot.memtable.clone());
-        for memtable in &snapshot.state.imm_memtable {
-            memtables.push_back(memtable.table());
-        }
-
-        let mem_iter =
-            VecDequeKeyValueIterator::materialize_range(memtables, range.clone()).await?;
-
-        let state = snapshot.state.as_ref().clone();
-        let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
-
-        let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 1,
-            blocks_to_fetch: read_ahead_blocks,
-            cache_blocks: options.cache_blocks,
-            eager_spawn: true,
-        };
-
-        let mut l0_iters = VecDeque::new();
-        for sst in state.core.l0 {
-            let iter = SstIterator::new_owned(
-                range.clone(),
-                sst,
-                self.table_store.clone(),
-                sst_iter_options,
-            )
-            .await?;
-            l0_iters.push_back(iter);
-        }
-
-        let mut sr_iters = VecDeque::new();
-        for sr in state.core.compacted {
-            let iter = SortedRunIterator::new_owned(
-                range.clone(),
-                sr,
-                self.table_store.clone(),
-                sst_iter_options,
-            )
-            .await?;
-            sr_iters.push_back(iter);
-        }
-
-        DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters).await
+        self.reader.scan_with_options(range, options).await
     }
 
     async fn fence_writers(
@@ -514,6 +372,12 @@ impl DbInner {
             return Err(error.clone());
         }
         Ok(())
+    }
+}
+
+impl ReaderStateSupplier for RwLock<DbState> {
+    fn supply(&self) -> DbStateSnapshot {
+        self.read().snapshot()
     }
 }
 
@@ -1328,14 +1192,14 @@ mod tests {
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
-    use crate::sst_iter::SstIterator;
+    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
 
     use crate::cached_object_store::stats::{
         OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
     };
-    use crate::config::ReadLevel::Committed;
+    use crate::config::ReadLevel::{Committed, Uncommitted};
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::{proptest_util, test_utils};
     use futures::{future::join_all, StreamExt};

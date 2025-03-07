@@ -3,17 +3,17 @@ use crate::config::{
     CheckpointOptions, Clock, DbReaderOptions, ReadOptions, ScanOptions, SystemClock,
 };
 use crate::db_reader::ManifestPollerMsg::Shutdown;
-use crate::db_state::CoreDbState;
+use crate::db_state::{COWDbState, CoreDbState, DbStateSnapshot};
+use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
-use crate::manifest::Manifest;
 use crate::manifest_store::{ManifestStore, StoredManifest};
-use crate::mem_table::{ImmutableMemtable, VecDequeKeyValueIterator};
-use crate::sorted_run_iterator::SortedRunIterator;
+use crate::mem_table::{ImmutableMemtable, KVTable};
+use crate::reader::{Reader, ReaderStateSupplier};
 use crate::sst::SsTableFormat;
-use crate::sst_iter::{SstIterator, SstIteratorOptions};
+use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::{filter, utils, wal_replay, Checkpoint, DbIterator};
+use crate::utils::MonotonicClock;
+use crate::{utils, wal_replay, Checkpoint, DbIterator};
 use bytes::Bytes;
 use log::{info, warn};
 use object_store::path::Path;
@@ -40,6 +40,19 @@ struct DbReaderInner {
     options: DbReaderOptions,
     state: Arc<RwLock<CheckpointState>>,
     clock: Arc<dyn Clock + Sync + Send>,
+    reader: Reader,
+}
+
+impl ReaderStateSupplier for RwLock<CheckpointState> {
+    fn supply(&self) -> DbStateSnapshot {
+        let guard = self.read();
+        let state = guard.state.clone();
+        DbStateSnapshot {
+            memtable: Arc::new(KVTable::new()),
+            wal: Arc::new(KVTable::new()),
+            state,
+        }
+    }
 }
 
 struct ManifestPoller {
@@ -54,8 +67,7 @@ enum ManifestPollerMsg {
 #[derive(Clone)]
 struct CheckpointState {
     checkpoint: Checkpoint,
-    manifest: Manifest,
-    imm_memtables: Vec<Arc<ImmutableMemtable>>,
+    state: Arc<COWDbState>,
     last_wal_id: u64,
 }
 
@@ -85,12 +97,31 @@ impl DbReaderInner {
         )
         .await?;
 
+        let mono_clock = Arc::new(MonotonicClock::new(
+            clock.clone(),
+            initial_state.state.core.last_l0_clock_tick,
+        ));
+
+        let stat_registry = Arc::new(StatRegistry::new());
+        let db_stats = DbStats::new(stat_registry.as_ref());
+
+        let state = Arc::new(RwLock::new(initial_state));
+        let state_supplier = Arc::clone(&state) as Arc<dyn ReaderStateSupplier + Send + Sync>;
+
+        let reader = Reader {
+            supplier: state_supplier,
+            table_store: Arc::clone(&table_store),
+            db_stats: db_stats.clone(),
+            mono_clock: Arc::clone(&mono_clock),
+        };
+
         Ok(Self {
             manifest_store,
             table_store,
             options,
-            state: Arc::new(RwLock::new(initial_state)),
+            state,
             clock,
+            reader,
         })
     }
 
@@ -115,67 +146,12 @@ impl DbReaderInner {
         Ok(checkpoint)
     }
 
-    async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, SlateDBError> {
-        let key = key.as_ref();
-        let snapshot = self.state.read().clone();
-        let maybe_val = snapshot
-            .imm_memtables
-            .iter()
-            .find_map(|memtable| memtable.table().get(key));
-        if let Some(val) = maybe_val {
-            return Ok(val.value.as_bytes());
-        }
-
-        // Since the key remains unchanged during the point query, we only need to compute
-        // the hash value once and pass it to the filter to avoid unnecessary hash computation
-        let key_hash = filter::filter_hash(key);
-
-        let sst_iter_options = SstIteratorOptions {
-            cache_blocks: true,
-            eager_spawn: true,
-            ..SstIteratorOptions::default()
-        };
-
-        for sst in &snapshot.manifest.core.l0 {
-            let filter_result = self
-                .table_store
-                .sst_might_include_key(sst, key, key_hash)
-                .await?;
-            if filter_result.might_contain_key() {
-                let mut iter =
-                    SstIterator::for_key(sst, key, Arc::clone(&self.table_store), sst_iter_options)
-                        .await?;
-
-                if let Some(entry) = iter.next_entry().await? {
-                    if entry.key == key {
-                        return Ok(entry.value.as_bytes());
-                    }
-                }
-            }
-        }
-
-        for sr in &snapshot.manifest.core.compacted {
-            let filter_result = self
-                .table_store
-                .sr_might_include_key(sr, key, key_hash)
-                .await?;
-            if filter_result.might_contain_key() {
-                let mut iter = SortedRunIterator::for_key(
-                    sr,
-                    key,
-                    Arc::clone(&self.table_store),
-                    sst_iter_options,
-                )
-                .await?;
-                if let Some(entry) = iter.next_entry().await? {
-                    if entry.key == key {
-                        return Ok(entry.value.as_bytes());
-                    }
-                }
-            }
-        }
-
-        Ok(None)
+    async fn get_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<Bytes>, SlateDBError> {
+        self.reader.get_with_options(key, options).await
     }
 
     async fn scan_with_options(
@@ -183,55 +159,12 @@ impl DbReaderInner {
         range: BytesRange,
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
-        let snapshot = self.state.read().clone();
-
-        let mut memtables = VecDeque::new();
-        for memtable in &snapshot.imm_memtables {
-            memtables.push_back(memtable.table());
-        }
-
-        let mem_iter =
-            VecDequeKeyValueIterator::materialize_range(memtables, range.clone()).await?;
-
-        let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
-
-        let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 1,
-            blocks_to_fetch: read_ahead_blocks,
-            cache_blocks: options.cache_blocks,
-            eager_spawn: true,
-        };
-
-        let mut l0_iters = VecDeque::new();
-        for sst in snapshot.manifest.core.l0 {
-            let iter = SstIterator::new_owned(
-                range.clone(),
-                sst,
-                Arc::clone(&self.table_store),
-                sst_iter_options,
-            )
-            .await?;
-            l0_iters.push_back(iter);
-        }
-
-        let mut sr_iters = VecDeque::new();
-        for sr in snapshot.manifest.core.compacted {
-            let iter = SortedRunIterator::new_owned(
-                range.clone(),
-                sr,
-                Arc::clone(&self.table_store),
-                sst_iter_options,
-            )
-            .await?;
-            sr_iters.push_back(iter);
-        }
-
-        DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters).await
+        self.reader.scan_with_options(range, options).await
     }
 
     fn should_reestablish_checkpoint(&self, latest: &CoreDbState) -> bool {
         let read_guard = self.state.read();
-        let current_state = &read_guard.manifest.core;
+        let current_state = &read_guard.state.core;
         latest.last_compacted_wal_sst_id > current_state.last_compacted_wal_sst_id
             || latest.next_wal_sst_id > current_state.next_wal_sst_id
             || latest.l0_last_compacted != current_state.l0_last_compacted
@@ -262,17 +195,20 @@ impl DbReaderInner {
         let last_seen_wal_id = self.table_store.last_seen_wal_id().await?;
         let last_replayed_wal_id = self.state.read().last_wal_id;
         if last_seen_wal_id > last_replayed_wal_id {
-            let mut new_checkpoint_state = self.state.read().clone();
+            let mut updated_checkpoint = self.state.read().clone();
+            let mut updated_state = updated_checkpoint.state.as_ref().clone();
+
             Self::replay_wal_into(
                 Arc::clone(&self.table_store),
                 &self.options,
-                &new_checkpoint_state.manifest,
-                &mut new_checkpoint_state.imm_memtables,
+                &updated_checkpoint.state.core,
+                &mut updated_state.imm_memtable,
                 true,
             )
             .await?;
+            updated_checkpoint.state = Arc::new(updated_state);
             let mut write_guard = self.state.write();
-            *write_guard = new_checkpoint_state;
+            *write_guard = updated_checkpoint;
         }
         Ok(())
     }
@@ -285,19 +221,24 @@ impl DbReaderInner {
         replay_new_wals: bool,
     ) -> Result<CheckpointState, SlateDBError> {
         let manifest = manifest_store.read_manifest(checkpoint.manifest_id).await?;
-        let mut imm_memtables = Vec::new();
+        let mut imm_memtable = VecDeque::new();
         let last_wal_id = Self::replay_wal_into(
             Arc::clone(&table_store),
             options,
-            &manifest,
-            &mut imm_memtables,
+            &manifest.core,
+            &mut imm_memtable,
             replay_new_wals,
         )
         .await?;
+        let state = Arc::new(COWDbState {
+            imm_memtable,
+            imm_wal: VecDeque::new(),
+            core: manifest.core,
+        });
+
         Ok(CheckpointState {
             checkpoint,
-            manifest,
-            imm_memtables,
+            state,
             last_wal_id,
         })
     }
@@ -311,24 +252,33 @@ impl DbReaderInner {
             .manifest_store
             .read_manifest(new_checkpoint.manifest_id)
             .await?;
-        let mut imm_memtables = prior
-            .imm_memtables
-            .into_iter()
+
+        let mut imm_memtable = prior
+            .state
+            .imm_memtable
+            .iter()
             .filter(|table| table.last_wal_id() <= manifest.core.last_compacted_wal_sst_id)
+            .cloned()
             .collect();
+
         let last_wal_id = Self::replay_wal_into(
             Arc::clone(&self.table_store),
             &self.options,
-            &manifest,
-            &mut imm_memtables,
+            &manifest.core,
+            &mut imm_memtable,
             true,
         )
         .await?;
+        let state = COWDbState {
+            imm_wal: VecDeque::new(),
+            imm_memtable,
+            core: manifest.core,
+        };
+
         Ok(CheckpointState {
             checkpoint: new_checkpoint,
-            manifest,
-            imm_memtables,
             last_wal_id,
+            state: Arc::new(state),
         })
     }
 
@@ -423,19 +373,19 @@ impl DbReaderInner {
     async fn replay_wal_into(
         table_store: Arc<TableStore>,
         reader_options: &DbReaderOptions,
-        manifest: &Manifest,
-        into_tables: &mut Vec<Arc<ImmutableMemtable>>,
+        core: &CoreDbState,
+        into_tables: &mut VecDeque<Arc<ImmutableMemtable>>,
         replay_new_wals: bool,
     ) -> Result<u64, SlateDBError> {
-        let wal_id_start = if let Some(last_replayed_table) = into_tables.last() {
+        let wal_id_start = if let Some(last_replayed_table) = into_tables.back() {
             last_replayed_table.last_wal_id() + 1
         } else {
-            manifest.core.last_compacted_wal_sst_id + 1
+            core.last_compacted_wal_sst_id + 1
         };
         let wal_id_end = if replay_new_wals {
             table_store.last_seen_wal_id().await?
         } else {
-            manifest.core.next_wal_sst_id - 1
+            core.next_wal_sst_id - 1
         };
 
         if wal_id_start > wal_id_end {
@@ -446,7 +396,8 @@ impl DbReaderInner {
             wal_id_start..(wal_id_end + 1),
             Arc::clone(&table_store),
             reader_options.max_memtable_bytes,
-        ).await?;
+        )
+        .await?;
 
         into_tables.extend(new_tables);
         Ok(wal_id_end)
@@ -633,9 +584,9 @@ impl DbReader {
     pub async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
-        _options: &ReadOptions,
+        options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        self.inner.get(key).await
+        self.inner.get_with_options(key, options).await
     }
 
     /// Scan a range of keys using the default scan options.
