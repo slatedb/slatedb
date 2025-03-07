@@ -133,10 +133,10 @@ impl KeyValueIterator for SortedRunIterator<'_> {
 impl SeekToKey for SortedRunIterator<'_> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         while let Some(next_table) = self.view.peek_next_table() {
-            let next_table_first_key = next_table.info.first_key.as_ref();
-            match next_table_first_key {
-                Some(key) if key < next_key => self.advance_table().await?,
-                _ => break,
+            if next_table.compacted_first_key() < next_key {
+                self.advance_table().await?;
+            } else {
+                break;
             }
         }
         if let Some(iter) = &mut self.current_iter {
