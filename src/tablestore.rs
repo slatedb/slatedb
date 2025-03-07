@@ -13,7 +13,7 @@ use object_store::ObjectStore;
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
-use crate::db_cache::{CachedEntry, DbCache, GetTarget};
+use crate::db_cache::{CachedEntry, DbCache};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
@@ -298,12 +298,9 @@ impl TableStore {
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(filter) = cache
-                .get(
-                    (handle.id, handle.info.filter_offset).into(),
-                    GetTarget::BloomFilter,
-                )
+                .get_filter((handle.id, handle.info.filter_offset).into())
                 .await
-                .and_then(|entry| entry.bloom_filter())
+                .and_then(|e| e.bloom_filter())
             {
                 return Ok(Some(filter));
             }
@@ -333,12 +330,9 @@ impl TableStore {
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(index) = cache
-                .get(
-                    (handle.id, handle.info.index_offset).into(),
-                    GetTarget::SsTableIndex,
-                )
+                .get_index((handle.id, handle.info.index_offset).into())
                 .await
-                .and_then(|entry| entry.sst_index())
+                .and_then(|e| e.sst_index())
             {
                 return Ok(index);
             }
@@ -408,7 +402,7 @@ impl TableStore {
                 let block_meta = index_borrow.block_meta().get(block_num);
                 let offset = block_meta.offset();
                 cache
-                    .get((handle.id, offset).into(), GetTarget::Block)
+                    .get_block((handle.id, offset).into())
                     .await
                     .and_then(|entry| entry.block())
             }))
@@ -561,7 +555,7 @@ mod tests {
     use proptest::proptest;
     use ulid::Ulid;
 
-    use crate::db_cache::{DbCache, DbCacheWrapper, GetTarget};
+    use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -710,9 +704,9 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset).into(), GetTarget::Block)
+                    .get_block((handle.id, offset).into())
                     .await
-                    .is_some_and(|entry| entry.block().is_some()),
+                    .is_some(),
                 "Block with offset {} should be in cache",
                 offset
             );
@@ -740,9 +734,9 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset).into(), GetTarget::Block)
+                    .get_block((handle.id, offset).into())
                     .await
-                    .is_some_and(|entry| entry.block().is_some()),
+                    .is_some(),
                 "Block with offset {} should be in cache after partial hit",
                 offset
             );
@@ -764,9 +758,9 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset).into(), GetTarget::Block)
+                    .get_block((handle.id, offset).into())
                     .await
-                    .is_some_and(|entry| entry.block().is_some()),
+                    .is_some(),
                 "Block with offset {} should be in cache after SST emptying",
                 offset
             );
