@@ -377,7 +377,7 @@ mod tests {
     #[tokio::test]
     async fn test_checkpoint_scope_with_force_flush() {
         let db_options = DbOptions {
-            flush_interval: Duration::from_millis(5000),
+            flush_interval: Some(Duration::from_millis(5000)),
             ..DbOptions::default()
         };
         test_checkpoint_scope_all(db_options, true, |manifest| {
@@ -389,7 +389,7 @@ mod tests {
     #[tokio::test]
     async fn test_checkpoint_scope_with_no_force_flush() {
         let db_options = DbOptions {
-            flush_interval: Duration::from_millis(10),
+            flush_interval: Some(Duration::from_millis(10)),
             ..DbOptions::default()
         };
         test_checkpoint_scope_all(db_options, false, |manifest| {
@@ -402,7 +402,7 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     async fn test_checkpoint_scope_with_force_flush_wal_disabled() {
         let db_options = DbOptions {
-            flush_interval: Duration::from_millis(5000),
+            flush_interval: Some(Duration::from_millis(5000)),
             wal_enabled: false,
             ..DbOptions::default()
         };
@@ -416,7 +416,7 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     async fn test_checkpoint_scope_with_no_force_flush_wal_disabled() {
         let db_options = DbOptions {
-            flush_interval: Duration::from_millis(10),
+            flush_interval: Some(Duration::from_millis(10)),
             wal_enabled: false,
             ..DbOptions::default()
         };
