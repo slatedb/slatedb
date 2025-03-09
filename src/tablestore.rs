@@ -45,13 +45,10 @@ struct ReadOnlyObject {
 impl ReadOnlyBlob for ReadOnlyObject {
     async fn len(&self) -> Result<u64, SlateDBError> {
         let object_metadata = self.object_store.head(&self.path).await?;
-        Ok(object_metadata.size as u64)
+        Ok(object_metadata.size)
     }
 
     async fn read_range(&self, range: Range<u64>) -> Result<Bytes, SlateDBError> {
-        // This will go away when we upgrade object store, which now takes u64's
-        // See https://github.com/apache/arrow-rs/issues/5351
-        let range = range.start as usize..range.end as usize;
         let bytes = self.object_store.get_range(&self.path, range).await?;
         Ok(bytes)
     }
@@ -70,7 +67,7 @@ pub(crate) struct SstFileMetadata {
     pub(crate) location: Path,
     pub(crate) last_modified: chrono::DateTime<Utc>,
     #[allow(dead_code)]
-    pub(crate) size: usize,
+    pub(crate) size: u64,
 }
 
 impl TableStore {
