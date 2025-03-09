@@ -58,6 +58,8 @@ mod clone;
 mod compactor;
 mod compactor_executor;
 mod compactor_state;
+#[allow(dead_code)]
+mod comparable_range;
 mod db;
 mod db_common;
 mod db_iter;
@@ -87,3 +89,4 @@ mod test_utils;
 mod transactional_object_store;
 mod types;
 mod utils;
+mod wal_replay;

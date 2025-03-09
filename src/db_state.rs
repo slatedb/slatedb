@@ -369,6 +369,18 @@ impl DbState {
         Ok(())
     }
 
+    pub(crate) fn replace_memtable(
+        &mut self,
+        memtable: WritableKVTable,
+    ) -> Result<(), SlateDBError> {
+        if let Some(err) = self.error.reader().read() {
+            return Err(err.clone());
+        }
+        assert!(self.memtable.is_empty());
+        let _ = std::mem::replace(&mut self.memtable, memtable);
+        Ok(())
+    }
+
     pub fn freeze_wal(&mut self) -> Result<(), SlateDBError> {
         if let Some(err) = self.error.reader().read() {
             return Err(err.clone());
@@ -426,6 +438,12 @@ impl DbState {
     pub fn increment_next_wal_id(&mut self) {
         let mut state = self.state_copy();
         state.manifest.core.next_wal_sst_id += 1;
+        self.update_state(state);
+    }
+
+    pub fn set_next_wal_id(&mut self, next_wal_id: u64) {
+        let mut state = self.state_copy();
+        state.manifest.core.next_wal_sst_id = next_wal_id;
         self.update_state(state);
     }
 
