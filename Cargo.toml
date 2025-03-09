@@ -25,7 +25,7 @@ flatbuffers = "24.3.25"
 futures = "0.3.30"
 humantime = {  version = "2.1.0", optional = true }
 leaky-bucket = {  version = "1.1", optional = true }
-object_store = { git = "https://github.com/apache/arrow-rs.git", rev = "3da5e0d010cb605c2f180c95643fc57dedf4f0fb", package = "object_store" }
+object_store = "0.12.0"
 parking_lot = "0.12.3"
 siphasher = "1"
 thiserror = "1.0.63"
