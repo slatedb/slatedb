@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
 use ulid::Ulid;
 
@@ -29,6 +29,8 @@ use crate::flatbuffer_types::manifest_generated::{
 };
 use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
 use crate::utils::clamp_allocated_size_bytes;
+
+pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
 
 /// A wrapper around a `Bytes` buffer containing a FlatBuffer-encoded `SsTableIndex`.
 pub(crate) struct SsTableIndexOwned {
@@ -106,7 +108,15 @@ impl ManifestCodec for FlatBufferManifestCodec {
     }
 
     fn decode(&self, bytes: &Bytes) -> Result<Manifest, SlateDBError> {
-        let manifest = flatbuffers::root::<ManifestV1>(bytes)?;
+        let version = u16::from_be_bytes([bytes[0], bytes[1]]);
+        if version != MANIFEST_FORMAT_VERSION {
+            return Err(SlateDBError::InvalidVersion {
+                expected_version: MANIFEST_FORMAT_VERSION,
+                actual_version: version,
+            });
+        }
+        let unversioned_bytes = bytes.slice(2..);
+        let manifest = flatbuffers::root::<ManifestV1>(unversioned_bytes.as_ref())?;
         Ok(Self::manifest(&manifest))
     }
 }
@@ -405,7 +415,10 @@ impl<'b> DbFlatBufferBuilder<'b> {
             },
         );
         self.builder.finish(manifest, None);
-        Bytes::copy_from_slice(self.builder.finished_data())
+        let mut bytes = BytesMut::new();
+        bytes.put_u16(MANIFEST_FORMAT_VERSION);
+        bytes.put_slice(self.builder.finished_data());
+        bytes.into()
     }
 
     fn create_sst_info(&mut self, info: &SsTableInfo) -> Bytes {
@@ -461,17 +474,20 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use crate::checkpoint;
     use crate::db_state::{CoreDbState, SsTableId};
     use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
     use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
+    use crate::{checkpoint, SlateDBError};
     use std::time::{Duration, SystemTime};
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
     use crate::sst::SsTableFormat;
     use crate::test_utils::build_test_sst;
+    use bytes::{BufMut, BytesMut};
     use ulid::Ulid;
     use uuid::Uuid;
+
+    use super::MANIFEST_FORMAT_VERSION;
 
     #[test]
     fn test_should_encode_decode_manifest_checkpoints() {
@@ -545,5 +561,42 @@ mod tests {
         let clamped = index.clamp_allocated_size();
 
         assert_index_clamped(&clamped, &index);
+    }
+
+    #[test]
+    fn test_should_validate_manifest_version() {
+        let codec = FlatBufferManifestCodec {};
+
+        // Create a valid manifest with current version
+        let mut bytes = BytesMut::with_capacity(4);
+        bytes.put_u16(MANIFEST_FORMAT_VERSION);
+        bytes.put_slice(&[0, 0]); // Minimal valid flatbuffer data
+        let valid_bytes = bytes.freeze();
+
+        // Test valid version
+        match codec.decode(&valid_bytes) {
+            Err(SlateDBError::InvalidVersion { .. }) => {
+                panic!("Expected current version in manifest")
+            }
+            Err(_) => { /* Expected error due to invalid flatbuffer data */ }
+            Ok(_) => panic!("Should fail due to invalid flatbuffer data"),
+        }
+
+        // Test invalid version
+        let mut bytes = BytesMut::with_capacity(4);
+        bytes.put_u16(MANIFEST_FORMAT_VERSION + 1);
+        bytes.put_slice(&[0, 0]); // Minimal valid flatbuffer data
+        let invalid_bytes = bytes.freeze();
+
+        match codec.decode(&invalid_bytes) {
+            Err(SlateDBError::InvalidVersion {
+                expected_version,
+                actual_version,
+            }) => {
+                assert_eq!(expected_version, MANIFEST_FORMAT_VERSION);
+                assert_eq!(actual_version, MANIFEST_FORMAT_VERSION + 1);
+            }
+            _ => panic!("Should fail with version mismatch"),
+        }
     }
 }
