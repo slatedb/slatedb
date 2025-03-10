@@ -112,6 +112,12 @@ pub enum SlateDBError {
 
     #[error("Database already exists: {msg}")]
     DatabaseAlreadyExists { msg: String },
+
+    #[error("Byte format version mismatch")]
+    InvalidVersion {
+        expected_version: u16,
+        actual_version: u16,
+    },
 }
 
 impl From<std::io::Error> for SlateDBError {
