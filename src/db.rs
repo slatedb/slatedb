@@ -20,7 +20,6 @@
 //! }
 //! ```
 
-use std::collections::VecDeque;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -47,21 +46,17 @@ use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
-use crate::iter::KeyValueIterator;
 use crate::manifest::store::{DirtyManifest, FenceableManifest, ManifestStore, StoredManifest};
-use crate::mem_table::{VecDequeKeyValueIterator, WritableKVTable};
+use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::reader::{Reader, ReaderStateSupplier};
 use crate::sst::SsTableFormat;
+use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::types::RowEntry;
-use crate::utils::{
-    bg_task_result_into_err, get_now_for_read, MonotonicClock,
-};
+use crate::utils::{bg_task_result_into_err, MonotonicClock};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use tracing::{info, warn};
-use crate::sst_iter::SstIteratorOptions;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -1142,22 +1137,22 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::cached_object_store::stats::{
+        OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
+    };
     use crate::cached_object_store::FsCacheStorage;
+    use crate::config::ReadLevel::{Committed, Uncommitted};
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions, Ttl,
     };
+    use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
+    use crate::iter::KeyValueIterator;
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
-
-    use crate::cached_object_store::stats::{
-        OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
-    };
-    use crate::config::ReadLevel::{Committed, Uncommitted};
-    use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::{proptest_util, test_utils};
     use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;

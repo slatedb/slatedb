@@ -19,6 +19,8 @@ pub(crate) struct WalReplayOptions {
     /// (save the final table, which may be arbitrarily small).
     pub(crate) min_memtable_bytes: usize,
 
+    // /// The maximum number of bytes in each returned table
+    // pub(crate) max_memtable_bytes: usize,
     /// Options to pass through to underlying SST iterators
     pub(crate) sst_iter_options: SstIteratorOptions,
 }
@@ -28,6 +30,7 @@ impl Default for WalReplayOptions {
         Self {
             sst_batch_size: 4,
             min_memtable_bytes: 64 * 1024 * 1024,
+            // max_memtable_bytes: 128 * 1024 * 1024,
             sst_iter_options: SstIteratorOptions::default(),
         }
     }
@@ -51,13 +54,12 @@ pub(crate) struct WalReplayIterator<'a> {
 }
 
 impl WalReplayIterator<'_> {
-    pub(crate) async fn new(
+    pub(crate) async fn range(
+        wal_id_range: Range<u64>,
         db_state: &CoreDbState,
         options: WalReplayOptions,
         table_store: Arc<TableStore>,
     ) -> Result<Self, SlateDBError> {
-        let wal_id_start = db_state.last_compacted_wal_sst_id + 1;
-        let wal_id_end = table_store.last_seen_wal_id().await?;
         let sst_batch_size = options.sst_batch_size;
 
         // load the last seq number from manifest, and use it as the starting seq number.
@@ -65,15 +67,16 @@ impl WalReplayIterator<'_> {
         // to the max seq number while iterating over the WALs.
         let last_seq = db_state.last_l0_seq;
         let last_tick = db_state.last_l0_clock_tick;
+        let next_wal_id = wal_id_range.start;
 
         let mut replay_iter = WalReplayIterator {
             options,
-            wal_id_range: wal_id_start..(wal_id_end + 1),
+            wal_id_range,
             table_store: Arc::clone(&table_store),
             next_iters: VecDeque::new(),
             last_tick,
             last_seq,
-            next_wal_id: wal_id_start,
+            next_wal_id,
         };
 
         for _ in 0..sst_batch_size {
@@ -83,6 +86,17 @@ impl WalReplayIterator<'_> {
         }
 
         Ok(replay_iter)
+    }
+
+    pub(crate) async fn new(
+        db_state: &CoreDbState,
+        options: WalReplayOptions,
+        table_store: Arc<TableStore>,
+    ) -> Result<Self, SlateDBError> {
+        let wal_id_start = db_state.last_compacted_wal_sst_id + 1;
+        let wal_id_end = table_store.last_seen_wal_id().await?;
+        let wal_id_range = wal_id_start..(wal_id_end + 1);
+        Self::range(wal_id_range, db_state, options, table_store).await
     }
 
     fn maybe_load_next_iter(&mut self) -> bool {

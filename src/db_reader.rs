@@ -6,14 +6,16 @@ use crate::db_reader::ManifestPollerMsg::Shutdown;
 use crate::db_state::{COWDbState, CoreDbState, DbStateSnapshot};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::manifest_store::{ManifestStore, StoredManifest};
+use crate::manifest::store::{DirtyManifest, ManifestStore, StoredManifest};
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::reader::{Reader, ReaderStateSupplier};
 use crate::sst::SsTableFormat;
+use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::MonotonicClock;
-use crate::{utils, wal_replay, Checkpoint, DbIterator};
+use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
+use crate::{utils, Checkpoint, DbIterator};
 use bytes::Bytes;
 use log::{info, warn};
 use object_store::path::Path;
@@ -99,7 +101,7 @@ impl DbReaderInner {
 
         let mono_clock = Arc::new(MonotonicClock::new(
             clock.clone(),
-            initial_state.state.core.last_l0_clock_tick,
+            initial_state.state.core().last_l0_clock_tick,
         ));
 
         let stat_registry = Arc::new(StatRegistry::new());
@@ -164,7 +166,7 @@ impl DbReaderInner {
 
     fn should_reestablish_checkpoint(&self, latest: &CoreDbState) -> bool {
         let read_guard = self.state.read();
-        let current_state = &read_guard.state.core;
+        let current_state = read_guard.state.core();
         latest.last_compacted_wal_sst_id > current_state.last_compacted_wal_sst_id
             || latest.next_wal_sst_id > current_state.next_wal_sst_id
             || latest.l0_last_compacted != current_state.l0_last_compacted
@@ -201,7 +203,7 @@ impl DbReaderInner {
             Self::replay_wal_into(
                 Arc::clone(&self.table_store),
                 &self.options,
-                &updated_checkpoint.state.core,
+                updated_checkpoint.state.core(),
                 &mut updated_state.imm_memtable,
                 true,
             )
@@ -230,10 +232,13 @@ impl DbReaderInner {
             replay_new_wals,
         )
         .await?;
+
+        let dirty_manifest = DirtyManifest::new(checkpoint.manifest_id, manifest);
+
         let state = Arc::new(COWDbState {
             imm_memtable,
             imm_wal: VecDeque::new(),
-            core: manifest.core,
+            manifest: dirty_manifest,
         });
 
         Ok(CheckpointState {
@@ -269,10 +274,12 @@ impl DbReaderInner {
             true,
         )
         .await?;
+        let dirty_manifest = DirtyManifest::new(new_checkpoint.manifest_id, manifest);
+
         let state = COWDbState {
             imm_wal: VecDeque::new(),
             imm_memtable,
-            core: manifest.core,
+            manifest: dirty_manifest,
         };
 
         Ok(CheckpointState {
@@ -377,30 +384,47 @@ impl DbReaderInner {
         into_tables: &mut VecDeque<Arc<ImmutableMemtable>>,
         replay_new_wals: bool,
     ) -> Result<u64, SlateDBError> {
+        let sst_iter_options = SstIteratorOptions {
+            max_fetch_tasks: 1,
+            blocks_to_fetch: 256,
+            cache_blocks: true,
+            eager_spawn: true,
+        };
+
+        let replay_options = WalReplayOptions {
+            sst_batch_size: 4,
+            min_memtable_bytes: reader_options.max_memtable_bytes as usize,
+            sst_iter_options,
+        };
+
         let wal_id_start = if let Some(last_replayed_table) = into_tables.back() {
             last_replayed_table.last_wal_id() + 1
         } else {
             core.last_compacted_wal_sst_id + 1
         };
         let wal_id_end = if replay_new_wals {
-            table_store.last_seen_wal_id().await?
+            table_store.last_seen_wal_id().await? + 1
         } else {
-            core.next_wal_sst_id - 1
+            core.next_wal_sst_id
         };
 
-        if wal_id_start > wal_id_end {
-            return Ok(wal_id_end);
-        }
-
-        let new_tables = wal_replay::replay(
-            wal_id_start..(wal_id_end + 1),
+        let mut replay_iter = WalReplayIterator::range(
+            wal_id_start..wal_id_end,
+            core,
+            replay_options,
             Arc::clone(&table_store),
-            reader_options.max_memtable_bytes,
         )
         .await?;
 
-        into_tables.extend(new_tables);
-        Ok(wal_id_end)
+        let mut last_wal_id = 0;
+        while let Some(replayed_table) = replay_iter.next().await? {
+            last_wal_id = replayed_table.last_wal_id;
+            let imm_memtable =
+                ImmutableMemtable::new(replayed_table.table, replayed_table.last_wal_id);
+            into_tables.push_back(Arc::new(imm_memtable));
+        }
+
+        Ok(last_wal_id)
     }
 }
 
@@ -743,8 +767,8 @@ mod tests {
     use crate::config::{CheckpointOptions, CheckpointScope, Clock, DbOptions};
     use crate::db_reader::{DbReader, DbReaderOptions};
     use crate::db_state::CoreDbState;
-    use crate::manifest::Manifest;
-    use crate::manifest_store::ManifestStore;
+    use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::{Manifest, ParentDb};
     use crate::test_utils::TokioClock;
     use crate::{test_utils, Db, SlateDBError};
     use bytes::Bytes;
@@ -755,6 +779,7 @@ mod tests {
     use std::ops::RangeFull;
     use std::sync::Arc;
     use std::time::Duration;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn should_get_latest_value_from_checkpoint() {
@@ -842,15 +867,21 @@ mod tests {
     #[tokio::test]
     async fn should_fail_if_db_is_uninitialized() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = Path::from("/tmp/clone_store");
         let manifest_store = Arc::new(ManifestStore::new(&path, Arc::clone(&object_store)));
 
-        let mut uninitialized_manifest = Manifest::initial(CoreDbState::new());
-        uninitialized_manifest.core.initialized = false;
-        manifest_store
-            .write_manifest(1, &uninitialized_manifest)
-            .await
-            .unwrap();
+        let parent_manifest = Manifest::initial(CoreDbState::new());
+        let parent_db = ParentDb {
+            path: "/tmp/parent_store".to_string(),
+            checkpoint_id: Uuid::new_v4(),
+        };
+        let _ = StoredManifest::create_uninitialized_clone(
+            Arc::clone(&manifest_store),
+            parent_db,
+            &parent_manifest,
+        )
+        .await
+        .unwrap();
 
         let err = DbReader::open(
             path.clone(),

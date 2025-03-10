@@ -65,7 +65,7 @@ impl Reader {
             ..SstIteratorOptions::default()
         };
 
-        for sst in &snapshot.state.core.l0 {
+        for sst in &snapshot.state.core().l0 {
             let filter_result = self
                 .table_store
                 .sst_might_include_key(sst, key, key_hash)
@@ -89,7 +89,7 @@ impl Reader {
             }
         }
 
-        for sr in &snapshot.state.core.compacted {
+        for sr in &snapshot.state.core().compacted {
             let filter_result = self
                 .table_store
                 .sr_might_include_key(sr, key, key_hash)
@@ -148,7 +148,7 @@ impl Reader {
         };
 
         let mut l0_iters = VecDeque::new();
-        for sst in &snapshot.state.core.l0 {
+        for sst in &snapshot.state.core().l0 {
             let iter = SstIterator::new_owned(
                 range.clone(),
                 sst.clone(),
@@ -160,7 +160,7 @@ impl Reader {
         }
 
         let mut sr_iters = VecDeque::new();
-        for sr in &snapshot.state.core.compacted {
+        for sr in &snapshot.state.core().compacted {
             let iter = SortedRunIterator::new_owned(
                 range.clone(),
                 sr.clone(),

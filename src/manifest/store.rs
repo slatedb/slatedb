@@ -28,7 +28,6 @@ use uuid::Uuid;
 #[derive(Clone, Debug)]
 pub(crate) struct DirtyManifest {
     id: u64,
-    next_id: u64,
     parent: Option<ParentDb>,
     pub(crate) core: CoreDbState,
     writer_epoch: u64,
@@ -47,10 +46,9 @@ impl From<DirtyManifest> for Manifest {
 }
 
 impl DirtyManifest {
-    fn new(id: u64, next_id: u64, manifest: Manifest) -> Self {
+    pub(crate) fn new(id: u64, manifest: Manifest) -> Self {
         Self {
             id,
-            next_id,
             parent: manifest.parent,
             core: manifest.core,
             writer_epoch: manifest.writer_epoch,
@@ -61,11 +59,6 @@ impl DirtyManifest {
     #[allow(dead_code)]
     fn id(&self) -> u64 {
         self.id
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn next_id(&self) -> u64 {
-        self.next_id
     }
 }
 
@@ -282,7 +275,7 @@ impl StoredManifest {
     }
 
     pub(crate) fn prepare_dirty(&self) -> DirtyManifest {
-        DirtyManifest::new(self.id, self.next_id(), self.manifest.clone())
+        DirtyManifest::new(self.id, self.manifest.clone())
     }
 
     pub(crate) fn db_state(&self) -> &CoreDbState {
@@ -372,16 +365,17 @@ impl StoredManifest {
         &mut self,
         checkpoint_id: Uuid,
     ) -> Result<(), SlateDBError> {
-        self.maybe_apply_db_state_update(|stored_manifest| {
-            let mut updated_db_state = stored_manifest.db_state().clone();
-            let initial_len = updated_db_state.checkpoints.len();
-            updated_db_state
+        self.maybe_apply_manifest_update(|stored_manifest| {
+            let mut updated_manifest = stored_manifest.prepare_dirty();
+            let initial_len = updated_manifest.core.checkpoints.len();
+            updated_manifest
+                .core
                 .checkpoints
                 .retain(|cp| cp.id != checkpoint_id);
-            if initial_len == updated_db_state.checkpoints.len() {
+            if initial_len == updated_manifest.core.checkpoints.len() {
                 Ok(None)
             } else {
-                Ok(Some(updated_db_state))
+                Ok(Some(updated_manifest))
             }
         })
         .await?;
@@ -398,15 +392,16 @@ impl StoredManifest {
         new_checkpoint_options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
         let new_checkpoint_id = Uuid::new_v4();
-        self.maybe_apply_db_state_update(|stored_manifest| {
+        self.maybe_apply_manifest_update(|stored_manifest| {
             let new_checkpoint =
                 stored_manifest.new_checkpoint(new_checkpoint_id, new_checkpoint_options)?;
-            let mut updated_db_state = stored_manifest.db_state().clone();
-            updated_db_state
+            let mut updated_manifest = stored_manifest.prepare_dirty();
+            updated_manifest
+                .core
                 .checkpoints
                 .retain(|cp| cp.id != old_checkpoint_id);
-            updated_db_state.checkpoints.push(new_checkpoint);
-            Ok(Some(updated_db_state))
+            updated_manifest.core.checkpoints.push(new_checkpoint);
+            Ok(Some(updated_manifest))
         })
         .await?;
         let new_checkpoint = self
@@ -423,15 +418,16 @@ impl StoredManifest {
         new_lifetime: Duration,
     ) -> Result<Checkpoint, SlateDBError> {
         let clock = self.manifest_store.clock.clone();
-        self.maybe_apply_db_state_update(|stored_manifest| {
-            let mut updated_db_state = stored_manifest.db_state().clone();
-            let checkpoint = updated_db_state
+        self.maybe_apply_manifest_update(|stored_manifest| {
+            let mut updated_manifest = stored_manifest.prepare_dirty();
+            let checkpoint = updated_manifest
+                .core
                 .checkpoints
                 .iter_mut()
                 .find(|c| c.id == checkpoint_id)
                 .ok_or(CheckpointMissing(checkpoint_id))?;
             checkpoint.expire_time = Some(clock.now_systime() + new_lifetime);
-            Ok(Some(updated_db_state))
+            Ok(Some(updated_manifest))
         })
         .await?;
         let checkpoint = self
@@ -462,7 +458,7 @@ impl StoredManifest {
         }
 
         let manifest = Manifest::cloned(parent_db, parent_manifest);
-        let dirty = DirtyManifest::new(self.id, self.next_id(), manifest);
+        let dirty = DirtyManifest::new(self.id, manifest);
         self.update_manifest(dirty).await
     }
 
@@ -470,10 +466,10 @@ impl StoredManifest {
         &mut self,
         manifest: DirtyManifest,
     ) -> Result<(), SlateDBError> {
-        let next_id = self.next_id();
-        if manifest.next_id() != next_id {
+        if manifest.id() != self.id {
             return Err(ManifestVersionExists);
         }
+        let next_id = self.next_id();
         let manifest = manifest.into();
         self.manifest_store
             .write_manifest(next_id, &manifest)
@@ -722,7 +718,7 @@ pub(crate) mod test_utils {
     use crate::manifest::Manifest;
 
     pub(crate) fn new_dirty_manifest() -> DirtyManifest {
-        DirtyManifest::new(1u64, 2u64, Manifest::initial(CoreDbState::new()))
+        DirtyManifest::new(1u64, Manifest::initial(CoreDbState::new()))
     }
 }
 
