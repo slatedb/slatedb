@@ -2,7 +2,7 @@ use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
-use crate::manifest_store::{ManifestStore, StoredManifest};
+use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;

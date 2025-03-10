@@ -10,6 +10,7 @@ use crate::manifest::{Manifest, ManifestCodec, ParentDb};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
+use crate::SlateDBError::ManifestVersionExists;
 use chrono::Utc;
 use futures::StreamExt;
 use object_store::path::Path;
@@ -22,6 +23,51 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 use uuid::Uuid;
+
+/// Represents a local view of the manifest that is in the process of being updated
+#[derive(Clone, Debug)]
+pub(crate) struct DirtyManifest {
+    id: u64,
+    next_id: u64,
+    parent: Option<ParentDb>,
+    pub(crate) core: CoreDbState,
+    writer_epoch: u64,
+    compactor_epoch: u64,
+}
+
+impl From<DirtyManifest> for Manifest {
+    fn from(manifest: DirtyManifest) -> Manifest {
+        Manifest {
+            parent: manifest.parent,
+            core: manifest.core,
+            writer_epoch: manifest.writer_epoch,
+            compactor_epoch: manifest.compactor_epoch,
+        }
+    }
+}
+
+impl DirtyManifest {
+    fn new(id: u64, next_id: u64, manifest: Manifest) -> Self {
+        Self {
+            id,
+            next_id,
+            parent: manifest.parent,
+            core: manifest.core,
+            writer_epoch: manifest.writer_epoch,
+            compactor_epoch: manifest.compactor_epoch,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn next_id(&self) -> u64 {
+        self.next_id
+    }
+}
 
 pub(crate) struct FenceableManifest {
     stored_manifest: StoredManifest,
@@ -56,10 +102,10 @@ impl FenceableManifest {
     async fn init(
         mut stored_manifest: StoredManifest,
         stored_epoch: fn(&Manifest) -> u64,
-        set_epoch: fn(&mut Manifest, u64),
+        set_epoch: fn(&mut DirtyManifest, u64),
     ) -> Result<Self, SlateDBError> {
-        let mut manifest = stored_manifest.manifest.clone();
-        let local_epoch = stored_epoch(&manifest) + 1;
+        let local_epoch = stored_epoch(&stored_manifest.manifest) + 1;
+        let mut manifest = stored_manifest.prepare_dirty();
         set_epoch(&mut manifest, local_epoch);
         stored_manifest.update_manifest(manifest).await?;
         Ok(Self {
@@ -69,22 +115,22 @@ impl FenceableManifest {
         })
     }
 
-    pub(crate) fn db_state(&self) -> Result<&CoreDbState, SlateDBError> {
-        self.check_epoch()?;
-        Ok(self.stored_manifest.db_state())
-    }
-
-    pub(crate) async fn refresh(&mut self) -> Result<&CoreDbState, SlateDBError> {
+    pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
         self.stored_manifest.refresh().await?;
-        self.db_state()
+        self.check_epoch()
     }
 
-    pub(crate) async fn update_db_state(
+    pub(crate) fn prepare_dirty(&self) -> Result<DirtyManifest, SlateDBError> {
+        self.check_epoch()?;
+        Ok(self.stored_manifest.prepare_dirty())
+    }
+
+    pub(crate) async fn update_manifest(
         &mut self,
-        db_state: CoreDbState,
+        manifest: DirtyManifest,
     ) -> Result<(), SlateDBError> {
         self.check_epoch()?;
-        self.stored_manifest.update_db_state(db_state).await
+        self.stored_manifest.update_manifest(manifest).await
     }
 
     pub(crate) fn new_checkpoint(
@@ -101,29 +147,31 @@ impl FenceableManifest {
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
         let checkpoint_id = checkpoint_id.unwrap_or(Uuid::new_v4());
-        self.maybe_apply_db_state_update(|stored_manifest| {
+        self.maybe_apply_manifest_update(|stored_manifest| {
             stored_manifest
                 .apply_new_checkpoint_to_db_state(checkpoint_id, options)
                 .map(Some)
         })
         .await?;
         let checkpoint = self
-            .db_state()?
+            .stored_manifest
+            .manifest()
+            .core
             .find_checkpoint(&checkpoint_id)
             .expect("update applied but checkpoint not found")
             .clone();
         Ok(checkpoint)
     }
 
-    pub(crate) async fn maybe_apply_db_state_update<F>(
+    pub(crate) async fn maybe_apply_manifest_update<F>(
         &mut self,
         mutator: F,
     ) -> Result<(), SlateDBError>
     where
-        F: Fn(&StoredManifest) -> Result<Option<CoreDbState>, SlateDBError>,
+        F: Fn(&StoredManifest) -> Result<Option<DirtyManifest>, SlateDBError>,
     {
         self.stored_manifest
-            .maybe_apply_db_state_update(|sm| {
+            .maybe_apply_manifest_update(|sm| {
                 Self::check_epoch_against_manifest(
                     self.local_epoch,
                     self.stored_epoch,
@@ -233,17 +281,21 @@ impl StoredManifest {
         &self.manifest
     }
 
+    pub(crate) fn prepare_dirty(&self) -> DirtyManifest {
+        DirtyManifest::new(self.id, self.next_id(), self.manifest.clone())
+    }
+
     pub(crate) fn db_state(&self) -> &CoreDbState {
         &self.manifest.core
     }
 
-    pub(crate) async fn refresh(&mut self) -> Result<&CoreDbState, SlateDBError> {
+    pub(crate) async fn refresh(&mut self) -> Result<&Manifest, SlateDBError> {
         let Some((id, manifest)) = self.manifest_store.try_read_latest_manifest().await? else {
             return Err(InvalidDBState);
         };
         self.manifest = manifest;
         self.id = id;
-        Ok(&self.manifest.core)
+        Ok(&self.manifest)
     }
 
     fn next_id(&self) -> u64 {
@@ -256,11 +308,11 @@ impl StoredManifest {
         &self,
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
-    ) -> Result<CoreDbState, SlateDBError> {
+    ) -> Result<DirtyManifest, SlateDBError> {
         let checkpoint = self.new_checkpoint(checkpoint_id, options)?;
-        let mut updated_db_state = self.db_state().clone();
-        updated_db_state.checkpoints.push(checkpoint);
-        Ok(updated_db_state)
+        let mut dirty = self.prepare_dirty();
+        dirty.core.checkpoints.push(checkpoint);
+        Ok(dirty)
     }
 
     /// Create a new checkpoint from the latest manifest state. This only creates
@@ -303,7 +355,7 @@ impl StoredManifest {
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
         let checkpoint_id = checkpoint_id.unwrap_or(Uuid::new_v4());
-        self.maybe_apply_db_state_update(|stored_manifest| {
+        self.maybe_apply_manifest_update(|stored_manifest| {
             stored_manifest
                 .apply_new_checkpoint_to_db_state(checkpoint_id, options)
                 .map(Some)
@@ -410,26 +462,24 @@ impl StoredManifest {
         }
 
         let manifest = Manifest::cloned(parent_db, parent_manifest);
-        self.update_manifest(manifest).await
+        let dirty = DirtyManifest::new(self.id, self.next_id(), manifest);
+        self.update_manifest(dirty).await
     }
 
-    pub(crate) async fn update_db_state(&mut self, core: CoreDbState) -> Result<(), SlateDBError> {
-        let manifest = Manifest {
-            parent: self.manifest.parent.clone(),
-            core,
-            writer_epoch: self.manifest.writer_epoch,
-            compactor_epoch: self.manifest.compactor_epoch,
-        };
-        self.update_manifest(manifest).await
-    }
-
-    async fn update_manifest(&mut self, manifest: Manifest) -> Result<(), SlateDBError> {
-        let new_id = self.id + 1;
+    pub(crate) async fn update_manifest(
+        &mut self,
+        manifest: DirtyManifest,
+    ) -> Result<(), SlateDBError> {
+        let next_id = self.next_id();
+        if manifest.next_id() != next_id {
+            return Err(ManifestVersionExists);
+        }
+        let manifest = manifest.into();
         self.manifest_store
-            .write_manifest(new_id, &manifest)
+            .write_manifest(next_id, &manifest)
             .await?;
         self.manifest = manifest;
-        self.id = new_id;
+        self.id = next_id;
         Ok(())
     }
 
@@ -439,19 +489,19 @@ impl StoredManifest {
     /// the mutator parameter, which is a function that takes a &StoredManifest and returns
     /// an optional [`CoreDbState`]. If the mutator returns `None`, then no update will
     /// be applied.
-    pub(crate) async fn maybe_apply_db_state_update<F>(
+    pub(crate) async fn maybe_apply_manifest_update<F>(
         &mut self,
         mutator: F,
     ) -> Result<(), SlateDBError>
     where
-        F: Fn(&StoredManifest) -> Result<Option<CoreDbState>, SlateDBError>,
+        F: Fn(&StoredManifest) -> Result<Option<DirtyManifest>, SlateDBError>,
     {
         loop {
-            let Some(mutated_db_state) = mutator(self)? else {
+            let Some(dirty) = mutator(self)? else {
                 return Ok(());
             };
 
-            return match self.update_db_state(mutated_db_state).await {
+            return match self.update_manifest(dirty).await {
                 Err(SlateDBError::ManifestVersionExists) => {
                     self.refresh().await?;
                     continue;
@@ -509,11 +559,7 @@ impl ManifestStore {
         }
     }
 
-    pub(crate) async fn write_manifest(
-        &self,
-        id: u64,
-        manifest: &Manifest,
-    ) -> Result<(), SlateDBError> {
+    async fn write_manifest(&self, id: u64, manifest: &Manifest) -> Result<(), SlateDBError> {
         let manifest_path = &self.get_manifest_path(id);
 
         self.object_store
@@ -670,6 +716,17 @@ impl ManifestStore {
 }
 
 #[cfg(test)]
+pub(crate) mod test_utils {
+    use crate::db_state::CoreDbState;
+    use crate::manifest::store::DirtyManifest;
+    use crate::manifest::Manifest;
+
+    pub(crate) fn new_dirty_manifest() -> DirtyManifest {
+        DirtyManifest::new(1u64, 2u64, Manifest::initial(CoreDbState::new()))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::config::CheckpointOptions;
@@ -677,8 +734,8 @@ mod tests {
     use crate::error;
     use crate::error::SlateDBError;
     use crate::error::SlateDBError::InvalidDBState;
+    use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::{Manifest, ParentDb};
-    use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -697,9 +754,9 @@ mod tests {
             .await
             .unwrap();
         let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
-        sm.update_db_state(state.clone()).await.unwrap();
+        sm.update_manifest(sm.prepare_dirty()).await.unwrap();
 
-        let result = sm2.update_db_state(state.clone()).await;
+        let result = sm2.update_manifest(sm2.prepare_dirty()).await;
 
         assert!(matches!(
             result.unwrap_err(),
@@ -714,7 +771,7 @@ mod tests {
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        sm.update_db_state(state.clone()).await.unwrap();
+        sm.update_manifest(sm.prepare_dirty()).await.unwrap();
 
         let (version, _) = ms.read_latest_manifest().await.unwrap();
 
@@ -724,12 +781,12 @@ mod tests {
     #[tokio::test]
     async fn test_should_update_local_state_on_write() {
         let ms = new_memory_manifest_store();
-        let mut state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let mut sm = StoredManifest::create_new_db(ms.clone(), CoreDbState::new())
             .await
             .unwrap();
-        state.next_wal_sst_id = 123;
-        sm.update_db_state(state.clone()).await.unwrap();
+        let mut dirty = sm.prepare_dirty();
+        dirty.core.next_wal_sst_id = 123;
+        sm.update_manifest(dirty).await.unwrap();
 
         assert_eq!(sm.db_state().next_wal_sst_id, 123);
     }
@@ -737,17 +794,17 @@ mod tests {
     #[tokio::test]
     async fn test_should_refresh() {
         let ms = new_memory_manifest_store();
-        let mut state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let mut sm = StoredManifest::create_new_db(ms.clone(), CoreDbState::new())
             .await
             .unwrap();
         let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
-        state.next_wal_sst_id = 123;
-        sm.update_db_state(state.clone()).await.unwrap();
+        let mut dirty = sm.prepare_dirty();
+        dirty.core.next_wal_sst_id = 123;
+        sm.update_manifest(dirty).await.unwrap();
 
         let refreshed = sm2.refresh().await.unwrap();
 
-        assert_eq!(refreshed.next_wal_sst_id, 123);
+        assert_eq!(refreshed.core.next_wal_sst_id, 123);
         assert_eq!(sm2.db_state().next_wal_sst_id, 123);
     }
 
@@ -767,24 +824,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_fail_on_writer_fenced() {
+    async fn test_should_fail_refresh_on_writer_fenced() {
         let ms = new_memory_manifest_store();
-        let mut state = CoreDbState::new();
+        let state = CoreDbState::new();
         let sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         let mut writer1 = FenceableManifest::init_writer(sm).await.unwrap();
         let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
 
-        let mut writer2 = FenceableManifest::init_writer(sm2).await.unwrap();
+        FenceableManifest::init_writer(sm2).await.unwrap();
 
         let result = writer1.refresh().await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
-        state.next_wal_sst_id = 123;
-        let result = writer1.update_db_state(state.clone()).await;
-        assert!(matches!(result, Err(error::SlateDBError::Fenced)));
-        let refreshed = writer2.refresh().await.unwrap();
-        assert_eq!(refreshed.next_wal_sst_id, 1);
     }
 
     #[tokio::test]
@@ -803,24 +855,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_fail_on_compactor_fenced() {
+    async fn test_should_fail_refresh_on_compactor_fenced() {
         let ms = new_memory_manifest_store();
-        let mut state = CoreDbState::new();
+        let state = CoreDbState::new();
         let sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
         let mut compactor1 = FenceableManifest::init_compactor(sm).await.unwrap();
         let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
 
-        let mut compactor2 = FenceableManifest::init_compactor(sm2).await.unwrap();
+        FenceableManifest::init_compactor(sm2).await.unwrap();
 
         let result = compactor1.refresh().await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
-        state.next_wal_sst_id = 123;
-        let result = compactor1.update_db_state(state.clone()).await;
-        assert!(matches!(result, Err(error::SlateDBError::Fenced)));
-        let refreshed = compactor2.refresh().await.unwrap();
-        assert_eq!(refreshed.next_wal_sst_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_should_fail_manifest_write_of_stale_dirty_manifest() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+        let stale = sm.prepare_dirty();
+        sm.update_manifest(sm.prepare_dirty()).await.unwrap();
+
+        let result = sm.update_manifest(stale).await;
+
+        assert!(matches!(result, Err(SlateDBError::ManifestVersionExists)));
     }
 
     #[tokio::test]
@@ -852,10 +914,10 @@ mod tests {
         let mut fm2 = FenceableManifest::init_writer(sm2).await.unwrap();
 
         let result = fm1
-            .maybe_apply_db_state_update(|sm| {
-                let mut dbstate = sm.manifest.core.clone();
-                dbstate.last_l0_seq += 1;
-                Ok(Some(dbstate))
+            .maybe_apply_manifest_update(|sm| {
+                let mut dirty = sm.prepare_dirty();
+                dirty.core.last_l0_seq += 1;
+                Ok(Some(dirty))
             })
             .await;
 
@@ -864,9 +926,9 @@ mod tests {
     }
 
     async fn assert_state_not_updated(fm: &mut FenceableManifest) {
-        let original_db_state = fm.db_state().unwrap().clone();
+        let original_db_state = fm.stored_manifest.manifest().core.clone();
         fm.refresh().await.unwrap();
-        let refreshed_db_state = fm.db_state().unwrap().clone();
+        let refreshed_db_state = fm.stored_manifest.manifest().core.clone();
         assert_eq!(refreshed_db_state, original_db_state);
     }
 
@@ -880,9 +942,9 @@ mod tests {
             .await
             .unwrap();
 
-        let mut updated_state = state.clone();
-        updated_state.checkpoints.push(new_checkpoint(sm.id));
-        sm.update_db_state(updated_state).await.unwrap();
+        let mut dirty = sm.prepare_dirty();
+        dirty.core.checkpoints.push(new_checkpoint(sm.id));
+        sm.update_manifest(dirty).await.unwrap();
 
         // When
         let manifest = ms.try_read_manifest(2).await.unwrap().unwrap();
@@ -898,7 +960,7 @@ mod tests {
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        sm.update_db_state(state.clone()).await.unwrap();
+        sm.update_manifest(sm.prepare_dirty()).await.unwrap();
 
         // Check unbounded
         let manifests = ms.list_manifests(..).await.unwrap();
@@ -929,7 +991,7 @@ mod tests {
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        sm.update_db_state(state.clone()).await.unwrap();
+        sm.update_manifest(sm.prepare_dirty()).await.unwrap();
         let manifests = ms.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
         assert_eq!(manifests[0].id, 1);
@@ -948,7 +1010,7 @@ mod tests {
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        sm.update_db_state(state.clone()).await.unwrap();
+        sm.update_manifest(sm.prepare_dirty()).await.unwrap();
         let manifests = ms.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
         assert_eq!(manifests[0].id, 1);
@@ -998,9 +1060,9 @@ mod tests {
         );
 
         // Add a checkpoint referencing the latest manifest
-        let mut updated_state = state.clone();
-        updated_state.checkpoints.push(new_checkpoint(sm.id));
-        sm.update_db_state(updated_state).await.unwrap();
+        let mut dirty = sm.prepare_dirty();
+        dirty.core.checkpoints.push(new_checkpoint(sm.id));
+        sm.update_manifest(dirty).await.unwrap();
         let active_manifests = ms.read_active_manifests().await.unwrap();
         assert_eq!(2, active_manifests.len());
         assert_eq!(
@@ -1010,9 +1072,9 @@ mod tests {
         assert_eq!(Some(&sm.manifest), active_manifests.get(&sm.id));
 
         // Remove the checkpoint and verify that only the latest manifest is active
-        let mut updated_state = state.clone();
-        updated_state.checkpoints.clear();
-        sm.update_db_state(updated_state).await.unwrap();
+        let mut dirty = sm.prepare_dirty();
+        dirty.core.checkpoints.clear();
+        sm.update_manifest(dirty).await.unwrap();
         let active_manifests = ms.read_active_manifests().await.unwrap();
         assert_eq!(1, active_manifests.len());
         assert_eq!(Some(&sm.manifest), active_manifests.get(&sm.id));
@@ -1027,10 +1089,10 @@ mod tests {
             .unwrap();
 
         let initial_id = sm.id;
-        sm.maybe_apply_db_state_update(|_| Ok(None)).await.unwrap();
+        sm.maybe_apply_manifest_update(|_| Ok(None)).await.unwrap();
         assert_eq!(initial_id, sm.id);
 
-        sm.maybe_apply_db_state_update(|sm| Ok(Some(sm.db_state().clone())))
+        sm.maybe_apply_manifest_update(|sm| Ok(Some(sm.prepare_dirty())))
             .await
             .unwrap();
         assert_eq!(initial_id + 1, sm.id);
@@ -1120,9 +1182,9 @@ mod tests {
         let parent_path = "/parent/path";
         let mut sm = create_uninitialized_clone(parent_path).await;
 
-        let mut initialized_core = sm.db_state().clone();
-        initialized_core.initialized = true;
-        sm.update_db_state(initialized_core).await.unwrap();
+        let mut dirty = sm.prepare_dirty();
+        dirty.core.initialized = true;
+        sm.update_manifest(dirty).await.unwrap();
 
         let parent_manifest = Manifest::initial(CoreDbState::new());
         let parent_db = ParentDb {
@@ -1142,9 +1204,9 @@ mod tests {
         let initial_parent_path = "/initial/parent/path";
         let mut sm = create_uninitialized_clone(initial_parent_path).await;
 
-        let mut initialized_core = sm.db_state().clone();
-        initialized_core.initialized = true;
-        sm.update_db_state(initialized_core).await.unwrap();
+        let mut dirty = sm.prepare_dirty();
+        dirty.core.initialized = true;
+        sm.update_manifest(dirty).await.unwrap();
 
         let updated_parent_path = "/updated/parent/path";
         let parent_manifest = Manifest::initial(CoreDbState::new());

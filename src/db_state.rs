@@ -2,6 +2,7 @@ use crate::bytes_range;
 use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
+use crate::manifest::store::DirtyManifest;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use bytes::Bytes;
@@ -34,28 +35,36 @@ impl SsTableHandle {
         SsTableHandle { id, info }
     }
 
+    // Compacted (non-WAL) SSTs are never empty. They are created by compaction or
+    // memtable flushes, which should never produce empty SSTs.
+    pub(crate) fn compacted_first_key(&self) -> &Bytes {
+        assert!(matches!(self.id, Compacted(_)));
+        match &self.info.first_key {
+            Some(k) => k,
+            None => unreachable!("Compacted SSTs must be non-empty."),
+        }
+    }
+
     pub(crate) fn range_covers_key(&self, key: &[u8]) -> bool {
         if let Some(first_key) = self.info.first_key.as_ref() {
             return key >= first_key;
         }
+        // If there is no first key, it means the SST is empty so it doesn't cover the key.
         false
     }
 
     pub(crate) fn intersects_range(
         &self,
-        end_bound_key: Option<Bytes>,
+        end_bound: Bound<&[u8]>,
         range: (Bound<&[u8]>, Bound<&[u8]>),
     ) -> bool {
         let start_bound = match &self.info.first_key {
-            None => Unbounded,
             Some(key) => Included(key.as_ref()),
+            None => {
+                // If there is no first key, it means the SST is empty so there is no intersection.
+                return false;
+            }
         };
-
-        let end_bound = match &end_bound_key {
-            None => Unbounded,
-            Some(key) => Excluded(key.as_ref()),
-        };
-
         bytes_range::has_nonempty_intersection(range, (start_bound, end_bound))
     }
 
@@ -138,13 +147,9 @@ impl SortedRun {
 
     pub(crate) fn find_sst_with_range_covering_key_idx(&self, key: &[u8]) -> Option<usize> {
         // returns the sst after the one whose range includes the key
-        let first_sst = self.ssts.partition_point(|sst| {
-            sst.info
-                .first_key
-                .as_ref()
-                .expect("sst must have first key")
-                <= key
-        });
+        let first_sst = self
+            .ssts
+            .partition_point(|sst| sst.compacted_first_key() <= key);
         if first_sst > 0 {
             return Some(first_sst - 1);
         }
@@ -166,9 +171,9 @@ impl SortedRun {
 
             let upper_bound_key = if idx + 1 < self.ssts.len() {
                 let next_sst = &self.ssts[idx + 1];
-                next_sst.info.first_key.clone()
+                Excluded(next_sst.compacted_first_key().as_ref())
             } else {
-                None
+                Unbounded
             };
 
             if current_sst.intersects_range(upper_bound_key, range) {
@@ -216,7 +221,13 @@ pub(crate) struct DbState {
 pub(crate) struct COWDbState {
     pub(crate) imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
     pub(crate) imm_wal: VecDeque<Arc<ImmutableWal>>,
-    pub(crate) core: CoreDbState,
+    pub(crate) manifest: DirtyManifest,
+}
+
+impl COWDbState {
+    pub(crate) fn core(&self) -> &CoreDbState {
+        &self.manifest.core
+    }
 }
 
 /// represent the in-memory state of the manifest
@@ -288,15 +299,15 @@ pub(crate) struct DbStateSnapshot {
 }
 
 impl DbState {
-    pub fn new(core_db_state: CoreDbState) -> Self {
-        let last_l0_seq = core_db_state.last_l0_seq;
+    pub fn new(manifest: DirtyManifest) -> Self {
+        let last_l0_seq = manifest.core.last_l0_seq;
         Self {
             memtable: WritableKVTable::new(),
             wal: WritableKVTable::new(),
             state: Arc::new(COWDbState {
                 imm_memtable: VecDeque::new(),
                 imm_wal: VecDeque::new(),
-                core: core_db_state,
+                manifest,
             }),
             error: WatchableOnceCell::new(),
             last_seq: last_l0_seq,
@@ -316,8 +327,8 @@ impl DbState {
     }
 
     pub fn last_written_wal_id(&self) -> u64 {
-        assert!(self.state.core.next_wal_sst_id > 0);
-        self.state.core.next_wal_sst_id - 1
+        assert!(self.state.core().next_wal_sst_id > 0);
+        self.state.core().next_wal_sst_id - 1
     }
 
     pub fn error_reader(&self) -> WatchableOnceCellReader<SlateDBError> {
@@ -358,6 +369,18 @@ impl DbState {
         Ok(())
     }
 
+    pub(crate) fn replace_memtable(
+        &mut self,
+        memtable: WritableKVTable,
+    ) -> Result<(), SlateDBError> {
+        if let Some(err) = self.error.reader().read() {
+            return Err(err.clone());
+        }
+        assert!(self.memtable.is_empty());
+        let _ = std::mem::replace(&mut self.memtable, memtable);
+        Ok(())
+    }
+
     pub fn freeze_wal(&mut self) -> Result<(), SlateDBError> {
         if let Some(err) = self.error.reader().read() {
             return Err(err.clone());
@@ -390,21 +413,22 @@ impl DbState {
             .pop_back()
             .expect("expected imm memtable");
         assert!(Arc::ptr_eq(&popped, &imm_memtable));
-        state.core.l0.push_front(sst_handle);
-        state.core.last_compacted_wal_sst_id = imm_memtable.last_wal_id();
+        state.manifest.core.l0.push_front(sst_handle);
+        state.manifest.core.last_compacted_wal_sst_id = imm_memtable.last_wal_id();
 
         // ensure the persisted manifest tick never goes backwards in time
         let memtable_tick = imm_memtable.table().last_tick();
-        state.core.last_l0_clock_tick = cmp::max(state.core.last_l0_clock_tick, memtable_tick);
-        if state.core.last_l0_clock_tick != memtable_tick {
+        state.manifest.core.last_l0_clock_tick =
+            cmp::max(state.manifest.core.last_l0_clock_tick, memtable_tick);
+        if state.manifest.core.last_l0_clock_tick != memtable_tick {
             return Err(SlateDBError::InvalidClockTick {
-                last_tick: state.core.last_l0_clock_tick,
+                last_tick: state.manifest.core.last_l0_clock_tick,
                 next_tick: memtable_tick,
             });
         }
         // update the persisted manifest last_l0_seq as the latest seq in the imm.
         if let Some(seq) = imm_memtable.table().last_seq() {
-            state.core.last_l0_seq = seq;
+            state.manifest.core.last_l0_seq = seq;
         }
 
         self.update_state(state);
@@ -413,7 +437,13 @@ impl DbState {
 
     pub fn increment_next_wal_id(&mut self) {
         let mut state = self.state_copy();
-        state.core.next_wal_sst_id += 1;
+        state.manifest.core.next_wal_sst_id += 1;
+        self.update_state(state);
+    }
+
+    pub fn set_next_wal_id(&mut self, next_wal_id: u64) {
+        let mut state = self.state_copy();
+        state.manifest.core.next_wal_sst_id = next_wal_id;
         self.update_state(state);
     }
 
@@ -429,12 +459,13 @@ impl DbState {
         self.last_seq = seq;
     }
 
-    pub fn merge_db_state(&mut self, updated_state: &CoreDbState) {
+    pub fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyManifest) {
         // The compactor removes tables from l0_last_compacted, so we
         // only want to keep the tables up to there.
-        let l0_last_compacted = &updated_state.l0_last_compacted;
+        let l0_last_compacted = &remote_manifest.core.l0_last_compacted;
         let new_l0 = if let Some(l0_last_compacted) = l0_last_compacted {
             self.state
+                .manifest
                 .core
                 .l0
                 .iter()
@@ -442,21 +473,23 @@ impl DbState {
                 .take_while(|sst| sst.id.unwrap_compacted_id() != *l0_last_compacted)
                 .collect()
         } else {
-            self.state.core.l0.iter().cloned().collect()
+            self.state.manifest.core.l0.iter().cloned().collect()
         };
 
-        let compacted = updated_state.compacted.clone();
         let mut state = self.state_copy();
-        state.core.l0_last_compacted.clone_from(l0_last_compacted);
-        state.core.l0 = new_l0;
-        state.core.compacted = compacted;
-
-        // Checkpoints may also be added externally, so we need to copy them.
-        state
-            .core
-            .checkpoints
-            .clone_from(&updated_state.checkpoints);
-
+        let my_db_state = state.core();
+        remote_manifest.core = CoreDbState {
+            initialized: my_db_state.initialized,
+            l0_last_compacted: remote_manifest.core.l0_last_compacted,
+            l0: new_l0,
+            compacted: remote_manifest.core.compacted,
+            next_wal_sst_id: my_db_state.next_wal_sst_id,
+            last_compacted_wal_sst_id: my_db_state.last_compacted_wal_sst_id,
+            last_l0_clock_tick: my_db_state.last_l0_clock_tick,
+            last_l0_seq: my_db_state.last_l0_seq,
+            checkpoints: remote_manifest.core.checkpoints,
+        };
+        state.manifest = remote_manifest;
         self.update_state(state);
     }
 }
@@ -464,7 +497,8 @@ impl DbState {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::db_state::{CoreDbState, DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
     use crate::test_utils;
     use bytes::Bytes;
@@ -480,56 +514,58 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
         // given:
-        let mut db_state = DbState::new(CoreDbState::new());
+        let mut db_state = DbState::new(new_dirty_manifest());
         // mimic an externally added checkpoint
-        let mut updated_state = db_state.state.core.clone();
+        let mut updated_state = new_dirty_manifest();
+        updated_state.core = db_state.state.core().clone();
         let checkpoint = Checkpoint {
             id: Uuid::new_v4(),
             manifest_id: 1,
             expire_time: None,
             create_time: SystemTime::now(),
         };
-        updated_state.checkpoints.push(checkpoint.clone());
+        updated_state.core.checkpoints.push(checkpoint.clone());
 
         // when:
-        db_state.merge_db_state(&updated_state);
+        db_state.merge_remote_manifest(updated_state);
 
         // then:
-        assert_eq!(vec![checkpoint], db_state.state.core.checkpoints);
+        assert_eq!(vec![checkpoint], db_state.state.core().checkpoints);
     }
 
     #[test]
     fn test_should_merge_db_state_with_l0s_up_to_last_compacted() {
         // given:
-        let mut db_state = DbState::new(CoreDbState::new());
+        let mut db_state = DbState::new(new_dirty_manifest());
         add_l0s_to_dbstate(&mut db_state, 4);
         // mimic the compactor popping off l0s
-        let mut compactor_state = db_state.state.core.clone();
-        let last_compacted = compactor_state.l0.pop_back().unwrap();
-        compactor_state.l0_last_compacted = Some(last_compacted.id.unwrap_compacted_id());
+        let mut compactor_state = new_dirty_manifest();
+        compactor_state.core = db_state.state.core().clone();
+        let last_compacted = compactor_state.core.l0.pop_back().unwrap();
+        compactor_state.core.l0_last_compacted = Some(last_compacted.id.unwrap_compacted_id());
 
         // when:
-        db_state.merge_db_state(&compactor_state);
+        db_state.merge_remote_manifest(compactor_state.clone());
 
         // then:
-        let expected: Vec<SsTableId> = compactor_state.l0.iter().map(|l0| l0.id).collect();
-        let merged: Vec<SsTableId> = db_state.state.core.l0.iter().map(|l0| l0.id).collect();
+        let expected: Vec<SsTableId> = compactor_state.core.l0.iter().map(|l0| l0.id).collect();
+        let merged: Vec<SsTableId> = db_state.state.core().l0.iter().map(|l0| l0.id).collect();
         assert_eq!(expected, merged);
     }
 
     #[test]
     fn test_should_merge_db_state_with_all_l0s_if_none_compacted() {
         // given:
-        let mut db_state = DbState::new(CoreDbState::new());
+        let mut db_state = DbState::new(new_dirty_manifest());
         add_l0s_to_dbstate(&mut db_state, 4);
-        let l0s = db_state.state.core.l0.clone();
+        let l0s = db_state.state.core().l0.clone();
 
         // when:
-        db_state.merge_db_state(&CoreDbState::new());
+        db_state.merge_remote_manifest(new_dirty_manifest());
 
         // then:
         let expected: Vec<SsTableId> = l0s.iter().map(|l0| l0.id).collect();
-        let merged: Vec<SsTableId> = db_state.state.core.l0.iter().map(|l0| l0.id).collect();
+        let merged: Vec<SsTableId> = db_state.state.core().l0.iter().map(|l0| l0.id).collect();
         assert_eq!(expected, merged);
     }
 
@@ -568,7 +604,7 @@ mod tests {
                 assert!(range_end_key <= first_key);
             } else {
                 let covering_first_key = covering_tables.front()
-                .and_then(|t| t.info.first_key.clone())
+                .map(|t| t.compacted_first_key().clone())
                 .unwrap();
 
                 if range_start_key < covering_first_key {
@@ -576,7 +612,7 @@ mod tests {
                 }
 
                 let covering_last_key = covering_tables.iter().last()
-                .and_then(|t| t.info.first_key.clone())
+                .map(|t| t.compacted_first_key().clone())
                 .unwrap();
                 if covering_last_key == range_end_key {
                     assert_eq!(Included(range_end_key), range.end_bound().cloned());

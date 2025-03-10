@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 use crate::bytes_range::BytesRange;
-use crate::db_state::SsTableHandle;
+use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::iter::SeekToKey;
@@ -156,6 +156,10 @@ impl<'a> SstIterator<'a> {
             iter.spawn_fetches();
         }
         Ok(iter)
+    }
+
+    pub(crate) fn table_id(&self) -> SsTableId {
+        self.view.table_as_ref().id
     }
 
     pub(crate) async fn new_owned<T: RangeBounds<Bytes>>(

@@ -20,7 +20,6 @@
 //! }
 //! ```
 
-use std::cmp;
 use std::collections::VecDeque;
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -49,16 +48,20 @@ use crate::error::SlateDBError;
 use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::iter::KeyValueIterator;
-use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
-use crate::mem_table::WritableKVTable;
+use crate::manifest::store::{DirtyManifest, FenceableManifest, ManifestStore, StoredManifest};
+use crate::mem_table::{VecDequeKeyValueIterator, WritableKVTable};
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::reader::{Reader, ReaderStateSupplier};
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::{bg_task_result_into_err, MonotonicClock};
-use crate::wal_replay;
+use crate::types::RowEntry;
+use crate::utils::{
+    bg_task_result_into_err, get_now_for_read, MonotonicClock,
+};
+use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use tracing::{info, warn};
+use crate::sst_iter::SstIteratorOptions;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -77,7 +80,7 @@ impl DbInner {
     pub async fn new(
         options: DbOptions,
         table_store: Arc<TableStore>,
-        core_db_state: CoreDbState,
+        manifest: DirtyManifest,
         wal_flush_notifier: UnboundedSender<WalFlushMsg>,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
@@ -85,9 +88,9 @@ impl DbInner {
     ) -> Result<Self, SlateDBError> {
         let mono_clock = Arc::new(MonotonicClock::new(
             options.clock.clone(),
-            core_db_state.last_l0_clock_tick,
+            manifest.core.last_l0_clock_tick,
         ));
-        let state = Arc::new(RwLock::new(DbState::new(core_db_state)));
+        let state = Arc::new(RwLock::new(DbState::new(manifest)));
         let db_stats = DbStats::new(stat_registry.as_ref());
         let state_supplier = Arc::clone(&state) as Arc<dyn ReaderStateSupplier + Send + Sync>;
 
@@ -132,6 +135,8 @@ impl DbInner {
         self.reader.scan_with_options(range, options).await
     }
 
+    /// Fences all writers with an older epoch than the provided `manifest` by flushing an empty WAL file that acts
+    /// as a barrier. Any parallel old writers will fail with `SlateDBError::Fenced` when trying to "re-write" this file.
     async fn fence_writers(
         &self,
         manifest: &mut FenceableManifest,
@@ -149,8 +154,10 @@ impl DbInner {
                     return Ok(());
                 }
                 Err(SlateDBError::Fenced) => {
-                    let updated_state = manifest.refresh().await?;
-                    self.state.write().merge_db_state(updated_state);
+                    manifest.refresh().await?;
+                    self.state
+                        .write()
+                        .merge_remote_manifest(manifest.prepare_dirty()?);
                     empty_wal_id += 1;
                 }
                 Err(e) => {
@@ -266,17 +273,8 @@ impl DbInner {
         rx.await?
     }
 
-    fn freeze_memtable(&self) -> Result<(), SlateDBError> {
-        let mut guard = self.state.write();
-        if guard.memtable().is_empty() {
-            return Ok(());
-        }
-        let wal_id = guard.last_written_wal_id();
-        guard.freeze_memtable(wal_id)
-    }
-
     // use to manually flush memtables
-    async fn flush_memtables(&self) -> Result<(), SlateDBError> {
+    async fn flush_immutable_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
             .send(MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) })
@@ -284,79 +282,39 @@ impl DbInner {
         rx.await?
     }
 
+    async fn flush_memtables(&self) -> Result<(), SlateDBError> {
+        {
+            let mut guard = self.state.write();
+            if !guard.memtable().is_empty() {
+                let last_wal_id = guard.last_written_wal_id();
+                guard.freeze_memtable(last_wal_id)?;
+            }
+        }
+        self.flush_immutable_memtables().await
+    }
+
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
-        let wal_id_last_compacted = self.state.read().state().core.last_compacted_wal_sst_id;
-        let mut wal_sst_list = self
-            .table_store
-            .list_wal_ssts((wal_id_last_compacted + 1)..)
-            .await?
-            .iter()
-            .map(|wal_sst| wal_sst.id.unwrap_wal_id())
-            .collect::<Vec<_>>();
-        let mut last_sst_id = wal_id_last_compacted;
-        let mut last_tick = self.state.read().state().core.last_l0_clock_tick;
-        let sst_batch_size = 4;
+        let sst_iter_options = SstIteratorOptions {
+            max_fetch_tasks: 1,
+            blocks_to_fetch: 256,
+            cache_blocks: true,
+            eager_spawn: true,
+        };
 
-        let mut remaining_sst_list = Vec::new();
-        if wal_sst_list.len() > sst_batch_size {
-            remaining_sst_list = wal_sst_list.split_off(sst_batch_size);
+        let replay_options = WalReplayOptions {
+            sst_batch_size: 4,
+            min_memtable_bytes: self.options.l0_sst_size_bytes,
+            sst_iter_options,
+        };
+
+        let db_state = self.state.read().state().core().clone();
+        let mut replay_iter =
+            WalReplayIterator::new(&db_state, replay_options, Arc::clone(&self.table_store))
+                .await?;
+
+        while let Some(replayed_table) = replay_iter.next().await? {
+            self.replay_memtable(replayed_table)?;
         }
-        let mut remaining_sst_iter = remaining_sst_list.iter();
-
-        // Load the first N ssts and instantiate their iterators
-        let mut sst_iterators = VecDeque::new();
-        for sst_id in wal_sst_list {
-            let sst_iter = wal_replay::load_wal_iter(Arc::clone(&self.table_store), sst_id).await?;
-            sst_iterators.push_back((sst_iter, sst_id));
-        }
-
-        // load the last seq number from manifest, and use it as the starting seq number.
-        // there might have bigger seq number in the WALs, we'd update the last seq number
-        // to the max seq number while iterating over the WALs.
-        let mut last_seq = self.state.read().state().core.last_l0_seq;
-        while let Some((mut sst_iter, sst_id)) = sst_iterators.pop_front() {
-            last_sst_id = sst_id;
-            // iterate over the WAL SSTs in reverse order to ensure we recover in write-order
-            // buffer the WAL entries to bulk replay them into the memtable.
-            let mut wal_replay_buf = Vec::new();
-            while let Some(kv) = sst_iter.next_entry().await? {
-                wal_replay_buf.push(kv);
-            }
-            // Build the memtable
-            {
-                let mut guard = self.state.write();
-                for kv in wal_replay_buf.iter() {
-                    if let Some(ts) = kv.create_ts {
-                        last_tick = cmp::max(last_tick, ts);
-                    }
-
-                    last_seq = last_seq.max(kv.seq);
-                    guard.memtable().put(kv.clone());
-                }
-                self.maybe_freeze_memtable(&mut guard, sst_id)?;
-                if guard.state().core.next_wal_sst_id == sst_id {
-                    guard.increment_next_wal_id();
-                }
-            }
-
-            // feed the remaining SstIterators into the vecdeque
-            if let Some(sst_id) = remaining_sst_iter.next() {
-                let sst_iter =
-                    wal_replay::load_wal_iter(Arc::clone(&self.table_store), *sst_id).await?;
-                sst_iterators.push_back((sst_iter, *sst_id));
-            }
-        }
-
-        self.mono_clock.set_last_tick(last_tick)?;
-
-        // assert that we didn't have any gaps in the wal
-        assert_eq!(
-            last_sst_id + 1,
-            self.state.read().state().core.next_wal_sst_id
-        );
-
-        // restore the last seq number
-        self.state.write().update_last_seq(last_seq);
 
         Ok(())
     }
@@ -568,7 +526,7 @@ impl Db {
             DbInner::new(
                 options.clone(),
                 table_store.clone(),
-                manifest.db_state()?.clone(),
+                manifest.prepare_dirty()?,
                 wal_flush_tx,
                 memtable_flush_tx,
                 write_tx,
@@ -1151,7 +1109,6 @@ impl Db {
         if self.inner.wal_enabled() {
             self.inner.flush_wals().await
         } else {
-            self.inner.freeze_memtable()?;
             self.inner.flush_memtables().await
         }
     }
@@ -1735,7 +1692,7 @@ mod tests {
 
         let runtime = Runtime::new().unwrap();
         let mut db_options = test_db_options(0, 1024, None);
-        db_options.flush_interval = Duration::from_secs(5);
+        db_options.flush_interval = Some(Duration::from_secs(5));
         let db = runtime.block_on(build_database_from_table(&table, db_options, false));
 
         runner
@@ -2190,8 +2147,8 @@ mod tests {
             last_compacted = db_state.last_compacted_wal_sst_id
         }
 
-        let db_state = stored_manifest.refresh().await.unwrap();
-        let l0 = &db_state.l0;
+        let manifest = stored_manifest.refresh().await.unwrap();
+        let l0 = &manifest.core.l0;
         assert_eq!(l0.len(), 3);
         let sst_iter_options = SstIteratorOptions::default();
 
@@ -2639,7 +2596,7 @@ mod tests {
             1 + 2
         );
         assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 2);
-        assert_eq!(snapshot.state.core.next_wal_sst_id, next_wal_id);
+        assert_eq!(snapshot.state.core().next_wal_sst_id, next_wal_id);
         assert_eq!(
             reader.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -2681,7 +2638,7 @@ mod tests {
         let result = db.put(&key1, &value1).await;
         assert!(result.is_ok(), "Failed to write key1");
 
-        let flush_result = db.inner.flush_memtables().await;
+        let flush_result = db.inner.flush_immutable_memtables().await;
         assert!(flush_result.is_err());
         db.close().await.unwrap();
 
@@ -2716,7 +2673,7 @@ mod tests {
         );
         assert!(snapshot.state.imm_memtable.get(1).is_none());
 
-        assert_eq!(snapshot.state.core.next_wal_sst_id, 4);
+        assert_eq!(snapshot.state.core().next_wal_sst_id, 4);
         assert_eq!(
             db.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -2811,8 +2768,8 @@ mod tests {
         .await;
         info!(
             "1 l0: {} {}",
-            db.inner.state.read().state().core.l0.len(),
-            db.inner.state.read().state().core.compacted.len()
+            db.inner.state.read().state().core().l0.len(),
+            db.inner.state.read().state().core().compacted.len()
         );
         // write more l0s and wait for compaction
         for i in 0..4 {
@@ -2827,8 +2784,8 @@ mod tests {
         .await;
         info!(
             "2 l0: {} {}",
-            db.inner.state.read().state().core.l0.len(),
-            db.inner.state.read().state().core.compacted.len()
+            db.inner.state.read().state().core().l0.len(),
+            db.inner.state.read().state().core().compacted.len()
         );
         // write another l0
         db.put(&[b'a'; 32], &[128u8; 32]).await.unwrap();
@@ -2841,8 +2798,8 @@ mod tests {
         for i in 1..4 {
             info!(
                 "3 l0: {} {}",
-                db.inner.state.read().state().core.l0.len(),
-                db.inner.state.read().state().core.compacted.len()
+                db.inner.state.read().state().core().l0.len(),
+                db.inner.state.read().state().core().compacted.len()
             );
             let val = db.get([b'a' + i; 32]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[1u8 + i; 32])));
@@ -2907,7 +2864,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(db.inner.state.read().state().core.next_wal_sst_id, 2);
+        assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 2);
         db.put(b"1", b"1").await.unwrap();
         // assert that second open writes another empty wal.
         let db = Db::open_with_opts(
@@ -2917,7 +2874,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(db.inner.state.read().state().core.next_wal_sst_id, 4);
+        assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 4);
     }
 
     #[tokio::test]
@@ -2961,7 +2918,7 @@ mod tests {
         assert!(matches!(err, Err(SlateDBError::Fenced)));
 
         do_put(&db2, b"2", b"2").await.unwrap();
-        assert_eq!(db2.inner.state.read().state().core.next_wal_sst_id, 5);
+        assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
     }
 
     #[tokio::test]
@@ -3054,7 +3011,7 @@ mod tests {
 
         let db_options = DbOptions {
             wal_enabled: false,
-            flush_interval: Duration::from_secs(10),
+            flush_interval: Some(Duration::from_secs(10)),
             ..DbOptions::default()
         };
 
@@ -3218,9 +3175,9 @@ mod tests {
     ) -> CoreDbState {
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
-            let db_state = sm.refresh().await.unwrap();
-            if cond(db_state) {
-                return db_state.clone();
+            let manifest = sm.refresh().await.unwrap();
+            if cond(&manifest.core) {
+                return manifest.core.clone();
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -3263,7 +3220,7 @@ mod tests {
         ttl: Option<u64>,
     ) -> DbOptions {
         DbOptions {
-            flush_interval: Duration::from_millis(100),
+            flush_interval: Some(Duration::from_millis(100)),
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),

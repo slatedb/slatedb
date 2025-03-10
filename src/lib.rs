@@ -59,6 +59,8 @@ mod clone;
 mod compactor;
 mod compactor_executor;
 mod compactor_state;
+#[allow(dead_code)]
+mod comparable_range;
 mod db;
 mod db_common;
 mod db_iter;
@@ -72,7 +74,6 @@ mod flush;
 mod garbage_collector;
 mod iter;
 mod manifest;
-mod manifest_store;
 mod mem_table;
 mod mem_table_flush;
 mod merge_iterator;

@@ -4,7 +4,7 @@ use crate::db::DbInner;
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskShutdown;
-use crate::manifest_store::FenceableManifest;
+use crate::manifest::store::FenceableManifest;
 use crate::utils::{bg_task_result_into_err, spawn_bg_task};
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -33,9 +33,9 @@ pub(crate) struct MemtableFlusher {
 
 impl MemtableFlusher {
     pub(crate) async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
-        let core_state = self.manifest.refresh().await?;
+        self.manifest.refresh().await?;
         let mut wguard_state = self.db_inner.state.write();
-        wguard_state.merge_db_state(core_state);
+        wguard_state.merge_remote_manifest(self.manifest.prepare_dirty()?);
         Ok(())
     }
 
@@ -43,24 +43,24 @@ impl MemtableFlusher {
         &mut self,
         options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
-        let mut core = {
+        let mut dirty = {
             let rguard_state = self.db_inner.state.read();
-            rguard_state.state().core.clone()
+            rguard_state.state().manifest.clone()
         };
         let id = Uuid::new_v4();
         let checkpoint = self.manifest.new_checkpoint(id, options)?;
         let manifest_id = checkpoint.manifest_id;
-        core.checkpoints.push(checkpoint);
-        self.manifest.update_db_state(core).await?;
+        dirty.core.checkpoints.push(checkpoint);
+        self.manifest.update_manifest(dirty).await?;
         Ok(CheckpointCreateResult { id, manifest_id })
     }
 
     async fn write_manifest(&mut self) -> Result<(), SlateDBError> {
-        let core = {
+        let dirty = {
             let rguard_state = self.db_inner.state.read();
-            rguard_state.state().core.clone()
+            rguard_state.state().manifest.clone()
         };
-        self.manifest.update_db_state(core).await
+        self.manifest.update_manifest(dirty).await
     }
 
     pub(crate) async fn write_checkpoint_safely(
@@ -80,10 +80,10 @@ impl MemtableFlusher {
 
     pub(crate) async fn write_manifest_safely(&mut self) -> Result<(), SlateDBError> {
         loop {
-            self.load_manifest().await?;
             let result = self.write_manifest().await;
             if matches!(result, Err(SlateDBError::ManifestVersionExists)) {
                 error!("conflicting manifest version. retry write");
+                self.load_manifest().await?;
             } else {
                 return result;
             }
@@ -93,13 +93,13 @@ impl MemtableFlusher {
     async fn flush_imm_memtables_to_l0(&mut self) -> Result<(), SlateDBError> {
         while let Some(imm_memtable) = {
             let rguard = self.db_inner.state.read();
-            if rguard.state().core.l0.len() >= self.db_inner.options.l0_max_ssts {
+            if rguard.state().core().l0.len() >= self.db_inner.options.l0_max_ssts {
                 warn!(
                     "too many l0 files {} >= {}. Won't flush imm to l0",
-                    rguard.state().core.l0.len(),
+                    rguard.state().core().l0.len(),
                     self.db_inner.options.l0_max_ssts
                 );
-                rguard.state().core.log_db_runs();
+                rguard.state().core().log_db_runs();
                 None
             } else {
                 rguard.state().imm_memtable.back().cloned()
