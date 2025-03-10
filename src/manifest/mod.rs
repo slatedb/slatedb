@@ -1,12 +1,16 @@
-use crate::db_state::CoreDbState;
+use std::collections::HashSet;
+
+use crate::db_state::{CoreDbState, SsTableId};
 use crate::error::SlateDBError;
 use bytes::Bytes;
 use serde::Serialize;
 use uuid::Uuid;
 
+pub(crate) mod store;
+
 #[derive(Clone, Serialize, PartialEq, Debug)]
 pub(crate) struct Manifest {
-    pub(crate) parent: Option<ParentDb>,
+    pub(crate) external_dbs: Vec<ExternalDb>,
     pub(crate) core: CoreDbState,
     pub(crate) writer_epoch: u64,
     pub(crate) compactor_epoch: u64,
@@ -15,7 +19,7 @@ pub(crate) struct Manifest {
 impl Manifest {
     pub(crate) fn initial(core: CoreDbState) -> Self {
         Self {
-            parent: None,
+            external_dbs: vec![],
             core,
             writer_epoch: 0,
             compactor_epoch: 0,
@@ -25,11 +29,43 @@ impl Manifest {
     /// Create an initial manifest for a new clone. The returned
     /// manifest will set `initialized=false` to allow for additional
     /// initialization (such as copying wals).
-    pub(crate) fn cloned(parent_db: ParentDb, parent_manifest: &Manifest) -> Self {
-        let clone_core = parent_manifest.core.init_clone_db();
+    pub(crate) fn cloned(
+        parent_manifest: &Manifest,
+        parent_path: String,
+        source_checkpoint_id: Uuid,
+    ) -> Self {
+        let mut parent_external_sst_ids = HashSet::<SsTableId>::new();
+        let mut clone_external_dbs = vec![];
+
+        for parent_external_db in &parent_manifest.external_dbs {
+            parent_external_sst_ids.extend(&parent_external_db.sst_ids);
+            clone_external_dbs.push(ExternalDb {
+                path: parent_external_db.path.clone(),
+                source_checkpoint_id: parent_external_db.source_checkpoint_id,
+                final_checkpoint_id: Some(Uuid::new_v4()),
+                sst_ids: parent_external_db.sst_ids.clone(),
+            });
+        }
+
+        let parent_owned_sst_ids = parent_manifest
+            .core
+            .compacted
+            .iter()
+            .flat_map(|sr| sr.ssts.iter().map(|s| s.id))
+            .chain(parent_manifest.core.l0.iter().map(|s| s.id))
+            .filter(|id| !parent_external_sst_ids.contains(id))
+            .collect();
+
+        clone_external_dbs.push(ExternalDb {
+            path: parent_path,
+            source_checkpoint_id,
+            final_checkpoint_id: Some(Uuid::new_v4()),
+            sst_ids: parent_owned_sst_ids,
+        });
+
         Self {
-            parent: Some(parent_db),
-            core: clone_core,
+            external_dbs: clone_external_dbs,
+            core: parent_manifest.core.init_clone_db(),
             writer_epoch: parent_manifest.writer_epoch,
             compactor_epoch: parent_manifest.compactor_epoch,
         }
@@ -37,9 +73,11 @@ impl Manifest {
 }
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
-pub(crate) struct ParentDb {
+pub(crate) struct ExternalDb {
     pub(crate) path: String,
-    pub(crate) checkpoint_id: Uuid,
+    pub(crate) source_checkpoint_id: Uuid,
+    pub(crate) final_checkpoint_id: Option<Uuid>,
+    pub(crate) sst_ids: Vec<SsTableId>,
 }
 
 pub(crate) trait ManifestCodec: Send + Sync {
@@ -56,11 +94,10 @@ impl Manifest {
 
 #[cfg(test)]
 mod tests {
-    use crate::manifest_store::{ManifestStore, StoredManifest};
+    use crate::manifest::store::{ManifestStore, StoredManifest};
 
     use crate::config::CheckpointOptions;
     use crate::db_state::CoreDbState;
-    use crate::manifest::ParentDb;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -74,7 +111,7 @@ mod tests {
         let parent_manifest_store =
             Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
         let mut parent_manifest =
-            StoredManifest::create_new_db(Arc::clone(&parent_manifest_store), CoreDbState::new())
+            StoredManifest::create_new_db(parent_manifest_store, CoreDbState::new())
                 .await
                 .unwrap();
         let checkpoint = parent_manifest
@@ -82,23 +119,32 @@ mod tests {
             .await
             .unwrap();
 
-        let parent_link = ParentDb {
-            path: parent_path.to_string(),
-            checkpoint_id: checkpoint.id,
-        };
         let clone_path = Path::from("/tmp/test_clone");
         let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
         let clone_stored_manifest = StoredManifest::create_uninitialized_clone(
             Arc::clone(&clone_manifest_store),
-            parent_link.clone(),
             parent_manifest.manifest(),
+            parent_path.to_string(),
+            checkpoint.id,
         )
         .await
         .unwrap();
 
         let clone_manifest = clone_stored_manifest.manifest();
-        assert_eq!(Some(parent_link), clone_manifest.parent);
+
+        // There should be single external db, since parent is not deeply nested.
+        assert_eq!(clone_manifest.external_dbs.len(), 1);
+        assert_eq!(clone_manifest.external_dbs[0].path, parent_path.to_string());
+        assert_eq!(
+            clone_manifest.external_dbs[0].source_checkpoint_id,
+            checkpoint.id
+        );
+        assert!(clone_manifest.external_dbs[0].final_checkpoint_id.is_some());
+
+        // The clone manifest should not be initialized
         assert!(!clone_manifest.core.initialized);
+
+        // Check epoch has been carried over
         assert_eq!(
             parent_manifest.manifest().writer_epoch,
             clone_manifest.writer_epoch

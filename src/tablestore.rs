@@ -45,13 +45,10 @@ struct ReadOnlyObject {
 impl ReadOnlyBlob for ReadOnlyObject {
     async fn len(&self) -> Result<u64, SlateDBError> {
         let object_metadata = self.object_store.head(&self.path).await?;
-        Ok(object_metadata.size as u64)
+        Ok(object_metadata.size)
     }
 
     async fn read_range(&self, range: Range<u64>) -> Result<Bytes, SlateDBError> {
-        // This will go away when we upgrade object store, which now takes u64's
-        // See https://github.com/apache/arrow-rs/issues/5351
-        let range = range.start as usize..range.end as usize;
         let bytes = self.object_store.get_range(&self.path, range).await?;
         Ok(bytes)
     }
@@ -70,7 +67,7 @@ pub(crate) struct SstFileMetadata {
     pub(crate) location: Path,
     pub(crate) last_modified: chrono::DateTime<Utc>,
     #[allow(dead_code)]
-    pub(crate) size: usize,
+    pub(crate) size: u64,
 }
 
 impl TableStore {
@@ -83,23 +80,23 @@ impl TableStore {
         Self::new_with_fp_registry(
             object_store,
             sst_format,
-            root_path,
+            PathResolver::new(root_path),
             Arc::new(FailPointRegistry::new()),
             block_cache,
         )
     }
 
-    pub fn new_with_fp_registry<P: Into<Path>>(
+    pub fn new_with_fp_registry(
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
-        root_path: P,
+        path_resolver: PathResolver,
         fp_registry: Arc<FailPointRegistry>,
         block_cache: Option<Arc<dyn DbCache>>,
     ) -> Self {
         Self {
             object_store: object_store.clone(),
             sst_format,
-            path_resolver: PathResolver::new(root_path),
+            path_resolver,
             fp_registry,
             transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
                 Path::from("/"),
@@ -113,6 +110,12 @@ impl TableStore {
     /// The returned value will be rounded down to the nearest block.
     pub(crate) fn bytes_to_blocks(&self, bytes: usize) -> usize {
         bytes.div_ceil(self.sst_format.block_size)
+    }
+
+    pub(crate) async fn last_seen_wal_id(&self) -> Result<u64, SlateDBError> {
+        let wal_ssts = self.list_wal_ssts(..).await?;
+        let last_wal_id = wal_ssts.last().map(|md| md.id.unwrap_wal_id());
+        Ok(last_wal_id.unwrap_or(0))
     }
 
     pub(crate) async fn list_wal_ssts<R: RangeBounds<u64>>(
@@ -205,7 +208,10 @@ impl TableStore {
             .await
             .map_err(|e| match e {
                 object_store::Error::AlreadyExists { path: _, source: _ } => match id {
-                    SsTableId::Wal(_) => SlateDBError::Fenced,
+                    SsTableId::Wal(_) => {
+                        println!("Path {path} already exists");
+                        SlateDBError::Fenced
+                    }
                     SsTableId::Compacted(_) => SlateDBError::from(e),
                 },
                 _ => SlateDBError::from(e),

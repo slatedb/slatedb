@@ -1,12 +1,12 @@
 use crate::checkpoint::Checkpoint;
 use crate::config::GcExecutionMode::Periodic;
 use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions, GcExecutionMode};
-use crate::db_state::{CoreDbState, SsTableId};
+use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
 use crate::garbage_collector::GarbageCollectorMessage::*;
+use crate::manifest::store::{DirtyManifest, ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
-use crate::manifest_store::{ManifestStore, StoredManifest};
 use crate::stats::StatRegistry;
 use crate::tablestore::{SstFileMetadata, TableStore};
 use crate::utils::spawn_bg_thread;
@@ -431,10 +431,11 @@ impl GarbageCollectorOrchestrator {
 
     fn filter_expired_checkpoints(
         manifest: &StoredManifest,
-    ) -> Result<Option<CoreDbState>, SlateDBError> {
+    ) -> Result<Option<DirtyManifest>, SlateDBError> {
         let utc_now = Utc::now();
-        let mut db_state = manifest.db_state().clone();
-        let retained_checkpoints: Vec<Checkpoint> = db_state
+        let mut dirty = manifest.prepare_dirty();
+        let retained_checkpoints: Vec<Checkpoint> = dirty
+            .core
             .checkpoints
             .iter()
             .filter(|checkpoint| match checkpoint.expire_time {
@@ -444,19 +445,19 @@ impl GarbageCollectorOrchestrator {
             .cloned()
             .collect();
 
-        let updated_state = if db_state.checkpoints.len() != retained_checkpoints.len() {
-            db_state.checkpoints = retained_checkpoints;
-            Some(db_state)
+        let maybe_dirty = if dirty.core.checkpoints.len() != retained_checkpoints.len() {
+            dirty.core.checkpoints = retained_checkpoints;
+            Some(dirty)
         } else {
             None
         };
-        Ok(updated_state)
+        Ok(maybe_dirty)
     }
 
     async fn remove_expired_checkpoints(&self) -> Result<(), SlateDBError> {
         let mut stored_manifest = self.load_stored_manifest().await?;
         stored_manifest
-            .maybe_apply_db_state_update(Self::filter_expired_checkpoints)
+            .maybe_apply_manifest_update(Self::filter_expired_checkpoints)
             .await
     }
 
@@ -662,7 +663,7 @@ mod tests {
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
         garbage_collector::GarbageCollector,
-        manifest_store::{ManifestStore, StoredManifest},
+        manifest::store::{ManifestStore, StoredManifest},
         sst::SsTableFormat,
         tablestore::TableStore,
     };
@@ -682,7 +683,7 @@ mod tests {
 
         // Add a second manifest
         stored_manifest
-            .update_db_state(state.clone())
+            .update_manifest(stored_manifest.prepare_dirty())
             .await
             .unwrap();
 
@@ -714,15 +715,14 @@ mod tests {
         let (manifest_store, table_store, _) = build_objects();
 
         // Create a manifest
-        let state = CoreDbState::new();
         let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
+            StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
                 .await
                 .unwrap();
 
         // Add a second manifest
         stored_manifest
-            .update_db_state(state.clone())
+            .update_manifest(stored_manifest.prepare_dirty())
             .await
             .unwrap();
 
@@ -755,11 +755,11 @@ mod tests {
         stored_manifest: &mut StoredManifest,
         expire_time: Option<SystemTime>,
     ) -> Result<Uuid, SlateDBError> {
-        let mut updated_state = stored_manifest.db_state().clone();
+        let mut dirty = stored_manifest.prepare_dirty();
         let checkpoint = new_checkpoint(stored_manifest.id(), expire_time);
         let checkpoint_id = checkpoint.id;
-        updated_state.checkpoints.push(checkpoint);
-        stored_manifest.update_db_state(updated_state).await?;
+        dirty.core.checkpoints.push(checkpoint);
+        stored_manifest.update_manifest(dirty).await?;
         Ok(checkpoint_id)
     }
 
@@ -767,15 +767,16 @@ mod tests {
         checkpoint_id: Uuid,
         stored_manifest: &mut StoredManifest,
     ) -> Result<(), SlateDBError> {
-        let mut updated_state = stored_manifest.db_state().clone();
-        let updated_checkpoints = updated_state
+        let mut dirty = stored_manifest.prepare_dirty();
+        let updated_checkpoints = dirty
+            .core
             .checkpoints
             .iter()
             .filter(|checkpoint| checkpoint.id != checkpoint_id)
             .cloned()
             .collect();
-        updated_state.checkpoints = updated_checkpoints;
-        stored_manifest.update_db_state(updated_state).await?;
+        dirty.core.checkpoints = updated_checkpoints;
+        stored_manifest.update_manifest(dirty).await?;
         Ok(())
     }
 
@@ -899,15 +900,14 @@ mod tests {
         let (manifest_store, table_store, local_object_store) = build_objects();
 
         // Create a manifest
-        let state = CoreDbState::new();
         let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
+            StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
                 .await
                 .unwrap();
 
         // Add a second manifest
         stored_manifest
-            .update_db_state(state.clone())
+            .update_manifest(stored_manifest.prepare_dirty())
             .await
             .unwrap();
 
@@ -1025,14 +1025,11 @@ mod tests {
         assert_eq!(1, stored_manifest.id());
 
         // Manifest 2 with checkpoint referencing Manifest 1
-        let mut updated_state = state.clone();
-        updated_state.last_compacted_wal_sst_id = 3;
-        updated_state.next_wal_sst_id = 4;
-        updated_state.checkpoints.push(new_checkpoint(1, None));
-        stored_manifest
-            .update_db_state(updated_state)
-            .await
-            .unwrap();
+        let mut dirty = stored_manifest.prepare_dirty();
+        dirty.core.last_compacted_wal_sst_id = 3;
+        dirty.core.next_wal_sst_id = 4;
+        dirty.core.checkpoints.push(new_checkpoint(1, None));
+        stored_manifest.update_manifest(dirty).await.unwrap();
         assert_eq!(2, stored_manifest.id());
 
         // All tables are eligible for deletion
@@ -1288,10 +1285,10 @@ mod tests {
             .unwrap();
 
         // Now drop the active tables from the checkpoint
-        let mut state = stored_manifest.db_state().clone();
-        state.l0.truncate(1);
-        state.compacted.truncate(1);
-        stored_manifest.update_db_state(state).await.unwrap();
+        let mut dirty = stored_manifest.prepare_dirty();
+        dirty.core.l0.truncate(1);
+        dirty.core.compacted.truncate(1);
+        stored_manifest.update_manifest(dirty).await.unwrap();
 
         // Start the garbage collector
         run_gc_once(manifest_store.clone(), table_store.clone()).await;
