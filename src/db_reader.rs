@@ -768,7 +768,7 @@ mod tests {
     use crate::db_reader::{DbReader, DbReaderOptions};
     use crate::db_state::CoreDbState;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::manifest::{Manifest, ParentDb};
+    use crate::manifest::Manifest;
     use crate::test_utils::TokioClock;
     use crate::{test_utils, Db, SlateDBError};
     use bytes::Bytes;
@@ -871,14 +871,14 @@ mod tests {
         let manifest_store = Arc::new(ManifestStore::new(&path, Arc::clone(&object_store)));
 
         let parent_manifest = Manifest::initial(CoreDbState::new());
-        let parent_db = ParentDb {
-            path: "/tmp/parent_store".to_string(),
-            checkpoint_id: Uuid::new_v4(),
-        };
+        let parent_path = "/tmp/parent_store".to_string();
+        let source_checkpoint_id = Uuid::new_v4();
+
         let _ = StoredManifest::create_uninitialized_clone(
             Arc::clone(&manifest_store),
-            parent_db,
             &parent_manifest,
+            parent_path,
+            source_checkpoint_id,
         )
         .await
         .unwrap();

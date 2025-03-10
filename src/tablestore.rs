@@ -13,7 +13,7 @@ use object_store::ObjectStore;
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
-use crate::db_cache::{CachedEntry, DbCache, GetTarget};
+use crate::db_cache::{CachedEntry, DbCache};
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
@@ -63,13 +63,10 @@ struct ReadOnlyObject {
 impl ReadOnlyBlob for ReadOnlyObject {
     async fn len(&self) -> Result<u64, SlateDBError> {
         let object_metadata = self.object_store.head(&self.path).await?;
-        Ok(object_metadata.size as u64)
+        Ok(object_metadata.size)
     }
 
     async fn read_range(&self, range: Range<u64>) -> Result<Bytes, SlateDBError> {
-        // This will go away when we upgrade object store, which now takes u64's
-        // See https://github.com/apache/arrow-rs/issues/5351
-        let range = range.start as usize..range.end as usize;
         let bytes = self.object_store.get_range(&self.path, range).await?;
         Ok(bytes)
     }
@@ -88,7 +85,7 @@ pub(crate) struct SstFileMetadata {
     pub(crate) location: Path,
     pub(crate) last_modified: chrono::DateTime<Utc>,
     #[allow(dead_code)]
-    pub(crate) size: usize,
+    pub(crate) size: u64,
 }
 
 impl TableStore {
@@ -101,23 +98,23 @@ impl TableStore {
         Self::new_with_fp_registry(
             object_store,
             sst_format,
-            root_path,
+            PathResolver::new(root_path),
             Arc::new(FailPointRegistry::new()),
             block_cache,
         )
     }
 
-    pub fn new_with_fp_registry<P: Into<Path>>(
+    pub fn new_with_fp_registry(
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
-        root_path: P,
+        path_resolver: PathResolver,
         fp_registry: Arc<FailPointRegistry>,
         block_cache: Option<Arc<dyn DbCache>>,
     ) -> Self {
         Self {
             object_store: object_store.clone(),
             sst_format,
-            path_resolver: PathResolver::new(root_path),
+            path_resolver,
             fp_registry,
             transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
                 Path::from("/"),
@@ -325,12 +322,9 @@ impl TableStore {
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(filter) = cache
-                .get(
-                    (handle.id, handle.info.filter_offset).into(),
-                    GetTarget::BloomFilter,
-                )
+                .get_filter((handle.id, handle.info.filter_offset).into())
                 .await
-                .and_then(|entry| entry.bloom_filter())
+                .and_then(|e| e.bloom_filter())
             {
                 return Ok(Some(filter));
             }
@@ -360,12 +354,9 @@ impl TableStore {
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(index) = cache
-                .get(
-                    (handle.id, handle.info.index_offset).into(),
-                    GetTarget::SsTableIndex,
-                )
+                .get_index((handle.id, handle.info.index_offset).into())
                 .await
-                .and_then(|entry| entry.sst_index())
+                .and_then(|e| e.sst_index())
             {
                 return Ok(index);
             }
@@ -435,7 +426,7 @@ impl TableStore {
                 let block_meta = index_borrow.block_meta().get(block_num);
                 let offset = block_meta.offset();
                 cache
-                    .get((handle.id, offset).into(), GetTarget::Block)
+                    .get_block((handle.id, offset).into())
                     .await
                     .and_then(|entry| entry.block())
             }))
@@ -644,7 +635,7 @@ mod tests {
     use proptest::proptest;
     use ulid::Ulid;
 
-    use crate::db_cache::{DbCache, DbCacheWrapper, GetTarget};
+    use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -793,9 +784,9 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset).into(), GetTarget::Block)
+                    .get_block((handle.id, offset).into())
                     .await
-                    .is_some_and(|entry| entry.block().is_some()),
+                    .is_some(),
                 "Block with offset {} should be in cache",
                 offset
             );
@@ -823,9 +814,9 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset).into(), GetTarget::Block)
+                    .get_block((handle.id, offset).into())
                     .await
-                    .is_some_and(|entry| entry.block().is_some()),
+                    .is_some(),
                 "Block with offset {} should be in cache after partial hit",
                 offset
             );
@@ -847,9 +838,9 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get((handle.id, offset).into(), GetTarget::Block)
+                    .get_block((handle.id, offset).into())
                     .await
-                    .is_some_and(|entry| entry.block().is_some()),
+                    .is_some(),
                 "Block with offset {} should be in cache after SST emptying",
                 offset
             );

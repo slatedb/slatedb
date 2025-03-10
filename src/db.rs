@@ -20,6 +20,7 @@
 //! }
 //! ```
 
+use std::collections::HashMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -49,6 +50,7 @@ use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{DirtyManifest, FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushMsg;
+use crate::paths::PathResolver;
 use crate::reader::{Reader, ReaderStateSupplier};
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIteratorOptions;
@@ -491,18 +493,32 @@ impl Db {
             }
         };
 
+        let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
+        let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
+
+        let external_ssts = match &latest_manifest {
+            Some(latest_stored_manifest) => {
+                let mut external_ssts = HashMap::new();
+                for external_db in &latest_stored_manifest.manifest().external_dbs {
+                    for id in &external_db.sst_ids {
+                        external_ssts.insert(*id, external_db.path.clone().into());
+                    }
+                }
+                external_ssts
+            }
+            None => HashMap::new(),
+        };
+
+        let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             maybe_cached_object_store.clone(),
             sst_format.clone(),
-            path.clone(),
+            path_resolver.clone(),
             fp_registry.clone(),
             options.block_cache.as_ref().map(|c| {
                 Arc::new(DbCacheWrapper::new(c.clone(), stat_registry.as_ref())) as Arc<dyn DbCache>
             }),
         ));
-
-        let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
-        let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
 
         // get the next wal id before writing manifest.
         let wal_id_last_compacted = match &latest_manifest {
@@ -548,7 +564,7 @@ impl Db {
             let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
                 object_store.clone(),
                 sst_format,
-                path.clone(),
+                path_resolver,
                 fp_registry.clone(),
                 None,
             ));
