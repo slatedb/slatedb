@@ -18,6 +18,8 @@ use crate::types::RowEntry;
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
 
+pub(crate) const SST_FORMAT_VERSION: u16 = 0x0001;
+
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
     pub(crate) block_size: usize,
@@ -45,14 +47,23 @@ impl SsTableFormat {
         obj: &impl ReadOnlyBlob,
     ) -> Result<SsTableInfo, SlateDBError> {
         let len = obj.len().await?;
-        if len <= 8 {
+        if len <= 10 {
+            // 8 bytes for the metadata offset + 2 bytes for the version
             return Err(SlateDBError::EmptySSTable);
         }
+        let version = obj.read_range(len - 2..len).await?.get_u16();
+        // TODO: Support older and newer versions
+        if version != SST_FORMAT_VERSION {
+            return Err(SlateDBError::InvalidVersion {
+                expected_version: SST_FORMAT_VERSION,
+                actual_version: version,
+            });
+        }
         // Get the size of the metadata
-        let sst_metadata_offset_range = (len - 8)..len;
+        let sst_metadata_offset_range = (len - 10)..(len - 2);
         let sst_metadata_offset = obj.read_range(sst_metadata_offset_range).await?.get_u64();
         // Get the metadata. Last 8 bytes are the offset of SsTableInfo
-        let sst_metadata_range = sst_metadata_offset..len - 8;
+        let sst_metadata_range = sst_metadata_offset..len - 10;
         let sst_metadata_bytes = obj.read_range(sst_metadata_range).await?;
         SsTableInfo::decode(sst_metadata_bytes, &*self.sst_codec)
     }
@@ -519,6 +530,8 @@ impl EncodedSsTableBuilder<'_> {
     /// +---------------------------------------------------+
     /// |             8-byte Metadata Offset                |
     /// +---------------------------------------------------+
+    /// |                 2-byte Version                    |
+    /// +---------------------------------------------------+
     /// * Only present if num_keys >= min_filter_keys.
     ///
     pub fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
@@ -574,6 +587,7 @@ impl EncodedSsTableBuilder<'_> {
         // write the metadata offset at the end of the file. FlatBuffer internal
         // representation is not intended to be used directly.
         buf.put_u64(meta_offset);
+        buf.put_u16(SST_FORMAT_VERSION);
         self.blocks.push_back(Bytes::from(buf));
         Ok(EncodedSsTable {
             info,
