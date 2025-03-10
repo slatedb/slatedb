@@ -487,7 +487,7 @@ mod tests {
     use ulid::Ulid;
     use uuid::Uuid;
 
-    use super::MANIFEST_FORMAT_VERSION;
+    use super::{manifest_generated, MANIFEST_FORMAT_VERSION};
 
     #[test]
     fn test_should_encode_decode_manifest_checkpoints() {
@@ -568,24 +568,49 @@ mod tests {
         let codec = FlatBufferManifestCodec {};
 
         // Create a valid manifest with current version
-        let mut bytes = BytesMut::with_capacity(4);
+        let mut fbb = flatbuffers::FlatBufferBuilder::new();
+
+        // Create minimal required fields for ManifestV1
+        let l0 = fbb.create_vector::<flatbuffers::WIPOffset<_>>(&[]);
+        let compacted = fbb.create_vector::<flatbuffers::WIPOffset<_>>(&[]);
+        let checkpoints = fbb.create_vector::<flatbuffers::WIPOffset<_>>(&[]);
+
+        let manifest = manifest_generated::ManifestV1::create(
+            &mut fbb,
+            &manifest_generated::ManifestV1Args {
+                manifest_id: 0,
+                external_dbs: None,
+                initialized: false,
+                writer_epoch: 0,
+                compactor_epoch: 0,
+                wal_id_last_compacted: 0,
+                wal_id_last_seen: 0,
+                l0_last_compacted: None,
+                l0: Some(l0),
+                compacted: Some(compacted),
+                checkpoints: Some(checkpoints),
+                last_l0_clock_tick: 0,
+                last_l0_seq: 0,
+            },
+        );
+        fbb.finish(manifest, None);
+        let fb_data = fbb.finished_data();
+
+        let mut bytes = BytesMut::with_capacity(2 + fb_data.len());
         bytes.put_u16(MANIFEST_FORMAT_VERSION);
-        bytes.put_slice(&[0, 0]); // Minimal valid flatbuffer data
+        bytes.put_slice(fb_data);
         let valid_bytes = bytes.freeze();
 
         // Test valid version
         match codec.decode(&valid_bytes) {
-            Err(SlateDBError::InvalidVersion { .. }) => {
-                panic!("Expected current version in manifest")
-            }
-            Err(_) => { /* Expected error due to invalid flatbuffer data */ }
-            Ok(_) => panic!("Should fail due to invalid flatbuffer data"),
+            Ok(_) => { /* Expected success with valid flatbuffer data */ }
+            Err(e) => panic!("Should succeed with valid flatbuffer data: {:?}", e),
         }
 
         // Test invalid version
-        let mut bytes = BytesMut::with_capacity(4);
+        let mut bytes = BytesMut::with_capacity(2 + fb_data.len());
         bytes.put_u16(MANIFEST_FORMAT_VERSION + 1);
-        bytes.put_slice(&[0, 0]); // Minimal valid flatbuffer data
+        bytes.put_slice(fb_data);
         let invalid_bytes = bytes.freeze();
 
         match codec.decode(&invalid_bytes) {
