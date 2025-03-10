@@ -107,6 +107,7 @@ pub enum SlateDBError {
     #[error("Merge Operator error: {0}")]
     MergeOperatorError(#[from] MergeOperatorError),
 
+    // todo add Path as 2nd parameter
     #[error("Checkpoint {0} missing")]
     CheckpointMissing(Uuid),
 

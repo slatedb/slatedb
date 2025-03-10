@@ -1,13 +1,3 @@
-table CompactedSstId {
-    high: uint64;
-    low: uint64;
-}
-
-table CompactedSsTable {
-    id: CompactedSstId (required);
-    info: SsTableInfo (required);
-}
-
 enum CompressionFormat: byte {
     None,
     Snappy,

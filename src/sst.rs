@@ -597,9 +597,11 @@ mod tests {
 
     use super::*;
     use crate::block_iterator::BlockIterator;
+    use crate::bytes_range::BytesRange;
     use crate::db_state::SsTableId;
     use crate::filter::filter_hash;
     use crate::iter::IterationOrder::Ascending;
+    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, gen_attrs, gen_empty_attrs};
 
@@ -1020,6 +1022,44 @@ mod tests {
             format.validate_checksum(corrupted_bytes.into()),
             Err(SlateDBError::ChecksumMismatch)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_sst_handle_with_visible_ranges() -> Result<(), SlateDBError> {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 1024,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(object_store, format, root_path, None));
+        let mut builder = table_store.table_builder();
+        for key in 'a'..='z' {
+            let key_bytes = [key as u8];
+            builder.add_value(&key_bytes, b"value", gen_empty_attrs())?;
+        }
+        let encoded = builder.build()?;
+
+        let sst_id = SsTableId::Wal(0);
+        let sst_handle = table_store
+            .write_sst(&sst_id, encoded)
+            .await?
+            .with_visible_range(BytesRange::from_ref("c"..="f"));
+
+        let mut iter =
+            SstIterator::new_owned(.., sst_handle, table_store, SstIteratorOptions::default())
+                .await?;
+
+        Ok(assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"c", b"value", 0),
+                RowEntry::new_value(b"d", b"value", 0),
+                RowEntry::new_value(b"e", b"value", 0),
+                RowEntry::new_value(b"f", b"value", 0),
+            ],
+        )
+        .await)
     }
 
     struct BytesBlob {
