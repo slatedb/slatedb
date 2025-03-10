@@ -18,7 +18,7 @@ use crate::types::RowEntry;
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
 
-pub(crate) const SST_FORMAT_VERSION: u16 = 0x0001;
+pub(crate) const SST_FORMAT_VERSION: u16 = 1;
 
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
@@ -1034,6 +1034,64 @@ mod tests {
             format.validate_checksum(corrupted_bytes.into()),
             Err(SlateDBError::ChecksumMismatch)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_version_checking() {
+        let format = SsTableFormat::default();
+
+        // Create a mock SSTable with correct version
+        let mut valid_sst = Vec::new();
+        valid_sst.extend_from_slice(&[1u8; 20]); // Some dummy data
+        valid_sst.put_u64(10); // Metadata offset
+        valid_sst.put_u16(SST_FORMAT_VERSION); // Correct version
+
+        // Create a mock SSTable with incorrect version
+        let mut invalid_sst = Vec::new();
+        invalid_sst.extend_from_slice(&[1u8; 20]); // Some dummy data
+        invalid_sst.put_u64(10); // Metadata offset
+        invalid_sst.put_u16(SST_FORMAT_VERSION + 1); // Incorrect version
+
+        // Create a mock empty SSTable
+        let empty_sst = Vec::new();
+
+        // Test valid version
+        let valid_blob = BytesBlob {
+            bytes: Bytes::from(valid_sst),
+        };
+        let result = format.read_info(&valid_blob).await;
+        match result {
+            Ok(_) => {
+                panic!("Expected error due to invalid manifest bytes (we're using dummy data)")
+            }
+            Err(e) => assert!(
+                !matches!(e, SlateDBError::InvalidVersion { .. }),
+                "Didn't expect version error, expected invalid manifest data"
+            ),
+        }
+
+        // Test invalid version
+        let invalid_blob = BytesBlob {
+            bytes: Bytes::from(invalid_sst),
+        };
+        let result = format.read_info(&invalid_blob).await;
+        match result {
+            Err(SlateDBError::InvalidVersion {
+                expected_version,
+                actual_version,
+            }) => {
+                assert_eq!(expected_version, SST_FORMAT_VERSION);
+                assert_eq!(actual_version, SST_FORMAT_VERSION + 1);
+            }
+            _ => panic!("Expected InvalidVersion error"),
+        }
+
+        // Test empty SSTable
+        let empty_blob = BytesBlob {
+            bytes: Bytes::from(empty_sst),
+        };
+        let result = format.read_info(&empty_blob).await;
+        assert!(matches!(result, Err(SlateDBError::EmptySSTable)));
     }
 
     struct BytesBlob {
