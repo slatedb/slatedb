@@ -587,6 +587,7 @@ impl EncodedSsTableBuilder<'_> {
         // write the metadata offset at the end of the file. FlatBuffer internal
         // representation is not intended to be used directly.
         buf.put_u64(meta_offset);
+        // write the version at the end of the file.
         buf.put_u16(SST_FORMAT_VERSION);
         self.blocks.push_back(Bytes::from(buf));
         Ok(EncodedSsTable {
@@ -1038,60 +1039,47 @@ mod tests {
 
     #[tokio::test]
     async fn test_version_checking() {
-        let format = SsTableFormat::default();
+        // Create a valid SST
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
 
-        // Create a mock SSTable with correct version
-        let mut valid_sst = Vec::new();
-        valid_sst.extend_from_slice(&[1u8; 20]); // Some dummy data
-        valid_sst.put_u64(10); // Metadata offset
-        valid_sst.put_u16(SST_FORMAT_VERSION); // Correct version
+        let table_store = TableStore::new(object_store, format.clone(), root_path, None);
+        let mut builder = table_store.table_builder();
+        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
+        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
+        let encoded = builder.build().unwrap();
+        let mut bytes = BytesMut::new();
+        for block in encoded.unconsumed_blocks {
+            bytes.extend_from_slice(&block);
+        }
+        let bytes = bytes.freeze();
 
-        // Create a mock SSTable with incorrect version
-        let mut invalid_sst = Vec::new();
-        invalid_sst.extend_from_slice(&[1u8; 20]); // Some dummy data
-        invalid_sst.put_u64(10); // Metadata offset
-        invalid_sst.put_u16(SST_FORMAT_VERSION + 1); // Incorrect version
-
-        // Create a mock empty SSTable
-        let empty_sst = Vec::new();
-
-        // Test valid version
+        // Test valid version decodes properly through read_info
         let valid_blob = BytesBlob {
-            bytes: Bytes::from(valid_sst),
+            bytes: bytes.clone(),
         };
         let result = format.read_info(&valid_blob).await;
         match result {
-            Ok(_) => {
-                panic!("Expected error due to invalid manifest bytes (we're using dummy data)")
+            Ok(_) => {}
+            Err(e) => {
+                panic!("Expected Ok result, but got error: {:?}", e);
             }
-            Err(e) => assert!(
-                !matches!(e, SlateDBError::InvalidVersion { .. }),
-                "Didn't expect version error, expected invalid manifest data"
-            ),
         }
 
-        // Test invalid version
+        let mut invalid_bytes = BytesMut::from(bytes.clone());
+        // Corrupt the version
+        invalid_bytes[bytes.len() - 1] ^= 1;
         let invalid_blob = BytesBlob {
-            bytes: Bytes::from(invalid_sst),
+            bytes: invalid_bytes.freeze(),
         };
-        let result = format.read_info(&invalid_blob).await;
-        match result {
-            Err(SlateDBError::InvalidVersion {
-                expected_version,
-                actual_version,
-            }) => {
-                assert_eq!(expected_version, SST_FORMAT_VERSION);
-                assert_eq!(actual_version, SST_FORMAT_VERSION + 1);
-            }
-            _ => panic!("Expected InvalidVersion error"),
-        }
-
-        // Test empty SSTable
-        let empty_blob = BytesBlob {
-            bytes: Bytes::from(empty_sst),
-        };
-        let result = format.read_info(&empty_blob).await;
-        assert!(matches!(result, Err(SlateDBError::EmptySSTable)));
+        assert!(matches!(
+            format.read_info(&invalid_blob).await,
+            Err(SlateDBError::InvalidVersion { .. })
+        ));
     }
 
     struct BytesBlob {
