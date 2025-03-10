@@ -168,7 +168,8 @@ impl<'a> SstIterator<'a> {
         if let Some(visible_range) = &table.visible_range {
             view_range = view_range
                 .intersect(visible_range)
-                .expect("Provided range is outside of table's visible range");
+                .unwrap_or_else(BytesRange::empty);
+            // .expect("Provided range is outside of table's visible range");
         }
         let view = SstView::Owned(Box::new(table), view_range);
         Self::new(view, table_store.clone(), options).await
@@ -184,7 +185,8 @@ impl<'a> SstIterator<'a> {
         if let Some(visible_range) = &table.visible_range {
             view_range = view_range
                 .intersect(visible_range)
-                .expect("Provided range is outside of table's visible range");
+                .unwrap_or_else(BytesRange::empty);
+            // .expect("Provided range is outside of table's visible range");
         }
         let view = SstView::Borrowed(table, view_range);
         Self::new(view, table_store.clone(), options).await

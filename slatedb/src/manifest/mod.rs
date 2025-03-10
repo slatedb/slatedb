@@ -1,5 +1,7 @@
+use std::cmp::{max, min};
 use std::collections::HashSet;
 use std::fmt::Debug;
+use std::ops::Bound;
 
 use crate::bytes_range::BytesRange;
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId};
@@ -112,86 +114,78 @@ impl Manifest {
         filtered_handles
     }
 
-    // /// Compacts a set of projections into a minimal set of non-overlapping projections.
-    // ///
-    // /// Given a set of projections, this method will merge any overlapping projections into a single
-    // /// projection. The result will be a set of non-overlapping projections covering the same range as
-    // /// the input projections.
-    // ///
-    // /// For example, given the following projections:
-    // ///
-    // /// | Range          | SST IDs |
-    // /// | -------------- | ------- |
-    // /// | [0, 10)        | [A, B]  |
-    // /// | [10, 15)       | [B, C]  |
-    // /// | [12, 20)       | [C, D]  |
-    // /// | [30, 40)       | [D, F]  |
-    // ///
-    // /// The resulting compacted projections will be:
-    // ///
-    // /// | Range          | SST IDs      |
-    // /// | -------------- | ------------ |
-    // /// | [0, 20)        | [A, B, C, D] |
-    // /// | [30, 40)       | [D, F]       |
-    // ///
-    // /// Note that the order of the SST IDs in the resulting projections does not matter.
-    // ///
-    // /// This method is idempotent, meaning that calling it multiple times on the same input will
-    // /// result in the same output.
-    // pub(crate) fn compact_projections(
-    //     projections: &BTreeMap<BytesRange, Vec<SsTableId>>,
-    // ) -> Vec<Projection> {
-    //     let mut final_projections = vec![];
+    pub(crate) fn union(manifests: Vec<Manifest>) -> Manifest {
+        if manifests.len() == 1 {
+            manifests[0].clone()
+        } else {
+            let mut ranges = vec![];
+            for manifest in &manifests {
+                let range = Self::range(manifest);
+                if let Some(range) = range {
+                    ranges.push((manifest, range));
+                } else {
+                    tracing::warn!("Manifest {:?} has no SST files", manifest);
+                }
+            }
+            ranges.sort_by_key(|(_, range)| range.comparable_start_bound().cloned());
 
-    //     let mut candidate_range: Option<BytesRange> = None;
-    //     let mut candidate_ssts_unordered = HashSet::new();
-    //     let mut candidate_ssts_ordered: Vec<SsTableId> = vec![];
+            // Ensure manifests are non-overlapping
+            let mut previous_range = None;
+            for (_, range) in ranges.iter() {
+                if let Some(previous_range) = previous_range {
+                    if range.intersect(previous_range).is_some() {
+                        unreachable!("Overlapping ranges found");
+                    }
+                }
+                previous_range = Some(range);
+            }
 
-    //     macro_rules! reset_candidate {
-    //         ($range: expr, $sst_ids: expr) => {
-    //             candidate_ssts_unordered.clear();
-    //             candidate_ssts_ordered.clear();
-    //             candidate_range = Some($range);
-    //             candidate_ssts_unordered.extend($sst_ids);
-    //             candidate_ssts_ordered.extend($sst_ids);
-    //         };
-    //     }
+            // Now we can zip the manifests together
+            let mut external_dbs = vec![];
+            let mut core = CoreDbState::new();
 
-    //     for (current_range, current_sst_ids) in projections.iter() {
-    //         if let Some(range) = candidate_range {
-    //             if let Some(compacted_range) = range.union(current_range) {
-    //                 candidate_range = Some(compacted_range);
-    //                 for sst_id in current_sst_ids {
-    //                     if candidate_ssts_unordered.insert(*sst_id) {
-    //                         candidate_ssts_ordered.push(*sst_id);
-    //                     }
-    //                 }
-    //             } else {
-    //                 // The current range does not overlap with the candidate range, so we promote
-    //                 // the candidate to the final projections and create a new candidate.
-    //                 final_projections.push(Projection {
-    //                     visible_range: range,
-    //                     sst_ids: candidate_ssts_ordered.clone(),
-    //                 });
-    //                 reset_candidate!(current_range.clone(), current_sst_ids);
-    //             }
-    //         } else {
-    //             // The current range is the first range, so we set it as the candidate.
-    //             reset_candidate!(current_range.clone(), current_sst_ids);
-    //         }
-    //     }
-    //     // Promote the final candidate, if any.
-    //     if let Some(range) = candidate_range {
-    //         final_projections.push(Projection {
-    //             visible_range: range,
-    //             sst_ids: candidate_ssts_ordered.clone(),
-    //         });
-    //     }
-    //     final_projections
-    // }
+            for (manifest, _) in ranges {
+                // First, we need to add all the external dbs
+                external_dbs.extend_from_slice(&manifest.external_dbs);
+                // Then, we can add all the l0 ssts
+                for sst in &manifest.core.l0 {
+                    core.l0.push_back(sst.clone());
+                }
+                // Finally, we can add all the sorted runs
+                for sorted_run in &manifest.core.compacted {
+                    core.compacted.push(sorted_run.clone());
+                }
+            }
 
-    pub(crate) fn merged(_manifests: Vec<Manifest>) -> Manifest {
-        todo!()
+            Self {
+                external_dbs,
+                core,
+                writer_epoch: 0,
+                compactor_epoch: 0,
+            }
+        }
+    }
+
+    fn range(manifest: &Manifest) -> Option<BytesRange> {
+        let mut start_bound = None;
+        let mut end_bound = None;
+        for sst in &manifest.core.l0 {
+            let range = sst.compacted_effective_range();
+            start_bound = start_bound
+                .map(|b| min(b, range.comparable_start_bound()))
+                .or_else(|| Some(range.comparable_start_bound()));
+            end_bound = end_bound
+                .map(|b| max(b, range.comparable_end_bound()))
+                .or_else(|| Some(range.comparable_end_bound()));
+        }
+        match (start_bound, end_bound) {
+            (Some(start), Some(end)) => {
+                let start: Bound<&Bytes> = start.into();
+                let end: Bound<&Bytes> = end.into();
+                Some(BytesRange::new(start.cloned(), end.cloned()))
+            }
+            (_, _) => None,
+        }
     }
 }
 
@@ -228,7 +222,7 @@ mod tests {
     use object_store::ObjectStore;
     use rstest::rstest;
     use std::collections::HashMap;
-    use std::ops::{Range, RangeBounds};
+    use std::ops::{Bound, Range, RangeBounds};
     use std::sync::Arc;
     use ulid::Ulid;
 
@@ -403,80 +397,150 @@ mod tests {
         },
     })]
     fn test_projected(#[case] test_case: ProjectionTestCase) {
-        let mut core = CoreDbState::new();
-
         let mut sst_ids = HashMap::new();
-        for entry in test_case.existing_manifest.l0 {
+        let initial_manifest = build_manifest(&test_case.existing_manifest, |alias| {
             let sst_id = SsTableId::Compacted(Ulid::new());
-            if let Some(_) = sst_ids.insert(entry.sst_alias, sst_id) {
-                unreachable!("duplicate sst alias: {}", entry.sst_alias);
+            if let Some(_) = sst_ids.insert(alias.to_string(), sst_id) {
+                unreachable!("duplicate sst alias")
             }
-            core.l0.push_back(SsTableHandle::new_compacted(
-                sst_id,
-                SsTableInfo {
-                    first_key: Some(entry.first_key),
-                    ..SsTableInfo::default()
-                },
-                entry.visible_range.clone(),
-            ));
-        }
-        for (idx, sorted_run) in test_case.existing_manifest.sorted_runs.iter().enumerate() {
-            let mut sorted_run_ssts = Vec::new();
-            for entry in sorted_run {
-                let sst_id = SsTableId::Compacted(Ulid::new());
-                if let Some(_) = sst_ids.insert(entry.sst_alias, sst_id) {
-                    unreachable!("duplicate sst alias")
-                }
-                sorted_run_ssts.push(SsTableHandle::new_compacted(
-                    sst_id,
-                    SsTableInfo {
-                        first_key: Some(entry.first_key.clone()),
-                        ..SsTableInfo::default()
-                    },
-                    entry.visible_range.clone(),
-                ));
-            }
-            core.compacted.push(SortedRun {
-                id: idx as u32,
-                ssts: sorted_run_ssts,
-            });
-        }
-
-        let initial_manifest = Manifest::initial(core);
+            sst_id
+        });
 
         let projected = Manifest::projected(
             &initial_manifest,
             BytesRange::from_ref(test_case.visible_range),
         );
 
-        let expected_l0: Vec<SsTableHandle> = test_case
-            .expected_manifest
-            .l0
+        let expected_manifest = build_manifest(&test_case.expected_manifest, |alias| {
+            sst_ids.get(alias).unwrap().clone()
+        });
+
+        assert_manifest_equal(&projected, &expected_manifest, &sst_ids);
+    }
+
+    struct UnionTestCase {
+        manifests: Vec<SimpleManifest>,
+        expected: SimpleManifest,
+    }
+
+    #[rstest]
+    #[case::non_overlapping_l0s(UnionTestCase {
+        manifests: vec![
+            SimpleManifest {
+                l0: vec![
+                    SstEntry::projected("foo", "a", "a".."m"),
+                    SstEntry::projected("bar", "f", "a".."m"),
+                    SstEntry::projected("baz", "j", "a".."m")
+                ],
+                sorted_runs: vec![]
+            },
+            SimpleManifest {
+                l0: vec![
+                    SstEntry::projected("foo", "a", "m"..),
+                    SstEntry::projected("bar", "f", "m"..),
+                    SstEntry::projected("baz", "j", "m"..)
+                ],
+                sorted_runs: vec![]
+            }
+        ],
+        expected: SimpleManifest {
+            l0: vec![
+                SstEntry::projected("foo", "a", "a".."m"),
+                SstEntry::projected("bar", "f", "a".."m"),
+                SstEntry::projected("baz", "j", "a".."m"),
+                SstEntry::projected("foo", "a", "m"..),
+                SstEntry::projected("bar", "f", "m"..),
+                SstEntry::projected("baz", "j", "m"..)
+                // This is not optimal, but it's a good start from correctness point of view. Eventually we want the manifest to look as follows:
+                //
+                // SstEntry::projected("foo", "a", "a"..),
+                // SstEntry::projected("bar", "f", "a"..),
+                // SstEntry::projected("baz", "j", "a"..),
+            ],
+            sorted_runs: vec![]
+        },
+    })]
+    #[case::non_overlapping_l0s_with_gap(UnionTestCase {
+        manifests: vec![
+            SimpleManifest {
+                l0: vec![
+                    SstEntry::projected("foo", "a", "a".."m"),
+                    SstEntry::projected("bar", "f", "a".."m"),
+                    SstEntry::projected("baz", "j", "a".."m")
+                ],
+                sorted_runs: vec![]
+            },
+            SimpleManifest {
+                l0: vec![
+                    SstEntry::projected("foo", "a", "o"..),
+                    SstEntry::projected("bar", "f", "o"..),
+                    SstEntry::projected("baz", "j", "o"..)
+                ],
+                sorted_runs: vec![]
+            }
+        ],
+        expected: SimpleManifest {
+            l0: vec![
+                SstEntry::projected("foo", "a", "a".."m"),
+                SstEntry::projected("bar", "f", "a".."m"),
+                SstEntry::projected("baz", "j", "a".."m"),
+                SstEntry::projected("foo", "a", "o"..),
+                SstEntry::projected("bar", "f", "o"..),
+                SstEntry::projected("baz", "j", "o"..)
+            ],
+            sorted_runs: vec![]
+        },
+    })]
+    fn test_union(#[case] test_case: UnionTestCase) {
+        let mut sst_ids: HashMap<String, SsTableId> = HashMap::new();
+        let manifests: Vec<Manifest> = test_case
+            .manifests
             .iter()
-            .map(|entry| {
-                SsTableHandle::new_compacted(
-                    sst_ids.get(entry.sst_alias).unwrap().clone(),
-                    SsTableInfo {
-                        first_key: Some(entry.first_key.clone()),
-                        ..SsTableInfo::default()
-                    },
-                    entry.visible_range.clone(),
-                )
+            .map(|m| {
+                build_manifest(m, |alias| {
+                    if let Some(sst_id) = sst_ids.get(alias) {
+                        sst_id.clone()
+                    } else {
+                        let sst_id = SsTableId::Compacted(Ulid::new());
+                        sst_ids.insert(alias.to_string(), sst_id);
+                        sst_id
+                    }
+                })
             })
             .collect();
 
-        let expected_sorted_runs: Vec<SortedRun> = test_case
-            .expected_manifest
-            .sorted_runs
-            .iter()
-            .enumerate()
-            .map(|(idx, sst_entries)| SortedRun {
+        let expected_manifest = build_manifest(&test_case.expected, |alias| {
+            sst_ids.get(alias).unwrap().clone()
+        });
+
+        let union = Manifest::union(manifests);
+
+        assert_manifest_equal(&union, &expected_manifest, &sst_ids);
+    }
+
+    fn build_manifest<F>(manifest: &SimpleManifest, mut sst_id_fn: F) -> Manifest
+    where
+        F: FnMut(&str) -> SsTableId,
+    {
+        let mut core = CoreDbState::new();
+        for entry in &manifest.l0 {
+            core.l0.push_back(SsTableHandle::new_compacted(
+                sst_id_fn(entry.sst_alias),
+                SsTableInfo {
+                    first_key: Some(entry.first_key.clone()),
+                    ..SsTableInfo::default()
+                },
+                entry.visible_range.clone(),
+            ));
+        }
+        for (idx, sorted_run) in manifest.sorted_runs.iter().enumerate() {
+            core.compacted.push(SortedRun {
                 id: idx as u32,
-                ssts: sst_entries
+                ssts: sorted_run
                     .iter()
                     .map(|entry| {
                         SsTableHandle::new_compacted(
-                            sst_ids.get(entry.sst_alias).unwrap().clone(),
+                            sst_id_fn(entry.sst_alias),
                             SsTableInfo {
                                 first_key: Some(entry.first_key.clone()),
                                 ..SsTableInfo::default()
@@ -485,13 +549,108 @@ mod tests {
                         )
                     })
                     .collect(),
-            })
+            });
+        }
+        Manifest::initial(core)
+    }
+
+    fn assert_manifest_equal(
+        actual: &Manifest,
+        expected: &Manifest,
+        sst_ids: &HashMap<String, SsTableId>,
+    ) {
+        let sst_aliases: HashMap<SsTableId, String> = sst_ids
+            .iter()
+            .map(|(k, v)| (v.clone(), k.clone()))
             .collect();
 
-        assert_eq!(projected.core.l0, expected_l0, "L0s do not match.");
+        if actual.core.l0 != expected.core.l0 {
+            let mut error_msg = String::from("Manifest L0 mismatch.\n\nActual: \n");
+
+            // Format actual L0 entries
+            for (idx, handle) in actual.core.l0.iter().enumerate() {
+                let id_str = sst_aliases
+                    .get(&handle.id)
+                    .map(|a| a.as_str())
+                    .unwrap_or("UNKNOWN");
+
+                let first_key = handle
+                    .info
+                    .first_key
+                    .as_ref()
+                    .map(|k| format!("{:?}", k))
+                    .unwrap();
+
+                let visible_range = handle
+                    .visible_range
+                    .as_ref()
+                    .map(|r| format_range(r))
+                    .unwrap_or_else(|| "None".to_string());
+
+                let result = if expected.core.l0.get(idx) == Some(handle) {
+                    ""
+                } else {
+                    " --> Unexpected"
+                };
+
+                error_msg.push_str(&format!(
+                    "{}. {} (first_key: {}, visible_range: {}){}\n",
+                    idx + 1,
+                    id_str,
+                    first_key,
+                    visible_range,
+                    result
+                ));
+            }
+
+            error_msg.push_str("\nExpected: \n");
+
+            // Format expected L0 entries
+            for (idx, handle) in expected.core.l0.iter().enumerate() {
+                let id_str = sst_aliases.get(&handle.id).unwrap();
+
+                let first_key = handle
+                    .info
+                    .first_key
+                    .as_ref()
+                    .map(|k| format!("{:?}", k))
+                    .unwrap();
+
+                let visible_range = handle
+                    .visible_range
+                    .as_ref()
+                    .map(|r| format_range(r))
+                    .unwrap_or_else(|| "None".to_string());
+
+                error_msg.push_str(&format!(
+                    "{}. {} (first_key: {}, visible_range: {})\n",
+                    idx + 1,
+                    id_str,
+                    first_key,
+                    visible_range
+                ));
+            }
+
+            panic!("{}", error_msg);
+        }
+
         assert_eq!(
-            projected.core.compacted, expected_sorted_runs,
+            actual.core.compacted, expected.core.compacted,
             "Sorted runs do not match."
         );
+    }
+
+    fn format_range(range: &BytesRange) -> String {
+        let start = match range.start_bound() {
+            Bound::Included(start) => format!("={:?}", start),
+            Bound::Excluded(start) => format!("{:?}", start),
+            Bound::Unbounded => "".to_string(),
+        };
+        let end = match range.end_bound() {
+            Bound::Included(end) => format!("={:?}", end),
+            Bound::Excluded(end) => format!("{:?}", end),
+            Bound::Unbounded => "".to_string(),
+        };
+        format!("{}..{}", start, end)
     }
 }

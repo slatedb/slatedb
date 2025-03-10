@@ -10,7 +10,6 @@ use crate::paths::PathResolver;
 use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
 use object_store::ObjectStore;
-use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -18,9 +17,9 @@ use uuid::Uuid;
 #[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct SourceDatabase<P: Into<Path>> {
-    path: P,
-    checkpoint: Uuid,
-    visible_range: BytesRange,
+    pub(crate) path: P,
+    pub(crate) checkpoint: Uuid,
+    pub(crate) visible_range: BytesRange,
 }
 
 impl<P: Into<Path>> SourceDatabase<P> {
@@ -116,7 +115,7 @@ pub(crate) async fn create_multi_clone<P: Into<Path>>(
         projected_manifests.push(Manifest::projected(&manifest, source.visible_range));
     }
 
-    let merged_manifest = Manifest::merged(projected_manifests);
+    let merged_manifest = Manifest::union(projected_manifests);
     let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
     StoredManifest::init(clone_manifest_store, merged_manifest).await?;
 
@@ -420,8 +419,7 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
     use crate::proptest_util::{rng, sample};
-    use crate::test_utils::assert_ranged_db_scan;
-    use crate::{test_utils, DbBuilder};
+    use crate::test_utils;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -902,27 +900,39 @@ mod tests {
         let clone_path = "/tmp/test_clone";
 
         let parent_db = Db::builder(parent_path, object_store.clone())
-            .build().await?;
+            .build()
+            .await?;
 
         for i in 0..10 {
             parent_db.put(&[i as u8; 4], &[i as u8; 28]).await?;
         }
 
-        let parent_checkpoint = parent_db.create_checkpoint(CheckpointScope::All, &CheckpointOptions::default()).await?;
+        let parent_checkpoint = parent_db
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await?;
 
         let visible_range = BytesRange::from_ref("c".."f");
-        create_multi_clone(clone_path, vec![SourceDatabase {
-            path: parent_path.into(),
-            visible_range: visible_range.clone(),
-            checkpoint: parent_checkpoint.id,
-        }], object_store.clone()).await?;
+        create_multi_clone(
+            clone_path,
+            vec![SourceDatabase {
+                path: parent_path.into(),
+                visible_range: visible_range.clone(),
+                checkpoint: parent_checkpoint.id,
+            }],
+            object_store.clone(),
+        )
+        .await?;
 
         let clone_db = Db::open(clone_path, object_store.clone()).await?;
         let mut iter = clone_db.scan("a".."z").await?;
-        
+
         // Verify all keys are within visible range
         while let Some(entry) = iter.next().await? {
-            assert!(visible_range.contains(&entry.key), "Key {:?} outside visible range [c..f]", entry.key);
+            assert!(
+                visible_range.contains(&entry.key),
+                "Key {:?} outside visible range [c..f]",
+                entry.key
+            );
         }
 
         Ok(())

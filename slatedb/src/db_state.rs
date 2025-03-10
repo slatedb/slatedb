@@ -114,6 +114,10 @@ impl SsTableHandle {
         self.effective_range.contains(key)
     }
 
+    pub(crate) fn compacted_effective_range(&self) -> &BytesRange {
+        &self.effective_range
+    }
+
     pub(crate) fn compacted_intersection(
         &self,
         next_handle: Option<&SsTableHandle>,
