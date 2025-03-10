@@ -8,7 +8,7 @@ use std::{collections::HashMap, fmt::Display, ops::Range};
 pub struct LocalCacheHead {
     pub location: String,
     pub last_modified: String,
-    pub size: usize,
+    pub size: u64,
     pub e_tag: Option<String>,
     pub version: Option<String>,
     pub attributes: HashMap<String, String>,
