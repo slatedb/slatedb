@@ -80,23 +80,23 @@ impl TableStore {
         Self::new_with_fp_registry(
             object_store,
             sst_format,
-            root_path,
+            PathResolver::new(root_path),
             Arc::new(FailPointRegistry::new()),
             block_cache,
         )
     }
 
-    pub fn new_with_fp_registry<P: Into<Path>>(
+    pub fn new_with_fp_registry(
         object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
-        root_path: P,
+        path_resolver: PathResolver,
         fp_registry: Arc<FailPointRegistry>,
         block_cache: Option<Arc<dyn DbCache>>,
     ) -> Self {
         Self {
             object_store: object_store.clone(),
             sst_format,
-            path_resolver: PathResolver::new(root_path),
+            path_resolver,
             fp_registry,
             transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
                 Path::from("/"),
