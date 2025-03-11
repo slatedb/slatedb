@@ -393,7 +393,8 @@ impl DbReaderInner {
 
         let replay_options = WalReplayOptions {
             sst_batch_size: 4,
-            min_memtable_bytes: reader_options.max_memtable_bytes as usize,
+            max_memtable_bytes: reader_options.max_memtable_bytes as usize,
+            min_memtable_bytes: usize::MAX,
             sst_iter_options,
         };
 

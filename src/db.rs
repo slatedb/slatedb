@@ -301,6 +301,7 @@ impl DbInner {
         let replay_options = WalReplayOptions {
             sst_batch_size: 4,
             min_memtable_bytes: self.options.l0_sst_size_bytes,
+            max_memtable_bytes: usize::MAX,
             sst_iter_options,
         };
 
