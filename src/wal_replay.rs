@@ -68,13 +68,18 @@ impl<T> IteratorHolder<T> {
     }
 }
 
+struct ReplayedRow {
+    row_entry: RowEntry,
+    wal_id: u64,
+}
+
 pub(crate) struct WalReplayIterator<'a> {
     options: WalReplayOptions,
     wal_id_range: Range<u64>,
     table_store: Arc<TableStore>,
     current_iter: IteratorHolder<SstIterator<'a>>,
     next_iters: VecDeque<JoinHandle<Result<SstIterator<'a>, SlateDBError>>>,
-    overflow_row: Option<RowEntry>,
+    overflow_row: Option<ReplayedRow>,
     last_tick: i64,
     last_seq: u64,
     next_wal_id: u64,
@@ -194,36 +199,37 @@ impl WalReplayIterator<'_> {
         }
 
         let mut table = WritableKVTable::new();
-        let mut last_tick = self.last_tick;
-        let mut last_seq = self.last_seq;
         let mut last_wal_id = 0;
 
-        if let Some(row_entry) = self.overflow_row.take() {
+        if let Some(overflow_row) = self.overflow_row.take() {
+            let row_entry = overflow_row.row_entry;
             if let Some(ts) = row_entry.create_ts {
-                last_tick = last_tick.max(ts);
+                self.last_tick = self.last_tick.max(ts);
             }
-            last_seq = last_seq.max(row_entry.seq);
+            self.last_seq = self.last_seq.max(row_entry.seq);
             table.put(row_entry);
+            last_wal_id = overflow_row.wal_id;
         }
 
         while !self.current_iter.is_finished() {
             if let Some(sst_iter) = &mut self.current_iter.current_iter {
+                let wal_id = sst_iter.table_id().unwrap_wal_id();
                 while let Some(row_entry) = sst_iter.next_entry().await? {
                     if table.size() + row_entry.estimated_size() > self.options.max_memtable_bytes {
-                        self.overflow_row.replace(row_entry);
+                        self.overflow_row.replace(ReplayedRow { row_entry, wal_id });
                         break;
                     }
 
                     if let Some(ts) = row_entry.create_ts {
-                        last_tick = last_tick.max(ts);
+                        self.last_tick = self.last_tick.max(ts);
                     }
-                    last_seq = last_seq.max(row_entry.seq);
+                    self.last_seq = self.last_seq.max(row_entry.seq);
                     table.put(row_entry);
                 }
 
                 let table_overflowed = self.overflow_row.is_some();
-                if !table_overflowed {
-                    last_wal_id = sst_iter.table_id().unwrap_wal_id();
+                if !table.is_empty() || !table_overflowed {
+                    last_wal_id = wal_id;
                 }
 
                 if table_overflowed || table.size() > self.options.min_memtable_bytes {
@@ -235,15 +241,16 @@ impl WalReplayIterator<'_> {
             self.advance_current_iter().await?
         }
 
-        self.last_tick = last_tick;
-        self.last_seq = last_seq;
-
-        Ok(Some(ReplayedMemtable {
-            table,
-            last_tick,
-            last_seq,
-            last_wal_id,
-        }))
+        if last_wal_id > 0 {
+            Ok(Some(ReplayedMemtable {
+                table,
+                last_tick: self.last_tick,
+                last_seq: self.last_seq,
+                last_wal_id,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 }
 
