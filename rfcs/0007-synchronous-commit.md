@@ -127,7 +127,7 @@ Another important consideration is WAL write is possible to be failures. RocksDB
 Based on the PostgreSQL and RocksDB references above, we can summarize the key semantics of Synchronous Commit:
 
 1. A write is only considered committed once the WAL has been persisted to storage. Until then, the data remains invisible to readers.
-2. If there is a permanent failure while persisting the WAL during a Synchronous Commit, the transaction rolls back completely. The database instance enters a fatal state and switches to read-only mode.
+2. If there is a permanent failure while persisting the WAL during a Synchronous Commit, the transaction rolls back. The database instance enters a fatal state and switches to read-only mode.
 3. It's possible to have multiple levels of Synchronous Commit, or even disable it, allowing users to balance performance and durability requirements.
 4. Synchronous and Unsynchronous Commits can be interleaved in different transactions. A transaction using Synchronous Commit can read writes from transactions that used Unsynchronous Commit. When a Synchronous Commit persists, it also persists any previous Unsynchronous Commit writes in the WAL.
 
@@ -183,19 +183,17 @@ In short:
 
 ## Proposal
 
-### Read Watermark
+### Read Committed Data by Default
 
 This proposal aims to provide users with true Synchronous Commit semantics while preserving all capabilities of the current model.
-
-To address the challenges mentioned above, we need to add an option which allows users to read the "Committed" data only, other than "Memory" and "Remote" data.
 
 As we've discussed before, it's important to note that "Commit" and "Durability" are distinct concepts that aren't necessarily coupled with each other. Data can be considered "Committed" even if it hasn't been flushed to persistent storage - it may exist only in memory. While such data isn't persisted, it can still be treated as safely committed from a transactional perspective.
 
 Later transactions can safely depend on these "Unpersisted" but "Committed" data without worrying about conflicts, since they represent the latest committed state of the data. This allows for consistent transaction semantics even when some committed data hasn't yet been persisted to storage.
 
-On the other hand, "Committed" data won't contain data that is still in the process of being committed (which is possible in the read with `DurabilityLevel::Memory` in the current model). This ensures that readers will never see data that could potentially be rolled back if a write operation fails.
+On the other hand, "Committed" data won't contain data that is still in the process of being committed (which is possible in the read with `DurabilityLevel::Memory` in the current model).
 
-By allowing users to read "Committed" data, we can address the challenges outlined in the "Possible Improvements" section. The ability to read committed data only, regardless of persistence status, enables proper transaction semantics while still allowing for performance optimizations through writes with lower durability requirements. This provides a cleaner separation between transaction consistency and durability guarantees.
+By allowing users to read "Committed" data by default, we can address the challenges outlined in the "Possible Improvements" section. To read committed data, regardless of persistence status, enables proper transaction semantics while still allowing for performance optimizations through writes with lower durability requirements. This provides a cleaner separation between transaction consistency and durability guarantees.
 
 Let's assume we have a sequence of writes like this:
 
@@ -204,68 +202,43 @@ Let's assume we have a sequence of writes like this:
 | 100 | WRITE key001 = "value001" with (durability: Memory) | |
 | 101 | WRITE key002 = "value002" with (durability: Memory) | |
 | 102 | WRITE key003 = "value003" with (durability: Memory) | |
-| 103 | WRITE key004 = "value004" with (durability: Remote) | <-- last remote persisted watermark |
+| 103 | WRITE key004 = "value004" with (durability: Remote) | <-- last remote persisted seq |
 | 104 | WRITE key005 = "value005" with (durability: Memory) | |
-| 105 | WRITE key006 = "value006" with (durability: Memory) | <-- last committed watermark |
-| 106 | WRITE key007 = "value007" with (durability: Remote), but still haven't persisted yet | <-- last committing watermark |
+| 105 | WRITE key006 = "value006" with (durability: Memory) | <-- last committed seq |
+| 106 | WRITE key007 = "value007" with (durability: Remote), but still haven't persisted yet | <-- last committing seq |
 
 While "Committed" is distinct from the "DurabilityLevel" concept, both the "Committed" and "Persisted" positions can be tracked using separate watermarks in the commit history of sequence number.
 
-A "Committed" data is not necessarily a "Persisted" data. It doesn't make sense to set the "Committed" watermark under the notion of `DurabilityLevel`. We need to define a better name that contains all the "Committed" and "Persisted" positions.
+Reading "Committed" data should be considered as the default behavior for the read operations, commited data is the safe data.
 
-Let's call it `ReadWatermark`.
-
-```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum ReadWatermark {
-    #[default]
-    LastCommitted,
-    LastLocalPersisted,
-    LastRemotePersisted,
-}
-```
-
-The read operation may look like this:
+At some cases, users may want to read the "Persisted" data only, and they can use the `durability_filter` option to achieve this goal:
 
 ```rust
-let opts = ReadOptions::new().with_watermark(ReadWatermark::LastCommitted);
+let opts = ReadOptions::new().with_durability_filter(DurabilityLevel::Local);
 db.get(key, opts).await?;
 ```
 
-The biggest semantic difference between `ReadWatermark` and `DurabilityLevel` is `ReadWatermark` reflects the positions of the commit history, while `DurabilityLevel` reflects the durability level on different levels of storage.
+Using this durability filter option, the read operation will only retrieve data that has been persisted to storage. This will make sure the data it read is at least durable at `DurabilityLevel::Local`, but it might not be the most up-to-date.
 
-These watermarks have the following relationships:
+By default, no matter what `DurabilityLevel` is set in the `durability_filter` option, the read operation will always read the Committed data. But at some use cases like disk caching, users may not care about the commitness of the data, but only care about the data is durable at least at `DurabilityLevel::Local`.
 
-- The "last committed watermark"'s position (in term of sequence number) is always greater than or equal to the "last local persisted watermark"
-- The "last local persisted watermark"'s position is always greater than or equal to the "last remote persisted watermark"
+If the writer write with `SyncLevel::Remote`, the data will not be considered as committed until it's persisted to `Remote`. If the user want to read the data as soon as it's persisted to `Local`, they can use an additional option `dirty: true` to make this possible:
 
-If we successfully write a key that succesfully persisted to S3, at this point, all these watermarks will point to the same position. 
-
-For reads in a transaction, it's possible to allow users specify the watermark as `ReadWatermark::LastRemotePersisted` or `ReadWatermark::LastLocalPersisted`. This might let users read an older version of the data, but it won't violate the semantics of conflict checking: if there exists a newer version of the same key, this transaction could be rolled back on commit.
-
-In conclusion, the difference between the current model and this proposal is adding a "Committed" watermark. And as it does not make sense to use `DurabilityLevel` to contain it, we propose to use `ReadWatermark` to identify the positions of the commit history for read operations.
-
-In most of the use cases, users do not need to care about this `ReadWatermark` option. `ReadWatermark::LastCommitted` is the default and the most commonly used value, all the read are safely committed, and the read operations will never block each other. At some mission critical use cases (like using SlateDB as a Kafka-like at-least-once data bus), users may do not want to touch any unpersisted data which risks data loss, and they can set the watermark as `ReadWatermark::LastLocalPersisted` or `ReadWatermark::LastRemotePersisted` to achieve this goal.
-
-In the earlier draft, I've put a `ReadWatermark::LastCommitting` in the `ReadWatermark` enum. But after several discussions, we gradually reached a consensus that it's not a good idea to keep it, because it doesn't improve the performance of read operations, but only allows reading data that might be rolled back later, which might violate the semantics of conflict checking, and also introduce more corner cases to handle.
+```rust
+let opts = ReadOptions::new()
+    .with_durability_filter(DurabilityLevel::Local)
+    .with_dirty(true);
+db.get(key, opts).await?;
+```
 
 ### Sync Commit
 
-In contrast to the read side which may mix the positions in term of "durability" and "commit", the write / commit side is more straightforward, it only need to track the things about durability.
+To implement Synchronous Commit semantics, the write side do not need to change a lot: the operation returns once the WAL is persisted according to the specified durability level.
 
-To implement Synchronous Commit semantics, the write side remains do not need to change at all: the operation returns once the WAL is persisted according to the specified durability level. A `DurabilityLevel` is all we need here.
-
-Like:
+In other systems, this option is often named as `sync`, to emphasize the idea of synchronous commit, like:
 
 ```rust
-let opts = WriteOptions::new().with_await_durability(DurabilityLevel::Remote);
-db.write(key, value, opts).await?;
-```
-
-In other systems, this option is often named as `sync`, to emphasize the idea of synchronous commit. To respect the idea of Least Surprise, it might be not a bad idea to rename `await_durability` to `sync`.
-
-```rust
-let opts = WriteOptions::new().with_sync(DurabilityLevel::Memory);
+let opts = WriteOptions::new().with_sync(DurabilityLevel::Remote);
 db.write(key, value, opts).await?;
 ```
 
@@ -282,14 +255,25 @@ let opts = WriteOptions::new().with_sync(SyncLevel::Off);
 db.write(key, value, opts).await?;
 ```
 
-The benefits of this naming change are:
+The benefits of having a `SyncLevel` enum are:
 
 1. The name "Synchronous Commit" directly describes the feature we aim to support.
 2. The term "sync" is commonly used across database systems and is well understood, familiar to users.
 3. The names are shorter, easier to type & read.
 4. It's accurate to describe as sync commit as "off" when it comes with memory durability.
 
-The inner implementation of the write side do not need to change, it's still just await the data to be persisted to storage as the specified durability level, then return. All we put into discussion here is the naming stuff.
+At the writer side, if `sync` is enabled, the write operation will wait until the data is persisted to storage according to the specified sync level.
+
+If `sync` is set to `SyncLevel::Off`, the write operation will not await it self to be persisted remotely.
+
+But there's one worth noting: the commits are strictly ordered. The later write will wait for the previous write to be committed to commit itself. As a result, the write operation with `SyncLevel::Off` does NOT means the write will become visible immediately.
+
+Give an example:
+
+- thread A: seq 100: write keyXXX with `sync: Remote`
+- thread B: seq 101: write keyYYY with `sync: Off`
+
+The write operation B will NOT return immediately, but it will be queued in the WAL buffer, and await the previous write operation A to be committed, then it will be applied to MemTable and visible to readers, and finally return.
 
 ### Difference between "await_durable" and "sync"
 
@@ -310,7 +294,7 @@ Sometimes, user might hope to always allow the writes to be visible to readers i
 
 ```rust
 let opts = WriteOptions::new()
-  .with_sync(SyncLevel::Off) // this write becomes visible for readers immediately
+  .with_sync(SyncLevel::Off) 
   .with_await_durable(DurabilityLevel::Remote) // on the writer side, i still await this until it's persisted in remote
 db.put_with_options("key", "val", opts)
 ```
@@ -318,8 +302,6 @@ db.put_with_options("key", "val", opts)
 When WAL is disabled (no-WAL mode), the `sync` option has no effect since there is no WAL to sync. In this case, users should use `await_durable` to ensure their writes are persisted durably.
 
 While `SyncLevel` and `DurabilityLevel` may appear similar, they serve distinct purposes. `SyncLevel` controls when writes become visible to readers by determining the commit semantics, while `DurabilityLevel` focuses on the durability of the write.
-
-In my opinion, keeping these as separate enums follows the Single Responsibility Principle, as each enum has a distinct purpose. They are not necessarily to have to be the same thing in the future. For example, in the PostgreSQL example, the option `remote_apply` is not really about the durability of the write, but the application of the commit. We have no plan to support it in SlateDB at the time of writing, but it might be a good example to distinguish the concept difference between `SyncLevel` and `DurabilityLevel`.
 
 ## Implementation
 
@@ -439,3 +421,4 @@ However, it's a different codebase, it would be better to keep code structure ch
 ## Updates
 
 - 2025-02-20: added the comparision between `sync` and `await_durable`
+- 2025-03-12: revise the api with `with_durability_filter` and `with_dirty`
