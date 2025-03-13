@@ -113,7 +113,7 @@ pub enum SlateDBError {
     #[error("Database already exists: {msg}")]
     DatabaseAlreadyExists { msg: String },
 
-    #[error("Byte format version mismatch")]
+    #[error("Byte format version mismatch: expected {expected_version}, actual {actual_version}")]
     InvalidVersion {
         expected_version: u16,
         actual_version: u16,
