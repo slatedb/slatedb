@@ -42,6 +42,7 @@ struct DbReaderInner {
     options: DbReaderOptions,
     state: Arc<RwLock<CheckpointState>>,
     clock: Arc<dyn Clock + Sync + Send>,
+    user_checkpoint_id: Option<Uuid>,
     reader: Reader,
 }
 
@@ -119,6 +120,7 @@ impl DbReaderInner {
             options,
             state,
             clock,
+            user_checkpoint_id: checkpoint_id,
             reader,
         })
     }
@@ -346,8 +348,11 @@ impl DbReaderInner {
                                     Arc::clone(&this.manifest_store),
                                 ).await?;
                                 let checkpoint_id = this.state.read().checkpoint.id;
-                                info!("Deleting reader checkpoint {} for shutdown", checkpoint_id);
-                                manifest.delete_checkpoint(checkpoint_id).await
+                                if Some(checkpoint_id) != this.user_checkpoint_id {
+                                    info!("Deleting reader established checkpoint {} for shutdown", checkpoint_id);
+                                    manifest.delete_checkpoint(checkpoint_id).await?;
+                                }
+                                Ok(())
                             },
                         }
                     }
