@@ -275,6 +275,8 @@ Give an example:
 
 The write operation B will NOT return immediately, but it will be queued in the WAL buffer, and await the previous write operation A to be committed, then it will be applied to MemTable and visible to readers, and finally return.
 
+`commit()` always ensures "read your writes consistency", as a result, it's still a blocking operation even with `sync: Off`. If we want to have a no-wait write, we can consider add something like `commit_with_callback(cb: Callback)` interface, like [badger](https://pkg.go.dev/github.com/dgraph-io/badger/v4#Txn.CommitWith) did. This async commit interface is out of scope of this RFC, we can discuss it in a separate RFC or issue if needed.
+
 ### Difference between "await_durable" and "sync"
 
 `await_durable` and `sync` appear to have similar behaviors - on the write side, both wait until data reaches a persistent state before returning.
@@ -329,7 +331,7 @@ sequenceDiagram
 
 In this proposal, "Commit to make it visible" effectively means "applying the changes to the MemTable", whenever the change is applied to MemTable, it's considered as committed.
 
-The changes to the read path are minimal. For reads with `ReadWatermark::LastCommitted`, `ReadWatermark::LastLocalPersisted`, or `ReadWatermark::LastRemotePersisted`, readers will first check the MemTable, using different sequence numbers as watermarks to determine visibility.
+The changes to the read path are minimal. For reads with different durability levels, we can simply use different sequence numbers as watermarks to determine visibility.
 
 On the write side, after the data is appended to the WAL, it'll be applied to MemTable as soon as possible to make the change to be visible to readers.
 
