@@ -20,6 +20,10 @@ use crate::{block::BlockBuilder, error::SlateDBError};
 
 pub(crate) const SST_FORMAT_VERSION: u16 = 1;
 
+// 8 bytes for the metadata offset + 2 bytes for the version
+const NUM_FOOTER_BYTES: usize = 10;
+const NUM_FOOTER_BYTES_LONG: u64 = NUM_FOOTER_BYTES as u64;
+
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
     pub(crate) block_size: usize,
@@ -46,12 +50,18 @@ impl SsTableFormat {
         &self,
         obj: &impl ReadOnlyBlob,
     ) -> Result<SsTableInfo, SlateDBError> {
-        let len = obj.len().await?;
-        if len <= 10 {
-            // 8 bytes for the metadata offset + 2 bytes for the version
+        let obj_len = obj.len().await?;
+        if obj_len <= NUM_FOOTER_BYTES_LONG {
             return Err(SlateDBError::EmptySSTable);
         }
-        let version = obj.read_range(len - 2..len).await?.get_u16();
+        // Get the size of the metadata
+        let header = obj
+            .read_range((obj_len - NUM_FOOTER_BYTES_LONG)..obj_len)
+            .await?;
+        assert!(header.len() == NUM_FOOTER_BYTES);
+
+        // Last 2 bytes of the header represent the version
+        let version = header.slice(8..NUM_FOOTER_BYTES).get_u16();
         // TODO: Support older and newer versions
         if version != SST_FORMAT_VERSION {
             return Err(SlateDBError::InvalidVersion {
@@ -59,12 +69,12 @@ impl SsTableFormat {
                 actual_version: version,
             });
         }
-        // Get the size of the metadata
-        let sst_metadata_offset_range = (len - 10)..(len - 2);
-        let sst_metadata_offset = obj.read_range(sst_metadata_offset_range).await?.get_u64();
-        // Get the metadata. Last 8 bytes are the offset of SsTableInfo
-        let sst_metadata_range = sst_metadata_offset..len - 10;
-        let sst_metadata_bytes = obj.read_range(sst_metadata_range).await?;
+
+        // First 8 bytes of the header represent the metadata offset
+        let sst_metadata_offset = header.slice(0..8).get_u64();
+        let sst_metadata_bytes = obj
+            .read_range(sst_metadata_offset..obj_len - NUM_FOOTER_BYTES_LONG)
+            .await?;
         SsTableInfo::decode(sst_metadata_bytes, &*self.sst_codec)
     }
 
