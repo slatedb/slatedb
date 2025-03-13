@@ -21,7 +21,7 @@
 //! ```
 
 use std::collections::{HashMap, VecDeque};
-use std::ops::RangeBounds;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -40,7 +40,7 @@ use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
 use crate::config::ReadLevel::Uncommitted;
-use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
+use crate::config::{DbOptions, MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db::SstFilterResult::{FilterNegative, FilterPositive, RangeNegative, RangePositive};
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_iter::DbIterator;
@@ -55,13 +55,14 @@ use crate::iter::KeyValueIterator;
 use crate::manifest::store::{DirtyManifest, FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::{VecDequeKeyValueIterator, WritableKVTable};
 use crate::mem_table_flush::MemtableFlushMsg;
+use crate::merge_operator::{MergeOperatorAccumulator, MergeOperatorIterator};
 use crate::paths::PathResolver;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::types::RowEntry;
+use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{
     bg_task_result_into_err, filter_expired, get_now_for_read, unwrap_result, MonotonicClock,
 };
@@ -117,29 +118,47 @@ impl DbInner {
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.check_error()?;
-        let key = key.as_ref();
+        let key = Bytes::copy_from_slice(key.as_ref());
         let snapshot = self.state.read().snapshot();
         let ttl_now = get_now_for_read(self.mono_clock.clone(), options.read_level).await?;
+
+        let mut accumulator = None;
+        if let Some(merge_operator) = self.options.merge_operator.clone() {
+            accumulator = Some(MergeOperatorAccumulator::new(merge_operator, true));
+        }
 
         if matches!(options.read_level, Uncommitted) {
             let maybe_val = std::iter::once(snapshot.wal)
                 .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
-                .find_map(|memtable| memtable.get(key));
-            if let Some(entry) = maybe_val {
-                return self.unwrap_value(filter_expired(entry, ttl_now));
+                .find_map(|memtable| memtable.get(&key));
+            if let Some(val) = maybe_val {
+                return self.unwrap_value(filter_expired(val, ttl_now));
             }
         }
 
-        let maybe_val = std::iter::once(snapshot.memtable)
-            .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
-            .find_map(|memtable| memtable.get(key));
-        if let Some(entry) = maybe_val {
-            return self.unwrap_value(filter_expired(entry, ttl_now));
+        let single_key_range =
+            BytesRange::new(Bound::Included(key.clone()), Bound::Included(key.clone()));
+        let memtables = std::iter::once(snapshot.memtable)
+            .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()));
+        for memtable in memtables {
+            if let Some(merge_operator) = self.options.merge_operator.clone() {
+                let memtable_iter = memtable.range_ascending(single_key_range.clone());
+                let mut mo_iter = MergeOperatorIterator::new(merge_operator, memtable_iter, true);
+                if let Some(entry) = accumulator
+                    .as_mut()
+                    .unwrap()
+                    .maybe_merge(mo_iter.next_entry().await?)?
+                {
+                    return unwrap_result(entry.value);
+                }
+            } else if let Some(val) = memtable.get(&key) {
+                return self.unwrap_value(filter_expired(val, ttl_now));
+            }
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
         // the hash value once and pass it to the filter to avoid unnecessary hash computation
-        let key_hash = filter::filter_hash(key);
+        let key_hash = filter::filter_hash(&key);
 
         // cache blocks that are being read
         let sst_iter_options = SstIteratorOptions {
@@ -149,17 +168,24 @@ impl DbInner {
         };
 
         for sst in &snapshot.state.core().l0 {
-            let filter_result = self.sst_might_include_key(sst, key, key_hash).await?;
+            let filter_result = self.sst_might_include_key(sst, &key, key_hash).await?;
             if filter_result.might_contain_key() {
                 let iter =
-                    SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
+                    SstIterator::for_key(sst, &key, self.table_store.clone(), sst_iter_options)
                         .await?;
+                let mut iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
 
-                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
-                if let Some(entry) = ttl_iter.next_entry().await? {
-                    if entry.key == key {
+                if let Some(merge_operator) = self.options.merge_operator.clone() {
+                    let mut mo_iter = MergeOperatorIterator::new(merge_operator, iter, true);
+                    if let Some(entry) = accumulator
+                        .as_mut()
+                        .unwrap()
+                        .maybe_merge(mo_iter.next_entry().await?)?
+                    {
                         return unwrap_result(entry.value);
                     }
+                } else if let Some(entry) = iter.next_entry().await? {
+                    return unwrap_result(entry.value);
                 }
                 if matches!(filter_result, FilterPositive) {
                     self.db_stats.sst_filter_false_positives.inc();
@@ -168,22 +194,40 @@ impl DbInner {
         }
 
         for sr in &snapshot.state.core().compacted {
-            let filter_result = self.sr_might_include_key(sr, key, key_hash).await?;
+            let filter_result = self.sr_might_include_key(sr, &key, key_hash).await?;
             if filter_result.might_contain_key() {
-                let iter =
-                    SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
-                        .await?;
-
-                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
-                if let Some(entry) = ttl_iter.next_entry().await? {
-                    if entry.key == key {
+                let iter = SortedRunIterator::for_key(
+                    sr,
+                    &key,
+                    self.table_store.clone(),
+                    sst_iter_options,
+                )
+                .await?;
+                let mut iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
+                if let Some(merge_operator) = self.options.merge_operator.clone() {
+                    let mut mo_iter = MergeOperatorIterator::new(merge_operator, iter, true);
+                    if let Some(entry) = accumulator
+                        .as_mut()
+                        .unwrap()
+                        .maybe_merge(mo_iter.next_entry().await?)?
+                    {
                         return unwrap_result(entry.value);
                     }
+                } else if let Some(entry) = iter.next_entry().await? {
+                    return unwrap_result(entry.value);
                 }
                 if matches!(filter_result, FilterPositive) {
                     self.db_stats.sst_filter_false_positives.inc();
                 }
             }
+        }
+
+        if let Some(mut accumulator) = accumulator {
+            return Ok(accumulator.flush().and_then(|entry| match entry.value {
+                ValueDeletable::Merge(v) => Some(v),
+                ValueDeletable::Value(v) => Some(v),
+                ValueDeletable::Tombstone => None,
+            }));
         }
         Ok(None)
     }
@@ -1155,6 +1199,78 @@ impl Db {
         self.write_with_options(batch, write_opts).await
     }
 
+    /// Write a merge operand into the database with default `WriteOptions`.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to write
+    /// - `value`: the value to write
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error writing the value.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.merge(b"key", b"value").await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn merge<K, V>(&self, key: K, value: V) -> Result<(), SlateDBError>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let mut batch = WriteBatch::new();
+        batch.merge(key, value);
+        self.write(batch).await
+    }
+
+    /// Write a merge operand into the database with custom `MergeOptions` and `WriteOptions`.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to write
+    /// - `value`: the value to write
+    /// - `merge_opts`: the merge options to use
+    /// - `write_opts`: the write options to use
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error writing the value.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, config::{MergeOptions, WriteOptions}, SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.merge_with_options(b"key", b"value", &MergeOptions::default(), &WriteOptions::default()).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn merge_with_options(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        merge_opts: &MergeOptions,
+        write_opts: &WriteOptions,
+    ) -> Result<(), SlateDBError> {
+        let mut batch = WriteBatch::new();
+        batch.merge_with_options(key, value, merge_opts);
+        self.write_with_options(batch, write_opts).await
+    }
+
     /// Delete a key from the database with default `WriteOptions`.
     ///
     /// ## Arguments
@@ -1324,6 +1440,12 @@ impl Db {
         }
     }
 
+    #[cfg(test)]
+    async fn flush_memtables(&self) -> Result<(), SlateDBError> {
+        // self.inner.freeze_memtable()?;
+        self.inner.flush_memtables().await
+    }
+
     pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
         let table = {
             let guard = self.inner.state.read();
@@ -1357,6 +1479,7 @@ mod tests {
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions, Ttl,
     };
+    use crate::merge_operator::AppendingMergeOperator;
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
@@ -3379,6 +3502,49 @@ mod tests {
         assert!(write_options.await_durable);
     }
 
+    #[tokio::test]
+    async fn test_merge_xxx() -> Result<(), SlateDBError> {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let db = Db::open_with_opts(
+            path.clone(),
+            DbOptions {
+                merge_operator: Some(Arc::new(AppendingMergeOperator::new())),
+                ..test_db_options(0, 1024, None)
+            },
+            object_store.clone(),
+        )
+        .await?;
+
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await?;
+
+        db.merge("key", "1").await?;
+        db.merge("key", "2").await?;
+        db.merge("key", "3").await?;
+
+        assert_eq!(db.get("key").await?, Some("123".into()));
+
+        db.flush_memtables().await?;
+
+        {
+            let manifest = stored_manifest.refresh().await?;
+            assert_eq!(manifest.core.l0.len(), 1);
+        }
+
+        assert_eq!(db.get("key").await?, Some("123".into()));
+
+        db.merge("key", "4").await?;
+        assert_eq!(db.get("key").await?, Some("1234".into()));
+
+        db.put("key", "1").await?;
+        assert_eq!(db.get("key").await?, Some("1".into()));
+
+        db.close().await?;
+
+        Ok(())
+    }
+
     async fn wait_for_manifest_condition(
         sm: &mut StoredManifest,
         cond: impl Fn(&CoreDbState) -> bool,
@@ -3447,6 +3613,7 @@ mod tests {
             garbage_collector_options: None,
             clock,
             default_ttl: ttl,
+            merge_operator: None,
         }
     }
 }
