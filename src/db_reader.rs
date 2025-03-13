@@ -446,7 +446,8 @@ impl DbReader {
                 })?;
         if options.checkpoint_lifetime < double_poll_interval {
             return Err(SlateDBError::InvalidArgument {
-                msg: "Checkpoint lifetime must be at least double the manifest poll interval".to_string(),
+                msg: "Checkpoint lifetime must be at least double the manifest poll interval"
+                    .to_string(),
             });
         }
         Ok(())
