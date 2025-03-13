@@ -129,7 +129,9 @@ impl DbInner {
     ) -> Result<DbIterator<'a>, SlateDBError> {
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
-        self.reader.scan_with_options(range, options, snapshot).await
+        self.reader
+            .scan_with_options(range, options, snapshot)
+            .await
     }
 
     /// Fences all writers with an older epoch than the provided `manifest` by flushing an empty WAL file that acts

@@ -1,21 +1,39 @@
 use crate::bytes_range::BytesRange;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{ReadOptions, ScanOptions};
-use crate::db_state::DbStateSnapshot;
+use crate::db_state::{DbStateSnapshot, SortedRun, SsTableHandle};
 use crate::db_stats::DbStats;
 use crate::filter_iterator::FilterIterator;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::VecDequeKeyValueIterator;
+use crate::reader::SstFilterResult::{
+    FilterNegative, FilterPositive, RangeNegative, RangePositive,
+};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
-use crate::tablestore::SstFilterResult::{FilterNegative, FilterPositive};
-use crate::tablestore::{SstFilterResult, TableStore};
+use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::utils::{get_now_for_read, is_not_expired, MonotonicClock};
 use crate::{filter, DbIterator, SlateDBError};
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::sync::Arc;
+
+enum SstFilterResult {
+    RangeNegative,
+    RangePositive,
+    FilterPositive,
+    FilterNegative,
+}
+
+impl SstFilterResult {
+    pub(crate) fn might_contain_key(&self) -> bool {
+        match self {
+            RangeNegative | FilterNegative => false,
+            RangePositive | FilterPositive => true,
+        }
+    }
+}
 
 pub(crate) struct Reader {
     pub(crate) table_store: Arc<TableStore>,
@@ -61,10 +79,7 @@ impl Reader {
         };
 
         for sst in &snapshot.state.core().l0 {
-            let filter_result = self
-                .table_store
-                .sst_might_include_key(sst, key, key_hash)
-                .await?;
+            let filter_result = self.sst_might_include_key(sst, key, key_hash).await?;
             self.record_filter_result(&filter_result);
 
             if filter_result.might_contain_key() {
@@ -85,10 +100,7 @@ impl Reader {
         }
 
         for sr in &snapshot.state.core().compacted {
-            let filter_result = self
-                .table_store
-                .sr_might_include_key(sr, key, key_hash)
-                .await?;
+            let filter_result = self.sr_might_include_key(sr, key, key_hash).await?;
             self.record_filter_result(&filter_result);
 
             if filter_result.might_contain_key() {
@@ -183,5 +195,61 @@ impl Reader {
         } else if matches!(result, FilterNegative) {
             self.db_stats.sst_filter_negatives.inc();
         }
+    }
+
+    /// Check if the given key might be in the range of the SST. Checks if the key is
+    /// in the range of the sst and if the filter might contain the key.
+    /// ## Arguments
+    /// - `sst`: the sst to check
+    /// - `key`: the key to check
+    /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
+    /// ## Returns
+    /// - `SstFilterResult` indicating whether the key was found or was not in range
+    async fn sst_might_include_key(
+        &self,
+        sst: &SsTableHandle,
+        key: &[u8],
+        key_hash: u64,
+    ) -> Result<SstFilterResult, SlateDBError> {
+        if !sst.range_covers_key(key) {
+            Ok(RangeNegative)
+        } else {
+            self.apply_filter(sst, key_hash).await
+        }
+    }
+
+    /// Check if the given key might be in the range of the sorted run (SR). Checks if the key
+    /// is in the range of the SSTs in the run and if the SST's filter might contain the key.
+    /// ## Arguments
+    /// - `sr`: the sorted run to check
+    /// - `key`: the key to check
+    /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
+    /// ## Returns
+    /// - `SstFilterResult` indicating whether the key was found or not
+    async fn sr_might_include_key(
+        &self,
+        sr: &SortedRun,
+        key: &[u8],
+        key_hash: u64,
+    ) -> Result<SstFilterResult, SlateDBError> {
+        let Some(sst) = sr.find_sst_with_range_covering_key(key) else {
+            return Ok(RangeNegative);
+        };
+        self.apply_filter(sst, key_hash).await
+    }
+
+    async fn apply_filter(
+        &self,
+        sst: &SsTableHandle,
+        key_hash: u64,
+    ) -> Result<SstFilterResult, SlateDBError> {
+        if let Some(filter) = self.table_store.read_filter(sst).await? {
+            return if filter.might_contain(key_hash) {
+                Ok(FilterPositive)
+            } else {
+                Ok(FilterNegative)
+            };
+        }
+        Ok(RangePositive)
     }
 }

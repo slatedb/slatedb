@@ -14,36 +14,18 @@ use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 use crate::db_cache::{CachedEntry, DbCache};
-use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
+use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::paths::PathResolver;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
-use crate::tablestore::SstFilterResult::{
-    FilterNegative, FilterPositive, RangeNegative, RangePositive,
-};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
 use crate::types::RowEntry;
 use crate::{blob::ReadOnlyBlob, block::Block};
 
-pub(crate) enum SstFilterResult {
-    RangeNegative,
-    RangePositive,
-    FilterPositive,
-    FilterNegative,
-}
-
-impl SstFilterResult {
-    pub(crate) fn might_contain_key(&self) -> bool {
-        match self {
-            RangeNegative | FilterNegative => false,
-            RangePositive | FilterPositive => true,
-        }
-    }
-}
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,
@@ -517,62 +499,6 @@ impl TableStore {
 
     fn path(&self, id: &SsTableId) -> Path {
         self.path_resolver.table_path(id)
-    }
-
-    /// Check if the given key might be in the range of the SST. Checks if the key is
-    /// in the range of the sst and if the filter might contain the key.
-    /// ## Arguments
-    /// - `sst`: the sst to check
-    /// - `key`: the key to check
-    /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
-    /// ## Returns
-    /// - `SstFilterResult` indicating whether the key was found or was not in range
-    pub(crate) async fn sst_might_include_key(
-        &self,
-        sst: &SsTableHandle,
-        key: &[u8],
-        key_hash: u64,
-    ) -> Result<SstFilterResult, SlateDBError> {
-        if !sst.range_covers_key(key) {
-            Ok(RangeNegative)
-        } else {
-            self.apply_filter(sst, key_hash).await
-        }
-    }
-
-    /// Check if the given key might be in the range of the sorted run (SR). Checks if the key
-    /// is in the range of the SSTs in the run and if the SST's filter might contain the key.
-    /// ## Arguments
-    /// - `sr`: the sorted run to check
-    /// - `key`: the key to check
-    /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
-    /// ## Returns
-    /// - `SstFilterResult` indicating whether the key was found or not
-    pub(crate) async fn sr_might_include_key(
-        &self,
-        sr: &SortedRun,
-        key: &[u8],
-        key_hash: u64,
-    ) -> Result<SstFilterResult, SlateDBError> {
-        let Some(sst) = sr.find_sst_with_range_covering_key(key) else {
-            return Ok(RangeNegative);
-        };
-        self.apply_filter(sst, key_hash).await
-    }
-
-    async fn apply_filter(
-        &self,
-        sst: &SsTableHandle,
-        key_hash: u64,
-    ) -> Result<SstFilterResult, SlateDBError> {
-        if let Some(filter) = self.read_filter(sst).await? {
-            return if filter.might_contain(key_hash) {
-                Ok(FilterPositive)
-            } else {
-                Ok(FilterNegative)
-            };
-        }
-        Ok(RangePositive)
     }
 }
 

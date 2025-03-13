@@ -159,7 +159,9 @@ impl DbReaderInner {
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
         let snapshot = self.state.read().snapshot();
-        self.reader.scan_with_options(range, options, snapshot).await
+        self.reader
+            .scan_with_options(range, options, snapshot)
+            .await
     }
 
     fn should_reestablish_checkpoint(&self, latest: &CoreDbState) -> bool {
