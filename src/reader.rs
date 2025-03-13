@@ -54,7 +54,7 @@ impl Reader {
         &self,
         key: K,
         options: &ReadOptions,
-        snapshot: impl ReadSnapshot,
+        snapshot: &(dyn ReadSnapshot + Sync),
     ) -> Result<Option<Bytes>, SlateDBError> {
         let key = key.as_ref();
         let ttl_now = get_now_for_read(self.mono_clock.clone(), options.read_level).await?;
@@ -134,7 +134,7 @@ impl Reader {
         &'a self,
         range: BytesRange,
         options: &ScanOptions,
-        snapshot: impl ReadSnapshot,
+        snapshot: &(dyn ReadSnapshot + Sync),
     ) -> Result<DbIterator<'a>, SlateDBError> {
         let mut memtables = VecDeque::new();
 

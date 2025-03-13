@@ -119,7 +119,7 @@ impl DbInner {
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
-        self.reader.get_with_options(key, options, snapshot).await
+        self.reader.get_with_options(key, options, &snapshot).await
     }
 
     pub async fn scan_with_options<'a>(
@@ -130,7 +130,7 @@ impl DbInner {
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
         self.reader
-            .scan_with_options(range, options, snapshot)
+            .scan_with_options(range, options, &snapshot)
             .await
     }
 

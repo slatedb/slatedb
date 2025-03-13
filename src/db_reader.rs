@@ -42,7 +42,7 @@ struct DbReaderInner {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
     options: DbReaderOptions,
-    state: Arc<RwLock<Arc<CheckpointState>>>,
+    state: RwLock<Arc<CheckpointState>>,
     clock: Arc<dyn Clock + Sync + Send>,
     user_checkpoint_id: Option<Uuid>,
     reader: Reader,
@@ -68,7 +68,7 @@ struct CheckpointState {
 static EMPTY_TABLE: Lazy<Arc<KVTable>> = Lazy::new(|| Arc::new(KVTable::new()));
 static EMPTY_WAL: Lazy<VecDeque<Arc<ImmutableWal>>> = Lazy::new(VecDeque::new);
 
-impl ReadSnapshot for Arc<CheckpointState> {
+impl ReadSnapshot for CheckpointState {
     fn memtable(&self) -> Arc<KVTable> {
         Arc::clone(&EMPTY_TABLE)
     }
@@ -126,7 +126,7 @@ impl DbReaderInner {
         let stat_registry = Arc::new(StatRegistry::new());
         let db_stats = DbStats::new(stat_registry.as_ref());
 
-        let state = Arc::new(RwLock::new(initial_state));
+        let state = RwLock::new(initial_state);
         let reader = Reader {
             table_store: Arc::clone(&table_store),
             db_stats: db_stats.clone(),
@@ -171,7 +171,9 @@ impl DbReaderInner {
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
         let snapshot = Arc::clone(&self.state.read());
-        self.reader.get_with_options(key, options, snapshot).await
+        self.reader
+            .get_with_options(key, options, snapshot.as_ref())
+            .await
     }
 
     async fn scan_with_options(
@@ -181,7 +183,7 @@ impl DbReaderInner {
     ) -> Result<DbIterator, SlateDBError> {
         let snapshot = Arc::clone(&self.state.read());
         self.reader
-            .scan_with_options(range, options, snapshot)
+            .scan_with_options(range, options, snapshot.as_ref())
             .await
     }
 
