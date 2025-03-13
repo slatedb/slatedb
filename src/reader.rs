@@ -1,11 +1,11 @@
 use crate::bytes_range::BytesRange;
 use crate::config::ReadLevel::Uncommitted;
 use crate::config::{ReadOptions, ScanOptions};
-use crate::db_state::{DbStateSnapshot, SortedRun, SsTableHandle};
+use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::db_stats::DbStats;
 use crate::filter_iterator::FilterIterator;
 use crate::iter::KeyValueIterator;
-use crate::mem_table::VecDequeKeyValueIterator;
+use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, VecDequeKeyValueIterator};
 use crate::reader::SstFilterResult::{
     FilterNegative, FilterPositive, RangeNegative, RangePositive,
 };
@@ -35,6 +35,14 @@ impl SstFilterResult {
     }
 }
 
+pub(crate) trait ReadSnapshot {
+    fn memtable(&self) -> Arc<KVTable>;
+    fn wal(&self) -> Arc<KVTable>;
+    fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>>;
+    fn imm_wal(&self) -> &VecDeque<Arc<ImmutableWal>>;
+    fn core(&self) -> &CoreDbState;
+}
+
 pub(crate) struct Reader {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) db_stats: DbStats,
@@ -46,22 +54,22 @@ impl Reader {
         &self,
         key: K,
         options: &ReadOptions,
-        snapshot: DbStateSnapshot,
+        snapshot: impl ReadSnapshot,
     ) -> Result<Option<Bytes>, SlateDBError> {
         let key = key.as_ref();
         let ttl_now = get_now_for_read(self.mono_clock.clone(), options.read_level).await?;
 
         if matches!(options.read_level, Uncommitted) {
-            let maybe_val = std::iter::once(snapshot.wal)
-                .chain(snapshot.state.imm_wal.iter().map(|imm| imm.table()))
+            let maybe_val = std::iter::once(snapshot.wal())
+                .chain(snapshot.imm_wal().iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
             if let Some(val) = maybe_val {
                 return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
             }
         }
 
-        let maybe_val = std::iter::once(snapshot.memtable)
-            .chain(snapshot.state.imm_memtable.iter().map(|imm| imm.table()))
+        let maybe_val = std::iter::once(snapshot.memtable())
+            .chain(snapshot.imm_memtable().iter().map(|imm| imm.table()))
             .find_map(|memtable| memtable.get(key));
         if let Some(val) = maybe_val {
             return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
@@ -78,7 +86,7 @@ impl Reader {
             ..SstIteratorOptions::default()
         };
 
-        for sst in &snapshot.state.core().l0 {
+        for sst in &snapshot.core().l0 {
             let filter_result = self.sst_might_include_key(sst, key, key_hash).await?;
             self.record_filter_result(&filter_result);
 
@@ -99,7 +107,7 @@ impl Reader {
             }
         }
 
-        for sr in &snapshot.state.core().compacted {
+        for sr in &snapshot.core().compacted {
             let filter_result = self.sr_might_include_key(sr, key, key_hash).await?;
             self.record_filter_result(&filter_result);
 
@@ -126,19 +134,19 @@ impl Reader {
         &'a self,
         range: BytesRange,
         options: &ScanOptions,
-        snapshot: DbStateSnapshot,
+        snapshot: impl ReadSnapshot,
     ) -> Result<DbIterator<'a>, SlateDBError> {
         let mut memtables = VecDeque::new();
 
         if matches!(options.read_level, Uncommitted) {
-            memtables.push_back(Arc::clone(&snapshot.wal));
-            for imm_wal in &snapshot.state.imm_wal {
+            memtables.push_back(Arc::clone(&snapshot.wal()));
+            for imm_wal in snapshot.imm_wal() {
                 memtables.push_back(imm_wal.table());
             }
         }
 
-        memtables.push_back(Arc::clone(&snapshot.memtable));
-        for memtable in &snapshot.state.imm_memtable {
+        memtables.push_back(Arc::clone(&snapshot.memtable()));
+        for memtable in snapshot.imm_memtable() {
             memtables.push_back(memtable.table());
         }
 
@@ -155,7 +163,7 @@ impl Reader {
         };
 
         let mut l0_iters = VecDeque::new();
-        for sst in &snapshot.state.core().l0 {
+        for sst in &snapshot.core().l0 {
             let iter = SstIterator::new_owned(
                 range.clone(),
                 sst.clone(),
@@ -167,7 +175,7 @@ impl Reader {
         }
 
         let mut sr_iters = VecDeque::new();
-        for sr in &snapshot.state.core().compacted {
+        for sr in &snapshot.core().compacted {
             let iter = SortedRunIterator::new_owned(
                 range.clone(),
                 sr.clone(),
