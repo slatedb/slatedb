@@ -42,7 +42,7 @@ use crate::compactor::Compactor;
 use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_iter::DbIterator;
-use crate::db_state::{CoreDbState, DbState, DbStateSnapshot, SsTableId};
+use crate::db_state::{CoreDbState, DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::flush::WalFlushMsg;
@@ -51,7 +51,7 @@ use crate::manifest::store::{DirtyManifest, FenceableManifest, ManifestStore, St
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::paths::PathResolver;
-use crate::reader::{Reader, ReaderStateSupplier};
+use crate::reader::Reader;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
@@ -89,10 +89,8 @@ impl DbInner {
         ));
         let state = Arc::new(RwLock::new(DbState::new(manifest)));
         let db_stats = DbStats::new(stat_registry.as_ref());
-        let state_supplier = Arc::clone(&state) as Arc<dyn ReaderStateSupplier + Send + Sync>;
 
         let reader = Reader {
-            supplier: state_supplier,
             table_store: Arc::clone(&table_store),
             db_stats: db_stats.clone(),
             mono_clock: Arc::clone(&mono_clock),
@@ -120,7 +118,8 @@ impl DbInner {
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.check_error()?;
-        self.reader.get_with_options(key, options).await
+        let snapshot = self.state.read().snapshot();
+        self.reader.get_with_options(key, options, snapshot).await
     }
 
     pub async fn scan_with_options<'a>(
@@ -129,7 +128,8 @@ impl DbInner {
         options: &ScanOptions,
     ) -> Result<DbIterator<'a>, SlateDBError> {
         self.check_error()?;
-        self.reader.scan_with_options(range, options).await
+        let snapshot = self.state.read().snapshot();
+        self.reader.scan_with_options(range, options, snapshot).await
     }
 
     /// Fences all writers with an older epoch than the provided `manifest` by flushing an empty WAL file that acts
@@ -328,12 +328,6 @@ impl DbInner {
             return Err(error.clone());
         }
         Ok(())
-    }
-}
-
-impl ReaderStateSupplier for RwLock<DbState> {
-    fn supply(&self) -> DbStateSnapshot {
-        self.read().snapshot()
     }
 }
 

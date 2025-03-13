@@ -8,7 +8,7 @@ use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::manifest::store::{DirtyManifest, ManifestStore, StoredManifest};
 use crate::mem_table::{ImmutableMemtable, KVTable};
-use crate::reader::{Reader, ReaderStateSupplier};
+use crate::reader::Reader;
 use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
@@ -45,18 +45,6 @@ struct DbReaderInner {
     reader: Reader,
 }
 
-impl ReaderStateSupplier for RwLock<CheckpointState> {
-    fn supply(&self) -> DbStateSnapshot {
-        let guard = self.read();
-        let state = guard.state.clone();
-        DbStateSnapshot {
-            memtable: Arc::new(KVTable::new()),
-            wal: Arc::new(KVTable::new()),
-            state,
-        }
-    }
-}
-
 struct ManifestPoller {
     join_handle: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     thread_tx: UnboundedSender<ManifestPollerMsg>,
@@ -71,6 +59,17 @@ struct CheckpointState {
     checkpoint: Checkpoint,
     state: Arc<COWDbState>,
     last_wal_id: u64,
+}
+
+impl CheckpointState {
+    fn snapshot(&self) -> DbStateSnapshot {
+        let state = self.state.clone();
+        DbStateSnapshot {
+            memtable: Arc::new(KVTable::new()),
+            wal: Arc::new(KVTable::new()),
+            state,
+        }
+    }
 }
 
 impl DbReaderInner {
@@ -108,10 +107,7 @@ impl DbReaderInner {
         let db_stats = DbStats::new(stat_registry.as_ref());
 
         let state = Arc::new(RwLock::new(initial_state));
-        let state_supplier = Arc::clone(&state) as Arc<dyn ReaderStateSupplier + Send + Sync>;
-
         let reader = Reader {
-            supplier: state_supplier,
             table_store: Arc::clone(&table_store),
             db_stats: db_stats.clone(),
             mono_clock: Arc::clone(&mono_clock),
@@ -153,7 +149,8 @@ impl DbReaderInner {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        self.reader.get_with_options(key, options).await
+        let snapshot = self.state.read().snapshot();
+        self.reader.get_with_options(key, options, snapshot).await
     }
 
     async fn scan_with_options(
@@ -161,7 +158,8 @@ impl DbReaderInner {
         range: BytesRange,
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
-        self.reader.scan_with_options(range, options).await
+        let snapshot = self.state.read().snapshot();
+        self.reader.scan_with_options(range, options, snapshot).await
     }
 
     fn should_reestablish_checkpoint(&self, latest: &CoreDbState) -> bool {

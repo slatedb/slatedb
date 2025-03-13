@@ -17,12 +17,7 @@ use bytes::Bytes;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-pub(crate) trait ReaderStateSupplier {
-    fn supply(&self) -> DbStateSnapshot;
-}
-
 pub(crate) struct Reader {
-    pub(crate) supplier: Arc<dyn ReaderStateSupplier + Send + Sync>,
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) db_stats: DbStats,
     pub(crate) mono_clock: Arc<MonotonicClock>,
@@ -33,9 +28,9 @@ impl Reader {
         &self,
         key: K,
         options: &ReadOptions,
+        snapshot: DbStateSnapshot,
     ) -> Result<Option<Bytes>, SlateDBError> {
         let key = key.as_ref();
-        let snapshot = self.supplier.supply();
         let ttl_now = get_now_for_read(self.mono_clock.clone(), options.read_level).await?;
 
         if matches!(options.read_level, Uncommitted) {
@@ -119,8 +114,8 @@ impl Reader {
         &'a self,
         range: BytesRange,
         options: &ScanOptions,
+        snapshot: DbStateSnapshot,
     ) -> Result<DbIterator<'a>, SlateDBError> {
-        let snapshot = self.supplier.supply();
         let mut memtables = VecDeque::new();
 
         if matches!(options.read_level, Uncommitted) {
