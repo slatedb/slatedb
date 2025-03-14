@@ -251,22 +251,16 @@ impl DbReaderInner {
         replay_new_wals: bool,
     ) -> Result<CheckpointState, SlateDBError> {
         let manifest = manifest_store.read_manifest(checkpoint.manifest_id).await?;
-        let mut imm_memtable = VecDeque::new();
-        let last_wal_id = Self::replay_wal_into(
-            Arc::clone(&table_store),
-            options,
-            &manifest.core,
-            &mut imm_memtable,
-            replay_new_wals,
-        )
-        .await?;
-
-        Ok(CheckpointState {
+        let imm_memtable = VecDeque::new();
+        Self::build_checkpoint_state(
             checkpoint,
             manifest,
             imm_memtable,
-            last_wal_id,
-        })
+            replay_new_wals,
+            Arc::clone(&table_store),
+            &options,
+        )
+        .await
     }
 
     async fn rebuild_checkpoint_state(
@@ -279,24 +273,43 @@ impl DbReaderInner {
             .read_manifest(new_checkpoint.manifest_id)
             .await?;
 
-        let mut imm_memtable = prior
+        let imm_memtable = prior
             .imm_memtable
             .iter()
             .filter(|table| table.last_wal_id() <= manifest.core.last_compacted_wal_sst_id)
             .cloned()
             .collect();
 
-        let last_wal_id = Self::replay_wal_into(
+        Self::build_checkpoint_state(
+            new_checkpoint,
+            manifest,
+            imm_memtable,
+            true,
             Arc::clone(&self.table_store),
             &self.options,
+        )
+        .await
+    }
+
+    async fn build_checkpoint_state(
+        checkpoint: Checkpoint,
+        manifest: Manifest,
+        mut imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
+        replay_new_wals: bool,
+        table_store: Arc<TableStore>,
+        options: &DbReaderOptions,
+    ) -> Result<CheckpointState, SlateDBError> {
+        let last_wal_id = Self::replay_wal_into(
+            Arc::clone(&table_store),
+            options,
             &manifest.core,
             &mut imm_memtable,
-            true,
+            replay_new_wals,
         )
         .await?;
 
         Ok(CheckpointState {
-            checkpoint: new_checkpoint,
+            checkpoint,
             manifest,
             imm_memtable,
             last_wal_id,
