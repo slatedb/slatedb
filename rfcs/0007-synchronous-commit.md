@@ -1,6 +1,6 @@
 # SlateDB Synchronous Commit & Durability
 
-Status: Draft
+Status: Accepted
 
 Authors:
 
