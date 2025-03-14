@@ -4,6 +4,7 @@ use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::manifest::store::DirtyManifest;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
+use crate::reader::ReadSnapshot;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use bytes::Bytes;
 use serde::Serialize;
@@ -285,8 +286,8 @@ impl CoreDbState {
         debug!("-----------------");
     }
 
-    pub(crate) fn find_checkpoint(&self, checkpoint_id: &Uuid) -> Option<&Checkpoint> {
-        self.checkpoints.iter().find(|c| c.id == *checkpoint_id)
+    pub(crate) fn find_checkpoint(&self, checkpoint_id: Uuid) -> Option<&Checkpoint> {
+        self.checkpoints.iter().find(|c| c.id == checkpoint_id)
     }
 }
 
@@ -296,6 +297,28 @@ pub(crate) struct DbStateSnapshot {
     pub(crate) memtable: Arc<KVTable>,
     pub(crate) wal: Arc<KVTable>,
     pub(crate) state: Arc<COWDbState>,
+}
+
+impl ReadSnapshot for DbStateSnapshot {
+    fn memtable(&self) -> Arc<KVTable> {
+        Arc::clone(&self.memtable)
+    }
+
+    fn wal(&self) -> Arc<KVTable> {
+        Arc::clone(&self.wal)
+    }
+
+    fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>> {
+        &self.state.imm_memtable
+    }
+
+    fn imm_wal(&self) -> &VecDeque<Arc<ImmutableWal>> {
+        &self.state.imm_wal
+    }
+
+    fn core(&self) -> &CoreDbState {
+        self.state.core()
+    }
 }
 
 impl DbState {

@@ -122,6 +122,13 @@ impl TableStore {
         &self,
         id_range: R,
     ) -> Result<Vec<SstFileMetadata>, SlateDBError> {
+        fail_point!(Arc::clone(&self.fp_registry), "list-wal-ssts", |_| {
+            Err(SlateDBError::from(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "oops",
+            )))
+        });
+
         let mut wal_list: Vec<SstFileMetadata> = Vec::new();
         let wal_path = &self.path_resolver.wal_path();
         let mut files_stream = self.object_store.list(Some(wal_path));

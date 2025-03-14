@@ -296,6 +296,7 @@ pub trait Clock {
 }
 
 /// contains the default implementation of the Clock, and will return the system time
+#[derive(Default)]
 pub struct SystemClock {
     last_tick: AtomicI64,
 }
@@ -312,7 +313,7 @@ impl Clock for SystemClock {
     }
 }
 
-fn default_clock() -> Arc<dyn Clock + Send + Sync> {
+pub(crate) fn default_clock() -> Arc<dyn Clock + Send + Sync> {
     Arc::new(SystemClock {
         last_tick: AtomicI64::new(i64::MIN),
     })
@@ -661,6 +662,38 @@ impl Default for DbOptions {
             filter_bits_per_key: 10,
             clock: default_clock(),
             default_ttl: None,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct DbReaderOptions {
+    /// How frequently to poll for new manifest files. Refreshing the manifest
+    /// file allows readers to detect newly compacted data. If the reader is
+    /// using an explicit checkpoint, then the manifest will not be polled.
+    pub manifest_poll_interval: Duration,
+
+    /// For readers that do not provide an explicit checkpoint, the client will
+    /// maintain its own checkpoint against the latest database state. The checkpoint’s
+    /// expire time will be set to the current time plus this value. This lifetime
+    /// must always be greater than manifest_poll_interval x 2.
+    pub checkpoint_lifetime: Duration,
+
+    /// The max size of a single in-memory table used to buffer WAL entries
+    /// Defaults to 64MB
+    pub max_memtable_bytes: u64,
+
+    #[serde(skip)]
+    pub block_cache: Option<Arc<dyn DbCache>>,
+}
+
+impl Default for DbReaderOptions {
+    fn default() -> Self {
+        Self {
+            manifest_poll_interval: Duration::from_secs(10),
+            checkpoint_lifetime: Duration::from_secs(10 * 60),
+            max_memtable_bytes: 64 * 1024 * 1024,
+            block_cache: default_block_cache(),
         }
     }
 }

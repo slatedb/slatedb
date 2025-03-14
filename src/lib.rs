@@ -30,6 +30,7 @@ pub use compactor::stats as compactor_stats;
 pub use db::Db;
 pub use db_cache::stats as db_cache_stats;
 pub use db_iter::DbIterator;
+pub use db_reader::DbReader;
 pub use error::{DbOptionsError, SlateDBError};
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
@@ -63,6 +64,7 @@ mod comparable_range;
 mod db;
 mod db_common;
 mod db_iter;
+mod db_reader;
 mod db_state;
 mod error;
 mod filter;
@@ -79,10 +81,12 @@ mod merge_operator;
 mod paths;
 #[cfg(test)]
 mod proptest_util;
+mod reader;
 mod row_codec;
 mod sorted_run_iterator;
 mod sst;
 mod sst_iter;
+mod store_provider;
 mod tablestore;
 #[cfg(test)]
 mod test_utils;

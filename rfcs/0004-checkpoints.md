@@ -178,7 +178,7 @@ struct CheckpointOptions {
     /// Optionally specifies an existing checkpoint to use as the source for this checkpoint. This is
     /// useful for users to establish checkpoints from existing checkpoints, but with a different lifecycle
     /// and/or metadata.
-    source: Option<UUID>
+    source: Option<Uuid>
 }
 
 #[derive(Debug)]
