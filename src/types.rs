@@ -145,4 +145,14 @@ impl ValueDeletable {
             ValueDeletable::Tombstone => 0,
         }
     }
+
+    pub(crate) fn as_bytes(&self) -> Option<Bytes> {
+        match self {
+            ValueDeletable::Value(v) => Some(v.clone()),
+            ValueDeletable::Merge(_) => {
+                unimplemented!("MergeOperator is not yet fully implemented")
+            }
+            ValueDeletable::Tombstone => None,
+        }
+    }
 }

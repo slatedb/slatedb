@@ -2,14 +2,14 @@ use crate::config::ReadLevel::{Committed, Uncommitted};
 use crate::config::{Clock, ReadLevel};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
-use crate::types::{RowEntry, ValueDeletable};
+use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use std::cmp;
 use std::future::Future;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tracing::info;
 
 pub(crate) struct WatchableOnceCell<T: Clone> {
@@ -135,18 +135,6 @@ where
         .expect("failed to create monitor thread")
 }
 
-// Temporary functions to convert ValueDeletable to Option<Bytes> until
-// we add proper support for merges.
-pub(crate) fn unwrap_result(value: ValueDeletable) -> Result<Option<Bytes>, SlateDBError> {
-    match value {
-        ValueDeletable::Value(v) => Ok(Some(v)),
-        ValueDeletable::Merge(_) => {
-            unimplemented!("MergeOperator is not yet fully implemented")
-        }
-        ValueDeletable::Tombstone => Ok(None),
-    }
-}
-
 pub(crate) async fn get_now_for_read(
     mono_clock: Arc<MonotonicClock>,
     read_level: ReadLevel,
@@ -170,14 +158,6 @@ pub(crate) async fn get_now_for_read(
     match read_level {
         Committed => Ok(mono_clock.get_last_durable_tick()),
         Uncommitted => mono_clock.now().await,
-    }
-}
-
-pub(crate) fn filter_expired(entry: RowEntry, now: i64) -> Option<RowEntry> {
-    if is_not_expired(&entry, now) {
-        Some(entry)
-    } else {
-        None
     }
 }
 
@@ -280,6 +260,12 @@ fn bytes_into_minimal_vec(bytes: &Bytes) -> Vec<u8> {
 
 pub(crate) fn clamp_allocated_size_bytes(bytes: &Bytes) -> Bytes {
     bytes_into_minimal_vec(bytes).into()
+}
+
+pub(crate) fn now_systime(clock: &dyn Clock) -> SystemTime {
+    chrono::DateTime::from_timestamp_millis(clock.now())
+        .map(SystemTime::from)
+        .expect("Failed to convert Clock time to SystemTime")
 }
 
 #[cfg(test)]
