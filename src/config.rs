@@ -293,12 +293,6 @@ pub trait Clock {
     /// it represents a sequence that can attribute a logical ordering
     /// to actions on the database.
     fn now(&self) -> i64;
-
-    fn now_systime(&self) -> SystemTime {
-        chrono::DateTime::from_timestamp_millis(self.now())
-            .map(SystemTime::from)
-            .expect("Failed to convert Clock time to SystemTime")
-    }
 }
 
 /// contains the default implementation of the Clock, and will return the system time

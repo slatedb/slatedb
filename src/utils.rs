@@ -9,7 +9,7 @@ use std::future::Future;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tracing::info;
 
 pub(crate) struct WatchableOnceCell<T: Clone> {
@@ -260,6 +260,12 @@ fn bytes_into_minimal_vec(bytes: &Bytes) -> Vec<u8> {
 
 pub(crate) fn clamp_allocated_size_bytes(bytes: &Bytes) -> Bytes {
     bytes_into_minimal_vec(bytes).into()
+}
+
+pub(crate) fn now_systime(clock: &dyn Clock) -> SystemTime {
+    chrono::DateTime::from_timestamp_millis(clock.now())
+        .map(SystemTime::from)
+        .expect("Failed to convert Clock time to SystemTime")
 }
 
 #[cfg(test)]

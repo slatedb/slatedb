@@ -10,6 +10,7 @@ use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
+use crate::utils;
 use crate::SlateDBError::ManifestVersionExists;
 use chrono::Utc;
 use futures::StreamExt;
@@ -318,7 +319,7 @@ impl StoredManifest {
     ) -> Result<Checkpoint, SlateDBError> {
         let expire_time = options
             .lifetime
-            .map(|l| self.manifest_store.clock.now_systime() + l);
+            .map(|l| utils::now_systime(self.manifest_store.clock.as_ref()) + l);
         let db_state = self.db_state();
         let manifest_id = match options.source {
             Some(source_checkpoint_id) => {
@@ -339,7 +340,7 @@ impl StoredManifest {
             id: checkpoint_id,
             manifest_id,
             expire_time,
-            create_time: self.manifest_store.clock.now_systime(),
+            create_time: utils::now_systime(self.manifest_store.clock.as_ref()),
         })
     }
 
@@ -427,7 +428,7 @@ impl StoredManifest {
                 .iter_mut()
                 .find(|c| c.id == checkpoint_id)
                 .ok_or(CheckpointMissing(checkpoint_id))?;
-            checkpoint.expire_time = Some(clock.now_systime() + new_lifetime);
+            checkpoint.expire_time = Some(utils::now_systime(clock.as_ref()) + new_lifetime);
             Ok(Some(updated_manifest))
         })
         .await?;

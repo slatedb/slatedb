@@ -317,7 +317,7 @@ impl DbReaderInner {
             .expire_time
             .expect("Expected checkpoint expiration time to be set")
             .sub(half_lifetime);
-        if self.clock.now_systime() > refresh_deadline {
+        if utils::now_systime(self.clock.as_ref()) > refresh_deadline {
             let refreshed_checkpoint = stored_manifest
                 .refresh_checkpoint(checkpoint.id, self.options.checkpoint_lifetime)
                 .await?;
