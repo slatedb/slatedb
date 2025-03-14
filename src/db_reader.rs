@@ -788,6 +788,8 @@ mod tests {
     use crate::db_state::CoreDbState;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
+    use crate::proptest_util::rng::new_test_rng;
+    use crate::proptest_util::sample;
     use crate::test_utils::TokioClock;
     use crate::{test_utils, Db, SlateDBError};
     use bytes::Bytes;
@@ -962,40 +964,47 @@ mod tests {
     async fn should_reestablish_reader_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
+        let options = DbOptions {
+            l0_sst_size_bytes: 256,
+            ..DbOptions::default()
+        };
+        let db = Db::open_with_opts(path.clone(), options, Arc::clone(&object_store))
+            .await
+            .unwrap();
 
-        let db = Db::open_with_opts(
-            path.clone(),
-            DbOptions::default(),
-            Arc::clone(&object_store),
-        )
-        .await
-        .unwrap();
-
+        let clock = Arc::new(TokioClock::new()) as Arc<dyn Clock + Send + Sync>;
         let reader_options = DbReaderOptions {
             manifest_poll_interval: Duration::from_millis(10),
             ..DbReaderOptions::default()
         };
-        let reader = DbReader::open(
+        let reader = DbReader::open_with_clock(
             path.clone(),
             Arc::clone(&object_store),
             None,
             reader_options,
+            Arc::clone(&clock),
         )
         .await
         .unwrap();
 
-        let key = b"key";
-        assert_eq!(reader.get(key).await.unwrap(), None);
+        let manifest_store = Arc::new(ManifestStore::new(&path, Arc::clone(&object_store)));
+        let manifest = manifest_store.read_latest_manifest().await.unwrap().1;
+        let initial_checkpoint_id = manifest.core.checkpoints.first().unwrap().id;
 
-        let value = b"value";
-        db.put(key, value).await.unwrap();
-        db.close().await.unwrap(); // Close to force manifest update
+        let mut rng = new_test_rng(None);
+        let table = sample::table(&mut rng, 256, 10);
+        for (key, value) in &table {
+            db.put(key, value).await.unwrap();
+        }
+        db.flush().await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(
-            reader.get(key).await.unwrap(),
-            Some(Bytes::from_static(value))
-        );
+        let mut db_iter = reader.scan::<Vec<u8>, _>(..).await.unwrap();
+        test_utils::assert_ranged_db_scan(&table, .., &mut db_iter).await;
+
+        let manifest = manifest_store.read_latest_manifest().await.unwrap().1;
+        assert!(!manifest.core.checkpoints.is_empty());
+        assert_eq!(None, manifest.core.find_checkpoint(&initial_checkpoint_id));
     }
 
     #[tokio::test(start_paused = true)]
