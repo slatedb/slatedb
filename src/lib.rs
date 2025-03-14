@@ -86,6 +86,7 @@ mod row_codec;
 mod sorted_run_iterator;
 mod sst;
 mod sst_iter;
+mod store_provider;
 mod tablestore;
 #[cfg(test)]
 mod test_utils;
