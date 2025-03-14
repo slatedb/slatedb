@@ -18,6 +18,12 @@ use crate::types::RowEntry;
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
 
+pub(crate) const SST_FORMAT_VERSION: u16 = 1;
+
+// 8 bytes for the metadata offset + 2 bytes for the version
+const NUM_FOOTER_BYTES: usize = 10;
+const NUM_FOOTER_BYTES_LONG: u64 = NUM_FOOTER_BYTES as u64;
+
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
     pub(crate) block_size: usize,
@@ -44,16 +50,31 @@ impl SsTableFormat {
         &self,
         obj: &impl ReadOnlyBlob,
     ) -> Result<SsTableInfo, SlateDBError> {
-        let len = obj.len().await?;
-        if len <= 8 {
+        let obj_len = obj.len().await?;
+        if obj_len <= NUM_FOOTER_BYTES_LONG {
             return Err(SlateDBError::EmptySSTable);
         }
         // Get the size of the metadata
-        let sst_metadata_offset_range = (len - 8)..len;
-        let sst_metadata_offset = obj.read_range(sst_metadata_offset_range).await?.get_u64();
-        // Get the metadata. Last 8 bytes are the offset of SsTableInfo
-        let sst_metadata_range = sst_metadata_offset..len - 8;
-        let sst_metadata_bytes = obj.read_range(sst_metadata_range).await?;
+        let header = obj
+            .read_range((obj_len - NUM_FOOTER_BYTES_LONG)..obj_len)
+            .await?;
+        assert!(header.len() == NUM_FOOTER_BYTES);
+
+        // Last 2 bytes of the header represent the version
+        let version = header.slice(8..NUM_FOOTER_BYTES).get_u16();
+        // TODO: Support older and newer versions
+        if version != SST_FORMAT_VERSION {
+            return Err(SlateDBError::InvalidVersion {
+                expected_version: SST_FORMAT_VERSION,
+                actual_version: version,
+            });
+        }
+
+        // First 8 bytes of the header represent the metadata offset
+        let sst_metadata_offset = header.slice(0..8).get_u64();
+        let sst_metadata_bytes = obj
+            .read_range(sst_metadata_offset..obj_len - NUM_FOOTER_BYTES_LONG)
+            .await?;
         SsTableInfo::decode(sst_metadata_bytes, &*self.sst_codec)
     }
 
@@ -519,6 +540,8 @@ impl EncodedSsTableBuilder<'_> {
     /// +---------------------------------------------------+
     /// |             8-byte Metadata Offset                |
     /// +---------------------------------------------------+
+    /// |                 2-byte Version                    |
+    /// +---------------------------------------------------+
     /// * Only present if num_keys >= min_filter_keys.
     ///
     pub fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
@@ -574,6 +597,8 @@ impl EncodedSsTableBuilder<'_> {
         // write the metadata offset at the end of the file. FlatBuffer internal
         // representation is not intended to be used directly.
         buf.put_u64(meta_offset);
+        // write the version at the end of the file.
+        buf.put_u16(SST_FORMAT_VERSION);
         self.blocks.push_back(Bytes::from(buf));
         Ok(EncodedSsTable {
             info,
@@ -1019,6 +1044,51 @@ mod tests {
         assert!(matches!(
             format.validate_checksum(corrupted_bytes.into()),
             Err(SlateDBError::ChecksumMismatch)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_version_checking() {
+        // Create a valid SST
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
+
+        let table_store = TableStore::new(object_store, format.clone(), root_path, None);
+        let mut builder = table_store.table_builder();
+        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
+        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
+        let encoded = builder.build().unwrap();
+        let mut bytes = BytesMut::new();
+        for block in encoded.unconsumed_blocks {
+            bytes.extend_from_slice(&block);
+        }
+        let bytes = bytes.freeze();
+
+        // Test valid version decodes properly through read_info
+        let valid_blob = BytesBlob {
+            bytes: bytes.clone(),
+        };
+        let result = format.read_info(&valid_blob).await;
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                panic!("Expected Ok result, but got error: {:?}", e);
+            }
+        }
+
+        let mut invalid_bytes = BytesMut::from(bytes.clone());
+        // Corrupt the version
+        invalid_bytes[bytes.len() - 1] ^= 1;
+        let invalid_blob = BytesBlob {
+            bytes: invalid_bytes.freeze(),
+        };
+        assert!(matches!(
+            format.read_info(&invalid_blob).await,
+            Err(SlateDBError::InvalidVersion { .. })
         ));
     }
 
