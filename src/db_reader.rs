@@ -154,7 +154,7 @@ impl DbReaderInner {
         let checkpoint = if let Some(checkpoint_id) = checkpoint_id {
             manifest
                 .db_state()
-                .find_checkpoint(&checkpoint_id)
+                .find_checkpoint(checkpoint_id)
                 .ok_or(SlateDBError::CheckpointMissing(checkpoint_id))?
                 .clone()
         } else {
@@ -1002,7 +1002,7 @@ mod tests {
 
         let manifest = manifest_store.read_latest_manifest().await.unwrap().1;
         assert!(!manifest.core.checkpoints.is_empty());
-        assert_eq!(None, manifest.core.find_checkpoint(&initial_checkpoint_id));
+        assert_eq!(None, manifest.core.find_checkpoint(initial_checkpoint_id));
     }
 
     #[tokio::test(start_paused = true)]

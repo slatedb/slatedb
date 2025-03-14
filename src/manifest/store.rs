@@ -151,7 +151,7 @@ impl FenceableManifest {
             .stored_manifest
             .manifest()
             .core
-            .find_checkpoint(&checkpoint_id)
+            .find_checkpoint(checkpoint_id)
             .expect("update applied but checkpoint not found")
             .clone();
         Ok(checkpoint)
@@ -323,8 +323,7 @@ impl StoredManifest {
         let db_state = self.db_state();
         let manifest_id = match options.source {
             Some(source_checkpoint_id) => {
-                let Some(source_checkpoint) = db_state.find_checkpoint(&source_checkpoint_id)
-                else {
+                let Some(source_checkpoint) = db_state.find_checkpoint(source_checkpoint_id) else {
                     return Err(CheckpointMissing(source_checkpoint_id));
                 };
                 source_checkpoint.manifest_id
@@ -358,7 +357,7 @@ impl StoredManifest {
         .await?;
         Ok(self
             .db_state()
-            .find_checkpoint(&checkpoint_id)
+            .find_checkpoint(checkpoint_id)
             .expect("update applied but checkpoint not found")
             .clone())
     }
@@ -408,7 +407,7 @@ impl StoredManifest {
         .await?;
         let new_checkpoint = self
             .db_state()
-            .find_checkpoint(&new_checkpoint_id)
+            .find_checkpoint(new_checkpoint_id)
             .expect("update applied but checkpoint not found")
             .clone();
         Ok(new_checkpoint)
@@ -434,7 +433,7 @@ impl StoredManifest {
         .await?;
         let checkpoint = self
             .db_state()
-            .find_checkpoint(&checkpoint_id)
+            .find_checkpoint(checkpoint_id)
             .expect("update applied but checkpoint not found")
             .clone();
         Ok(checkpoint)
@@ -1117,7 +1116,7 @@ mod tests {
 
         assert_eq!(
             Some(&refreshed_checkpoint),
-            sm.manifest.core.find_checkpoint(&checkpoint.id)
+            sm.manifest.core.find_checkpoint(checkpoint.id)
         );
     }
 
@@ -1159,10 +1158,10 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(checkpoint.id, replaced_checkpoint.id);
-        assert_eq!(None, sm.manifest.core.find_checkpoint(&checkpoint.id));
+        assert_eq!(None, sm.manifest.core.find_checkpoint(checkpoint.id));
         assert_eq!(
             Some(&replaced_checkpoint),
-            sm.manifest.core.find_checkpoint(&replaced_checkpoint.id),
+            sm.manifest.core.find_checkpoint(replaced_checkpoint.id),
         );
     }
 
@@ -1182,7 +1181,7 @@ mod tests {
 
         assert_eq!(
             Some(&replaced_checkpoint),
-            sm.manifest.core.find_checkpoint(&replaced_checkpoint.id),
+            sm.manifest.core.find_checkpoint(replaced_checkpoint.id),
         );
     }
 
@@ -1200,7 +1199,7 @@ mod tests {
             .unwrap();
 
         sm.delete_checkpoint(checkpoint.id).await.unwrap();
-        assert_eq!(None, sm.manifest.core.find_checkpoint(&checkpoint.id));
+        assert_eq!(None, sm.manifest.core.find_checkpoint(checkpoint.id));
     }
 
     #[tokio::test]

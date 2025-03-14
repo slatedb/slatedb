@@ -130,7 +130,7 @@ async fn create_clone_manifest(
 
         if external_db_manifest
             .db_state()
-            .find_checkpoint(&final_checkpoint_id)
+            .find_checkpoint(final_checkpoint_id)
             .is_none()
         {
             external_db_manifest
@@ -159,7 +159,7 @@ async fn get_or_create_parent_checkpoint(
     maybe_checkpoint_id: Option<Uuid>,
 ) -> Result<Checkpoint, SlateDBError> {
     let checkpoint = match maybe_checkpoint_id {
-        Some(checkpoint_id) => match manifest.db_state().find_checkpoint(&checkpoint_id) {
+        Some(checkpoint_id) => match manifest.db_state().find_checkpoint(checkpoint_id) {
             Some(found_checkpoint) => found_checkpoint.clone(),
             None => return Err(CheckpointMissing(checkpoint_id)),
         },
@@ -230,7 +230,7 @@ async fn validate_external_dbs_contain_final_checkpoint(
         let external_manifest = external_manifest_store.read_latest_manifest().await?.1;
         if external_manifest
             .core
-            .find_checkpoint(&final_checkpoint_id)
+            .find_checkpoint(final_checkpoint_id)
             .is_none()
         {
             return Err(SlateDBError::DatabaseAlreadyExists {

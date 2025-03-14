@@ -286,8 +286,8 @@ impl CoreDbState {
         debug!("-----------------");
     }
 
-    pub(crate) fn find_checkpoint(&self, checkpoint_id: &Uuid) -> Option<&Checkpoint> {
-        self.checkpoints.iter().find(|c| c.id == *checkpoint_id)
+    pub(crate) fn find_checkpoint(&self, checkpoint_id: Uuid) -> Option<&Checkpoint> {
+        self.checkpoints.iter().find(|c| c.id == checkpoint_id)
     }
 }
 
