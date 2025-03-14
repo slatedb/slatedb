@@ -82,7 +82,7 @@ Let's summarize the use cases and trade-offs for different `synchronous_commit` 
 
 ### RocksDB
 
-Let's look at how RocksDB describes synchronous commit in their documentation:
+RocksDB describes synchronous commit in their documentation as follows:
 
 > #### Non-Sync Mode
 >
@@ -110,19 +110,19 @@ When `sync = false`, a write is considered committed immediately after the trans
 
 Unlike PostgreSQL's `synchronous_commit` which offers multiple levels, RocksDB only provides a simple boolean option. This is because RocksDB is an embedded database and doesn't have the primary/standby architecture that PostgreSQL has.
 
-To optimize synchronous commit performance, RocksDB implements Group Commit, which is a common pattern in WAL-based systems. This mechanism batches multiple writes together into a single, larger WAL write and flush operation, should improve I/O throughput a lot when comparing with multiple small writes.
+To optimize synchronous commit performance, RocksDB implements Group Commit, which is a common pattern in WAL-based systems. This mechanism batches multiple writes together into a single, larger WAL write and flush operation, which significantly improves I/O throughput compared to multiple small writes.
 
-(SlateDB implemented a similar Group Commit mechanism through its Commit Pipeline, multiple writes with `await_durable: true` will be batched into a single WAL write after `flush.interval` seconds or when the WAL buffer is full.)
+(SlateDB implemented a similar Group Commit mechanism through its Commit Pipeline, where multiple writes with `await_durable: true` will be batched into a single WAL write after `flush.interval` seconds or when the WAL buffer is full.)
 
-It worths to note that RocksDB defaults to `sync = false`, meaning WAL writes are not crash-safe by default.
+It's worth noting that RocksDB defaults to `sync = false`, meaning WAL writes are not crash-safe by default.
 
-This default is likely to be a trade-off for performance. In many distributed systems (RocksDB's primary use case imo), some data loss on individual nodes is acceptable without compromising overall system durability. Examples include Raft clusters, distributed key-value stores, and stream processing state stores. For these use cases, enabling `sync: false` or `manual_wal_flush: true` is possible to be a good idea.
+This default is likely a performance trade-off. In many distributed systems (RocksDB's primary use case), some data loss on individual nodes is acceptable without compromising overall system durability. Examples include Raft clusters, distributed key-value stores, and stream processing state stores. For these use cases, enabling `sync: false` or `manual_wal_flush: true` can be beneficial for performance.
 
 RocksDB allows mixing writes with different sync settings. For example, if transaction A commits with `sync = false` and transaction B starts afterwards, transaction A's writes will be visible to readers in transaction B. When transaction B commits with `sync = true`, both transactions' writes are persisted. This ordering guarantee means that when a `sync = true` write commits, all previous writes are guaranteed to be persisted as well.
 
-Another important consideration is WAL write is possible to be failures. RocksDB handles these by retrying writes until determining whether the failure is temporary or permanent. In cases of permanent failure (like a full or corrupted disk), RocksDB marks the database state as fatal, rolls back the transaction like nothing happened, and switches the database instance to read-only mode.
+Another important consideration is WAL write failures. RocksDB handles these by retrying writes until determining whether the failure is temporary or permanent. In cases of permanent failure (like a full or corrupted disk), RocksDB marks the database state as fatal, rolls back the transaction, and switches the database instance to read-only mode.
 
-## Synchronous Commit in a summary 
+## Synchronous Commit in Summary 
 
 Based on the PostgreSQL and RocksDB references above, we can summarize the key semantics of Synchronous Commit:
 
@@ -133,9 +133,9 @@ Based on the PostgreSQL and RocksDB references above, we can summarize the key s
 
 ## Current Design in SlateDB
 
-This section is based on @criccomini 's comment in <https://github.com/slatedb/slatedb/pull/260#issuecomment-2576502212>.
+This section is based on @criccomini's comment in <https://github.com/slatedb/slatedb/pull/260#issuecomment-2576502212>.
 
-SlateDB currently does not provide an explicit notion of Synchronous Commit. But it does provide a `DurabilityLevel` enum to control the durability guarantees on both read and write operations.
+SlateDB currently does not provide an explicit notion of Synchronous Commit. However, it does provide a `DurabilityLevel` enum to control the durability guarantees on both read and write operations.
 
 The `DurabilityLevel` enum is defined as follows:
 
@@ -147,24 +147,29 @@ enum DurabilityLevel {
 }
 ```
 
-And the `WriteOptions` struct contains a `await_durability: DurabilityLevel` option to control the waiting behavior for durability. If `await_durability` is set to `DurabilityLevel::Remote`, the write will wait for the WAL to be written into S3 before returning.
+The `WriteOptions` struct contains an `await_durability: DurabilityLevel` option to control the waiting behavior for durability. If `await_durability` is set to `DurabilityLevel::Remote`, the write will wait for the WAL to be written into S3 before returning.
 
-Please note that the commit semantic is a bit different from other systems' Synchronous Commit. No matter what `DurabilityLevel` is set in the write operation, this write is considered visible to the readers with `DurabilityLevel::Memory` immediately after the write is appended to the WAL, not nessarily flushed to storage.
+It's important to note that SlateDB's commit semantics differ from other systems' Synchronous Commit. Regardless of what `DurabilityLevel` is set in the write operation, this write is considered visible to readers with `DurabilityLevel::Memory` immediately after the write is appended to the WAL, not necessarily flushed to storage.
 
-The reason is that SlateDB's WAL is not a place for crash recovery only, but also a place for data reads. The read path is first access the WAL, then MemTable, then L0 SST, then SSTs at deeper levels.
+This difference exists because SlateDB's WAL serves not only for crash recovery but also for data reads. The read path first accesses the WAL, then MemTable, then L0 SST, and finally SSTs at deeper levels.
 
-In the notion of Synchronous Commit, the data is considered as committed as soon as the write is persisted to the WAL storage. Users can specify the durability level as `DurabilityLevel::Remote` for the read calls to ensure only the committed/persisted data is read.
+In traditional Synchronous Commit semantics, data is considered committed only after the write is persisted to WAL storage. Users can specify the durability level as `DurabilityLevel::Remote` for read calls to ensure only committed/persisted data is read.
 
-SlateDB differs from both PostgreSQL and RocksDB in multiple ways. Unlike PostgreSQL, it's not a distributed system with Primary/Standby nodes. And unlike RocksDB, it stores data in S3 rather than local disk, which means slower write operations and additional costs for API requests. These differences lead to several key considerations:
+SlateDB differs from both PostgreSQL and RocksDB in multiple ways:
 
-1. Group commit is essential. By batching multiple writes together, we can reduce both API costs and improve performance compared to multiple small writes. However, even with Group Commit, writes to S3 will still be slower than local disk writes. (While parallel writes to S3 could potentially improve performance, this would increase both API costs and the complexity of handling failures.)
+1. Unlike PostgreSQL, it's not a distributed system with Primary/Standby nodes.
+2. Unlike RocksDB, it stores data in S3 rather than local disk, resulting in slower write operations and additional costs for API requests.
+
+These differences lead to several key considerations:
+
+1. Group commit is essential. By batching multiple writes together, we can reduce both API costs and improve performance compared to multiple small writes. However, even with Group Commit, writes to S3 will still be slower than local disk writes.
 2. Writes will inherently take longer due to S3 latency. Given this reality, it makes sense to allow readers who can accept eventual consistency to access unpersisted and uncommitted data while waiting for writes to be durably committed.
 3. Writing WAL to S3 has a higher risk of permanent failures due to network instability compared to local disk. This makes it critical to implement robust auto-recovery mechanisms for handling I/O failures. [^1]
-4. We should provide a way to control the durability level of the read operations, so that users can choose to read the persisted data only data.
+4. We should provide a way to control the durability level of read operations, so users can choose to read only persisted data.
 
 These unique characteristics of SlateDB must be carefully considered as we design our durability and commit semantics.
 
-[^1]: The discussion in [RFC for Handling Data Corruption](https://github.com/slatedb/slatedb/pull/441) may also related to this topic.
+[^1]: The discussion in [RFC for Handling Data Corruption](https://github.com/slatedb/slatedb/pull/441) may also be related to this topic.
 
 ## Possible Improvements
 
@@ -187,13 +192,13 @@ In short:
 
 This proposal aims to provide users with true Synchronous Commit semantics while preserving all capabilities of the current model.
 
-As we've discussed before, it's important to note that "Commit" and "Durability" are distinct concepts that aren't necessarily coupled with each other. Data can be considered "Committed" even if it hasn't been flushed to persistent storage - it may exist only in memory. While such data isn't persisted, it can still be treated as safely committed from a transactional perspective.
+It's important to note that "Commit" and "Durability" are distinct concepts that aren't necessarily coupled. Data can be considered "Committed" even if it hasn't been flushed to persistent storage - it may exist only in memory. While such data isn't persisted, it can still be treated as safely committed from a transactional perspective.
 
 Later transactions can safely depend on these "Unpersisted" but "Committed" data without worrying about conflicts, since they represent the latest committed state of the data. This allows for consistent transaction semantics even when some committed data hasn't yet been persisted to storage.
 
-On the other hand, "Committed" data won't contain data that is still in the process of being committed (which is possible in the read with `DurabilityLevel::Memory` in the current model).
+"Committed" data won't contain data that is still in the process of being committed (which is possible in reads with `DurabilityLevel::Memory` in the current model).
 
-By allowing users to read "Committed" data by default, we can address the challenges outlined in the "Possible Improvements" section. To read committed data, regardless of persistence status, enables proper transaction semantics while still allowing for performance optimizations through writes with lower durability requirements. This provides a cleaner separation between transaction consistency and durability guarantees.
+By allowing users to read "Committed" data by default, we can address the challenges outlined earlier. Reading committed data, regardless of persistence status, enables proper transaction semantics while still allowing for performance optimizations through writes with lower durability requirements. This provides a cleaner separation between transaction consistency and durability guarantees.
 
 Let's assume we have a sequence of writes like this:
 
@@ -207,11 +212,11 @@ Let's assume we have a sequence of writes like this:
 | 105 | WRITE key006 = "value006" with (durability: Memory) | <-- last committed seq |
 | 106 | WRITE key007 = "value007" with (durability: Remote), but still haven't persisted yet | <-- last committing seq |
 
-While "Committed" is distinct from the "DurabilityLevel" concept, both the "Committed" and "Persisted" positions can be tracked using separate watermarks in the commit history of sequence number.
+While "Committed" is distinct from the "DurabilityLevel" concept, both the "Committed" and "Persisted" positions can be tracked using separate watermarks in the commit history of sequence numbers.
 
-Reading "Committed" data should be considered as the default behavior for the read operations, commited data is the safe data.
+Reading "Committed" data should be considered the default behavior for read operations, as committed data is safe data.
 
-At some cases, users may want to read the "Persisted" data only, and they can use the `durability_filter` option to achieve this goal:
+In some cases, users may want to read only "Persisted" data, and they can use the `durability_filter` option to achieve this goal:
 
 ```rust
 let opts = ReadOptions::new().with_durability_filter(DurabilityLevel::Local);
