@@ -108,6 +108,9 @@ impl ManifestCodec for FlatBufferManifestCodec {
     }
 
     fn decode(&self, bytes: &Bytes) -> Result<Manifest, SlateDBError> {
+        if bytes.len() < 2 {
+            return Err(SlateDBError::EmptyManifest);
+        }
         let version = u16::from_be_bytes([bytes[0], bytes[1]]);
         if version != MANIFEST_FORMAT_VERSION {
             return Err(SlateDBError::InvalidVersion {

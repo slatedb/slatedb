@@ -24,6 +24,9 @@ pub enum SlateDBError {
     #[error("Empty block")]
     EmptyBlock,
 
+    #[error("Empty manifest")]
+    EmptyManifest,
+
     #[error("Object store error: {0}")]
     ObjectStoreError(#[from] Arc<object_store::Error>),
 
