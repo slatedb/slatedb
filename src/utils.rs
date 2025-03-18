@@ -270,10 +270,7 @@ pub(crate) fn now_systime(clock: &dyn Clock) -> SystemTime {
 
 /// Computes the "index key" (lowest bound) for an SST index block, ie a key that's greater
 /// than all keys in the previous block and less than or equal to all keys in the new block
-pub(crate) fn index_key(
-    prev_block_last_key: Option<Bytes>,
-    this_block_first_key: &Bytes,
-) -> Bytes {
+pub(crate) fn index_key(prev_block_last_key: Option<Bytes>, this_block_first_key: &Bytes) -> Bytes {
     if prev_block_last_key.is_none() {
         Bytes::new()
     } else {
@@ -281,12 +278,7 @@ pub(crate) fn index_key(
     }
 }
 
-fn compute_lower_bound(
-    prev_block_last_key: &Bytes,
-    this_block_first_key: &Bytes,
-) -> Bytes {
-    // TODO sophie: optimize this for rust (ie how to avoid the copy)
-
+fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes) -> Bytes {
     for i in 0..prev_block_last_key.len() {
         if prev_block_last_key[i] != this_block_first_key[i] {
             return Bytes::copy_from_slice(&this_block_first_key[..i + 1]);
@@ -303,15 +295,14 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::test_utils::TestClock;
     use crate::utils::{
-        bytes_into_minimal_vec, clamp_allocated_size_bytes, index_key, spawn_bg_task, spawn_bg_thread,
-        MonotonicClock, WatchableOnceCell,
+        bytes_into_minimal_vec, clamp_allocated_size_bytes, index_key, spawn_bg_task,
+        spawn_bg_thread, MonotonicClock, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
     use std::time::Duration;
-
 
     struct ResultCaptor<T: Clone> {
         error: Mutex<Option<Result<T, SlateDBError>>>,
@@ -361,7 +352,21 @@ mod tests {
             Bytes::from(String::from("abac"))
         );
 
-        // TODO: more test cases
+        assert_eq!(
+            index_key(
+                Some(Bytes::from(String::from("ababc"))),
+                &Bytes::from(String::from("abacd"))
+            ),
+            Bytes::from(String::from("abac"))
+        );
+
+        assert_eq!(
+            index_key(
+                Some(Bytes::from(String::from("ababc"))),
+                &Bytes::from(String::from("abacd"))
+            ),
+            Bytes::from(String::from("abac"))
+        );
     }
 
     #[tokio::test]
