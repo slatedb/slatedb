@@ -146,6 +146,8 @@ impl WalBufferManager {
             inner.last_flushed_wal_id =
                 Some(flushing_wals.last().expect("flushing_wals is not empty").0);
         }
+
+        self.maybe_release_immutable_wals();
         Ok(())
     }
 
@@ -183,13 +185,31 @@ impl WalBufferManager {
     ///
     /// It's the caller's duty to ensure the seq is monotonically increasing.
     pub async fn track_last_applied_seq(&self, seq: u64) {
-        let mut inner = self.inner.lock().await;
-        inner.last_applied_seq = seq;
+        {
+            let mut inner = self.inner.lock().await;
+            inner.last_applied_seq = seq;
+        }
+        self.maybe_release_immutable_wals().await;
     }
 
     /// Recycle the immutable WALs that are applied to the memtable and flushed to the remote storage.
-    fn maybe_release_immutable_wals(&self) {
-        todo!()
+    async fn maybe_release_immutable_wals(&self) {
+        let mut inner = self.inner.lock().await;
+
+        let mut releaseable_count = 0;
+        for (_, wal) in inner.immutable_wals.iter() {
+            if wal
+                .last_seq()
+                .map(|seq| seq <= inner.last_applied_seq)
+                .unwrap_or(false)
+            {
+                releaseable_count += 1;
+            } else {
+                break;
+            }
+        }
+
+        inner.immutable_wals.drain(..releaseable_count);
     }
 
     /// Scan the WAL from the given sequence number. If the seq is None, it'll include the latest
