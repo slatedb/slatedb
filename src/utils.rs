@@ -354,18 +354,26 @@ mod tests {
 
         assert_eq!(
             index_key(
-                Some(Bytes::from(String::from("ababc"))),
-                &Bytes::from(String::from("abacd"))
+                Some(Bytes::from(String::from(""))),
+                &Bytes::from(String::from("a"))
             ),
-            Bytes::from(String::from("abac"))
+            Bytes::from(String::from("a"))
         );
 
         assert_eq!(
             index_key(
-                Some(Bytes::from(String::from("ababc"))),
-                &Bytes::from(String::from("abacd"))
+                Some(Bytes::from(String::from("cc"))),
+                &Bytes::from(String::from("ccccccc"))
             ),
-            Bytes::from(String::from("abac"))
+            Bytes::from(String::from("ccc"))
+        );
+
+        assert_eq!(
+            index_key(
+                Some(Bytes::from(String::from("eed"))),
+                &Bytes::from(String::from("eee"))
+            ),
+            Bytes::from(String::from("eee"))
         );
     }
 
