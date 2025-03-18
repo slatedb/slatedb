@@ -811,9 +811,9 @@ mod tests {
             "first key in sst info should be correct after reading from store"
         );
         assert_eq!(
-            b"key1",
+            b"",
             index.borrow().block_meta().get(0).first_key().bytes(),
-            "first key in block meta should be correct after reading from store"
+            "index key in block meta should be correct after reading from store"
         );
 
         // Validate filter presence
