@@ -271,10 +271,10 @@ pub(crate) fn now_systime(clock: &dyn Clock) -> SystemTime {
 /// Computes the "index key" (lowest bound) for an SST index block, ie a key that's greater
 /// than all keys in the previous block and less than or equal to all keys in the new block
 pub(crate) fn index_key(prev_block_last_key: Option<Bytes>, this_block_first_key: &Bytes) -> Bytes {
-    if prev_block_last_key.is_none() {
-        Bytes::new()
+    if let Some(prev_key) = prev_block_last_key {
+        compute_lower_bound(&prev_key, this_block_first_key)
     } else {
-        compute_lower_bound(&prev_block_last_key.unwrap(), this_block_first_key)
+        Bytes::new()
     }
 }
 
