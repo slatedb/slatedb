@@ -268,19 +268,50 @@ pub(crate) fn now_systime(clock: &dyn Clock) -> SystemTime {
         .expect("Failed to convert Clock time to SystemTime")
 }
 
+/// Computes the "index key" (lowest bound) for an SST index block, ie a key that's greater
+/// than all keys in the previous block and less than or equal to all keys in the new block
+pub(crate) fn index_key(
+    prev_block_last_key: Option<Bytes>,
+    this_block_first_key: &Bytes,
+) -> Bytes {
+    if prev_block_last_key.is_none() {
+        Bytes::new()
+    } else {
+        compute_lower_bound(&prev_block_last_key.unwrap(), this_block_first_key)
+    }
+}
+
+fn compute_lower_bound(
+    prev_block_last_key: &Bytes,
+    this_block_first_key: &Bytes,
+) -> Bytes {
+    // TODO sophie: optimize this for rust (ie how to avoid the copy)
+
+    for i in 0..prev_block_last_key.len() {
+        if prev_block_last_key[i] != this_block_first_key[i] {
+            return Bytes::copy_from_slice(&this_block_first_key[..i + 1]);
+        }
+    }
+
+    // if we didn't find a mismatch yet then the prev block's key must be shorter,
+    // so just use the common prefix plus the next byte in this block's key
+    Bytes::copy_from_slice(&this_block_first_key[..prev_block_last_key.len() + 1])
+}
+
 #[cfg(test)]
 mod tests {
     use crate::error::SlateDBError;
     use crate::test_utils::TestClock;
     use crate::utils::{
-        bytes_into_minimal_vec, clamp_allocated_size_bytes, spawn_bg_task, spawn_bg_thread,
+        bytes_into_minimal_vec, clamp_allocated_size_bytes, index_key, spawn_bg_task, spawn_bg_thread,
         MonotonicClock, WatchableOnceCell,
     };
-    use bytes::{BufMut, BytesMut};
+    use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
     use std::time::Duration;
+
 
     struct ResultCaptor<T: Clone> {
         error: Mutex<Option<Result<T, SlateDBError>>>,
@@ -302,6 +333,19 @@ mod tests {
         fn captured(&self) -> Option<Result<T, SlateDBError>> {
             self.error.lock().clone()
         }
+    }
+
+    #[test]
+    fn test_should_return_empty_for_index_of_first_block() {
+        let this_block_first_key = Bytes::from(vec![0x01, 0x02, 0x03]);
+        let result = index_key(None, &this_block_first_key);
+
+        assert_eq!(result, Bytes::new());
+    }
+
+    #[test]
+    fn test_should_compute_index_key() {
+
     }
 
     #[tokio::test]
