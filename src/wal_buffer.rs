@@ -3,51 +3,57 @@ use std::{
     sync::Arc,
 };
 
-use chrono::Duration;
 use tokio::{
-    sync::{oneshot, Mutex},
+    sync::{mpsc, oneshot, Mutex},
     time::Instant,
 };
 
 use crate::{
     db_state::SsTableId,
     mem_table::KVTable,
+    tablestore::TableStore,
     types::RowEntry,
-    utils::{WatchableOnceCell, WatchableOnceCellReader},
+    utils::{MonotonicClock, WatchableOnceCell, WatchableOnceCellReader},
     SlateDBError,
 };
 
-/// [`WalBufferManager`] buffers write operations in memory before flushing them to persistent storage. It
-/// maintains a `current_wal` buffer for active writes and a queue of immutable WALs pending flush.
+/// [`WalBufferManager`] buffers write operations in memory before flushing them to persistent storage.
+/// The flush operation only targets Remote storage right now, later we can add an option to flush to local
+/// storage.
+///
+/// It maintains a `current_wal` buffer for active writes and a queue of immutable WALs pending flush.
 ///
 /// By default, it offers a best-effort durability guarantee based on:
 ///
 /// - `max_wal_size`: Flushes when `max_wal_size` bytes is exceeded
 /// - `max_flush_interval`: Flushes after `max_flush_interval` elapses, if set
 ///
-/// For strict durability requirements on synchronous writes, use [`WalManager::start_flush()`] to explicitly
+/// For strict durability requirements on synchronous writes, use [`WalManager::trigger_flush_with_watch()`] to explicitly
 /// trigger and await a flush operation. This will flush ALL the in memory WALs to remote storage.
 ///
 /// The manager is thread-safe and can be safely shared across multiple threads.
 ///
 /// Please note:
 ///
-/// - WAL entries within a single write batch are guaranteed to be written atomically to the same WAL
-///   file
-/// - The size limit (`max_wal_size`) is a soft threshold - write batches are never split across WALs
+/// - the size limit (`max_wal_size`) is a soft threshold. WAL entries within a single write batch are
+///   guaranteed to be written atomically to the same WAL file.
 /// - Fatal errors during flush operations are stored internally and propagated to all subsequent
 ///   operations. The manager becomes unusable after encountering a fatal error.
 pub struct WalBufferManager {
     inner: Arc<Mutex<WalBufferManagerInner>>,
+    quit_tx: Option<oneshot::Sender<()>>,
+    flush_tx: Option<mpsc::Sender<WalFlushWork>>,
+    table_store: Arc<TableStore>,
+    mono_clock: Arc<MonotonicClock>,
 }
 
 struct WalBufferManagerInner {
-    current_wal: KVTable,
+    current_wal: Arc<KVTable>,
     current_wal_id: u64,
     /// When the current WAL is ready to be flushed, it'll be moved to the `immutable_wals`.
     /// The flusher will try flush all the immutable wals to remote storage.
-    immutable_wals: VecDeque<(u64, KVTable)>,
-    flush_tx: tokio::sync::mpsc::Sender<WalFlushWork>,
+    immutable_wals: VecDeque<(u64, Arc<KVTable>)>,
+    /// fatal error includes permission denied, permanent IO errors.
     fatal: Option<SlateDBError>,
     /// Whenever a WAL is applied to Memtable and successfully flushed to remote storage,
     /// the immutable wal can be recycled in memory.
@@ -69,9 +75,6 @@ impl WalBufferManager {
     /// TODO: validate the seq number is always increasing.
     pub async fn append(&self, entries: &[RowEntry]) -> Result<(), SlateDBError> {
         let inner = self.inner.lock().await;
-        if let Some(err) = &inner.fatal {
-            return Err(err.clone());
-        }
 
         for entry in entries {
             inner.current_wal.put(entry.clone());
@@ -85,43 +88,52 @@ impl WalBufferManager {
     ///
     /// It's the caller's duty to call `maybe_trigger_flush` after calling `append`.
     pub async fn maybe_trigger_flush(&self) -> Result<(), SlateDBError> {
-        let need_flush = self.need_flush().await;
+        // check the size of the current wal
+        let need_flush = {
+            let inner = self.inner.lock().await;
+            inner.current_wal.size() >= inner.max_wal_size as usize
+        };
         if need_flush {
-            self.trigger_flush_with_watch().await?;
+            self.flush_tx
+                .as_ref()
+                .unwrap()
+                .send(WalFlushWork { result_tx: None })
+                .await
+                .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
         }
         Ok(())
     }
 
-    /// Start a flush operation and return a watchable cell that will be notified when the flush is done.
-    ///
-    pub async fn trigger_flush_with_watch(
-        &self,
-    ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
-        let mut inner = self.inner.lock().await;
-        if let Some(err) = &inner.fatal {
-            return Err(err.clone());
-        }
-
-        // move current wal to immutable wals, place a new current wal and increase the current wal id.
-        let current_wal_id = inner.current_wal_id;
-        let current_wal = std::mem::replace(&mut inner.current_wal, KVTable::new());
-        let current_watch_cell = current_wal.watch_durable();
-        inner
-            .immutable_wals
-            .push_back((current_wal_id, current_wal));
-        inner.current_wal_id += 1;
-
-        // trigger flusher to work
-        inner
-            .flush_tx
+    pub async fn flush(&self) -> Result<(), SlateDBError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.flush_tx
+            .as_ref()
+            .unwrap()
             .send(WalFlushWork {
-                flush_until_wal_id: current_wal_id,
+                result_tx: Some(result_tx),
             })
             .await
             .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
+        result_rx.await?
+    }
 
-        // return a watchable cell that will be notified when the flush is done.
-        Ok(current_watch_cell)
+    async fn do_flush(&self) -> Result<(), SlateDBError> {
+        self.freeze_current_wal().await?;
+        // flush the wal from previous flush wal id to the last immutable wal
+        Ok(())
+    }
+
+    async fn freeze_current_wal(&self) -> Result<(), SlateDBError> {
+        let mut inner = self.inner.lock().await;
+        if !inner.current_wal.is_empty() {
+            let current_wal_id = inner.current_wal_id;
+            let current_wal = std::mem::replace(&mut inner.current_wal, Arc::new(KVTable::new()));
+            inner
+                .immutable_wals
+                .push_back((current_wal_id, current_wal));
+            inner.current_wal_id += 1;
+        }
+        Ok(())
     }
 
     /// Track the last applied sequence number. It's called when some WAL entries are applied to the memtable.
@@ -145,38 +157,14 @@ impl WalBufferManager {
         todo!()
     }
 
-    async fn need_flush(&self) -> bool {
-        let inner = self.inner.lock().await;
-
-        // if max_flush_interval is set, check if the time since the last flush is greater than the interval
-        if let Some(max_flush_interval_secs) = inner.max_flush_interval_secs {
-            let time_exceeded = inner
-                .last_flush_triggered_at
-                .map(|t| t.elapsed().as_secs() > max_flush_interval_secs)
-                .unwrap_or(false);
-            if time_exceeded {
-                return true;
-            }
+    pub async fn close(&mut self) -> Result<(), SlateDBError> {
+        if let Some(quit_tx) = self.quit_tx.take() {
+            quit_tx.send(()).unwrap();
         }
-
-        // check the size of the current wal
-        if inner.current_wal.size() >= inner.max_wal_size as usize {
-            return true;
-        }
-
-        false
-    }
-
-    pub async fn close(&self) -> Result<(), SlateDBError> {
-        todo!()
+        Ok(())
     }
 }
 
 struct WalFlushWork {
-    flush_until_wal_id: u64,
-}
-
-struct WalFlusher {
-    flush_rx: tokio::sync::mpsc::Receiver<WalFlushWork>,
-    mgr: Arc<Mutex<WalBufferManagerInner>>,
+    result_tx: Option<oneshot::Sender<Result<(), SlateDBError>>>,
 }
