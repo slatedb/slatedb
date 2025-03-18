@@ -1,11 +1,15 @@
 use std::{
     collections::{HashMap, VecDeque},
+    future::Future,
+    pin::Pin,
     sync::Arc,
+    time::Duration,
 };
 
 use tokio::{
+    select,
     sync::{mpsc, oneshot, Mutex},
-    time::Instant,
+    time::{Instant, Interval},
 };
 
 use crate::{
@@ -46,6 +50,8 @@ pub struct WalBufferManager {
     flush_tx: Option<mpsc::Sender<WalFlushWork>>,
     table_store: Arc<TableStore>,
     mono_clock: Arc<MonotonicClock>,
+    max_wal_size: u64,
+    max_flush_interval_secs: u64,
 }
 
 struct WalBufferManagerInner {
@@ -65,22 +71,20 @@ struct WalBufferManagerInner {
     last_flushed_seq: u64,
     /// The last time the flush is triggered.
     last_flush_triggered_at: Option<Instant>,
-    /// max wal size.
-    max_wal_size: u64,
-    /// max flush interval.
-    max_flush_interval_secs: u64,
 }
 
 impl WalBufferManager {
-    /// Append row entries to the current WAL.
+    pub fn spawn_background() {}
+
+    /// Append row entries to the current WAL. return the last seq number of the WAL.
     /// TODO: validate the seq number is always increasing.
-    pub async fn append(&self, entries: &[RowEntry]) -> Result<(), SlateDBError> {
+    pub async fn append(&self, entries: &[RowEntry]) -> Result<Option<u64>, SlateDBError> {
         let inner = self.inner.lock().await;
 
         for entry in entries {
             inner.current_wal.put(entry.clone());
         }
-        Ok(())
+        Ok(entries.last().map(|entry| entry.seq))
     }
 
     /// Check if we need to flush the wal with considering max_wal_size and max_flush_interval.
@@ -92,7 +96,7 @@ impl WalBufferManager {
         // check the size of the current wal
         let need_flush = {
             let inner = self.inner.lock().await;
-            inner.current_wal.size() >= inner.max_wal_size as usize
+            inner.current_wal.size() >= self.max_wal_size as usize
         };
         if need_flush {
             self.flush_tx
@@ -116,6 +120,34 @@ impl WalBufferManager {
             .await
             .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
         result_rx.await?
+    }
+
+    async fn do_background_work(
+        &self,
+        mut flush_rx: mpsc::Receiver<WalFlushWork>,
+        mut quit_rx: oneshot::Receiver<()>,
+        mut max_flush_interval: Option<Interval>,
+    ) -> Result<(), SlateDBError> {
+        let mut ticker_fut: Pin<Box<dyn Future<Output = Instant>>> =
+            match max_flush_interval.as_mut() {
+                Some(interval) => Box::pin(interval.tick()),
+                None => Box::pin(std::future::pending()),
+            };
+        loop {
+            let result = select! {
+                _ = flush_rx.recv() => {
+                    self.do_flush().await
+                }
+                _ = &mut ticker_fut => {
+                    self.do_flush().await
+                }
+                _ = &mut quit_rx => {
+                    return Ok(());
+                }
+            };
+
+            // TODO: handle the result of the flush.
+        }
     }
 
     async fn do_flush(&self) -> Result<(), SlateDBError> {
@@ -147,7 +179,7 @@ impl WalBufferManager {
                 Some(flushing_wals.last().expect("flushing_wals is not empty").0);
         }
 
-        self.maybe_release_immutable_wals();
+        self.maybe_release_immutable_wals().await;
         Ok(())
     }
 
@@ -163,6 +195,7 @@ impl WalBufferManager {
             .write_sst(&SsTableId::Wal(wal_id), encoded_sst)
             .await?;
 
+        // TODO: notify kv table's durable channel.
         self.mono_clock.fetch_max_last_durable_tick(wal.last_tick());
         Ok(())
     }
@@ -223,6 +256,8 @@ impl WalBufferManager {
         if let Some(quit_tx) = self.quit_tx.take() {
             quit_tx.send(()).unwrap();
         }
+
+        // TODO: mark all the kv table's durable channel as shutdown error.
         Ok(())
     }
 }
