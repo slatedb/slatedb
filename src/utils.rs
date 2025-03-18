@@ -345,7 +345,23 @@ mod tests {
 
     #[test]
     fn test_should_compute_index_key() {
+        assert_eq!(
+            index_key(
+                Some(Bytes::from(String::from("aaaac"))),
+                &Bytes::from(String::from("abaaa"))
+            ),
+            Bytes::from(String::from("ab"))
+        );
 
+        assert_eq!(
+            index_key(
+                Some(Bytes::from(String::from("ababc"))),
+                &Bytes::from(String::from("abacd"))
+            ),
+            Bytes::from(String::from("abac"))
+        );
+
+        // TODO: more test cases
     }
 
     #[tokio::test]
