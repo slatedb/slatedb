@@ -10,6 +10,7 @@ use tokio::{
 
 use crate::{
     db_state::SsTableId,
+    iter::KeyValueIterator,
     mem_table::KVTable,
     tablestore::TableStore,
     types::RowEntry,
@@ -67,7 +68,7 @@ struct WalBufferManagerInner {
     /// max wal size.
     max_wal_size: u64,
     /// max flush interval.
-    max_flush_interval_secs: Option<u64>,
+    max_flush_interval_secs: u64,
 }
 
 impl WalBufferManager {
@@ -120,6 +121,47 @@ impl WalBufferManager {
     async fn do_flush(&self) -> Result<(), SlateDBError> {
         self.freeze_current_wal().await?;
         // flush the wal from previous flush wal id to the last immutable wal
+        let flushing_wals = {
+            let mut inner = self.inner.lock().await;
+            let mut flushing_wals = Vec::new();
+            for (wal_id, wal) in inner.immutable_wals.iter() {
+                if *wal_id > inner.last_flushed_wal_id.unwrap_or(0) {
+                    flushing_wals.push((*wal_id, wal.clone()));
+                }
+            }
+            inner.immutable_wals.clear();
+            flushing_wals
+        };
+
+        if flushing_wals.is_empty() {
+            return Ok(());
+        }
+
+        for (wal_id, wal) in flushing_wals.iter() {
+            self.do_flush_one_wal(*wal_id, wal.clone()).await?;
+        }
+
+        {
+            let mut inner = self.inner.lock().await;
+            inner.last_flushed_wal_id =
+                Some(flushing_wals.last().expect("flushing_wals is not empty").0);
+        }
+        Ok(())
+    }
+
+    async fn do_flush_one_wal(&self, wal_id: u64, wal: Arc<KVTable>) -> Result<(), SlateDBError> {
+        let mut sst_builder = self.table_store.table_builder();
+        let mut iter = wal.iter();
+        while let Some(entry) = iter.next_entry().await? {
+            sst_builder.add(entry)?;
+        }
+
+        let encoded_sst = sst_builder.build()?;
+        self.table_store
+            .write_sst(&SsTableId::Wal(wal_id), encoded_sst)
+            .await?;
+
+        self.mono_clock.fetch_max_last_durable_tick(wal.last_tick());
         Ok(())
     }
 
