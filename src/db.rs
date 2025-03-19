@@ -1397,24 +1397,35 @@ mod tests {
             options.clone(),
             object_store,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         // write enough rows with the same key that we yield an L0 SST with multiple blocks
         let mut last_val: String = "foo".to_string();
         for x in 0..4096 {
             let val = format!("val{}", x);
             db.put_with_options(
-                b"key", val.as_bytes(),
-                &PutOptions{ ttl: Default::default() },
-                &WriteOptions{await_durable: false}
-            ).await.unwrap();
+                b"key",
+                val.as_bytes(),
+                &PutOptions {
+                    ttl: Default::default(),
+                },
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
             last_val = val;
-            if db.inner.state.write().memtable().size() > (SsTableFormat::default().block_size * 3) {
+            if db.inner.state.write().memtable().size() > (SsTableFormat::default().block_size * 3)
+            {
                 break;
             }
         }
-        assert_eq!(Some(Bytes::copy_from_slice(last_val.as_bytes())), db.get(b"key").await.unwrap());
+        assert_eq!(
+            Some(Bytes::copy_from_slice(last_val.as_bytes())),
+            db.get(b"key").await.unwrap()
+        );
         db.flush().await.unwrap();
 
         let state = db.inner.state.read().snapshot();
@@ -1422,7 +1433,10 @@ mod tests {
         let sst = state.state.manifest.core.l0.front().unwrap();
         let index = db.inner.table_store.read_index(sst).await.unwrap();
         assert!(index.borrow().block_meta().len() >= 3);
-        assert_eq!(Some(Bytes::copy_from_slice(last_val.as_bytes())), db.get(b"key").await.unwrap());
+        assert_eq!(
+            Some(Bytes::copy_from_slice(last_val.as_bytes())),
+            db.get(b"key").await.unwrap()
+        );
         db.close().await.unwrap();
     }
 

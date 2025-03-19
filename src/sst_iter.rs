@@ -218,7 +218,7 @@ impl<'a> SstIterator<'a> {
                         break;
                     }
                     high = mid;
-                },
+                }
             }
         }
         found_block_id
@@ -376,13 +376,13 @@ mod tests {
     use super::*;
     use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
+    use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs, SsTableIndexArgs};
     use crate::sst::SsTableFormat;
     use crate::test_utils::{assert_kv, gen_attrs};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use rstest::rstest;
     use std::sync::Arc;
-    use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs, SsTableIndexArgs};
 
     #[tokio::test]
     async fn test_one_block_sst_iter() {
@@ -619,7 +619,7 @@ mod tests {
     }
 
     struct FindFirstBlockTestCase {
-        first_keys: Vec<&'static [u8]>
+        first_keys: Vec<&'static [u8]>,
     }
 
     #[rstest]
@@ -641,14 +641,17 @@ mod tests {
     #[case::all_same_first_key(FindFirstBlockTestCase{
         first_keys: vec![b"bbbb", b"bbbb", b"bbbb"]
     })]
-    fn test_find_first_block_with_data_including_or_after_key(#[case] case: FindFirstBlockTestCase) {
+    fn test_find_first_block_with_data_including_or_after_key(
+        #[case] case: FindFirstBlockTestCase,
+    ) {
         let first_keys = &case.first_keys;
         let index = build_index_with_first_keys(first_keys);
 
         // do a search where the key is earlier than the first key
         let found_block = SstIterator::first_block_with_data_including_or_after_key(
             &index.borrow(),
-            b"\x00\x00\x00");
+            b"\x00\x00\x00",
+        );
         assert_eq!(0, found_block);
 
         let mut prev_key = None;
@@ -656,10 +659,11 @@ mod tests {
         for i in 0..first_keys.len() {
             // do a search where the key matches this block's first key
             let key = first_keys[i];
-            let found_block = SstIterator::first_block_with_data_including_or_after_key(&index.borrow(), key);
+            let found_block =
+                SstIterator::first_block_with_data_including_or_after_key(&index.borrow(), key);
             expected_found_block = match prev_key {
                 Some(prev_key) if prev_key == key => expected_found_block,
-                _ => i
+                _ => i,
             };
             assert_eq!(expected_found_block, found_block);
             prev_key = Some(key);
@@ -670,7 +674,10 @@ mod tests {
                 // we could do something more robust here, but its fine since the test cases are
                 // static.
                 let key = [key, b"bla"].concat();
-                let found_block = SstIterator::first_block_with_data_including_or_after_key(&index.borrow(), &key);
+                let found_block = SstIterator::first_block_with_data_including_or_after_key(
+                    &index.borrow(),
+                    &key,
+                );
                 assert_eq!(i, found_block);
             }
         }
@@ -685,8 +692,8 @@ mod tests {
                 &mut index_builder,
                 &BlockMetaArgs {
                     first_key: Some(fk),
-                    offset: 0u64
-                }
+                    offset: 0u64,
+                },
             );
             block_metas.push(block_meta);
         }
@@ -694,8 +701,8 @@ mod tests {
         let index_wip = SsTableIndex::create(
             &mut index_builder,
             &SsTableIndexArgs {
-                block_meta: Some(block_metas)
-            }
+                block_meta: Some(block_metas),
+            },
         );
         index_builder.finish(index_wip, None);
         let index_bytes = Bytes::copy_from_slice(index_builder.finished_data());
