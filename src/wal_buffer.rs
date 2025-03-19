@@ -33,8 +33,9 @@ use crate::{
 /// - `max_wal_size`: Flushes when `max_wal_size` bytes is exceeded
 /// - `max_flush_interval`: Flushes after `max_flush_interval` elapses, if set
 ///
-/// For strict durability requirements on synchronous writes, use [`WalManager::trigger_flush_with_watch()`] to explicitly
-/// trigger and await a flush operation. This will flush ALL the in memory WALs to remote storage.
+/// For strict durability requirements on synchronous writes, use [`WalBufferManager::flush()`] to explicitly
+/// trigger a flush operation and await the result. This will flush ALL the in memory WALs (including the
+/// current WAL) to remote storage.
 ///
 /// The manager is thread-safe and can be safely shared across multiple threads.
 ///
@@ -48,6 +49,7 @@ pub struct WalBufferManager {
     inner: Arc<Mutex<WalBufferManagerInner>>,
     quit_tx: Option<oneshot::Sender<()>>,
     flush_tx: Option<mpsc::Sender<WalFlushWork>>,
+    fatal_once: WatchableOnceCell<SlateDBError>,
     table_store: Arc<TableStore>,
     mono_clock: Arc<MonotonicClock>,
     max_wal_size: u64,
@@ -60,15 +62,13 @@ struct WalBufferManagerInner {
     /// When the current WAL is ready to be flushed, it'll be moved to the `immutable_wals`.
     /// The flusher will try flush all the immutable wals to remote storage.
     immutable_wals: VecDeque<(u64, Arc<KVTable>)>,
-    /// fatal error includes permission denied, permanent IO errors.
-    fatal: Option<SlateDBError>,
     /// Whenever a WAL is applied to Memtable and successfully flushed to remote storage,
     /// the immutable wal can be recycled in memory.
     last_applied_seq: u64,
     /// The flusher will update the last_flushed_wal_id and last_flushed_seq when the flush is done.
     last_flushed_wal_id: Option<u64>,
     /// The last flushed sequence number.
-    last_flushed_seq: u64,
+    last_flushed_seq: Option<u64>,
     /// The last time the flush is triggered.
     last_flush_triggered_at: Option<Instant>,
 }
@@ -79,6 +79,8 @@ impl WalBufferManager {
     /// Append row entries to the current WAL. return the last seq number of the WAL.
     /// TODO: validate the seq number is always increasing.
     pub async fn append(&self, entries: &[RowEntry]) -> Result<Option<u64>, SlateDBError> {
+        // TODO: check if the wal buffer is in a fatal error state.
+
         let inner = self.inner.lock().await;
 
         for entry in entries {
@@ -127,56 +129,111 @@ impl WalBufferManager {
         mut flush_rx: mpsc::Receiver<WalFlushWork>,
         mut quit_rx: oneshot::Receiver<()>,
         mut max_flush_interval: Option<Interval>,
-    ) -> Result<(), SlateDBError> {
+    ) {
         let mut ticker_fut: Pin<Box<dyn Future<Output = Instant>>> =
             match max_flush_interval.as_mut() {
                 Some(interval) => Box::pin(interval.tick()),
                 None => Box::pin(std::future::pending()),
             };
+
+        let mut contiguous_failures_count = 0;
+        let mut fatal = None;
         loop {
             let result = select! {
-                _ = flush_rx.recv() => {
-                    self.do_flush().await
+                work = flush_rx.recv() => {
+                    let result_tx = match work {
+                        None => break,
+                        Some(work) => work.result_tx,
+                    };
+                    let result = self.do_flush().await;
+                    // notify the result of do_flush to the caller if needed.
+                    if let Some(result_tx) = result_tx {
+                        result_tx.send(result.clone()).ok();
+                    }
+                    result
                 }
                 _ = &mut ticker_fut => {
                     self.do_flush().await
                 }
                 _ = &mut quit_rx => {
-                    return Ok(());
+                    break;
                 }
             };
 
-            // TODO: handle the result of the flush.
+            // not all the flush error is fatal. on temporary network errors, we can retry later.
+            // After a few continuous failures, we'll set it into fatal state.
+            match result {
+                Ok(_) => {
+                    contiguous_failures_count = 0;
+                }
+                Err(e) => {
+                    contiguous_failures_count += 1;
+                    if contiguous_failures_count > 3 {
+                        fatal = Some(e.clone());
+                        break;
+                    }
+                }
+            }
         }
+
+        // There are two possible paths to exit the loop:
+        //
+        // 1. Got fatal error
+        // 2. Got shutdown signal
+        //
+        // In both cases, we need to notify all the flushing WALs to be finished with fatal error or shutdown error.
+        // If we got a fatal error, we need to set it in fatal_once to notify the database to enter fatal state.
+        if let Some(e) = &fatal {
+            self.fatal_once.write(e.clone());
+        }
+        // notify all the flushing wals to be finished with fatal error or shutdown error. we need ensure all the wal
+        // tables finally get notified.
+        let flushing_wals = self.flushing_wals().await;
+        for (_, wal) in flushing_wals.iter() {
+            wal.notify_durable(Err(fatal
+                .clone()
+                .unwrap_or(SlateDBError::BackgroundTaskShutdown)));
+        }
+    }
+
+    // flush the wal from previous flush wal id to the last immutable wal
+    async fn flushing_wals(&self) -> Vec<(u64, Arc<KVTable>)> {
+        let inner = self.inner.lock().await;
+        let mut flushing_wals = Vec::new();
+        for (wal_id, wal) in inner.immutable_wals.iter() {
+            if *wal_id > inner.last_flushed_wal_id.unwrap_or(0) {
+                flushing_wals.push((*wal_id, wal.clone()));
+            }
+        }
+        flushing_wals
     }
 
     async fn do_flush(&self) -> Result<(), SlateDBError> {
         self.freeze_current_wal().await?;
-        // flush the wal from previous flush wal id to the last immutable wal
-        let flushing_wals = {
-            let mut inner = self.inner.lock().await;
-            let mut flushing_wals = Vec::new();
-            for (wal_id, wal) in inner.immutable_wals.iter() {
-                if *wal_id > inner.last_flushed_wal_id.unwrap_or(0) {
-                    flushing_wals.push((*wal_id, wal.clone()));
-                }
-            }
-            inner.immutable_wals.clear();
-            flushing_wals
-        };
+        let flushing_wals = self.flushing_wals().await;
 
         if flushing_wals.is_empty() {
             return Ok(());
         }
 
         for (wal_id, wal) in flushing_wals.iter() {
-            self.do_flush_one_wal(*wal_id, wal.clone()).await?;
-        }
+            let result = self.do_flush_one_wal(*wal_id, wal.clone()).await;
+            // a kv table can be retried to flush multiple times, but WatchableOnceCell is only set once.
+            // let's notify Ok(()) as soon as possible, while the error will be notified when it goes into
+            // fatal state.
+            if result.is_ok() {
+                wal.notify_durable(result.clone());
+            }
+            result?;
 
-        {
-            let mut inner = self.inner.lock().await;
-            inner.last_flushed_wal_id =
-                Some(flushing_wals.last().expect("flushing_wals is not empty").0);
+            // increment the last flushed wal id, and last flushed seq
+            {
+                let mut inner = self.inner.lock().await;
+                inner.last_flushed_wal_id = Some(*wal_id);
+                if let Some(seq) = wal.last_seq() {
+                    inner.last_flushed_seq = Some(seq);
+                }
+            }
         }
 
         self.maybe_release_immutable_wals().await;
@@ -195,7 +252,6 @@ impl WalBufferManager {
             .write_sst(&SsTableId::Wal(wal_id), encoded_sst)
             .await?;
 
-        // TODO: notify kv table's durable channel.
         self.mono_clock.fetch_max_last_durable_tick(wal.last_tick());
         Ok(())
     }
@@ -247,6 +303,7 @@ impl WalBufferManager {
 
     /// Scan the WAL from the given sequence number. If the seq is None, it'll include the latest
     /// WALs. The scan includes the current WAL and the immutable WALs.
+    /// it's used for dirty read. will be implemented in another PR.
     /// TODO: return an kv iterator.
     pub fn scan(&self, seq: Option<u64>) -> Result<(), SlateDBError> {
         todo!()
@@ -257,7 +314,6 @@ impl WalBufferManager {
             quit_tx.send(()).unwrap();
         }
 
-        // TODO: mark all the kv table's durable channel as shutdown error.
         Ok(())
     }
 }
