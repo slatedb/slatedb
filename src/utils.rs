@@ -270,32 +270,44 @@ pub(crate) fn now_systime(clock: &dyn Clock) -> SystemTime {
 
 /// Computes the "index key" (lowest bound) for an SST index block, ie a key that's greater
 /// than all keys in the previous block and less than or equal to all keys in the new block
-pub(crate) fn index_key(prev_block_last_key: Option<Bytes>, this_block_first_key: &Bytes) -> Bytes {
+pub(crate) fn compute_index_key<'a>(
+    prev_block_last_key: Option<Bytes>,
+    this_block_first_key: &Bytes,
+) -> &'a Bytes {
     if let Some(prev_key) = prev_block_last_key {
         compute_lower_bound(&prev_key, this_block_first_key)
     } else {
-        Bytes::new()
+        &Bytes::new()
     }
 }
 
-fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes) -> Bytes {
+fn compute_lower_bound<'a>(prev_block_last_key: &Bytes, this_block_first_key: &Bytes) -> &'a Bytes {
+    assert!(prev_block_last_key.len() > 0 && this_block_first_key.len() > 0);
+
     for i in 0..prev_block_last_key.len() {
         if prev_block_last_key[i] != this_block_first_key[i] {
-            return Bytes::copy_from_slice(&this_block_first_key[..i + 1]);
+            return &this_block_first_key.slice(..i + 1);
         }
+    }
+
+    // if the keys are equal, just use the full key
+    if prev_block_last_key.len() == this_block_first_key.len() {
+        return this_block_first_key;
     }
 
     // if we didn't find a mismatch yet then the prev block's key must be shorter,
     // so just use the common prefix plus the next byte in this block's key
-    Bytes::copy_from_slice(&this_block_first_key[..prev_block_last_key.len() + 1])
+    &this_block_first_key.slice(..prev_block_last_key.len() + 1)
 }
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use crate::error::SlateDBError;
     use crate::test_utils::TestClock;
     use crate::utils::{
-        bytes_into_minimal_vec, clamp_allocated_size_bytes, index_key, spawn_bg_task,
+        bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key, spawn_bg_task,
         spawn_bg_thread, MonotonicClock, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
@@ -329,51 +341,28 @@ mod tests {
     #[test]
     fn test_should_return_empty_for_index_of_first_block() {
         let this_block_first_key = Bytes::from(vec![0x01, 0x02, 0x03]);
-        let result = index_key(None, &this_block_first_key);
+        let result = compute_index_key(None, &this_block_first_key);
 
-        assert_eq!(result, Bytes::new());
+        assert_eq!(result, &Bytes::new());
     }
 
-    #[test]
-    fn test_should_compute_index_key() {
+    #[rstest]
+    #[case(Some("aaaac"), "abaaa", "ab")]
+    #[case(Some("ababc"), "abacd", "abac")]
+    #[case(Some(""), "a", "a")]
+    #[case(Some("cc"), "ccccccc", "ccc")]
+    #[case(Some("eed"), "eee", "eee")]
+    fn test_should_compute_index_key(
+        #[case] prev_block_last_key: Option<&'static str>,
+        #[case] this_block_first_key: &'static str,
+        #[case] expected_index_key: &'static str,
+    ) {
         assert_eq!(
-            index_key(
-                Some(Bytes::from(String::from("aaaac"))),
-                &Bytes::from(String::from("abaaa"))
+            compute_index_key(
+                prev_block_last_key.map(|s| Bytes::from(s.to_string())),
+                &Bytes::from(this_block_first_key.to_string())
             ),
-            Bytes::from(String::from("ab"))
-        );
-
-        assert_eq!(
-            index_key(
-                Some(Bytes::from(String::from("ababc"))),
-                &Bytes::from(String::from("abacd"))
-            ),
-            Bytes::from(String::from("abac"))
-        );
-
-        assert_eq!(
-            index_key(
-                Some(Bytes::from(String::from(""))),
-                &Bytes::from(String::from("a"))
-            ),
-            Bytes::from(String::from("a"))
-        );
-
-        assert_eq!(
-            index_key(
-                Some(Bytes::from(String::from("cc"))),
-                &Bytes::from(String::from("ccccccc"))
-            ),
-            Bytes::from(String::from("ccc"))
-        );
-
-        assert_eq!(
-            index_key(
-                Some(Bytes::from(String::from("eed"))),
-                &Bytes::from(String::from("eee"))
-            ),
-            Bytes::from(String::from("eee"))
+            &Bytes::from_static(expected_index_key.as_bytes())
         );
     }
 

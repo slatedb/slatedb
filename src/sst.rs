@@ -15,7 +15,7 @@ use crate::flatbuffer_types::{
     SsTableIndexOwned,
 };
 use crate::types::RowEntry;
-use crate::utils::index_key;
+use crate::utils::compute_index_key;
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
 
@@ -445,7 +445,7 @@ impl EncodedSsTableBuilder<'_> {
         self.num_keys += 1;
         let key = entry.key.clone();
 
-        let index_key = index_key(self.current_block_max_key.take(), &key);
+        let index_key = compute_index_key(self.current_block_max_key.take(), &key);
         self.current_block_max_key = Some(key.clone());
 
         if !self.builder.add(entry.clone()) {
@@ -458,11 +458,11 @@ impl EncodedSsTableBuilder<'_> {
             // New block must always accept the first KV pair
             assert!(self.builder.add(entry));
 
-            self.first_key = Some(self.index_builder.create_vector(&index_key));
+            self.first_key = Some(self.index_builder.create_vector(index_key));
         } else if self.sst_first_key.is_none() {
             self.sst_first_key = Some(Bytes::copy_from_slice(&key));
 
-            self.first_key = Some(self.index_builder.create_vector(&index_key));
+            self.first_key = Some(self.index_builder.create_vector(index_key));
         }
 
         self.filter_builder.add_key(&key);
