@@ -284,7 +284,7 @@ pub(crate) fn compute_index_key(
 }
 
 fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes) -> Bytes {
-    assert!(prev_block_last_key.len() > 0 && this_block_first_key.len() > 0);
+    assert!(!prev_block_last_key.is_empty() && !this_block_first_key.is_empty());
 
     for i in 0..prev_block_last_key.len() {
         if prev_block_last_key[i] != this_block_first_key[i] {
@@ -294,7 +294,7 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
 
     // if the keys are equal, just use the full key
     if prev_block_last_key.len() == this_block_first_key.len() {
-        return this_block_first_key.clone()
+        return this_block_first_key.clone();
     }
 
     // if we didn't find a mismatch yet then the prev block's key must be shorter,
@@ -377,7 +377,7 @@ mod tests {
     ) {
         compute_index_key(
             prev_block_last_key.map(|s| Bytes::from(s.to_string())),
-            &Bytes::from(this_block_first_key.to_string())
+            &Bytes::from(this_block_first_key.to_string()),
         );
     }
 
