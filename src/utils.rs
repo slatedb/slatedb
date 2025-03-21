@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tracing::info;
 
+static EMPTY_KEY: Bytes = Bytes::new();
+
 pub(crate) struct WatchableOnceCell<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
     tx: tokio::sync::watch::Sender<Option<T>>,
@@ -270,34 +272,34 @@ pub(crate) fn now_systime(clock: &dyn Clock) -> SystemTime {
 
 /// Computes the "index key" (lowest bound) for an SST index block, ie a key that's greater
 /// than all keys in the previous block and less than or equal to all keys in the new block
-pub(crate) fn compute_index_key<'a>(
+pub(crate) fn compute_index_key(
     prev_block_last_key: Option<Bytes>,
     this_block_first_key: &Bytes,
-) -> &'a Bytes {
+) -> Bytes {
     if let Some(prev_key) = prev_block_last_key {
         compute_lower_bound(&prev_key, this_block_first_key)
     } else {
-        &Bytes::new()
+        EMPTY_KEY.clone()
     }
 }
 
-fn compute_lower_bound<'a>(prev_block_last_key: &Bytes, this_block_first_key: &Bytes) -> &'a Bytes {
+fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes) -> Bytes {
     assert!(prev_block_last_key.len() > 0 && this_block_first_key.len() > 0);
 
     for i in 0..prev_block_last_key.len() {
         if prev_block_last_key[i] != this_block_first_key[i] {
-            return &this_block_first_key.slice(..i + 1);
+            return this_block_first_key.slice(..i + 1);
         }
     }
 
     // if the keys are equal, just use the full key
     if prev_block_last_key.len() == this_block_first_key.len() {
-        return this_block_first_key;
+        return this_block_first_key.clone()
     }
 
     // if we didn't find a mismatch yet then the prev block's key must be shorter,
     // so just use the common prefix plus the next byte in this block's key
-    &this_block_first_key.slice(..prev_block_last_key.len() + 1)
+    this_block_first_key.slice(..prev_block_last_key.len() + 1)
 }
 
 #[cfg(test)]
@@ -349,7 +351,6 @@ mod tests {
     #[rstest]
     #[case(Some("aaaac"), "abaaa", "ab")]
     #[case(Some("ababc"), "abacd", "abac")]
-    #[case(Some(""), "a", "a")]
     #[case(Some("cc"), "ccccccc", "ccc")]
     #[case(Some("eed"), "eee", "eee")]
     fn test_should_compute_index_key(
@@ -362,7 +363,21 @@ mod tests {
                 prev_block_last_key.map(|s| Bytes::from(s.to_string())),
                 &Bytes::from(this_block_first_key.to_string())
             ),
-            &Bytes::from_static(expected_index_key.as_bytes())
+            Bytes::from_static(expected_index_key.as_bytes())
+        );
+    }
+
+    #[rstest]
+    #[case(Some(""), "a")]
+    #[case(Some("a"), "")]
+    #[should_panic]
+    fn test_should_panic_on_empty_keys(
+        #[case] prev_block_last_key: Option<&'static str>,
+        #[case] this_block_first_key: &'static str,
+    ) {
+        compute_index_key(
+            prev_block_last_key.map(|s| Bytes::from(s.to_string())),
+            &Bytes::from(this_block_first_key.to_string())
         );
     }
 

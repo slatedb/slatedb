@@ -458,11 +458,11 @@ impl EncodedSsTableBuilder<'_> {
             // New block must always accept the first KV pair
             assert!(self.builder.add(entry));
 
-            self.first_key = Some(self.index_builder.create_vector(index_key));
+            self.first_key = Some(self.index_builder.create_vector(&index_key));
         } else if self.sst_first_key.is_none() {
             self.sst_first_key = Some(Bytes::copy_from_slice(&key));
 
-            self.first_key = Some(self.index_builder.create_vector(index_key));
+            self.first_key = Some(self.index_builder.create_vector(&index_key));
         }
 
         self.filter_builder.add_key(&key);
