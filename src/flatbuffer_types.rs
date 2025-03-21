@@ -28,6 +28,7 @@ use crate::flatbuffer_types::manifest_generated::{
     UuidArgs,
 };
 use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
+use crate::partitioned_keyspace::RangePartitionedKeySpace;
 use crate::utils::clamp_allocated_size_bytes;
 
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
@@ -56,6 +57,16 @@ impl SsTableIndexOwned {
     /// Returns the size of the SSTable index in bytes.
     pub(crate) fn size(&self) -> usize {
         self.data.len()
+    }
+}
+
+impl<'a> RangePartitionedKeySpace for SsTableIndex<'a> {
+    fn partitions(&self) -> usize {
+        self.block_meta().len()
+    }
+
+    fn partition_first_key(&self, partition: usize) -> &[u8] {
+        self.block_meta().get(partition).first_key().bytes()
     }
 }
 
