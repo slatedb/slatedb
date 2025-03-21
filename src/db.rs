@@ -1387,6 +1387,60 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_find_with_multiple_repeated_keys() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut options = test_db_options(0, 1024 * 1024, None);
+        options.wal_enabled = false;
+        let db = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            options.clone(),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        // write enough rows with the same key that we yield an L0 SST with multiple blocks
+        let mut last_val: String = "foo".to_string();
+        for x in 0..4096 {
+            let val = format!("val{}", x);
+            db.put_with_options(
+                b"key",
+                val.as_bytes(),
+                &PutOptions {
+                    ttl: Default::default(),
+                },
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+            last_val = val;
+            if db.inner.state.write().memtable().size() > (SsTableFormat::default().block_size * 3)
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            Some(Bytes::copy_from_slice(last_val.as_bytes())),
+            db.get(b"key").await.unwrap()
+        );
+        db.flush().await.unwrap();
+
+        let state = db.inner.state.read().snapshot();
+        assert_eq!(1, state.state.manifest.core.l0.len());
+        let sst = state.state.manifest.core.l0.front().unwrap();
+        let index = db.inner.table_store.read_index(sst).await.unwrap();
+        assert!(index.borrow().block_meta().len() >= 3);
+        assert_eq!(
+            Some(Bytes::copy_from_slice(last_val.as_bytes())),
+            db.get(b"key").await.unwrap()
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_get_with_row_override_ttl_and_read_committed() {
         let clock = Arc::new(TestClock::new());
         let ttl = 100;
