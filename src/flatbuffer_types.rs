@@ -60,7 +60,7 @@ impl SsTableIndexOwned {
     }
 }
 
-impl<'a> RangePartitionedKeySpace for SsTableIndex<'a> {
+impl RangePartitionedKeySpace for SsTableIndex<'_> {
     fn partitions(&self) -> usize {
         self.block_meta().len()
     }

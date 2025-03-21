@@ -226,7 +226,7 @@ mod tests {
         partitions: Vec<&'a [u8]>,
     }
 
-    impl<'a> RangePartitionedKeySpace for TestKeyspace<'a> {
+    impl RangePartitionedKeySpace for TestKeyspace<'_> {
         fn partitions(&self) -> usize {
             self.partitions.len()
         }
