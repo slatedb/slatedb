@@ -94,11 +94,12 @@ impl WalBufferManager {
     /// into a single WAL file.
     ///
     /// It's the caller's duty to call `maybe_trigger_flush` after calling `append`.
-    pub async fn maybe_trigger_flush(&self) -> Result<(), SlateDBError> {
+    pub async fn maybe_trigger_flush(&self) -> Result<Arc<KVTable>, SlateDBError> {
         // check the size of the current wal
-        let need_flush = {
+        let (current_wal, need_flush) = {
             let inner = self.inner.lock().await;
-            inner.current_wal.size() >= self.max_wal_size as usize
+            let need_flush = inner.current_wal.size() >= self.max_wal_size as usize;
+            (inner.current_wal.clone(), need_flush)
         };
         if need_flush {
             self.flush_tx
@@ -108,7 +109,7 @@ impl WalBufferManager {
                 .await
                 .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
         }
-        Ok(())
+        Ok(current_wal)
     }
 
     pub async fn flush(&self) -> Result<(), SlateDBError> {
