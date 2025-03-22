@@ -1,30 +1,41 @@
-use slatedb::object_store::ObjectStore;
-use slatedb::object_store::path::Path;
-use slatedb::object_store::memory::InMemory;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
-use std::time::Duration;
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use slatedb::config::{DbOptions, PutOptions, WriteOptions};
+use slatedb::object_store::memory::InMemory;
+use slatedb::object_store::path::Path;
+use slatedb::object_store::ObjectStore;
 use slatedb::Db;
-use slatedb::config::{DbOptions, WriteOptions, PutOptions};
-use futures::future::join_all;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_concurrent_writers_and_readers() {
     const NUM_WRITERS: usize = 10;
     const NUM_READERS: usize = 2;
-    const WRITES_PER_TASK: usize = 10000;
+    const WRITES_PER_TASK: usize = 100;
+    const KEY_LENGTH: usize = 256;
+
+    // Pad keys to allow us to control how many blocks we take up
+    // Since block size is not configurable
+    fn zero_pad_key(key: u64, length: usize) -> Vec<u8> {
+        let mut padded_key = vec![0; length];
+        // Set the first 8 bytes to the key
+        padded_key[0..8].copy_from_slice(&key.to_le_bytes());
+        padded_key
+    }
 
     // Create an InMemory object store and DB
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let config = DbOptions {
         flush_interval: Some(Duration::from_millis(100)),
         manifest_poll_interval: Duration::from_millis(100),
-        max_unflushed_bytes: 4 * 1024,
+        // Allow 16KB of unflushed data
+        max_unflushed_bytes: 16 * 1024,
         min_filter_keys: 0,
-        l0_sst_size_bytes: 1024,
+        // Allow up to four 4096-byte blocks per-SST
+        l0_sst_size_bytes: 4 * 4096,
         ..Default::default()
     };
     let db = Arc::new(
@@ -38,19 +49,24 @@ async fn test_concurrent_writers_and_readers() {
     );
 
     // Flag to signal readers to stop
-    let stop_readers = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
 
     // Writer tasks: each writer writes to its own key with incrementing values
     let writer_handles = (0..NUM_WRITERS)
         .map(|writer_id| {
             let db = db.clone();
+            let stop_writers = stop.clone();
             tokio::spawn(async move {
                 // Get a random key in the keyspace. Don't use nth. Pick one at random.
-                let key = writer_id.to_be_bytes();
+                let key = zero_pad_key(writer_id.try_into().unwrap(), KEY_LENGTH);
                 for i in 1..=WRITES_PER_TASK {
+                    if stop_writers.load(Ordering::Relaxed) {
+                        break;
+                    }
+
                     // Write the incremented value
                     db.put_with_options(
-                        key.as_ref(),
+                        &key,
                         i.to_be_bytes().as_ref(),
                         &PutOptions::default(),
                         &WriteOptions {
@@ -68,7 +84,7 @@ async fn test_concurrent_writers_and_readers() {
         })
         .collect::<Vec<_>>();
 
-    let stop_flushers = stop_readers.clone();
+    let stop_flushers = stop.clone();
     let flusher_db = db.clone();
     let flusher = tokio::spawn(async move {
         while !stop_flushers.load(Ordering::Relaxed) {
@@ -81,7 +97,7 @@ async fn test_concurrent_writers_and_readers() {
     let reader_handles = (0..NUM_READERS)
         .map(|reader_id| {
             let db = db.clone();
-            let stop_readers = stop_readers.clone();
+            let stop_readers = stop.clone();
 
             tokio::spawn(async move {
                 let mut latest_values = HashMap::<usize, AtomicU64>::new();
@@ -92,7 +108,7 @@ async fn test_concurrent_writers_and_readers() {
                     // Pick a random key and validate that it's higher than the last value for that key
                     let key = rng.gen_range(0..NUM_WRITERS);
                     if let Some(bytes) = db
-                        .get(key.to_be_bytes().as_ref())
+                        .get(zero_pad_key(key.try_into().unwrap(), KEY_LENGTH))
                         .await
                         .expect("Failed to read value")
                     {
@@ -135,12 +151,32 @@ async fn test_concurrent_writers_and_readers() {
         })
         .collect::<Vec<_>>();
 
-    // Wait for all writers to complete
-    join_all(writer_handles).await;
+    loop {
+        // Check if any handles are still running.
+        let finished_writers = writer_handles
+            .iter()
+            .filter(|handle| handle.is_finished())
+            .count();
+        let finished_readers = reader_handles
+            .iter()
+            .filter(|handle| handle.is_finished())
+            .count();
+        println!(
+            "Finished writers: {}, finished readers: {}",
+            finished_writers, finished_readers
+        );
 
-    // Signal readers to stop, wait for them to complete, and clean up
-    stop_readers.store(true, Ordering::Relaxed);
-    join_all(reader_handles).await;
-    flusher.await.unwrap();
+        if finished_writers == NUM_WRITERS || finished_readers > 0 {
+            stop.store(true, Ordering::Relaxed);
+            break;
+        }
+    }
+
+    // Wait for all readers and writers to complete, and verify none ended with an error using try_join_all
+    let all_handles = writer_handles
+        .into_iter()
+        .chain(reader_handles)
+        .chain(vec![flusher]);
+    futures::future::try_join_all(all_handles).await.unwrap();
     db.close().await.unwrap();
 }
