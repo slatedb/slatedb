@@ -1,3 +1,4 @@
+use chrono::Duration;
 use std::any::Any;
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc};
@@ -147,4 +148,51 @@ pub enum DbOptionsError {
 
     #[error("Invalid configuration format: {0}")]
     InvalidFormat(#[from] figment::Error),
+}
+
+#[derive(Clone, Debug, Error)]
+pub enum Error {
+    /// The application attempted an invalid operation or an operation with an
+    /// invalid parameter (including misconfiguration).
+    #[error("Operation Error: {msg}")]
+    OperationError { msg: String },
+
+    /// Unexpected internal error. This error is fatal (i.e. the database must be closed).
+    #[error("System Error: {msg}")]
+    SystemError { msg: String },
+
+    /// Invalid persistent state (e.g. corrupted data files). The state must
+    /// be repaired before the database can be restarted.
+    #[error("Persistent Error: {msg}")]
+    PersistentError { msg: String },
+
+    /// Failed access database resources (e.g. remote storage) due to some
+    /// kind of authentication or authorization error. The operation can be
+    /// retried after the permission issue is resolved.
+    #[error("Permission Error: {msg}")]
+    PermissionError { msg: String },
+
+    /// The operation failed due to a transient error (such as IO unavailability).
+    /// The operation can be retried after backing off.
+    #[error("Transient Error: {msg}. Backoff {backoff} before retrying.")]
+    TransientError { msg: String, backoff: Duration },
+
+    /// An operation failed during a transaction. The transaction can be aborted
+    /// and the operation can be retried.
+    #[error("Transaction Error: {msg}")]
+    TransactionError { msg: String },
+}
+
+impl From<SlateDBError> for Error {
+    fn from(err: SlateDBError) -> Self {
+        match err {
+            // Operation Errors (invalid inputs or operations)
+            SlateDBError::ChecksumMismatch => Error::OperationError {
+                msg: "Checksum mismatch".to_string(),
+            },
+            _ => Error::SystemError {
+                msg: format!("Unexpected SlateDB error: {}", err),
+            },
+        }
+    }
 }
