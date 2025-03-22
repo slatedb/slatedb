@@ -161,10 +161,6 @@ async fn test_concurrent_writers_and_readers() {
             .iter()
             .filter(|handle| handle.is_finished())
             .count();
-        println!(
-            "Finished writers: {}, finished readers: {}",
-            finished_writers, finished_readers
-        );
 
         if finished_writers == NUM_WRITERS || finished_readers > 0 {
             stop.store(true, Ordering::Relaxed);
