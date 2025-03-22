@@ -142,7 +142,7 @@ async fn test_concurrent_writers_and_readers() {
 
                         iterations += 1;
 
-                        if iterations % 1000 == 0 {
+                        if current_value != last_seen_value {
                             println!("Reader {} processed {} values. Sample key: {}, last seen value: {}, current value: {}", reader_id, iterations, key, last_seen_value, current_value);
                         }
                     }
@@ -166,6 +166,8 @@ async fn test_concurrent_writers_and_readers() {
             stop.store(true, Ordering::Relaxed);
             break;
         }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     // Wait for all readers and writers to complete, and verify none ended with an error using try_join_all
