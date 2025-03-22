@@ -12,8 +12,8 @@ use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::iter::SeekToKey;
 use crate::{
-    block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, partitioned_keyspace,
-    tablestore::TableStore, types::RowEntry,
+    block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, tablestore::TableStore,
+    types::RowEntry,
 };
 
 enum FetchTask {
@@ -192,12 +192,36 @@ impl<'a> SstIterator<'a> {
         Self::new_borrowed(key..=key, table, table_store, options).await
     }
 
-    fn last_block_with_data_including_key(index: &SsTableIndex, key: &[u8]) -> Option<usize> {
-        partitioned_keyspace::last_partition_including_key(index, key)
-    }
-
     fn first_block_with_data_including_or_after_key(index: &SsTableIndex, key: &[u8]) -> usize {
-        partitioned_keyspace::first_partition_including_or_after_key(index, key)
+        let mut low = 0;
+        let mut high = index.block_meta().len() - 1;
+        let mut found_block_id = 0;
+        let block_meta = index.block_meta();
+        while low <= high {
+            let mid = low + (high - low) / 2;
+            let mid_block_first_key = block_meta.get(mid).first_key().bytes();
+            match mid_block_first_key.cmp(key) {
+                std::cmp::Ordering::Less => {
+                    low = mid + 1;
+                    found_block_id = mid;
+                }
+                std::cmp::Ordering::Greater => {
+                    if mid > 0 {
+                        high = mid - 1;
+                    } else {
+                        break;
+                    }
+                }
+                std::cmp::Ordering::Equal => {
+                    found_block_id = mid;
+                    if low == mid {
+                        break;
+                    }
+                    high = mid;
+                }
+            }
+        }
+        found_block_id
     }
 
     fn blocks_covering_view(index: &SsTableIndex, view: &SstView) -> Range<usize> {
@@ -209,21 +233,14 @@ impl<'a> SstIterator<'a> {
         };
 
         let end_block_id_exclusive = match view.end_key() {
-            Included(k) => Self::last_block_with_data_including_key(index, k)
-                .map(|b| b + 1)
-                .unwrap_or(start_block_id),
+            Included(k) => Self::first_block_with_data_including_or_after_key(index, k) + 1,
             Excluded(k) => {
-                let block_index = Self::last_block_with_data_including_key(index, k);
-                match block_index {
-                    None => start_block_id,
-                    Some(block_index) => {
-                        let block = index.block_meta().get(block_index);
-                        if k == block.first_key().bytes() {
-                            block_index
-                        } else {
-                            block_index + 1
-                        }
-                    }
+                let block_index = Self::first_block_with_data_including_or_after_key(index, k);
+                let block = index.block_meta().get(block_index);
+                if k == block.first_key().bytes() {
+                    block_index
+                } else {
+                    block_index + 1
                 }
             }
             Unbounded => index.block_meta().len(),
@@ -359,10 +376,12 @@ mod tests {
     use super::*;
     use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
+    use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs, SsTableIndexArgs};
     use crate::sst::SsTableFormat;
     use crate::test_utils::{assert_kv, gen_attrs};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
+    use rstest::rstest;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -597,6 +616,97 @@ mod tests {
         .unwrap();
 
         assert!(iter.next().await.unwrap().is_none());
+    }
+
+    struct FindFirstBlockTestCase {
+        first_keys: Vec<&'static [u8]>,
+    }
+
+    #[rstest]
+    #[case::one_block(FindFirstBlockTestCase{
+        first_keys: vec![b"aaaa"]
+    })]
+    #[case::two_blocks(FindFirstBlockTestCase{
+        first_keys: vec![b"aaaa", b"bbbb"]
+    })]
+    #[case::three_blocks(FindFirstBlockTestCase{
+        first_keys: vec![b"aaaa", b"bbbb", b"cccccc"]
+    })]
+    #[case::five_blocks(FindFirstBlockTestCase{
+        first_keys: vec![b"aaaa", b"bbbb", b"cccccccc", b"ddd", b"eeeee"]
+    })]
+    #[case::five_blocks_same_first_key(FindFirstBlockTestCase{
+        first_keys: vec![b"aaaa", b"bbbb", b"bbbb", b"bbbb", b"bbbb"]
+    })]
+    #[case::all_same_first_key(FindFirstBlockTestCase{
+        first_keys: vec![b"bbbb", b"bbbb", b"bbbb"]
+    })]
+    fn test_find_first_block_with_data_including_or_after_key(
+        #[case] case: FindFirstBlockTestCase,
+    ) {
+        let first_keys = &case.first_keys;
+        let index = build_index_with_first_keys(first_keys);
+
+        // do a search where the key is earlier than the first key
+        let found_block = SstIterator::first_block_with_data_including_or_after_key(
+            &index.borrow(),
+            b"\x00\x00\x00",
+        );
+        assert_eq!(0, found_block);
+
+        let mut prev_key = None;
+        let mut expected_found_block = 0;
+        for i in 0..first_keys.len() {
+            // do a search where the key matches this block's first key
+            let key = first_keys[i];
+            let found_block =
+                SstIterator::first_block_with_data_including_or_after_key(&index.borrow(), key);
+            expected_found_block = match prev_key {
+                Some(prev_key) if prev_key == key => expected_found_block,
+                _ => i,
+            };
+            assert_eq!(expected_found_block, found_block);
+            prev_key = Some(key);
+
+            // if this is the last block, or the next block is not the same key, do a search
+            // where the key is between this block and the next one
+            if i == first_keys.len() - 1 || key != first_keys[i + 1] {
+                // we could do something more robust here, but its fine since the test cases are
+                // static.
+                let key = [key, b"bla"].concat();
+                let found_block = SstIterator::first_block_with_data_including_or_after_key(
+                    &index.borrow(),
+                    &key,
+                );
+                assert_eq!(i, found_block);
+            }
+        }
+    }
+
+    fn build_index_with_first_keys(first_keys: &[&[u8]]) -> SsTableIndexOwned {
+        let mut index_builder = flatbuffers::FlatBufferBuilder::new();
+        let mut block_metas = Vec::new();
+        for fk in first_keys {
+            let fk = index_builder.create_vector(fk);
+            let block_meta = BlockMeta::create(
+                &mut index_builder,
+                &BlockMetaArgs {
+                    first_key: Some(fk),
+                    offset: 0u64,
+                },
+            );
+            block_metas.push(block_meta);
+        }
+        let block_metas = index_builder.create_vector(&block_metas);
+        let index_wip = SsTableIndex::create(
+            &mut index_builder,
+            &SsTableIndexArgs {
+                block_meta: Some(block_metas),
+            },
+        );
+        index_builder.finish(index_wip, None);
+        let index_bytes = Bytes::copy_from_slice(index_builder.finished_data());
+        SsTableIndexOwned::new(index_bytes).unwrap()
     }
 
     async fn build_sst_with_n_blocks(
