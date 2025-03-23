@@ -45,8 +45,8 @@ pub struct WalBufferManager {
     fatal_once: WatchableOnceCell<SlateDBError>,
     table_store: Arc<TableStore>,
     mono_clock: Arc<MonotonicClock>,
-    max_wal_bytes_size: u64,
-    max_flush_interval_secs: Option<u64>,
+    max_wal_bytes_size: usize,
+    max_flush_interval: Option<Duration>,
 }
 
 struct WalBufferManagerInner {
@@ -77,8 +77,8 @@ impl WalBufferManager {
         current_wal_id: u64,
         table_store: Arc<TableStore>,
         mono_clock: Arc<MonotonicClock>,
-        max_wal_bytes_size: u64,
-        max_flush_interval_secs: Option<u64>,
+        max_wal_bytes_size: usize,
+        max_flush_interval: Option<Duration>,
     ) -> Self {
         let current_wal = Arc::new(KVTable::new());
         let immutable_wals = VecDeque::new();
@@ -100,11 +100,11 @@ impl WalBufferManager {
             table_store,
             mono_clock,
             max_wal_bytes_size,
-            max_flush_interval_secs,
+            max_flush_interval,
         }
     }
 
-    pub async fn start_background(self: Arc<Self>) {
+    pub async fn start_background(self: &Arc<Self>) {
         let (quit_tx, quit_rx) = oneshot::channel();
         let (flush_tx, flush_rx) = mpsc::channel(1);
         {
@@ -112,15 +112,26 @@ impl WalBufferManager {
             inner.quit_tx = Some(quit_tx);
             inner.flush_tx = Some(flush_tx);
         }
-        let max_flush_interval_secs = self.max_flush_interval_secs.clone();
-        let background_fut =
-            self.clone()
-                .do_background_work(flush_rx, quit_rx, max_flush_interval_secs);
+        let max_flush_interval = self.max_flush_interval.clone();
+        let background_fut = self
+            .clone()
+            .do_background_work(flush_rx, quit_rx, max_flush_interval);
         let task_handle = tokio::spawn(background_fut);
         {
             let mut inner = self.inner.lock().await;
             inner.background_task = Some(task_handle);
         }
+    }
+
+    /// Returns the total size of all unflushed WALs in bytes.
+    pub async fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
+        let inner = self.inner.lock().await;
+        Ok(inner.current_wal.size()
+            + inner
+                .immutable_wals
+                .iter()
+                .map(|(_, wal)| wal.size())
+                .sum::<usize>())
     }
 
     /// Append row entries to the current WAL. return the last seq number of the WAL.
@@ -185,10 +196,10 @@ impl WalBufferManager {
         self: Arc<Self>,
         mut flush_rx: mpsc::Receiver<WalFlushWork>,
         mut quit_rx: oneshot::Receiver<()>,
-        max_flush_interval_secs: Option<u64>,
+        max_flush_interval: Option<Duration>,
     ) {
         let mut max_flush_interval: Option<Interval> =
-            max_flush_interval_secs.map(|secs| tokio::time::interval(Duration::from_secs(secs)));
+            max_flush_interval.map(|d| tokio::time::interval(d));
         let mut ticker_fut: Pin<Box<dyn Future<Output = Instant> + Send>> =
             match max_flush_interval.as_mut() {
                 Some(interval) => Box::pin(interval.tick()),

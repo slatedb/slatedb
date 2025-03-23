@@ -82,7 +82,8 @@ impl DbInner {
                 }
             }
             let table = current_wal.table().clone();
-            self.maybe_freeze_wal(&mut guard)?;
+            // TODO(flaneur): FIX THIS BEFORE MERGING
+            // self.maybe_freeze_wal(&mut guard)?;
             table
         } else {
             if cfg!(not(feature = "wal_disable")) {

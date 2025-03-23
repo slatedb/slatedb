@@ -14,6 +14,7 @@ use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::utils::{get_now_for_read, is_not_expired, MonotonicClock};
+use crate::wal_buffer::WalBufferManager;
 use crate::{filter, DbIterator, SlateDBError};
 use bytes::Bytes;
 use std::collections::VecDeque;
@@ -37,9 +38,7 @@ impl SstFilterResult {
 
 pub(crate) trait ReadSnapshot {
     fn memtable(&self) -> Arc<KVTable>;
-    fn wal(&self) -> Arc<KVTable>;
     fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>>;
-    fn imm_wal(&self) -> &VecDeque<Arc<ImmutableWal>>;
     fn core(&self) -> &CoreDbState;
 }
 
@@ -59,14 +58,15 @@ impl Reader {
         let key = key.as_ref();
         let ttl_now = get_now_for_read(self.mono_clock.clone(), options.read_level).await?;
 
-        if matches!(options.read_level, Uncommitted) {
-            let maybe_val = std::iter::once(snapshot.wal())
-                .chain(snapshot.imm_wal().iter().map(|imm| imm.table()))
-                .find_map(|memtable| memtable.get(key));
-            if let Some(val) = maybe_val {
-                return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
-            }
-        }
+        // TODO(flaneur): FIX THIS BEFORE MERGING
+        // if matches!(options.read_level, Uncommitted) {
+        //     let maybe_val = std::iter::once(snapshot.wal())
+        //         .chain(snapshot.imm_wal().iter().map(|imm| imm.table()))
+        //         .find_map(|memtable| memtable.get(key));
+        //     if let Some(val) = maybe_val {
+        //         return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
+        //     }
+        //  }
 
         let maybe_val = std::iter::once(snapshot.memtable())
             .chain(snapshot.imm_memtable().iter().map(|imm| imm.table()))
@@ -138,12 +138,13 @@ impl Reader {
     ) -> Result<DbIterator<'a>, SlateDBError> {
         let mut memtables = VecDeque::new();
 
-        if matches!(options.read_level, Uncommitted) {
-            memtables.push_back(Arc::clone(&snapshot.wal()));
-            for imm_wal in snapshot.imm_wal() {
-                memtables.push_back(imm_wal.table());
-            }
-        }
+        // TODO(flaneur): FIX THIS BEFORE MERGING
+        // if matches!(options.read_level, Uncommitted) {
+        //     memtables.push_back(Arc::clone(&snapshot.wal()));
+        //     for imm_wal in snapshot.imm_wal() {
+        //         memtables.push_back(imm_wal.table());
+        //     }
+        // }
 
         memtables.push_back(Arc::clone(&snapshot.memtable()));
         for memtable in snapshot.imm_memtable() {
