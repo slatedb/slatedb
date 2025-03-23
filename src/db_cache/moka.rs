@@ -33,6 +33,7 @@
 use crate::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
 use async_trait::async_trait;
 use std::time::Duration;
+use crate::SlateDBError;
 
 /// The options for the Moka cache.
 #[derive(Clone, Copy, Debug)]
@@ -103,16 +104,16 @@ impl Default for MokaCache {
 
 #[async_trait]
 impl DbCache for MokaCache {
-    async fn get_block(&self, key: CachedKey) -> Option<CachedEntry> {
-        self.inner.get(&key).await
+    async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+        Ok(self.inner.get(&key).await)
     }
 
-    async fn get_index(&self, key: CachedKey) -> Option<CachedEntry> {
-        self.inner.get(&key).await
+    async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+        Ok(self.inner.get(&key).await)
     }
 
-    async fn get_filter(&self, key: CachedKey) -> Option<CachedEntry> {
-        self.inner.get(&key).await
+    async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+        Ok(self.inner.get(&key).await)
     }
 
     async fn insert(&self, key: CachedKey, value: CachedEntry) {

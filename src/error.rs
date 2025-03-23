@@ -121,6 +121,9 @@ pub enum SlateDBError {
         expected_version: u16,
         actual_version: u16,
     },
+
+    #[error("Db Cache error: {msg}")]
+    DbCacheError{ msg: String }
 }
 
 impl From<std::io::Error> for SlateDBError {
