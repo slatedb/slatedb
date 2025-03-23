@@ -1,6 +1,6 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use slatedb::config::{DbOptions, PutOptions, WriteOptions};
+use slatedb::config::{CompactorOptions, DbOptions, PutOptions, WriteOptions};
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::path::Path;
 use slatedb::object_store::ObjectStore;
@@ -31,6 +31,10 @@ async fn test_concurrent_writers_and_readers() {
     let config = DbOptions {
         flush_interval: Some(Duration::from_millis(100)),
         manifest_poll_interval: Duration::from_millis(100),
+        compactor_options: Some(CompactorOptions {
+            poll_interval: Duration::from_millis(100),
+            ..Default::default()
+        }),
         // Allow 16KB of unflushed data
         max_unflushed_bytes: 16 * 1024,
         min_filter_keys: 0,
