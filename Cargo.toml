@@ -53,6 +53,7 @@ figment = { version = "0.10.19", features = ["env", "json", "toml", "yaml"] }
 duration-str = { version = "0.11.2", features = ["serde", "time"], default-features = false }
 
 [dev-dependencies]
+bincode = "1"
 tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
 tokio-test = "0.4.4"
 fail-parallel = { version = "0.5.1", features = ["failpoints"] }
