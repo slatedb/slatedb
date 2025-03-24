@@ -61,7 +61,6 @@ async fn test_concurrent_writers_and_readers() {
             let db = db.clone();
             let stop_writers = stop.clone();
             tokio::spawn(async move {
-                // Get a random key in the keyspace. Don't use nth. Pick one at random.
                 let key = zero_pad_key(writer_id.try_into().unwrap(), KEY_LENGTH);
                 for i in 1..=WRITES_PER_TASK {
                     if stop_writers.load(Ordering::Relaxed) {
