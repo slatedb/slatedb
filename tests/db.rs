@@ -123,7 +123,7 @@ async fn test_concurrent_writers_and_readers() {
                         // Check if this value is greater than the last seen value for this key
                         let last_seen_atomic = latest_values
                             .entry(key)
-                            .or_insert(AtomicU64::new(0));
+                            .or_insert(AtomicU64::new(current_value));
                         let last_seen_value = last_seen_atomic.load(Ordering::SeqCst);
 
                         assert!(
