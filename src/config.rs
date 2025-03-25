@@ -153,6 +153,7 @@
 use duration_str::{deserialize_duration, deserialize_option_duration};
 use figment::providers::{Env, Format, Json, Toml, Yaml};
 use figment::{Figment, Metadata, Provider};
+use object_store::ObjectStore;
 use serde::{Deserialize, Serialize, Serializer};
 use std::path::Path;
 use std::sync::atomic::AtomicI64;
@@ -389,6 +390,17 @@ pub struct DbOptions {
     /// If set to false, SlateDB will disable the WAL and write directly into the memtable
     #[cfg(feature = "wal_disable")]
     pub wal_enabled: bool,
+
+    /// An optional [object store](ObjectStore) dedicated specifically for WAL.
+    ///
+    /// If not set, the main object store passed to `Db::open(...)` will be used
+    /// for WAL storage.
+    ///
+    /// NOTE: WAL durability and availability properties depend on the properties
+    ///       of the underlying object store. Make sure the configured object
+    ///       store is durable and available enough for your use case.
+    #[serde(skip)]
+    pub wal_object_store: Option<Arc<dyn ObjectStore>>,
 
     /// How frequently to poll for new manifest files. Refreshing the manifest file
     /// allows writers to detect fencing operations and allows readers to detect newly
@@ -652,6 +664,7 @@ impl Default for DbOptions {
             flush_interval: Some(Duration::from_millis(100)),
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
+            wal_object_store: None,
             manifest_poll_interval: Duration::from_secs(1),
             min_filter_keys: 1000,
             max_unflushed_bytes: 1_073_741_824,

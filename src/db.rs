@@ -529,6 +529,7 @@ impl Db {
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             maybe_cached_object_store.clone(),
+            options.wal_object_store.clone(),
             sst_format.clone(),
             path_resolver.clone(),
             fp_registry.clone(),
@@ -580,6 +581,7 @@ impl Db {
             // not to pollute the cache during compaction
             let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
                 object_store.clone(),
+                options.wal_object_store.clone(),
                 sst_format,
                 path_resolver,
                 fp_registry.clone(),
@@ -3374,6 +3376,7 @@ mod tests {
             flush_interval: Some(Duration::from_millis(100)),
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
+            wal_object_store: None,
             manifest_poll_interval: Duration::from_millis(100),
             max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,
