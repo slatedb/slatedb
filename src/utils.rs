@@ -353,6 +353,7 @@ mod tests {
     #[case(Some("ababc"), "abacd", "abac")]
     #[case(Some("cc"), "ccccccc", "ccc")]
     #[case(Some("eed"), "eee", "eee")]
+    #[case(Some("abcdef"), "abcdef", "abcdef")]
     fn test_should_compute_index_key(
         #[case] prev_block_last_key: Option<&'static str>,
         #[case] this_block_first_key: &'static str,
