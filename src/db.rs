@@ -178,10 +178,11 @@ impl DbInner {
         return true;
     }
 
-    pub async fn write_with_options(
+    async fn write_with_options_callback(
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
+        callback: Option<impl FnOnce(Result<(), SlateDBError>) + Send + 'static>
     ) -> Result<(), SlateDBError> {
         self.check_error()?;
 
@@ -197,13 +198,22 @@ impl DbInner {
             .send(batch_msg)
             .expect("write notifier closed");
 
-        // if the write pipeline task exits then this call to rx.await will fail because tx is dropped
-        let current_table = rx.await??;
+        let await_durable = options.await_durable;
+        let result_handler = async move {// if the write pipeline task exits then this call to rx.await will fail because tx is dropped
+            let current_table = rx.await??;
 
-        if options.await_durable {
-            current_table.await_durable().await?;
+            if await_durable {
+                current_table.await_durable().await?;
+            }
+            Ok(())
+        };
+        if let Some(callback) = callback {
+            tokio::spawn(async move {
+                callback(result_handler.await);
+            });
+        } else {
+            result_handler.await?;
         }
-
         Ok(())
     }
 
@@ -957,6 +967,23 @@ impl Db {
         self.write_with_options(batch, write_opts).await
     }
 
+    pub async fn put_with_options_callback<K, V>(
+        &self,
+        key: K,
+        value: V,
+        put_opts: &PutOptions,
+        write_opts: &WriteOptions,
+        callback: impl FnOnce(Result<(), SlateDBError>) + Send + 'static
+    ) -> Result<(), SlateDBError>
+        where
+            K: AsRef<[u8]>,
+            V: AsRef<[u8]>,
+    {
+        let mut batch = WriteBatch::new();
+        batch.put_with_options(key, value, put_opts);
+        self.write_with_options_callback(batch, write_opts, callback).await
+    }
+
     /// Delete a key from the database with default `WriteOptions`.
     ///
     /// ## Arguments
@@ -1018,6 +1045,17 @@ impl Db {
         let mut batch = WriteBatch::new();
         batch.delete(key);
         self.write_with_options(batch, options).await
+    }
+
+    pub async fn delete_with_options_callback<K: AsRef<[u8]>>(
+        &self,
+        key: K,
+        options: &WriteOptions,
+        callback: impl FnOnce(Result<(), SlateDBError>) + Send + 'static
+    ) -> Result<(), SlateDBError> {
+        let mut batch = WriteBatch::new();
+        batch.delete(key);
+        self.write_with_options_callback(batch, options, callback).await
     }
 
     /// Write a batch of put/delete operations atomically to the database. Batch writes
@@ -1093,7 +1131,17 @@ impl Db {
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
-        self.inner.write_with_options(batch, options).await
+        let none_callback: Option<fn(Result<(), SlateDBError>)> = None;
+        self.inner.write_with_options_callback(batch, options, none_callback).await
+    }
+
+    pub async fn write_with_options_callback(
+        &self,
+        batch: WriteBatch,
+        options: &WriteOptions,
+        callback: impl FnOnce(Result<(), SlateDBError>) + Send + 'static
+    ) -> Result<(), SlateDBError> {
+        self.inner.write_with_options_callback(batch, options, Some(callback)).await
     }
 
     /// Flush the database to disk.
@@ -1178,6 +1226,7 @@ mod tests {
     use proptest::test_runner::{TestRng, TestRunner};
     use tokio::runtime::Runtime;
     use tracing::info;
+    use crate::utils::WatchableOnceCell;
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -1692,6 +1741,55 @@ mod tests {
                 path
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_put_with_callback() {
+        let os = Arc::new(InMemory::new());
+        let mut opts = test_db_options(0, 1024, None);
+        // set a long flush interval so we exercise returning from put immediately
+        opts.flush_interval = Some(Duration::from_secs(60));
+        #[cfg(feature = "wal_disable")]
+        {
+            opts.wal_enabled = false;
+        }
+        let db = Db::open_with_opts(Path::from("testdb"), opts, os.clone())
+            .await
+            .unwrap();
+
+        let watch = WatchableOnceCell::new();
+        let mut watch_reader = watch.reader();
+        let callback = move |result: Result<(), SlateDBError>| {
+            watch.write(result)
+        };
+        db.put_with_options_callback(
+            b"foo",
+            b"bar",
+            &PutOptions::default(),
+            &WriteOptions{
+                await_durable: true,
+            },
+            callback
+        ).await.unwrap();
+
+        // the put callback's parent task waits on the batch writer task to apply the write
+        // so periodically call flush while waiting on the watch reader
+        let mut ticker = tokio::time::interval(Duration::from_millis(10));
+        loop {
+            tokio::select! {
+                r = watch_reader.await_value() => {
+                    r.unwrap();
+                    break;
+                },
+                _ = ticker.tick() => {
+                    db.flush().await.unwrap()
+                }
+            }
+        }
+        // check that the value is written
+        let val = db.get(b"foo").await.unwrap();
+        assert_eq!(Some(Bytes::copy_from_slice(b"bar")), val);
+        db.close().await.unwrap();
     }
 
     async fn build_database_from_table(
