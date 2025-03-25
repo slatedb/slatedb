@@ -1,6 +1,5 @@
 use crate::bytes_range::BytesRange;
-use crate::config::ReadLevel::Uncommitted;
-use crate::config::{ReadOptions, ScanOptions};
+use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::db_stats::DbStats;
 use crate::filter_iterator::FilterIterator;
@@ -47,9 +46,22 @@ pub(crate) struct Reader {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) db_stats: DbStats,
     pub(crate) mono_clock: Arc<MonotonicClock>,
+    pub(crate) wal_enabled: bool
 }
 
 impl Reader {
+    fn include_wal_memtables(&self, durability_filter: DurabilityLevel) -> bool {
+        matches!(durability_filter, DurabilityLevel::Memory)
+    }
+
+    fn include_memtables(&self, durability_filter: DurabilityLevel) -> bool {
+        if self.wal_enabled {
+            true
+        } else {
+            matches!(durability_filter, DurabilityLevel::Memory)
+        }
+    }
+
     pub(crate) async fn get_with_options<K: AsRef<[u8]>>(
         &self,
         key: K,
@@ -57,9 +69,9 @@ impl Reader {
         snapshot: &(dyn ReadSnapshot + Sync),
     ) -> Result<Option<Bytes>, SlateDBError> {
         let key = key.as_ref();
-        let ttl_now = get_now_for_read(self.mono_clock.clone(), options.read_level).await?;
+        let ttl_now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
 
-        if matches!(options.read_level, Uncommitted) {
+        if self.include_wal_memtables(options.durability_filter) {
             let maybe_val = std::iter::once(snapshot.wal())
                 .chain(snapshot.imm_wal().iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
@@ -68,11 +80,13 @@ impl Reader {
             }
         }
 
-        let maybe_val = std::iter::once(snapshot.memtable())
-            .chain(snapshot.imm_memtable().iter().map(|imm| imm.table()))
-            .find_map(|memtable| memtable.get(key));
-        if let Some(val) = maybe_val {
-            return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
+        if self.include_memtables(options.durability_filter) {
+            let maybe_val = std::iter::once(snapshot.memtable())
+                .chain(snapshot.imm_memtable().iter().map(|imm| imm.table()))
+                .find_map(|memtable| memtable.get(key));
+            if let Some(val) = maybe_val {
+                return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
+            }
         }
 
         // Since the key remains unchanged during the point query, we only need to compute
@@ -138,16 +152,18 @@ impl Reader {
     ) -> Result<DbIterator<'a>, SlateDBError> {
         let mut memtables = VecDeque::new();
 
-        if matches!(options.read_level, Uncommitted) {
+        if self.include_wal_memtables(options.durability_filter) {
             memtables.push_back(Arc::clone(&snapshot.wal()));
             for imm_wal in snapshot.imm_wal() {
                 memtables.push_back(imm_wal.table());
             }
         }
 
-        memtables.push_back(Arc::clone(&snapshot.memtable()));
-        for memtable in snapshot.imm_memtable() {
-            memtables.push_back(memtable.table());
+        if self.include_memtables(options.durability_filter) {
+            memtables.push_back(Arc::clone(&snapshot.memtable()));
+            for memtable in snapshot.imm_memtable() {
+                memtables.push_back(memtable.table());
+            }
         }
 
         let mem_iter =
