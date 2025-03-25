@@ -2,14 +2,13 @@ use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::types::RowEntry;
 use crate::utils::is_not_expired;
 use crate::SlateDBError;
-use crate::sst_iter::SstIterator;
 
-pub(crate) struct FilterIterator<T: KeyValueIterator> {
+pub(crate) struct FilterIterator<T: KeyValueIterator + SeekToKey> {
     iterator: T,
     predicate: Box<dyn Fn(&RowEntry) -> bool + Send>,
 }
 
-impl<T: KeyValueIterator> FilterIterator<T> {
+impl<T: KeyValueIterator + SeekToKey> FilterIterator<T> {
     pub(crate) fn new(iterator: T, predicate: Box<dyn Fn(&RowEntry) -> bool + Send>) -> Self {
         Self {
             predicate,
@@ -23,7 +22,7 @@ impl<T: KeyValueIterator> FilterIterator<T> {
     }
 }
 
-impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
+impl<T: KeyValueIterator + SeekToKey> KeyValueIterator for FilterIterator<T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         while let Some(entry) = self.iterator.next_entry().await? {
             if (self.predicate)(&entry) {
@@ -34,9 +33,9 @@ impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
     }
 }
 
-impl SeekToKey for SstIterator<'_> {
+impl<T: KeyValueIterator + SeekToKey> SeekToKey for FilterIterator<T> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        if iterator
+        self.iterator.seek(next_key).await
     }
 }
 

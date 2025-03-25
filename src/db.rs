@@ -217,8 +217,12 @@ impl DbInner {
             memtables.push_back(memtable.table());
         }
 
-        let mem_iter =
-            VecDequeKeyValueIterator::materialize_range(memtables, range.clone()).await?;
+        let mem_iter = FilterIterator::wrap_ttl_filter_iterator(
+            VecDequeKeyValueIterator::materialize_range(memtables, range.clone()
+            )
+            .await?,
+            ttl_now,
+        );
 
         let state = snapshot.state.as_ref().clone();
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
@@ -1728,6 +1732,28 @@ mod tests {
         );
 
         kv_store.close().await.unwrap();
+    }
+
+    #[test]
+    fn test_scan_with_ttl_and_read_level_uncommitted() {
+        let mut runner = new_proptest_runner(None);
+        let table = sample::table(runner.rng(), 1000, 5);
+
+        let runtime = Runtime::new().unwrap();
+        let mut db_options = test_db_options(0, 1024, None);
+        db_options.flush_interval = Duration::from_secs(5);
+        let db = runtime.block_on(build_database_from_table(&table, db_options, false));
+
+        runner
+            .run(&arbitrary::nonempty_range(10), |range| {
+                let scan_options = ScanOptions {
+                    read_level: Uncommitted,
+                    ..ScanOptions::default()
+                };
+                runtime.block_on(assert_records_in_range(&table, &db, &scan_options, range));
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[tokio::test]

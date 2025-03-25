@@ -13,7 +13,7 @@ use std::ops::RangeBounds;
 use crate::filter_iterator::FilterIterator;
 
 type ScanIterator<'a> = TwoMergeIterator<
-    VecDequeKeyValueIterator,
+    FilterIterator<VecDequeKeyValueIterator>,
     TwoMergeIterator<MergeIterator<FilterIterator<SstIterator<'a>>>, MergeIterator<FilterIterator<SortedRunIterator<'a>>>>,
 >;
 
@@ -27,7 +27,7 @@ pub struct DbIterator<'a> {
 impl<'a> DbIterator<'a> {
     pub(crate) async fn new(
         range: BytesRange,
-        mem_iter: VecDequeKeyValueIterator,
+        mem_iter: FilterIterator<VecDequeKeyValueIterator>,
         l0_iters: VecDeque<FilterIterator<SstIterator<'a>>>,
         sr_iters: VecDeque<FilterIterator<SortedRunIterator<'a>>>,
     ) -> Result<Self, SlateDBError> {
@@ -119,12 +119,13 @@ mod tests {
     use crate::mem_table::VecDequeKeyValueIterator;
     use bytes::Bytes;
     use std::collections::VecDeque;
+    use crate::filter_iterator::FilterIterator;
 
     #[tokio::test]
     async fn test_invalidated_iterator() {
         let mut iter = DbIterator::new(
             BytesRange::from(..),
-            VecDequeKeyValueIterator::new(VecDeque::new()),
+            FilterIterator::wrap_ttl_filter_iterator(VecDequeKeyValueIterator::new(VecDeque::new()), 0),
             VecDeque::new(),
             VecDeque::new(),
         )
