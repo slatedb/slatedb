@@ -176,14 +176,14 @@ use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 /// updates the same key.
 #[non_exhaustive]
 #[derive(Clone, Default, Debug, Copy)]
-pub enum ReadLevel {
+pub enum DurabilityLevel {
     /// Client reads will only see data that's been committed durably to the DB.
     #[default]
-    Committed,
+    Remote,
 
     /// Clients will see all writes, including those not yet durably committed to the
     /// DB.
-    Uncommitted,
+    Memory,
 }
 
 /// Configuration for client read operations. `ReadOptions` is supplied for each
@@ -191,13 +191,13 @@ pub enum ReadLevel {
 #[derive(Clone, Default)]
 pub struct ReadOptions {
     /// The read commit level for read operations.
-    pub read_level: ReadLevel,
+    pub durability_filter: DurabilityLevel,
 }
 
 #[derive(Clone)]
 pub struct ScanOptions {
     /// The read commit level for read operations
-    pub read_level: ReadLevel,
+    pub durability_filter: DurabilityLevel,
     /// The number of bytes to read ahead. The value is rounded up to the nearest
     /// block size when fetching from object storage. The default is 1, which
     /// rounds up to one block.
@@ -207,10 +207,10 @@ pub struct ScanOptions {
 }
 
 impl Default for ScanOptions {
-    /// Create a new ScanOptions with `read_level` set to [`ReadLevel::Committed`].
+    /// Create a new ScanOptions with `read_level` set to [`DurabilityLevel::Remote`].
     fn default() -> Self {
         Self {
-            read_level: ReadLevel::Committed,
+            durability_filter: DurabilityLevel::Remote,
             read_ahead_bytes: 1,
             cache_blocks: false,
         }

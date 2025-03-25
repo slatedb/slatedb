@@ -1,5 +1,5 @@
-use crate::config::ReadLevel::{Committed, Uncommitted};
-use crate::config::{Clock, ReadLevel};
+use crate::config::DurabilityLevel::{Remote, Memory};
+use crate::config::{Clock, DurabilityLevel};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
@@ -139,7 +139,7 @@ where
 
 pub(crate) async fn get_now_for_read(
     mono_clock: Arc<MonotonicClock>,
-    read_level: ReadLevel,
+    durability_level: DurabilityLevel,
 ) -> Result<i64, SlateDBError> {
     /*
      Note: the semantics of filtering expired records on read differ slightly depending on
@@ -157,9 +157,9 @@ pub(crate) async fn get_now_for_read(
      filtered out due to ttl expiry, it is guaranteed not to be seen again by future Committed
      reads.
     */
-    match read_level {
-        Committed => Ok(mono_clock.get_last_durable_tick()),
-        Uncommitted => mono_clock.now().await,
+    match durability_level {
+        Remote => Ok(mono_clock.get_last_durable_tick()),
+        Memory => mono_clock.now().await,
     }
 }
 
