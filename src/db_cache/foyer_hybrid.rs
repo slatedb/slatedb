@@ -6,6 +6,8 @@
 //!
 //! ## Features
 //!
+//! - **Hybrid Cache**: Caches blocks using a tiered cache that stores data across memory and
+//!   local disk.
 //! - **Custom Weigher**: Implements a custom weigher to account for the size of cached blocks.
 //! - **Flexible Configuration**: The HybridCache instance is passed to the cache, so you are free
 //!   to configure it as needed for your use case.
