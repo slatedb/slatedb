@@ -147,7 +147,11 @@ impl DbInner {
         loop {
             let empty_wal = WritableKVTable::new();
             match self
-                .flush_imm_table(&SsTableId::Wal(empty_wal_id), empty_wal.table().clone())
+                .flush_imm_table(
+                    &SsTableId::Wal(empty_wal_id),
+                    empty_wal.table().clone(),
+                    false,
+                )
                 .await
             {
                 Ok(_) => {

@@ -97,7 +97,7 @@ impl SsTableFormat {
         Ok(filter)
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn read_filter_raw(
         &self,
         info: &SsTableInfo,
@@ -350,10 +350,39 @@ impl SsTableInfo {
     }
 }
 
+pub(crate) struct EncodedSsTableBlock {
+    pub(crate) offset: u64,
+    pub(crate) block: Block,
+    pub(crate) encoded_bytes: Bytes,
+}
+
 pub(crate) struct EncodedSsTable {
     pub(crate) info: SsTableInfo,
+    pub(crate) index: SsTableIndexOwned,
     pub(crate) filter: Option<Arc<BloomFilter>>,
-    pub(crate) unconsumed_blocks: VecDeque<Bytes>,
+    pub(crate) unconsumed_blocks: VecDeque<EncodedSsTableBlock>,
+    pub(crate) footer: Bytes,
+}
+
+impl EncodedSsTable {
+    pub(crate) fn put_remaining<T: BufMut>(&self, buf: &mut T) {
+        for chunk in self.unconsumed_blocks.iter() {
+            buf.put_slice(chunk.encoded_bytes.as_ref())
+        }
+        buf.put_slice(self.footer.as_ref());
+    }
+
+    pub(crate) fn remaining_as_bytes(&self) -> Bytes {
+        let total_size = self
+            .unconsumed_blocks
+            .iter()
+            .map(|chunk| chunk.encoded_bytes.len())
+            .sum::<usize>()
+            + self.footer.len();
+        let mut data = Vec::<u8>::with_capacity(total_size);
+        self.put_remaining(&mut data);
+        Bytes::from(data)
+    }
 }
 
 /// Builds an SSTable from key-value pairs.
@@ -365,7 +394,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     current_block_max_key: Option<Bytes>,
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'a>>>,
     current_len: u64,
-    blocks: VecDeque<Bytes>,
+    blocks: VecDeque<EncodedSsTableBlock>,
     block_size: usize,
     min_filter_keys: u32,
     num_keys: u32,
@@ -450,10 +479,7 @@ impl EncodedSsTableBuilder<'_> {
 
         if !self.builder.add(entry.clone()) {
             // Create a new block builder and append block data
-            if let Some(block) = self.finish_block()? {
-                self.current_len += block.len() as u64;
-                self.blocks.push_back(Bytes::from(block));
-            }
+            self.finish_block()?;
 
             // New block must always accept the first KV pair
             assert!(self.builder.add(entry));
@@ -487,38 +513,59 @@ impl EncodedSsTableBuilder<'_> {
         self.add(entry)
     }
 
-    pub fn next_block(&mut self) -> Option<Bytes> {
+    pub fn next_block(&mut self) -> Option<EncodedSsTableBlock> {
         self.blocks.pop_front()
     }
 
-    fn finish_block(&mut self) -> Result<Option<Vec<u8>>, SlateDBError> {
-        if self.builder.is_empty() {
-            return Ok(None);
-        }
+    #[cfg(test)]
+    pub(crate) fn num_blocks(&self) -> usize {
+        // use block_meta since blocks can be consumed as sst is being built
+        self.block_meta.len()
+    }
 
+    fn finish_block(&mut self) -> Result<(), SlateDBError> {
+        if self.builder.is_empty() {
+            return Ok(());
+        }
         let new_builder = BlockBuilder::new(self.block_size);
         let builder = std::mem::replace(&mut self.builder, new_builder);
-        let encoded_block = builder.build()?.encode();
+        let block = self.prepare_block(builder, self.current_len)?;
+        let block_meta = BlockMeta::create(
+            &mut self.index_builder,
+            &BlockMetaArgs {
+                offset: block.offset,
+                first_key: self.first_key,
+            },
+        );
+        self.block_meta.push(block_meta);
+        self.current_len += block.encoded_bytes.len() as u64;
+        self.blocks.push_back(block);
+        self.first_key = None;
+        Ok(())
+    }
+
+    fn prepare_block(
+        &mut self,
+        builder: BlockBuilder,
+        offset: u64,
+    ) -> Result<EncodedSsTableBlock, SlateDBError> {
+        let block = builder.build()?;
+        let encoded_block = block.encode();
         let compressed_block = match self.compression_codec {
             Some(c) => Self::compress(encoded_block, c)?,
             None => encoded_block,
         };
-
-        let block_meta = BlockMeta::create(
-            &mut self.index_builder,
-            &BlockMetaArgs {
-                offset: self.current_len,
-                first_key: self.first_key,
-            },
-        );
-
-        self.block_meta.push(block_meta);
         let checksum = crc32fast::hash(&compressed_block);
         let total_block_size = compressed_block.len() + std::mem::size_of::<u32>();
-        let mut block = Vec::with_capacity(total_block_size);
-        block.put(compressed_block);
-        block.put_u32(checksum);
-        Ok(Some(block))
+        let mut encoded_bytes = Vec::with_capacity(total_block_size);
+        encoded_bytes.put(compressed_block);
+        encoded_bytes.put_u32(checksum);
+        let sst_block = EncodedSsTableBlock {
+            offset,
+            block,
+            encoded_bytes: Bytes::from(encoded_bytes),
+        };
+        Ok(sst_block)
     }
 
     /// Builds the SST from the current state.
@@ -553,7 +600,8 @@ impl EncodedSsTableBuilder<'_> {
     /// * Only present if num_keys >= min_filter_keys.
     ///
     pub fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
-        let mut buf = self.finish_block()?.unwrap_or(Vec::new());
+        self.finish_block()?;
+        let mut buf = Vec::new();
         let mut maybe_filter = None;
         let mut filter_len = 0;
         let filter_offset = self.current_len + buf.len() as u64;
@@ -581,6 +629,7 @@ impl EncodedSsTableBuilder<'_> {
         );
         self.index_builder.finish(index_wip, None);
         let index_block = Bytes::from(self.index_builder.finished_data().to_vec());
+        let index = SsTableIndexOwned::new(index_block.clone())?;
         let index_block = match self.compression_codec {
             None => index_block,
             Some(c) => Self::compress(index_block, c)?,
@@ -607,11 +656,12 @@ impl EncodedSsTableBuilder<'_> {
         buf.put_u64(meta_offset);
         // write the version at the end of the file.
         buf.put_u16(SST_FORMAT_VERSION);
-        self.blocks.push_back(Bytes::from(buf));
         Ok(EncodedSsTable {
             info,
+            index,
             filter: maybe_filter,
             unconsumed_blocks: self.blocks,
+            footer: Bytes::from(buf),
         })
     }
 }
@@ -634,13 +684,12 @@ mod tests {
     use crate::filter::filter_hash;
     use crate::iter::IterationOrder::Ascending;
     use crate::tablestore::TableStore;
-    use crate::test_utils::{assert_iterator, gen_attrs, gen_empty_attrs};
+    use crate::test_utils::{assert_iterator, build_test_sst, gen_attrs, gen_empty_attrs};
 
     fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIterator<Block> {
         let block = builder.next_block();
         assert!(block.is_some());
-        let block = block.unwrap();
-        let block = Block::decode(block.slice(..block.len() - 4));
+        let block = block.unwrap().block;
         BlockIterator::new(block, Ascending)
     }
 
@@ -711,14 +760,12 @@ mod tests {
             .unwrap();
         let first_block = builder.next_block();
 
-        let mut encoded = builder.build().unwrap();
+        let encoded = builder.build().unwrap();
 
         let mut raw_sst = Vec::<u8>::new();
-        raw_sst.put_slice(first_block.unwrap().as_ref());
+        raw_sst.put_slice(first_block.unwrap().encoded_bytes.as_ref());
         assert_eq!(encoded.unconsumed_blocks.len(), 2);
-        while let Some(block) = encoded.unconsumed_blocks.pop_front() {
-            raw_sst.put_slice(block.as_ref());
-        }
+        encoded.put_remaining(&mut raw_sst);
         let raw_sst = Bytes::copy_from_slice(raw_sst.as_slice());
         let index = format.read_index_raw(&encoded.info, &raw_sst).unwrap();
         let block = format
@@ -748,6 +795,24 @@ mod tests {
             vec![RowEntry::new_value(&[b'c'; 8], &[b'3'; 8], 0).with_create_ts(3)],
         )
         .await;
+    }
+
+    #[test]
+    fn test_builder_should_return_blocks_with_correct_data_and_offsets() {
+        let format = SsTableFormat::default();
+
+        let sst = build_test_sst(&format, 3);
+
+        let bytes = sst.remaining_as_bytes();
+        let index = format.read_index_raw(&sst.info, &bytes).unwrap();
+        let block_metas = index.borrow().block_meta();
+        assert_eq!(block_metas.len(), sst.unconsumed_blocks.len());
+        for i in 0..block_metas.len() {
+            let encoded_block = sst.unconsumed_blocks.get(i).unwrap();
+            assert_eq!(block_metas.get(i).offset(), encoded_block.offset);
+            let read_block = format.read_block_raw(&sst.info, &index, i, &bytes).unwrap();
+            assert!(encoded_block.block == read_block);
+        }
     }
 
     #[rstest]
@@ -785,7 +850,7 @@ mod tests {
 
         // write sst and validate that the handle returned has the correct content.
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(wal_id), encoded)
+            .write_sst(&SsTableId::Wal(wal_id), encoded, false)
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
@@ -846,7 +911,7 @@ mod tests {
         let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded)
+            .write_sst(&SsTableId::Wal(0), encoded, false)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
@@ -900,7 +965,7 @@ mod tests {
         let encoded = builder.build().unwrap();
         let encoded_info = encoded.info.clone();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded)
+            .write_sst(&SsTableId::Wal(0), encoded, false)
             .await
             .unwrap();
 
@@ -976,12 +1041,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().unwrap();
         let info = encoded.info.clone();
-        let mut bytes = BytesMut::new();
-        encoded
-            .unconsumed_blocks
-            .iter()
-            .for_each(|b| bytes.put(b.clone()));
-        let bytes = bytes.freeze();
+        let bytes = encoded.remaining_as_bytes();
         let index = format.read_index_raw(&encoded.info, &bytes).unwrap();
         let blob = BytesBlob { bytes };
 
@@ -1017,7 +1077,7 @@ mod tests {
 
         // write sst and validate that the handle returned has the correct content.
         let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded)
+            .write_sst(&SsTableId::Wal(0), encoded, false)
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
@@ -1070,11 +1130,7 @@ mod tests {
         builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
         builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
         let encoded = builder.build().unwrap();
-        let mut bytes = BytesMut::new();
-        for block in encoded.unconsumed_blocks {
-            bytes.extend_from_slice(&block);
-        }
-        let bytes = bytes.freeze();
+        let bytes = encoded.remaining_as_bytes();
 
         // Test valid version decodes properly through read_info
         let valid_blob = BytesBlob {
