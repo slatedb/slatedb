@@ -20,7 +20,6 @@
 //! use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
 //! use slatedb::config::DbOptions;
 //! use std::sync::Arc;
-//! use tempfile::tempdir;
 //!
 //! #[::tokio::main]
 //! async fn main() {
@@ -31,7 +30,7 @@
 //!             .with_weighter(|_, v: &CachedEntry| v.size())
 //!             .storage(Engine::Large)
 //!             .with_device_options(
-//!                 DirectFsDeviceOptions::new(tempdir().path()).with_capacity(1024 * 1024))
+//!                 DirectFsDeviceOptions::new("/tmp/slatedb-cache").with_capacity(1024 * 1024))
 //!             .build()
 //!             .await
 //!             .unwrap();
@@ -54,7 +53,7 @@ pub struct FoyerHybridCache {
 }
 
 impl FoyerHybridCache {
-    pub async fn new_with_cache(cache: foyer::HybridCache<CachedKey, CachedEntry>) -> Self {
+    pub fn new_with_cache(cache: foyer::HybridCache<CachedKey, CachedEntry>) -> Self {
         Self { inner: cache }
     }
 }
@@ -163,6 +162,6 @@ mod tests {
             .build()
             .await
             .unwrap();
-        (FoyerHybridCache::new_with_cache(cache).await, tempdir)
+        (FoyerHybridCache::new_with_cache(cache), tempdir)
     }
 }
