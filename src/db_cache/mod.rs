@@ -20,7 +20,10 @@ use tracing::{debug, error};
 
 use crate::db_cache::stats::DbCacheStats;
 use crate::stats::StatRegistry;
-use crate::{block::Block, db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned, SlateDBError};
+use crate::{
+    block::Block, db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned,
+    SlateDBError,
+};
 
 #[cfg(feature = "foyer")]
 pub mod foyer;
@@ -244,7 +247,7 @@ pub struct DbCacheWrapper {
     cache: Arc<dyn DbCache>,
     // Records the last time that the wrapper logged an error from the wrapped cache at error
     // level. Used to ensure we only log at error level once every ERROR_LOG_INTERVAL.
-    last_err_log_instant: Mutex<Option<Instant>>
+    last_err_log_instant: Mutex<Option<Instant>>,
 }
 
 impl DbCacheWrapper {
@@ -252,7 +255,7 @@ impl DbCacheWrapper {
         Self {
             stats: DbCacheStats::new(stats_registry),
             cache,
-            last_err_log_instant: Mutex::new(None)
+            last_err_log_instant: Mutex::new(None),
         }
     }
 }
@@ -273,8 +276,8 @@ impl DbCacheWrapper {
                 Some(i) if i.elapsed() > ERROR_LOG_INTERVAL => {
                     *guard = Some(Instant::now());
                     true
-                },
-                _ => false
+                }
+                _ => false,
             }
         };
         if log_at_err {
@@ -412,12 +415,12 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::stats::{ReadableStat, StatRegistry};
     use crate::test_utils::{build_test_sst, SstData};
+    use crate::SlateDBError;
     use async_trait::async_trait;
     use rstest::{fixture, rstest};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use ulid::Ulid;
-    use crate::SlateDBError;
 
     const SST_ID: SsTableId = SsTableId::Compacted(Ulid::from_parts(0u64, 0u128));
 

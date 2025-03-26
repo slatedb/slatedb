@@ -32,8 +32,8 @@
 //!
 
 use crate::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
-use async_trait::async_trait;
 use crate::SlateDBError;
+use async_trait::async_trait;
 
 /// The options for the Foyer cache.
 #[derive(Clone, Copy, Debug)]

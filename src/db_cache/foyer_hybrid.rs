@@ -43,10 +43,10 @@
 //! ```
 //!
 
-use async_trait::async_trait;
 use crate::db_cache::{CachedEntry, CachedKey, DbCache};
 use crate::SlateDBError;
 use crate::SlateDBError::DbCacheError;
+use async_trait::async_trait;
 
 pub struct FoyerHybridCache {
     inner: foyer::HybridCache<CachedKey, CachedEntry>,
@@ -60,9 +60,10 @@ impl FoyerHybridCache {
 
 impl FoyerHybridCache {
     async fn get(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
-        self.inner.get(&key)
+        self.inner
+            .get(&key)
             .await
-            .map_err(|e| DbCacheError {msg: e.to_string()})
+            .map_err(|e| DbCacheError { msg: e.to_string() })
             .map(|maybe_v| maybe_v.map(|v| v.value().clone()))
     }
 }
@@ -97,16 +98,16 @@ impl DbCache for FoyerHybridCache {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use foyer::{DirectFsDeviceOptions, Engine, HybridCacheBuilder};
-    use rand::RngCore;
-    use tempfile::{TempDir, tempdir};
-    use crate::block::{BlockBuilder};
-    use crate::db_cache::{CachedEntry, CachedKey, DbCache};
+    use crate::block::BlockBuilder;
     use crate::db_cache::foyer_hybrid::FoyerHybridCache;
+    use crate::db_cache::{CachedEntry, CachedKey, DbCache};
     use crate::db_state::SsTableId;
     use crate::types::RowAttributes;
+    use foyer::{DirectFsDeviceOptions, Engine, HybridCacheBuilder};
+    use rand::RngCore;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tempfile::{tempdir, TempDir};
 
     const SST_ID: SsTableId = SsTableId::Wal(123);
 
@@ -128,7 +129,7 @@ mod tests {
                 assert!(v.block().unwrap().as_ref() == cached_v.block().unwrap().as_ref());
                 found += 1;
             } else {
-                notfound +=1;
+                notfound += 1;
             }
         }
         println!("found: {}, notfound: {}", found, notfound);
@@ -143,7 +144,14 @@ mod tests {
             rng.fill_bytes(&mut k);
             let mut v = vec![0u8; 128];
             rng.fill_bytes(&mut v);
-            if builder.add_value(&k, &v, RowAttributes{ts: None, expire_ts: None}) {
+            if builder.add_value(
+                &k,
+                &v,
+                RowAttributes {
+                    ts: None,
+                    expire_ts: None,
+                },
+            ) {
                 break;
             }
         }
@@ -158,7 +166,9 @@ mod tests {
             .memory(1024)
             .with_weighter(|_, v: &CachedEntry| v.size())
             .storage(Engine::Large)
-            .with_device_options(DirectFsDeviceOptions::new(tempdir.path()).with_capacity(1024 * 1024))
+            .with_device_options(
+                DirectFsDeviceOptions::new(tempdir.path()).with_capacity(1024 * 1024),
+            )
             .build()
             .await
             .unwrap();

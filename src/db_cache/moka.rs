@@ -31,9 +31,9 @@
 //! ```
 //!
 use crate::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
+use crate::SlateDBError;
 use async_trait::async_trait;
 use std::time::Duration;
-use crate::SlateDBError;
 
 /// The options for the Moka cache.
 #[derive(Clone, Copy, Debug)]
