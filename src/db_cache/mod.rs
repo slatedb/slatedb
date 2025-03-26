@@ -242,7 +242,9 @@ impl CachedEntry {
 pub struct DbCacheWrapper {
     stats: DbCacheStats,
     cache: Arc<dyn DbCache>,
-    last_err_log: Mutex<Option<Instant>>
+    // Records the last time that the wrapper logged an error from the wrapped cache at error
+    // level. Used to ensure we only log at error level once every ERROR_LOG_INTERVAL.
+    last_err_log_instant: Mutex<Option<Instant>>
 }
 
 impl DbCacheWrapper {
@@ -250,23 +252,25 @@ impl DbCacheWrapper {
         Self {
             stats: DbCacheStats::new(stats_registry),
             cache,
-            last_err_log: Mutex::new(None)
+            last_err_log_instant: Mutex::new(None)
         }
     }
 }
 
-const LOG_INTERVAL: Duration = Duration::from_secs(1);
+// The minimum interval between which the wrapper logs cache errors at error level. This is used to
+// ensure we don't spam the logs on non-transient errors from the cache.
+const ERROR_LOG_INTERVAL: Duration = Duration::from_secs(1);
 
 impl DbCacheWrapper {
     fn record_get_err(&self, block_type: &str, err: SlateDBError) {
         let log_at_err = {
-            let mut guard = self.last_err_log.lock();
+            let mut guard = self.last_err_log_instant.lock();
             match *guard {
                 None => {
                     *guard = Some(Instant::now());
                     true
                 }
-                Some(i) if i.elapsed() > LOG_INTERVAL => {
+                Some(i) if i.elapsed() > ERROR_LOG_INTERVAL => {
                     *guard = Some(Instant::now());
                     true
                 },

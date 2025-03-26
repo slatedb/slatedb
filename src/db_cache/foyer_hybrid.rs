@@ -1,3 +1,49 @@
+//! # Foyer Hybrid Cache
+//!
+//! This module provides an implementation of a hybrid (in-memory + on-disk) cache using the Foyer
+//! library. The cache is designed to store and retrieve cached blocks, indexes, and bloom filters
+//! associated with SSTable IDs.
+//!
+//! ## Features
+//!
+//! - **Custom Weigher**: Implements a custom weigher to account for the size of cached blocks.
+//! - **Flexible Configuration**: The HybridCache instance is passed to the cache, so you are free
+//!   to configure it as needed for your use case.
+//!
+//! ## Examples
+//!
+//! ```rust,no_run
+//! use object_store::local::LocalFileSystem;
+//! use foyer::{DirectFsDeviceOptions, Engine, HybridCacheBuilder};
+//! use slatedb::Db;
+//! use slatedb::db_cache::CachedEntry;
+//! use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
+//! use slatedb::config::DbOptions;
+//! use std::sync::Arc;
+//! use tempfile::tempdir;
+//!
+//! #[::tokio::main]
+//! async fn main() {
+//! let object_store = Arc::new(LocalFileSystem::new());
+//!     let cache = HybridCacheBuilder::new()
+//!             .with_name("hybrid_cache")
+//!             .memory(1024)
+//!             .with_weighter(|_, v: &CachedEntry| v.size())
+//!             .storage(Engine::Large)
+//!             .with_device_options(
+//!                 DirectFsDeviceOptions::new(tempdir().path()).with_capacity(1024 * 1024))
+//!             .build()
+//!             .await
+//!             .unwrap();
+//!     let options = DbOptions {
+//!         block_cache: Some(Arc::new(FoyerHybridCache::new_with_cache(cache))),
+//!         ..Default::default()
+//!     };
+//!     let db = Db::open_with_opts("path/to/db", options, object_store).await;
+//! }
+//! ```
+//!
+
 use async_trait::async_trait;
 use crate::db_cache::{CachedEntry, CachedKey, DbCache};
 use crate::SlateDBError;
@@ -54,7 +100,6 @@ impl DbCache for FoyerHybridCache {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::time::Duration;
     use foyer::{DirectFsDeviceOptions, Engine, HybridCacheBuilder};
     use rand::RngCore;
     use tempfile::{TempDir, tempdir};
@@ -68,13 +113,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_hybrid_cache() {
-        let (cache, dir) = setup();
+        let (cache, _dir) = setup().await;
         let mut items = HashMap::new();
         for b in 0u64..256 {
             let k = CachedKey(SST_ID, b);
             let v = build_block();
             cache.insert(k.clone(), v.clone()).await;
-            tokio::time::sleep(Duration::from_millis(100)).await;
             items.insert(k, v);
         }
         let mut found = 0;
@@ -119,6 +163,6 @@ mod tests {
             .build()
             .await
             .unwrap();
-        (FoyerHybridCache::new_with_cache(cache), tempdir)
+        (FoyerHybridCache::new_with_cache(cache).await, tempdir)
     }
 }
