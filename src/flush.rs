@@ -92,13 +92,18 @@ impl DbInner {
         self: &Arc<Self>,
         mut rx: UnboundedReceiver<WalFlushMsg>,
         tokio_handle: &Handle,
-    ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
+    ) -> tokio::task::JoinHandle<Result<(), SlateDBError>> {
         let this = Arc::clone(self);
         async fn core_flush_loop(
             this: &Arc<DbInner>,
             rx: &mut UnboundedReceiver<WalFlushMsg>,
         ) -> Result<(), SlateDBError> {
-            let mut ticker = tokio::time::interval(this.options.flush_interval);
+            let Some(period) = this.options.flush_interval else {
+                // If flush_interval is not set, we do not start the flush task.
+                return Ok(());
+            };
+
+            let mut ticker = tokio::time::interval(period);
             let mut err_reader = this.state.read().error_reader();
             loop {
                 select! {
@@ -149,7 +154,7 @@ impl DbInner {
         };
 
         let this = Arc::clone(self);
-        Some(spawn_bg_task(
+        spawn_bg_task(
             tokio_handle,
             move |result| {
                 let err = bg_task_result_into_err(result);
@@ -165,7 +170,7 @@ impl DbInner {
                 }
             },
             fut,
-        ))
+        )
     }
 
     async fn close_and_drain_receiver(

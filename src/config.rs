@@ -296,6 +296,7 @@ pub trait Clock {
 }
 
 /// contains the default implementation of the Clock, and will return the system time
+#[derive(Default)]
 pub struct SystemClock {
     last_tick: AtomicI64,
 }
@@ -312,7 +313,7 @@ impl Clock for SystemClock {
     }
 }
 
-fn default_clock() -> Arc<dyn Clock + Send + Sync> {
+pub(crate) fn default_clock() -> Arc<dyn Clock + Send + Sync> {
     Arc::new(SystemClock {
         last_tick: AtomicI64::new(i64::MIN),
     })
@@ -375,9 +376,12 @@ pub struct DbOptions {
     /// Keep in mind that the flush interval does not include the network latency. A
     /// 100ms flush interval will result in a 100ms + the time it takes to send the
     /// bytes to object storage.
-    #[serde(deserialize_with = "deserialize_duration")]
-    #[serde(serialize_with = "serialize_duration")]
-    pub flush_interval: Duration,
+    ///
+    /// If this value is None, automatic flushing will be disabled. The application
+    /// can flush by calling `Db::flush()` manually, and by closing the database.
+    #[serde(deserialize_with = "deserialize_option_duration")]
+    #[serde(serialize_with = "serialize_option_duration")]
+    pub flush_interval: Option<Duration>,
 
     /// If set to false, SlateDB will disable the WAL and write directly into the memtable
     #[cfg(feature = "wal_disable")]
@@ -642,7 +646,7 @@ impl Provider for DbOptions {
 impl Default for DbOptions {
     fn default() -> Self {
         Self {
-            flush_interval: Duration::from_millis(100),
+            flush_interval: Some(Duration::from_millis(100)),
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
             manifest_poll_interval: Duration::from_secs(1),
@@ -658,6 +662,38 @@ impl Default for DbOptions {
             filter_bits_per_key: 10,
             clock: default_clock(),
             default_ttl: None,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct DbReaderOptions {
+    /// How frequently to poll for new manifest files. Refreshing the manifest
+    /// file allows readers to detect newly compacted data. If the reader is
+    /// using an explicit checkpoint, then the manifest will not be polled.
+    pub manifest_poll_interval: Duration,
+
+    /// For readers that do not provide an explicit checkpoint, the client will
+    /// maintain its own checkpoint against the latest database state. The checkpoint’s
+    /// expire time will be set to the current time plus this value. This lifetime
+    /// must always be greater than manifest_poll_interval x 2.
+    pub checkpoint_lifetime: Duration,
+
+    /// The max size of a single in-memory table used to buffer WAL entries
+    /// Defaults to 64MB
+    pub max_memtable_bytes: u64,
+
+    #[serde(skip)]
+    pub block_cache: Option<Arc<dyn DbCache>>,
+}
+
+impl Default for DbReaderOptions {
+    fn default() -> Self {
+        Self {
+            manifest_poll_interval: Duration::from_secs(10),
+            checkpoint_lifetime: Duration::from_secs(10 * 60),
+            max_memtable_bytes: 64 * 1024 * 1024,
+            block_cache: default_block_cache(),
         }
     }
 }
@@ -974,7 +1010,7 @@ mod tests {
 
             let options = DbOptions::from_env("SLATEDB_")
                 .expect("failed to load db options from environment");
-            assert_eq!(Duration::from_secs(1), options.flush_interval);
+            assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -1002,7 +1038,7 @@ mod tests {
 
             let options = DbOptions::from_file("config.json")
                 .expect("failed to load db options from environment");
-            assert_eq!(Duration::from_secs(1), options.flush_interval);
+            assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -1026,7 +1062,7 @@ root_folder = "/tmp/slatedb-root"
 
             let options = DbOptions::from_file("config.toml")
                 .expect("failed to load db options from environment");
-            assert_eq!(Duration::from_secs(1), options.flush_interval);
+            assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -1050,7 +1086,7 @@ object_store_cache_options:
 
             let options = DbOptions::from_file("config.yaml")
                 .expect("failed to load db options from environment");
-            assert_eq!(Duration::from_secs(1), options.flush_interval);
+            assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -1074,7 +1110,7 @@ object_store_cache_options:
             .expect("failed to create db options config file");
 
             let options = DbOptions::load().expect("failed to load db options from environment");
-            assert_eq!(Duration::from_secs(1), options.flush_interval);
+            assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder

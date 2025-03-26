@@ -1,15 +1,16 @@
 use crate::checkpoint::Checkpoint;
-use crate::config::CheckpointOptions;
+use crate::config::{CheckpointOptions, Clock, SystemClock};
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestManifestMissing, ManifestMissing,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
-use crate::manifest::{Manifest, ManifestCodec, ParentDb};
+use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
+use crate::utils;
 use crate::SlateDBError::ManifestVersionExists;
 use chrono::Utc;
 use futures::StreamExt;
@@ -20,7 +21,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::Duration;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -28,8 +29,7 @@ use uuid::Uuid;
 #[derive(Clone, Debug)]
 pub(crate) struct DirtyManifest {
     id: u64,
-    next_id: u64,
-    parent: Option<ParentDb>,
+    external_dbs: Vec<ExternalDb>,
     pub(crate) core: CoreDbState,
     writer_epoch: u64,
     compactor_epoch: u64,
@@ -38,7 +38,7 @@ pub(crate) struct DirtyManifest {
 impl From<DirtyManifest> for Manifest {
     fn from(manifest: DirtyManifest) -> Manifest {
         Manifest {
-            parent: manifest.parent,
+            external_dbs: manifest.external_dbs,
             core: manifest.core,
             writer_epoch: manifest.writer_epoch,
             compactor_epoch: manifest.compactor_epoch,
@@ -47,11 +47,10 @@ impl From<DirtyManifest> for Manifest {
 }
 
 impl DirtyManifest {
-    fn new(id: u64, next_id: u64, manifest: Manifest) -> Self {
+    pub(crate) fn new(id: u64, manifest: Manifest) -> Self {
         Self {
             id,
-            next_id,
-            parent: manifest.parent,
+            external_dbs: manifest.external_dbs,
             core: manifest.core,
             writer_epoch: manifest.writer_epoch,
             compactor_epoch: manifest.compactor_epoch,
@@ -61,11 +60,6 @@ impl DirtyManifest {
     #[allow(dead_code)]
     fn id(&self) -> u64 {
         self.id
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn next_id(&self) -> u64 {
-        self.next_id
     }
 }
 
@@ -157,7 +151,7 @@ impl FenceableManifest {
             .stored_manifest
             .manifest()
             .core
-            .find_checkpoint(&checkpoint_id)
+            .find_checkpoint(checkpoint_id)
             .expect("update applied but checkpoint not found")
             .clone();
         Ok(checkpoint)
@@ -244,10 +238,11 @@ impl StoredManifest {
     /// for the rest of the clone state to be initialized
     pub(crate) async fn create_uninitialized_clone(
         clone_manifest_store: Arc<ManifestStore>,
-        parent_db: ParentDb,
         parent_manifest: &Manifest,
+        parent_path: String,
+        source_checkpoint_id: Uuid,
     ) -> Result<Self, SlateDBError> {
-        let manifest = Manifest::cloned(parent_db, parent_manifest);
+        let manifest = Manifest::cloned(parent_manifest, parent_path, source_checkpoint_id);
         Self::init(clone_manifest_store, manifest).await
     }
 
@@ -282,7 +277,7 @@ impl StoredManifest {
     }
 
     pub(crate) fn prepare_dirty(&self) -> DirtyManifest {
-        DirtyManifest::new(self.id, self.next_id(), self.manifest.clone())
+        DirtyManifest::new(self.id, self.manifest.clone())
     }
 
     pub(crate) fn db_state(&self) -> &CoreDbState {
@@ -322,12 +317,13 @@ impl StoredManifest {
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let expire_time = options.lifetime.map(|l| SystemTime::now() + l);
+        let expire_time = options
+            .lifetime
+            .map(|l| utils::now_systime(self.manifest_store.clock.as_ref()) + l);
         let db_state = self.db_state();
         let manifest_id = match options.source {
             Some(source_checkpoint_id) => {
-                let Some(source_checkpoint) = db_state.find_checkpoint(&source_checkpoint_id)
-                else {
+                let Some(source_checkpoint) = db_state.find_checkpoint(source_checkpoint_id) else {
                     return Err(CheckpointMissing(source_checkpoint_id));
                 };
                 source_checkpoint.manifest_id
@@ -343,7 +339,7 @@ impl StoredManifest {
             id: checkpoint_id,
             manifest_id,
             expire_time,
-            create_time: SystemTime::now(),
+            create_time: utils::now_systime(self.manifest_store.clock.as_ref()),
         })
     }
 
@@ -359,46 +355,98 @@ impl StoredManifest {
                 .map(Some)
         })
         .await?;
+        Ok(self
+            .db_state()
+            .find_checkpoint(checkpoint_id)
+            .expect("update applied but checkpoint not found")
+            .clone())
+    }
+
+    pub(crate) async fn delete_checkpoint(
+        &mut self,
+        checkpoint_id: Uuid,
+    ) -> Result<(), SlateDBError> {
+        self.maybe_apply_manifest_update(|stored_manifest| {
+            let mut updated_manifest = stored_manifest.prepare_dirty();
+            let initial_len = updated_manifest.core.checkpoints.len();
+            updated_manifest
+                .core
+                .checkpoints
+                .retain(|cp| cp.id != checkpoint_id);
+            if initial_len == updated_manifest.core.checkpoints.len() {
+                Ok(None)
+            } else {
+                Ok(Some(updated_manifest))
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Replace an existing checkpoint with a new checkpoint. If the old checkpoint
+    /// is no longer present, then the new checkpoint will still be added.
+    /// This is useful when establishing a new checkpoint (e.g. in a reader) in
+    /// order to avoid two manifest updates.
+    pub(crate) async fn replace_checkpoint(
+        &mut self,
+        old_checkpoint_id: Uuid,
+        new_checkpoint_options: &CheckpointOptions,
+    ) -> Result<Checkpoint, SlateDBError> {
+        let new_checkpoint_id = Uuid::new_v4();
+        self.maybe_apply_manifest_update(|stored_manifest| {
+            let new_checkpoint =
+                stored_manifest.new_checkpoint(new_checkpoint_id, new_checkpoint_options)?;
+            let mut updated_manifest = stored_manifest.prepare_dirty();
+            updated_manifest
+                .core
+                .checkpoints
+                .retain(|cp| cp.id != old_checkpoint_id);
+            updated_manifest.core.checkpoints.push(new_checkpoint);
+            Ok(Some(updated_manifest))
+        })
+        .await?;
+        let new_checkpoint = self
+            .db_state()
+            .find_checkpoint(new_checkpoint_id)
+            .expect("update applied but checkpoint not found")
+            .clone();
+        Ok(new_checkpoint)
+    }
+
+    pub(crate) async fn refresh_checkpoint(
+        &mut self,
+        checkpoint_id: Uuid,
+        new_lifetime: Duration,
+    ) -> Result<Checkpoint, SlateDBError> {
+        let clock = self.manifest_store.clock.clone();
+        self.maybe_apply_manifest_update(|stored_manifest| {
+            let mut updated_manifest = stored_manifest.prepare_dirty();
+            let checkpoint = updated_manifest
+                .core
+                .checkpoints
+                .iter_mut()
+                .find(|c| c.id == checkpoint_id)
+                .ok_or(CheckpointMissing(checkpoint_id))?;
+            checkpoint.expire_time = Some(utils::now_systime(clock.as_ref()) + new_lifetime);
+            Ok(Some(updated_manifest))
+        })
+        .await?;
         let checkpoint = self
             .db_state()
-            .find_checkpoint(&checkpoint_id)
+            .find_checkpoint(checkpoint_id)
             .expect("update applied but checkpoint not found")
             .clone();
         Ok(checkpoint)
-    }
-
-    pub(crate) async fn rewrite_parent_db(
-        &mut self,
-        parent_db: ParentDb,
-        parent_manifest: &Manifest,
-    ) -> Result<(), SlateDBError> {
-        // Do not allow the parent to be rewritten if the manifest finished initialization.
-        if self.manifest.core.initialized {
-            return Err(InvalidDBState);
-        }
-
-        // Also do not allow the parent path to be changed.
-        let Some(current_parent) = self.manifest.parent.as_ref() else {
-            return Err(InvalidDBState);
-        };
-
-        if current_parent.path != parent_db.path {
-            return Err(InvalidDBState);
-        }
-
-        let manifest = Manifest::cloned(parent_db, parent_manifest);
-        let dirty = DirtyManifest::new(self.id, self.next_id(), manifest);
-        self.update_manifest(dirty).await
     }
 
     pub(crate) async fn update_manifest(
         &mut self,
         manifest: DirtyManifest,
     ) -> Result<(), SlateDBError> {
-        let next_id = self.next_id();
-        if manifest.next_id() != next_id {
+        if manifest.id() != self.id {
             return Err(ManifestVersionExists);
         }
+        let next_id = self.next_id();
         let manifest = manifest.into();
         self.manifest_store
             .write_manifest(next_id, &manifest)
@@ -446,7 +494,7 @@ pub(crate) struct ManifestFileMetadata {
     pub(crate) location: Path,
     pub(crate) last_modified: chrono::DateTime<Utc>,
     #[allow(dead_code)]
-    pub(crate) size: usize,
+    pub(crate) size: u32,
 }
 
 fn serialize_path<S>(path: &Path, serializer: S) -> Result<S::Ok, S::Error>
@@ -460,10 +508,19 @@ pub(crate) struct ManifestStore {
     object_store: Box<dyn TransactionalObjectStore>,
     codec: Box<dyn ManifestCodec>,
     manifest_suffix: &'static str,
+    clock: Arc<dyn Clock + Send + Sync>,
 }
 
 impl ManifestStore {
     pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
+        Self::new_with_clock(root_path, object_store, Arc::new(SystemClock::default()))
+    }
+
+    pub(crate) fn new_with_clock(
+        root_path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        clock: Arc<dyn Clock + Send + Sync>,
+    ) -> Self {
         Self {
             object_store: Box::new(DelegatingTransactionalObjectStore::new(
                 root_path.child("manifest"),
@@ -471,6 +528,7 @@ impl ManifestStore {
             )),
             codec: Box::new(FlatBufferManifestCodec {}),
             manifest_suffix: "manifest",
+            clock,
         }
     }
 
@@ -534,7 +592,7 @@ impl ManifestStore {
                         id,
                         location: file.location,
                         last_modified: file.last_modified,
-                        size: file.size,
+                        size: file.size as u32,
                     });
                 }
                 Err(_) => warn!("Unknown file in manifest directory: {:?}", file.location),
@@ -637,7 +695,7 @@ pub(crate) mod test_utils {
     use crate::manifest::Manifest;
 
     pub(crate) fn new_dirty_manifest() -> DirtyManifest {
-        DirtyManifest::new(1u64, 2u64, Manifest::initial(CoreDbState::new()))
+        DirtyManifest::new(1u64, Manifest::initial(CoreDbState::new()))
     }
 }
 
@@ -645,18 +703,14 @@ pub(crate) mod test_utils {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::config::CheckpointOptions;
-    use crate::db_state::{CoreDbState, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::CoreDbState;
     use crate::error;
     use crate::error::SlateDBError;
-    use crate::error::SlateDBError::InvalidDBState;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
-    use crate::manifest::{Manifest, ParentDb};
-    use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
-    use ulid::Ulid;
     use uuid::Uuid;
 
     const ROOT: &str = "/root/path";
@@ -1038,140 +1092,128 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_safely_rewrite_parent_db() {
-        let parent_path = "/parent/path";
-        let mut sm = create_uninitialized_clone(parent_path).await;
-
-        // The new manifest and all of its state should be copied over
-        // to the clone manifest
-        let rewrite_checkpoint_id = Uuid::new_v4();
-        let mut parent_manifest = Manifest::initial(CoreDbState::new());
-        parent_manifest.core.next_wal_sst_id = 5;
-        parent_manifest.writer_epoch = 2;
-        parent_manifest.compactor_epoch = 3;
-        parent_manifest.core.l0.push_back(create_sst(
-            SsTableId::Compacted(Ulid::new()),
-            Some(Bytes::from("a")),
-        ));
-        parent_manifest.core.l0.push_back(create_sst(
-            SsTableId::Compacted(Ulid::new()),
-            Some(Bytes::from("abc")),
-        ));
-
-        let parent_db = ParentDb {
-            path: parent_path.to_string(),
-            checkpoint_id: rewrite_checkpoint_id,
-        };
-        sm.rewrite_parent_db(parent_db, &parent_manifest)
-            .await
-            .unwrap();
-        assert_eq!(2, sm.id());
-        assert!(!sm.db_state().initialized);
-        assert_eq!(
-            Some(rewrite_checkpoint_id),
-            sm.manifest.parent.map(|p| p.checkpoint_id)
-        );
-        assert_eq!(parent_manifest.writer_epoch, sm.manifest.writer_epoch);
-        assert_eq!(parent_manifest.compactor_epoch, sm.manifest.compactor_epoch);
-        assert_eq!(
-            parent_manifest.core.next_wal_sst_id,
-            sm.manifest.core.next_wal_sst_id
-        );
-        assert_eq!(parent_manifest.core.l0, sm.manifest.core.l0);
-    }
-
-    fn create_sst(id: SsTableId, first_key: Option<Bytes>) -> SsTableHandle {
-        let table_info = SsTableInfo {
-            first_key,
-            index_offset: 0,
-            index_len: 0,
-            filter_offset: 0,
-            filter_len: 0,
-            compression_codec: None,
-        };
-        SsTableHandle::new(id, table_info)
-    }
-
-    #[tokio::test]
-    async fn should_not_rewrite_parent_for_initialized_clone() {
-        let parent_path = "/parent/path";
-        let mut sm = create_uninitialized_clone(parent_path).await;
-
-        let mut dirty = sm.prepare_dirty();
-        dirty.core.initialized = true;
-        sm.update_manifest(dirty).await.unwrap();
-
-        let parent_manifest = Manifest::initial(CoreDbState::new());
-        let parent_db = ParentDb {
-            path: parent_path.to_string(),
-            checkpoint_id: Uuid::new_v4(),
-        };
-        assert!(matches!(
-            sm.rewrite_parent_db(parent_db, &parent_manifest)
-                .await
-                .unwrap_err(),
-            InvalidDBState
-        ));
-    }
-
-    #[tokio::test]
-    async fn should_not_rewrite_parent_db_with_different_path() {
-        let initial_parent_path = "/initial/parent/path";
-        let mut sm = create_uninitialized_clone(initial_parent_path).await;
-
-        let mut dirty = sm.prepare_dirty();
-        dirty.core.initialized = true;
-        sm.update_manifest(dirty).await.unwrap();
-
-        let updated_parent_path = "/updated/parent/path";
-        let parent_manifest = Manifest::initial(CoreDbState::new());
-        let parent_db = ParentDb {
-            path: updated_parent_path.to_string(),
-            checkpoint_id: Uuid::new_v4(),
-        };
-        assert!(matches!(
-            sm.rewrite_parent_db(parent_db, &parent_manifest)
-                .await
-                .unwrap_err(),
-            InvalidDBState
-        ));
-    }
-
-    #[tokio::test]
-    async fn should_not_rewrite_parent_db_for_noncloned_db() {
+    async fn should_refresh_checkpoint() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
 
-        let parent_manifest = Manifest::initial(CoreDbState::new());
-        let parent_db = ParentDb {
-            path: "/parent/path".to_string(),
-            checkpoint_id: Uuid::new_v4(),
+        let options = CheckpointOptions {
+            lifetime: Some(Duration::from_secs(100)),
+            ..CheckpointOptions::default()
         };
-        assert!(matches!(
-            sm.rewrite_parent_db(parent_db, &parent_manifest)
-                .await
-                .unwrap_err(),
-            InvalidDBState
-        ));
+
+        let checkpoint = sm.write_checkpoint(None, &options).await.unwrap();
+        let expire_time = checkpoint.expire_time.unwrap();
+
+        let refreshed_checkpoint = sm
+            .refresh_checkpoint(checkpoint.id, Duration::from_secs(500))
+            .await
+            .unwrap();
+        let refreshed_expire_time = refreshed_checkpoint.expire_time.unwrap();
+        assert!(refreshed_expire_time > expire_time);
+
+        assert_eq!(
+            Some(&refreshed_checkpoint),
+            sm.manifest.core.find_checkpoint(checkpoint.id)
+        );
     }
 
-    async fn create_uninitialized_clone(parent_path: &str) -> StoredManifest {
-        let parent_manifest = Manifest::initial(CoreDbState::new());
-        let parent_db = ParentDb {
-            path: parent_path.to_string(),
-            checkpoint_id: Uuid::new_v4(),
-        };
+    #[tokio::test]
+    async fn should_fail_refresh_if_checkpoint_missing() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
 
-        let clone_manifest_store = new_memory_manifest_store();
-        StoredManifest::create_uninitialized_clone(
-            Arc::clone(&clone_manifest_store),
-            parent_db,
-            &parent_manifest,
-        )
-        .await
-        .unwrap()
+        let checkpoint_id = Uuid::new_v4();
+        let result = sm
+            .refresh_checkpoint(checkpoint_id, Duration::from_secs(100))
+            .await;
+
+        if let Err(SlateDBError::CheckpointMissing(missing_id)) = result {
+            assert_eq!(checkpoint_id, missing_id);
+        } else {
+            panic!("Unexpected result {result:?}")
+        }
+    }
+
+    #[tokio::test]
+    async fn should_replace_checkpoint() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let checkpoint = sm
+            .write_checkpoint(None, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        let replaced_checkpoint = sm
+            .replace_checkpoint(checkpoint.id, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        assert_ne!(checkpoint.id, replaced_checkpoint.id);
+        assert_eq!(None, sm.manifest.core.find_checkpoint(checkpoint.id));
+        assert_eq!(
+            Some(&replaced_checkpoint),
+            sm.manifest.core.find_checkpoint(replaced_checkpoint.id),
+        );
+    }
+
+    #[tokio::test]
+    async fn should_ignore_missing_checkpoint_if_replacing() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let missing_checkpoint_id = Uuid::new_v4();
+        let replaced_checkpoint = sm
+            .replace_checkpoint(missing_checkpoint_id, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            Some(&replaced_checkpoint),
+            sm.manifest.core.find_checkpoint(replaced_checkpoint.id),
+        );
+    }
+
+    #[tokio::test]
+    async fn should_delete_checkpoint() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let checkpoint = sm
+            .write_checkpoint(None, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        sm.delete_checkpoint(checkpoint.id).await.unwrap();
+        assert_eq!(None, sm.manifest.core.find_checkpoint(checkpoint.id));
+    }
+
+    #[tokio::test]
+    async fn should_ignore_missing_checkpoint_if_deleting() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        let checkpoint_id = Uuid::new_v4();
+        let manifest_id = sm.id;
+        sm.delete_checkpoint(checkpoint_id).await.unwrap();
+        sm.refresh().await.unwrap();
+        assert_eq!(manifest_id, sm.id);
     }
 }

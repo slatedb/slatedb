@@ -14,7 +14,7 @@
 
 To mitigate high write API costs (PUTs), SlateDB batches writes. Rather than writing every `put()` call to object storage, MemTables are flushed periodically to object storage as a string-sorted table (SST). The flush interval is configurable.
 
-To mitigate write latency, SlateDB provides an async `put` method. Clients that prefer strong durability can `await` on `put` until the MemTable is flushed to object storage (trading latency for durability). Clients that prefer lower latency can simply ignore the future returned by `put`.
+`put()` returns a `Future` that resolves when the data is durably persisted. Clients that prefer lower latency at the cost of durability can instead use `put_with_options` with `await_durable` set to `false`.
 
 To mitigate read latency and read API costs (GETs), SlateDB will use standard LSM-tree caching techniques: in-memory block caches, compression, bloom filters, and local SST disk caches.
 
@@ -135,7 +135,7 @@ SlateDB is currently in the early stages of development. It is not yet ready for
 - [x] Compaction ([#7](https://github.com/slatedb/slatedb/issues/7))
 - [ ] Transactions
 - [ ] Merge operator ([#328](https://github.com/slatedb/slatedb/issues/328))
-- [ ] Clones ([#49](https://github.com/slatedb/slatedb/issues/49))
+- [x] Clones ([#49](https://github.com/slatedb/slatedb/issues/49))
 
 ## License
 

@@ -240,7 +240,7 @@ impl WritableKVTable {
 }
 
 impl KVTable {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             map: SkipMap::new(),
             size: AtomicUsize::new(0),

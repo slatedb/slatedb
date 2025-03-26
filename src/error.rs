@@ -24,6 +24,9 @@ pub enum SlateDBError {
     #[error("Empty block")]
     EmptyBlock,
 
+    #[error("Empty manifest")]
+    EmptyManifest,
+
     #[error("Object store error: {0}")]
     ObjectStoreError(#[from] Arc<object_store::Error>),
 
@@ -112,6 +115,15 @@ pub enum SlateDBError {
 
     #[error("Database already exists: {msg}")]
     DatabaseAlreadyExists { msg: String },
+
+    #[error("Byte format version mismatch: expected {expected_version}, actual {actual_version}")]
+    InvalidVersion {
+        expected_version: u16,
+        actual_version: u16,
+    },
+
+    #[error("Db Cache error: {msg}")]
+    DbCacheError { msg: String },
 }
 
 impl From<std::io::Error> for SlateDBError {

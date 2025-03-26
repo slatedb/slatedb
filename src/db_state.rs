@@ -4,6 +4,7 @@ use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::manifest::store::DirtyManifest;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
+use crate::reader::ReadSnapshot;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use bytes::Bytes;
 use serde::Serialize;
@@ -35,28 +36,36 @@ impl SsTableHandle {
         SsTableHandle { id, info }
     }
 
+    // Compacted (non-WAL) SSTs are never empty. They are created by compaction or
+    // memtable flushes, which should never produce empty SSTs.
+    pub(crate) fn compacted_first_key(&self) -> &Bytes {
+        assert!(matches!(self.id, Compacted(_)));
+        match &self.info.first_key {
+            Some(k) => k,
+            None => unreachable!("Compacted SSTs must be non-empty."),
+        }
+    }
+
     pub(crate) fn range_covers_key(&self, key: &[u8]) -> bool {
         if let Some(first_key) = self.info.first_key.as_ref() {
             return key >= first_key;
         }
+        // If there is no first key, it means the SST is empty so it doesn't cover the key.
         false
     }
 
     pub(crate) fn intersects_range(
         &self,
-        end_bound_key: Option<Bytes>,
+        end_bound: Bound<&[u8]>,
         range: (Bound<&[u8]>, Bound<&[u8]>),
     ) -> bool {
         let start_bound = match &self.info.first_key {
-            None => Unbounded,
             Some(key) => Included(key.as_ref()),
+            None => {
+                // If there is no first key, it means the SST is empty so there is no intersection.
+                return false;
+            }
         };
-
-        let end_bound = match &end_bound_key {
-            None => Unbounded,
-            Some(key) => Excluded(key.as_ref()),
-        };
-
         bytes_range::has_nonempty_intersection(range, (start_bound, end_bound))
     }
 
@@ -139,13 +148,9 @@ impl SortedRun {
 
     pub(crate) fn find_sst_with_range_covering_key_idx(&self, key: &[u8]) -> Option<usize> {
         // returns the sst after the one whose range includes the key
-        let first_sst = self.ssts.partition_point(|sst| {
-            sst.info
-                .first_key
-                .as_ref()
-                .expect("sst must have first key")
-                <= key
-        });
+        let first_sst = self
+            .ssts
+            .partition_point(|sst| sst.compacted_first_key() <= key);
         if first_sst > 0 {
             return Some(first_sst - 1);
         }
@@ -167,9 +172,9 @@ impl SortedRun {
 
             let upper_bound_key = if idx + 1 < self.ssts.len() {
                 let next_sst = &self.ssts[idx + 1];
-                next_sst.info.first_key.clone()
+                Excluded(next_sst.compacted_first_key().as_ref())
             } else {
-                None
+                Unbounded
             };
 
             if current_sst.intersects_range(upper_bound_key, range) {
@@ -281,8 +286,8 @@ impl CoreDbState {
         debug!("-----------------");
     }
 
-    pub(crate) fn find_checkpoint(&self, checkpoint_id: &Uuid) -> Option<&Checkpoint> {
-        self.checkpoints.iter().find(|c| c.id == *checkpoint_id)
+    pub(crate) fn find_checkpoint(&self, checkpoint_id: Uuid) -> Option<&Checkpoint> {
+        self.checkpoints.iter().find(|c| c.id == checkpoint_id)
     }
 }
 
@@ -292,6 +297,28 @@ pub(crate) struct DbStateSnapshot {
     pub(crate) memtable: Arc<KVTable>,
     pub(crate) wal: Arc<KVTable>,
     pub(crate) state: Arc<COWDbState>,
+}
+
+impl ReadSnapshot for DbStateSnapshot {
+    fn memtable(&self) -> Arc<KVTable> {
+        Arc::clone(&self.memtable)
+    }
+
+    fn wal(&self) -> Arc<KVTable> {
+        Arc::clone(&self.wal)
+    }
+
+    fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>> {
+        &self.state.imm_memtable
+    }
+
+    fn imm_wal(&self) -> &VecDeque<Arc<ImmutableWal>> {
+        &self.state.imm_wal
+    }
+
+    fn core(&self) -> &CoreDbState {
+        self.state.core()
+    }
 }
 
 impl DbState {
@@ -365,6 +392,18 @@ impl DbState {
         Ok(())
     }
 
+    pub(crate) fn replace_memtable(
+        &mut self,
+        memtable: WritableKVTable,
+    ) -> Result<(), SlateDBError> {
+        if let Some(err) = self.error.reader().read() {
+            return Err(err.clone());
+        }
+        assert!(self.memtable.is_empty());
+        let _ = std::mem::replace(&mut self.memtable, memtable);
+        Ok(())
+    }
+
     pub fn freeze_wal(&mut self) -> Result<(), SlateDBError> {
         if let Some(err) = self.error.reader().read() {
             return Err(err.clone());
@@ -422,6 +461,12 @@ impl DbState {
     pub fn increment_next_wal_id(&mut self) {
         let mut state = self.state_copy();
         state.manifest.core.next_wal_sst_id += 1;
+        self.update_state(state);
+    }
+
+    pub fn set_next_wal_id(&mut self, next_wal_id: u64) {
+        let mut state = self.state_copy();
+        state.manifest.core.next_wal_sst_id = next_wal_id;
         self.update_state(state);
     }
 
@@ -582,7 +627,7 @@ mod tests {
                 assert!(range_end_key <= first_key);
             } else {
                 let covering_first_key = covering_tables.front()
-                .and_then(|t| t.info.first_key.clone())
+                .map(|t| t.compacted_first_key().clone())
                 .unwrap();
 
                 if range_start_key < covering_first_key {
@@ -590,7 +635,7 @@ mod tests {
                 }
 
                 let covering_last_key = covering_tables.iter().last()
-                .and_then(|t| t.info.first_key.clone())
+                .map(|t| t.compacted_first_key().clone())
                 .unwrap();
                 if covering_last_key == range_end_key {
                     assert_eq!(Included(range_end_key), range.end_bound().cloned());
