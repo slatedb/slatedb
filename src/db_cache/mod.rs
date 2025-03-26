@@ -12,17 +12,23 @@
 //! To use the cache, you need to configure the [DbOptions](crate::config::DbOptions) with the desired cache implementation.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
+use tracing::{debug, error};
 
 use crate::db_cache::stats::DbCacheStats;
 use crate::stats::StatRegistry;
 use crate::{
     block::Block, db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned,
+    SlateDBError,
 };
 
 #[cfg(feature = "foyer")]
 pub mod foyer;
+#[cfg(feature = "foyer")]
+pub mod foyer_hybrid;
 #[cfg(feature = "moka")]
 pub mod moka;
 mod serde;
@@ -43,6 +49,7 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 /// use slatedb::Db;
 /// use slatedb::config::DbOptions;
 /// use slatedb::db_cache::{DbCache, CachedEntry, CachedKey};
+/// use slatedb::SlateDBError;
 /// use std::collections::HashMap;
 /// use std::sync::{Arc, Mutex};
 ///
@@ -72,19 +79,19 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 ///
 /// #[async_trait]
 /// impl DbCache for MyCache {
-///     async fn get_block(&self, key: CachedKey) -> Option<CachedEntry> {
+///     async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
 ///         let guard = self.inner.lock().unwrap();
-///         guard.data.get(&key).cloned()
+///         Ok(guard.data.get(&key).cloned())
 ///     }
 ///
-///     async fn get_index(&self, key: CachedKey) -> Option<CachedEntry> {
+///     async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
 ///         let guard = self.inner.lock().unwrap();
-///         guard.data.get(&key).cloned()
+///         Ok(guard.data.get(&key).cloned())
 ///     }
 ///
-///     async fn get_filter(&self, key: CachedKey) -> Option<CachedEntry> {
+///     async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
 ///         let guard = self.inner.lock().unwrap();
-///         guard.data.get(&key).cloned()
+///         Ok(guard.data.get(&key).cloned())
 ///     }
 ///
 ///     async fn insert(&self, key: CachedKey, value: CachedEntry) {
@@ -124,9 +131,9 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 /// ```
 #[async_trait]
 pub trait DbCache: Send + Sync {
-    async fn get_block(&self, key: CachedKey) -> Option<CachedEntry>;
-    async fn get_index(&self, key: CachedKey) -> Option<CachedEntry>;
-    async fn get_filter(&self, key: CachedKey) -> Option<CachedEntry>;
+    async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError>;
+    async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError>;
+    async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError>;
     async fn insert(&self, key: CachedKey, value: CachedEntry);
     #[allow(dead_code)]
     async fn remove(&self, key: CachedKey);
@@ -238,6 +245,9 @@ impl CachedEntry {
 pub struct DbCacheWrapper {
     stats: DbCacheStats,
     cache: Arc<dyn DbCache>,
+    // Records the last time that the wrapper logged an error from the wrapped cache at error
+    // level. Used to ensure we only log at error level once every ERROR_LOG_INTERVAL.
+    last_err_log_instant: Mutex<Option<Instant>>,
 }
 
 impl DbCacheWrapper {
@@ -245,40 +255,88 @@ impl DbCacheWrapper {
         Self {
             stats: DbCacheStats::new(stats_registry),
             cache,
+            last_err_log_instant: Mutex::new(None),
         }
+    }
+}
+
+// The minimum interval between which the wrapper logs cache errors at error level. This is used to
+// ensure we don't spam the logs on non-transient errors from the cache.
+const ERROR_LOG_INTERVAL: Duration = Duration::from_secs(1);
+
+impl DbCacheWrapper {
+    fn record_get_err(&self, block_type: &str, err: &SlateDBError) {
+        let log_at_err = {
+            let mut guard = self.last_err_log_instant.lock();
+            match *guard {
+                None => {
+                    *guard = Some(Instant::now());
+                    true
+                }
+                Some(i) if i.elapsed() > ERROR_LOG_INTERVAL => {
+                    *guard = Some(Instant::now());
+                    true
+                }
+                _ => false,
+            }
+        };
+        if log_at_err {
+            error!("error getting {} from cache: {}", block_type, err);
+        } else {
+            debug!("error getting {} from cache: {}", block_type, err);
+        }
+        self.stats.get_error.inc();
     }
 }
 
 #[async_trait]
 impl DbCache for DbCacheWrapper {
-    async fn get_block(&self, key: CachedKey) -> Option<CachedEntry> {
-        let entry = self.cache.get_block(key).await;
+    async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+        let entry = match self.cache.get_block(key).await {
+            Ok(e) => e,
+            Err(err) => {
+                self.record_get_err("block", &err);
+                return Err(err);
+            }
+        };
         if entry.is_some() {
             self.stats.data_block_hit.inc();
         } else {
             self.stats.data_block_miss.inc();
         }
-        entry
+        Ok(entry)
     }
 
-    async fn get_index(&self, key: CachedKey) -> Option<CachedEntry> {
-        let entry = self.cache.get_index(key).await;
+    async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+        let entry = match self.cache.get_index(key).await {
+            Ok(e) => e,
+            Err(err) => {
+                self.record_get_err("index", &err);
+                return Err(err);
+            }
+        };
         if entry.is_some() {
             self.stats.index_hit.inc();
         } else {
             self.stats.index_miss.inc();
         }
-        entry
+        Ok(entry)
     }
 
-    async fn get_filter(&self, key: CachedKey) -> Option<CachedEntry> {
-        let entry = self.cache.get_filter(key).await;
+    async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+        let entry = match self.cache.get_filter(key).await {
+            Ok(e) => e,
+            Err(err) => {
+                self.record_get_err("filter", &err);
+                return Err(err);
+            }
+        };
         if entry.is_some() {
             self.stats.filter_hit.inc();
         } else {
             self.stats.filter_miss.inc();
         }
-        entry
+        Ok(entry)
     }
 
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
@@ -311,6 +369,7 @@ pub mod stats {
     pub const DB_CACHE_INDEX_MISS: &str = dbcache_stat_name!("index_miss");
     pub const DB_CACHE_DATA_BLOCK_HIT: &str = dbcache_stat_name!("data_block_hit");
     pub const DB_CACHE_DATA_BLOCK_MISS: &str = dbcache_stat_name!("data_block_miss");
+    pub const DB_CACHE_GET_ERROR: &str = dbcache_stat_name!("get_error");
 
     pub(super) struct DbCacheStats {
         pub(super) filter_hit: Arc<Counter>,
@@ -319,6 +378,7 @@ pub mod stats {
         pub(super) index_miss: Arc<Counter>,
         pub(super) data_block_hit: Arc<Counter>,
         pub(super) data_block_miss: Arc<Counter>,
+        pub(super) get_error: Arc<Counter>,
     }
 
     impl DbCacheStats {
@@ -330,6 +390,7 @@ pub mod stats {
                 index_miss: Arc::new(Counter::default()),
                 data_block_hit: Arc::new(Counter::default()),
                 data_block_miss: Arc::new(Counter::default()),
+                get_error: Arc::new(Counter::default()),
             };
             registry.register(DB_CACHE_FILTER_HIT, stats.filter_hit.clone());
             registry.register(DB_CACHE_FILTER_MISS, stats.filter_miss.clone());
@@ -337,6 +398,7 @@ pub mod stats {
             registry.register(DB_CACHE_INDEX_MISS, stats.index_miss.clone());
             registry.register(DB_CACHE_DATA_BLOCK_HIT, stats.data_block_hit.clone());
             registry.register(DB_CACHE_DATA_BLOCK_MISS, stats.data_block_miss.clone());
+            registry.register(DB_CACHE_GET_ERROR, stats.get_error.clone());
             stats
         }
     }
@@ -353,6 +415,7 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::stats::{ReadableStat, StatRegistry};
     use crate::test_utils::{build_test_sst, SstData};
+    use crate::SlateDBError;
     use async_trait::async_trait;
     use rstest::{fixture, rstest};
     use std::collections::HashMap;
@@ -443,7 +506,7 @@ mod tests {
             .await;
 
         // when:
-        let cached = cache.get_index(key).await.unwrap();
+        let cached = cache.get_index(key).await.unwrap().unwrap();
 
         // then:
         assert_index_clamped(index.as_ref(), cached.sst_index().unwrap().as_ref());
@@ -541,19 +604,19 @@ mod tests {
 
     #[async_trait]
     impl DbCache for TestCache {
-        async fn get_block(&self, key: CachedKey) -> Option<CachedEntry> {
+        async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
             let guard = self.items.lock().unwrap();
-            guard.get(&key).cloned()
+            Ok(guard.get(&key).cloned())
         }
 
-        async fn get_index(&self, key: CachedKey) -> Option<CachedEntry> {
+        async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
             let guard = self.items.lock().unwrap();
-            guard.get(&key).cloned()
+            Ok(guard.get(&key).cloned())
         }
 
-        async fn get_filter(&self, key: CachedKey) -> Option<CachedEntry> {
+        async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
             let guard = self.items.lock().unwrap();
-            guard.get(&key).cloned()
+            Ok(guard.get(&key).cloned())
         }
 
         async fn insert(&self, key: CachedKey, value: CachedEntry) {

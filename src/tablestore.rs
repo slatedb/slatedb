@@ -313,6 +313,7 @@ impl TableStore {
             if let Some(filter) = cache
                 .get_filter((handle.id, handle.info.filter_offset).into())
                 .await
+                .unwrap_or(None)
                 .and_then(|e| e.bloom_filter())
             {
                 return Ok(Some(filter));
@@ -345,6 +346,7 @@ impl TableStore {
             if let Some(index) = cache
                 .get_index((handle.id, handle.info.index_offset).into())
                 .await
+                .unwrap_or(None)
                 .and_then(|e| e.sst_index())
             {
                 return Ok(index);
@@ -417,6 +419,7 @@ impl TableStore {
                 cache
                     .get_block((handle.id, offset).into())
                     .await
+                    .unwrap_or(None)
                     .and_then(|entry| entry.block())
             }))
             .await;
@@ -719,6 +722,7 @@ mod tests {
                 block_cache
                     .get_block((handle.id, offset).into())
                     .await
+                    .unwrap_or(None)
                     .is_some(),
                 "Block with offset {} should be in cache",
                 offset
@@ -749,6 +753,7 @@ mod tests {
                 block_cache
                     .get_block((handle.id, offset).into())
                     .await
+                    .unwrap_or(None)
                     .is_some(),
                 "Block with offset {} should be in cache after partial hit",
                 offset
@@ -773,6 +778,7 @@ mod tests {
                 block_cache
                     .get_block((handle.id, offset).into())
                     .await
+                    .unwrap_or(None)
                     .is_some(),
                 "Block with offset {} should be in cache after SST emptying",
                 offset
