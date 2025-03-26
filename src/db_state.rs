@@ -3,7 +3,7 @@ use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::manifest::store::DirtyManifest;
-use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
+use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::ReadSnapshot;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use bytes::Bytes;
@@ -211,7 +211,6 @@ impl SortedRun {
 
 pub(crate) struct DbState {
     memtable: WritableKVTable,
-    wal: WritableKVTable,
     state: Arc<COWDbState>,
     last_seq: u64,
     error: WatchableOnceCell<SlateDBError>,
@@ -221,7 +220,6 @@ pub(crate) struct DbState {
 #[derive(Clone)]
 pub(crate) struct COWDbState {
     pub(crate) imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
-    pub(crate) imm_wal: VecDeque<Arc<ImmutableWal>>,
     pub(crate) manifest: DirtyManifest,
 }
 
@@ -295,7 +293,6 @@ impl CoreDbState {
 #[derive(Clone)]
 pub(crate) struct DbStateSnapshot {
     pub(crate) memtable: Arc<KVTable>,
-    pub(crate) wal: Arc<KVTable>,
     pub(crate) state: Arc<COWDbState>,
 }
 
@@ -304,16 +301,8 @@ impl ReadSnapshot for DbStateSnapshot {
         Arc::clone(&self.memtable)
     }
 
-    fn wal(&self) -> Arc<KVTable> {
-        Arc::clone(&self.wal)
-    }
-
     fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>> {
         &self.state.imm_memtable
-    }
-
-    fn imm_wal(&self) -> &VecDeque<Arc<ImmutableWal>> {
-        &self.state.imm_wal
     }
 
     fn core(&self) -> &CoreDbState {
@@ -326,10 +315,8 @@ impl DbState {
         let last_l0_seq = manifest.core.last_l0_seq;
         Self {
             memtable: WritableKVTable::new(),
-            wal: WritableKVTable::new(),
             state: Arc::new(COWDbState {
                 imm_memtable: VecDeque::new(),
-                imm_wal: VecDeque::new(),
                 manifest,
             }),
             error: WatchableOnceCell::new(),
@@ -344,7 +331,6 @@ impl DbState {
     pub fn snapshot(&self) -> DbStateSnapshot {
         DbStateSnapshot {
             memtable: self.memtable.table().clone(),
-            wal: self.wal.table().clone(),
             state: self.state.clone(),
         }
     }
@@ -361,10 +347,6 @@ impl DbState {
     // mutations
     pub fn record_fatal_error(&mut self, error: SlateDBError) {
         self.error.write(error);
-    }
-
-    pub fn wal(&mut self) -> &mut WritableKVTable {
-        &mut self.wal
     }
 
     pub fn memtable(&mut self) -> &mut WritableKVTable {
@@ -402,27 +384,6 @@ impl DbState {
         assert!(self.memtable.is_empty());
         let _ = std::mem::replace(&mut self.memtable, memtable);
         Ok(())
-    }
-
-    pub fn freeze_wal(&mut self) -> Result<(), SlateDBError> {
-        if let Some(err) = self.error.reader().read() {
-            return Err(err.clone());
-        }
-        if self.wal.table().is_empty() {
-            return Ok(());
-        }
-        let old_wal = std::mem::replace(&mut self.wal, WritableKVTable::new());
-        let mut state = self.state_copy();
-        let imm_wal = Arc::new(ImmutableWal::new(old_wal));
-        state.imm_wal.push_front(imm_wal);
-        self.update_state(state);
-        Ok(())
-    }
-
-    pub fn pop_imm_wal(&mut self) {
-        let mut state = self.state_copy();
-        state.imm_wal.pop_back();
-        self.update_state(state);
     }
 
     pub fn move_imm_memtable_to_l0(
