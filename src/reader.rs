@@ -137,6 +137,7 @@ impl Reader {
         snapshot: &(dyn ReadSnapshot + Sync),
     ) -> Result<DbIterator<'a>, SlateDBError> {
         let mut memtables = VecDeque::new();
+        let ttl_now = get_now_for_read(self.mono_clock.clone(), options.read_level).await?;
 
         if matches!(options.read_level, Uncommitted) {
             memtables.push_back(Arc::clone(&snapshot.wal()));
@@ -150,8 +151,10 @@ impl Reader {
             memtables.push_back(memtable.table());
         }
 
-        let mem_iter =
-            VecDequeKeyValueIterator::materialize_range(memtables, range.clone()).await?;
+        let mem_iter = FilterIterator::wrap_ttl_filter_iterator(
+            VecDequeKeyValueIterator::materialize_range(memtables, range.clone()).await?,
+            ttl_now,
+        );
 
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
@@ -164,25 +167,31 @@ impl Reader {
 
         let mut l0_iters = VecDeque::new();
         for sst in &snapshot.core().l0 {
-            let iter = SstIterator::new_owned(
-                range.clone(),
-                sst.clone(),
-                self.table_store.clone(),
-                sst_iter_options,
-            )
-            .await?;
+            let iter = FilterIterator::wrap_ttl_filter_iterator(
+                SstIterator::new_owned(
+                    range.clone(),
+                    sst.clone(),
+                    self.table_store.clone(),
+                    sst_iter_options,
+                )
+                .await?,
+                ttl_now,
+            );
             l0_iters.push_back(iter);
         }
 
         let mut sr_iters = VecDeque::new();
         for sr in &snapshot.core().compacted {
-            let iter = SortedRunIterator::new_owned(
-                range.clone(),
-                sr.clone(),
-                self.table_store.clone(),
-                sst_iter_options,
-            )
-            .await?;
+            let iter = FilterIterator::wrap_ttl_filter_iterator(
+                SortedRunIterator::new_owned(
+                    range.clone(),
+                    sr.clone(),
+                    self.table_store.clone(),
+                    sst_iter_options,
+                )
+                .await?,
+                ttl_now,
+            );
             sr_iters.push_back(iter);
         }
 
