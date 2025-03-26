@@ -14,6 +14,7 @@ use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::Arc;
 use ulid::Ulid;
+use crate::SlateDBError;
 
 #[derive(Serialize, Deserialize)]
 enum SerializedSsTableId {
@@ -41,7 +42,7 @@ impl From<SsTableId> for SerializedSsTableId {
 
 #[derive(Serialize, Deserialize)]
 enum SerializedCachedKey {
-    V1(SerializedSsTableId, u64 /*#[default] String*/),
+    V1(SerializedSsTableId, u64),
 }
 
 impl From<SerializedCachedKey> for CachedKey {
@@ -86,14 +87,14 @@ enum SerializedCachedEntryV1 {
 }
 
 impl SerializedCachedEntryV1 {
-    fn into_cached_entry(self) -> Result<CachedEntry, String> {
+    fn into_cached_entry(self) -> Result<CachedEntry, SlateDBError> {
         let item = match self {
             SerializedCachedEntryV1::Block(encoded) => {
                 let block = Block::decode(encoded);
                 CachedItem::Block(Arc::new(block))
             }
             SerializedCachedEntryV1::SsTableIndex(encoded) => {
-                let index = SsTableIndexOwned::new(encoded).map_err(|e| e.to_string())?;
+                let index = SsTableIndexOwned::new(encoded)?;
                 CachedItem::SsTableIndex(Arc::new(index))
             }
             SerializedCachedEntryV1::BloomFilter(encoded) => {
@@ -111,7 +112,7 @@ enum SerializedCachedEntry {
 }
 
 impl SerializedCachedEntry {
-    fn into_cached_entry(self) -> Result<CachedEntry, String> {
+    fn into_cached_entry(self) -> Result<CachedEntry, SlateDBError> {
         match self {
             SerializedCachedEntry::V1(entry) => entry.into_cached_entry(),
         }
@@ -155,7 +156,8 @@ impl<'de> Deserialize<'de> for CachedEntry {
         let serialized_entry = SerializedCachedEntry::deserialize(deserializer)?;
         serialized_entry
             .into_cached_entry()
-            .map_err(D::Error::custom)
+            // the error returned by deserialize must be lowercase and not end in a .
+            .map_err(|e| D::Error::custom(format!("slatedb error ({})", e).to_lowercase()))
     }
 }
 
