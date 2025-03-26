@@ -328,7 +328,7 @@ impl DbCache for DbCacheWrapper {
             Ok(e) => e,
             Err(err) => {
                 self.record_get_err("filter", &err);
-                return Err(err)
+                return Err(err);
             }
         };
         if entry.is_some() {
