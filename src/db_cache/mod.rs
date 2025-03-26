@@ -405,6 +405,60 @@ pub mod stats {
 }
 
 #[cfg(test)]
+pub(crate) mod test_utils {
+    use crate::db_cache::{CachedEntry, CachedKey, DbCache};
+    use crate::SlateDBError;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    pub(crate) struct TestCache {
+        items: Mutex<HashMap<CachedKey, CachedEntry>>,
+    }
+
+    impl TestCache {
+        pub(crate) fn new() -> Self {
+            Self {
+                items: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DbCache for TestCache {
+        async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+            let guard = self.items.lock().unwrap();
+            Ok(guard.get(&key).cloned())
+        }
+
+        async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+            let guard = self.items.lock().unwrap();
+            Ok(guard.get(&key).cloned())
+        }
+
+        async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+            let guard = self.items.lock().unwrap();
+            Ok(guard.get(&key).cloned())
+        }
+
+        async fn insert(&self, key: CachedKey, value: CachedEntry) {
+            let mut guard = self.items.lock().unwrap();
+            guard.insert(key, value);
+        }
+
+        async fn remove(&self, key: CachedKey) {
+            let mut guard = self.items.lock().unwrap();
+            guard.remove(&key);
+        }
+
+        fn entry_count(&self) -> u64 {
+            let guard = self.items.lock().unwrap();
+            guard.iter().count() as u64
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
 
     use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper};
@@ -412,33 +466,26 @@ mod tests {
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
 
-    use crate::sst::SsTableFormat;
+    use crate::db_cache::test_utils::TestCache;
+    use crate::sst::{EncodedSsTable, SsTableFormat};
     use crate::stats::{ReadableStat, StatRegistry};
-    use crate::test_utils::{build_test_sst, SstData};
-    use crate::SlateDBError;
-    use async_trait::async_trait;
+    use crate::test_utils::build_test_sst;
     use rstest::{fixture, rstest};
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use ulid::Ulid;
 
     const SST_ID: SsTableId = SsTableId::Compacted(Ulid::from_parts(0u64, 0u128));
 
     #[rstest]
     #[tokio::test]
-    async fn test_should_count_filter_hits(
-        cache: DbCacheWrapper,
-        sst_format: SsTableFormat,
-        sst: SstData,
-    ) {
+    async fn test_should_count_filter_hits(cache: DbCacheWrapper, sst: EncodedSsTable) {
         // given:
-        let filter = sst_format
-            .read_filter_raw(&sst.info, &sst.data)
-            .unwrap()
-            .unwrap();
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
-            .insert(key.clone(), CachedEntry::with_bloom_filter(filter))
+            .insert(
+                key.clone(),
+                CachedEntry::with_bloom_filter(sst.filter.unwrap()),
+            )
             .await;
 
         for i in 1..4 {
@@ -469,16 +516,14 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_should_count_index_hits(
-        cache: DbCacheWrapper,
-        sst_format: SsTableFormat,
-        sst: SstData,
-    ) {
+    async fn test_should_count_index_hits(cache: DbCacheWrapper, sst: EncodedSsTable) {
         // given:
-        let index = sst_format.read_index_raw(&sst.info, &sst.data).unwrap();
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
-            .insert(key.clone(), CachedEntry::with_sst_index(Arc::new(index)))
+            .insert(
+                key.clone(),
+                CachedEntry::with_sst_index(Arc::new(sst.index)),
+            )
             .await;
 
         for i in 1..4 {
@@ -496,10 +541,11 @@ mod tests {
     async fn test_should_clamp_entries_to_cache(
         cache: DbCacheWrapper,
         sst_format: SsTableFormat,
-        sst: SstData,
+        sst: EncodedSsTable,
     ) {
         // given:
-        let index = Arc::new(sst_format.read_index_raw(&sst.info, &sst.data).unwrap());
+        let bytes = sst.remaining_as_bytes();
+        let index = Arc::new(sst_format.read_index_raw(&sst.info, &bytes).unwrap());
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
             .insert(key.clone(), CachedEntry::with_sst_index(index.clone()))
@@ -533,12 +579,12 @@ mod tests {
     async fn test_should_count_data_block_hits(
         cache: DbCacheWrapper,
         sst_format: SsTableFormat,
-        sst: SstData,
+        sst: EncodedSsTable,
     ) {
         // given:
-        let index = sst_format.read_index_raw(&sst.info, &sst.data).unwrap();
+        let data = sst.remaining_as_bytes();
         let block = sst_format
-            .read_block_raw(&sst.info, &index, 0, &sst.data)
+            .read_block_raw(&sst.info, &sst.index, 0, &data)
             .unwrap();
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
@@ -586,52 +632,7 @@ mod tests {
     }
 
     #[fixture]
-    fn sst(sst_format: SsTableFormat) -> SstData {
+    fn sst(sst_format: SsTableFormat) -> EncodedSsTable {
         build_test_sst(&sst_format, 1)
-    }
-
-    struct TestCache {
-        items: Mutex<HashMap<CachedKey, CachedEntry>>,
-    }
-
-    impl TestCache {
-        fn new() -> Self {
-            Self {
-                items: Mutex::new(HashMap::new()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl DbCache for TestCache {
-        async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
-            let guard = self.items.lock().unwrap();
-            Ok(guard.get(&key).cloned())
-        }
-
-        async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
-            let guard = self.items.lock().unwrap();
-            Ok(guard.get(&key).cloned())
-        }
-
-        async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
-            let guard = self.items.lock().unwrap();
-            Ok(guard.get(&key).cloned())
-        }
-
-        async fn insert(&self, key: CachedKey, value: CachedEntry) {
-            let mut guard = self.items.lock().unwrap();
-            guard.insert(key, value);
-        }
-
-        async fn remove(&self, key: CachedKey) {
-            let mut guard = self.items.lock().unwrap();
-            guard.remove(&key);
-        }
-
-        fn entry_count(&self) -> u64 {
-            let guard = self.items.lock().unwrap();
-            guard.iter().count() as u64
-        }
     }
 }
