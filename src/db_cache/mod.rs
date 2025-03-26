@@ -25,6 +25,7 @@ use crate::{
 pub mod foyer;
 #[cfg(feature = "moka")]
 pub mod moka;
+mod serde;
 
 /// The default max capacity for the cache. (64MB)
 pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;

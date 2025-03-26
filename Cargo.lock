@@ -2989,6 +2989,7 @@ dependencies = [
  "async-channel",
  "async-trait",
  "atomic",
+ "bincode",
  "bitflags 2.9.0",
  "bytemuck",
  "bytes",
