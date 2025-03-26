@@ -265,7 +265,7 @@ impl DbCacheWrapper {
 const ERROR_LOG_INTERVAL: Duration = Duration::from_secs(1);
 
 impl DbCacheWrapper {
-    fn record_get_err(&self, block_type: &str, err: SlateDBError) {
+    fn record_get_err(&self, block_type: &str, err: &SlateDBError) {
         let log_at_err = {
             let mut guard = self.last_err_log_instant.lock();
             match *guard {
@@ -295,8 +295,8 @@ impl DbCache for DbCacheWrapper {
         let entry = match self.cache.get_block(key).await {
             Ok(e) => e,
             Err(err) => {
-                self.record_get_err("block", err);
-                None
+                self.record_get_err("block", &err);
+                return Err(err);
             }
         };
         if entry.is_some() {
@@ -311,8 +311,8 @@ impl DbCache for DbCacheWrapper {
         let entry = match self.cache.get_index(key).await {
             Ok(e) => e,
             Err(err) => {
-                self.record_get_err("index", err);
-                None
+                self.record_get_err("index", &err);
+                return Err(err);
             }
         };
         if entry.is_some() {
@@ -327,8 +327,8 @@ impl DbCache for DbCacheWrapper {
         let entry = match self.cache.get_filter(key).await {
             Ok(e) => e,
             Err(err) => {
-                self.record_get_err("filter", err);
-                None
+                self.record_get_err("filter", &err);
+                return Err(err)
             }
         };
         if entry.is_some() {
