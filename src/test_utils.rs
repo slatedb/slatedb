@@ -160,8 +160,7 @@ use crate::bytes_generator::OrderedBytesGenerator;
 use crate::bytes_range::BytesRange;
 use crate::db::Db;
 use crate::db_iter::DbIterator;
-use crate::db_state::SsTableInfo;
-use crate::sst::SsTableFormat;
+use crate::sst::{EncodedSsTable, SsTableFormat};
 pub(crate) use assert_debug_snapshot;
 
 pub(crate) fn decode_codec_entries(
@@ -272,35 +271,17 @@ pub(crate) async fn seed_database(
     Ok(())
 }
 
-pub(crate) struct SstData {
-    pub(crate) info: SsTableInfo,
-    pub(crate) data: Bytes,
-}
-
-pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> SstData {
+pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> EncodedSsTable {
     let mut rng = rand::thread_rng();
     let mut keygen = OrderedBytesGenerator::new_with_suffix(&[], &[0u8; 16]);
     let mut encoded_sst_builder = format.table_builder();
-    let mut blocks = 0;
-    let mut data = BytesMut::with_capacity(num_blocks * (format.block_size + 1));
-    while blocks < num_blocks {
+    while encoded_sst_builder.num_blocks() < num_blocks {
         let k = keygen.next();
         let mut val = BytesMut::with_capacity(32);
         val.put_bytes(0u8, 32);
         rng.fill_bytes(&mut val);
         let row = RowEntry::new(k, ValueDeletable::Value(val.freeze()), 0u64, None, None);
         encoded_sst_builder.add(row).unwrap();
-        if let Some(block) = encoded_sst_builder.next_block() {
-            data.put(block);
-            blocks += 1;
-        }
     }
-    let mut encoded_table = encoded_sst_builder.build().unwrap();
-    while let Some(block) = encoded_table.unconsumed_blocks.pop_front() {
-        data.put(block);
-    }
-    SstData {
-        info: encoded_table.info,
-        data: data.freeze(),
-    }
+    encoded_sst_builder.build().unwrap()
 }

@@ -34,7 +34,7 @@ use crate::utils::clamp_allocated_size_bytes;
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
 
 /// A wrapper around a `Bytes` buffer containing a FlatBuffer-encoded `SsTableIndex`.
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone)]
 pub(crate) struct SsTableIndexOwned {
     data: Bytes,
 }
@@ -572,9 +572,10 @@ mod tests {
     fn test_should_clamp_index_alloc() {
         let format = SsTableFormat::default();
         let sst = build_test_sst(&format, 3);
+        let data = sst.remaining_as_bytes();
         let start_off = sst.info.index_offset as usize;
         let end_off = sst.info.index_offset as usize + sst.info.index_len as usize;
-        let index_bytes = sst.data.slice(start_off..end_off);
+        let index_bytes = data.slice(start_off..end_off);
         let index = SsTableIndexOwned::new(index_bytes).unwrap();
 
         let clamped = index.clamp_allocated_size();
