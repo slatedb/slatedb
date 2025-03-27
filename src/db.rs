@@ -94,7 +94,7 @@ impl DbInner {
             table_store: Arc::clone(&table_store),
             db_stats: db_stats.clone(),
             mono_clock: Arc::clone(&mono_clock),
-            wal_enabled: DbInner::wal_enabled_in_options(&options)
+            wal_enabled: DbInner::wal_enabled_in_options(&options),
         };
 
         let db_inner = Self {
@@ -1159,7 +1159,7 @@ mod tests {
         OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
     };
     use crate::cached_object_store::FsCacheStorage;
-    use crate::config::DurabilityLevel::{Remote, Memory};
+    use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions, Ttl,
     };
@@ -1402,20 +1402,48 @@ mod tests {
             options.clone(),
             object_store,
         )
+        .await
+        .unwrap();
+        let put_options = PutOptions::default();
+        let write_options = WriteOptions {
+            await_durable: false,
+        };
+        let get_memory_options = ReadOptions {
+            durability_filter: Memory,
+        };
+        let get_remote_options = ReadOptions {
+            durability_filter: Remote,
+        };
+
+        db.put_with_options(b"foo", b"bar", &put_options, &write_options)
             .await
             .unwrap();
-        let put_options = PutOptions::default();
-        let write_options = WriteOptions{await_durable: false};
-        let get_memory_options = ReadOptions{durability_filter: Memory};
-        let get_remote_options = ReadOptions{durability_filter: Remote};
-
-        db.put_with_options(b"foo", b"bar", &put_options, &write_options).await.unwrap();
         let val_bytes = Bytes::copy_from_slice(b"bar");
-        assert_eq!(None, db.get_with_options(b"foo", &get_remote_options).await.unwrap());
-        assert_eq!(Some(val_bytes.clone()), db.get_with_options(b"foo", &get_memory_options).await.unwrap());
+        assert_eq!(
+            None,
+            db.get_with_options(b"foo", &get_remote_options)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            Some(val_bytes.clone()),
+            db.get_with_options(b"foo", &get_memory_options)
+                .await
+                .unwrap()
+        );
         db.flush().await.unwrap();
-        assert_eq!(Some(val_bytes.clone()), db.get_with_options(b"foo", &get_remote_options).await.unwrap());
-        assert_eq!(Some(val_bytes.clone()), db.get_with_options(b"foo", &get_memory_options).await.unwrap());
+        assert_eq!(
+            Some(val_bytes.clone()),
+            db.get_with_options(b"foo", &get_remote_options)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            Some(val_bytes.clone()),
+            db.get_with_options(b"foo", &get_memory_options)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1456,7 +1484,14 @@ mod tests {
         }
         assert_eq!(
             Some(Bytes::copy_from_slice(last_val.as_bytes())),
-            db.get_with_options(b"key", &ReadOptions{durability_filter: Memory}).await.unwrap()
+            db.get_with_options(
+                b"key",
+                &ReadOptions {
+                    durability_filter: Memory
+                }
+            )
+            .await
+            .unwrap()
         );
         db.flush().await.unwrap();
 

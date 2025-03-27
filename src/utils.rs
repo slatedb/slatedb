@@ -1,4 +1,4 @@
-use crate::config::DurabilityLevel::{Remote, Memory};
+use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::config::{Clock, DurabilityLevel};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;

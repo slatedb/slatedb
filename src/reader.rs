@@ -46,7 +46,7 @@ pub(crate) struct Reader {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) db_stats: DbStats,
     pub(crate) mono_clock: Arc<MonotonicClock>,
-    pub(crate) wal_enabled: bool
+    pub(crate) wal_enabled: bool,
 }
 
 impl Reader {
