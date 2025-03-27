@@ -33,6 +33,7 @@ pub use db_iter::DbIterator;
 pub use db_reader::DbReader;
 pub use error::{DbOptionsError, SlateDBError};
 pub use garbage_collector::stats as garbage_collector_stats;
+pub use iter::IterationOrder;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use types::KeyValue;
 

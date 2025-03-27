@@ -168,6 +168,8 @@ use crate::config::GcExecutionMode::Periodic;
 use crate::error::{DbOptionsError, SlateDBError};
 
 use crate::db_cache::DbCache;
+use crate::iter::IterationOrder;
+use crate::iter::IterationOrder::Ascending;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 /// Whether reads see only writes that have been committed durably to the DB.  A
@@ -204,6 +206,7 @@ pub struct ScanOptions {
     pub read_ahead_bytes: usize,
     /// Whether or not fetched blocks should be cached
     pub cache_blocks: bool,
+    pub order: IterationOrder,
 }
 
 impl Default for ScanOptions {
@@ -213,6 +216,7 @@ impl Default for ScanOptions {
             read_level: ReadLevel::Committed,
             read_ahead_bytes: 1,
             cache_blocks: false,
+            order: Ascending,
         }
     }
 }
