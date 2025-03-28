@@ -171,6 +171,7 @@ impl DbInner {
         Self::wal_enabled_in_options(&self.options)
     }
 
+    #[allow(unused_variables)]
     pub(crate) fn wal_enabled_in_options(options: &DbOptions) -> bool {
         #[cfg(feature = "wal_disable")]
         return options.wal_enabled;
