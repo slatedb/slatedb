@@ -170,34 +170,37 @@ use crate::error::{DbOptionsError, SlateDBError};
 use crate::db_cache::DbCache;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
-/// Whether reads see only writes that have been committed durably to the DB.  A
-/// write is considered durably committed if all future calls to read are guaranteed
-/// to serve the data written by the write, until some later durably committed write
-/// updates the same key.
+/// Describes the durability of data based on the medium (e.g. in-memory, object storags)
+/// that the data is currently stored in. Currently this is used to define a
+/// durability filter for data served by a read.
 #[non_exhaustive]
 #[derive(Clone, Default, Debug, Copy)]
-pub enum ReadLevel {
-    /// Client reads will only see data that's been committed durably to the DB.
+pub enum DurabilityLevel {
+    /// Includes only data currently stored durably in object storage.
     #[default]
-    Committed,
+    Remote,
 
-    /// Clients will see all writes, including those not yet durably committed to the
-    /// DB.
-    Uncommitted,
+    /// Includes data with level Remote and data currently only stored in-memory awaiting flush
+    /// to object storage.
+    Memory,
 }
 
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
 #[derive(Clone, Default)]
 pub struct ReadOptions {
-    /// The read commit level for read operations.
-    pub read_level: ReadLevel,
+    /// Specifies the minimum durability level for data returned by this read. For example,
+    /// if set to Remote then slatedb returns the latest version of a row that has been durably
+    /// stored in object storage.
+    pub durability_filter: DurabilityLevel,
 }
 
 #[derive(Clone)]
 pub struct ScanOptions {
-    /// The read commit level for read operations
-    pub read_level: ReadLevel,
+    /// Specifies the minimum durability level for data returned by this scan. For example,
+    /// if set to Remote then slatedb returns the latest version of a row that has been durably
+    /// stored in object storage.
+    pub durability_filter: DurabilityLevel,
     /// The number of bytes to read ahead. The value is rounded up to the nearest
     /// block size when fetching from object storage. The default is 1, which
     /// rounds up to one block.
@@ -207,10 +210,10 @@ pub struct ScanOptions {
 }
 
 impl Default for ScanOptions {
-    /// Create a new ScanOptions with `read_level` set to [`ReadLevel::Committed`].
+    /// Create a new ScanOptions with `read_level` set to [`DurabilityLevel::Remote`].
     fn default() -> Self {
         Self {
-            read_level: ReadLevel::Committed,
+            durability_filter: DurabilityLevel::Remote,
             read_ahead_bytes: 1,
             cache_blocks: false,
         }
