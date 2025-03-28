@@ -176,11 +176,12 @@ use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 #[non_exhaustive]
 #[derive(Clone, Default, Debug, Copy)]
 pub enum DurabilityLevel {
-    /// Describes data currently stored durably in object storage.
+    /// Includes only data currently stored durably in object storage.
     #[default]
     Remote,
 
-    /// Describes data currently only stored in-memory, awaiting flush to object storage.
+    /// Includes data with level Remote and data currently only stored in-memory awaiting flush
+    /// to object storage.
     Memory,
 }
 
