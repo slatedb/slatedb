@@ -36,12 +36,13 @@ impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iter::IterationOrder::Ascending;
     use crate::test_utils::assert_iterator;
     use crate::types::RowEntry;
 
     #[tokio::test]
     async fn test_filter_iterator_should_return_only_matching_entries() {
-        let iter = crate::test_utils::TestIterator::new()
+        let iter = crate::test_utils::TestIterator::new(Ascending)
             .with_entry(b"aaaa", b"1111", 0)
             .with_entry(b"bbbb", b"", 0)
             .with_entry(b"cccc", b"3333", 0)
@@ -68,7 +69,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_filter_iterator_should_return_none_with_no_matches() {
-        let iter = crate::test_utils::TestIterator::new()
+        let iter = crate::test_utils::TestIterator::new(Ascending)
             .with_entry(b"", b"1", 0)
             .with_entry(b"b", b"2", 0)
             .with_entry(b"c", b"3", 0);

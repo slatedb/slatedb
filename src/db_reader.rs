@@ -6,6 +6,7 @@ use crate::db_reader::ManifestPollerMsg::Shutdown;
 use crate::db_state::CoreDbState;
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
+use crate::iter::IterationOrder::Ascending;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable};
@@ -426,6 +427,7 @@ impl DbReaderInner {
             blocks_to_fetch: 256,
             cache_blocks: true,
             eager_spawn: true,
+            order: Ascending,
         };
 
         let replay_options = WalReplayOptions {
@@ -806,24 +808,19 @@ impl DbReader {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{CheckpointOptions, CheckpointScope, Clock, DbOptions};
+    use crate::config::{CheckpointOptions, CheckpointScope, DbOptions};
     use crate::db_reader::{DbReader, DbReaderOptions};
     use crate::db_state::CoreDbState;
-    use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::iter::IterationOrder::Ascending;
+    use crate::manifest::store::StoredManifest;
     use crate::manifest::Manifest;
-    use crate::paths::PathResolver;
     use crate::proptest_util::rng::new_test_rng;
     use crate::proptest_util::sample;
-    use crate::sst::SsTableFormat;
     use crate::store_provider::StoreProvider;
-    use crate::tablestore::TableStore;
-    use crate::test_utils::TokioClock;
-    use crate::{test_utils, Db, SlateDBError};
+    use crate::test_utils::TestStoreProvider;
+    use crate::{test_utils, SlateDBError};
     use bytes::Bytes;
-    use fail_parallel::FailPointRegistry;
-    use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::ObjectStore;
     use std::collections::BTreeMap;
     use std::ops::RangeFull;
     use std::sync::Arc;
@@ -832,9 +829,8 @@ mod tests {
 
     #[tokio::test]
     async fn should_get_latest_value_from_checkpoint() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+        let test_provider = TestStoreProvider::new(path.clone());
 
         let db = test_provider.new_db(DbOptions::default()).await.unwrap();
         let key = b"test_key";
@@ -869,9 +865,8 @@ mod tests {
 
     #[tokio::test]
     async fn should_get_from_checkpoint() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+        let test_provider = TestStoreProvider::new(path.clone());
 
         let db = test_provider.new_db(DbOptions::default()).await.unwrap();
         let key = b"test_key";
@@ -890,7 +885,7 @@ mod tests {
 
         let reader = DbReader::open(
             path.clone(),
-            Arc::clone(&object_store),
+            Arc::clone(&test_provider.object_store),
             Some(checkpoint_result.id),
             DbReaderOptions::default(),
         )
@@ -905,9 +900,8 @@ mod tests {
 
     #[tokio::test]
     async fn should_fail_if_db_is_uninitialized() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let test_provider = TestStoreProvider::new(path);
         let manifest_store = test_provider.manifest_store();
 
         let parent_manifest = Manifest::initial(CoreDbState::new());
@@ -931,9 +925,8 @@ mod tests {
 
     #[tokio::test]
     async fn should_scan_from_checkpoint() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+        let test_provider = TestStoreProvider::new(path.clone());
 
         let db = test_provider.new_db(DbOptions::default()).await.unwrap();
         let checkpoint_key = b"checkpoint_key";
@@ -963,14 +956,13 @@ mod tests {
             Bytes::copy_from_slice(value),
         );
 
-        test_utils::assert_ranged_db_scan(&table, .., &mut db_iter).await;
+        test_utils::assert_ranged_db_scan(&table, .., &mut db_iter, Ascending).await;
     }
 
     #[tokio::test(start_paused = true)]
     async fn should_reestablish_reader_checkpoint() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+        let test_provider = TestStoreProvider::new(path.clone());
 
         let db_options = DbOptions {
             l0_sst_size_bytes: 256,
@@ -998,7 +990,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(20)).await;
         let mut db_iter = reader.scan::<Vec<u8>, _>(..).await.unwrap();
-        test_utils::assert_ranged_db_scan(&table, .., &mut db_iter).await;
+        test_utils::assert_ranged_db_scan(&table, .., &mut db_iter, Ascending).await;
 
         let manifest = manifest_store.read_latest_manifest().await.unwrap().1;
         assert!(!manifest.core.checkpoints.is_empty());
@@ -1007,9 +999,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn should_refresh_reader_checkpoint() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+        let test_provider = TestStoreProvider::new(path.clone());
 
         let _db = test_provider.new_db(DbOptions::default()).await;
         let reader_options = DbReaderOptions {
@@ -1047,9 +1038,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn should_replay_new_wals() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+        let test_provider = TestStoreProvider::new(path.clone());
         let db = test_provider.new_db(DbOptions::default()).await.unwrap();
 
         let reader_options = DbReaderOptions {
@@ -1076,9 +1066,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn should_fail_new_reads_if_manifest_poller_crashes() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+        let test_provider = TestStoreProvider::new(path.clone());
         let _db = test_provider.new_db(DbOptions::default()).await.unwrap();
 
         let reader_options = DbReaderOptions {
@@ -1104,56 +1093,13 @@ mod tests {
         assert!(matches!(err, SlateDBError::IoError(_)));
     }
 
-    struct TestProvider {
-        object_store: Arc<dyn ObjectStore>,
-        path: Path,
-        fp_registry: Arc<FailPointRegistry>,
-        clock: Arc<dyn Clock + Send + Sync>,
-    }
-
-    impl TestProvider {
-        fn new(path: Path, object_store: Arc<dyn ObjectStore>) -> Self {
-            let clock = Arc::new(TokioClock::new()) as Arc<dyn Clock + Send + Sync>;
-            TestProvider {
-                object_store,
-                path,
-                fp_registry: Arc::new(FailPointRegistry::new()),
-                clock,
-            }
-        }
-    }
-
-    impl TestProvider {
-        async fn new_db(&self, options: DbOptions) -> Result<Db, SlateDBError> {
-            Db::open_with_opts(self.path.clone(), options, Arc::clone(&self.object_store)).await
-        }
-
+    impl TestStoreProvider {
         async fn new_db_reader(
             &self,
             options: DbReaderOptions,
             checkpoint: Option<Uuid>,
         ) -> Result<DbReader, SlateDBError> {
             DbReader::open_internal(self, checkpoint, options, Arc::clone(&self.clock)).await
-        }
-    }
-
-    impl StoreProvider for TestProvider {
-        fn table_store(&self) -> Arc<TableStore> {
-            Arc::new(TableStore::new_with_fp_registry(
-                Arc::clone(&self.object_store),
-                SsTableFormat::default(),
-                PathResolver::new(self.path.clone()),
-                Arc::clone(&self.fp_registry),
-                None,
-            ))
-        }
-
-        fn manifest_store(&self) -> Arc<ManifestStore> {
-            Arc::new(ManifestStore::new_with_clock(
-                &self.path,
-                Arc::clone(&self.object_store),
-                Arc::clone(&self.clock),
-            ))
         }
     }
 }

@@ -1,20 +1,19 @@
+use crate::bytes_range::BytesRange;
+use crate::db_state::{SsTableHandle, SsTableId};
+use crate::error::SlateDBError;
+use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
+use crate::iter::{IterationOrder, SeekToKey};
+use crate::{
+    block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, partitioned_keyspace,
+    tablestore::TableStore, types::RowEntry,
+};
 use bytes::Bytes;
-use std::cmp::min;
 use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
-
-use crate::bytes_range::BytesRange;
-use crate::db_state::{SsTableHandle, SsTableId};
-use crate::error::SlateDBError;
-use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
-use crate::iter::SeekToKey;
-use crate::{
-    block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, partitioned_keyspace,
-    tablestore::TableStore, types::RowEntry,
-};
+use IterationOrder::{Ascending, Descending};
 
 enum FetchTask {
     InFlight(JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
@@ -27,6 +26,7 @@ pub(crate) struct SstIteratorOptions {
     pub(crate) blocks_to_fetch: usize,
     pub(crate) cache_blocks: bool,
     pub(crate) eager_spawn: bool,
+    pub(crate) order: IterationOrder,
 }
 
 impl Default for SstIteratorOptions {
@@ -36,6 +36,7 @@ impl Default for SstIteratorOptions {
             blocks_to_fetch: 1,
             cache_blocks: true,
             eager_spawn: false,
+            order: Ascending,
         }
     }
 }
@@ -89,6 +90,14 @@ impl SstView<'_> {
             Unbounded => false,
         }
     }
+
+    fn key_precedes(&self, key: &[u8]) -> bool {
+        match self.start_key() {
+            Included(end) => key < end,
+            Excluded(end) => key <= end,
+            Unbounded => false,
+        }
+    }
 }
 
 struct IteratorState {
@@ -123,8 +132,7 @@ pub(crate) struct SstIterator<'a> {
     view: SstView<'a>,
     index: Arc<SsTableIndexOwned>,
     state: IteratorState,
-    next_block_idx_to_fetch: usize,
-    block_idx_range: Range<usize>,
+    block_idx_iter: BatchRangeIter,
     fetch_tasks: VecDeque<FetchTask>,
     table_store: Arc<TableStore>,
     options: SstIteratorOptions,
@@ -140,13 +148,17 @@ impl<'a> SstIterator<'a> {
         assert!(options.blocks_to_fetch > 0);
         let index = table_store.read_index(view.table_as_ref()).await?;
         let block_idx_range = SstIterator::blocks_covering_view(&index.borrow(), &view);
+        let block_idx_range_iter = BatchRangeIter::new(
+            block_idx_range.clone(),
+            options.order,
+            options.blocks_to_fetch,
+        );
 
         let mut iter = Self {
             view,
             index,
             state: IteratorState::new(),
-            next_block_idx_to_fetch: block_idx_range.start,
-            block_idx_range,
+            block_idx_iter: block_idx_range_iter,
             fetch_tasks: VecDeque::new(),
             table_store,
             options,
@@ -160,6 +172,10 @@ impl<'a> SstIterator<'a> {
 
     pub(crate) fn table_id(&self) -> SsTableId {
         self.view.table_as_ref().id
+    }
+
+    pub(crate) fn table_as_ref(&self) -> &SsTableHandle {
+        self.view.table_as_ref()
     }
 
     pub(crate) async fn new_owned<T: RangeBounds<Bytes>>(
@@ -234,30 +250,20 @@ impl<'a> SstIterator<'a> {
 
     fn spawn_fetches(&mut self) {
         while self.fetch_tasks.len() < self.options.max_fetch_tasks
-            && self.block_idx_range.contains(&self.next_block_idx_to_fetch)
+            && self.block_idx_iter.has_remaining()
         {
-            let blocks_to_fetch = min(
-                self.options.blocks_to_fetch,
-                self.block_idx_range.end - self.next_block_idx_to_fetch,
-            );
             let table = self.view.table_as_ref().clone();
             let table_store = self.table_store.clone();
-            let blocks_start = self.next_block_idx_to_fetch;
-            let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
             let index = self.index.clone();
             let cache_blocks = self.options.cache_blocks;
+            let block_range = self.block_idx_iter.next();
+
             self.fetch_tasks
                 .push_back(FetchTask::InFlight(tokio::spawn(async move {
                     table_store
-                        .read_blocks_using_index(
-                            &table,
-                            index,
-                            blocks_start..blocks_end,
-                            cache_blocks,
-                        )
+                        .read_blocks_using_index(&table, index, block_range, cache_blocks)
                         .await
                 })));
-            self.next_block_idx_to_fetch = blocks_end;
         }
     }
 
@@ -271,8 +277,13 @@ impl<'a> SstIterator<'a> {
                         *fetch_task = FetchTask::Finished(blocks);
                     }
                     FetchTask::Finished(blocks) => {
-                        if let Some(block) = blocks.pop_front() {
-                            return Ok(Some(BlockIterator::new_ascending(block)));
+                        let next_block = match self.options.order {
+                            Ascending => blocks.pop_front(),
+                            Descending => blocks.pop_back(),
+                        };
+
+                        if let Some(block) = next_block {
+                            return Ok(Some(BlockIterator::new(block, self.options.order)));
                         } else {
                             self.fetch_tasks.pop_front();
                         }
@@ -280,7 +291,7 @@ impl<'a> SstIterator<'a> {
                 }
             } else {
                 assert!(self.fetch_tasks.is_empty());
-                assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.end);
+                assert!(!self.block_idx_iter.has_remaining());
                 return Ok(None);
             }
         }
@@ -289,10 +300,16 @@ impl<'a> SstIterator<'a> {
     async fn advance_block(&mut self) -> Result<(), SlateDBError> {
         if !self.state.is_finished() {
             if let Some(mut iter) = self.next_iter().await? {
-                match self.view.start_key() {
-                    Included(start_key) | Excluded(start_key) => iter.seek(start_key).await?,
+                let first_key = match self.order() {
+                    Ascending => self.view.start_key(),
+                    Descending => self.view.end_key(),
+                };
+
+                match first_key {
+                    Included(key) | Excluded(key) => iter.seek(key).await?,
                     Unbounded => (),
                 }
+
                 self.state.advance(iter);
             } else {
                 self.state.stop();
@@ -302,8 +319,7 @@ impl<'a> SstIterator<'a> {
     }
 
     fn stop(&mut self) {
-        let num_blocks = self.index.borrow().block_meta().len();
-        self.next_block_idx_to_fetch = num_blocks;
+        self.block_idx_iter.stop();
         self.state.stop();
     }
 }
@@ -321,14 +337,22 @@ impl KeyValueIterator for SstIterator<'_> {
                 Some(kv) => {
                     if self.view.contains(&kv.key) {
                         return Ok(Some(kv));
-                    } else if self.view.key_exceeds(&kv.key) {
-                        self.stop()
+                    } else {
+                        match self.options.order {
+                            Ascending if self.view.key_exceeds(&kv.key) => self.stop(),
+                            Descending if self.view.key_precedes(&kv.key) => self.stop(),
+                            _ => (),
+                        }
                     }
                 }
                 None => self.advance_block().await?,
             }
         }
         Ok(None)
+    }
+
+    fn order(&self) -> IterationOrder {
+        self.options.order
     }
 }
 
@@ -354,16 +378,66 @@ impl SeekToKey for SstIterator<'_> {
     }
 }
 
+struct BatchRangeIter {
+    range: Range<usize>,
+    order: IterationOrder,
+    next_id: usize,
+    batch_size: usize,
+}
+
+impl BatchRangeIter {
+    fn new(range: Range<usize>, order: IterationOrder, batch_size: usize) -> Self {
+        let next_id = range.start;
+        Self {
+            range,
+            order,
+            next_id,
+            batch_size,
+        }
+    }
+
+    fn has_remaining(&self) -> bool {
+        self.next_id < self.range.end
+    }
+
+    fn desc_id(&self, id: usize) -> usize {
+        self.range.end - id + self.range.start
+    }
+
+    fn next(&mut self) -> Range<usize> {
+        let start_id = self.next_id;
+        let batch_size = self.batch_size.min(self.range.end - start_id);
+        let end_id = start_id + batch_size;
+        self.next_id += batch_size;
+        match self.order {
+            Ascending => start_id..end_id,
+            Descending => self.desc_id(end_id)..self.desc_id(start_id),
+        }
+    }
+
+    fn stop(&mut self) {
+        self.next_id = self.range.end;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
+    use crate::proptest_util::{arbitrary, sample};
     use crate::sst::SsTableFormat;
+    use crate::store_provider::StoreProvider;
     use crate::test_utils::{assert_kv, gen_attrs};
+    use crate::{proptest_util, test_utils};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
+    use proptest::proptest;
+    use proptest::test_runner::{TestRng, TestRunner};
+    use rand::Rng;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
+    use tokio::runtime::Runtime;
 
     #[tokio::test]
     async fn test_one_block_sst_iter() {
@@ -418,6 +492,190 @@ mod tests {
         assert!(kv.is_none());
     }
 
+    #[test]
+    fn test_seek_through_sst() {
+        let block_size = 256;
+        let max_bytes_len = 10;
+        let sst_size: usize = 5000;
+
+        let sst_format = SsTableFormat {
+            block_size,
+            ..SsTableFormat::default()
+        };
+        let mut test_provider = test_utils::TestStoreProvider::new("/");
+        test_provider.sst_format = sst_format;
+        let table_store = test_utils::TestStoreProvider::new("/").table_store();
+
+        let runtime = Runtime::new().unwrap();
+        let mut runner = new_proptest_runner(None);
+
+        let (table, sst) = runtime.block_on(build_sst(
+            sst_size,
+            max_bytes_len,
+            Arc::clone(&table_store),
+            runner.rng(),
+        ));
+
+        async fn assert_iteration(
+            table_store: Arc<TableStore>,
+            table: &BTreeMap<Bytes, Bytes>,
+            sst: &SsTableHandle,
+            range: BytesRange,
+            order: IterationOrder,
+            rng: &mut TestRng,
+        ) {
+            let sst_iter_options = SstIteratorOptions {
+                order,
+                ..SstIteratorOptions::default()
+            };
+
+            let mut sst_iter = SstIterator::new_borrowed(
+                range.as_ref(),
+                sst,
+                Arc::clone(&table_store),
+                sst_iter_options,
+            )
+            .await
+            .unwrap();
+
+            let table_iter =
+                table.range((range.start_bound().cloned(), range.end_bound().cloned()));
+            let mut table_iter = match order {
+                Ascending => Box::new(table_iter) as Box<dyn Iterator<Item = (&Bytes, &Bytes)>>,
+                Descending => {
+                    Box::new(table_iter.rev()) as Box<dyn Iterator<Item = (&Bytes, &Bytes)>>
+                }
+            }
+            .peekable();
+
+            loop {
+                let skip = rng.gen::<usize>() % 40;
+                let run = rng.gen::<usize>() % 40;
+
+                let _ = table_iter.nth(skip);
+                let Some((seek_key, _)) = table_iter.peek() else {
+                    break;
+                };
+                sst_iter.seek(seek_key).await.unwrap();
+
+                for (key, value) in table_iter.by_ref().take(run) {
+                    let kv = sst_iter.next().await.unwrap().unwrap();
+                    assert_eq!(*key, kv.key);
+                    assert_eq!(*value, kv.value);
+                }
+            }
+        }
+
+        runner
+            .run(
+                &(
+                    arbitrary::nonempty_range(max_bytes_len),
+                    arbitrary::iteration_order(),
+                    arbitrary::rng(),
+                ),
+                |(range, order, mut rng)| {
+                    runtime.block_on(assert_iteration(
+                        Arc::clone(&table_store),
+                        &table,
+                        &sst,
+                        range,
+                        order,
+                        &mut rng,
+                    ));
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn test_iterate_sst() {
+        let block_size = 256;
+        let max_bytes_len = 10;
+        let sst_size: usize = 5000;
+
+        let sst_format = SsTableFormat {
+            block_size,
+            ..SsTableFormat::default()
+        };
+        let mut test_provider = test_utils::TestStoreProvider::new("/");
+        test_provider.sst_format = sst_format;
+        let table_store = test_utils::TestStoreProvider::new("/").table_store();
+
+        let runtime = Runtime::new().unwrap();
+        let mut runner = new_proptest_runner(None);
+
+        let (table, sst) = runtime.block_on(build_sst(
+            sst_size,
+            max_bytes_len,
+            Arc::clone(&table_store),
+            runner.rng(),
+        ));
+
+        async fn assert_iteration(
+            table_store: Arc<TableStore>,
+            table: &BTreeMap<Bytes, Bytes>,
+            sst: &SsTableHandle,
+            range: BytesRange,
+            order: IterationOrder,
+        ) {
+            let sst_iter_options = SstIteratorOptions {
+                order,
+                ..SstIteratorOptions::default()
+            };
+
+            let mut sst_iter = SstIterator::new_borrowed(
+                range.as_ref(),
+                sst,
+                Arc::clone(&table_store),
+                sst_iter_options,
+            )
+            .await
+            .unwrap();
+            test_utils::assert_ranged_kv_scan(table, &range, order, &mut sst_iter).await
+        }
+
+        runner
+            .run(
+                &(
+                    arbitrary::nonempty_range(max_bytes_len),
+                    arbitrary::iteration_order(),
+                ),
+                |(range, order)| {
+                    runtime.block_on(assert_iteration(
+                        Arc::clone(&table_store),
+                        &table,
+                        &sst,
+                        range,
+                        order,
+                    ));
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    async fn build_sst(
+        sst_size: usize,
+        max_bytes_len: usize,
+        table_store: Arc<TableStore>,
+        rng: &mut TestRng,
+    ) -> (BTreeMap<Bytes, Bytes>, SsTableHandle) {
+        let table = sample::table(rng, sst_size, max_bytes_len);
+        let mut builder = table_store.table_builder();
+
+        for (key, value) in &table {
+            builder.add_value(key, value, gen_attrs(0)).unwrap();
+        }
+
+        let encoded = builder.build().unwrap();
+        let table_id = SsTableId::Wal(0);
+
+        table_store.write_sst(&table_id, encoded).await.unwrap();
+        let sst_handle = table_store.open_sst(&table_id).await.unwrap();
+        (table, sst_handle)
+    }
+
     #[tokio::test]
     async fn test_many_block_sst_iter() {
         let root_path = Path::from("");
@@ -464,7 +722,65 @@ mod tests {
             SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options)
                 .await
                 .unwrap();
+
         for i in 0..1000 {
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key, format!("key{}", i));
+            assert_eq!(kv.value, format!("value{}", i));
+        }
+
+        let next = iter.next().await.unwrap();
+        assert!(next.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_many_block_sst_iter_descending() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 3,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path.clone(),
+            None,
+        ));
+        let mut builder = table_store.table_builder();
+
+        for i in 0..1000 {
+            builder
+                .add_value(
+                    format!("key{}", i).as_bytes(),
+                    format!("value{}", i).as_bytes(),
+                    gen_attrs(i),
+                )
+                .unwrap();
+        }
+
+        let encoded = builder.build().unwrap();
+        table_store
+            .write_sst(&SsTableId::Wal(0), encoded)
+            .await
+            .unwrap();
+        let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
+        let index = table_store.read_index(&sst_handle).await.unwrap();
+        assert_eq!(index.borrow().block_meta().len(), 10);
+
+        let sst_iter_options = SstIteratorOptions {
+            max_fetch_tasks: 3,
+            blocks_to_fetch: 3,
+            cache_blocks: true,
+            order: Descending,
+            ..SstIteratorOptions::default()
+        };
+        let mut iter =
+            SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options)
+                .await
+                .unwrap();
+
+        for i in (0..1000).rev() {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, format!("key{}", i));
             assert_eq!(kv.value, format!("value{}", i));
@@ -599,6 +915,60 @@ mod tests {
         assert!(iter.next().await.unwrap().is_none());
     }
 
+    #[test]
+    fn test_batch_range_iterator_ascending() {
+        proptest!(|(x in 0usize..20, y in 0usize..20, batch_size in 1usize..10)| {
+            let min = x.min(y);
+            let max = x.max(y);
+            let mut iter = BatchRangeIter::new(min..max, Ascending, batch_size);
+
+            let mut batch_range = iter.next();
+            assert_eq!(batch_range.start, min);
+            loop {
+                if batch_range.end < max {
+                    assert_eq!(batch_range.len(), batch_size);
+                } else {
+                    assert!(batch_range.len() <= batch_size)
+                }
+
+                if batch_range.end < max {
+                    let next_range = iter.next();
+                    assert_eq!(next_range.start, batch_range.end);
+                    batch_range = next_range;
+                } else {
+                    break;
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_batch_range_iterator_descending() {
+        proptest!(|(x in 0usize..20, y in 0usize..20, batch_size in 1usize..10)| {
+            let min = x.min(y);
+            let max = x.max(y);
+            let mut iter = BatchRangeIter::new(min..max, Descending, batch_size);
+
+            let mut batch_range = iter.next();
+            assert_eq!(max, batch_range.end);
+            loop {
+                if batch_range.start > min {
+                    assert_eq!(batch_range.len(), batch_size);
+                } else {
+                    assert!(batch_range.len() <= batch_size)
+                }
+
+                if batch_range.end > min {
+                    let next_range = iter.next();
+                    assert_eq!(next_range.end, batch_range.start);
+                    batch_range = next_range;
+                } else {
+                    break;
+                }
+            }
+        });
+    }
+
     async fn build_sst_with_n_blocks(
         n: usize,
         ts: Arc<TableStore>,
@@ -613,5 +983,9 @@ mod tests {
             nkeys += 1;
         }
         (writer.close().await.unwrap(), nkeys)
+    }
+
+    fn new_proptest_runner(rng_seed: Option<[u8; 32]>) -> TestRunner {
+        proptest_util::runner::new(file!(), rng_seed)
     }
 }
