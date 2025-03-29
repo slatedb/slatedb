@@ -94,6 +94,7 @@ impl DbInner {
             table_store: Arc::clone(&table_store),
             db_stats: db_stats.clone(),
             mono_clock: Arc::clone(&mono_clock),
+            wal_enabled: DbInner::wal_enabled_in_options(&options),
         };
 
         let db_inner = Self {
@@ -167,8 +168,13 @@ impl DbInner {
     }
 
     pub(crate) fn wal_enabled(&self) -> bool {
+        Self::wal_enabled_in_options(&self.options)
+    }
+
+    #[allow(unused_variables)]
+    pub(crate) fn wal_enabled_in_options(options: &DbOptions) -> bool {
         #[cfg(feature = "wal_disable")]
-        return self.options.wal_enabled;
+        return options.wal_enabled;
         #[cfg(not(feature = "wal_disable"))]
         return true;
     }
@@ -835,7 +841,7 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, config::ScanOptions, config::ReadLevel, SlateDBError};
+    /// use slatedb::{Db, config::ScanOptions, config::DurabilityLevel, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -847,7 +853,7 @@ impl Db {
     ///     db.put(b"b", b"b_value").await?;
     ///
     ///     let mut iter = db.scan_with_options("a".."b", &ScanOptions {
-    ///         read_level: ReadLevel::Uncommitted,
+    ///         durability_filter: DurabilityLevel::Memory,
     ///         ..ScanOptions::default()
     ///     }).await?;
     ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
@@ -1154,7 +1160,7 @@ mod tests {
         OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
     };
     use crate::cached_object_store::FsCacheStorage;
-    use crate::config::ReadLevel::{Committed, Uncommitted};
+    use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions, Ttl,
     };
@@ -1226,7 +1232,7 @@ mod tests {
                 .get_with_options(
                     key,
                     &ReadOptions {
-                        read_level: Uncommitted
+                        durability_filter: Memory
                     }
                 )
                 .await
@@ -1241,7 +1247,7 @@ mod tests {
                 .get_with_options(
                     key,
                     &ReadOptions {
-                        read_level: Uncommitted
+                        durability_filter: Memory
                     }
                 )
                 .await
@@ -1289,7 +1295,7 @@ mod tests {
                 .get_with_options(
                     key,
                     &ReadOptions {
-                        read_level: Uncommitted
+                        durability_filter: Memory
                     }
                 )
                 .await
@@ -1304,7 +1310,7 @@ mod tests {
                 .get_with_options(
                     key,
                     &ReadOptions {
-                        read_level: Uncommitted
+                        durability_filter: Memory
                     }
                 )
                 .await
@@ -1345,7 +1351,7 @@ mod tests {
                 .get_with_options(
                     key,
                     &ReadOptions {
-                        read_level: Committed
+                        durability_filter: Remote
                     }
                 )
                 .await
@@ -1360,7 +1366,7 @@ mod tests {
                 .get_with_options(
                     key,
                     &ReadOptions {
-                        read_level: Committed
+                        durability_filter: Remote
                     }
                 )
                 .await
@@ -1376,7 +1382,7 @@ mod tests {
                 .get_with_options(
                     key,
                     &ReadOptions {
-                        read_level: Committed
+                        durability_filter: Remote
                     }
                 )
                 .await
@@ -1384,6 +1390,61 @@ mod tests {
         );
 
         kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_get_with_durability_level_when_wal_disabled() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut options = test_db_options(0, 1024 * 1024, None);
+        options.wal_enabled = false;
+        let db = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            options.clone(),
+            object_store,
+        )
+        .await
+        .unwrap();
+        let put_options = PutOptions::default();
+        let write_options = WriteOptions {
+            await_durable: false,
+        };
+        let get_memory_options = ReadOptions {
+            durability_filter: Memory,
+        };
+        let get_remote_options = ReadOptions {
+            durability_filter: Remote,
+        };
+
+        db.put_with_options(b"foo", b"bar", &put_options, &write_options)
+            .await
+            .unwrap();
+        let val_bytes = Bytes::copy_from_slice(b"bar");
+        assert_eq!(
+            None,
+            db.get_with_options(b"foo", &get_remote_options)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            Some(val_bytes.clone()),
+            db.get_with_options(b"foo", &get_memory_options)
+                .await
+                .unwrap()
+        );
+        db.flush().await.unwrap();
+        assert_eq!(
+            Some(val_bytes.clone()),
+            db.get_with_options(b"foo", &get_remote_options)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            Some(val_bytes.clone()),
+            db.get_with_options(b"foo", &get_memory_options)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1424,7 +1485,14 @@ mod tests {
         }
         assert_eq!(
             Some(Bytes::copy_from_slice(last_val.as_bytes())),
-            db.get(b"key").await.unwrap()
+            db.get_with_options(
+                b"key",
+                &ReadOptions {
+                    durability_filter: Memory
+                }
+            )
+            .await
+            .unwrap()
         );
         db.flush().await.unwrap();
 
@@ -1481,7 +1549,7 @@ mod tests {
                 .get_with_options(
                     key,
                     &ReadOptions {
-                        read_level: Committed
+                        durability_filter: Remote
                     }
                 )
                 .await
@@ -1496,7 +1564,7 @@ mod tests {
                 .get_with_options(
                     key,
                     &ReadOptions {
-                        read_level: Committed
+                        durability_filter: Remote
                     }
                 )
                 .await
@@ -1512,7 +1580,7 @@ mod tests {
                 .get_with_options(
                     key,
                     &ReadOptions {
-                        read_level: Committed
+                        durability_filter: Remote
                     }
                 )
                 .await
@@ -1760,7 +1828,7 @@ mod tests {
         runner
             .run(&arbitrary::nonempty_range(10), |range| {
                 let scan_options = ScanOptions {
-                    read_level: Uncommitted,
+                    durability_filter: Memory,
                     ..ScanOptions::default()
                 };
                 runtime.block_on(assert_records_in_range(&table, &db, &scan_options, range));
@@ -2500,7 +2568,7 @@ mod tests {
             .get_with_options(
                 "foo".as_bytes(),
                 &ReadOptions {
-                    read_level: Uncommitted,
+                    durability_filter: Memory,
                 },
             )
             .await
@@ -2552,7 +2620,7 @@ mod tests {
             .get_with_options(
                 "foo".as_bytes(),
                 &ReadOptions {
-                    read_level: Uncommitted,
+                    durability_filter: Memory,
                 },
             )
             .await
@@ -2598,7 +2666,7 @@ mod tests {
             .get_with_options(
                 "foo".as_bytes(),
                 &ReadOptions {
-                    read_level: Uncommitted,
+                    durability_filter: Memory,
                 },
             )
             .await

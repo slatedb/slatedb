@@ -132,6 +132,7 @@ impl DbReaderInner {
             table_store: Arc::clone(&table_store),
             db_stats: db_stats.clone(),
             mono_clock: Arc::clone(&mono_clock),
+            wal_enabled: true,
         };
 
         Ok(Self {
@@ -721,7 +722,7 @@ impl DbReader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, config::DbReaderOptions, config::ScanOptions, config::ReadLevel, SlateDBError};
+    /// use slatedb::{Db, DbReader, config::DbReaderOptions, config::ScanOptions, config::DurabilityLevel, SlateDBError};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
