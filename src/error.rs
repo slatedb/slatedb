@@ -189,12 +189,109 @@ pub enum Error {
 impl From<SlateDBError> for Error {
     fn from(err: SlateDBError) -> Self {
         match err {
+            // System Errors (e.g. resource exhaustion)
+            SlateDBError::IoError(_) => Error::SystemError {
+                msg: "IO error".to_string(),
+            },
             // Operation Errors (invalid inputs or operations)
             SlateDBError::ChecksumMismatch => Error::OperationError {
                 msg: "Checksum mismatch".to_string(),
             },
-            _ => Error::SystemError {
-                msg: format!("Unexpected SlateDB error: {}", err),
+            SlateDBError::EmptySSTable => Error::OperationError {
+                msg: "Empty SSTable".to_string(),
+            },
+            SlateDBError::EmptyBlockMeta => Error::OperationError {
+                msg: "Empty Block Meta".to_string(),
+            },
+            SlateDBError::EmptyBlock => Error::OperationError {
+                msg: "Empty Block".to_string(),
+            },
+            SlateDBError::EmptyManifest => Error::OperationError {
+                msg: "Empty Manifest".to_string(),
+            },
+            SlateDBError::ObjectStoreError(_) => Error::OperationError {
+                msg: "Object store error".to_string(),
+            },
+            SlateDBError::ManifestVersionExists => Error::OperationError {
+                msg: "Manifest version exists".to_string(),
+            },
+            SlateDBError::ManifestMissing(_) => Error::PersistentError {
+                msg: "Manifest not found".to_string(),
+            },
+            SlateDBError::LatestManifestMissing => Error::PersistentError {
+                msg: "Latest manifest missing".to_string(),
+            },
+            SlateDBError::InvalidDeletion => Error::OperationError {
+                msg: "Invalid deletion".to_string(),
+            },
+            SlateDBError::InvalidFlatbuffer(_) => Error::OperationError {
+                msg: "Invalid flatbuffer".to_string(),
+            },
+            SlateDBError::InvalidDBState => Error::PersistentError {
+                msg: "Invalid DB state".to_string(),
+            },
+            SlateDBError::InvalidCompaction => Error::OperationError {
+                msg: "Invalid Compaction".to_string(),
+            },
+            SlateDBError::InvalidClockTick { .. } => Error::OperationError {
+                msg: "Invalid clock tick".to_string(),
+            },
+            SlateDBError::Fenced => Error::PermissionError {
+                msg: "Detected newer DB client".to_string(),
+            },
+            SlateDBError::InvalidCachePartSize => Error::OperationError {
+                msg: "Invalid Cache Part Size".to_string(),
+            },
+            SlateDBError::InvalidCompressionCodec => Error::OperationError {
+                msg: "Invalid compression codec".to_string(),
+            },
+            SlateDBError::BlockDecompressionError => Error::OperationError {
+                msg: "Error decompressing block".to_string(),
+            },
+            SlateDBError::BlockCompressionError => Error::OperationError {
+                msg: "Error compressing block".to_string(),
+            },
+            SlateDBError::InvalidRowFlags { .. } => Error::OperationError {
+                msg: "Invalid row flags".to_string(),
+            },
+            SlateDBError::WalFlushChannelError => Error::SystemError {
+                msg: "Error in wal flush channel".to_string(),
+            },
+            SlateDBError::MemtableFlushChannelError => Error::SystemError {
+                msg: "Error in memtable flush channel".to_string(),
+            },
+            SlateDBError::CheckpointChannelError => Error::SystemError {
+                msg: "Error in checkpoint channel".to_string(),
+            },
+            SlateDBError::ReadChannelError(_) => Error::SystemError {
+                msg: "Error in read channel".to_string(),
+            },
+            SlateDBError::InvalidatedIterator(_) => Error::PersistentError {
+                msg: "Iterator invalidated after unexpected error".to_string(),
+            },
+            SlateDBError::BackgroundTaskPanic(_) => Error::SystemError {
+                msg: "Background Task Panic".to_string(),
+            },
+            SlateDBError::BackgroundTaskShutdown => Error::SystemError {
+                msg: "Background Task Shutdown".to_string(),
+            },
+            SlateDBError::MergeOperatorError(_) => Error::OperationError {
+                msg: "Merge Operator Error".to_string(),
+            },
+            SlateDBError::CheckpointMissing(_) => Error::PersistentError {
+                msg: "Checkpoint Missing".to_string(),
+            },
+            SlateDBError::DatabaseAlreadyExists { .. } => Error::SystemError {
+                msg: "Database already exists".to_string(),
+            },
+            SlateDBError::InvalidVersion { .. } => Error::PersistentError {
+                msg: "Invalid Version".to_string(),
+            },
+            SlateDBError::InvalidArgument { .. } => Error::OperationError {
+                msg: "Invalid Argument".to_string(),
+            },
+            SlateDBError::DbCacheError { .. } => Error::SystemError {
+                msg: "Db Cache Error".to_string(),
             },
         }
     }
