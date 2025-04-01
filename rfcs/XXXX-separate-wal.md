@@ -37,9 +37,9 @@ pub struct DbOptions {
     /// If not set, the main object store passed to `Db::open(...)` will be used
     /// for WAL storage.
     ///
-    /// NOTE: WAL durability properties depend on the durability properties of
-    ///       the underlying object store. Make sure the configured object store
-    ///       is durable enough for your use case.
+    /// NOTE: WAL durability and availability properties depend on the properties
+    ///       of the underlying object store. Make sure the configured object
+    ///       store is durable and available enough for your use case.
     #[serde(skip)]
     pub wal_object_store: Option<Arc<dyn ObjectStore>>
 }
