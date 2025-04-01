@@ -111,3 +111,8 @@ between two `CachedObjectStore` instances to avoid creating an extra cache
 instance running a separate background eviction task. Since the object path
 structure for object stores won't be changed, resulting `FsCacheStorage` paths
 will remain exactly the same too.
+
+Alternatively, assuming the ongoing WAL refactoring is completed successfully,
+there will be no need in WAL caching support. The WAL will be fully read only
+once during the startup. The raw configured `wal_object_store` could be used
+directly, no wrapping into `CachedObjectStore` is required.
