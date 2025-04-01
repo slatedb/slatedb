@@ -1,5 +1,5 @@
-use crate::config::ReadLevel::{Committed, Uncommitted};
-use crate::config::{Clock, ReadLevel};
+use crate::config::DurabilityLevel::{Memory, Remote};
+use crate::config::{Clock, DurabilityLevel};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
@@ -11,6 +11,8 @@ use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tracing::info;
+
+static EMPTY_KEY: Bytes = Bytes::new();
 
 pub(crate) struct WatchableOnceCell<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
@@ -137,7 +139,7 @@ where
 
 pub(crate) async fn get_now_for_read(
     mono_clock: Arc<MonotonicClock>,
-    read_level: ReadLevel,
+    durability_level: DurabilityLevel,
 ) -> Result<i64, SlateDBError> {
     /*
      Note: the semantics of filtering expired records on read differ slightly depending on
@@ -155,9 +157,9 @@ pub(crate) async fn get_now_for_read(
      filtered out due to ttl expiry, it is guaranteed not to be seen again by future Committed
      reads.
     */
-    match read_level {
-        Committed => Ok(mono_clock.get_last_durable_tick()),
-        Uncommitted => mono_clock.now().await,
+    match durability_level {
+        Remote => Ok(mono_clock.get_last_durable_tick()),
+        Memory => mono_clock.now().await,
     }
 }
 
@@ -268,15 +270,49 @@ pub(crate) fn now_systime(clock: &dyn Clock) -> SystemTime {
         .expect("Failed to convert Clock time to SystemTime")
 }
 
+/// Computes the "index key" (lowest bound) for an SST index block, ie a key that's greater
+/// than all keys in the previous block and less than or equal to all keys in the new block
+pub(crate) fn compute_index_key(
+    prev_block_last_key: Option<Bytes>,
+    this_block_first_key: &Bytes,
+) -> Bytes {
+    if let Some(prev_key) = prev_block_last_key {
+        compute_lower_bound(&prev_key, this_block_first_key)
+    } else {
+        EMPTY_KEY.clone()
+    }
+}
+
+fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes) -> Bytes {
+    assert!(!prev_block_last_key.is_empty() && !this_block_first_key.is_empty());
+
+    for i in 0..prev_block_last_key.len() {
+        if prev_block_last_key[i] != this_block_first_key[i] {
+            return this_block_first_key.slice(..i + 1);
+        }
+    }
+
+    // if the keys are equal, just use the full key
+    if prev_block_last_key.len() == this_block_first_key.len() {
+        return this_block_first_key.clone();
+    }
+
+    // if we didn't find a mismatch yet then the prev block's key must be shorter,
+    // so just use the common prefix plus the next byte in this block's key
+    this_block_first_key.slice(..prev_block_last_key.len() + 1)
+}
+
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use crate::error::SlateDBError;
     use crate::test_utils::TestClock;
     use crate::utils::{
-        bytes_into_minimal_vec, clamp_allocated_size_bytes, spawn_bg_task, spawn_bg_thread,
-        MonotonicClock, WatchableOnceCell,
+        bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key, spawn_bg_task,
+        spawn_bg_thread, MonotonicClock, WatchableOnceCell,
     };
-    use bytes::{BufMut, BytesMut};
+    use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
@@ -302,6 +338,48 @@ mod tests {
         fn captured(&self) -> Option<Result<T, SlateDBError>> {
             self.error.lock().clone()
         }
+    }
+
+    #[test]
+    fn test_should_return_empty_for_index_of_first_block() {
+        let this_block_first_key = Bytes::from(vec![0x01, 0x02, 0x03]);
+        let result = compute_index_key(None, &this_block_first_key);
+
+        assert_eq!(result, &Bytes::new());
+    }
+
+    #[rstest]
+    #[case(Some("aaaac"), "abaaa", "ab")]
+    #[case(Some("ababc"), "abacd", "abac")]
+    #[case(Some("cc"), "ccccccc", "ccc")]
+    #[case(Some("eed"), "eee", "eee")]
+    #[case(Some("abcdef"), "abcdef", "abcdef")]
+    fn test_should_compute_index_key(
+        #[case] prev_block_last_key: Option<&'static str>,
+        #[case] this_block_first_key: &'static str,
+        #[case] expected_index_key: &'static str,
+    ) {
+        assert_eq!(
+            compute_index_key(
+                prev_block_last_key.map(|s| Bytes::from(s.to_string())),
+                &Bytes::from(this_block_first_key.to_string())
+            ),
+            Bytes::from_static(expected_index_key.as_bytes())
+        );
+    }
+
+    #[rstest]
+    #[case(Some(""), "a")]
+    #[case(Some("a"), "")]
+    #[should_panic]
+    fn test_should_panic_on_empty_keys(
+        #[case] prev_block_last_key: Option<&'static str>,
+        #[case] this_block_first_key: &'static str,
+    ) {
+        compute_index_key(
+            prev_block_last_key.map(|s| Bytes::from(s.to_string())),
+            &Bytes::from(this_block_first_key.to_string()),
+        );
     }
 
     #[tokio::test]

@@ -34,6 +34,7 @@ use crate::utils::clamp_allocated_size_bytes;
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
 
 /// A wrapper around a `Bytes` buffer containing a FlatBuffer-encoded `SsTableIndex`.
+#[derive(PartialEq, Eq)]
 pub(crate) struct SsTableIndexOwned {
     data: Bytes,
 }
@@ -47,6 +48,10 @@ impl SsTableIndexOwned {
     pub fn borrow(&self) -> SsTableIndex<'_> {
         let raw = &self.data;
         unsafe { flatbuffers::root_unchecked::<SsTableIndex>(raw) }
+    }
+
+    pub(crate) fn data(&self) -> Bytes {
+        self.data.clone()
     }
 
     pub(crate) fn clamp_allocated_size(&self) -> Self {

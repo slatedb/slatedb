@@ -6,6 +6,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
 
+#[derive(Eq, PartialEq)]
 pub(crate) struct Block {
     pub(crate) data: Bytes,
     pub(crate) offsets: Vec<u16>,
