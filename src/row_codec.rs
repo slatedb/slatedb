@@ -130,6 +130,17 @@ impl SstRowCodecV0 {
         Self {}
     }
 
+    /// estimated_entries_size include the size of seqnum,create_ts(if exist),expire_ts(exist),key,value
+    pub fn estimate_encoded_size(entry_num: usize, estimated_entries_size: usize) -> usize {
+        let key_prefix_len_size = std::mem::size_of::<u16>();
+        let key_suffix_len_size = std::mem::size_of::<u16>();
+        let value_len_size = std::mem::size_of::<u32>();
+        let flag_size = std::mem::size_of::<u8>();
+        let mut ans = estimated_entries_size;
+        ans += (key_prefix_len_size + key_suffix_len_size + value_len_size + flag_size) * entry_num;
+        ans
+    }
+
     pub fn encode(&self, output: &mut Vec<u8>, row: &SstRowEntry) {
         output.put_u16(row.key_prefix_len as u16);
         output.put_u16(row.key_suffix.len() as u16);
@@ -467,5 +478,39 @@ mod tests {
         assert_eq!(decoded.expire_ts, Some(1));
         assert_eq!(decoded.create_ts, Some(2));
         assert_eq!(decoded.size(), 43);
+    }
+
+    #[test]
+    fn test_estimate_encoded_size() {
+        // Test with zero entries
+        assert_eq!(SstRowCodecV0::estimate_encoded_size(0, 0), 0);
+        assert_eq!(SstRowCodecV0::estimate_encoded_size(0, 100), 100);
+
+        // Test with one entry
+        let entry_size = 50; // Example entry size
+        let expected_size = entry_size + (2 + 2 + 4 + 1); // key_prefix_len + key_suffix_len + value_len + flag
+        assert_eq!(
+            SstRowCodecV0::estimate_encoded_size(1, entry_size),
+            expected_size
+        );
+
+        // Test with multiple entries
+        let num_entries = 5;
+        let total_entry_size = entry_size * num_entries;
+        let expected_size = total_entry_size + (2 + 2 + 4 + 1) * num_entries;
+        assert_eq!(
+            SstRowCodecV0::estimate_encoded_size(num_entries, total_entry_size),
+            expected_size
+        );
+
+        // Test with large numbers
+        let large_num_entries = 10000;
+        let large_entry_size = 10000;
+        let total_large_size = large_entry_size * large_num_entries;
+        let expected_large_size = total_large_size + (2 + 2 + 4 + 1) * large_num_entries;
+        assert_eq!(
+            SstRowCodecV0::estimate_encoded_size(large_num_entries, total_large_size),
+            expected_large_size
+        );
     }
 }
