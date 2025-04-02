@@ -93,26 +93,7 @@ fn object_store_for(&self, id: &SsTableId) -> Arc<dyn ObjectStore> {
 
 The transactional object store selection logic would look about the same.
 
-### Block Cache
+### Block and Object Cache
 
-Interaction with the block cache is completely transparent. After a suitable
-object store is selected for the operation, no special care is needed to make it
-work with the block cache.
-
-### Object Cache
-
-Interaction with the on-disk object cache is more complex. To support caching,
-an object store must be wrapped into `CachedObjectStore` instance. This instance
-internally holds a reference to `LocalCacheStorage` which manages the actual
-cache storage.
-
-Apparently, it should be possible to share a `LocalCacheStorage` instance
-between two `CachedObjectStore` instances to avoid creating an extra cache
-instance running a separate background eviction task. Since the object path
-structure for object stores won't be changed, resulting `FsCacheStorage` paths
-will remain exactly the same too.
-
-Alternatively, assuming the ongoing WAL refactoring is completed successfully,
-there will be no need in WAL caching support. The WAL will be fully read only
-once during the startup. The raw configured `wal_object_store` could be used
-directly, no wrapping into `CachedObjectStore` is required.
+WAL requires no caching support since it is read only once at startup. All
+operations on dedicated WAL object store should be direct and bypass all caches.
