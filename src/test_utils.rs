@@ -16,11 +16,12 @@ pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entri
     for expected_entry in entries.iter() {
         assert_next_entry(iterator, expected_entry).await;
     }
-    assert!(iterator
+
+    let next_entry = iterator
         .next_entry()
         .await
-        .expect("iterator next_entry failed")
-        .is_none());
+        .expect("iterator next_entry failed");
+    assert_eq!(next_entry, None);
 }
 
 pub(crate) async fn assert_next_entry<T: KeyValueIterator>(

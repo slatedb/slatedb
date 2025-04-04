@@ -151,6 +151,12 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIt
             }
             self.advance_inner().await?;
         }
+
+        if let Some(max_seq) = self.max_seq {
+            if current_kv.seq > max_seq {
+                return Ok(None);
+            }
+        }
         Ok(Some(current_kv))
     }
 }
@@ -276,6 +282,12 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
                 current_kv = peeked_entry.clone();
             }
             self.advance().await?;
+        }
+
+        if let Some(max_seq) = self.max_seq {
+            if current_kv.seq > max_seq {
+                return Ok(None);
+            }
         }
         Ok(Some(current_kv))
     }
@@ -460,6 +472,34 @@ mod tests {
             vec![
                 RowEntry::new_value(b"bb", b"bb1", 0),
                 RowEntry::new_value(b"cc", b"cc2", 0),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_seek_merge_iter_with_max_seq() {
+        let mut iters = VecDeque::new();
+        iters.push_back(
+            TestIterator::new()
+                .with_entry(b"aa", b"aa1", 1)
+                .with_entry(b"bb", b"bb1", 2)
+                .with_entry(b"cc", b"cc1", 6),
+        );
+        iters.push_back(
+            TestIterator::new()
+                .with_entry(b"aa", b"aa2", 3)
+                .with_entry(b"bb", b"bb2", 4)
+                .with_entry(b"cc", b"cc2", 5),
+        );
+
+        let mut merge_iter = MergeIterator::new(iters, Some(4)).await.unwrap();
+
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_value(b"aa", b"aa2", 3),
+                RowEntry::new_value(b"bb", b"bb2", 4),
             ],
         )
         .await;
