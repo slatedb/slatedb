@@ -116,7 +116,7 @@ impl TokioCompactionExecutorInner {
                     .await?,
             );
         }
-        let l0_merge_iter = MergeIterator::new(l0_iters).await?;
+        let l0_merge_iter = MergeIterator::new(l0_iters, None).await?;
 
         let mut sr_iters = VecDeque::new();
         for sr in compaction.sorted_runs.iter() {
@@ -125,8 +125,8 @@ impl TokioCompactionExecutorInner {
                     .await?;
             sr_iters.push_back(iter);
         }
-        let sr_merge_iter = MergeIterator::new(sr_iters).await?;
-        TwoMergeIterator::new(l0_merge_iter, sr_merge_iter).await
+        let sr_merge_iter = MergeIterator::new(sr_iters, None).await?;
+        TwoMergeIterator::new(l0_merge_iter, sr_merge_iter, None).await
     }
 
     async fn execute_compaction(

@@ -207,7 +207,8 @@ impl Reader {
             sr_iters.push_back(iter);
         }
 
-        DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters).await
+        // TODO(flaneur): load max committed seq here
+        DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters, None).await
     }
 
     fn unwrap_value_if_not_expired(entry: &RowEntry, now_ttl: i64) -> Option<Bytes> {

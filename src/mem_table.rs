@@ -133,7 +133,7 @@ impl VecDequeKeyValueIterator {
             .iter()
             .map(|t| t.range_ascending(range.clone()))
             .collect();
-        let mut merge_iter = MergeIterator::new(memtable_iters).await?;
+        let mut merge_iter = MergeIterator::new(memtable_iters, None).await?;
         let mut rows = VecDeque::new();
 
         while let Some(row_entry) = merge_iter.next_entry().await? {
@@ -454,7 +454,7 @@ mod tests {
 
         // in merge iterator, it should only return one entry
         let iter = table.table().iter();
-        let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter]))
+        let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter]), None)
             .await
             .unwrap();
         assert_iterator(

@@ -29,11 +29,14 @@ impl<'a> DbIterator<'a> {
         mem_iter: VecDequeKeyValueIterator,
         l0_iters: VecDeque<SstIterator<'a>>,
         sr_iters: VecDeque<SortedRunIterator<'a>>,
+        max_seq: Option<u64>,
     ) -> Result<Self, SlateDBError> {
-        let (l0_iter, sr_iter) =
-            tokio::join!(MergeIterator::new(l0_iters), MergeIterator::new(sr_iters),);
-        let sst_iter = TwoMergeIterator::new(l0_iter?, sr_iter?).await?;
-        let iter = TwoMergeIterator::new(mem_iter, sst_iter).await?;
+        let (l0_iter, sr_iter) = tokio::join!(
+            MergeIterator::new(l0_iters, max_seq),
+            MergeIterator::new(sr_iters, max_seq),
+        );
+        let sst_iter = TwoMergeIterator::new(l0_iter?, sr_iter?, max_seq).await?;
+        let iter = TwoMergeIterator::new(mem_iter, sst_iter, max_seq).await?;
         Ok(DbIterator {
             range,
             iter,
@@ -126,6 +129,7 @@ mod tests {
             VecDequeKeyValueIterator::new(VecDeque::new()),
             VecDeque::new(),
             VecDeque::new(),
+            None,
         )
         .await
         .unwrap();
