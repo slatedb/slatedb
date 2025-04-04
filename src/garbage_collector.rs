@@ -947,7 +947,7 @@ mod tests {
         let mut sst = table_store.table_builder();
         sst.add(RowEntry::new_value(b"key", b"value", 0))?;
         let table1 = sst.build()?;
-        table_store.write_sst(table_id, table1).await?;
+        table_store.write_sst(table_id, table1, false).await?;
         Ok(())
     }
 
@@ -1063,13 +1063,13 @@ mod tests {
         sst1.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
 
         let table1 = sst1.build().unwrap();
-        table_store.write_sst(&id1, table1).await.unwrap();
+        table_store.write_sst(&id1, table1, false).await.unwrap();
 
         let id2 = SsTableId::Wal(2);
         let mut sst2 = table_store.table_builder();
         sst2.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
         let table2 = sst2.build().unwrap();
-        table_store.write_sst(&id2, table2).await.unwrap();
+        table_store.write_sst(&id2, table2, false).await.unwrap();
 
         // Set the both WAL SST file to be a day old
         let now_minus_24h_1 = set_modified(
@@ -1391,7 +1391,7 @@ mod tests {
         let mut sst = table_store.table_builder();
         sst.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
         let table = sst.build().unwrap();
-        table_store.write_sst(&sst_id, table).await.unwrap()
+        table_store.write_sst(&sst_id, table, false).await.unwrap()
     }
 
     /// Set the modified time of a file to be a certain number of seconds ago.
