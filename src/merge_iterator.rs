@@ -563,4 +563,29 @@ mod tests {
         )
         .await;
     }
+
+    #[tokio::test]
+    async fn test_two_merge_iterator_with_max_seq() {
+        let iter1 = TestIterator::new()
+            .with_entry(b"aa", b"aa1", 1)
+            .with_entry(b"aa", b"aa4", 6)
+            .with_entry(b"bb", b"bb1", 2)
+            .with_entry(b"cc", b"cc1", 6);
+        let iter2 = TestIterator::new()
+            .with_entry(b"aa", b"aa2", 3)
+            .with_entry(b"aa", b"aa3", 5)
+            .with_entry(b"bb", b"bb2", 4)
+            .with_entry(b"cc", b"cc2", 5);
+
+        let mut merge_iter = TwoMergeIterator::new(iter1, iter2, Some(4)).await.unwrap();
+
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_value(b"aa", b"aa2", 3),
+                RowEntry::new_value(b"bb", b"bb2", 4),
+            ],
+        )
+        .await;
+    }
 }
