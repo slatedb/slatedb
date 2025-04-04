@@ -30,8 +30,11 @@ impl<'a> DbIterator<'a> {
         l0_iters: VecDeque<SstIterator<'a>>,
         sr_iters: VecDeque<SortedRunIterator<'a>>,
     ) -> Result<Self, SlateDBError> {
-        let (l0_iter, sr_iter) =
-            tokio::join!(MergeIterator::new(l0_iters), MergeIterator::new(sr_iters),);
+        let order = mem_iter.order();
+        let (l0_iter, sr_iter) = tokio::join!(
+            MergeIterator::new(l0_iters, order),
+            MergeIterator::new(sr_iters, order)
+        );
         let sst_iter = TwoMergeIterator::new(l0_iter?, sr_iter?).await?;
         let iter = TwoMergeIterator::new(mem_iter, sst_iter).await?;
         Ok(DbIterator {
@@ -98,10 +101,10 @@ impl<'a> DbIterator<'a> {
         } else if self
             .last_key
             .clone()
-            .is_some_and(|last_key| next_key <= last_key)
+            .is_some_and(|last_key| !self.iter.order().precedes(last_key.as_ref(), next_key))
         {
             Err(SlateDBError::InvalidArgument {
-                msg: "Cannot seek to a key less than the last returned key".to_string(),
+                msg: "Cannot seek to a key which precedes the last returned key".to_string(),
             })
         } else {
             let result = self.iter.seek(next_key).await;
@@ -115,6 +118,7 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::db_iter::DbIterator;
     use crate::error::SlateDBError;
+    use crate::iter::IterationOrder::Ascending;
     use crate::mem_table::VecDequeKeyValueIterator;
     use bytes::Bytes;
     use std::collections::VecDeque;
@@ -123,7 +127,7 @@ mod tests {
     async fn test_invalidated_iterator() {
         let mut iter = DbIterator::new(
             BytesRange::from(..),
-            VecDequeKeyValueIterator::new(VecDeque::new()),
+            VecDequeKeyValueIterator::new(VecDeque::new(), Ascending),
             VecDeque::new(),
             VecDeque::new(),
         )

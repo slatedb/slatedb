@@ -168,6 +168,8 @@ use crate::config::GcExecutionMode::Periodic;
 use crate::error::{DbOptionsError, SlateDBError};
 
 use crate::db_cache::DbCache;
+use crate::iter::IterationOrder;
+use crate::iter::IterationOrder::Ascending;
 use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 /// Describes the durability of data based on the medium (e.g. in-memory, object storags)
@@ -207,6 +209,7 @@ pub struct ScanOptions {
     pub read_ahead_bytes: usize,
     /// Whether or not fetched blocks should be cached
     pub cache_blocks: bool,
+    pub order: IterationOrder,
 }
 
 impl Default for ScanOptions {
@@ -216,6 +219,7 @@ impl Default for ScanOptions {
             durability_filter: DurabilityLevel::Remote,
             read_ahead_bytes: 1,
             cache_blocks: false,
+            order: Ascending,
         }
     }
 }

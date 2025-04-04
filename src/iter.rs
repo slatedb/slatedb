@@ -1,12 +1,23 @@
 use crate::error::SlateDBError;
+use crate::iter::IterationOrder::{Ascending, Descending};
 use crate::types::RowEntry;
 use crate::types::{KeyValue, ValueDeletable};
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum IterationOrder {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IterationOrder {
     Ascending,
-    #[allow(dead_code)]
     Descending,
+}
+
+impl IterationOrder {
+    /// Compare two values using the iteration order.
+    /// Return true if `a` should be ordered before `b`, and false otherwise
+    pub(crate) fn precedes<T: PartialOrd>(&self, a: T, b: T) -> bool {
+        match self {
+            Ascending => a < b,
+            Descending => b < a,
+        }
+    }
 }
 
 /// Note: this is intentionally its own trait instead of an Iterator<Item=KeyValue>,
@@ -38,6 +49,11 @@ pub trait KeyValueIterator {
     /// Returns the next entry in the iterator, which may be a key-value pair or
     /// a tombstone of a deleted key-value pair.
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError>;
+
+    /// Return the order of this iterator
+    fn order(&self) -> IterationOrder {
+        Ascending
+    }
 }
 
 pub(crate) trait SeekToKey {

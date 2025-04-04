@@ -167,7 +167,8 @@ impl Reader {
         }
 
         let mem_iter =
-            VecDequeKeyValueIterator::materialize_range(memtables, range.clone()).await?;
+            VecDequeKeyValueIterator::materialize_range(memtables, range.clone(), options.order)
+                .await?;
 
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
@@ -176,6 +177,7 @@ impl Reader {
             blocks_to_fetch: read_ahead_blocks,
             cache_blocks: options.cache_blocks,
             eager_spawn: true,
+            order: options.order,
         };
 
         let mut l0_iters = VecDeque::new();

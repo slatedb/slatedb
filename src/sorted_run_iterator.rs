@@ -1,7 +1,7 @@
 use crate::bytes_range::BytesRange;
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, SeekToKey};
+use crate::iter::{IterationOrder, KeyValueIterator, SeekToKey};
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstView};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
@@ -9,6 +9,7 @@ use bytes::Bytes;
 use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
+use IterationOrder::{Ascending, Descending};
 
 #[derive(Debug)]
 enum SortedRunView<'a> {
@@ -20,13 +21,21 @@ enum SortedRunView<'a> {
 }
 
 impl<'a> SortedRunView<'a> {
-    fn pop_sst(&mut self) -> Option<SstView<'a>> {
+    fn pop_sst(&mut self, order: IterationOrder) -> Option<SstView<'a>> {
         match self {
-            SortedRunView::Owned(tables, r) => tables
-                .pop_front()
-                .map(|table| SstView::Owned(table, r.clone())),
+            SortedRunView::Owned(tables, r) => {
+                let next_table = match order {
+                    Ascending => tables.pop_front(),
+                    Descending => tables.pop_back(),
+                };
+                next_table.map(|table| SstView::Owned(table, r.clone()))
+            }
             SortedRunView::Borrowed(tables, r) => {
-                tables.pop_front().map(|table| SstView::Borrowed(table, *r))
+                let next_table = match order {
+                    Ascending => tables.pop_front(),
+                    Descending => tables.pop_back(),
+                };
+                next_table.map(|table| SstView::Borrowed(table, *r))
             }
         }
     }
@@ -36,7 +45,7 @@ impl<'a> SortedRunView<'a> {
         table_store: Arc<TableStore>,
         sst_iterator_options: SstIteratorOptions,
     ) -> Result<Option<SstIterator<'a>>, SlateDBError> {
-        let next_iter = if let Some(view) = self.pop_sst() {
+        let next_iter = if let Some(view) = self.pop_sst(sst_iterator_options.order) {
             Some(SstIterator::new(view, table_store.clone(), sst_iterator_options).await?)
         } else {
             None
@@ -44,10 +53,17 @@ impl<'a> SortedRunView<'a> {
         Ok(next_iter)
     }
 
-    fn peek_next_table(&self) -> Option<&SsTableHandle> {
+    fn peek_next_table(&self, order: IterationOrder) -> Option<&SsTableHandle> {
         match self {
-            SortedRunView::Owned(tables, _) => tables.front(),
-            SortedRunView::Borrowed(tables, _) => tables.front().copied(),
+            SortedRunView::Owned(tables, _) => match order {
+                Ascending => tables.front(),
+                Descending => tables.back(),
+            },
+            SortedRunView::Borrowed(tables, _) => match order {
+                Ascending => tables.front(),
+                Descending => tables.back(),
+            }
+            .copied(),
         }
     }
 }
@@ -115,6 +131,30 @@ impl<'a> SortedRunIterator<'a> {
             .await?;
         Ok(())
     }
+
+    async fn seek_table_ascending(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        while let Some(next_table) = self.view.peek_next_table(self.sst_iter_options.order) {
+            // If the first key in the next table is smaller than the seek key,
+            // then we should advance to the next table
+            if next_table.compacted_first_key() < next_key {
+                self.advance_table().await?;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn seek_table_descending(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        while let Some(table) = self.current_iter.as_ref().map(|iter| iter.table_as_ref()) {
+            if table.compacted_first_key() > next_key {
+                self.advance_table().await?;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl KeyValueIterator for SortedRunIterator<'_> {
@@ -128,17 +168,19 @@ impl KeyValueIterator for SortedRunIterator<'_> {
         }
         Ok(None)
     }
+
+    fn order(&self) -> IterationOrder {
+        self.sst_iter_options.order
+    }
 }
 
 impl SeekToKey for SortedRunIterator<'_> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        while let Some(next_table) = self.view.peek_next_table() {
-            if next_table.compacted_first_key() < next_key {
-                self.advance_table().await?;
-            } else {
-                break;
-            }
+        match self.order() {
+            Ascending => self.seek_table_ascending(next_key).await?,
+            Descending => self.seek_table_descending(next_key).await?,
         }
+
         if let Some(iter) = &mut self.current_iter {
             iter.seek(next_key).await?;
         }
@@ -151,19 +193,20 @@ mod tests {
     use super::*;
     use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
-    use crate::proptest_util;
-    use crate::proptest_util::sample;
+    use crate::proptest_util::{arbitrary, sample};
     use crate::sst::SsTableFormat;
     use crate::test_utils::{assert_kv, gen_attrs};
+    use crate::{proptest_util, test_utils};
 
-    use bytes::{BufMut, BytesMut};
+    use crate::store_provider::StoreProvider;
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
-    use proptest::test_runner::TestRng;
+    use proptest::test_runner::{TestRng, TestRunner};
     use rand::distributions::uniform::SampleRange;
     use rand::Rng;
     use std::collections::BTreeMap;
     use std::sync::Arc;
+    use tokio::runtime::Runtime;
     use ulid::Ulid;
 
     #[tokio::test]
@@ -286,7 +329,7 @@ mod tests {
             let mut expected_key_gen = test_case_key_gen.clone();
             let mut expected_val_gen = test_case_val_gen.clone();
             let from_key = test_case_key_gen.next();
-            _ = test_case_val_gen.next();
+            let _ = test_case_val_gen.next();
             let mut iter = SortedRunIterator::new_borrowed(
                 from_key.as_ref()..,
                 &sr,
@@ -374,55 +417,167 @@ mod tests {
         assert!(iter.next().await.unwrap().is_none());
     }
 
-    #[tokio::test]
-    async fn test_seek_through_sorted_run() {
-        let root_path = Path::from("");
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let table_store = Arc::new(TableStore::new(
-            object_store,
-            SsTableFormat::default(),
-            root_path.clone(),
-            None,
+    #[test]
+    fn test_iterate_sorted_run() {
+        let table_store = test_utils::TestStoreProvider::new("/").table_store();
+        let max_bytes_len = 10;
+        let runtime = Runtime::new().unwrap();
+        let mut runner = new_proptest_runner(None);
+        let rng = runner.rng();
+        let (table, sorted_run) = runtime.block_on(build_sorted_run(
+            Arc::clone(&table_store),
+            rng,
+            1000,
+            max_bytes_len,
+            20,
         ));
 
-        let mut rng = proptest_util::rng::new_test_rng(None);
-        let table = sample::table(&mut rng, 400, 10);
-        let max_entries_per_sst = 20;
-        let entries_per_sst = 1..max_entries_per_sst;
-        let sr =
-            build_sorted_run_from_table(&table, table_store.clone(), entries_per_sst, &mut rng)
-                .await;
-        let mut sr_iter = SortedRunIterator::new_owned(
-            ..,
-            sr,
-            table_store.clone(),
-            SstIteratorOptions::default(),
-        )
-        .await
-        .unwrap();
-        let mut table_iter = table.iter();
-        loop {
-            let skip = rng.gen::<usize>() % (max_entries_per_sst * 2);
-            let run = rng.gen::<usize>() % (max_entries_per_sst * 2);
-
-            let Some((k, _)) = table_iter.nth(skip) else {
-                break;
+        async fn assert_iteration(
+            table_store: Arc<TableStore>,
+            table: &BTreeMap<Bytes, Bytes>,
+            sorted_run: &SortedRun,
+            range: BytesRange,
+            order: IterationOrder,
+        ) {
+            let sst_iter_options = SstIteratorOptions {
+                order,
+                ..SstIteratorOptions::default()
             };
-            let seek_key = increment_length(k);
-            sr_iter.seek(&seek_key).await.unwrap();
 
-            for (key, value) in table_iter.by_ref().take(run) {
-                let kv = sr_iter.next().await.unwrap().unwrap();
-                assert_eq!(*key, kv.key);
-                assert_eq!(*value, kv.value);
-            }
+            let mut sr_iter = SortedRunIterator::new_borrowed(
+                range.as_ref(),
+                sorted_run,
+                table_store.clone(),
+                sst_iter_options,
+            )
+            .await
+            .unwrap();
+            test_utils::assert_ranged_kv_scan(table, &range, order, &mut sr_iter).await
         }
+
+        runner
+            .run(
+                &(
+                    arbitrary::nonempty_range(max_bytes_len),
+                    arbitrary::iteration_order(),
+                ),
+                |(range, order)| {
+                    runtime.block_on(assert_iteration(
+                        Arc::clone(&table_store),
+                        &table,
+                        &sorted_run,
+                        range,
+                        order,
+                    ));
+                    Ok(())
+                },
+            )
+            .unwrap();
     }
 
-    fn increment_length(b: &[u8]) -> Bytes {
-        let mut buf = BytesMut::from(b);
-        buf.put_u8(u8::MIN);
-        buf.freeze()
+    #[test]
+    fn test_seek_through_sorted_run() {
+        let max_bytes_len = 10;
+        let max_sst_records: usize = 20;
+
+        let table_store = test_utils::TestStoreProvider::new("/").table_store();
+        let runtime = Runtime::new().unwrap();
+        let mut runner = new_proptest_runner(None);
+        let rng = runner.rng();
+        let (table, sorted_run) = runtime.block_on(build_sorted_run(
+            Arc::clone(&table_store),
+            rng,
+            1000,
+            max_bytes_len,
+            max_sst_records,
+        ));
+
+        async fn assert_iteration(
+            table_store: Arc<TableStore>,
+            table: &BTreeMap<Bytes, Bytes>,
+            sorted_run: &SortedRun,
+            range: BytesRange,
+            order: IterationOrder,
+            rng: &mut TestRng,
+            max_sst_records: usize,
+        ) {
+            let sst_iter_options = SstIteratorOptions {
+                order,
+                ..SstIteratorOptions::default()
+            };
+
+            let mut sr_iter = SortedRunIterator::new_borrowed(
+                range.as_ref(),
+                sorted_run,
+                table_store.clone(),
+                sst_iter_options,
+            )
+            .await
+            .unwrap();
+
+            let table_iter =
+                table.range((range.start_bound().cloned(), range.end_bound().cloned()));
+            let mut table_iter = match order {
+                Ascending => Box::new(table_iter) as Box<dyn Iterator<Item = (&Bytes, &Bytes)>>,
+                Descending => {
+                    Box::new(table_iter.rev()) as Box<dyn Iterator<Item = (&Bytes, &Bytes)>>
+                }
+            }
+            .peekable();
+
+            loop {
+                let skip = rng.gen::<usize>() % (max_sst_records * 2);
+                let run = rng.gen::<usize>() % (max_sst_records * 2);
+
+                let _ = table_iter.nth(skip);
+                let Some((seek_key, _)) = table_iter.peek() else {
+                    break;
+                };
+                sr_iter.seek(seek_key).await.unwrap();
+
+                for (key, value) in table_iter.by_ref().take(run) {
+                    let kv = sr_iter.next().await.unwrap().unwrap();
+                    assert_eq!(*key, kv.key);
+                    assert_eq!(*value, kv.value);
+                }
+            }
+        }
+
+        runner
+            .run(
+                &(
+                    arbitrary::nonempty_range(max_bytes_len),
+                    arbitrary::iteration_order(),
+                    arbitrary::rng(),
+                ),
+                |(range, order, mut rng)| {
+                    runtime.block_on(assert_iteration(
+                        Arc::clone(&table_store),
+                        &table,
+                        &sorted_run,
+                        range,
+                        order,
+                        &mut rng,
+                        max_sst_records,
+                    ));
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    async fn build_sorted_run(
+        table_store: Arc<TableStore>,
+        rng: &mut TestRng,
+        num_records: usize,
+        max_bytes_len: usize,
+        max_sst_records: usize,
+    ) -> (BTreeMap<Bytes, Bytes>, SortedRun) {
+        let table = sample::table(rng, num_records, max_bytes_len);
+        let entries_per_sst = 1..max_sst_records;
+        let sorted_run =
+            build_sorted_run_from_table(&table, table_store.clone(), entries_per_sst, rng).await;
+        (table, sorted_run)
     }
 
     async fn build_sorted_run_from_table<R: SampleRange<usize> + Clone>(
@@ -473,5 +628,9 @@ mod tests {
             ssts.push(writer.close().await.unwrap());
         }
         SortedRun { id: 0, ssts }
+    }
+
+    fn new_proptest_runner(rng_seed: Option<[u8; 32]>) -> TestRunner {
+        proptest_util::runner::new(file!(), rng_seed)
     }
 }
