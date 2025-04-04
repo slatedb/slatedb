@@ -31,7 +31,7 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 
 use crate::types::{RowEntry, ValueDeletable};
-use crate::utils::spawn_bg_task;
+use crate::utils::{spawn_bg_task, WatchableOnceCellReader};
 use crate::{
     batch::{WriteBatch, WriteOp},
     db::DbInner,
@@ -46,12 +46,17 @@ pub(crate) enum WriteBatchMsg {
 
 pub(crate) struct WriteBatchRequest {
     pub(crate) batch: WriteBatch,
-    pub(crate) done: tokio::sync::oneshot::Sender<Result<Arc<KVTable>, SlateDBError>>,
+    pub(crate) done: tokio::sync::oneshot::Sender<
+        Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError>,
+    >,
 }
 
 impl DbInner {
     #[allow(clippy::panic)]
-    async fn write_batch(&self, batch: WriteBatch) -> Result<Arc<KVTable>, SlateDBError> {
+    async fn write_batch(
+        &self,
+        batch: WriteBatch,
+    ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
         let now = self.mono_clock.now().await?;
         let seq = self.state.write().increment_seq();
         for op in batch.ops {
@@ -80,15 +85,20 @@ impl DbInner {
             self.state.write().memtable().put(row_entry);
         }
 
-        self.wal_buffer.maybe_trigger_flush().await?;
-        // TODO: handle sync here, if sync is enabled, we can call `flush` here.
+        let durable_watcher = if self.wal_enabled() {
+            self.wal_buffer.maybe_trigger_flush().await?;
+            // TODO: handle sync here, if sync is enabled, we can call `flush` here.
+            self.wal_buffer.watch_durable().await
+        } else {
+            self.state.write().memtable().table().watch_durable()
+        };
 
+        // TODO: handle the last_written_wal_id here.
         let mut guard = self.state.write();
-        let table = guard.memtable().table().clone();
         let last_wal_id = guard.last_written_wal_id();
         self.maybe_freeze_memtable(&mut guard, last_wal_id)?;
 
-        Ok(table)
+        Ok(durable_watcher)
     }
 
     pub(crate) fn spawn_write_task(

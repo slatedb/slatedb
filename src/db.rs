@@ -208,12 +208,11 @@ impl DbInner {
             .expect("write notifier closed");
 
         // if the write pipeline task exits then this call to rx.await will fail because tx is dropped
-        let current_table = rx.await??;
-
+        // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
+        let mut durable_watch = rx.await??;
         if options.await_durable {
-            current_table.await_durable().await?;
+            durable_watch.await_value().await?;
         }
-
         Ok(())
     }
 
