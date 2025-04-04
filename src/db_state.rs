@@ -213,6 +213,7 @@ pub(crate) struct DbState {
     memtable: WritableKVTable,
     state: Arc<COWDbState>,
     last_seq: u64,
+    last_committed_seq: u64,
     error: WatchableOnceCell<SlateDBError>,
 }
 
@@ -321,6 +322,7 @@ impl DbState {
             }),
             error: WatchableOnceCell::new(),
             last_seq: last_l0_seq,
+            last_committed_seq: last_l0_seq,
         }
     }
 
@@ -432,6 +434,8 @@ impl DbState {
     }
 
     /// increment_seq is called whenever a new write is performed.
+    /// All the writes is done inside the commit pipeline, which
+    /// locates in a single task.
     pub fn increment_seq(&mut self) -> u64 {
         self.last_seq += 1;
         self.last_seq
