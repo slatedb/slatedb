@@ -102,4 +102,28 @@ mod tests {
 
         assert_eq!(filter_iter.next().await.unwrap(), None);
     }
+
+    #[tokio::test]
+    async fn test_filter_iterator_predicate_builder() {
+        let iter = crate::test_utils::TestIterator::new()
+            .with_entry(b"a", b"val1", 5)
+            .with_entry(b"b", b"val2", 2)
+            .with_entry(b"b", b"val2", 10)
+            .with_entry(b"c", b"val3", 10)
+            .with_entry(b"d", b"val4", 8);
+
+        let now = 1000;
+        let predicate = FilterIteratorPredicateBuilder::new(Some(now), Some(9)).build();
+        let mut filter_iter = FilterIterator::new(iter, Arc::new(predicate));
+
+        assert_iterator(
+            &mut filter_iter,
+            vec![
+                RowEntry::new_value(b"a", b"val1", 5),
+                RowEntry::new_value(b"b", b"val2", 2),
+                RowEntry::new_value(b"d", b"val4", 8),
+            ],
+        )
+        .await;
+    }
 }
