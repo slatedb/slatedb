@@ -174,6 +174,15 @@ impl WalBufferManager {
         Ok(current_wal)
     }
 
+    // await the pending wals to be flushed to remote storage.
+    pub async fn await_flush(&self) -> Result<(), SlateDBError> {
+        let current_wal = self.inner.lock().await.current_wal.clone();
+        if current_wal.is_empty() {
+            return Ok(());
+        }
+        current_wal.await_durable().await
+    }
+
     pub async fn flush(&self) -> Result<(), SlateDBError> {
         let flush_tx = self
             .inner
@@ -374,14 +383,6 @@ impl WalBufferManager {
         }
 
         inner.immutable_wals.drain(..releaseable_count);
-    }
-
-    /// Scan the WAL from the given sequence number. If the seq is None, it'll include the latest
-    /// WALs. The scan includes the current WAL and the immutable WALs.
-    /// it's used for dirty read. will be implemented in another PR.
-    /// TODO: return an kv iterator.
-    pub fn scan(&self, seq: Option<u64>) -> Result<(), SlateDBError> {
-        todo!()
     }
 
     pub async fn close(&self) -> Result<(), SlateDBError> {

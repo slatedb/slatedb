@@ -239,7 +239,7 @@ impl DbInner {
                     "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
                     mem_size_bytes, self.options.max_unflushed_bytes,
                 );
-                tokio::time::sleep(Duration::from_secs(1));
+                tokio::time::sleep(Duration::from_secs(1)).await;
             } else {
                 return Ok(());
             }
@@ -1127,23 +1127,19 @@ impl Db {
     }
 
     pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
-        let table = {
-            let guard = self.inner.state.read();
-            let snapshot = guard.snapshot();
-            if self.inner.wal_enabled() {
-                // TODO(flaneur): FIX THIS BEFORE MERGING
-                /*
-                snapshot.wal.clone()
-                */
-                todo!()
-            } else {
+        if self.inner.wal_enabled() {
+            self.inner.wal_buffer.await_flush().await
+        } else {
+            let table = {
+                let guard = self.inner.state.read();
+                let snapshot = guard.snapshot();
                 snapshot.memtable.clone()
+            };
+            if table.is_empty() {
+                return Ok(());
             }
-        };
-        if table.is_empty() {
-            return Ok(());
+            table.await_durable().await
         }
-        table.await_durable().await
     }
 
     pub fn metrics(&self) -> Arc<StatRegistry> {
