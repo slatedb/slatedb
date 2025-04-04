@@ -475,7 +475,8 @@ mod tests {
     async fn test_compactor_compacts_l0() {
         // given:
         let clock = Arc::new(TestClock::new());
-        let options = db_options(Some(compactor_options()), clock.clone());
+        let mut options = db_options(Some(compactor_options()), clock.clone());
+        options.l0_sst_size_bytes = 128;
         let (_, manifest_store, table_store, db) = build_test_db(options).await;
         for i in 0..4 {
             db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48])
@@ -955,7 +956,7 @@ mod tests {
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),
-            l0_sst_size_bytes: 128,
+            l0_sst_size_bytes: 256,
             l0_max_ssts: 8,
             compactor_options,
             clock,

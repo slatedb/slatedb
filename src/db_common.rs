@@ -13,7 +13,12 @@ impl DbInner {
         guard: &mut RwLockWriteGuard<'_, DbState>,
         wal_id: u64,
     ) -> Result<(), SlateDBError> {
-        if guard.memtable().size() < self.options.l0_sst_size_bytes {
+        let meta = guard.memtable().metadata();
+        if self
+            .table_store
+            .estimate_encoded_size(meta.entry_num, meta.entries_size_in_bytes)
+            < self.options.l0_sst_size_bytes
+        {
             Ok(())
         } else {
             self.freeze_memtable(guard, wal_id)
@@ -59,7 +64,12 @@ impl DbInner {
         // a single WAL table gets added to a single L0 SST. If the WAL table
         // were allowed to grow larger than the L0 SST threshold, the L0 SST
         // size would be greater than the threshold.
-        if guard.wal().size() < self.options.l0_sst_size_bytes {
+        let meta = guard.wal().metadata();
+        if self
+            .table_store
+            .estimate_encoded_size(meta.entry_num, meta.entries_size_in_bytes)
+            < self.options.l0_sst_size_bytes
+        {
             return Ok(());
         }
         guard.freeze_wal()?;
