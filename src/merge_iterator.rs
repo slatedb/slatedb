@@ -7,15 +7,21 @@ use std::collections::{BinaryHeap, VecDeque};
 pub(crate) struct TwoMergeIterator<T1: KeyValueIterator, T2: KeyValueIterator> {
     iterator1: (T1, Option<RowEntry>),
     iterator2: (T2, Option<RowEntry>),
+    max_seq: Option<u64>,
 }
 
 impl<T1: KeyValueIterator, T2: KeyValueIterator> TwoMergeIterator<T1, T2> {
-    pub(crate) async fn new(mut iterator1: T1, mut iterator2: T2) -> Result<Self, SlateDBError> {
+    pub(crate) async fn new(
+        mut iterator1: T1,
+        mut iterator2: T2,
+        max_seq: Option<u64>,
+    ) -> Result<Self, SlateDBError> {
         let next1 = iterator1.next_entry().await?;
         let next2 = iterator2.next_entry().await?;
         Ok(Self {
             iterator1: (iterator1, next1),
             iterator2: (iterator2, next2),
+            max_seq,
         })
     }
 
@@ -135,7 +141,12 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIt
             if peeked_kv.key != current_kv.key {
                 break;
             }
-            if peeked_kv.seq > current_kv.seq {
+            if peeked_kv.seq > current_kv.seq
+                && self
+                    .max_seq
+                    .map(|max_seq| peeked_kv.seq <= max_seq)
+                    .unwrap_or(true)
+            {
                 current_kv = peeked_kv.clone();
             }
             self.advance_inner().await?;
@@ -198,10 +209,14 @@ impl<T: KeyValueIterator> Ord for MergeIteratorHeapEntry<T> {
 pub(crate) struct MergeIterator<T: KeyValueIterator> {
     current: Option<MergeIteratorHeapEntry<T>>,
     iterators: BinaryHeap<Reverse<MergeIteratorHeapEntry<T>>>,
+    max_seq: Option<u64>,
 }
 
 impl<T: KeyValueIterator> MergeIterator<T> {
-    pub(crate) async fn new(mut iterators: VecDeque<T>) -> Result<Self, SlateDBError> {
+    pub(crate) async fn new(
+        mut iterators: VecDeque<T>,
+        max_seq: Option<u64>,
+    ) -> Result<Self, SlateDBError> {
         let mut heap = BinaryHeap::new();
         let mut index = 0;
         while let Some(mut iterator) = iterators.pop_front() {
@@ -217,6 +232,7 @@ impl<T: KeyValueIterator> MergeIterator<T> {
         Ok(Self {
             current: heap.pop().map(|r| r.0),
             iterators: heap,
+            max_seq,
         })
     }
 
@@ -251,7 +267,12 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
             if peeked_entry.key != current_kv.key {
                 break;
             }
-            if peeked_entry.seq > current_kv.seq {
+            if peeked_entry.seq > current_kv.seq
+                && self
+                    .max_seq
+                    .map(|max_seq| peeked_entry.seq <= max_seq)
+                    .unwrap_or(true)
+            {
                 current_kv = peeked_entry.clone();
             }
             self.advance().await?;
@@ -313,7 +334,7 @@ mod tests {
                 .with_entry(b"gggg", b"7777", 0),
         );
 
-        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters, None).await.unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -353,7 +374,7 @@ mod tests {
                 .with_entry(b"xxxx", b"badx1", 3),
         );
 
-        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters, None).await.unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -378,7 +399,7 @@ mod tests {
             .with_entry(b"xxxx", b"24242424", 0)
             .with_entry(b"yyyy", b"25252525", 0);
 
-        let mut merge_iter = TwoMergeIterator::new(iter1, iter2).await.unwrap();
+        let mut merge_iter = TwoMergeIterator::new(iter1, iter2, None).await.unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -403,7 +424,7 @@ mod tests {
             .with_entry(b"cccc", b"badc1", 2)
             .with_entry(b"xxxx", b"24242424", 3);
 
-        let mut merge_iter = TwoMergeIterator::new(iter1, iter2).await.unwrap();
+        let mut merge_iter = TwoMergeIterator::new(iter1, iter2, None).await.unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -431,7 +452,7 @@ mod tests {
                 .with_entry(b"cc", b"cc2", 0),
         );
 
-        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters, None).await.unwrap();
         merge_iter.seek(b"bb".as_ref()).await.unwrap();
 
         assert_iterator(
@@ -459,7 +480,7 @@ mod tests {
                 .with_entry(b"cc", b"cc2", 0),
         );
 
-        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters, None).await.unwrap();
         assert_next_entry(&mut merge_iter, &RowEntry::new_value(b"aa", b"aa1", 0)).await;
 
         merge_iter.seek(b"bb".as_ref()).await.unwrap();
@@ -488,7 +509,7 @@ mod tests {
             .with_entry(b"cc", b"cc2", 6)
             .with_entry(b"ee", b"ee2", 7);
 
-        let mut merge_iter = TwoMergeIterator::new(iter1, iter2).await.unwrap();
+        let mut merge_iter = TwoMergeIterator::new(iter1, iter2, None).await.unwrap();
         merge_iter.seek(b"b".as_ref()).await.unwrap();
 
         assert_iterator(
