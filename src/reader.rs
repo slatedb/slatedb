@@ -2,7 +2,7 @@ use crate::bytes_range::BytesRange;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::db_stats::DbStats;
-use crate::filter_iterator::FilterIterator;
+use crate::filter_iterator::{FilterIterator, FilterIteratorPredicateBuilder};
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, VecDequeKeyValueIterator};
 use crate::reader::SstFilterResult::{
@@ -67,6 +67,7 @@ impl Reader {
         key: K,
         options: &ReadOptions,
         snapshot: &(dyn ReadSnapshot + Sync),
+        max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
         let key = key.as_ref();
         let ttl_now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
@@ -74,7 +75,7 @@ impl Reader {
         if self.include_wal_memtables(options.durability_filter) {
             let maybe_val = std::iter::once(snapshot.wal())
                 .chain(snapshot.imm_wal().iter().map(|imm| imm.table()))
-                .find_map(|memtable| memtable.get(key));
+                .find_map(|memtable| memtable.get(key, max_seq));
             if let Some(val) = maybe_val {
                 return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
             }
@@ -83,7 +84,7 @@ impl Reader {
         if self.include_memtables(options.durability_filter) {
             let maybe_val = std::iter::once(snapshot.memtable())
                 .chain(snapshot.imm_memtable().iter().map(|imm| imm.table()))
-                .find_map(|memtable| memtable.get(key));
+                .find_map(|memtable| memtable.get(key, max_seq));
             if let Some(val) = maybe_val {
                 return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
             }
@@ -99,6 +100,8 @@ impl Reader {
             eager_spawn: true,
             ..SstIteratorOptions::default()
         };
+        let filter_predicate =
+            Arc::new(FilterIteratorPredicateBuilder::new(Some(ttl_now), max_seq).build());
 
         for sst in &snapshot.core().l0 {
             let filter_result = self.sst_might_include_key(sst, key, key_hash).await?;
@@ -109,7 +112,7 @@ impl Reader {
                     SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
                         .await?;
 
-                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
+                let mut ttl_iter = FilterIterator::new(iter, filter_predicate.clone());
                 if let Some(entry) = ttl_iter.next_entry().await? {
                     if entry.key == key {
                         return Ok(entry.value.as_bytes());
@@ -130,7 +133,7 @@ impl Reader {
                     SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
                         .await?;
 
-                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
+                let mut ttl_iter = FilterIterator::new(iter, filter_predicate.clone());
                 if let Some(entry) = ttl_iter.next_entry().await? {
                     if entry.key == key {
                         return Ok(entry.value.as_bytes());
