@@ -12,8 +12,8 @@ use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::iter::SeekToKey;
 use crate::{
-    block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, tablestore::TableStore,
-    types::RowEntry,
+    block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, partitioned_keyspace,
+    tablestore::TableStore, types::RowEntry,
 };
 
 enum FetchTask {
@@ -192,32 +192,12 @@ impl<'a> SstIterator<'a> {
         Self::new_borrowed(key..=key, table, table_store, options).await
     }
 
-    fn first_block_with_data_including_or_after_key(index: &SsTableIndex, key: &[u8]) -> usize {
-        // search for the block that could contain the key.
-        let mut low = 0;
-        let mut high = index.block_meta().len() - 1;
-        // if the key is less than all the blocks' first key, scan the whole sst
-        let mut found_block_id = 0;
+    fn last_block_with_data_including_key(index: &SsTableIndex, key: &[u8]) -> Option<usize> {
+        partitioned_keyspace::last_partition_including_key(index, key)
+    }
 
-        while low <= high {
-            let mid = low + (high - low) / 2;
-            let mid_block_first_key = index.block_meta().get(mid).first_key().bytes();
-            match mid_block_first_key.cmp(key) {
-                std::cmp::Ordering::Less => {
-                    low = mid + 1;
-                    found_block_id = mid;
-                }
-                std::cmp::Ordering::Greater => {
-                    if mid > 0 {
-                        high = mid - 1;
-                    } else {
-                        break;
-                    }
-                }
-                std::cmp::Ordering::Equal => return mid,
-            }
-        }
-        found_block_id
+    fn first_block_with_data_including_or_after_key(index: &SsTableIndex, key: &[u8]) -> usize {
+        partitioned_keyspace::first_partition_including_or_after_key(index, key)
     }
 
     fn blocks_covering_view(index: &SsTableIndex, view: &SstView) -> Range<usize> {
@@ -229,14 +209,21 @@ impl<'a> SstIterator<'a> {
         };
 
         let end_block_id_exclusive = match view.end_key() {
-            Included(k) => Self::first_block_with_data_including_or_after_key(index, k) + 1,
+            Included(k) => Self::last_block_with_data_including_key(index, k)
+                .map(|b| b + 1)
+                .unwrap_or(start_block_id),
             Excluded(k) => {
-                let block_index = Self::first_block_with_data_including_or_after_key(index, k);
-                let block = index.block_meta().get(block_index);
-                if k == block.first_key().bytes() {
-                    block_index
-                } else {
-                    block_index + 1
+                let block_index = Self::last_block_with_data_including_key(index, k);
+                match block_index {
+                    None => start_block_id,
+                    Some(block_index) => {
+                        let block = index.block_meta().get(block_index);
+                        if k == block.first_key().bytes() {
+                            block_index
+                        } else {
+                            block_index + 1
+                        }
+                    }
                 }
             }
             Unbounded => index.block_meta().len(),

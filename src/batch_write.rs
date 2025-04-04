@@ -58,6 +58,8 @@ impl DbInner {
             let mut guard = self.state.write();
 
             let seq = guard.increment_seq();
+            // TODO(flaneur): FIX THIS BEFORE MERGING
+            /*
             let current_wal = guard.wal();
             for op in batch.ops {
                 match op {
@@ -82,9 +84,10 @@ impl DbInner {
                 }
             }
             let table = current_wal.table().clone();
-            // TODO(flaneur): FIX THIS BEFORE MERGING
-            // self.maybe_freeze_wal(&mut guard)?;
+            self.maybe_freeze_wal(&mut guard)?;
             table
+            */
+            todo!()
         } else {
             if cfg!(not(feature = "wal_disable")) {
                 panic!("wal_disabled feature must be enabled");

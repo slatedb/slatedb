@@ -28,11 +28,13 @@ use crate::flatbuffer_types::manifest_generated::{
     UuidArgs,
 };
 use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
+use crate::partitioned_keyspace::RangePartitionedKeySpace;
 use crate::utils::clamp_allocated_size_bytes;
 
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
 
 /// A wrapper around a `Bytes` buffer containing a FlatBuffer-encoded `SsTableIndex`.
+#[derive(PartialEq, Eq)]
 pub(crate) struct SsTableIndexOwned {
     data: Bytes,
 }
@@ -48,6 +50,10 @@ impl SsTableIndexOwned {
         unsafe { flatbuffers::root_unchecked::<SsTableIndex>(raw) }
     }
 
+    pub(crate) fn data(&self) -> Bytes {
+        self.data.clone()
+    }
+
     pub(crate) fn clamp_allocated_size(&self) -> Self {
         Self::new(clamp_allocated_size_bytes(&self.data))
             .expect("clamped buffer could not be decoded to index")
@@ -56,6 +62,16 @@ impl SsTableIndexOwned {
     /// Returns the size of the SSTable index in bytes.
     pub(crate) fn size(&self) -> usize {
         self.data.len()
+    }
+}
+
+impl RangePartitionedKeySpace for SsTableIndex<'_> {
+    fn partitions(&self) -> usize {
+        self.block_meta().len()
+    }
+
+    fn partition_first_key(&self, partition: usize) -> &[u8] {
+        self.block_meta().get(partition).first_key().bytes()
     }
 }
 

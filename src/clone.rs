@@ -40,6 +40,7 @@ pub(crate) async fn create_clone<P: Into<Path>>(
         parent_path.to_string(),
         parent_checkpoint,
         object_store.clone(),
+        fp_registry.clone(),
     )
     .await?;
 
@@ -67,6 +68,7 @@ async fn create_clone_manifest(
     parent_path: String,
     parent_checkpoint_id: Option<Uuid>,
     object_store: Arc<dyn ObjectStore>,
+    #[allow(unused)] fp_registry: Arc<FailPointRegistry>,
 ) -> Result<StoredManifest, SlateDBError> {
     let clone_manifest = match StoredManifest::try_load(clone_manifest_store.clone()).await? {
         Some(initialized_clone_manifest) if initialized_clone_manifest.db_state().initialized => {
@@ -110,6 +112,10 @@ async fn create_clone_manifest(
             .await?
         }
     };
+
+    fail_point!(fp_registry, "create-clone-manifest-io-error", |_| Err(
+        SlateDBError::from(std::io::Error::new(std::io::ErrorKind::Other, "oops"))
+    ));
 
     // Ensure all external databases contain the final checkpoint.
     for external_db in &clone_manifest.manifest().external_dbs {
@@ -273,7 +279,7 @@ async fn copy_wal_ssts(
 
     let mut wal_id = parent_checkpoint_state.last_compacted_wal_sst_id + 1;
     while wal_id < parent_checkpoint_state.next_wal_sst_id {
-        fail_point!(Arc::clone(&fp_registry), "copy-wal-ssts-io-error", |_| Err(
+        fail_point!(fp_registry.clone(), "copy-wal-ssts-io-error", |_| Err(
             SlateDBError::from(std::io::Error::new(std::io::ErrorKind::Other, "oops"))
         ));
 
@@ -631,5 +637,69 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_fail_retry_if_source_checkpoint_is_missing() -> Result<(), SlateDBError> {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent");
+        let clone_path = Path::from("/tmp/test_clone");
+
+        let parent_db = Db::open(parent_path.clone(), Arc::clone(&object_store)).await?;
+        let mut rng = rng::new_test_rng(None);
+        test_utils::seed_database(&parent_db, &sample::table(&mut rng, 100, 10), false).await?;
+        let checkpoint = parent_db
+            .create_checkpoint(
+                CheckpointScope::All { force_flush: true },
+                &CheckpointOptions::default(),
+            )
+            .await?;
+        parent_db.close().await?;
+
+        fail_parallel::cfg(
+            Arc::clone(&fp_registry),
+            "create-clone-manifest-io-error",
+            "return",
+        )
+        .unwrap();
+
+        let err = create_clone(
+            clone_path.clone(),
+            parent_path.clone(),
+            Arc::clone(&object_store),
+            Some(checkpoint.id),
+            Arc::clone(&fp_registry),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, SlateDBError::IoError(_)));
+
+        fail_parallel::cfg(
+            Arc::clone(&fp_registry),
+            "create-clone-manifest-io-error",
+            "off",
+        )
+        .unwrap();
+
+        // Delete the checkpoint from the parent database
+        let parent_manifest_store =
+            Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
+        let mut parent_manifest = StoredManifest::load(parent_manifest_store).await?;
+        parent_manifest.delete_checkpoint(checkpoint.id).await?;
+
+        // Attempting to clone with a missing checkpoint should fail
+        let err = create_clone(
+            clone_path.clone(),
+            parent_path.clone(),
+            Arc::clone(&object_store),
+            Some(checkpoint.id),
+            Arc::clone(&fp_registry),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, SlateDBError::CheckpointMissing(id) if id == checkpoint.id));
+
+        Ok(())
     }
 }

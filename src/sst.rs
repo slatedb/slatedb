@@ -15,6 +15,7 @@ use crate::flatbuffer_types::{
     SsTableIndexOwned,
 };
 use crate::types::RowEntry;
+use crate::utils::compute_index_key;
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
 
@@ -361,6 +362,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     index_builder: flatbuffers::FlatBufferBuilder<'a, DefaultAllocator>,
     first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
     sst_first_key: Option<Bytes>,
+    current_block_max_key: Option<Bytes>,
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'a>>>,
     current_len: u64,
     blocks: VecDeque<Bytes>,
@@ -387,6 +389,7 @@ impl EncodedSsTableBuilder<'_> {
             block_meta: Vec::new(),
             first_key: None,
             sst_first_key: None,
+            current_block_max_key: None,
             block_size,
             builder: BlockBuilder::new(block_size),
             min_filter_keys,
@@ -442,6 +445,9 @@ impl EncodedSsTableBuilder<'_> {
         self.num_keys += 1;
         let key = entry.key.clone();
 
+        let index_key = compute_index_key(self.current_block_max_key.take(), &key);
+        self.current_block_max_key = Some(key.clone());
+
         if !self.builder.add(entry.clone()) {
             // Create a new block builder and append block data
             if let Some(block) = self.finish_block()? {
@@ -451,10 +457,12 @@ impl EncodedSsTableBuilder<'_> {
 
             // New block must always accept the first KV pair
             assert!(self.builder.add(entry));
-            self.first_key = Some(self.index_builder.create_vector(&key));
+
+            self.first_key = Some(self.index_builder.create_vector(&index_key));
         } else if self.sst_first_key.is_none() {
             self.sst_first_key = Some(Bytes::copy_from_slice(&key));
-            self.first_key = Some(self.index_builder.create_vector(&key));
+
+            self.first_key = Some(self.index_builder.create_vector(&index_key));
         }
 
         self.filter_builder.add_key(&key);
@@ -803,9 +811,9 @@ mod tests {
             "first key in sst info should be correct after reading from store"
         );
         assert_eq!(
-            b"key1",
+            b"",
             index.borrow().block_meta().get(0).first_key().bytes(),
-            "first key in block meta should be correct after reading from store"
+            "index key in block meta should be correct after reading from store"
         );
 
         // Validate filter presence
