@@ -15,7 +15,7 @@ use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator, SeekToKey};
 use crate::merge_iterator::MergeIterator;
 use crate::types::RowEntry;
-use crate::utils::WatchableOnceCell;
+use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 
 /// Memtable may contains multiple versions of a single user key, with a monotonically increasing sequence number.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -133,7 +133,7 @@ impl VecDequeKeyValueIterator {
             .iter()
             .map(|t| t.range_ascending(range.clone()))
             .collect();
-        let mut merge_iter = MergeIterator::new(memtable_iters).await?;
+        let mut merge_iter = MergeIterator::new(memtable_iters, None).await?;
         let mut rows = VecDeque::new();
 
         while let Some(row_entry) = merge_iter.next_entry().await? {
@@ -309,7 +309,7 @@ impl KVTable {
         }
     }
 
-    fn put(&self, row: RowEntry) {
+    pub(crate) fn put(&self, row: RowEntry) {
         self.size.fetch_add(row.estimated_size(), Ordering::Relaxed);
         let internal_key = KVTableInternalKey::new(row.key.clone(), row.seq);
         let previous_size = Cell::new(None);
@@ -339,6 +339,10 @@ impl KVTable {
 
     pub(crate) async fn await_durable(&self) -> Result<(), SlateDBError> {
         self.durable.reader().await_value().await
+    }
+
+    pub(crate) fn watch_durable(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
+        self.durable.reader()
     }
 
     pub(crate) fn notify_durable(&self, result: Result<(), SlateDBError>) {
@@ -450,7 +454,7 @@ mod tests {
 
         // in merge iterator, it should only return one entry
         let iter = table.table().iter();
-        let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter]))
+        let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter]), None)
             .await
             .unwrap();
         assert_iterator(

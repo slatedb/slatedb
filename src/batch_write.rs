@@ -31,7 +31,7 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 
 use crate::types::{RowEntry, ValueDeletable};
-use crate::utils::spawn_bg_task;
+use crate::utils::{spawn_bg_task, WatchableOnceCellReader};
 use crate::{
     batch::{WriteBatch, WriteOp},
     db::DbInner,
@@ -46,80 +46,59 @@ pub(crate) enum WriteBatchMsg {
 
 pub(crate) struct WriteBatchRequest {
     pub(crate) batch: WriteBatch,
-    pub(crate) done: tokio::sync::oneshot::Sender<Result<Arc<KVTable>, SlateDBError>>,
+    pub(crate) done: tokio::sync::oneshot::Sender<
+        Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError>,
+    >,
 }
 
 impl DbInner {
     #[allow(clippy::panic)]
-    async fn write_batch(&self, batch: WriteBatch) -> Result<Arc<KVTable>, SlateDBError> {
+    async fn write_batch(
+        &self,
+        batch: WriteBatch,
+    ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
         let now = self.mono_clock.now().await?;
-
-        let current_table = if self.wal_enabled() {
-            let mut guard = self.state.write();
-
-            let seq = guard.increment_seq();
-            let current_wal = guard.wal();
-            for op in batch.ops {
-                match op {
-                    WriteOp::Put(key, value, opts) => {
-                        current_wal.put(RowEntry {
-                            key,
-                            value: ValueDeletable::Value(value),
-                            create_ts: Some(now),
-                            expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
-                            seq,
-                        });
-                    }
-                    WriteOp::Delete(key) => {
-                        current_wal.put(RowEntry {
-                            key,
-                            value: ValueDeletable::Tombstone,
-                            create_ts: Some(now),
-                            expire_ts: None,
-                            seq,
-                        });
-                    }
-                }
+        let seq = self.state.write().increment_seq();
+        for op in batch.ops {
+            let row_entry = match op {
+                WriteOp::Put(key, value, opts) => RowEntry {
+                    key,
+                    value: ValueDeletable::Value(value),
+                    create_ts: Some(now),
+                    expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
+                    seq,
+                },
+                WriteOp::Delete(key) => RowEntry {
+                    key,
+                    value: ValueDeletable::Tombstone,
+                    create_ts: Some(now),
+                    expire_ts: None,
+                    seq,
+                },
+            };
+            if self.wal_enabled() {
+                self.wal_buffer.append(&[row_entry.clone()]).await?;
             }
-            let table = current_wal.table().clone();
-            self.maybe_freeze_wal(&mut guard)?;
-            table
+            // we do not need to lock the memtable in mid of the commit pipeline
+            // the writes will not visible to the reader until the last_committed_seq
+            // is updated.
+            self.state.write().memtable().put(row_entry);
+        }
+
+        let durable_watcher = if self.wal_enabled() {
+            let current_wal = self.wal_buffer.maybe_trigger_flush().await?;
+            // TODO: handle sync here, if sync is enabled, we can call `flush` here.
+            current_wal.watch_durable()
         } else {
-            if cfg!(not(feature = "wal_disable")) {
-                panic!("wal_disabled feature must be enabled");
-            }
-            let mut guard = self.state.write();
-            let seq = guard.increment_seq();
-            let current_memtable = guard.memtable();
-            for op in batch.ops {
-                match op {
-                    WriteOp::Put(key, value, opts) => {
-                        current_memtable.put(RowEntry {
-                            key,
-                            value: ValueDeletable::Value(value),
-                            create_ts: Some(now),
-                            expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
-                            seq,
-                        });
-                    }
-                    WriteOp::Delete(key) => {
-                        current_memtable.put(RowEntry {
-                            key,
-                            value: ValueDeletable::Tombstone,
-                            create_ts: Some(now),
-                            expire_ts: None,
-                            seq,
-                        });
-                    }
-                }
-            }
-            let table = current_memtable.table().clone();
-            let last_wal_id = guard.last_written_wal_id();
-            self.maybe_freeze_memtable(&mut guard, last_wal_id)?;
-            table
+            self.state.write().memtable().table().watch_durable()
         };
 
-        Ok(current_table)
+        // TODO: handle the last_written_wal_id here.
+        let mut guard = self.state.write();
+        let last_wal_id = guard.last_written_wal_id();
+        self.maybe_freeze_memtable(&mut guard, last_wal_id)?;
+
+        Ok(durable_watcher)
     }
 
     pub(crate) fn spawn_write_task(

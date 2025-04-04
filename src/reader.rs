@@ -36,9 +36,7 @@ impl SstFilterResult {
 
 pub(crate) trait ReadSnapshot {
     fn memtable(&self) -> Arc<KVTable>;
-    fn wal(&self) -> Arc<KVTable>;
     fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>>;
-    fn imm_wal(&self) -> &VecDeque<Arc<ImmutableWal>>;
     fn core(&self) -> &CoreDbState;
 }
 
@@ -72,12 +70,15 @@ impl Reader {
         let ttl_now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
 
         if self.include_wal_memtables(options.durability_filter) {
+            // TODO(flaneur): FIX THIS BEFORE MERGING
+            /*
             let maybe_val = std::iter::once(snapshot.wal())
                 .chain(snapshot.imm_wal().iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key));
             if let Some(val) = maybe_val {
                 return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
             }
+            */
         }
 
         if self.include_memtables(options.durability_filter) {
@@ -153,10 +154,14 @@ impl Reader {
         let mut memtables = VecDeque::new();
 
         if self.include_wal_memtables(options.durability_filter) {
+            // TODO(flaneur): FIX THIS BEFORE MERGING
+            /*
             memtables.push_back(Arc::clone(&snapshot.wal()));
             for imm_wal in snapshot.imm_wal() {
                 memtables.push_back(imm_wal.table());
             }
+            */
+            todo!()
         }
 
         if self.include_memtables(options.durability_filter) {
@@ -202,7 +207,8 @@ impl Reader {
             sr_iters.push_back(iter);
         }
 
-        DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters).await
+        // TODO(flaneur): load max committed seq here
+        DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters, None).await
     }
 
     fn unwrap_value_if_not_expired(entry: &RowEntry, now_ttl: i64) -> Option<Bytes> {
