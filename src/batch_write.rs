@@ -86,9 +86,9 @@ impl DbInner {
         }
 
         let durable_watcher = if self.wal_enabled() {
-            self.wal_buffer.maybe_trigger_flush().await?;
+            let current_wal = self.wal_buffer.maybe_trigger_flush().await?;
             // TODO: handle sync here, if sync is enabled, we can call `flush` here.
-            self.wal_buffer.watch_durable().await
+            current_wal.watch_durable()
         } else {
             self.state.write().memtable().table().watch_durable()
         };

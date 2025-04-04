@@ -183,11 +183,6 @@ impl WalBufferManager {
         current_wal.await_durable().await
     }
 
-    pub async fn watch_durable(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
-        let current_wal = self.inner.lock().await.current_wal.clone();
-        current_wal.watch_durable()
-    }
-
     pub async fn flush(&self) -> Result<(), SlateDBError> {
         let flush_tx = self
             .inner
