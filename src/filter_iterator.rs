@@ -15,7 +15,7 @@ impl FilterIteratorPredicateBuilder {
         Self { ttl_now, max_seq }
     }
 
-    pub(crate) fn build(self) -> Box<dyn Fn(&RowEntry) -> bool + Send> {
+    pub(crate) fn build(self) -> Box<dyn Fn(&RowEntry) -> bool + Send + Sync> {
         Box::new(move |entry: &RowEntry| {
             let not_expired = self
                 .ttl_now
@@ -32,11 +32,14 @@ impl FilterIteratorPredicateBuilder {
 
 pub(crate) struct FilterIterator<T: KeyValueIterator> {
     iterator: T,
-    predicate: Arc<dyn Fn(&RowEntry) -> bool + Send>,
+    predicate: Arc<dyn Fn(&RowEntry) -> bool + Send + Sync>,
 }
 
 impl<T: KeyValueIterator> FilterIterator<T> {
-    pub(crate) fn new(iterator: T, predicate: Arc<dyn Fn(&RowEntry) -> bool + Send>) -> Self {
+    pub(crate) fn new(
+        iterator: T,
+        predicate: Arc<dyn Fn(&RowEntry) -> bool + Send + Sync>,
+    ) -> Self {
         Self {
             predicate,
             iterator,

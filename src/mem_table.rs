@@ -283,14 +283,13 @@ impl KVTable {
         ));
         self.map
             .range(range)
-            .filter(|entry| {
+            .find(|entry| {
                 if let Some(max_seq) = max_seq {
                     entry.key().seq <= max_seq
                 } else {
                     true
                 }
             })
-            .next()
             .map(|entry| entry.value().clone())
     }
 
