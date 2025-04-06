@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::iter::KeyValueIterator;
 use crate::types::RowEntry;
 use crate::utils::is_not_expired;
@@ -7,13 +5,13 @@ use crate::SlateDBError;
 
 pub(crate) struct FilterIterator<T: KeyValueIterator> {
     iterator: T,
-    predicate: Arc<dyn Fn(&RowEntry) -> bool + Send + Sync>,
+    predicate: Box<dyn Fn(&RowEntry) -> bool + Send + Sync>,
 }
 
 impl<T: KeyValueIterator> FilterIterator<T> {
     pub(crate) fn new(
         iterator: T,
-        predicate: Arc<dyn Fn(&RowEntry) -> bool + Send + Sync>,
+        predicate: Box<dyn Fn(&RowEntry) -> bool + Send + Sync>,
     ) -> Self {
         Self {
             predicate,
@@ -21,18 +19,19 @@ impl<T: KeyValueIterator> FilterIterator<T> {
         }
     }
 
+    #[allow(unused)]
     pub(crate) fn new_with_ttl_now(iterator: T, ttl_now: i64) -> Self {
-        let predicate = Arc::new(move |entry: &RowEntry| is_not_expired(entry, ttl_now));
+        let predicate = Box::new(move |entry: &RowEntry| is_not_expired(entry, ttl_now));
         Self::new(iterator, predicate)
     }
 
     pub(crate) fn new_with_max_seq(iterator: T, max_seq: Option<u64>) -> Self {
         match max_seq {
             Some(max_seq) => {
-                let predicate = Arc::new(move |entry: &RowEntry| entry.seq <= max_seq);
+                let predicate = Box::new(move |entry: &RowEntry| entry.seq <= max_seq);
                 Self::new(iterator, predicate)
             }
-            None => Self::new(iterator, Arc::new(|_| true)),
+            None => Self::new(iterator, Box::new(|_| true)),
         }
     }
 }
@@ -68,7 +67,7 @@ mod tests {
         let filter_entry =
             move |entry: &RowEntry| -> bool { entry.key.len() == 4 && entry.value.len() == 4 };
 
-        let mut filter_iter = FilterIterator::new(iter, Arc::new(filter_entry));
+        let mut filter_iter = FilterIterator::new(iter, Box::new(filter_entry));
 
         assert_iterator(
             &mut filter_iter,
@@ -91,7 +90,7 @@ mod tests {
         let filter_entry =
             move |entry: &RowEntry| -> bool { entry.key.len() == 4 && entry.value.len() == 4 };
 
-        let mut filter_iter = FilterIterator::new(iter, Arc::new(filter_entry));
+        let mut filter_iter = FilterIterator::new(iter, Box::new(filter_entry));
 
         assert_eq!(filter_iter.next().await.unwrap(), None);
     }
