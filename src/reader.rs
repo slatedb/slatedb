@@ -76,14 +76,14 @@ impl Reader {
         let get = LevelGet {
             key: key.as_ref(),
             max_seq,
-            snapshot: snapshot,
+            snapshot,
             table_store: self.table_store.clone(),
             db_stats: self.db_stats.clone(),
             now,
             include_wal_memtables: self.include_wal_memtables(options.durability_filter),
             include_memtables: self.include_memtables(options.durability_filter),
         };
-        Ok(get.get().await?)
+        get.get().await
     }
 
     pub(crate) async fn scan_with_options<'a>(
