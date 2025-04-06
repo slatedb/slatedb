@@ -11,7 +11,7 @@ use crate::reader::SstFilterResult::{
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
-use crate::types::RowEntry;
+use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{get_now_for_read, is_not_expired, MonotonicClock};
 use crate::{filter, DbIterator, SlateDBError};
 use bytes::Bytes;
@@ -72,14 +72,14 @@ impl Reader {
         snapshot: &(dyn ReadSnapshot + Sync + Send),
         max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
+        let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
         let get = LevelGet {
             key: key.as_ref(),
-            options,
             max_seq,
             snapshot: snapshot,
             table_store: self.table_store.clone(),
             db_stats: self.db_stats.clone(),
-            mono_clock: self.mono_clock.clone(),
+            now,
             include_wal_memtables: self.include_wal_memtables(options.durability_filter),
             include_memtables: self.include_memtables(options.durability_filter),
         };
@@ -150,12 +150,11 @@ impl Reader {
 
 struct LevelGet<'a> {
     key: &'a [u8],
-    options: &'a ReadOptions,
     max_seq: Option<u64>,
     snapshot: &'a (dyn ReadSnapshot + Sync + Send),
     table_store: Arc<TableStore>,
     db_stats: DbStats,
-    mono_clock: Arc<MonotonicClock>,
+    now: i64,
     include_wal_memtables: bool,
     include_memtables: bool,
 }
@@ -175,19 +174,19 @@ impl<'a> LevelGet<'a> {
         &'a self,
         getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>>,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        let ttl_now =
-            get_now_for_read(self.mono_clock.clone(), self.options.durability_filter).await?;
-
         for getter in getters {
             let result = match getter.await? {
                 Some(result) => result,
                 None => continue,
             };
-            if is_not_expired(&result, ttl_now) {
-                return Ok(result.value.as_bytes());
-            } else {
+
+            // expired is semantically equivalent to a tombstone. tombstone does not have an expiration.
+            let is_tombstone = matches!(result.value, ValueDeletable::Tombstone);
+            let is_expired = !is_not_expired(&result, self.now);
+            if is_tombstone || is_expired {
                 return Ok(None);
             }
+            return Ok(result.value.as_bytes());
         }
         Ok(None)
     }
@@ -357,5 +356,204 @@ impl<'a> LevelGet<'a> {
         } else if matches!(result, FilterNegative) {
             self.db_stats.sst_filter_negatives.inc();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{sst::SsTableFormat, stats::StatRegistry, types::ValueDeletable};
+    use object_store::{memory::InMemory, path::Path};
+    use rstest::rstest;
+
+    struct MockReadSnapshot {
+        memtable: Arc<KVTable>,
+        wal: Arc<KVTable>,
+        imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
+        imm_wal: VecDeque<Arc<ImmutableWal>>,
+    }
+
+    impl ReadSnapshot for MockReadSnapshot {
+        fn memtable(&self) -> Arc<KVTable> {
+            self.memtable.clone()
+        }
+
+        fn wal(&self) -> Arc<KVTable> {
+            self.wal.clone()
+        }
+
+        fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>> {
+            &self.imm_memtable
+        }
+
+        fn imm_wal(&self) -> &VecDeque<Arc<ImmutableWal>> {
+            &self.imm_wal
+        }
+
+        fn core(&self) -> &CoreDbState {
+            todo!()
+        }
+    }
+
+    fn mock_read_snapshot() -> MockReadSnapshot {
+        MockReadSnapshot {
+            memtable: Arc::new(KVTable::new()),
+            wal: Arc::new(KVTable::new()),
+            imm_memtable: VecDeque::new(),
+            imm_wal: VecDeque::new(),
+        }
+    }
+
+    fn mock_level_getters<'a>(
+        row_entries: Vec<Option<RowEntry>>,
+    ) -> Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> {
+        row_entries
+            .into_iter()
+            .map(|entry| async move { Ok(entry) }.boxed())
+            .collect()
+    }
+
+    struct LevelGetExpireTestCase {
+        entries: Vec<Option<RowEntry>>,
+        expected: Option<Bytes>,
+    }
+
+    #[tokio::test]
+    #[rstest]
+    #[case(LevelGetExpireTestCase {
+        entries: vec![
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v1")),
+                10,
+                Some(10000 - 2000),
+                Some(10000 - 1000),
+            )), // already expired, should be None
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v2")),
+                9,
+                Some(10000 - 3000),
+                Some(10000 + 4000),
+            )), // not expired
+        ],
+        expected: None,
+    })]
+    #[case(LevelGetExpireTestCase {
+        entries: vec![
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v1")),
+                10,
+                Some(10000 - 2000),
+                Some(10000 + 1000),
+            )), // not expired
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v2")),
+                9,
+                Some(10000 - 5000),
+                Some(10000 - 4000),
+            )), // expired
+        ],
+        expected: Some(Bytes::from_static(b"v1")),
+    })]
+    #[case(LevelGetExpireTestCase {
+        entries: vec![
+            None,
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v2")),
+                9,
+                Some(10000 - 5000),
+                Some(10000 + 4000),
+            )), // not expired
+        ],
+        expected: Some(Bytes::from_static(b"v2")),
+    })]
+    #[case(LevelGetExpireTestCase {
+        entries: vec![
+            None,
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Tombstone,
+                9,
+                Some(10000 - 5000),
+                Some(10000 + 4000),
+            )), // tombstone
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v2")),
+                9,
+                Some(10000 - 5000),
+                None, // no expiration
+            )), // not expired
+        ],
+        expected: None,
+    })]
+    #[case(LevelGetExpireTestCase {
+        entries: vec![
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Tombstone,
+                9,
+                Some(10000 - 5000),
+                Some(10000 + 4000),
+            )), // tombstone
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v2")),
+                9,
+                Some(10000 - 5000),
+                None, // no expiration
+            )), // not expired
+        ],
+        expected: None,
+    })]
+    #[case(LevelGetExpireTestCase {
+        entries: vec![
+            None,
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v1")),
+                9,
+                Some(10000 - 5000),
+                Some(10000 + 4000), // not expired
+            )), // tombstone
+            None,
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Tombstone,
+                9,
+                Some(10000 - 5000),
+                None, // no expiration
+            )), // not expired
+        ],
+        expected: Some(Bytes::from_static(b"v1")),
+    })]
+    async fn test_level_get_handles_expire(
+        #[case] test_case: LevelGetExpireTestCase,
+    ) -> Result<(), SlateDBError> {
+        let mock_read_snapshot = mock_read_snapshot();
+        let stat_registry = StatRegistry::new();
+        let get = LevelGet {
+            key: b"key",
+            max_seq: None,
+            snapshot: &mock_read_snapshot,
+            table_store: Arc::new(TableStore::new(
+                Arc::new(InMemory::new()),
+                SsTableFormat::default(),
+                Path::from(""),
+                None,
+            )),
+            db_stats: DbStats::new(&stat_registry),
+            now: 10000,
+            include_wal_memtables: false,
+            include_memtables: false,
+        };
+
+        let result = get.get_inner(mock_level_getters(test_case.entries)).await?;
+        assert_eq!(result, test_case.expected);
+        Ok(())
     }
 }
