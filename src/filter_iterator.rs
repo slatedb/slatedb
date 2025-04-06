@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use crate::iter::KeyValueIterator;
 use crate::types::RowEntry;
 use crate::utils::is_not_expired;
@@ -5,11 +7,14 @@ use crate::SlateDBError;
 
 pub(crate) struct FilterIterator<T: KeyValueIterator> {
     iterator: T,
-    predicate: Box<dyn Fn(&RowEntry) -> bool + Send>,
+    predicate: Box<dyn Fn(&RowEntry) -> bool + Send + Sync>,
 }
 
 impl<T: KeyValueIterator> FilterIterator<T> {
-    pub(crate) fn new(iterator: T, predicate: Box<dyn Fn(&RowEntry) -> bool + Send>) -> Self {
+    pub(crate) fn new(
+        iterator: T,
+        predicate: Box<dyn Fn(&RowEntry) -> bool + Send + Sync>,
+    ) -> Self {
         Self {
             predicate,
             iterator,
@@ -22,6 +27,7 @@ impl<T: KeyValueIterator> FilterIterator<T> {
     }
 }
 
+#[async_trait]
 impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         while let Some(entry) = self.iterator.next_entry().await? {

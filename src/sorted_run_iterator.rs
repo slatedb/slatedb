@@ -5,6 +5,7 @@ use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstView};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
+use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
@@ -117,6 +118,7 @@ impl<'a> SortedRunIterator<'a> {
     }
 }
 
+#[async_trait]
 impl KeyValueIterator for SortedRunIterator<'_> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         while let Some(iter) = &mut self.current_iter {
@@ -130,6 +132,7 @@ impl KeyValueIterator for SortedRunIterator<'_> {
     }
 }
 
+#[async_trait]
 impl SeekToKey for SortedRunIterator<'_> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         while let Some(next_table) = self.view.peek_next_table() {
