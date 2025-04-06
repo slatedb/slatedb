@@ -2,7 +2,7 @@ use crate::bytes_range::BytesRange;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::db_stats::DbStats;
-use crate::filter_iterator::{FilterIterator, FilterIteratorPredicateBuilder};
+use crate::filter_iterator::FilterIterator;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, VecDequeKeyValueIterator};
 use crate::reader::SstFilterResult::{
@@ -62,6 +62,7 @@ impl Reader {
         }
     }
 
+    /// Get the value for the given key, and return None if the value is expired.
     pub(crate) async fn get_with_options<K: AsRef<[u8]>>(
         &self,
         key: K,
@@ -69,15 +70,31 @@ impl Reader {
         snapshot: &(dyn ReadSnapshot + Sync),
         max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        let key = key.as_ref();
         let ttl_now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
+        let entry = self
+            .get_with_options_inner(key, options, snapshot, max_seq)
+            .await?;
+        match entry {
+            Some(entry) => Ok(Self::unwrap_value_if_not_expired(&entry, ttl_now)),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn get_with_options_inner<K: AsRef<[u8]>>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+        snapshot: &(dyn ReadSnapshot + Sync),
+        max_seq: Option<u64>,
+    ) -> Result<Option<RowEntry>, SlateDBError> {
+        let key = key.as_ref();
 
         if self.include_wal_memtables(options.durability_filter) {
             let maybe_val = std::iter::once(snapshot.wal())
                 .chain(snapshot.imm_wal().iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key, max_seq));
             if let Some(val) = maybe_val {
-                return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
+                return Ok(Some(val));
             }
         }
 
@@ -86,7 +103,7 @@ impl Reader {
                 .chain(snapshot.imm_memtable().iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(key, max_seq));
             if let Some(val) = maybe_val {
-                return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
+                return Ok(Some(val));
             }
         }
 
@@ -100,8 +117,6 @@ impl Reader {
             eager_spawn: true,
             ..SstIteratorOptions::default()
         };
-        let filter_predicate =
-            Arc::new(FilterIteratorPredicateBuilder::new(Some(ttl_now), max_seq).build());
 
         for sst in &snapshot.core().l0 {
             let filter_result = self.sst_might_include_key(sst, key, key_hash).await?;
@@ -112,10 +127,10 @@ impl Reader {
                     SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
                         .await?;
 
-                let mut ttl_iter = FilterIterator::new(iter, filter_predicate.clone());
-                if let Some(entry) = ttl_iter.next_entry().await? {
+                let mut iter = FilterIterator::new_with_max_seq(iter, max_seq);
+                if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return Ok(entry.value.as_bytes());
+                        return Ok(Some(entry));
                     }
                 }
                 if matches!(filter_result, FilterPositive) {
@@ -133,10 +148,10 @@ impl Reader {
                     SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
                         .await?;
 
-                let mut ttl_iter = FilterIterator::new(iter, filter_predicate.clone());
-                if let Some(entry) = ttl_iter.next_entry().await? {
+                let mut iter = FilterIterator::new_with_max_seq(iter, max_seq);
+                if let Some(entry) = iter.next_entry().await? {
                     if entry.key == key {
-                        return Ok(entry.value.as_bytes());
+                        return Ok(Some(entry));
                     }
                 }
                 if matches!(filter_result, FilterPositive) {

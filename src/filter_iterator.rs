@@ -5,31 +5,6 @@ use crate::types::RowEntry;
 use crate::utils::is_not_expired;
 use crate::SlateDBError;
 
-pub(crate) struct FilterIteratorPredicateBuilder {
-    ttl_now: Option<i64>,
-    max_seq: Option<u64>,
-}
-
-impl FilterIteratorPredicateBuilder {
-    pub(crate) fn new(ttl_now: Option<i64>, max_seq: Option<u64>) -> Self {
-        Self { ttl_now, max_seq }
-    }
-
-    pub(crate) fn build(self) -> Box<dyn Fn(&RowEntry) -> bool + Send + Sync> {
-        Box::new(move |entry: &RowEntry| {
-            let not_expired = self
-                .ttl_now
-                .map(|ttl_now| is_not_expired(entry, ttl_now))
-                .unwrap_or(true);
-            let seq_ok = self
-                .max_seq
-                .map(|max_seq| entry.seq <= max_seq)
-                .unwrap_or(true);
-            not_expired && seq_ok
-        })
-    }
-}
-
 pub(crate) struct FilterIterator<T: KeyValueIterator> {
     iterator: T,
     predicate: Arc<dyn Fn(&RowEntry) -> bool + Send + Sync>,
@@ -43,6 +18,21 @@ impl<T: KeyValueIterator> FilterIterator<T> {
         Self {
             predicate,
             iterator,
+        }
+    }
+
+    pub(crate) fn new_with_ttl_now(iterator: T, ttl_now: i64) -> Self {
+        let predicate = Arc::new(move |entry: &RowEntry| is_not_expired(entry, ttl_now));
+        Self::new(iterator, predicate)
+    }
+
+    pub(crate) fn new_with_max_seq(iterator: T, max_seq: Option<u64>) -> Self {
+        match max_seq {
+            Some(max_seq) => {
+                let predicate = Arc::new(move |entry: &RowEntry| entry.seq <= max_seq);
+                Self::new(iterator, predicate)
+            }
+            None => Self::new(iterator, Arc::new(|_| true)),
         }
     }
 }
@@ -115,9 +105,7 @@ mod tests {
             .with_entry(b"c", b"val3", 10)
             .with_entry(b"d", b"val4", 8);
 
-        let now = 1000;
-        let predicate = FilterIteratorPredicateBuilder::new(Some(now), Some(9)).build();
-        let mut filter_iter = FilterIterator::new(iter, Arc::new(predicate));
+        let mut filter_iter = FilterIterator::new_with_max_seq(iter, Some(9));
 
         assert_iterator(
             &mut filter_iter,
