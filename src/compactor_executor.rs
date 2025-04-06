@@ -13,13 +13,14 @@ use crate::compactor::WorkerToOrchestratorMsg::CompactionFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 
 use crate::compactor::stats::CompactionStats;
+use crate::iter::IterationOrder::Ascending;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
 use crate::utils::spawn_bg_task;
@@ -107,6 +108,7 @@ impl TokioCompactionExecutorInner {
             blocks_to_fetch: 256,
             cache_blocks: false, // don't clobber the cache
             eager_spawn: true,
+            order: IterationOrder::Ascending,
         };
 
         let mut l0_iters = VecDeque::new();
@@ -116,7 +118,7 @@ impl TokioCompactionExecutorInner {
                     .await?,
             );
         }
-        let l0_merge_iter = MergeIterator::new(l0_iters).await?;
+        let l0_merge_iter = MergeIterator::new(l0_iters, Ascending).await?;
 
         let mut sr_iters = VecDeque::new();
         for sr in compaction.sorted_runs.iter() {
@@ -125,7 +127,7 @@ impl TokioCompactionExecutorInner {
                     .await?;
             sr_iters.push_back(iter);
         }
-        let sr_merge_iter = MergeIterator::new(sr_iters).await?;
+        let sr_merge_iter = MergeIterator::new(sr_iters, Ascending).await?;
         TwoMergeIterator::new(l0_merge_iter, sr_merge_iter).await
     }
 

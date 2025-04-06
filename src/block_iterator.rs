@@ -48,7 +48,7 @@ pub struct BlockIterator<B: BlockLike> {
     // first key in the block, because slateDB does not support multi version of keys
     // so we use `Bytes` temporarily
     first_key: Bytes,
-    ordering: IterationOrder,
+    order: IterationOrder,
 }
 
 impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
@@ -67,33 +67,28 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
 
 impl<B: BlockLike> SeekToKey for BlockIterator<B> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        loop {
-            let result = self.load_at_current_off();
-            match result {
-                Ok(None) => return Ok(()),
-                Ok(Some(kv)) => {
-                    if kv.key < next_key {
-                        self.advance();
-                    } else {
-                        return Ok(());
-                    }
-                }
-                Err(e) => return Err(e),
+        while let Some(kv) = self.load_at_current_off()? {
+            if self.order.precedes(kv.key.as_ref(), next_key) {
+                self.advance()
+            } else {
+                break;
             }
         }
+        Ok(())
     }
 }
 
 impl<B: BlockLike> BlockIterator<B> {
-    pub fn new(block: B, ordering: IterationOrder) -> Self {
+    pub fn new(block: B, order: IterationOrder) -> Self {
         BlockIterator {
             first_key: BlockIterator::decode_first_key(&block),
             block,
             off_off: 0,
-            ordering,
+            order,
         }
     }
 
+    #[cfg(test)]
     pub fn new_ascending(block: B) -> Self {
         Self::new(block, Ascending)
     }
@@ -110,7 +105,7 @@ impl<B: BlockLike> BlockIterator<B> {
         if self.is_empty() {
             return Ok(None);
         }
-        let off_off = match self.ordering {
+        let off_off = match self.order {
             Ascending => self.off_off,
             Descending => self.block.offsets().len() - 1 - self.off_off,
         };
@@ -145,6 +140,7 @@ mod tests {
     use crate::block::BlockBuilder;
     use crate::block_iterator::BlockIterator;
     use crate::bytes_range::BytesRange;
+    use crate::iter::IterationOrder::Descending;
     use crate::iter::{KeyValueIterator, SeekToKey};
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::{assert_iterator, assert_next_entry, gen_attrs, gen_empty_attrs};
@@ -183,6 +179,22 @@ mod tests {
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"super", b"mario");
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_seek_descending() {
+        let mut block_builder = BlockBuilder::new(1024);
+        assert!(block_builder.add_value(b"donkey", b"kong", gen_attrs(1)));
+        assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
+        assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
+        let block = block_builder.build().unwrap();
+        let mut iter = BlockIterator::new(&block, Descending);
+        iter.seek(b"kratos").await.unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"kratos", b"atreus");
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"donkey", b"kong");
         assert!(iter.next().await.unwrap().is_none());
     }
 

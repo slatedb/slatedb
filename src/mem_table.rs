@@ -125,34 +125,36 @@ pub(crate) struct ImmutableWal {
 pub(crate) struct MemTableIterator<'a, T: RangeBounds<KVTableInternalKey>> {
     /// `inner` is the Iterator impl of SkipMap, which is the underlying data structure of MemTable.
     inner: Range<'a, KVTableInternalKey, T, KVTableInternalKey, RowEntry>,
-    ordering: IterationOrder,
+    order: IterationOrder,
 }
 
 pub(crate) struct VecDequeKeyValueIterator {
     rows: VecDeque<RowEntry>,
+    order: IterationOrder,
 }
 
 impl VecDequeKeyValueIterator {
-    pub(crate) fn new(rows: VecDeque<RowEntry>) -> Self {
-        Self { rows }
+    pub(crate) fn new(rows: VecDeque<RowEntry>, order: IterationOrder) -> Self {
+        Self { rows, order }
     }
 
     pub(crate) async fn materialize_range(
         tables: VecDeque<Arc<KVTable>>,
         range: BytesRange,
+        order: IterationOrder,
     ) -> Result<Self, SlateDBError> {
         let memtable_iters = tables
             .iter()
-            .map(|t| t.range_ascending(range.clone()))
+            .map(|t| t.range(range.clone(), order))
             .collect();
-        let mut merge_iter = MergeIterator::new(memtable_iters).await?;
+        let mut merge_iter = MergeIterator::new(memtable_iters, order).await?;
         let mut rows = VecDeque::new();
 
         while let Some(row_entry) = merge_iter.next_entry().await? {
-            rows.push_back(row_entry.clone());
+            rows.push_back(row_entry);
         }
 
-        Ok(VecDequeKeyValueIterator::new(rows))
+        Ok(VecDequeKeyValueIterator::new(rows, order))
     }
 }
 
@@ -160,13 +162,17 @@ impl KeyValueIterator for VecDequeKeyValueIterator {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.rows.pop_front())
     }
+
+    fn order(&self) -> IterationOrder {
+        self.order
+    }
 }
 
 impl SeekToKey for VecDequeKeyValueIterator {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
             let front = self.rows.front();
-            if front.is_some_and(|record| record.key < next_key) {
+            if front.is_some_and(|record| self.order.precedes(record.key.as_ref(), next_key)) {
                 self.rows.pop_front();
             } else {
                 return Ok(());
@@ -179,11 +185,15 @@ impl<T: RangeBounds<KVTableInternalKey>> KeyValueIterator for MemTableIterator<'
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.next_entry_sync())
     }
+
+    fn order(&self) -> IterationOrder {
+        self.order
+    }
 }
 
 impl<T: RangeBounds<KVTableInternalKey>> MemTableIterator<'_, T> {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
-        let next_entry = match self.ordering {
+        let next_entry = match self.order {
             IterationOrder::Ascending => self.inner.next(),
             IterationOrder::Descending => self.inner.next_back(),
         };
@@ -326,7 +336,7 @@ impl KVTable {
     ) -> MemTableIterator<KVTableInternalKeyRange> {
         MemTableIterator {
             inner: self.map.range(range.into()),
-            ordering,
+            order: ordering,
         }
     }
 
@@ -376,6 +386,7 @@ impl KVTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iter::IterationOrder::Ascending;
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::assert_iterator;
     use crate::{proptest_util, test_utils};
@@ -477,7 +488,7 @@ mod tests {
 
         // in merge iterator, it should only return one entry
         let iter = table.table().iter();
-        let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter]))
+        let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter]), Ascending)
             .await
             .unwrap();
         assert_iterator(

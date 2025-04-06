@@ -116,6 +116,10 @@ query isolation through a `ScanOptions` struct. Similar to `get_with_options`, t
 two isolation levels that will be supported are `Committed` and `Uncommitted`.
 The default when `scan` is called without explicit options will be `Committed`.
 
+`DbIterator` will support ascending and descending iteration as specified in `ScanOptions`. 
+The default is ascending order iteration.
+
+
 ```rust
 impl Db {
     /// Scan a range of keys with the provided options.
@@ -138,7 +142,25 @@ pub struct ScanOptions {
     /// The number of bytes to read ahead
     pub read_ahead_bytes: usize,
     /// Whether or not fetched blocks should be cached
-    pub cache_blocks: bool
+    pub cache_blocks: bool,
+    /// The order of iteration (ascending by default)
+    pub order: IterationOrder,
+}
+
+impl Default for ScanOptions {
+  fn default() -> Self {
+    Self {
+      read_level: ReadLevel::Committed,
+      read_ahead_bytes: 1,
+      cache_blocks: false,
+      order: Ascending,
+    }
+  }
+}
+
+pub enum IterationOrder {
+  Ascending,
+  Descending,
 }
 ```
 
@@ -256,4 +278,6 @@ the `DbIterator`.
 
 
 ## Updates
+
+- Added support for descending iteration through `ScanOptions::order`.
 

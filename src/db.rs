@@ -47,6 +47,7 @@ use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
+use crate::iter::IterationOrder::Ascending;
 use crate::manifest::store::{DirtyManifest, FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushMsg;
@@ -316,6 +317,7 @@ impl DbInner {
             blocks_to_fetch: 256,
             cache_blocks: true,
             eager_spawn: true,
+            order: Ascending,
         };
 
         let replay_options = WalReplayOptions {
@@ -1163,7 +1165,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::collections::Bound::Included;
+    use std::ops::Bound::Included;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
@@ -1182,15 +1184,16 @@ mod tests {
     use crate::proptest_util::sample;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::test_utils::{assert_iterator, TestClock};
+    use crate::test_utils::{assert_iterator, TestClock, TestStoreProvider};
     use crate::types::RowEntry;
-    use crate::{proptest_util, test_utils};
+    use crate::{proptest_util, test_utils, IterationOrder};
     use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use proptest::test_runner::{TestRng, TestRunner};
     use tokio::runtime::Runtime;
     use tracing::info;
+    use IterationOrder::Descending;
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -1805,7 +1808,7 @@ mod tests {
             .scan_with_options(range.clone(), scan_options)
             .await
             .unwrap();
-        test_utils::assert_ranged_db_scan(table, range, &mut iter).await;
+        test_utils::assert_ranged_db_scan(table, range, &mut iter, scan_options.order).await;
     }
 
     #[test]
@@ -1818,15 +1821,18 @@ mod tests {
         let db = runtime.block_on(build_database_from_table(&table, db_options, true));
 
         runner
-            .run(&arbitrary::nonempty_range(10), |range| {
-                runtime.block_on(assert_records_in_range(
-                    &table,
-                    &db,
-                    &ScanOptions::default(),
-                    range,
-                ));
-                Ok(())
-            })
+            .run(
+                &(arbitrary::nonempty_range(10), arbitrary::iteration_order()),
+                |(range, order)| {
+                    let options = ScanOptions {
+                        order,
+                        ..ScanOptions::default()
+                    };
+
+                    runtime.block_on(assert_records_in_range(&table, &db, &options, range));
+                    Ok(())
+                },
+            )
             .unwrap();
     }
 
@@ -1921,10 +1927,14 @@ mod tests {
 
         runner
             .run(
-                &(arbitrary::nonempty_range(5), arbitrary::rng()),
-                |(range, mut rng)| {
+                &(
+                    arbitrary::nonempty_range(5),
+                    arbitrary::rng(),
+                    arbitrary::iteration_order(),
+                ),
+                |(range, mut rng, order)| {
                     runtime.block_on(assert_seek_fast_forwards_iterator(
-                        &table, &db, &range, &mut rng,
+                        &table, &db, range, order, &mut rng,
                     ));
                     Ok(())
                 },
@@ -1934,20 +1944,31 @@ mod tests {
         async fn assert_seek_fast_forwards_iterator(
             table: &BTreeMap<Bytes, Bytes>,
             db: &Db,
-            scan_range: &BytesRange,
+            scan_range: BytesRange,
+            order: IterationOrder,
             rng: &mut TestRng,
         ) {
+            let options = ScanOptions {
+                order,
+                ..ScanOptions::default()
+            };
+
             let mut iter = db
                 .inner
-                .scan_with_options(scan_range.clone(), &ScanOptions::default())
+                .scan_with_options(scan_range.clone(), &options)
                 .await
                 .unwrap();
 
-            let seek_key = sample::bytes_in_range(rng, scan_range);
+            let seek_key = sample::bytes_in_range(rng, &scan_range);
             iter.seek(seek_key.clone()).await.unwrap();
 
-            let seek_range = BytesRange::new(Included(seek_key), scan_range.end_bound().cloned());
-            test_utils::assert_ranged_db_scan(table, seek_range, &mut iter).await;
+            let seek_range = match order {
+                Ascending => BytesRange::new(Included(seek_key), scan_range.end_bound().cloned()),
+                Descending => {
+                    BytesRange::new(scan_range.start_bound().cloned(), Included(seek_key))
+                }
+            };
+            test_utils::assert_ranged_db_scan(table, seek_range, &mut iter, order).await;
         }
     }
 
@@ -3385,6 +3406,12 @@ mod tests {
             garbage_collector_options: None,
             clock,
             default_ttl: ttl,
+        }
+    }
+
+    impl TestStoreProvider {
+        pub(crate) async fn new_db(&self, options: DbOptions) -> Result<Db, SlateDBError> {
+            Db::open_with_opts(self.path.clone(), options, Arc::clone(&self.object_store)).await
         }
     }
 }

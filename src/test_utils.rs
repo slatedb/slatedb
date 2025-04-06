@@ -4,11 +4,16 @@ use crate::iter::{IterationOrder, KeyValueIterator, SeekToKey};
 use crate::row_codec::SstRowCodecV0;
 use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
 use bytes::{BufMut, Bytes, BytesMut};
+use fail_parallel::FailPointRegistry;
+use object_store::memory::InMemory;
+use object_store::path::Path;
+use object_store::ObjectStore;
 use rand::{Rng, RngCore};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
@@ -56,12 +61,14 @@ pub(crate) fn gen_empty_attrs() -> RowAttributes {
 
 pub(crate) struct TestIterator {
     entries: VecDeque<Result<RowEntry, SlateDBError>>,
+    order: IterationOrder,
 }
 
 impl TestIterator {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(order: IterationOrder) -> Self {
         Self {
             entries: VecDeque::new(),
+            order,
         }
     }
 
@@ -74,10 +81,19 @@ impl TestIterator {
 
 impl KeyValueIterator for TestIterator {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        self.entries.pop_front().map_or(Ok(None), |e| match e {
+        let next_entry = match self.order {
+            Ascending => self.entries.pop_front(),
+            Descending => self.entries.pop_back(),
+        };
+
+        next_entry.map_or(Ok(None), |e| match e {
             Ok(kv) => Ok(Some(kv)),
             Err(err) => Err(err),
         })
+    }
+
+    fn order(&self) -> IterationOrder {
+        self.order
     }
 }
 
@@ -85,7 +101,7 @@ impl SeekToKey for TestIterator {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         while let Some(entry_result) = self.entries.front() {
             let entry = entry_result.clone()?;
-            if entry.key < next_key {
+            if self.order.precedes(entry.key.as_ref(), next_key) {
                 self.entries.pop_front();
             } else {
                 break;
@@ -161,7 +177,13 @@ use crate::bytes_range::BytesRange;
 use crate::db::Db;
 use crate::db_iter::DbIterator;
 use crate::db_state::SsTableInfo;
+use crate::iter::IterationOrder::Ascending;
+use crate::iter::IterationOrder::Descending;
+use crate::manifest::store::ManifestStore;
+use crate::paths::PathResolver;
 use crate::sst::SsTableFormat;
+use crate::store_provider::StoreProvider;
+use crate::tablestore::TableStore;
 pub(crate) use assert_debug_snapshot;
 
 pub(crate) fn decode_codec_entries(
@@ -198,10 +220,14 @@ pub(crate) async fn assert_ranged_db_scan<T: RangeBounds<Bytes>>(
     table: &BTreeMap<Bytes, Bytes>,
     range: T,
     iter: &mut DbIterator<'_>,
+    ordering: IterationOrder,
 ) {
     let mut expected = table.range(range);
     loop {
-        let expected_next = expected.next();
+        let expected_next = match ordering {
+            Ascending => expected.next(),
+            Descending => expected.next_back(),
+        };
         let actual_next = iter.next().await.unwrap();
         if expected_next.is_none() && actual_next.is_none() {
             return;
@@ -220,8 +246,8 @@ pub(crate) async fn assert_ranged_kv_scan<T: KeyValueIterator>(
 
     loop {
         let expected_next = match ordering {
-            IterationOrder::Ascending => expected.next(),
-            IterationOrder::Descending => expected.next_back(),
+            Ascending => expected.next(),
+            Descending => expected.next_back(),
         };
         let actual_next = iter.next().await.unwrap();
         if expected_next.is_none() && actual_next.is_none() {
@@ -264,7 +290,11 @@ pub(crate) async fn seed_database(
     let put_options = PutOptions::default();
     let write_options = WriteOptions { await_durable };
 
-    for (key, value) in table.iter() {
+    let unsorted_table: HashMap<Bytes, Bytes> = table
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    for (key, value) in unsorted_table.iter() {
         db.put_with_options(key, value, &put_options, &write_options)
             .await?;
     }
@@ -302,5 +332,48 @@ pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> SstDa
     SstData {
         info: encoded_table.info,
         data: data.freeze(),
+    }
+}
+
+pub(crate) struct TestStoreProvider {
+    pub(crate) object_store: Arc<dyn ObjectStore>,
+    pub(crate) path: Path,
+    pub(crate) fp_registry: Arc<FailPointRegistry>,
+    pub(crate) clock: Arc<dyn Clock + Send + Sync>,
+    pub(crate) sst_format: SsTableFormat,
+}
+
+impl TestStoreProvider {
+    pub(crate) fn new<P: Into<Path>>(path: P) -> Self {
+        let path = path.into();
+        let object_store = Arc::new(InMemory::new());
+        let clock = Arc::new(TokioClock::new()) as Arc<dyn Clock + Send + Sync>;
+        TestStoreProvider {
+            object_store,
+            path,
+            fp_registry: Arc::new(FailPointRegistry::new()),
+            clock,
+            sst_format: SsTableFormat::default(),
+        }
+    }
+}
+
+impl StoreProvider for TestStoreProvider {
+    fn table_store(&self) -> Arc<TableStore> {
+        Arc::new(TableStore::new_with_fp_registry(
+            Arc::clone(&self.object_store),
+            self.sst_format.clone(),
+            PathResolver::new(self.path.clone()),
+            Arc::clone(&self.fp_registry),
+            None,
+        ))
+    }
+
+    fn manifest_store(&self) -> Arc<ManifestStore> {
+        Arc::new(ManifestStore::new_with_clock(
+            &self.path,
+            Arc::clone(&self.object_store),
+            Arc::clone(&self.clock),
+        ))
     }
 }
