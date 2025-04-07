@@ -58,6 +58,20 @@ impl Block {
         + self.offsets.len() * SIZEOF_U16 // offsets as u16's
         + SIZEOF_U16 // number of offsets in the block
     }
+
+    /// estimate the size of Blocks encoded in SST
+    pub(crate) fn estimate_encoded_size(
+        entry_num: usize,
+        entries_size_encoded: usize,
+        number_of_blocks: usize,
+    ) -> usize {
+        let mut ans = entries_size_encoded;
+        let offset_len = std::mem::size_of::<u16>();
+        let checksum_len = std::mem::size_of::<u32>();
+        ans += offset_len * entry_num;
+        ans += checksum_len * number_of_blocks;
+        ans
+    }
 }
 
 pub struct BlockBuilder {
@@ -357,5 +371,47 @@ mod tests {
         assert_ne!(block.data.as_ptr(), block_clamped.data.as_ptr());
         let mut iter = BlockIterator::new_ascending(block_clamped);
         assert_iterator(&mut iter, case.entries).await;
+    }
+
+    #[test]
+    fn test_estimate_encoded_size() {
+        // Test with zero entries and blocks
+        assert_eq!(Block::estimate_encoded_size(0, 0, 0), 0);
+
+        // Test with one entry and one block
+        let entry_size = 100;
+        let expected_size = entry_size + 2 + 4; // entry_size + offset + checksum
+        assert_eq!(
+            Block::estimate_encoded_size(1, entry_size, 1),
+            expected_size
+        );
+
+        // Test with multiple entries and one block
+        let num_entries = 5;
+        let total_entry_size = entry_size * num_entries;
+        let expected_size = total_entry_size + (2 * num_entries) + 4; // entries + offsets + checksum
+        assert_eq!(
+            Block::estimate_encoded_size(num_entries, total_entry_size, 1),
+            expected_size
+        );
+
+        // Test with multiple entries and multiple blocks
+        let num_blocks = 3;
+        let expected_size = total_entry_size + (2 * num_entries) + (4 * num_blocks);
+        assert_eq!(
+            Block::estimate_encoded_size(num_entries, total_entry_size, num_blocks),
+            expected_size
+        );
+
+        // Test with large numbers（assume 20GB and every block 4kb with 200 entries）
+        let large_entry_size = 20 * 1024 * 1024 * 1024; // 20GB
+        let num_entries = 200;
+        let block_size = 4 * 1024; // 4KB
+        let num_blocks = usize::div_ceil(large_entry_size, block_size);
+        let expected_size = large_entry_size + (2 * num_entries) + (4 * num_blocks);
+        assert_eq!(
+            Block::estimate_encoded_size(num_entries, large_entry_size, num_blocks),
+            expected_size
+        );
     }
 }

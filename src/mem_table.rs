@@ -88,12 +88,24 @@ impl<T: RangeBounds<Bytes>> From<T> for KVTableInternalKeyRange {
 pub(crate) struct KVTable {
     map: SkipMap<KVTableInternalKey, RowEntry>,
     durable: WatchableOnceCell<Result<(), SlateDBError>>,
-    size: AtomicUsize,
+    entries_size_in_bytes: AtomicUsize,
     /// this corresponds to the timestamp of the most recent
     /// modifying operation on this KVTable (insertion or deletion)
     last_tick: AtomicI64,
     /// the sequence number of the most recent operation on this KVTable
     last_seq: AtomicU64,
+}
+
+pub(crate) struct KVTableMetadata {
+    pub(crate) entry_num: usize,
+    pub(crate) entries_size_in_bytes: usize,
+    /// this corresponds to the timestamp of the most recent
+    /// modifying operation on this KVTable (insertion or deletion)
+    #[allow(dead_code)]
+    pub(crate) last_tick: i64,
+    /// the sequence number of the most recent operation on this KVTable
+    #[allow(dead_code)]
+    pub(crate) last_seq: u64,
 }
 
 pub(crate) struct WritableKVTable {
@@ -230,12 +242,12 @@ impl WritableKVTable {
         self.table.put(row);
     }
 
-    pub(crate) fn size(&self) -> usize {
-        self.table.size()
+    pub(crate) fn metadata(&self) -> KVTableMetadata {
+        self.table.metadata()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.size() == 0
+        self.table.is_empty()
     }
 }
 
@@ -243,19 +255,28 @@ impl KVTable {
     pub(crate) fn new() -> Self {
         Self {
             map: SkipMap::new(),
-            size: AtomicUsize::new(0),
+            entries_size_in_bytes: AtomicUsize::new(0),
             durable: WatchableOnceCell::new(),
             last_tick: AtomicI64::new(i64::MIN),
             last_seq: AtomicU64::new(0),
         }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.map.is_empty()
+    pub(crate) fn metadata(&self) -> KVTableMetadata {
+        let entry_num = self.map.len();
+        let entries_size_in_bytes = self.entries_size_in_bytes.load(Ordering::Relaxed);
+        let last_tick = self.last_tick.load(SeqCst);
+        let last_seq = self.last_seq.load(SeqCst);
+        KVTableMetadata {
+            entry_num,
+            entries_size_in_bytes,
+            last_tick,
+            last_seq,
+        }
     }
 
-    pub(crate) fn size(&self) -> usize {
-        self.size.load(Ordering::Relaxed)
+    pub(crate) fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 
     pub(crate) fn last_tick(&self) -> i64 {
@@ -316,7 +337,6 @@ impl KVTable {
     }
 
     fn put(&self, row: RowEntry) {
-        self.size.fetch_add(row.estimated_size(), Ordering::Relaxed);
         let internal_key = KVTableInternalKey::new(row.key.clone(), row.seq);
         let previous_size = Cell::new(None);
 
@@ -330,6 +350,7 @@ impl KVTable {
         // update the last seq number if it is greater than the current last seq
         self.last_seq.fetch_max(row.seq, atomic::Ordering::SeqCst);
 
+        let row_size = row.estimated_size();
         self.map.compare_insert(internal_key, row, |previous_row| {
             // Optimistically calculate the size of the previous value.
             // `compare_fn` might be called multiple times in case of concurrent
@@ -339,7 +360,13 @@ impl KVTable {
             true
         });
         if let Some(size) = previous_size.take() {
-            self.size.fetch_sub(size, Ordering::Relaxed);
+            self.entries_size_in_bytes
+                .fetch_sub(size, Ordering::Relaxed);
+            self.entries_size_in_bytes
+                .fetch_add(row_size, Ordering::Relaxed);
+        } else {
+            self.entries_size_in_bytes
+                .fetch_add(row_size, Ordering::Relaxed);
         }
     }
 
@@ -470,30 +497,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_memtable_track_sz() {
+    async fn test_memtable_track_sz_and_num() {
         let mut table = WritableKVTable::new();
+        let mut metadata = table.table().metadata();
 
-        assert_eq!(table.table.size(), 0);
+        assert_eq!(metadata.entry_num, 0);
+        assert_eq!(metadata.entries_size_in_bytes, 0);
         table.put(RowEntry::new_value(b"first", b"foo", 1));
-        assert_eq!(table.table.size(), 16);
+        metadata = table.table().metadata();
+        assert_eq!(metadata.entry_num, 1);
+        assert_eq!(metadata.entries_size_in_bytes, 16);
 
         table.put(RowEntry::new_tombstone(b"first", 2));
-        assert_eq!(table.table.size(), 29);
+        metadata = table.table().metadata();
+        assert_eq!(metadata.entry_num, 2);
+        assert_eq!(metadata.entries_size_in_bytes, 29);
 
         table.put(RowEntry::new_tombstone(b"first", 2));
-        assert_eq!(table.table.size(), 29);
+        metadata = table.table().metadata();
+        assert_eq!(metadata.entry_num, 2);
+        assert_eq!(metadata.entries_size_in_bytes, 29);
 
         table.put(RowEntry::new_value(b"abc333", b"val1", 1));
-        assert_eq!(table.table.size(), 47);
+        metadata = table.table().metadata();
+        assert_eq!(metadata.entry_num, 3);
+        assert_eq!(metadata.entries_size_in_bytes, 47);
 
         table.put(RowEntry::new_value(b"def456", b"blablabla", 2));
-        assert_eq!(table.table.size(), 70);
+        metadata = table.table().metadata();
+        assert_eq!(metadata.entry_num, 4);
+        assert_eq!(metadata.entries_size_in_bytes, 70);
 
         table.put(RowEntry::new_value(b"def456", b"blabla", 3));
-        assert_eq!(table.table.size(), 90);
+        metadata = table.table().metadata();
+        assert_eq!(metadata.entry_num, 5);
+        assert_eq!(metadata.entries_size_in_bytes, 90);
 
         table.put(RowEntry::new_tombstone(b"abc333", 4));
-        assert_eq!(table.table.size(), 104);
+        metadata = table.table().metadata();
+        assert_eq!(metadata.entry_num, 6);
+        assert_eq!(metadata.entries_size_in_bytes, 104);
     }
 
     #[rstest]

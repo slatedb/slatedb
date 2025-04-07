@@ -510,6 +510,11 @@ impl TableStore {
     fn path(&self, id: &SsTableId) -> Path {
         self.path_resolver.table_path(id)
     }
+
+    pub(crate) fn estimate_encoded_size(&self, entry_num: usize, entries_size: usize) -> usize {
+        self.sst_format
+            .estimate_encoded_size(entry_num, entries_size)
+    }
 }
 
 pub(crate) struct EncodedSsTableWriter<'a> {

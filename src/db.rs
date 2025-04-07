@@ -220,13 +220,25 @@ impl DbInner {
                     .state()
                     .imm_wal
                     .iter()
-                    .map(|imm| imm.table().size())
+                    .map(|imm| {
+                        let metadata = imm.table().metadata();
+                        self.table_store.estimate_encoded_size(
+                            metadata.entry_num,
+                            metadata.entries_size_in_bytes,
+                        )
+                    })
                     .sum::<usize>();
                 let imm_memtable_size = guard
                     .state()
                     .imm_memtable
                     .iter()
-                    .map(|imm| imm.table().size())
+                    .map(|imm| {
+                        let metadata = imm.table().metadata();
+                        self.table_store.estimate_encoded_size(
+                            metadata.entry_num,
+                            metadata.entries_size_in_bytes,
+                        )
+                    })
                     .sum::<usize>();
                 imm_wal_size + imm_memtable_size
             };
@@ -1480,7 +1492,14 @@ mod tests {
             .await
             .unwrap();
             last_val = val;
-            if db.inner.state.write().memtable().size() > (SsTableFormat::default().block_size * 3)
+            if db
+                .inner
+                .state
+                .write()
+                .memtable()
+                .metadata()
+                .entries_size_in_bytes
+                > (SsTableFormat::default().block_size * 3)
             {
                 break;
             }
@@ -2161,7 +2180,7 @@ mod tests {
         use crate::{test_utils::assert_iterator, types::RowEntry};
 
         let clock = Arc::new(TestClock::new());
-        let mut options = test_db_options_with_clock(0, 128, None, clock.clone());
+        let mut options = test_db_options_with_clock(0, 256, None, clock.clone());
         options.wal_enabled = false;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -2239,7 +2258,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let kv_store = Db::open_with_opts(
             path.clone(),
-            test_db_options(0, 128, None),
+            test_db_options(0, 256, None),
             object_store.clone(),
         )
         .await
@@ -2504,7 +2523,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let db = Db::open_with_opts(
             path.clone(),
-            test_db_options(0, 128, None),
+            test_db_options(0, 256, None),
             object_store.clone(),
         )
         .await
@@ -2518,7 +2537,7 @@ mod tests {
 
         let db_restored = Db::open_with_opts(
             path.clone(),
-            test_db_options(0, 128, None),
+            test_db_options(0, 256, None),
             object_store.clone(),
         )
         .await

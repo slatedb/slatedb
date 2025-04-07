@@ -14,6 +14,7 @@ use crate::flatbuffer_types::{
     BlockMeta, BlockMetaArgs, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs,
     SsTableIndexOwned,
 };
+use crate::row_codec;
 use crate::types::RowEntry;
 use crate::utils::compute_index_key;
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
@@ -24,6 +25,14 @@ pub(crate) const SST_FORMAT_VERSION: u16 = 1;
 // 8 bytes for the metadata offset + 2 bytes for the version
 const NUM_FOOTER_BYTES: usize = 10;
 const NUM_FOOTER_BYTES_LONG: u64 = NUM_FOOTER_BYTES as u64;
+
+pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
+pub(crate) const SIZEOF_U32: usize = std::mem::size_of::<u32>();
+pub(crate) const SIZEOF_U64: usize = std::mem::size_of::<u64>();
+pub(crate) const CHECKSUM_SIZE: usize = SIZEOF_U32;
+pub(crate) const OFFSET_SIZE: usize = SIZEOF_U16;
+pub(crate) const METADATA_OFFSET_SIZE: usize = SIZEOF_U64;
+pub(crate) const VERSION_SIZE: usize = SIZEOF_U16;
 
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
@@ -322,6 +331,42 @@ impl SsTableFormat {
             return Err(SlateDBError::ChecksumMismatch);
         }
         Ok(data_bytes)
+    }
+
+    /// The function estimates the size of the SST (Sorted String Table) without considering compression effects.
+    pub(crate) fn estimate_encoded_size(
+        &self,
+        entry_num: usize,
+        estimated_entries_size: usize,
+    ) -> usize {
+        if entry_num == 0 {
+            return 0;
+        }
+
+        let entries_size_encoded =
+            row_codec::SstRowCodecV0::estimate_encoded_size(entry_num, estimated_entries_size);
+
+        // estimate sum of Block
+        let number_of_blocks = usize::div_ceil(entries_size_encoded, self.block_size);
+        let mut ans =
+            Block::estimate_encoded_size(entry_num, entries_size_encoded, number_of_blocks);
+
+        // estimate sum of BloomFilter
+        if entry_num >= self.min_filter_keys as usize {
+            ans += BloomFilter::estimate_encoded_size(entry_num as u32, self.filter_bits_per_key);
+        }
+
+        // estimate sum of Index
+        let guess_at_average_first_key_size_bytes = 12;
+        ans += (number_of_blocks * guess_at_average_first_key_size_bytes + OFFSET_SIZE)
+            + CHECKSUM_SIZE;
+
+        // estimate sum of Metadata
+        ans += guess_at_average_first_key_size_bytes + 4 * SIZEOF_U64 + SIZEOF_U16;
+
+        ans += METADATA_OFFSET_SIZE + VERSION_SIZE;
+
+        ans
     }
 }
 
@@ -635,6 +680,35 @@ mod tests {
     use crate::iter::IterationOrder::Ascending;
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, gen_attrs, gen_empty_attrs};
+
+    #[test]
+    fn test_estimate_encoded_size() {
+        let mut format = SsTableFormat::default();
+
+        // Test with zero entries
+        assert_eq!(format.estimate_encoded_size(0, 0), 0);
+
+        // Test with one entry
+        let encoded_entry_size = 100;
+        let size = format.estimate_encoded_size(1, encoded_entry_size);
+        assert!(size > 0);
+
+        // Test with multiple entries with not trigger bloom filter
+        format.min_filter_keys = 1000;
+        let num_entries = 100;
+        let total_size = encoded_entry_size * num_entries;
+        let size = format.estimate_encoded_size(num_entries, total_size);
+        assert!(size > total_size); // Should be larger due to overhead
+
+        // Test with entries that should trigger bloom filter
+        let num_entries = format.min_filter_keys as usize * 10;
+        let total_size = encoded_entry_size * num_entries;
+        let size_with_filter = format.estimate_encoded_size(num_entries, total_size);
+        format.min_filter_keys = format.min_filter_keys * 10 + 1;
+        let size_without_filter =
+            format.estimate_encoded_size(num_entries, encoded_entry_size * num_entries);
+        assert!(size_with_filter > size_without_filter); // Should be larger due to bloom filter
+    }
 
     fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIterator<Block> {
         let block = builder.next_block();

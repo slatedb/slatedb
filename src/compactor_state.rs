@@ -600,7 +600,7 @@ mod tests {
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
         let opts = DbOptions {
-            l0_sst_size_bytes: 128,
+            l0_sst_size_bytes: 256,
             ..Default::default()
         };
         tokio_handle
