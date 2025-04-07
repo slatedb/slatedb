@@ -3,7 +3,7 @@ use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::db_stats::DbStats;
 use crate::filter_iterator::FilterIterator;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, VecDequeKeyValueIterator};
 use crate::reader::SstFilterResult::{
     FilterNegative, FilterPositive, RangeNegative, RangePositive,
@@ -142,6 +142,160 @@ impl Reader {
             }
         }
         Ok(None)
+    }
+
+    pub(crate) async fn multi_get_with_options<K: AsRef<[u8]>>(
+        &self,
+        keys: &[K],
+        options: &ReadOptions,
+        snapshot: &(dyn ReadSnapshot + Sync),
+    ) -> Result<Vec<Option<Bytes>>, SlateDBError> {
+        let ttl_now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
+
+        let mut remaining_keys: std::collections::BTreeSet<(&[u8], usize)> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.as_ref(), i))
+            .collect();
+        let mut results = vec![None; keys.len()];
+        let results_converter = move |input: Vec<Option<RowEntry>>,
+                                      ttl_now: i64|
+              -> Vec<Option<Bytes>> {
+            input
+                .into_iter()
+                .map(|row_entry| {
+                    row_entry.and_then(|entry| Self::unwrap_value_if_not_expired(&entry, ttl_now))
+                })
+                .collect()
+        };
+
+        if self.include_wal_memtables(options.durability_filter) {
+            std::iter::once(snapshot.wal())
+                .chain(snapshot.imm_wal().iter().map(|imm| imm.table()))
+                .for_each(|memtable| {
+                    for (key, i) in remaining_keys.iter() {
+                        if results[*i].is_none() {
+                            results[*i] = memtable.get(key);
+                        }
+                    }
+                    remaining_keys.retain(|(_, i)| results[*i].is_none());
+                });
+
+            if remaining_keys.is_empty() {
+                let results = results_converter(results, ttl_now);
+                return Ok(results);
+            }
+        }
+
+        if self.include_memtables(options.durability_filter) {
+            std::iter::once(snapshot.memtable())
+                .chain(snapshot.imm_memtable().iter().map(|imm| imm.table()))
+                .for_each(|memtable| {
+                    for (key, i) in remaining_keys.iter() {
+                        if results[*i].is_none() {
+                            results[*i] = memtable.get(key);
+                        }
+                    }
+                    remaining_keys.retain(|(_, i)| results[*i].is_none());
+                });
+
+            if remaining_keys.is_empty() {
+                let results = results_converter(results, ttl_now);
+                return Ok(results);
+            }
+        }
+
+        // Since the key remains unchanged during the point query, we only need to compute
+        // the hash value once and pass it to the filter to avoid unnecessary hash computation
+        let mut key_hashes = vec![0u64; results.len()];
+        for (key, i) in remaining_keys.iter() {
+            key_hashes[*i] = filter::filter_hash(key);
+        }
+
+        // cache blocks that are being read
+        let sst_iter_options = SstIteratorOptions {
+            cache_blocks: true,
+            eager_spawn: true,
+            ..SstIteratorOptions::default()
+        };
+
+        for sst in &snapshot.core().l0 {
+            for (key, i) in remaining_keys.iter() {
+                let filter_result = self.sst_might_include_key(sst, key, key_hashes[*i]).await?;
+                self.record_filter_result(&filter_result);
+                if matches!(filter_result, RangeNegative) {
+                    break;
+                }
+
+                if filter_result.might_contain_key() {
+                    let mut iter =
+                        SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
+                            .await?;
+
+                    if let Some(entry) = iter.next_entry().await? {
+                        if entry.key == key {
+                            results[*i] = Some(entry);
+                            continue;
+                        }
+                        if matches!(filter_result, FilterPositive) {
+                            self.db_stats.sst_filter_false_positives.inc();
+                        }
+                    }
+                }
+            }
+            remaining_keys.retain(|(_, i)| results[*i].is_none());
+
+            if remaining_keys.is_empty() {
+                let results = results_converter(results, ttl_now);
+                return Ok(results);
+            }
+        }
+
+        for sr in &snapshot.core().compacted {
+            let mut idx = 0;
+            let mut sr_iter = SortedRunIterator::new_borrowed(
+                ..,
+                sr,
+                self.table_store.clone(),
+                SstIteratorOptions::default(),
+            )
+            .await?;
+            for (key, i) in remaining_keys.iter() {
+                while idx + 1 != sr.ssts.len()
+                    && !(sr.ssts[idx].range_covers_key(key)
+                        && sr.ssts[idx + 1].key_may_be_before(key))
+                {
+                    idx += 1;
+                }
+                let filter_result = match self
+                    .sst_might_include_key(&sr.ssts[idx], key, key_hashes[*i])
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(e) => return Err(e),
+                };
+                self.record_filter_result(&filter_result);
+                if filter_result.might_contain_key() {
+                    sr_iter.seek(key).await?;
+                    if let Some(row_entry) = sr_iter.next_entry().await? {
+                        if row_entry.key == key {
+                            results[*i] = Some(row_entry);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+            remaining_keys.retain(|(_, i)| results[*i].is_none());
+
+            if remaining_keys.is_empty() {
+                let results = results_converter(results, ttl_now);
+                return Ok(results);
+            }
+        }
+
+        let results = results_converter(results, ttl_now);
+        Ok(results)
     }
 
     pub(crate) async fn scan_with_options<'a>(

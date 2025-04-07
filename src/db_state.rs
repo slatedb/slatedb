@@ -54,6 +54,14 @@ impl SsTableHandle {
         false
     }
 
+    pub(crate) fn key_may_be_before(&self, key: &[u8]) -> bool {
+        if let Some(first_key) = self.info.first_key.as_ref() {
+            return key <= first_key;
+        }
+        // If there is no first key, it means the SST is empty so it doesn't cover the key.
+        true
+    }
+
     pub(crate) fn intersects_range(
         &self,
         end_bound: Bound<&[u8]>,

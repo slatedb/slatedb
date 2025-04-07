@@ -180,6 +180,18 @@ impl DbReaderInner {
             .await
     }
 
+    async fn multi_get_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        keys: &[K],
+        options: &ReadOptions,
+    ) -> Result<Vec<Option<Bytes>>, SlateDBError> {
+        self.check_error()?;
+        let snapshot = Arc::clone(&self.state.read());
+        self.reader
+            .multi_get_with_options(keys, options, snapshot.as_ref())
+            .await
+    }
+
     async fn scan_with_options(
         &self,
         range: BytesRange,
@@ -654,6 +666,22 @@ impl DbReader {
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.inner.get_with_options(key, options).await
+    }
+
+    pub async fn multi_get<K: AsRef<[u8]> + Send>(
+        &self,
+        key: &[K],
+    ) -> Result<Vec<Option<Bytes>>, SlateDBError> {
+        self.multi_get_with_options(key, &ReadOptions::default())
+            .await
+    }
+
+    pub async fn multi_get_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        keys: &[K],
+        options: &ReadOptions,
+    ) -> Result<Vec<Option<Bytes>>, SlateDBError> {
+        self.inner.multi_get_with_options(keys, options).await
     }
 
     /// Scan a range of keys using the default scan options.
