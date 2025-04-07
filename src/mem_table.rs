@@ -4,6 +4,7 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
@@ -156,12 +157,14 @@ impl VecDequeKeyValueIterator {
     }
 }
 
+#[async_trait]
 impl KeyValueIterator for VecDequeKeyValueIterator {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.rows.pop_front())
     }
 }
 
+#[async_trait]
 impl SeekToKey for VecDequeKeyValueIterator {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
@@ -175,6 +178,7 @@ impl SeekToKey for VecDequeKeyValueIterator {
     }
 }
 
+#[async_trait]
 impl<T: RangeBounds<KVTableInternalKey>> KeyValueIterator for MemTableIterator<'_, T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.next_entry_sync())

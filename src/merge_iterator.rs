@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use crate::error::SlateDBError;
 use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::types::RowEntry;
@@ -114,6 +116,7 @@ where
     }
 }
 
+#[async_trait]
 impl<T1, T2> SeekToKey for TwoMergeIterator<T1, T2>
 where
     T1: KeyValueIterator + SeekToKey,
@@ -125,6 +128,7 @@ where
     }
 }
 
+#[async_trait]
 impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIterator<T1, T2> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         let mut current_kv = match self.advance_inner().await? {
@@ -238,6 +242,7 @@ impl<T: KeyValueIterator> MergeIterator<T> {
     }
 }
 
+#[async_trait]
 impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         let mut current_kv = match self.advance().await? {
@@ -260,6 +265,7 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
     }
 }
 
+#[async_trait]
 impl<T: KeyValueIterator + SeekToKey> SeekToKey for MergeIterator<T> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         let mut seek_futures = VecDeque::new();

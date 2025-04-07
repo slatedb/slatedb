@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use thiserror::Error;
 
@@ -174,6 +175,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
     }
 }
 
+#[async_trait]
 impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorIterator<T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         let next_entry = match self.buffered_entry.take() {
@@ -340,6 +342,7 @@ mod tests {
         values: VecDeque<RowEntry>,
     }
 
+    #[async_trait]
     impl KeyValueIterator for MockKeyValueIterator {
         async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
             Ok(self.values.pop_front())

@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use crate::error::SlateDBError;
 use crate::types::RowEntry;
 use crate::types::{KeyValue, ValueDeletable};
@@ -13,7 +15,9 @@ pub(crate) enum IterationOrder {
 /// because next will need to be made async to support SSTs, which are loaded over
 /// the network.
 /// See: https://github.com/slatedb/slatedb/issues/12
-pub trait KeyValueIterator {
+
+#[async_trait]
+pub trait KeyValueIterator: Send + Sync {
     /// Returns the next non-deleted key-value pair in the iterator.
     async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
         loop {
@@ -40,6 +44,7 @@ pub trait KeyValueIterator {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError>;
 }
 
+#[async_trait]
 pub(crate) trait SeekToKey {
     /// Seek to the next (inclusive) key
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError>;

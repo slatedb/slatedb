@@ -6,7 +6,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use std::sync::Arc;
 
-pub(crate) trait StoreProvider {
+pub(crate) trait StoreProvider: Send + Sync {
     fn table_store(&self) -> Arc<TableStore>;
     fn manifest_store(&self) -> Arc<ManifestStore>;
 }

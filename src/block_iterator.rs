@@ -4,10 +4,11 @@ use crate::iter::IterationOrder::Ascending;
 use crate::iter::{IterationOrder, SeekToKey};
 use crate::row_codec::SstRowCodecV0;
 use crate::{block::Block, error::SlateDBError, iter::KeyValueIterator, types::RowEntry};
+use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use IterationOrder::Descending;
 
-pub trait BlockLike {
+pub trait BlockLike: Send + Sync {
     fn data(&self) -> &Bytes;
     fn offsets(&self) -> &[u16];
 }
@@ -51,6 +52,7 @@ pub struct BlockIterator<B: BlockLike> {
     ordering: IterationOrder,
 }
 
+#[async_trait]
 impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         let result = self.load_at_current_off();
@@ -65,6 +67,7 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
     }
 }
 
+#[async_trait]
 impl<B: BlockLike> SeekToKey for BlockIterator<B> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
