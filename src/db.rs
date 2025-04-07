@@ -120,7 +120,20 @@ impl DbInner {
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
-        self.reader.get_with_options(key, options, &snapshot).await
+        self.reader.get_with_options(&key, options, &snapshot).await
+    }
+
+    /// Get the value for a given key.
+    pub async fn multi_get_with_options<K: AsRef<[u8]>>(
+        &self,
+        key: &[K],
+        options: &ReadOptions,
+    ) -> Result<Vec<Option<Bytes>>, SlateDBError> {
+        self.check_error()?;
+        let snapshot = self.state.read().snapshot();
+        self.reader
+            .multi_get_with_options(key, options, &snapshot)
+            .await
     }
 
     pub async fn scan_with_options<'a>(
@@ -805,6 +818,102 @@ impl Db {
         self.inner.get_with_options(key, options).await
     }
 
+    /// Get multiple values from the database with default read options.
+    ///
+    /// The `Bytes` objects returned contain slices of entire
+    /// 4 KiB blocks. The blocks will be held in memory as long as the
+    /// caller holds references to the `Bytes` objects. Consider
+    /// copying the data if you need to hold it for a long time.
+    ///
+    /// ## Arguments
+    /// - `keys`: a slice of keys to get
+    ///
+    /// ## Returns
+    /// - `Result<Vec<Option<Bytes>>, SlateDBError>`:
+    ///     - A vector of `Option<Bytes>` where each element corresponds to the key at the same index:
+    ///         - `Some(Bytes)`: the value if it exists
+    ///         - `None`: if the value does not exist
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error getting the values
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"key1", b"value1").await?;
+    ///     db.put(b"key2", b"value2").await?;
+    ///     let results = db.multi_get(&[b"key1", b"key2", b"key3"]).await?;
+    ///     assert_eq!(results[0], Some("value1".into()));
+    ///     assert_eq!(results[1], Some("value2".into()));
+    ///     assert_eq!(results[2], None);
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn multi_get<K: AsRef<[u8]> + Send>(
+        &self,
+        keys: &[K],
+    ) -> Result<Vec<Option<Bytes>>, SlateDBError> {
+        self.multi_get_with_options(keys, &ReadOptions::default())
+            .await
+    }
+
+    /// Get multiple values from the database with custom read options.
+    ///
+    /// The `Bytes` objects returned contain slices of entire
+    /// 4 KiB blocks. The blocks will be held in memory as long as the
+    /// caller holds references to the `Bytes` objects. Consider
+    /// copying the data if you need to hold it for a long time.
+    ///
+    /// ## Arguments
+    /// - `keys`: a slice of keys to get
+    /// - `options`: the read options to use (Note that [`ReadOptions::read_level`] has no effect for readers, which
+    ///    can only observe committed state).
+    ///
+    /// ## Returns
+    /// - `Result<Vec<Option<Bytes>>, SlateDBError>`:
+    ///     - A vector of `Option<Bytes>` where each element corresponds to the key at the same index:
+    ///         - `Some(Bytes)`: the value if it exists
+    ///         - `None`: if the value does not exist
+    ///
+    /// ## Errors
+    /// - `SlateDBError`: if there was an error getting the values
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, config::ReadOptions, SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"key1", b"value1").await?;
+    ///     db.put(b"key2", b"value2").await?;
+    ///     let results = db.multi_get_with_options(&[b"key1", b"key2", b"key3"], &ReadOptions::default()).await?;
+    ///     assert_eq!(results[0], Some("value1".into()));
+    ///     assert_eq!(results[1], Some("value2".into()));
+    ///     assert_eq!(results[2], None);
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn multi_get_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        keys: &[K],
+        options: &ReadOptions,
+    ) -> Result<Vec<Option<Bytes>>, SlateDBError> {
+        self.inner.multi_get_with_options(keys, options).await
+    }
+
     /// Scan a range of keys using the default scan options.
     ///
     /// returns a `DbIterator`
@@ -1258,6 +1367,188 @@ mod tests {
             kv_store
                 .get_with_options(
                     key,
+                    &ReadOptions {
+                        durability_filter: Memory
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_multi_get_with_default_ttl_and_read_uncommitted() {
+        let clock = Arc::new(TestClock::new());
+        let ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(ttl)),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let keys = [b"test_key1", b"test_key2", b"test_key3"];
+        let values = [b"test_value1", b"test_value2", b"test_value3"];
+
+        for i in 0..3 {
+            kv_store.put(keys[i], values[i]).await.unwrap();
+        }
+
+        // advance clock to t=99 --> still returned
+        clock.ticker.store(99, Ordering::SeqCst);
+        assert_eq!(
+            vec![
+                Some(Bytes::from_static(values[0])),
+                Some(Bytes::from_static(values[1])),
+                Some(Bytes::from_static(values[2]))
+            ],
+            kv_store
+                .multi_get_with_options(
+                    &keys,
+                    &ReadOptions {
+                        durability_filter: Memory
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // advance clock to t=100 --> no longer returned
+        clock.ticker.store(100, Ordering::SeqCst);
+        assert_eq!(
+            vec![None; 3],
+            kv_store
+                .multi_get_with_options(
+                    &keys,
+                    &ReadOptions {
+                        durability_filter: Memory
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_multi_get_with_flush() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options(0, 1024, None),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let keys = [b"test_key1", b"test_key2", b"test_key3"];
+        let values = [b"test_value1", b"test_value2", b"test_value3"];
+
+        // Insert keys and values
+        for i in 0..3 {
+            kv_store.put(keys[i], values[i]).await.unwrap();
+        }
+
+        // Verify values are in memory
+        assert_eq!(
+            vec![
+                Some(Bytes::from_static(values[0])),
+                Some(Bytes::from_static(values[1])),
+                Some(Bytes::from_static(values[2]))
+            ],
+            kv_store
+                .multi_get_with_options(
+                    &keys,
+                    &ReadOptions {
+                        durability_filter: Memory
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // Flush to disk
+        kv_store.flush().await.unwrap();
+
+        // Verify values are still accessible after flush
+        assert_eq!(
+            vec![
+                Some(Bytes::from_static(values[0])),
+                Some(Bytes::from_static(values[1])),
+                Some(Bytes::from_static(values[2]))
+            ],
+            kv_store
+                .multi_get_with_options(
+                    &keys,
+                    &ReadOptions {
+                        durability_filter: Memory
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_multi_get_with_no_ordered() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            test_db_options(0, 1024, None),
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let keys = [b"test_key2", b"test_key3", b"test_key1", b"test_key4"];
+        let values = [b"test_value2", b"test_value3", b"test_value1"];
+
+        // Insert keys and values
+        for i in 0..3 {
+            kv_store.put(keys[i], values[i]).await.unwrap();
+        }
+
+        // Verify values are in memory
+        assert_eq!(
+            vec![
+                Some(Bytes::from_static(values[0])),
+                Some(Bytes::from_static(values[1])),
+                Some(Bytes::from_static(values[2])),
+                None
+            ],
+            kv_store
+                .multi_get_with_options(
+                    &keys,
+                    &ReadOptions {
+                        durability_filter: Memory
+                    }
+                )
+                .await
+                .unwrap(),
+        );
+
+        // Flush to disk
+        kv_store.flush().await.unwrap();
+
+        // Verify values are still accessible after flush
+        assert_eq!(
+            vec![
+                Some(Bytes::from_static(values[0])),
+                Some(Bytes::from_static(values[1])),
+                Some(Bytes::from_static(values[2])),
+                None,
+            ],
+            kv_store
+                .multi_get_with_options(
+                    &keys,
                     &ReadOptions {
                         durability_filter: Memory
                     }
