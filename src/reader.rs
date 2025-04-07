@@ -519,7 +519,7 @@ mod tests {
                 9,
                 Some(10000 - 5000),
                 Some(10000 + 4000), // not expired
-            )), // tombstone
+            )),
             None,
             Some(RowEntry::new(
                 Bytes::from_static(b"key"),
@@ -527,7 +527,7 @@ mod tests {
                 9,
                 Some(10000 - 5000),
                 None, // no expiration
-            )), // not expired
+            )), // tombstone
         ],
         expected: Some(Bytes::from_static(b"v1")),
     })]
