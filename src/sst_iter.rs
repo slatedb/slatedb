@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use bytes::Bytes;
 use std::cmp::min;
 use std::collections::VecDeque;
@@ -308,6 +309,7 @@ impl<'a> SstIterator<'a> {
     }
 }
 
+#[async_trait]
 impl KeyValueIterator for SstIterator<'_> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         while !self.state.is_finished() {
@@ -332,6 +334,7 @@ impl KeyValueIterator for SstIterator<'_> {
     }
 }
 
+#[async_trait]
 impl SeekToKey for SstIterator<'_> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         if !self.view.contains(next_key) {

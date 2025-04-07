@@ -3,6 +3,7 @@ use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator, SeekToKey};
 use crate::row_codec::SstRowCodecV0;
 use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
+use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::{Rng, RngCore};
 use std::collections::{BTreeMap, VecDeque};
@@ -72,6 +73,7 @@ impl TestIterator {
     }
 }
 
+#[async_trait]
 impl KeyValueIterator for TestIterator {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         self.entries.pop_front().map_or(Ok(None), |e| match e {
@@ -81,6 +83,7 @@ impl KeyValueIterator for TestIterator {
     }
 }
 
+#[async_trait]
 impl SeekToKey for TestIterator {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         while let Some(entry_result) = self.entries.front() {
