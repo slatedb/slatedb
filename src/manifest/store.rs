@@ -12,6 +12,7 @@ use crate::transactional_object_store::{
 };
 use crate::utils;
 use crate::SlateDBError::ManifestVersionExists;
+use async_trait::async_trait;
 use chrono::Utc;
 use futures::StreamExt;
 use object_store::path::Path;
@@ -19,7 +20,7 @@ use object_store::Error::AlreadyExists;
 use object_store::{Error, ObjectStore};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::ops::RangeBounds;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
@@ -505,36 +506,52 @@ where
 }
 
 pub(crate) struct ManifestStore {
-    object_store: Box<dyn TransactionalObjectStore>,
-    codec: Box<dyn ManifestCodec>,
-    manifest_suffix: &'static str,
+    backend: Box<dyn ManifestStoreBackend>,
     clock: Arc<dyn Clock + Send + Sync>,
 }
 
-impl ManifestStore {
-    pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
-        Self::new_with_clock(root_path, object_store, Arc::new(SystemClock::default()))
+#[async_trait]
+pub trait ManifestStoreBackend: Send + Sync {
+    async fn write_manifest(&self, id: u64, manifest: &Manifest) -> Result<(), SlateDBError>;
+    async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError>;
+    async fn try_read_manifest(&self, id: u64) -> Result<Option<Manifest>, SlateDBError>;
+    async fn list_manifests(
+        &self,
+        start_bound: Bound<u64>,
+        end_bound: Bound<u64>,
+    ) -> Result<Vec<ManifestFileMetadata>, SlateDBError>;
+}
+
+struct ObjectStoreManifestStoreBackend {
+    object_store: Box<dyn TransactionalObjectStore>,
+    codec: Box<dyn ManifestCodec>,
+    manifest_suffix: &'static str,
+}
+
+impl ObjectStoreManifestStoreBackend {
+    fn get_manifest_path(&self, id: u64) -> Path {
+        Path::from(format!("{:020}.{}", id, self.manifest_suffix))
     }
 
-    pub(crate) fn new_with_clock(
-        root_path: &Path,
-        object_store: Arc<dyn ObjectStore>,
-        clock: Arc<dyn Clock + Send + Sync>,
-    ) -> Self {
-        Self {
-            object_store: Box::new(DelegatingTransactionalObjectStore::new(
-                root_path.child("manifest"),
-                object_store,
-            )),
-            codec: Box::new(FlatBufferManifestCodec {}),
-            manifest_suffix: "manifest",
-            clock,
+    fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {
+        match path.extension() {
+            Some(ext) if ext == expected_extension => path
+                .filename()
+                .expect("invalid filename")
+                .split('.')
+                .next()
+                .ok_or_else(|| InvalidDBState)?
+                .parse()
+                .map_err(|_| InvalidDBState),
+            _ => Err(InvalidDBState),
         }
     }
+}
 
+#[async_trait]
+impl ManifestStoreBackend for ObjectStoreManifestStoreBackend {
     async fn write_manifest(&self, id: u64, manifest: &Manifest) -> Result<(), SlateDBError> {
         let manifest_path = &self.get_manifest_path(id);
-
         self.object_store
             .put_if_not_exists(manifest_path, self.codec.encode(manifest))
             .await
@@ -545,40 +562,39 @@ impl ManifestStore {
                     SlateDBError::from(err)
                 }
             })?;
-
         Ok(())
     }
 
-    /// Delete a manifest from the object store.
-    pub(crate) async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError> {
-        let (active_id, manifest) = self.read_latest_manifest().await?;
-        if active_id == id {
-            return Err(SlateDBError::InvalidDeletion);
-        }
-
-        if manifest
-            .core
-            .checkpoints
-            .iter()
-            .any(|ck| ck.manifest_id == id)
-        {
-            return Err(SlateDBError::InvalidDeletion);
-        }
-
+    async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError> {
         let manifest_path = &self.get_manifest_path(id);
         self.object_store.delete(manifest_path).await?;
         Ok(())
     }
 
-    /// Read a manifest from the object store. The last element in an unbounded
-    /// range is the current manifest.
-    /// # Arguments
-    /// * `id_range` - The range of IDs to list
-    pub(crate) async fn list_manifests<R: RangeBounds<u64>>(
+    async fn try_read_manifest(&self, id: u64) -> Result<Option<Manifest>, SlateDBError> {
+        let manifest_path = &self.get_manifest_path(id);
+        match self.object_store.get(manifest_path).await {
+            Ok(manifest) => match manifest.bytes().await {
+                Ok(bytes) => {
+                    let manifest = self.codec.decode(&bytes)?;
+                    Ok(Some(manifest))
+                }
+                Err(e) => Err(SlateDBError::from(e)),
+            },
+            Err(e) => match e {
+                Error::NotFound { .. } => Ok(None),
+                _ => Err(SlateDBError::from(e)),
+            },
+        }
+    }
+
+    async fn list_manifests(
         &self,
-        id_range: R,
+        start_bound: Bound<u64>,
+        end_bound: Bound<u64>,
     ) -> Result<Vec<ManifestFileMetadata>, SlateDBError> {
         let manifest_path = &Path::from("/");
+        let id_range = (start_bound, end_bound);
         let mut files_stream = self.object_store.list(Some(manifest_path));
         let mut manifests = Vec::new();
 
@@ -602,6 +618,69 @@ impl ManifestStore {
 
         manifests.sort_by_key(|m| m.id);
         Ok(manifests)
+    }
+}
+
+impl ManifestStore {
+    pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
+        Self::new_with_clock(root_path, object_store, Arc::new(SystemClock::default()))
+    }
+
+    pub(crate) fn new_with_clock(
+        root_path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        clock: Arc<dyn Clock + Send + Sync>,
+    ) -> Self {
+        Self {
+            backend: Box::new(ObjectStoreManifestStoreBackend {
+                object_store: Box::new(DelegatingTransactionalObjectStore::new(
+                    root_path.child("manifest"),
+                    object_store,
+                )),
+                codec: Box::new(FlatBufferManifestCodec {}),
+                manifest_suffix: "manifest",
+            }),
+            clock,
+        }
+    }
+
+    async fn write_manifest(&self, id: u64, manifest: &Manifest) -> Result<(), SlateDBError> {
+        self.backend.write_manifest(id, manifest).await
+    }
+
+    /// Delete a manifest from the object store.
+    pub(crate) async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError> {
+        let (active_id, manifest) = self.read_latest_manifest().await?;
+        if active_id == id {
+            return Err(SlateDBError::InvalidDeletion);
+        }
+
+        if manifest
+            .core
+            .checkpoints
+            .iter()
+            .any(|ck| ck.manifest_id == id)
+        {
+            return Err(SlateDBError::InvalidDeletion);
+        }
+
+        self.backend.delete_manifest(id).await
+    }
+
+    /// Read a manifest from the object store. The last element in an unbounded
+    /// range is the current manifest.
+    /// # Arguments
+    /// * `id_range` - The range of IDs to list
+    pub(crate) async fn list_manifests<R: RangeBounds<u64>>(
+        &self,
+        id_range: R,
+    ) -> Result<Vec<ManifestFileMetadata>, SlateDBError> {
+        self.backend
+            .list_manifests(
+                id_range.start_bound().cloned(),
+                id_range.end_bound().cloned(),
+            )
+            .await
     }
 
     /// Active manifests include the latest manifest and all manifests referenced
@@ -649,42 +728,11 @@ impl ManifestStore {
         &self,
         id: u64,
     ) -> Result<Option<Manifest>, SlateDBError> {
-        let manifest_path = &self.get_manifest_path(id);
-        match self.object_store.get(manifest_path).await {
-            Ok(manifest) => match manifest.bytes().await {
-                Ok(bytes) => {
-                    let manifest = self.codec.decode(&bytes)?;
-                    Ok(Some(manifest))
-                }
-                Err(e) => Err(SlateDBError::from(e)),
-            },
-            Err(e) => match e {
-                Error::NotFound { .. } => Ok(None),
-                _ => Err(SlateDBError::from(e)),
-            },
-        }
+        self.backend.try_read_manifest(id).await
     }
 
     pub(crate) async fn read_manifest(&self, id: u64) -> Result<Manifest, SlateDBError> {
         self.try_read_manifest(id).await?.ok_or(ManifestMissing(id))
-    }
-
-    fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {
-        match path.extension() {
-            Some(ext) if ext == expected_extension => path
-                .filename()
-                .expect("invalid filename")
-                .split('.')
-                .next()
-                .ok_or_else(|| InvalidDBState)?
-                .parse()
-                .map_err(|_| InvalidDBState),
-            _ => Err(InvalidDBState),
-        }
-    }
-
-    fn get_manifest_path(&self, id: u64) -> Path {
-        Path::from(format!("{:020}.{}", id, self.manifest_suffix))
     }
 }
 
