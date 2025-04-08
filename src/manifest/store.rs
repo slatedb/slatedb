@@ -489,20 +489,11 @@ impl StoredManifest {
 
 /// Represents the metadata of a manifest file stored in the object store.
 #[derive(Serialize, Debug)]
-pub(crate) struct ManifestFileMetadata {
+pub(crate) struct ManifestMetadata {
     pub(crate) id: u64,
-    #[serde(serialize_with = "serialize_path")]
-    pub(crate) location: Path,
     pub(crate) last_modified: chrono::DateTime<Utc>,
     #[allow(dead_code)]
     pub(crate) size: u32,
-}
-
-fn serialize_path<S>(path: &Path, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(path.as_ref())
 }
 
 pub(crate) struct ManifestStore {
@@ -519,7 +510,7 @@ pub trait ManifestStoreBackend: Send + Sync {
         &self,
         start_bound: Bound<u64>,
         end_bound: Bound<u64>,
-    ) -> Result<Vec<ManifestFileMetadata>, SlateDBError>;
+    ) -> Result<Vec<ManifestMetadata>, SlateDBError>;
 }
 
 struct ObjectStoreManifestStoreBackend {
@@ -592,7 +583,7 @@ impl ManifestStoreBackend for ObjectStoreManifestStoreBackend {
         &self,
         start_bound: Bound<u64>,
         end_bound: Bound<u64>,
-    ) -> Result<Vec<ManifestFileMetadata>, SlateDBError> {
+    ) -> Result<Vec<ManifestMetadata>, SlateDBError> {
         let manifest_path = &Path::from("/");
         let id_range = (start_bound, end_bound);
         let mut files_stream = self.object_store.list(Some(manifest_path));
@@ -604,9 +595,8 @@ impl ManifestStoreBackend for ObjectStoreManifestStoreBackend {
         } {
             match self.parse_id(&file.location, "manifest") {
                 Ok(id) if id_range.contains(&id) => {
-                    manifests.push(ManifestFileMetadata {
+                    manifests.push(ManifestMetadata {
                         id,
-                        location: file.location,
                         last_modified: file.last_modified,
                         size: file.size as u32,
                     });
@@ -674,7 +664,7 @@ impl ManifestStore {
     pub(crate) async fn list_manifests<R: RangeBounds<u64>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<ManifestFileMetadata>, SlateDBError> {
+    ) -> Result<Vec<ManifestMetadata>, SlateDBError> {
         self.backend
             .list_manifests(
                 id_range.start_bound().cloned(),
