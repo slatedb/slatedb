@@ -108,7 +108,7 @@ impl MemtableFlusher {
             let id = SsTableId::Compacted(Ulid::new());
             let sst_handle = self
                 .db_inner
-                .flush_imm_table(&id, imm_memtable.table())
+                .flush_imm_table(&id, imm_memtable.table(), true)
                 .await?;
             {
                 let mut guard = self.db_inner.state.write();
