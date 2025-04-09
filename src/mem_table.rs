@@ -300,7 +300,7 @@ impl KVTable {
     /// Returns None if the key is not in the memtable at all,
     /// Some(None) if the key is in the memtable but has a tombstone value,
     /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
-    pub(crate) fn get(&self, key: &[u8]) -> Option<RowEntry> {
+    pub(crate) fn get(&self, key: &[u8], max_seq: Option<u64>) -> Option<RowEntry> {
         let user_key = Bytes::from(key.to_vec());
         let range = KVTableInternalKeyRange::from(BytesRange::new(
             Bound::Included(user_key.clone()),
@@ -308,7 +308,13 @@ impl KVTable {
         ));
         self.map
             .range(range)
-            .next()
+            .find(|entry| {
+                if let Some(max_seq) = max_seq {
+                    entry.key().seq <= max_seq
+                } else {
+                    true
+                }
+            })
             .map(|entry| entry.value().clone())
     }
 

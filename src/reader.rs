@@ -11,10 +11,12 @@ use crate::reader::SstFilterResult::{
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
-use crate::types::RowEntry;
+use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{get_now_for_read, is_not_expired, MonotonicClock};
 use crate::{filter, DbIterator, SlateDBError};
 use bytes::Bytes;
+use futures::future::BoxFuture;
+use futures::FutureExt;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -62,86 +64,26 @@ impl Reader {
         }
     }
 
+    /// Get the value for the given key, and return None if the value is expired.
     pub(crate) async fn get_with_options<K: AsRef<[u8]>>(
         &self,
         key: K,
         options: &ReadOptions,
-        snapshot: &(dyn ReadSnapshot + Sync),
+        snapshot: &(dyn ReadSnapshot + Sync + Send),
+        max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        let key = key.as_ref();
-        let ttl_now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
-
-        if self.include_wal_memtables(options.durability_filter) {
-            let maybe_val = std::iter::once(snapshot.wal())
-                .chain(snapshot.imm_wal().iter().map(|imm| imm.table()))
-                .find_map(|memtable| memtable.get(key));
-            if let Some(val) = maybe_val {
-                return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
-            }
-        }
-
-        if self.include_memtables(options.durability_filter) {
-            let maybe_val = std::iter::once(snapshot.memtable())
-                .chain(snapshot.imm_memtable().iter().map(|imm| imm.table()))
-                .find_map(|memtable| memtable.get(key));
-            if let Some(val) = maybe_val {
-                return Ok(Self::unwrap_value_if_not_expired(&val, ttl_now));
-            }
-        }
-
-        // Since the key remains unchanged during the point query, we only need to compute
-        // the hash value once and pass it to the filter to avoid unnecessary hash computation
-        let key_hash = filter::filter_hash(key);
-
-        // cache blocks that are being read
-        let sst_iter_options = SstIteratorOptions {
-            cache_blocks: true,
-            eager_spawn: true,
-            ..SstIteratorOptions::default()
+        let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
+        let get = LevelGet {
+            key: key.as_ref(),
+            max_seq,
+            snapshot,
+            table_store: self.table_store.clone(),
+            db_stats: self.db_stats.clone(),
+            now,
+            include_wal_memtables: self.include_wal_memtables(options.durability_filter),
+            include_memtables: self.include_memtables(options.durability_filter),
         };
-
-        for sst in &snapshot.core().l0 {
-            let filter_result = self.sst_might_include_key(sst, key, key_hash).await?;
-            self.record_filter_result(&filter_result);
-
-            if filter_result.might_contain_key() {
-                let iter =
-                    SstIterator::for_key(sst, key, self.table_store.clone(), sst_iter_options)
-                        .await?;
-
-                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
-                if let Some(entry) = ttl_iter.next_entry().await? {
-                    if entry.key == key {
-                        return Ok(entry.value.as_bytes());
-                    }
-                }
-                if matches!(filter_result, FilterPositive) {
-                    self.db_stats.sst_filter_false_positives.inc();
-                }
-            }
-        }
-
-        for sr in &snapshot.core().compacted {
-            let filter_result = self.sr_might_include_key(sr, key, key_hash).await?;
-            self.record_filter_result(&filter_result);
-
-            if filter_result.might_contain_key() {
-                let iter =
-                    SortedRunIterator::for_key(sr, key, self.table_store.clone(), sst_iter_options)
-                        .await?;
-
-                let mut ttl_iter = FilterIterator::wrap_ttl_filter_iterator(iter, ttl_now);
-                if let Some(entry) = ttl_iter.next_entry().await? {
-                    if entry.key == key {
-                        return Ok(entry.value.as_bytes());
-                    }
-                }
-                if matches!(filter_result, FilterPositive) {
-                    self.db_stats.sst_filter_false_positives.inc();
-                }
-            }
-        }
-        Ok(None)
+        get.get().await
     }
 
     pub(crate) async fn scan_with_options<'a>(
@@ -204,21 +146,152 @@ impl Reader {
 
         DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters).await
     }
+}
 
-    fn unwrap_value_if_not_expired(entry: &RowEntry, now_ttl: i64) -> Option<Bytes> {
-        if is_not_expired(entry, now_ttl) {
-            entry.value.as_bytes()
-        } else {
-            None
-        }
+struct LevelGet<'a> {
+    key: &'a [u8],
+    max_seq: Option<u64>,
+    snapshot: &'a (dyn ReadSnapshot + Sync + Send),
+    table_store: Arc<TableStore>,
+    db_stats: DbStats,
+    now: i64,
+    include_wal_memtables: bool,
+    include_memtables: bool,
+}
+
+impl<'a> LevelGet<'a> {
+    async fn get(&'a self) -> Result<Option<Bytes>, SlateDBError> {
+        let getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> = vec![
+            Box::pin(self.get_memtable()),
+            Box::pin(self.get_l0()),
+            Box::pin(self.get_compacted()),
+        ];
+
+        self.get_inner(getters).await
     }
 
-    fn record_filter_result(&self, result: &SstFilterResult) {
-        if matches!(result, FilterPositive) {
-            self.db_stats.sst_filter_positives.inc();
-        } else if matches!(result, FilterNegative) {
-            self.db_stats.sst_filter_negatives.inc();
+    async fn get_inner(
+        &'a self,
+        getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>>,
+    ) -> Result<Option<Bytes>, SlateDBError> {
+        for getter in getters {
+            let result = match getter.await? {
+                Some(result) => result,
+                None => continue,
+            };
+
+            // expired is semantically equivalent to a tombstone. tombstone does not have an expiration.
+            let is_tombstone = matches!(result.value, ValueDeletable::Tombstone);
+            let is_expired = !is_not_expired(&result, self.now);
+            if is_tombstone || is_expired {
+                return Ok(None);
+            }
+            return Ok(result.value.as_bytes());
         }
+        Ok(None)
+    }
+
+    fn get_memtable(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
+        async move {
+            if self.include_wal_memtables {
+                let maybe_val = std::iter::once(self.snapshot.wal())
+                    .chain(self.snapshot.imm_wal().iter().map(|imm| imm.table()))
+                    .find_map(|memtable| memtable.get(self.key, self.max_seq));
+                if let Some(val) = maybe_val {
+                    return Ok(Some(val));
+                }
+            }
+
+            if self.include_memtables {
+                let maybe_val = std::iter::once(self.snapshot.memtable())
+                    .chain(self.snapshot.imm_memtable().iter().map(|imm| imm.table()))
+                    .find_map(|memtable| memtable.get(self.key, self.max_seq));
+                if let Some(val) = maybe_val {
+                    return Ok(Some(val));
+                }
+            }
+            Ok(None)
+        }
+        .boxed()
+    }
+
+    fn get_l0(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
+        async move {
+            // cache blocks that are being read
+            let sst_iter_options = SstIteratorOptions {
+                cache_blocks: true,
+                eager_spawn: true,
+                ..SstIteratorOptions::default()
+            };
+
+            let key_hash = filter::filter_hash(self.key);
+
+            for sst in &self.snapshot.core().l0 {
+                let filter_result = self.sst_might_include_key(sst, self.key, key_hash).await?;
+                self.record_filter_result(&filter_result);
+
+                if filter_result.might_contain_key() {
+                    let iter = SstIterator::for_key(
+                        sst,
+                        self.key,
+                        self.table_store.clone(),
+                        sst_iter_options,
+                    )
+                    .await?;
+
+                    let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
+                    if let Some(entry) = iter.next_entry().await? {
+                        if entry.key == self.key {
+                            return Ok(Some(entry));
+                        }
+                    }
+                    if matches!(filter_result, FilterPositive) {
+                        self.db_stats.sst_filter_false_positives.inc();
+                    }
+                }
+            }
+            Ok(None)
+        }
+        .boxed()
+    }
+
+    fn get_compacted(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
+        async move {
+            // cache blocks that are being read
+            let sst_iter_options = SstIteratorOptions {
+                cache_blocks: true,
+                eager_spawn: true,
+                ..SstIteratorOptions::default()
+            };
+            let key_hash = filter::filter_hash(self.key);
+
+            for sr in &self.snapshot.core().compacted {
+                let filter_result = self.sr_might_include_key(sr, self.key, key_hash).await?;
+                self.record_filter_result(&filter_result);
+
+                if filter_result.might_contain_key() {
+                    let iter = SortedRunIterator::for_key(
+                        sr,
+                        self.key,
+                        self.table_store.clone(),
+                        sst_iter_options,
+                    )
+                    .await?;
+
+                    let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
+                    if let Some(entry) = iter.next_entry().await? {
+                        if entry.key == self.key {
+                            return Ok(Some(entry));
+                        }
+                    }
+                    if matches!(filter_result, FilterPositive) {
+                        self.db_stats.sst_filter_false_positives.inc();
+                    }
+                }
+            }
+            Ok(None)
+        }
+        .boxed()
     }
 
     /// Check if the given key might be in the range of the SST. Checks if the key is
@@ -275,5 +348,212 @@ impl Reader {
             };
         }
         Ok(RangePositive)
+    }
+
+    fn record_filter_result(&self, result: &SstFilterResult) {
+        if matches!(result, FilterPositive) {
+            self.db_stats.sst_filter_positives.inc();
+        } else if matches!(result, FilterNegative) {
+            self.db_stats.sst_filter_negatives.inc();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{sst::SsTableFormat, stats::StatRegistry, types::ValueDeletable};
+    use object_store::{memory::InMemory, path::Path};
+    use rstest::rstest;
+
+    struct MockReadSnapshot {
+        memtable: Arc<KVTable>,
+        wal: Arc<KVTable>,
+        imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
+        imm_wal: VecDeque<Arc<ImmutableWal>>,
+    }
+
+    impl ReadSnapshot for MockReadSnapshot {
+        fn memtable(&self) -> Arc<KVTable> {
+            self.memtable.clone()
+        }
+
+        fn wal(&self) -> Arc<KVTable> {
+            self.wal.clone()
+        }
+
+        fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>> {
+            &self.imm_memtable
+        }
+
+        fn imm_wal(&self) -> &VecDeque<Arc<ImmutableWal>> {
+            &self.imm_wal
+        }
+
+        fn core(&self) -> &CoreDbState {
+            todo!()
+        }
+    }
+
+    fn mock_read_snapshot() -> MockReadSnapshot {
+        MockReadSnapshot {
+            memtable: Arc::new(KVTable::new()),
+            wal: Arc::new(KVTable::new()),
+            imm_memtable: VecDeque::new(),
+            imm_wal: VecDeque::new(),
+        }
+    }
+
+    fn mock_level_getters<'a>(
+        row_entries: Vec<Option<RowEntry>>,
+    ) -> Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> {
+        row_entries
+            .into_iter()
+            .map(|entry| async move { Ok(entry) }.boxed())
+            .collect()
+    }
+
+    struct LevelGetExpireTestCase {
+        entries: Vec<Option<RowEntry>>,
+        expected: Option<Bytes>,
+    }
+
+    #[tokio::test]
+    #[rstest]
+    #[case(LevelGetExpireTestCase {
+        entries: vec![
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v1")),
+                10,
+                Some(10000 - 2000),
+                Some(10000 - 1000),
+            )), // already expired, should be None
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v2")),
+                9,
+                Some(10000 - 3000),
+                Some(10000 + 4000),
+            )), // not expired
+        ],
+        expected: None,
+    })]
+    #[case(LevelGetExpireTestCase {
+        entries: vec![
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v1")),
+                10,
+                Some(10000 - 2000),
+                Some(10000 + 1000),
+            )), // not expired
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v2")),
+                9,
+                Some(10000 - 5000),
+                Some(10000 - 4000),
+            )), // expired
+        ],
+        expected: Some(Bytes::from_static(b"v1")),
+    })]
+    #[case(LevelGetExpireTestCase {
+        entries: vec![
+            None,
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v2")),
+                9,
+                Some(10000 - 5000),
+                Some(10000 + 4000),
+            )), // not expired
+        ],
+        expected: Some(Bytes::from_static(b"v2")),
+    })]
+    #[case(LevelGetExpireTestCase {
+        entries: vec![
+            None,
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Tombstone,
+                9,
+                Some(10000 - 5000),
+                Some(10000 + 4000),
+            )), // tombstone
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v2")),
+                9,
+                Some(10000 - 5000),
+                None, // no expiration
+            )), // not expired
+        ],
+        expected: None,
+    })]
+    #[case(LevelGetExpireTestCase {
+        entries: vec![
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Tombstone,
+                9,
+                Some(10000 - 5000),
+                Some(10000 + 4000),
+            )), // tombstone
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v2")),
+                9,
+                Some(10000 - 5000),
+                None, // no expiration
+            )), // not expired
+        ],
+        expected: None,
+    })]
+    #[case(LevelGetExpireTestCase {
+        entries: vec![
+            None,
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"v1")),
+                9,
+                Some(10000 - 5000),
+                Some(10000 + 4000), // not expired
+            )),
+            None,
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Tombstone,
+                9,
+                Some(10000 - 5000),
+                None, // no expiration
+            )), // tombstone
+        ],
+        expected: Some(Bytes::from_static(b"v1")),
+    })]
+    async fn test_level_get_handles_expire(
+        #[case] test_case: LevelGetExpireTestCase,
+    ) -> Result<(), SlateDBError> {
+        let mock_read_snapshot = mock_read_snapshot();
+        let stat_registry = StatRegistry::new();
+        let get = LevelGet {
+            key: b"key",
+            max_seq: None,
+            snapshot: &mock_read_snapshot,
+            table_store: Arc::new(TableStore::new(
+                Arc::new(InMemory::new()),
+                SsTableFormat::default(),
+                Path::from(""),
+                None,
+            )),
+            db_stats: DbStats::new(&stat_registry),
+            now: 10000,
+            include_wal_memtables: false,
+            include_memtables: false,
+        };
+
+        let result = get.get_inner(mock_level_getters(test_case.entries)).await?;
+        assert_eq!(result, test_case.expected);
+        Ok(())
     }
 }
