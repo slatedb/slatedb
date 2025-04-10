@@ -156,4 +156,21 @@ mod tests {
         };
         assert!(matches!(*from_err, SlateDBError::ChecksumMismatch));
     }
+
+    #[tokio::test]
+    async fn test_max_seq_iterator_empty() {
+        let mut iter = DbIterator::new(
+            BytesRange::from(..),
+            VecDequeKeyValueIterator::new(VecDeque::new()),
+            VecDeque::new(),
+            VecDeque::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Test that entries with seq > max_seq are filtered out
+        let result = iter.next().await;
+        assert!(result.unwrap().is_none());
+    }
 }

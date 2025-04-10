@@ -91,6 +91,7 @@ impl Reader {
         range: BytesRange,
         options: &ScanOptions,
         snapshot: &(dyn ReadSnapshot + Sync),
+        max_seq: Option<u64>,
     ) -> Result<DbIterator<'a>, SlateDBError> {
         let mut memtables = VecDeque::new();
 
@@ -144,7 +145,7 @@ impl Reader {
             sr_iters.push_back(iter);
         }
 
-        DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters, None).await
+        DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters, max_seq).await
     }
 }
 

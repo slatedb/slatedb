@@ -133,7 +133,7 @@ impl DbInner {
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
         self.reader
-            .scan_with_options(range, options, &snapshot)
+            .scan_with_options(range, options, &snapshot, None)
             .await
     }
 
