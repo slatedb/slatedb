@@ -3313,6 +3313,31 @@ mod tests {
         assert_eq!(db.inner.mono_clock.last_tick.load(Ordering::SeqCst), 11);
     }
 
+    #[tokio::test]
+    async fn test_put_get_delete_with_separate_wal_store() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut options = test_db_options(0, 1024, None);
+        options.wal_object_store = Some(wal_object_store);
+        let kv_store = Db::open_with_opts(Path::from("/tmp/test_kv_store"), options, object_store)
+            .await
+            .unwrap();
+
+        let key = b"test_key";
+        let value = b"test_value";
+        kv_store.put(key, value).await.unwrap();
+        kv_store.flush().await.unwrap();
+
+        assert_eq!(
+            kv_store.get(key).await.unwrap(),
+            Some(Bytes::from_static(value))
+        );
+
+        kv_store.delete(key).await.unwrap();
+        assert_eq!(None, kv_store.get(key).await.unwrap());
+        kv_store.close().await.unwrap();
+    }
+
     #[test]
     fn test_write_option_defaults() {
         // This is a regression test for a bug where the defaults for WriteOptions were not being
