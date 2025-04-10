@@ -202,7 +202,7 @@ pub(crate) async fn assert_ranged_db_scan<T: RangeBounds<Bytes>>(
     range: T,
     iter: &mut DbIterator<'_>,
 ) {
-    let mut expected = table.range(range);
+    let mut expected = table.range(range);   
     loop {
         let expected_next = expected.next();
         let actual_next = iter.next().await.unwrap();
