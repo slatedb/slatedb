@@ -51,6 +51,7 @@ walkdir = "2.3.3"
 radix_trie = "0.2.1"
 figment = { version = "0.10.19", features = ["env", "json", "toml", "yaml"] }
 duration-str = { version = "0.11.2", features = ["serde", "time"], default-features = false }
+ouroboros = "0.18"
 
 [dev-dependencies]
 bincode = "1"
