@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, SeekToKey};
 use crate::types::RowEntry;
 use crate::utils::is_not_expired;
 use crate::SlateDBError;
@@ -46,6 +46,13 @@ impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
             }
         }
         Ok(None)
+    }
+}
+
+#[async_trait]
+impl<T: KeyValueIterator + SeekToKey> SeekToKey for FilterIterator<T> {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.iterator.seek(next_key).await
     }
 }
 
