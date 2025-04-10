@@ -254,7 +254,7 @@ impl LocalCacheEntry for FsCacheEntry {
         for part_file_name in part_file_names.iter() {
             let part_number = part_file_name
                 .split('-')
-                .last()
+                .next_back()
                 .and_then(|part_number| part_number.parse::<usize>().ok());
             if let Some(part_number) = part_number {
                 part_numbers.push(part_number);
