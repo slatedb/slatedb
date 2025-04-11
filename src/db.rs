@@ -529,7 +529,7 @@ impl Db {
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             maybe_cached_object_store.clone(),
-            options.wal_object_store.clone(),
+            options.low_latency_object_store.clone(),
             sst_format.clone(),
             path_resolver.clone(),
             fp_registry.clone(),
@@ -581,7 +581,7 @@ impl Db {
             // not to pollute the cache during compaction
             let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
                 object_store.clone(),
-                options.wal_object_store.clone(),
+                options.low_latency_object_store.clone(),
                 sst_format,
                 path_resolver,
                 fp_registry.clone(),
@@ -3314,11 +3314,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_put_get_delete_with_separate_wal_store() {
+    async fn test_put_get_delete_with_low_latency_store() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let low_latency_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut options = test_db_options(0, 1024, None);
-        options.wal_object_store = Some(wal_object_store);
+        options.low_latency_object_store = Some(low_latency_object_store);
         let kv_store = Db::open_with_opts(Path::from("/tmp/test_kv_store"), options, object_store)
             .await
             .unwrap();
@@ -3401,7 +3401,7 @@ mod tests {
             flush_interval: Some(Duration::from_millis(100)),
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
-            wal_object_store: None,
+            low_latency_object_store: None,
             manifest_poll_interval: Duration::from_millis(100),
             max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,

@@ -28,13 +28,13 @@ use crate::{blob::ReadOnlyBlob, block::Block};
 
 pub struct TableStore {
     object_store: Arc<dyn ObjectStore>,
-    wal_object_store: Option<Arc<dyn ObjectStore>>,
+    low_latency_object_store: Option<Arc<dyn ObjectStore>>,
     sst_format: SsTableFormat,
     path_resolver: PathResolver,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
     transactional_store: Arc<dyn TransactionalObjectStore>,
-    wal_transactional_store: Option<Arc<dyn TransactionalObjectStore>>,
+    low_latency_transactional_store: Option<Arc<dyn TransactionalObjectStore>>,
     /// In-memory cache for blocks
     block_cache: Option<Arc<dyn DbCache>>,
 }
@@ -91,7 +91,7 @@ impl TableStore {
 
     pub fn new_with_fp_registry(
         object_store: Arc<dyn ObjectStore>,
-        wal_object_store: Option<Arc<dyn ObjectStore>>,
+        low_latency_object_store: Option<Arc<dyn ObjectStore>>,
         sst_format: SsTableFormat,
         path_resolver: PathResolver,
         fp_registry: Arc<FailPointRegistry>,
@@ -99,7 +99,7 @@ impl TableStore {
     ) -> Self {
         Self {
             object_store: object_store.clone(),
-            wal_object_store: wal_object_store.clone(),
+            low_latency_object_store: low_latency_object_store.clone(),
             sst_format,
             path_resolver,
             fp_registry,
@@ -107,7 +107,7 @@ impl TableStore {
                 Path::from("/"),
                 object_store.clone(),
             )),
-            wal_transactional_store: wal_object_store.map(|object_store| {
+            low_latency_transactional_store: low_latency_object_store.map(|object_store| {
                 Arc::new(DelegatingTransactionalObjectStore::new(
                     Path::from("/"),
                     object_store.clone(),
@@ -118,16 +118,16 @@ impl TableStore {
     }
 
     fn wal_object_store(&self) -> &Arc<dyn ObjectStore> {
-        if let Some(wal_object_store) = &self.wal_object_store {
-            wal_object_store
+        if let Some(low_latency_object_store) = &self.low_latency_object_store {
+            low_latency_object_store
         } else {
             &self.object_store
         }
     }
 
     fn wal_transactional_store(&self) -> &Arc<dyn TransactionalObjectStore> {
-        if let Some(wal_transactional_store) = &self.wal_transactional_store {
-            wal_transactional_store
+        if let Some(low_latency_transactional_store) = &self.low_latency_transactional_store {
+            low_latency_transactional_store
         } else {
             &self.transactional_store
         }

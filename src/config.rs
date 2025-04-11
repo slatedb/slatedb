@@ -391,16 +391,17 @@ pub struct DbOptions {
     #[cfg(feature = "wal_disable")]
     pub wal_enabled: bool,
 
-    /// An optional [object store](ObjectStore) dedicated specifically for WAL.
+    /// An optional low latency [object store](ObjectStore) dedicated specifically
+    /// for WAL.
     ///
     /// If not set, the main object store passed to `Db::open(...)` will be used
     /// for WAL storage.
     ///
     /// NOTE: WAL durability and availability properties depend on the properties
-    ///       of the underlying object store. Make sure the configured object
+    ///       of the configured object store. Make sure the configured object
     ///       store is durable and available enough for your use case.
     #[serde(skip)]
-    pub wal_object_store: Option<Arc<dyn ObjectStore>>,
+    pub low_latency_object_store: Option<Arc<dyn ObjectStore>>,
 
     /// How frequently to poll for new manifest files. Refreshing the manifest file
     /// allows writers to detect fencing operations and allows readers to detect newly
@@ -664,7 +665,7 @@ impl Default for DbOptions {
             flush_interval: Some(Duration::from_millis(100)),
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
-            wal_object_store: None,
+            low_latency_object_store: None,
             manifest_poll_interval: Duration::from_secs(1),
             min_filter_keys: 1000,
             max_unflushed_bytes: 1_073_741_824,
