@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
-use crate::iter::{IterationOrder, KeyValueIterator, SeekToKey};
+use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::merge_iterator::MergeIterator;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCell;
@@ -162,10 +162,7 @@ impl KeyValueIterator for VecDequeKeyValueIterator {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.rows.pop_front())
     }
-}
 
-#[async_trait]
-impl SeekToKey for VecDequeKeyValueIterator {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
             let front = self.rows.front();
@@ -182,6 +179,12 @@ impl SeekToKey for VecDequeKeyValueIterator {
 impl<T: RangeBounds<KVTableInternalKey>> KeyValueIterator for MemTableIterator<'_, T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.next_entry_sync())
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        Err(SlateDBError::Unsupported(
+            "seek is not supported for memtable iterator".to_string(),
+        ))
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::bytes_range::BytesRange;
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, SeekToKey};
+use crate::iter::KeyValueIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstView};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
@@ -130,10 +130,7 @@ impl KeyValueIterator for SortedRunIterator<'_> {
         }
         Ok(None)
     }
-}
 
-#[async_trait]
-impl SeekToKey for SortedRunIterator<'_> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         while let Some(next_table) = self.view.peek_next_table() {
             if next_table.compacted_first_key() < next_key {

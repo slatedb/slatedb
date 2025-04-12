@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use crate::iter::IterationOrder;
 use crate::iter::IterationOrder::Ascending;
-use crate::iter::{IterationOrder, SeekToKey};
 use crate::row_codec::SstRowCodecV0;
 use crate::{block::Block, error::SlateDBError, iter::KeyValueIterator, types::RowEntry};
 use async_trait::async_trait;
@@ -65,10 +65,7 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
             Err(e) => Err(e),
         }
     }
-}
 
-#[async_trait]
-impl<B: BlockLike> SeekToKey for BlockIterator<B> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
             let result = self.load_at_current_off();
@@ -148,7 +145,7 @@ mod tests {
     use crate::block::BlockBuilder;
     use crate::block_iterator::BlockIterator;
     use crate::bytes_range::BytesRange;
-    use crate::iter::{KeyValueIterator, SeekToKey};
+    use crate::iter::KeyValueIterator;
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::{assert_iterator, assert_next_entry, gen_attrs, gen_empty_attrs};
     use crate::types::RowEntry;

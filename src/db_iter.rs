@@ -1,6 +1,6 @@
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, SeekToKey};
+use crate::iter::KeyValueIterator;
 use crate::mem_table::VecDequeKeyValueIterator;
 use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
 use crate::sorted_run_iterator::SortedRunIterator;

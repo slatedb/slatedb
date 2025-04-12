@@ -11,7 +11,6 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
-use crate::iter::SeekToKey;
 use crate::{
     block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, partitioned_keyspace,
     tablestore::TableStore, types::RowEntry,
@@ -332,10 +331,7 @@ impl KeyValueIterator for SstIterator<'_> {
         }
         Ok(None)
     }
-}
 
-#[async_trait]
-impl SeekToKey for SstIterator<'_> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         if !self.view.contains(next_key) {
             return Err(SlateDBError::InvalidArgument {
