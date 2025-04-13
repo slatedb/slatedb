@@ -562,7 +562,7 @@ impl EncodedSsTableWriter<'_> {
 
 #[allow(dead_code)]
 fn slatedb_io_error() -> SlateDBError {
-    SlateDBError::from(std::io::Error::new(std::io::ErrorKind::Other, "oops"))
+    SlateDBError::from(std::io::Error::other("oops"))
 }
 
 #[cfg(test)]

@@ -773,7 +773,7 @@ impl Db {
     /// ## Arguments
     /// - `key`: the key to get
     /// - `options`: the read options to use (Note that [`ReadOptions::read_level`] has no effect for readers, which
-    ///    can only observe committed state).
+    ///   can only observe committed state).
     ///
     /// ## Returns
     /// - `Result<Option<Bytes>, SlateDBError>`:
