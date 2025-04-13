@@ -1,5 +1,6 @@
 use log::warn;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::runtime::Handle;
 use tokio::select;
@@ -98,12 +99,12 @@ impl DbInner {
             this: &Arc<DbInner>,
             rx: &mut UnboundedReceiver<WalFlushMsg>,
         ) -> Result<(), SlateDBError> {
-            let Some(period) = this.options.flush_interval else {
-                // If flush_interval is not set, we do not start the flush task.
-                return Ok(());
-            };
-
+            // Periodic flushing is disabled if `flush_interval` is set to None. Even if we do
+            // not perform periodic flushing, we still need to handle manual flush requests,
+            // and the final flush when the database is closed.
+            let period = this.options.flush_interval.unwrap_or(Duration::MAX);
             let mut ticker = tokio::time::interval(period);
+
             let mut err_reader = this.state.read().error_reader();
             loop {
                 select! {
@@ -131,7 +132,6 @@ impl DbInner {
                                     error!("error from wal flush: {err}");
                                     return Err(err);
                                 }
-
                                 if let Some(rsp_sender) = sender {
                                     let res = rsp_sender.send(result);
                                     if let Err(Err(err)) = res {
