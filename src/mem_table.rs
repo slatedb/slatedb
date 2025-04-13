@@ -138,7 +138,7 @@ impl VecDequeKeyValueIterator {
         Self { rows }
     }
 
-    pub(crate) async fn materialize_range<'a>(
+    pub(crate) async fn materialize_range(
         tables: VecDeque<Arc<KVTable>>,
         range: BytesRange,
     ) -> Result<Self, SlateDBError> {
@@ -183,7 +183,7 @@ impl<T: RangeBounds<KVTableInternalKey>> KeyValueIterator for MemTableIterator<'
         Ok(self.next_entry_sync())
     }
 
-    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+    async fn seek(&mut self, _next_key: &[u8]) -> Result<(), SlateDBError> {
         Err(SlateDBError::Unsupported(
             "seek is not supported for memtable iterator".to_string(),
         ))
@@ -340,7 +340,7 @@ impl KVTable {
         ordering: IterationOrder,
     ) -> MemTableIterator<KVTableInternalKeyRange> {
         MemTableIterator {
-            inner: self.clone().map.range(range.into()),
+            inner: self.map.range(range.into()),
             ordering,
         }
     }

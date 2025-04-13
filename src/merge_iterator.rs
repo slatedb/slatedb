@@ -170,21 +170,21 @@ impl<'a> MergeIteratorHeapEntry<'a> {
     }
 }
 
-impl<'a> Eq for MergeIteratorHeapEntry<'a> {}
+impl Eq for MergeIteratorHeapEntry<'_> {}
 
-impl<'a> PartialEq<Self> for MergeIteratorHeapEntry<'a> {
+impl PartialEq<Self> for MergeIteratorHeapEntry<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.index == other.index && self.next_kv == other.next_kv
     }
 }
 
-impl<'a> PartialOrd<Self> for MergeIteratorHeapEntry<'a> {
+impl PartialOrd<Self> for MergeIteratorHeapEntry<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'a> Ord for MergeIteratorHeapEntry<'a> {
+impl Ord for MergeIteratorHeapEntry<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         // we'll wrap a Reverse in the BinaryHeap, so the cmp here is in increasing order.
         // after Reverse is wrapped, it will return the entries with higher seqnum first.
@@ -238,7 +238,7 @@ impl<'a> MergeIterator<'a> {
 }
 
 #[async_trait]
-impl<'a> KeyValueIterator for MergeIterator<'a> {
+impl KeyValueIterator for MergeIterator<'_> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         let mut current_kv = match self.advance().await? {
             Some(kv) => kv,
