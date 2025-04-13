@@ -98,10 +98,7 @@ impl TokioCompactionExecutorInner {
     async fn load_iterators<'a>(
         &self,
         compaction: &'a CompactionJob,
-    ) -> Result<
-        TwoMergeIterator<MergeIterator<SstIterator<'a>>, MergeIterator<SortedRunIterator<'a>>>,
-        SlateDBError,
-    > {
+    ) -> Result<TwoMergeIterator<MergeIterator<'a>, MergeIterator<'a>>, SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 4,
             blocks_to_fetch: 256,

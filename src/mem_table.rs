@@ -138,14 +138,16 @@ impl VecDequeKeyValueIterator {
         Self { rows }
     }
 
-    pub(crate) async fn materialize_range(
+    pub(crate) async fn materialize_range<'a>(
         tables: VecDeque<Arc<KVTable>>,
         range: BytesRange,
     ) -> Result<Self, SlateDBError> {
-        let memtable_iters = tables
-            .iter()
-            .map(|t| t.range_ascending(range.clone()))
-            .collect();
+        let mut memtable_iters: VecDeque<MemTableIterator<KVTableInternalKeyRange>> =
+            VecDeque::new();
+        for table in &tables {
+            memtable_iters.push_back(table.range_ascending(range.clone()));
+        }
+
         let mut merge_iter = MergeIterator::new(memtable_iters).await?;
         let mut rows = VecDeque::new();
 
@@ -338,7 +340,7 @@ impl KVTable {
         ordering: IterationOrder,
     ) -> MemTableIterator<KVTableInternalKeyRange> {
         MemTableIterator {
-            inner: self.map.range(range.into()),
+            inner: self.clone().map.range(range.into()),
             ordering,
         }
     }
