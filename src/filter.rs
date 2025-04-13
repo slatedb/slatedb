@@ -309,7 +309,7 @@ mod tests {
 
         assert_eq!(clamped.buffer, filter.buffer);
         assert_eq!(clamped.num_probes, filter.num_probes);
-        assert!(clamped.buffer.as_ptr() != filter.buffer.as_ptr());
+        assert_ne!(clamped.buffer.as_ptr(), filter.buffer.as_ptr());
     }
 
     #[test]
