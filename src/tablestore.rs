@@ -123,10 +123,7 @@ impl TableStore {
         id_range: R,
     ) -> Result<Vec<SstFileMetadata>, SlateDBError> {
         fail_point!(Arc::clone(&self.fp_registry), "list-wal-ssts", |_| {
-            Err(SlateDBError::from(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "oops",
-            )))
+            Err(SlateDBError::from(std::io::Error::other("oops")))
         });
 
         let mut wal_list: Vec<SstFileMetadata> = Vec::new();
@@ -562,7 +559,7 @@ impl EncodedSsTableWriter<'_> {
 
 #[allow(dead_code)]
 fn slatedb_io_error() -> SlateDBError {
-    SlateDBError::from(std::io::Error::new(std::io::ErrorKind::Other, "oops"))
+    SlateDBError::from(std::io::Error::other("oops"))
 }
 
 #[cfg(test)]
