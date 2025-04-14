@@ -3,6 +3,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
+#![allow(clippy::result_large_err)]
 
 /// Re-export the bytes crate.
 ///
