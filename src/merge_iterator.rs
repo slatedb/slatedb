@@ -7,46 +7,38 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
 
 pub(crate) struct TwoMergeIterator<T1: KeyValueIterator, T2: KeyValueIterator> {
-    iterator1: (T1, Option<RowEntry>),
-    iterator2: (T2, Option<RowEntry>),
+    iterator1: T1,
+    iterator2: T2,
 }
 
 impl<T1: KeyValueIterator, T2: KeyValueIterator> TwoMergeIterator<T1, T2> {
-    pub(crate) async fn new(mut iterator1: T1, mut iterator2: T2) -> Result<Self, SlateDBError> {
-        let next1 = iterator1.next_entry().await?;
-        let next2 = iterator2.next_entry().await?;
+    pub(crate) async fn new(iterator1: T1, iterator2: T2) -> Result<Self, SlateDBError> {
         Ok(Self {
-            iterator1: (iterator1, next1),
-            iterator2: (iterator2, next2),
+            iterator1,
+            iterator2,
         })
     }
 
     async fn advance1(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        if self.iterator1.1.is_none() {
+        if self.iterator1.peek().is_none() {
             return Ok(None);
         }
-        Ok(std::mem::replace(
-            &mut self.iterator1.1,
-            self.iterator1.0.next_entry().await?,
-        ))
+        self.iterator1.take_and_next_entry().await
     }
 
     async fn advance2(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        if self.iterator2.1.is_none() {
+        if self.iterator2.peek().is_none() {
             return Ok(None);
         }
-        Ok(std::mem::replace(
-            &mut self.iterator2.1,
-            self.iterator2.0.next_entry().await?,
-        ))
+        self.iterator2.take_and_next_entry().await
     }
 
     fn peek1(&self) -> Option<&RowEntry> {
-        self.iterator1.1.as_ref()
+        self.iterator1.peek()
     }
 
     fn peek2(&self) -> Option<&RowEntry> {
-        self.iterator2.1.as_ref()
+        self.iterator2.peek()
     }
 
     fn peek_inner(&self) -> Option<&RowEntry> {
@@ -86,12 +78,11 @@ where
     T2: KeyValueIterator,
 {
     async fn seek1(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        match &self.iterator1.1 {
+        match &self.iterator1.peek() {
             None => Ok(()),
             Some(val) => {
                 if val.key < next_key {
-                    self.iterator1.0.seek(next_key).await?;
-                    self.iterator1.1 = self.iterator1.0.next_entry().await?;
+                    self.iterator1.seek(next_key).await?;
                     Ok(())
                 } else {
                     Ok(())
@@ -101,12 +92,11 @@ where
     }
 
     async fn seek2(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        match &self.iterator2.1 {
+        match &self.iterator2.peek() {
             None => Ok(()),
             Some(val) => {
                 if val.key < next_key {
-                    self.iterator2.0.seek(next_key).await?;
-                    self.iterator2.1 = self.iterator2.0.next_entry().await?;
+                    self.iterator2.seek(next_key).await?;
                     Ok(())
                 } else {
                     Ok(())
@@ -118,7 +108,7 @@ where
 
 #[async_trait]
 impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIterator<T1, T2> {
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn take_and_next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         let mut current_kv = match self.advance_inner().await? {
             Some(kv) => kv,
             None => return Ok(None),
@@ -139,34 +129,22 @@ impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIt
         self.seek1(next_key).await?;
         self.seek2(next_key).await
     }
+
+    fn peek(&self) -> Option<&RowEntry> {
+        self.peek_inner()
+    }
 }
 
 struct MergeIteratorHeapEntry<'a> {
-    next_kv: RowEntry,
     index: u32,
     iterator: Box<dyn KeyValueIterator + 'a>,
 }
 
 impl<'a> MergeIteratorHeapEntry<'a> {
     /// Seek the iterator and return a new heap entry
-    async fn seek(
-        mut self,
-        next_key: &[u8],
-    ) -> Result<Option<MergeIteratorHeapEntry<'a>>, SlateDBError> {
-        if self.next_kv.key >= next_key {
-            Ok(Some(self))
-        } else {
-            self.iterator.seek(next_key).await?;
-            if let Some(next_kv) = self.iterator.next_entry().await? {
-                Ok(Some(MergeIteratorHeapEntry {
-                    next_kv,
-                    index: self.index,
-                    iterator: self.iterator,
-                }))
-            } else {
-                Ok(None)
-            }
-        }
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.iterator.seek(next_key).await?;
+        Ok(())
     }
 }
 
@@ -174,7 +152,7 @@ impl Eq for MergeIteratorHeapEntry<'_> {}
 
 impl PartialEq<Self> for MergeIteratorHeapEntry<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.index == other.index && self.next_kv == other.next_kv
+        self.index == other.index
     }
 }
 
@@ -188,7 +166,8 @@ impl Ord for MergeIteratorHeapEntry<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         // we'll wrap a Reverse in the BinaryHeap, so the cmp here is in increasing order.
         // after Reverse is wrapped, it will return the entries with higher seqnum first.
-        (&self.next_kv.key, self.next_kv.seq).cmp(&(&other.next_kv.key, other.next_kv.seq))
+        (&self.iterator.peek().unwrap().key, self.index)
+            .cmp(&(&other.iterator.peek().unwrap().key, other.index))
     }
 }
 
@@ -203,13 +182,9 @@ impl<'a> MergeIterator<'a> {
     ) -> Result<Self, SlateDBError> {
         let mut heap = BinaryHeap::new();
         let mut index = 0;
-        while let Some(mut iterator) = iterators.pop_front() {
-            if let Some(kv) = iterator.next_entry().await? {
-                heap.push(Reverse(MergeIteratorHeapEntry {
-                    next_kv: kv,
-                    index,
-                    iterator: Box::new(iterator),
-                }));
+        while let Some(iterator) = iterators.pop_front() {
+            if iterator.peek().is_some() {
+                heap.push(Reverse(MergeIteratorHeapEntry { index, iterator: Box::new(iterator) }));
             }
             index += 1;
         }
@@ -220,27 +195,30 @@ impl<'a> MergeIterator<'a> {
     }
 
     fn peek(&self) -> Option<&RowEntry> {
-        self.current.as_ref().map(|c| &c.next_kv)
+        if let Some(current) = &self.current {
+            current.iterator.peek()
+        } else {
+            None
+        }
     }
 
-    async fn advance(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn take_and_advance(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if let Some(mut iterator_state) = self.current.take() {
-            let current_kv = iterator_state.next_kv;
-            if let Some(kv) = iterator_state.iterator.next_entry().await? {
-                iterator_state.next_kv = kv;
+            let current_kv = iterator_state.iterator.take_and_next_entry().await?;
+            if iterator_state.iterator.peek().is_some() {
                 self.iterators.push(Reverse(iterator_state));
             }
             self.current = self.iterators.pop().map(|r| r.0);
-            return Ok(Some(current_kv));
+            return Ok(current_kv);
         }
         Ok(None)
     }
 }
 
 #[async_trait]
-impl KeyValueIterator for MergeIterator<'_> {
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        let mut current_kv = match self.advance().await? {
+impl KeyValueIterator for MergeIterator<'_>{
+    async fn take_and_next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        let mut current_kv = match self.take_and_advance().await? {
             Some(kv) => kv,
             None => return Ok(None),
         };
@@ -254,28 +232,36 @@ impl KeyValueIterator for MergeIterator<'_> {
             if peeked_entry.seq > current_kv.seq {
                 current_kv = peeked_entry.clone();
             }
-            self.advance().await?;
+            self.take_and_advance().await?;
         }
         Ok(Some(current_kv))
     }
 
+    fn peek(&self) -> Option<&RowEntry> {
+        self.peek()
+    }
+
+    /// need suggestion for this impl（I'm not good at use rust）(delet this doc when change after suggestion)
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        let mut seek_futures = VecDeque::new();
-        if let Some(iterator) = self.current.take() {
-            seek_futures.push_back(iterator.seek(next_key))
-        }
-
-        for iterator in self.iterators.drain() {
-            seek_futures.push_back(iterator.0.seek(next_key));
-        }
-
-        for seek_result in futures::future::join_all(seek_futures).await {
-            if let Some(seeked_iterator) = seek_result? {
-                self.iterators.push(Reverse(seeked_iterator));
+        while let Some(entry) = self.peek() {
+            if entry.key < next_key {
+                let mut heap_entry = self
+                    .current
+                    .take()
+                    .expect("current heap_entry is must not None");
+                heap_entry.seek(next_key).await?;
+                if heap_entry.iterator.peek().is_some() {
+                    self.iterators.push(Reverse(heap_entry));
+                }
+                if self.iterators.is_empty() {
+                    self.current = None;
+                } else {
+                    self.current = self.iterators.pop().map(|r| r.0);
+                }
+            } else {
+                break;
             }
         }
-
-        self.current = self.iterators.pop().map(|r| r.0);
         Ok(())
     }
 }

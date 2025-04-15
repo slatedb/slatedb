@@ -219,7 +219,7 @@ mod tests {
 
         let decoded_block = decoded.block().unwrap();
         assert!(block.as_ref() == decoded_block.as_ref());
-        let mut iter = BlockIterator::new(decoded_block, IterationOrder::Ascending);
+        let mut iter = BlockIterator::new(decoded_block, IterationOrder::Ascending).unwrap();
         assert_iterator(&mut iter, rows).await;
     }
 

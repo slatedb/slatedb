@@ -18,7 +18,7 @@ pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entri
         assert_next_entry(iterator, expected_entry).await;
     }
     assert!(iterator
-        .next_entry()
+        .take_and_next_entry()
         .await
         .expect("iterator next_entry failed")
         .is_none());
@@ -29,7 +29,7 @@ pub(crate) async fn assert_next_entry<T: KeyValueIterator>(
     expected_entry: &RowEntry,
 ) {
     let actual_entry = iterator
-        .next_entry()
+        .take_and_next_entry()
         .await
         .expect("iterator next_entry failed")
         .expect("expected iterator to return a value");
@@ -75,7 +75,7 @@ impl TestIterator {
 
 #[async_trait]
 impl KeyValueIterator for TestIterator {
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn take_and_next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         self.entries.pop_front().map_or(Ok(None), |e| match e {
             Ok(kv) => Ok(Some(kv)),
             Err(err) => Err(err),
@@ -92,6 +92,10 @@ impl KeyValueIterator for TestIterator {
             }
         }
         Ok(())
+    }
+
+    fn peek(&self) -> Option<&RowEntry> {
+        self.entries.front().map(|e| e.as_ref().unwrap())
     }
 }
 
@@ -223,7 +227,7 @@ pub(crate) async fn assert_ranged_kv_scan<T: KeyValueIterator>(
             IterationOrder::Ascending => expected.next(),
             IterationOrder::Descending => expected.next_back(),
         };
-        let actual_next = iter.next().await.unwrap();
+        let actual_next = iter.take_and_next_kv().await.unwrap();
         if expected_next.is_none() && actual_next.is_none() {
             return;
         }

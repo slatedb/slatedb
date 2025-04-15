@@ -507,16 +507,16 @@ mod tests {
         .await
         .unwrap();
         for i in 0..4 {
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.take_and_next_kv().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), &[b'a' + i as u8; 16]);
             assert_eq!(kv.value.as_ref(), &[b'b' + i as u8; 48]);
         }
         for i in 0..4 {
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.take_and_next_kv().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), &[b'j' + i as u8; 16]);
             assert_eq!(kv.value.as_ref(), &[b'k' + i as u8; 48]);
         }
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.take_and_next_kv().await.unwrap().is_none());
         // todo: test that the db can read the k/vs (once we implement reading from compacted)
     }
 

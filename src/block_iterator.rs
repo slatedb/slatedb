@@ -49,52 +49,59 @@ pub struct BlockIterator<B: BlockLike> {
     // first key in the block, because slateDB does not support multi version of keys
     // so we use `Bytes` temporarily
     first_key: Bytes,
+    row_entry: Option<RowEntry>,
     ordering: IterationOrder,
 }
 
 #[async_trait]
 impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        let result = self.load_at_current_off();
+    async fn take_and_next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        let result = self.row_entry.take();
         match result {
-            Ok(None) => Ok(None),
-            Ok(key_value) => {
+            None => (),
+            Some(_) => {
                 self.advance();
-                Ok(key_value)
+                self.load_at_current_off()?;
             }
-            Err(e) => Err(e),
         }
+        Ok(result)
+    }
+
+    fn peek(&self) -> Option<&RowEntry> {
+        self.row_entry.as_ref()
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
-            let result = self.load_at_current_off();
+            let result = self.peek();
             match result {
-                Ok(None) => return Ok(()),
-                Ok(Some(kv)) => {
+                None => return Ok(()),
+                Some(kv) => {
                     if kv.key < next_key {
-                        self.advance();
+                        self.take_and_next_entry().await?;
                     } else {
                         return Ok(());
                     }
                 }
-                Err(e) => return Err(e),
             }
         }
     }
 }
 
 impl<B: BlockLike> BlockIterator<B> {
-    pub fn new(block: B, ordering: IterationOrder) -> Self {
-        BlockIterator {
+    pub fn new(block: B, ordering: IterationOrder) -> Result<Self, SlateDBError> {
+        let mut iter = BlockIterator {
             first_key: BlockIterator::decode_first_key(&block),
             block,
             off_off: 0,
+            row_entry: None,
             ordering,
-        }
+        };
+        iter.load_at_current_off()?;
+        Ok(iter)
     }
 
-    pub fn new_ascending(block: B) -> Self {
+    pub fn new_ascending(block: B) -> Result<Self, SlateDBError> {
         Self::new(block, Ascending)
     }
 
@@ -106,9 +113,9 @@ impl<B: BlockLike> BlockIterator<B> {
         self.off_off >= self.block.offsets().len()
     }
 
-    fn load_at_current_off(&self) -> Result<Option<RowEntry>, SlateDBError> {
+    fn load_at_current_off(&mut self) -> Result<(), SlateDBError> {
         if self.is_empty() {
-            return Ok(None);
+            return Ok(());
         }
         let off_off = match self.ordering {
             Ascending => self.off_off,
@@ -121,13 +128,14 @@ impl<B: BlockLike> BlockIterator<B> {
         let mut cursor = self.block.data().slice(off_usz..);
         let codec = SstRowCodecV0::new();
         let sst_row = codec.decode(&mut cursor)?;
-        Ok(Some(RowEntry::new(
+        self.row_entry = Some(RowEntry::new(
             sst_row.restore_full_key(&self.first_key),
             sst_row.value,
             sst_row.seq,
             sst_row.create_ts,
             sst_row.expire_ts,
-        )))
+        ));
+        Ok(())
     }
 
     pub fn decode_first_key(block: &B) -> Bytes {
@@ -160,14 +168,14 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(&block);
-        let kv = iter.next().await.unwrap().unwrap();
+        let mut iter = BlockIterator::new_ascending(&block).unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"donkey", b"kong");
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"super", b"mario");
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.take_and_next_kv().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -177,13 +185,13 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = BlockIterator::new_ascending(&block).unwrap();
         iter.seek(b"kratos").await.unwrap();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"super", b"mario");
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.take_and_next_kv().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -193,13 +201,13 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = BlockIterator::new_ascending(&block).unwrap();
         iter.seek(b"ka").await.unwrap();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"super", b"mario");
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.take_and_next_kv().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -209,9 +217,9 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = BlockIterator::new_ascending(&block).unwrap();
         iter.seek(b"zzz").await.unwrap();
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.take_and_next_kv().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -221,7 +229,7 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_empty_attrs()));
         assert!(block_builder.add_value(b"super", b"mario", gen_empty_attrs()));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = BlockIterator::new_ascending(block).unwrap();
         assert_next_entry(&mut iter, &RowEntry::new_value(b"donkey", b"kong", 0)).await;
         iter.seek(b"s").await.unwrap();
         assert_iterator(&mut iter, vec![RowEntry::new_value(b"super", b"mario", 0)]).await;
@@ -234,7 +242,7 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_empty_attrs()));
         assert!(block_builder.add_value(b"super", b"mario", gen_empty_attrs()));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = BlockIterator::new_ascending(block).unwrap();
         assert_next_entry(&mut iter, &RowEntry::new_value(b"donkey", b"kong", 0)).await;
         iter.seek(b"kratos").await.unwrap();
         assert_iterator(
@@ -254,7 +262,7 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = BlockIterator::new_ascending(block).unwrap();
         iter.seek(b"zelda".as_ref()).await.unwrap();
         assert_iterator(&mut iter, Vec::new()).await;
     }
@@ -273,7 +281,7 @@ mod tests {
 
         runner
             .run(&arbitrary::iteration_order(), |ordering| {
-                let mut iter = BlockIterator::new(block.clone(), ordering);
+                let mut iter = BlockIterator::new(block.clone(), ordering).unwrap();
                 runtime.block_on(test_utils::assert_ranged_kv_scan(
                     &sample_table,
                     &BytesRange::from(..),

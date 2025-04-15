@@ -807,8 +807,8 @@ mod tests {
         let mut expected_iter = expected.iter();
 
         while let (Some(block), Some(expected_item)) = (block_iter.next(), expected_iter.next()) {
-            let mut iter = BlockIterator::new_ascending(block.clone());
-            let kv = iter.next().await.unwrap().unwrap();
+            let mut iter = BlockIterator::new_ascending(block.clone()).unwrap();
+            let kv = iter.take_and_next_kv().await.unwrap().unwrap();
             assert_eq!(kv.key, expected_item.0);
             assert_eq!(ValueDeletable::Value(kv.value), expected_item.1);
         }

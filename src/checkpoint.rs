@@ -530,7 +530,7 @@ mod tests {
         .await
         .unwrap();
 
-        let wal_entry = wal_iter.next().await.unwrap().unwrap();
+        let wal_entry = wal_iter.take_and_next_kv().await.unwrap().unwrap();
         assert_eq!(*kv.1, wal_entry.value)
     }
 }

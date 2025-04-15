@@ -101,7 +101,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
 
         // Keep looking ahead and merging as long as we find mergeable entries
         loop {
-            let next = self.delegate.next_entry().await?;
+            let next = self.delegate.take_and_next_entry().await?;
             match next {
                 Some(next_entry)
                     if key == next_entry.key
@@ -177,10 +177,10 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
 
 #[async_trait]
 impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorIterator<T> {
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn take_and_next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         let next_entry = match self.buffered_entry.take() {
             Some(entry) => Some(entry),
-            None => self.delegate.next_entry().await?,
+            None => self.delegate.take_and_next_entry().await?,
         };
         if let Some(entry) = next_entry {
             match &entry.value {
@@ -198,6 +198,9 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorIterator<T> {
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         self.delegate.seek(next_key).await
+    }
+    fn peek(&self) -> Option<&RowEntry> {
+        self.buffered_entry.as_ref()
     }
 }
 
@@ -348,13 +351,17 @@ mod tests {
 
     #[async_trait]
     impl KeyValueIterator for MockKeyValueIterator {
-        async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        async fn take_and_next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
             Ok(self.values.pop_front())
         }
 
         async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
             self.values.retain(|entry| entry.key == next_key);
             Ok(())
+        }
+
+        fn peek(&self) -> Option<&RowEntry> {
+            self.values.front()
         }
     }
 
