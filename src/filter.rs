@@ -30,7 +30,7 @@ impl BloomFilterBuilder {
     pub(crate) fn filter_size_bytes(num_keys: u32, bits_per_key: u32) -> usize {
         let filter_bits = num_keys * bits_per_key;
         // compute filter bytes rounded up to the number of bytes required to fit the filter
-        ((filter_bits + 7) / 8) as usize
+        filter_bits.div_ceil(8) as usize
     }
 
     pub(crate) fn build(&self) -> BloomFilter {
@@ -309,7 +309,7 @@ mod tests {
 
         assert_eq!(clamped.buffer, filter.buffer);
         assert_eq!(clamped.num_probes, filter.num_probes);
-        assert!(clamped.buffer.as_ptr() != filter.buffer.as_ptr());
+        assert_ne!(clamped.buffer.as_ptr(), filter.buffer.as_ptr());
     }
 
     #[test]

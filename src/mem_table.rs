@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -8,13 +7,13 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
+use ouroboros::self_referencing;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
-use crate::merge_iterator::MergeIterator;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCell;
 
@@ -87,7 +86,7 @@ impl<T: RangeBounds<Bytes>> From<T> for KVTableInternalKeyRange {
 }
 
 pub(crate) struct KVTable {
-    map: SkipMap<KVTableInternalKey, RowEntry>,
+    map: Arc<SkipMap<KVTableInternalKey, RowEntry>>,
     durable: WatchableOnceCell<Result<(), SlateDBError>>,
     entries_size_in_bytes: AtomicUsize,
     /// this corresponds to the timestamp of the most recent
@@ -123,53 +122,29 @@ pub(crate) struct ImmutableWal {
     table: Arc<KVTable>,
 }
 
-pub(crate) struct MemTableIterator<'a, T: RangeBounds<KVTableInternalKey>> {
+#[self_referencing]
+pub(crate) struct MemTableIteratorInner<T: RangeBounds<KVTableInternalKey>> {
+    map: Arc<SkipMap<KVTableInternalKey, RowEntry>>,
     /// `inner` is the Iterator impl of SkipMap, which is the underlying data structure of MemTable.
-    inner: Range<'a, KVTableInternalKey, T, KVTableInternalKey, RowEntry>,
+    #[borrows(map)]
+    #[not_covariant]
+    inner: Range<'this, KVTableInternalKey, T, KVTableInternalKey, RowEntry>,
     ordering: IterationOrder,
+    item: Option<RowEntry>,
 }
-
-pub(crate) struct VecDequeKeyValueIterator {
-    rows: VecDeque<RowEntry>,
-}
-
-impl VecDequeKeyValueIterator {
-    pub(crate) fn new(rows: VecDeque<RowEntry>) -> Self {
-        Self { rows }
-    }
-
-    pub(crate) async fn materialize_range(
-        tables: VecDeque<Arc<KVTable>>,
-        range: BytesRange,
-    ) -> Result<Self, SlateDBError> {
-        let mut memtable_iters: VecDeque<MemTableIterator<KVTableInternalKeyRange>> =
-            VecDeque::new();
-        for table in &tables {
-            memtable_iters.push_back(table.range_ascending(range.clone()));
-        }
-
-        let mut merge_iter = MergeIterator::new(memtable_iters).await?;
-        let mut rows = VecDeque::new();
-
-        while let Some(row_entry) = merge_iter.next_entry().await? {
-            rows.push_back(row_entry.clone());
-        }
-
-        Ok(VecDequeKeyValueIterator::new(rows))
-    }
-}
+pub(crate) type MemTableIterator = MemTableIteratorInner<KVTableInternalKeyRange>;
 
 #[async_trait]
-impl KeyValueIterator for VecDequeKeyValueIterator {
+impl KeyValueIterator for MemTableIterator {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        Ok(self.rows.pop_front())
+        Ok(self.next_entry_sync())
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
-            let front = self.rows.front();
+            let front = self.borrow_item().clone();
             if front.is_some_and(|record| record.key < next_key) {
-                self.rows.pop_front();
+                self.next_entry_sync();
             } else {
                 return Ok(());
             }
@@ -177,26 +152,18 @@ impl KeyValueIterator for VecDequeKeyValueIterator {
     }
 }
 
-#[async_trait]
-impl<T: RangeBounds<KVTableInternalKey>> KeyValueIterator for MemTableIterator<'_, T> {
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        Ok(self.next_entry_sync())
-    }
-
-    async fn seek(&mut self, _next_key: &[u8]) -> Result<(), SlateDBError> {
-        Err(SlateDBError::Unsupported(
-            "seek is not supported for memtable iterator".to_string(),
-        ))
-    }
-}
-
-impl<T: RangeBounds<KVTableInternalKey>> MemTableIterator<'_, T> {
+impl MemTableIterator {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
-        let next_entry = match self.ordering {
-            IterationOrder::Ascending => self.inner.next(),
-            IterationOrder::Descending => self.inner.next_back(),
+        let ans = self.borrow_item().clone();
+        let next_entry = match self.borrow_ordering() {
+            IterationOrder::Ascending => self.with_inner_mut(|inner| inner.next()),
+            IterationOrder::Descending => self.with_inner_mut(|inner| inner.next_back()),
         };
-        next_entry.map(|entry| entry.value().clone())
+
+        let cloned_entry = next_entry.map(|entry| entry.value().clone());
+        self.with_item_mut(|item| *item = cloned_entry);
+
+        ans
     }
 }
 
@@ -263,7 +230,7 @@ impl WritableKVTable {
 impl KVTable {
     pub(crate) fn new() -> Self {
         Self {
-            map: SkipMap::new(),
+            map: Arc::new(SkipMap::new()),
             entries_size_in_bytes: AtomicUsize::new(0),
             durable: WatchableOnceCell::new(),
             last_tick: AtomicI64::new(i64::MIN),
@@ -323,14 +290,11 @@ impl KVTable {
             .map(|entry| entry.value().clone())
     }
 
-    pub(crate) fn iter(&self) -> MemTableIterator<KVTableInternalKeyRange> {
+    pub(crate) fn iter(&self) -> MemTableIterator {
         self.range_ascending(..)
     }
 
-    pub(crate) fn range_ascending<T: RangeBounds<Bytes>>(
-        &self,
-        range: T,
-    ) -> MemTableIterator<KVTableInternalKeyRange> {
+    pub(crate) fn range_ascending<T: RangeBounds<Bytes>>(&self, range: T) -> MemTableIterator {
         self.range(range, IterationOrder::Ascending)
     }
 
@@ -338,11 +302,17 @@ impl KVTable {
         &self,
         range: T,
         ordering: IterationOrder,
-    ) -> MemTableIterator<KVTableInternalKeyRange> {
-        MemTableIterator {
-            inner: self.map.range(range.into()),
+    ) -> MemTableIterator {
+        let internal_range = KVTableInternalKeyRange::from(range);
+        let mut iterator = MemTableIteratorInnerBuilder {
+            map: self.map.clone(),
+            inner_builder: |map| map.range(internal_range),
             ordering,
+            item: None,
         }
+        .build();
+        iterator.next_entry_sync();
+        iterator
     }
 
     fn put(&self, row: RowEntry) {
@@ -390,7 +360,10 @@ impl KVTable {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
+    use crate::merge_iterator::MergeIterator;
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::assert_iterator;
     use crate::{proptest_util, test_utils};

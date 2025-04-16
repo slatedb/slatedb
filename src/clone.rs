@@ -114,7 +114,7 @@ async fn create_clone_manifest(
     };
 
     fail_point!(fp_registry, "create-clone-manifest-io-error", |_| Err(
-        SlateDBError::from(std::io::Error::new(std::io::ErrorKind::Other, "oops"))
+        SlateDBError::from(std::io::Error::other("oops"))
     ));
 
     // Ensure all external databases contain the final checkpoint.
@@ -280,7 +280,7 @@ async fn copy_wal_ssts(
     let mut wal_id = parent_checkpoint_state.last_compacted_wal_sst_id + 1;
     while wal_id < parent_checkpoint_state.next_wal_sst_id {
         fail_point!(fp_registry.clone(), "copy-wal-ssts-io-error", |_| Err(
-            SlateDBError::from(std::io::Error::new(std::io::ErrorKind::Other, "oops"))
+            SlateDBError::from(std::io::Error::other("oops"))
         ));
 
         let id = SsTableId::Wal(wal_id);
