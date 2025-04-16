@@ -47,6 +47,10 @@ impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
         }
         Ok(None)
     }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.iterator.seek(next_key).await
+    }
 }
 
 #[cfg(test)]

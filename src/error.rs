@@ -48,6 +48,9 @@ pub enum SlateDBError {
     #[error("Invalid DB state error")]
     InvalidDBState,
 
+    #[error("Unsupported operation: {0}")]
+    Unsupported(String),
+
     #[error("Invalid Compaction")]
     InvalidCompaction,
 

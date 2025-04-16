@@ -1,6 +1,6 @@
 use crate::config::{Clock, PutOptions, WriteOptions};
 use crate::error::SlateDBError;
-use crate::iter::{IterationOrder, KeyValueIterator, SeekToKey};
+use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::row_codec::SstRowCodecV0;
 use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
 use async_trait::async_trait;
@@ -81,10 +81,7 @@ impl KeyValueIterator for TestIterator {
             Err(err) => Err(err),
         })
     }
-}
 
-#[async_trait]
-impl SeekToKey for TestIterator {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         while let Some(entry_result) = self.entries.front() {
             let entry = entry_result.clone()?;

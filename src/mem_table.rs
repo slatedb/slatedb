@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
-use crate::iter::{IterationOrder, KeyValueIterator, SeekToKey};
+use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCell;
 
@@ -139,10 +139,7 @@ impl KeyValueIterator for MemTableIterator {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.next_entry_sync())
     }
-}
 
-#[async_trait]
-impl SeekToKey for MemTableIterator {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
             let front = self.borrow_item().clone();
