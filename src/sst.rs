@@ -715,7 +715,7 @@ mod tests {
         assert!(block.is_some());
         let block = block.unwrap();
         let block = Block::decode(block.slice(..block.len() - 4));
-        BlockIterator::new(block, Ascending)
+        BlockIterator::new(block, Ascending).unwrap()
     }
 
     #[tokio::test]
@@ -798,7 +798,7 @@ mod tests {
         let block = format
             .read_block_raw(&encoded.info, &index, 0, &raw_sst)
             .unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = BlockIterator::new_ascending(block).unwrap();
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'a'; 8], &[b'1'; 8], 0).with_create_ts(1)],
@@ -807,7 +807,7 @@ mod tests {
         let block = format
             .read_block_raw(&encoded.info, &index, 1, &raw_sst)
             .unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = BlockIterator::new_ascending(block).unwrap();
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'b'; 8], &[b'2'; 8], 0).with_create_ts(2)],
@@ -816,7 +816,7 @@ mod tests {
         let block = format
             .read_block_raw(&encoded.info, &index, 2, &raw_sst)
             .unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = BlockIterator::new_ascending(block).unwrap();
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'c'; 8], &[b'3'; 8], 0).with_create_ts(3)],
@@ -1067,7 +1067,7 @@ mod tests {
 
         // then:
         for expected_entries in expected_blocks {
-            let mut iter = BlockIterator::new(blocks.pop_front().unwrap(), Ascending);
+            let mut iter = BlockIterator::new(blocks.pop_front().unwrap(), Ascending).unwrap();
             assert_iterator(&mut iter, expected_entries).await;
         }
         assert!(blocks.is_empty())

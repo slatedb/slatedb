@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use bytes::Bytes;
 
 /// Represents a key-value pair known not to be a tombstone.
@@ -21,7 +23,7 @@ where
 }
 
 /// Represents a key-value pair that may be a tombstone.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) struct RowEntry {
     pub(crate) key: Bytes,
     pub(crate) value: ValueDeletable,
@@ -114,6 +116,27 @@ impl RowEntry {
             create_ts: self.create_ts,
             expire_ts: Some(expire_ts),
         }
+    }
+}
+
+impl Eq for RowEntry {}
+
+impl PartialEq<Self> for RowEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.seq == other.seq
+    }
+}
+
+impl PartialOrd<Self> for RowEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RowEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Compare by key first, then by sequence number
+        (&self.key, self.seq).cmp(&(&other.key, other.seq))
     }
 }
 

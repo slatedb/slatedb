@@ -155,6 +155,7 @@ impl<'a> SstIterator<'a> {
         if options.eager_spawn {
             iter.spawn_fetches();
         }
+        iter.advance_block().await?;
         Ok(iter)
     }
 
@@ -272,7 +273,7 @@ impl<'a> SstIterator<'a> {
                     }
                     FetchTask::Finished(blocks) => {
                         if let Some(block) = blocks.pop_front() {
-                            return Ok(Some(BlockIterator::new_ascending(block)));
+                            return Ok(Some(BlockIterator::new_ascending(block)?));
                         } else {
                             self.fetch_tasks.pop_front();
                         }
@@ -310,23 +311,24 @@ impl<'a> SstIterator<'a> {
 
 #[async_trait]
 impl KeyValueIterator for SstIterator<'_> {
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn take_and_next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         while !self.state.is_finished() {
             let next_entry = if let Some(iter) = self.state.current_iter.as_mut() {
-                iter.next_entry().await?
+                let next_entry = iter.take_and_next_entry().await?;
+                if iter.peek().is_none(){
+                    self.advance_block().await?
+                }
+                next_entry
             } else {
                 None
             };
 
-            match next_entry {
-                Some(kv) => {
-                    if self.view.contains(&kv.key) {
-                        return Ok(Some(kv));
-                    } else if self.view.key_exceeds(&kv.key) {
-                        self.stop()
-                    }
+            if let Some(kv) = next_entry {
+                if self.view.contains(&kv.key) {
+                    return Ok(Some(kv));
+                } else if self.view.key_exceeds(&kv.key) {
+                    self.stop()
                 }
-                None => self.advance_block().await?,
             }
         }
         Ok(None)
@@ -350,6 +352,14 @@ impl KeyValueIterator for SstIterator<'_> {
             self.advance_block().await?;
         }
         Ok(())
+    }
+
+    fn peek(&self) -> Option<&RowEntry> {
+        if let Some(iter) = self.state.current_iter.as_ref() {
+            iter.peek()
+        } else {
+            None
+        }
     }
 }
 
@@ -401,19 +411,19 @@ mod tests {
             SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options)
                 .await
                 .unwrap();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key2".as_slice());
         assert_eq!(kv.value, b"value2".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key3".as_slice());
         assert_eq!(kv.value, b"value3".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key4".as_slice());
         assert_eq!(kv.value, b"value4".as_slice());
-        let kv = iter.next().await.unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap();
         assert!(kv.is_none());
     }
 
@@ -464,12 +474,12 @@ mod tests {
                 .await
                 .unwrap();
         for i in 0..1000 {
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.take_and_next_kv().await.unwrap().unwrap();
             assert_eq!(kv.key, format!("key{}", i));
             assert_eq!(kv.value, format!("value{}", i));
         }
 
-        let next = iter.next().await.unwrap();
+        let next = iter.take_and_next_kv().await.unwrap();
         assert!(next.is_none());
     }
 
@@ -511,14 +521,14 @@ mod tests {
             .await
             .unwrap();
             for _ in 0..nkeys - i {
-                let e = iter.next().await.unwrap().unwrap();
+                let e = iter.take_and_next_kv().await.unwrap().unwrap();
                 assert_kv(
                     &e,
                     expected_key_gen.next().as_ref(),
                     expected_val_gen.next().as_ref(),
                 );
             }
-            assert!(iter.next().await.unwrap().is_none());
+            assert!(iter.take_and_next_kv().await.unwrap().is_none());
         }
     }
 
@@ -555,14 +565,14 @@ mod tests {
         .unwrap();
 
         for _ in 0..nkeys {
-            let e = iter.next().await.unwrap().unwrap();
+            let e = iter.take_and_next_kv().await.unwrap().unwrap();
             assert_kv(
                 &e,
                 expected_key_gen.next().as_ref(),
                 expected_val_gen.next().as_ref(),
             );
         }
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.take_and_next_kv().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -595,7 +605,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.take_and_next_kv().await.unwrap().is_none());
     }
 
     async fn build_sst_with_n_blocks(

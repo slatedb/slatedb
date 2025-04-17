@@ -120,9 +120,9 @@ impl<'a> SortedRunIterator<'a> {
 
 #[async_trait]
 impl KeyValueIterator for SortedRunIterator<'_> {
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn take_and_next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         while let Some(iter) = &mut self.current_iter {
-            if let Some(kv) = iter.next_entry().await? {
+            if let Some(kv) = iter.take_and_next_entry().await? {
                 return Ok(Some(kv));
             } else {
                 self.advance_table().await?;
@@ -143,6 +143,14 @@ impl KeyValueIterator for SortedRunIterator<'_> {
             iter.seek(next_key).await?;
         }
         Ok(())
+    }
+
+    fn peek(&self) -> Option<&RowEntry> {
+        if let Some(iter) = &self.current_iter {
+            iter.peek()
+        } else {
+            None
+        }
     }
 }
 
@@ -197,16 +205,16 @@ mod tests {
                 .await
                 .unwrap();
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key2".as_slice());
         assert_eq!(kv.value, b"value2".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key3".as_slice());
         assert_eq!(kv.value, b"value3".as_slice());
-        let kv = iter.next().await.unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap();
         assert!(kv.is_none());
     }
 
@@ -249,16 +257,16 @@ mod tests {
         .await
         .unwrap();
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key2".as_slice());
         assert_eq!(kv.value, b"value2".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key3".as_slice());
         assert_eq!(kv.value, b"value3".as_slice());
-        let kv = iter.next().await.unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap();
         assert!(kv.is_none());
     }
 
@@ -297,12 +305,12 @@ mod tests {
             .unwrap();
             for _ in 0..30 - i {
                 assert_kv(
-                    &iter.next().await.unwrap().unwrap(),
+                    &iter.take_and_next_kv().await.unwrap().unwrap(),
                     expected_key_gen.next().as_ref(),
                     expected_val_gen.next().as_ref(),
                 );
             }
-            assert!(iter.next().await.unwrap().is_none());
+            assert!(iter.take_and_next_kv().await.unwrap().is_none());
         }
     }
 
@@ -336,12 +344,12 @@ mod tests {
 
         for _ in 0..30 {
             assert_kv(
-                &iter.next().await.unwrap().unwrap(),
+                &iter.take_and_next_kv().await.unwrap().unwrap(),
                 expected_key_gen.next().as_ref(),
                 expected_val_gen.next().as_ref(),
             );
         }
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.take_and_next_kv().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -371,7 +379,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.take_and_next_kv().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -412,7 +420,7 @@ mod tests {
             sr_iter.seek(&seek_key).await.unwrap();
 
             for (key, value) in table_iter.by_ref().take(run) {
-                let kv = sr_iter.next().await.unwrap().unwrap();
+                let kv = sr_iter.take_and_next_kv().await.unwrap().unwrap();
                 assert_eq!(*key, kv.key);
                 assert_eq!(*value, kv.value);
             }

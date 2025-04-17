@@ -369,7 +369,7 @@ mod tests {
         assert_eq!(block.data, block_clamped.data);
         assert_eq!(block.offsets, block_clamped.offsets);
         assert_ne!(block.data.as_ptr(), block_clamped.data.as_ptr());
-        let mut iter = BlockIterator::new_ascending(block_clamped);
+        let mut iter = BlockIterator::new_ascending(block_clamped).unwrap();
         assert_iterator(&mut iter, case.entries).await;
     }
 

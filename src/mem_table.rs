@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::mem::take;
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -136,8 +137,16 @@ pub(crate) type MemTableIterator = MemTableIteratorInner<KVTableInternalKeyRange
 
 #[async_trait]
 impl KeyValueIterator for MemTableIterator {
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn take_and_next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.next_entry_sync())
+    }
+
+    fn peek(&self) -> Option<&RowEntry> {
+        if let Some(item) = self.borrow_item() {
+            Some(item)
+        } else {
+            None
+        }
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
@@ -154,7 +163,9 @@ impl KeyValueIterator for MemTableIterator {
 
 impl MemTableIterator {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
-        let ans = self.borrow_item().clone();
+        let mut ans = None;
+        self.with_item_mut(|item| ans = take(item));
+
         let next_entry = match self.borrow_ordering() {
             IterationOrder::Ascending => self.with_inner_mut(|inner| inner.next()),
             IterationOrder::Descending => self.with_inner_mut(|inner| inner.next_back()),

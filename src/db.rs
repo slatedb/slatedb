@@ -2309,13 +2309,13 @@ mod tests {
                 SstIterator::new_borrowed(.., sst1, table_store.clone(), sst_iter_options)
                     .await
                     .unwrap();
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.take_and_next_kv().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.take_and_next_kv().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), [b'j' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'k' + i; 50]);
-            let kv = iter.next().await.unwrap();
+            let kv = iter.take_and_next_kv().await.unwrap();
             assert!(kv.is_none());
         }
         assert!(
@@ -2432,15 +2432,15 @@ mod tests {
         };
 
         let mut iter = memtable.iter();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc1111".as_slice());
 
         kv_store.flush().await.unwrap();
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc2222".as_slice());
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.take_and_next_kv().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc3333".as_slice());
     }
 

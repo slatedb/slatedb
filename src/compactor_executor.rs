@@ -137,7 +137,7 @@ impl TokioCompactionExecutorInner {
             .table_writer(SsTableId::Compacted(Ulid::new()));
         let mut current_size = 0usize;
 
-        while let Some(raw_kv) = all_iter.next_entry().await? {
+        while let Some(raw_kv) = all_iter.take_and_next_entry().await? {
             // filter out any expired entries -- eventually we can consider
             // abstracting this away into generic, pluggable compaction filters
             // but for now we do it inline

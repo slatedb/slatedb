@@ -49,7 +49,7 @@ impl<'a> DbIterator<'a> {
         if let Some(error) = self.invalidated_error.clone() {
             Err(SlateDBError::InvalidatedIterator(Box::new(error)))
         } else {
-            let result = self.iter.next().await;
+            let result = self.iter.take_and_next_kv().await;
             self.maybe_invalidate(result)
         }
     }

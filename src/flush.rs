@@ -38,7 +38,7 @@ impl DbInner {
     ) -> Result<SsTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = imm_table.iter();
-        while let Some(entry) = iter.next_entry().await? {
+        while let Some(entry) = iter.take_and_next_entry().await? {
             sst_builder.add(entry)?;
         }
 

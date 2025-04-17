@@ -214,7 +214,7 @@ impl WalReplayIterator<'_> {
         while !self.current_iter.is_finished() {
             if let Some(sst_iter) = &mut self.current_iter.current_iter {
                 let wal_id = sst_iter.table_id().unwrap_wal_id();
-                while let Some(row_entry) = sst_iter.next_entry().await? {
+                while let Some(row_entry) = sst_iter.take_and_next_entry().await? {
                     let meta = table.metadata();
                     if self.table_store.estimate_encoded_size(
                         meta.entry_num + 1,
@@ -380,7 +380,7 @@ mod tests {
             }
 
             let mut iter = replayed_table.table.table().iter();
-            while let Some(next_entry) = iter.next_entry().await.unwrap() {
+            while let Some(next_entry) = iter.take_and_next_entry().await.unwrap() {
                 full_replayed_table.put(next_entry);
             }
         }
@@ -427,7 +427,7 @@ mod tests {
             assert!(replayed_table.table.metadata().entries_size_in_bytes <= max_memtable_bytes);
 
             let mut iter = replayed_table.table.table().iter();
-            while let Some(next_entry) = iter.next_entry().await.unwrap() {
+            while let Some(next_entry) = iter.take_and_next_entry().await.unwrap() {
                 full_replayed_table.put(next_entry);
             }
         }

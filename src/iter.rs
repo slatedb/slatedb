@@ -19,9 +19,9 @@ pub(crate) enum IterationOrder {
 #[async_trait]
 pub trait KeyValueIterator: Send + Sync {
     /// Returns the next non-deleted key-value pair in the iterator.
-    async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+    async fn take_and_next_kv(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
         loop {
-            let entry = self.next_entry().await?;
+            let entry = self.take_and_next_entry().await?;
             if let Some(kv) = entry {
                 match kv.value {
                     ValueDeletable::Value(v) => {
@@ -41,7 +41,9 @@ pub trait KeyValueIterator: Send + Sync {
 
     /// Returns the next entry in the iterator, which may be a key-value pair or
     /// a tombstone of a deleted key-value pair.
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError>;
+    async fn take_and_next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError>;
+
+    fn peek(&self) -> Option<&RowEntry>;
 
     /// Seek to the next (inclusive) key
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError>;

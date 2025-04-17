@@ -241,7 +241,7 @@ impl<'a> LevelGet<'a> {
                     .await?;
 
                     let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
-                    if let Some(entry) = iter.next_entry().await? {
+                    if let Some(entry) = iter.take_and_next_entry().await? {
                         if entry.key == self.key {
                             return Ok(Some(entry));
                         }
@@ -280,7 +280,7 @@ impl<'a> LevelGet<'a> {
                     .await?;
 
                     let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
-                    if let Some(entry) = iter.next_entry().await? {
+                    if let Some(entry) = iter.take_and_next_entry().await? {
                         if entry.key == self.key {
                             return Ok(Some(entry));
                         }

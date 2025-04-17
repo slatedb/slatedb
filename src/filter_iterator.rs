@@ -39,8 +39,8 @@ impl<T: KeyValueIterator> FilterIterator<T> {
 
 #[async_trait]
 impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        while let Some(entry) = self.iterator.next_entry().await? {
+    async fn take_and_next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        while let Some(entry) = self.iterator.take_and_next_entry().await? {
             if (self.predicate)(&entry) {
                 return Ok(Some(entry));
             }
@@ -50,6 +50,10 @@ impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         self.iterator.seek(next_key).await
+    }
+
+    fn peek(&self) -> Option<&RowEntry> {
+        self.iterator.peek()
     }
 }
 
@@ -98,7 +102,7 @@ mod tests {
 
         let mut filter_iter = FilterIterator::new(iter, Box::new(filter_entry));
 
-        assert_eq!(filter_iter.next().await.unwrap(), None);
+        assert_eq!(filter_iter.take_and_next_kv().await.unwrap(), None);
     }
 
     #[tokio::test]
