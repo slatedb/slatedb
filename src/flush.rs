@@ -1,5 +1,7 @@
 use log::warn;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::Interval;
 
 use tokio::runtime::Handle;
 use tokio::select;
@@ -98,12 +100,8 @@ impl DbInner {
             this: &Arc<DbInner>,
             rx: &mut UnboundedReceiver<WalFlushMsg>,
         ) -> Result<(), SlateDBError> {
-            let Some(period) = this.options.flush_interval else {
-                // If flush_interval is not set, we do not start the flush task.
-                return Ok(());
-            };
+            let mut maybe_ticker = MaybeTicker::new(this.options.flush_interval);
 
-            let mut ticker = tokio::time::interval(period);
             let mut err_reader = this.state.read().error_reader();
             loop {
                 select! {
@@ -111,7 +109,7 @@ impl DbInner {
                         return Err(err);
                     }
                     // Tick to freeze and flush the memtable
-                    _ = ticker.tick() => {
+                    _ = maybe_ticker.tick() => {
                         let result = this.flush().await;
                         if let Err(err) = result {
                             error!("error from wal flush: {err}");
@@ -131,7 +129,6 @@ impl DbInner {
                                     error!("error from wal flush: {err}");
                                     return Err(err);
                                 }
-
                                 if let Some(rsp_sender) = sender {
                                     let res = rsp_sender.send(result);
                                     if let Err(Err(err)) = res {
@@ -187,5 +184,48 @@ impl DbInner {
                 let _ = sender.send(Err(error.clone()));
             }
         }
+    }
+}
+
+struct MaybeTicker {
+    maybe_ticker: Option<Interval>,
+}
+
+impl MaybeTicker {
+    fn new(duration_maybe: Option<Duration>) -> Self {
+        Self {
+            maybe_ticker: duration_maybe.map(tokio::time::interval),
+        }
+    }
+
+    async fn tick(&mut self) {
+        match &mut self.maybe_ticker {
+            None => {
+                // never completes
+                std::future::pending::<()>().await;
+            }
+            Some(ticker) => {
+                ticker.tick().await;
+            }
+        };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_maybe_ticker_never_ticks() {
+        let mut ticker = MaybeTicker::new(None);
+        let timeout_result = tokio::time::timeout(Duration::from_millis(50), ticker.tick()).await;
+        assert!(timeout_result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_maybe_ticker_ticks() {
+        let mut ticker = MaybeTicker::new(Some(Duration::from_millis(10)));
+        let timeout_result = tokio::time::timeout(Duration::from_millis(50), ticker.tick()).await;
+        assert!(timeout_result.is_ok());
     }
 }
