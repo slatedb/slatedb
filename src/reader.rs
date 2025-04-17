@@ -165,11 +165,8 @@ struct LevelGet<'a> {
 
 impl<'a> LevelGet<'a> {
     async fn get(&'a self) -> Result<Option<Bytes>, SlateDBError> {
-        let getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> = vec![
-            Box::pin(self.get_memtable()),
-            Box::pin(self.get_l0()),
-            Box::pin(self.get_compacted()),
-        ];
+        let getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> =
+            vec![self.get_memtable(), self.get_l0(), self.get_compacted()];
 
         self.get_inner(getters).await
     }
