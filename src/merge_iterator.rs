@@ -8,7 +8,7 @@ use std::collections::{BinaryHeap, VecDeque};
 
 struct MergeIteratorHeapEntry<'a> {
     next_kv: RowEntry,
-    index: u32,
+    index: usize,
     iterator: Box<dyn KeyValueIterator + 'a>,
 }
 
@@ -67,8 +67,7 @@ impl<'a> MergeIterator<'a> {
         iterators: impl IntoIterator<Item = T>,
     ) -> Result<Self, SlateDBError> {
         let mut heap = BinaryHeap::new();
-        let mut index = 0;
-        for mut iterator in iterators {
+        for (index, mut iterator) in iterators.into_iter().enumerate() {
             if let Some(kv) = iterator.next_entry().await? {
                 heap.push(Reverse(MergeIteratorHeapEntry {
                     next_kv: kv,
@@ -76,7 +75,6 @@ impl<'a> MergeIterator<'a> {
                     iterator: Box::new(iterator),
                 }));
             }
-            index += 1;
         }
         Ok(Self {
             current: heap.pop().map(|r| r.0),
