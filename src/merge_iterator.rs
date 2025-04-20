@@ -199,11 +199,11 @@ pub(crate) struct MergeIterator<'a> {
 
 impl<'a> MergeIterator<'a> {
     pub(crate) async fn new<T: KeyValueIterator + 'a>(
-        mut iterators: VecDeque<T>,
+        iterators: impl IntoIterator<Item = T>,
     ) -> Result<Self, SlateDBError> {
         let mut heap = BinaryHeap::new();
         let mut index = 0;
-        while let Some(mut iterator) = iterators.pop_front() {
+        for mut iterator in iterators {
             if let Some(kv) = iterator.next_entry().await? {
                 heap.push(Reverse(MergeIteratorHeapEntry {
                     next_kv: kv,
