@@ -195,6 +195,10 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorIterator<T> {
         }
         Ok(None)
     }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.delegate.seek(next_key).await
+    }
 }
 
 #[cfg(test)]
@@ -346,6 +350,11 @@ mod tests {
     impl KeyValueIterator for MockKeyValueIterator {
         async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
             Ok(self.values.pop_front())
+        }
+
+        async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+            self.values.retain(|entry| entry.key == next_key);
+            Ok(())
         }
     }
 

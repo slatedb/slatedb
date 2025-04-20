@@ -4,7 +4,8 @@ use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::db_stats::DbStats;
 use crate::filter_iterator::FilterIterator;
 use crate::iter::KeyValueIterator;
-use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, VecDequeKeyValueIterator};
+use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable};
+use crate::merge_iterator::MergeIterator;
 use crate::reader::SstFilterResult::{
     FilterNegative, FilterPositive, RangeNegative, RangePositive,
 };
@@ -108,9 +109,12 @@ impl Reader {
                 memtables.push_back(memtable.table());
             }
         }
+        let memtable_iters = memtables
+            .iter()
+            .map(|t| t.range_ascending(range.clone()))
+            .collect();
 
-        let mem_iter =
-            VecDequeKeyValueIterator::materialize_range(memtables, range.clone()).await?;
+        let mem_iter = MergeIterator::new(memtable_iters).await?;
 
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
@@ -162,11 +166,8 @@ struct LevelGet<'a> {
 
 impl<'a> LevelGet<'a> {
     async fn get(&'a self) -> Result<Option<Bytes>, SlateDBError> {
-        let getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> = vec![
-            Box::pin(self.get_memtable()),
-            Box::pin(self.get_l0()),
-            Box::pin(self.get_compacted()),
-        ];
+        let getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> =
+            vec![self.get_memtable(), self.get_l0(), self.get_compacted()];
 
         self.get_inner(getters).await
     }

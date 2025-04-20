@@ -1,8 +1,7 @@
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::filter_iterator::FilterIterator;
-use crate::iter::{KeyValueIterator, SeekToKey};
-use crate::mem_table::VecDequeKeyValueIterator;
+use crate::iter::KeyValueIterator;
 use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
@@ -13,11 +12,8 @@ use std::collections::VecDeque;
 use std::ops::RangeBounds;
 
 type ScanIterator<'a> = TwoMergeIterator<
-    FilterIterator<VecDequeKeyValueIterator>,
-    TwoMergeIterator<
-        FilterIterator<MergeIterator<SstIterator<'a>>>,
-        FilterIterator<MergeIterator<SortedRunIterator<'a>>>,
-    >,
+    FilterIterator<MergeIterator<'a>>,
+    TwoMergeIterator<FilterIterator<MergeIterator<'a>>, FilterIterator<MergeIterator<'a>>>,
 >;
 
 pub struct DbIterator<'a> {
@@ -30,7 +26,7 @@ pub struct DbIterator<'a> {
 impl<'a> DbIterator<'a> {
     pub(crate) async fn new(
         range: BytesRange,
-        mem_iter: VecDequeKeyValueIterator,
+        mem_iter: MergeIterator<'a>,
         l0_iters: VecDeque<SstIterator<'a>>,
         sr_iters: VecDeque<SortedRunIterator<'a>>,
         max_seq: Option<u64>,
@@ -123,15 +119,17 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::db_iter::DbIterator;
     use crate::error::SlateDBError;
-    use crate::mem_table::VecDequeKeyValueIterator;
+    use crate::mem_table::MemTableIterator;
+    use crate::merge_iterator::MergeIterator;
     use bytes::Bytes;
     use std::collections::VecDeque;
 
     #[tokio::test]
     async fn test_invalidated_iterator() {
+        let mem_iters: VecDeque<MemTableIterator> = VecDeque::new();
         let mut iter = DbIterator::new(
             BytesRange::from(..),
-            VecDequeKeyValueIterator::new(VecDeque::new()),
+            MergeIterator::new(mem_iters).await.unwrap(),
             VecDeque::new(),
             VecDeque::new(),
             None,
@@ -159,18 +157,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_seq_iterator_empty() {
-        let mut iter = DbIterator::new(
-            BytesRange::from(..),
-            VecDequeKeyValueIterator::new(VecDeque::new()),
-            VecDeque::new(),
-            VecDeque::new(),
-            None,
-        )
-        .await
-        .unwrap();
-
-        // Test that entries with seq > max_seq are filtered out
-        let result = iter.next().await;
-        assert!(result.unwrap().is_none());
+        todo!()
     }
 }

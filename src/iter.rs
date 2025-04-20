@@ -42,10 +42,7 @@ pub trait KeyValueIterator: Send + Sync {
     /// Returns the next entry in the iterator, which may be a key-value pair or
     /// a tombstone of a deleted key-value pair.
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError>;
-}
 
-#[async_trait]
-pub(crate) trait SeekToKey {
     /// Seek to the next (inclusive) key
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError>;
 }

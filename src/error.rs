@@ -48,6 +48,9 @@ pub enum SlateDBError {
     #[error("Invalid DB state error")]
     InvalidDBState,
 
+    #[error("Unsupported operation: {0}")]
+    Unsupported(String),
+
     #[error("Invalid Compaction")]
     InvalidCompaction,
 
@@ -148,6 +151,7 @@ pub enum DbOptionsError {
     #[error("Unknown configuration file format: {0}")]
     UnknownFormat(PathBuf),
 
+    // TODO: clippy complains this error is too large
     #[error("Invalid configuration format: {0}")]
     InvalidFormat(#[from] figment::Error),
 }
