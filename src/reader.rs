@@ -108,12 +108,8 @@ impl Reader {
                 memtables.push_back(memtable.table());
             }
         }
-        let memtable_iters = memtables
-            .iter()
-            .map(|t| t.range_ascending(range.clone()))
-            .collect::<Vec<_>>();
-
-        let mem_iter = MergeIterator::new(memtable_iters.into_iter()).await?;
+        let memtable_iters = memtables.iter().map(|t| t.range_ascending(range.clone()));
+        let mem_iter = MergeIterator::new(memtable_iters).await?;
 
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
