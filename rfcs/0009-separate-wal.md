@@ -26,26 +26,40 @@ such stores for the main store containing the entire database might be undesirab
 
 ## Public API
 
-The only change on the public API level is configuration:
+If user wants to use a separate WAL object store, the store instance should be
+provided while constructing a `Db`:
 
 ```rust
-pub struct DbOptions {
+impl Db {
     // ...
 
-    /// An optional [object store](ObjectStore) dedicated specifically for WAL.
+    /// ...
     ///
-    /// If not set, the main object store passed to `Db::open(...)` will be used
-    /// for WAL storage.
+    /// ## Arguments
+    /// ...
+    /// - `wal_object_store`: an optional [object store](ObjectStore) instance
+    ///   dedicated specifically for WAL.
     ///
-    /// NOTE: WAL durability and availability properties depend on the properties
-    ///       of the underlying object store. Make sure the configured object
-    ///       store is durable and available enough for your use case.
-    #[serde(skip)]
-    pub wal_object_store: Option<Arc<dyn ObjectStore>>
+    ///   If set to `None`, the passed `object_store` will be used for WAL storage.
+    ///
+    ///   NOTE: WAL durability and availability properties depend on the properties
+    ///         of the underlying object store. Make sure the configured object
+    ///         store is durable and available enough for your use case.
+    ///
+    /// ...
+
+    pub async fn open_with_opts<P: Into<Path>>(
+        path: P,
+        options: DbOptions,
+        object_store: Arc<dyn ObjectStore>,
+        wal_object_store: Option<Arc<dyn ObjectStore>>,
+    ) -> Result<Self, SlateDBError> {
+        // ...
+    }
+
+    // ...
 }
 ```
-
-By default `wal_object_store` is set to `None`.
 
 ## Implementation
 
@@ -96,4 +110,5 @@ The transactional object store selection logic would look about the same.
 ### Block and Object Cache
 
 WAL requires no caching support since it is read only once at startup. All
-operations on dedicated WAL object store should be direct and bypass all caches.
+operations on the dedicated WAL object store should be direct and bypass all
+the caches.
