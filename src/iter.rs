@@ -46,3 +46,18 @@ pub trait KeyValueIterator: Send + Sync {
     /// Seek to the next (inclusive) key
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError>;
 }
+
+#[async_trait]
+impl<'a> KeyValueIterator for Box<dyn KeyValueIterator + 'a> {
+    async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+        self.as_mut().next().await
+    }
+
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        self.as_mut().next_entry().await
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.as_mut().seek(next_key).await
+    }
+}

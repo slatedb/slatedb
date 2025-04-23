@@ -1,7 +1,7 @@
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
-use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
+use crate::merge_iterator::MergeIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
 use crate::types::KeyValue;
@@ -10,12 +10,9 @@ use bytes::Bytes;
 use std::collections::VecDeque;
 use std::ops::RangeBounds;
 
-type ScanIterator<'a> =
-    TwoMergeIterator<MergeIterator<'a>, TwoMergeIterator<MergeIterator<'a>, MergeIterator<'a>>>;
-
 pub struct DbIterator<'a> {
     range: BytesRange,
-    iter: ScanIterator<'a>,
+    iter: MergeIterator<'a>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
 }
@@ -29,8 +26,7 @@ impl<'a> DbIterator<'a> {
     ) -> Result<Self, SlateDBError> {
         let (l0_iter, sr_iter) =
             tokio::join!(MergeIterator::new(l0_iters), MergeIterator::new(sr_iters),);
-        let sst_iter = TwoMergeIterator::new(l0_iter?, sr_iter?).await?;
-        let iter = TwoMergeIterator::new(mem_iter, sst_iter).await?;
+        let iter = MergeIterator::new([mem_iter, l0_iter?, sr_iter?]).await?;
         Ok(DbIterator {
             range,
             iter,

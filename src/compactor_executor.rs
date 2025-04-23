@@ -14,7 +14,7 @@ use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
-use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
+use crate::merge_iterator::MergeIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
@@ -98,7 +98,7 @@ impl TokioCompactionExecutorInner {
     async fn load_iterators<'a>(
         &self,
         compaction: &'a CompactionJob,
-    ) -> Result<TwoMergeIterator<MergeIterator<'a>, MergeIterator<'a>>, SlateDBError> {
+    ) -> Result<MergeIterator<'a>, SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 4,
             blocks_to_fetch: 256,
@@ -123,7 +123,7 @@ impl TokioCompactionExecutorInner {
             sr_iters.push_back(iter);
         }
         let sr_merge_iter = MergeIterator::new(sr_iters).await?;
-        TwoMergeIterator::new(l0_merge_iter, sr_merge_iter).await
+        MergeIterator::new([l0_merge_iter, sr_merge_iter]).await
     }
 
     async fn execute_compaction(
