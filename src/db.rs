@@ -1164,8 +1164,10 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
+    use std::ops::Bound::Excluded;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
@@ -1186,7 +1188,7 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
-    use crate::{proptest_util, test_utils};
+    use crate::{proptest_util, test_utils, KeyValue};
     use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
@@ -1794,6 +1796,57 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_should_allow_iterating_behind_box_dyn() {
+        #[async_trait]
+        trait IteratorSupplier {
+            async fn iterator<'a>(&'a self) -> Box<dyn IteratorTrait + 'a>;
+        }
+
+        struct DbHolder {
+            db: Db,
+        }
+
+        #[async_trait]
+        impl IteratorSupplier for DbHolder {
+            async fn iterator<'a>(&'a self) -> Box<dyn IteratorTrait + 'a> {
+                let range = BytesRange::new(
+                    Excluded(Bytes::from(b"foo".as_slice())),
+                    Excluded(Bytes::from(b"foo".as_slice())),
+                );
+                let iter = self
+                    .db
+                    .inner
+                    .scan_with_options(range, &ScanOptions::default())
+                    .await
+                    .unwrap();
+                Box::new(iter)
+            }
+        }
+
+        #[async_trait]
+        trait IteratorTrait {
+            async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError>;
+        }
+
+        #[async_trait]
+        impl IteratorTrait for DbIterator<'_> {
+            async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+                DbIterator::next(self).await
+            }
+        }
+
+        let db_options = test_db_options(0, 1024, None);
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::open_with_opts(Path::from("/tmp/test_kv_store"), db_options, object_store)
+            .await
+            .unwrap();
+        let db_holder = DbHolder { db };
+        let mut boxed = db_holder.iterator().await;
+        let next = boxed.next().await;
+        assert_eq!(next.unwrap(), None);
     }
 
     async fn assert_records_in_range(
