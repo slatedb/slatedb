@@ -112,3 +112,32 @@ The transactional object store selection logic would look about the same.
 WAL requires no caching support since it is read only once at startup. All
 operations on the dedicated WAL object store should be direct and bypass all
 the caches.
+
+### Cloning Support
+
+Public API methods like `admin::create_clone` could just accept an explicitly
+passed WAL object store instance, but this is undesirable because that introduces
+another point for a potential misconfiguration. Instead, a reference to the object
+store should be included in the associated `Manifest`, so the information about
+the WAL store is always encapsulated in the database itself.
+
+`Manifest`-s are (de)serializable while `ObjectStore` instances are not. There is
+some support present in `object_store` crate for creating object stores from URIs,
+specifically `object_store::parse_url(_opts)`, but it's very limited in features.
+For instance, it's impossible to configure a store using a URI alone. At the same
+time, it's impossible to re-adjust the configuration after the store creation.
+The configuration must be fully known before the construction and passed either
+to `parse_url_opts` or to some other custom construction procedure.
+
+Additionally, there is no backward conversion from an object store instance to a
+URI. Getting store configuration information from an instance is even more
+problematic because the configuration details are private to the store instance.
+To avoid this problematic conversion, URIs must be used everywhere along with the
+configuration information encoded in the URIs themselves or as standalone objects.
+Alternatively, the store configuration might be obtained via some user-provided
+callbacks mechanism. Also, there should be a centralized URI-to-store resolver to
+construct and cache store instances.
+
+All this raises many open questions that are not directly related to this RFC.
+Exact implementation details will be provided in a separate RFC/PR dedicated to
+the descriptive representation of store references and configurations.
