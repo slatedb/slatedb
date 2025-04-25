@@ -27,15 +27,15 @@ impl<'a> DbIterator<'a> {
         max_seq: Option<u64>,
     ) -> Result<Self, SlateDBError> {
         let iters: [Box<dyn KeyValueIterator>; 3] = {
-            // Apply the max_seq filter to all the iterators. Please note that we should apply this filter at the source
-            // of iterators rather than at the merge iterator level.
+            // Apply the max_seq filter to all the iterators. Please note that we should apply this filter BEFORE
+            // merging the iterators.
             //
             // For example, if have the following iterators:
             // - Iterator A with entries [(key1, seq=96), (key1, seq=110)]
             // - Iterator B with entries [(key1, seq=95)]
             //
-            // If we filter the iterator after merging with max_seq=100, we'll lost the entry with seq=96 from the iterator A.
-            // But the element with seq=96 is actually the correct answer for this scan.
+            // If we filter the iterator after merging with max_seq=100, we'll lost the entry with seq=96 from the
+            // iterator A. But the element with seq=96 is actually the correct answer for this scan.
             let mem_iters = Self::apply_max_seq_filter(mem_iters, max_seq);
             let l0_iters = Self::apply_max_seq_filter(l0_iters, max_seq);
             let sr_iters = Self::apply_max_seq_filter(sr_iters, max_seq);
