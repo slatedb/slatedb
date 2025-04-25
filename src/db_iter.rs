@@ -26,6 +26,21 @@ impl<'a> DbIterator<'a> {
         sr_iters: impl IntoIterator<Item = SortedRunIterator<'a>>,
         max_seq: Option<u64>,
     ) -> Result<Self, SlateDBError> {
+        Self::new_inner(range, mem_iters, l0_iters, sr_iters, max_seq).await
+    }
+
+    async fn new_inner<T1, T2, T3>(
+        range: BytesRange,
+        mem_iters: impl IntoIterator<Item = T1>,
+        l0_iters: impl IntoIterator<Item = T2>,
+        sr_iters: impl IntoIterator<Item = T3>,
+        max_seq: Option<u64>,
+    ) -> Result<Self, SlateDBError>
+    where
+        T1: KeyValueIterator + 'a,
+        T2: KeyValueIterator + 'a,
+        T3: KeyValueIterator + 'a,
+    {
         let iters: [Box<dyn KeyValueIterator>; 3] = {
             // Apply the max_seq filter to all the iterators. Please note that we should apply this filter at the source
             // of iterators rather than at the merge iterator level.
