@@ -3029,7 +3029,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb"
-version = "0.5.2"
+version = "0.6.1"
 dependencies = [
  "async-channel",
  "async-trait",

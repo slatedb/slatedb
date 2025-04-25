@@ -1,8 +1,7 @@
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
-use crate::filter_iterator::FilterIterator;
 use crate::iter::KeyValueIterator;
-use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
+use crate::merge_iterator::MergeIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
 use crate::types::KeyValue;
@@ -11,14 +10,9 @@ use bytes::Bytes;
 use std::collections::VecDeque;
 use std::ops::RangeBounds;
 
-type ScanIterator<'a> = TwoMergeIterator<
-    FilterIterator<MergeIterator<'a>>,
-    TwoMergeIterator<FilterIterator<MergeIterator<'a>>, FilterIterator<MergeIterator<'a>>>,
->;
-
 pub struct DbIterator<'a> {
     range: BytesRange,
-    iter: ScanIterator<'a>,
+    iter: MergeIterator<'a>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
 }
@@ -29,15 +23,10 @@ impl<'a> DbIterator<'a> {
         mem_iter: MergeIterator<'a>,
         l0_iters: VecDeque<SstIterator<'a>>,
         sr_iters: VecDeque<SortedRunIterator<'a>>,
-        max_seq: Option<u64>,
     ) -> Result<Self, SlateDBError> {
         let (l0_iter, sr_iter) =
             tokio::join!(MergeIterator::new(l0_iters), MergeIterator::new(sr_iters),);
-        let l0_iter = FilterIterator::new_with_max_seq(l0_iter?, max_seq);
-        let sr_iter = FilterIterator::new_with_max_seq(sr_iter?, max_seq);
-        let mem_iter = FilterIterator::new_with_max_seq(mem_iter, max_seq);
-        let sst_iter = TwoMergeIterator::new(l0_iter, sr_iter).await?;
-        let iter = TwoMergeIterator::new(mem_iter, sst_iter).await?;
+        let iter = MergeIterator::new([mem_iter, l0_iter?, sr_iter?]).await?;
         Ok(DbIterator {
             range,
             iter,
@@ -132,7 +121,6 @@ mod tests {
             MergeIterator::new(mem_iters).await.unwrap(),
             VecDeque::new(),
             VecDeque::new(),
-            None,
         )
         .await
         .unwrap();
@@ -153,10 +141,5 @@ mod tests {
             panic!("Unexpected error")
         };
         assert!(matches!(*from_err, SlateDBError::ChecksumMismatch));
-    }
-
-    #[tokio::test]
-    async fn test_max_seq_iterator_empty() {
-        todo!()
     }
 }
