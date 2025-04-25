@@ -1,5 +1,6 @@
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
+use crate::filter_iterator::FilterIterator;
 use crate::iter::KeyValueIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -23,10 +24,33 @@ impl<'a> DbIterator<'a> {
         mem_iter: MergeIterator<'a>,
         l0_iters: VecDeque<SstIterator<'a>>,
         sr_iters: VecDeque<SortedRunIterator<'a>>,
+        max_seq: Option<u64>,
     ) -> Result<Self, SlateDBError> {
-        let (l0_iter, sr_iter) =
-            tokio::join!(MergeIterator::new(l0_iters), MergeIterator::new(sr_iters),);
-        let iter = MergeIterator::new([mem_iter, l0_iter?, sr_iter?]).await?;
+        let iters: [Box<dyn KeyValueIterator>; 3] = {
+            // Apply the max_seq filter to all the iterators. Please note that we should apply this filter at the source
+            // of iterators rather than at the merge iterator level.
+            //
+            // For example, if have the following iterators:
+            // - Iterator A with entries [(key1, seq=96), (key1, seq=110)]
+            // - Iterator B with entries [(key1, seq=95)]
+            //
+            // If we filter the iterator after merging with max_seq=100, we'll lost the entry with seq=96 from the iterator A.
+            // But the element with seq=96 is actually the correct answer for this scan.
+            let mem_iter = FilterIterator::new_with_max_seq(mem_iter, max_seq);
+            let l0_iters = l0_iters
+                .into_iter()
+                .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
+                .collect::<Vec<_>>();
+            let sr_iters = sr_iters
+                .into_iter()
+                .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
+                .collect::<Vec<_>>();
+            let (l0_iter, sr_iter) =
+                tokio::join!(MergeIterator::new(l0_iters), MergeIterator::new(sr_iters),);
+            [Box::new(mem_iter), Box::new(l0_iter?), Box::new(sr_iter?)]
+        };
+
+        let iter = MergeIterator::new(iters).await?;
         Ok(DbIterator {
             range,
             iter,
@@ -121,6 +145,7 @@ mod tests {
             MergeIterator::new(mem_iters).await.unwrap(),
             VecDeque::new(),
             VecDeque::new(),
+            None,
         )
         .await
         .unwrap();
