@@ -26,21 +26,6 @@ impl<'a> DbIterator<'a> {
         sr_iters: impl IntoIterator<Item = SortedRunIterator<'a>>,
         max_seq: Option<u64>,
     ) -> Result<Self, SlateDBError> {
-        Self::new_inner(range, mem_iters, l0_iters, sr_iters, max_seq).await
-    }
-
-    async fn new_inner<T1, T2, T3>(
-        range: BytesRange,
-        mem_iters: impl IntoIterator<Item = T1>,
-        l0_iters: impl IntoIterator<Item = T2>,
-        sr_iters: impl IntoIterator<Item = T3>,
-        max_seq: Option<u64>,
-    ) -> Result<Self, SlateDBError>
-    where
-        T1: KeyValueIterator + 'a,
-        T2: KeyValueIterator + 'a,
-        T3: KeyValueIterator + 'a,
-    {
         let iters: [Box<dyn KeyValueIterator>; 3] = {
             // Apply the max_seq filter to all the iterators. Please note that we should apply this filter at the source
             // of iterators rather than at the merge iterator level.
@@ -158,6 +143,8 @@ mod tests {
     use crate::db_iter::DbIterator;
     use crate::error::SlateDBError;
     use crate::mem_table::MemTableIterator;
+    use crate::mem_table::WritableKVTable;
+    use crate::types::RowEntry;
     use bytes::Bytes;
     use std::collections::VecDeque;
 
@@ -190,5 +177,38 @@ mod tests {
             panic!("Unexpected error")
         };
         assert!(matches!(*from_err, SlateDBError::ChecksumMismatch));
+    }
+
+    #[tokio::test]
+    async fn test_sequence_number_filtering() {
+        // Create two memtables with overlapping keys but different sequence numbers
+        let mut mem1 = WritableKVTable::new();
+        mem1.put(RowEntry::new_value(b"key1", b"value1", 96));
+        mem1.put(RowEntry::new_value(b"key1", b"value2", 110));
+        let mem_iter1 = mem1.table().range_ascending(BytesRange::from(..));
+
+        let mut mem2 = WritableKVTable::new();
+        mem2.put(RowEntry::new_value(b"key1", b"value3", 95));
+        let mem_iter2 = mem2.table().range_ascending(BytesRange::from(..));
+
+        // Create DbIterator with max_seq = 100
+        let mut iter = DbIterator::new(
+            BytesRange::from(..),
+            vec![mem_iter1, mem_iter2],
+            VecDeque::new(),
+            VecDeque::new(),
+            Some(100),
+        )
+        .await
+        .unwrap();
+
+        // The iterator should return the entry with seq=96 from the first memtable
+        // and not the one with seq=95 from the second memtable
+        let result = iter.next().await.unwrap();
+        assert!(result.is_some());
+        let kv = result.unwrap();
+        assert_eq!(kv.key, Bytes::from("key1"));
+        assert_eq!(kv.value, Bytes::from("value1"));
+        assert!(iter.next().await.unwrap().is_none());
     }
 }
