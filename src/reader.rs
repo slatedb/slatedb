@@ -109,11 +109,10 @@ impl Reader {
                 memtables.push_back(memtable.table());
             }
         }
-        let memtable_iters: Vec<MemTableIterator> = memtables
+        let memtable_iters: VecDeque<MemTableIterator> = memtables
             .iter()
             .map(|t| t.range_ascending(range.clone()))
             .collect();
-        let mem_iter = MergeIterator::new(memtable_iters).await?;
 
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
@@ -148,7 +147,7 @@ impl Reader {
             sr_iters.push_back(iter);
         }
 
-        DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters, max_seq).await
+        DbIterator::new(range.clone(), memtable_iters, l0_iters, sr_iters, max_seq).await
     }
 }
 

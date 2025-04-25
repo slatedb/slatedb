@@ -2,13 +2,13 @@ use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::filter_iterator::FilterIterator;
 use crate::iter::KeyValueIterator;
+use crate::mem_table::MemTableIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
 use crate::types::KeyValue;
 
 use bytes::Bytes;
-use std::collections::VecDeque;
 use std::ops::RangeBounds;
 
 pub struct DbIterator<'a> {
@@ -21,9 +21,9 @@ pub struct DbIterator<'a> {
 impl<'a> DbIterator<'a> {
     pub(crate) async fn new(
         range: BytesRange,
-        mem_iter: MergeIterator<'a>,
-        l0_iters: VecDeque<SstIterator<'a>>,
-        sr_iters: VecDeque<SortedRunIterator<'a>>,
+        mem_iters: impl IntoIterator<Item = MemTableIterator>,
+        l0_iters: impl IntoIterator<Item = SstIterator<'a>>,
+        sr_iters: impl IntoIterator<Item = SortedRunIterator<'a>>,
         max_seq: Option<u64>,
     ) -> Result<Self, SlateDBError> {
         let iters: [Box<dyn KeyValueIterator>; 3] = {
@@ -36,18 +36,15 @@ impl<'a> DbIterator<'a> {
             //
             // If we filter the iterator after merging with max_seq=100, we'll lost the entry with seq=96 from the iterator A.
             // But the element with seq=96 is actually the correct answer for this scan.
-            let mem_iter = FilterIterator::new_with_max_seq(mem_iter, max_seq);
-            let l0_iters = l0_iters
-                .into_iter()
-                .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
-                .collect::<Vec<_>>();
-            let sr_iters = sr_iters
-                .into_iter()
-                .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
-                .collect::<Vec<_>>();
-            let (l0_iter, sr_iter) =
-                tokio::join!(MergeIterator::new(l0_iters), MergeIterator::new(sr_iters),);
-            [Box::new(mem_iter), Box::new(l0_iter?), Box::new(sr_iter?)]
+            let mem_iters = Self::apply_max_seq_filter(mem_iters, max_seq);
+            let l0_iters = Self::apply_max_seq_filter(l0_iters, max_seq);
+            let sr_iters = Self::apply_max_seq_filter(sr_iters, max_seq);
+            let (mem_iter, l0_iter, sr_iter) = tokio::join!(
+                MergeIterator::new(mem_iters),
+                MergeIterator::new(l0_iters),
+                MergeIterator::new(sr_iters)
+            );
+            [Box::new(mem_iter?), Box::new(l0_iter?), Box::new(sr_iter?)]
         };
 
         let iter = MergeIterator::new(iters).await?;
@@ -57,6 +54,19 @@ impl<'a> DbIterator<'a> {
             invalidated_error: None,
             last_key: None,
         })
+    }
+
+    fn apply_max_seq_filter<T>(
+        iters: impl IntoIterator<Item = T>,
+        max_seq: Option<u64>,
+    ) -> Vec<FilterIterator<T>>
+    where
+        T: KeyValueIterator + 'a,
+    {
+        iters
+            .into_iter()
+            .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
+            .collect::<Vec<_>>()
     }
 
     /// Get the next record in the scan.
@@ -133,7 +143,6 @@ mod tests {
     use crate::db_iter::DbIterator;
     use crate::error::SlateDBError;
     use crate::mem_table::MemTableIterator;
-    use crate::merge_iterator::MergeIterator;
     use bytes::Bytes;
     use std::collections::VecDeque;
 
@@ -142,7 +151,7 @@ mod tests {
         let mem_iters: VecDeque<MemTableIterator> = VecDeque::new();
         let mut iter = DbIterator::new(
             BytesRange::from(..),
-            MergeIterator::new(mem_iters).await.unwrap(),
+            mem_iters,
             VecDeque::new(),
             VecDeque::new(),
             None,
