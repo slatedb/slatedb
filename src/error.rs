@@ -151,7 +151,6 @@ pub enum DbOptionsError {
     #[error("Unknown configuration file format: {0}")]
     UnknownFormat(PathBuf),
 
-    // TODO: clippy complains this error is too large
     #[error("Invalid configuration format: {0}")]
-    InvalidFormat(#[from] figment::Error),
+    InvalidFormat(#[from] Box<figment::Error>),
 }
