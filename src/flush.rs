@@ -36,6 +36,7 @@ impl DbInner {
         &self,
         id: &db_state::SsTableId,
         imm_table: Arc<KVTable>,
+        write_cache: bool,
     ) -> Result<SsTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = imm_table.iter();
@@ -44,7 +45,10 @@ impl DbInner {
         }
 
         let encoded_sst = sst_builder.build()?;
-        let handle = self.table_store.write_sst(id, encoded_sst).await?;
+        let handle = self
+            .table_store
+            .write_sst(id, encoded_sst, write_cache)
+            .await?;
 
         self.mono_clock
             .fetch_max_last_durable_tick(imm_table.last_tick());
@@ -57,7 +61,7 @@ impl DbInner {
         imm: Arc<ImmutableWal>,
     ) -> Result<SsTableHandle, SlateDBError> {
         let wal_id = db_state::SsTableId::Wal(id);
-        self.flush_imm_table(&wal_id, imm.table()).await
+        self.flush_imm_table(&wal_id, imm.table(), false).await
     }
 
     fn flush_imm_wal_to_memtable(&self, mem_table: &mut WritableKVTable, imm_table: Arc<KVTable>) {
