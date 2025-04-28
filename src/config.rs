@@ -561,7 +561,9 @@ impl DbOptions {
             "yaml" | "yml" => builder = builder.merge(Yaml::file(path)),
             _ => return Err(DbOptionsError::UnknownFormat(path.into())),
         }
-        builder.extract().map_err(Into::into)
+        builder
+            .extract()
+            .map_err(|e| DbOptionsError::InvalidFormat(Box::new(e)))
     }
 
     /// Loads DbOptions from environment variables with a specified prefix.
@@ -595,7 +597,7 @@ impl DbOptions {
         Figment::from(DbOptions::default())
             .merge(Env::prefixed(prefix))
             .extract()
-            .map_err(Into::into)
+            .map_err(|e| DbOptionsError::InvalidFormat(Box::new(e)))
     }
 
     /// Loads DbOptions from multiple configuration sources in a specific order.
@@ -630,7 +632,7 @@ impl DbOptions {
             .merge(Yaml::file("SlateDb.yml"))
             .admerge(Env::prefixed("SLATEDB_"))
             .extract()
-            .map_err(Into::into)
+            .map_err(|e| DbOptionsError::InvalidFormat(Box::new(e)))
     }
 }
 
