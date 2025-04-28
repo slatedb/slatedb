@@ -1033,6 +1033,7 @@ mod tests {
         .await
     }
 
+    #[allow(unused)] // only used with feature(wal_disable)
     async fn await_compacted_compaction(
         manifest_store: Arc<ManifestStore>,
         old_compacted: Vec<SortedRun>,
@@ -1138,11 +1139,13 @@ mod tests {
         }
     }
 
+    #[allow(unused)] // only used with feature(wal_disable)
     #[derive(Clone)]
     struct OnDemandCompactionScheduler {
         should_compact: Arc<AtomicBool>,
     }
 
+    #[allow(unused)] // only used with feature(wal_disable)
     impl OnDemandCompactionScheduler {
         fn new() -> Self {
             Self {
@@ -1185,10 +1188,12 @@ mod tests {
         }
     }
 
+    #[allow(unused)] // only used with feature(wal_disable)
     struct OnDemandCompactionSchedulerSupplier {
         scheduler: OnDemandCompactionScheduler,
     }
 
+    #[allow(unused)] // only used with feature(wal_disable)
     impl OnDemandCompactionSchedulerSupplier {
         fn new() -> Self {
             Self {
