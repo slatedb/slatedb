@@ -1225,6 +1225,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_no_flush_interval() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_options_no_flush_interval = {
+            let mut db_options = test_db_options(0, 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            db_options_no_flush_interval,
+            object_store,
+        )
+        .await
+        .unwrap();
+        let key = b"test_key";
+        let value = b"test_value";
+
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // a sanity check: the wal contains the most recent write
+        assert!(!kv_store.inner.state.write().wal().is_empty());
+
+        // and a flush() should clear it
+        kv_store.flush().await.unwrap();
+        assert!(kv_store.inner.state.write().wal().is_empty());
+    }
+
+    #[tokio::test]
     async fn test_get_with_default_ttl_and_read_uncommitted() {
         let clock = Arc::new(TestClock::new());
         let ttl = 100;
