@@ -347,13 +347,6 @@ impl CompactorEventHandler {
                 .compacted
                 .last()
                 .is_some_and(|sr| compaction.destination == sr.id);
-        info!(
-            "Compaction destination run determination: is_dest_last_run={}, compacted_empty={}, last_sr_id={:?}, compaction_destination={}",
-            is_dest_last_run,
-            db_state.compacted.is_empty(),
-            db_state.compacted.last().map(|sr| sr.id),
-            compaction.destination
-        );
         self.executor.start_compaction(CompactionJob {
             id,
             destination: compaction.destination,
