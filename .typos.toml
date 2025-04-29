@@ -2,5 +2,6 @@
 # Please list here along with a comment.
 [default.extend-words]
 "fpr" = "fpr"
+"Pn" = "Pn"
 
 [files]

@@ -224,7 +224,7 @@ For each key, SlateDB maintains a history of operations, which is subject to com
 Let's denote each operation as `OPi`. A key (`K`) that has experienced `n` changes looks like this logically (physically, the changes could be spread across the memtable and multiple SST files):
 
 ```
-K:    OP1    OP2    OP3    ...    OOn
+K:    OP1    OP2    OP3    ...    OPn
 
 earliest --------------------> latest
 ```
@@ -232,7 +232,7 @@ earliest --------------------> latest
 Currently, during a read operation, SlateDB always observes the latest known state of the database. In other words, it only needs to look up the latest operation. If it's a `Value`, it simply returns it, and if it's a `Tombstone`, it returns `None`. All previous operations can be ignored and will be removed by compaction at some point.
 
 ```
-K:    OP1    OP2    OP3    ...    OOn
+K:    OP1    OP2    OP3    ...    OPn
                                    ^
                                    |
                                   GET
@@ -241,7 +241,7 @@ K:    OP1    OP2    OP3    ...    OOn
 With the addition of a **Merge Operand**, it may be necessary to look backwards at previous values, up to the point where we encounter either a `Value` or a `Tombstone`. Everything beyond that point can be ignored.
 
 ```
-K:    OP1    OP2    OP3    OP4    OOn
+K:    OP1    OP2    OP3    OP4    OPn
             Value  Merge  Merge  Merge
                                    ^
                                    |
@@ -252,7 +252,7 @@ K:    OP1    OP2    OP3    OP4    OOn
 In the above example, `get` should essentially return something like:
 
 ```
-Merge(OP2, Merge(OP3, Merge(OP4, OOn)))
+Merge(OP2, Merge(OP3, Merge(OP4, OPn)))
 ```
 
 ### Write Path & Compactions
