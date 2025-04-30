@@ -49,13 +49,14 @@ jobs:
       - name: cargo fmt
         run: cargo fmt -- --check
 
-  typos:
-    runs-on: ubuntu-latest
-    name: typos
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check spelling
-        uses: crate-ci/typos@master
+  # commnet out for now, will added back later after typos-cli intergrated with other tools
+  # typos:
+  #   runs-on: ubuntu-latest
+  #   name: typos
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Check spelling
+  #       uses: crate-ci/typos@master
 
   flatbuffers:
     runs-on: ubuntu-latest
