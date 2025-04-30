@@ -157,10 +157,6 @@ impl ValueDeletable {
     }
 
     pub fn is_tombstone(&self) -> bool {
-        match self {
-            ValueDeletable::Value(_) => false,
-            ValueDeletable::Merge(_) => false,
-            ValueDeletable::Tombstone => true,
-        }
+        matches!(self, ValueDeletable::Tombstone)
     }
 }
