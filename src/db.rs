@@ -3370,6 +3370,62 @@ mod tests {
         assert_eq!(last_clock_tick, 11);
     }
 
+    #[cfg(all(feature = "zstd", feature = "wal_disable"))]
+    #[tokio::test]
+    async fn test_compression_overflow_bug() {
+        // This test reproduces the bug reported in issue #555
+        // https://github.com/slatedb/slatedb/issues/555
+        // where using zstd compression with flush() followed by get() causes
+        // an "attempt to subtract with overflow" error in Block::decode
+
+        use crate::config::CompressionCodec;
+        use std::str::FromStr;
+
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let compress = CompressionCodec::from_str("zstd").unwrap();
+        let db_options = DbOptions {
+            flush_interval: None,
+            wal_enabled: false,
+            compression_codec: Some(compress),
+            ..DbOptions::default()
+        };
+        let path = Path::from("/tmp/test_compression_overflow_bug");
+        let db = Db::open_with_opts(path.clone(), db_options, os.clone())
+            .await
+            .expect("failed to open db");
+
+        // Insert some data with large values to trigger compression
+        for i in 0..100 {
+            let key = format!("k{}", i);
+            let value = format!("{}{}", "v".repeat(10000), i);
+            db.put_with_options(
+                key.as_bytes(),
+                value.clone(),
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .expect("failed to put");
+        }
+
+        // Flush the database to disk - this is part of the bug reproduction
+        info!("Flushing database...");
+        let _ = db.flush().await;
+        info!("Flush completed");
+
+        // Now try to read a value back - this should trigger the overflow error
+        let read_option = ReadOptions {
+            durability_filter: Memory,
+        };
+
+        // This get operation should trigger the "attempt to subtract with overflow" error
+        let result = db.get_with_options("k5", &read_option).await.unwrap();
+        let expected_value = format!("{}{}", "v".repeat(10000), 5);
+        assert_eq!(result, Some(expected_value.into()));
+    }
+
     #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_recover_clock_tick_from_manifest() {
