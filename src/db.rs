@@ -3409,7 +3409,7 @@ mod tests {
             .await
             .expect("failed to put");
         }
-    
+
         // Flush the database to disk - this is part of the bug reproduction
         info!("Flushing database...");
         let _ = db.flush().await;
