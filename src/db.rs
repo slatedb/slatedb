@@ -3370,8 +3370,6 @@ mod tests {
         assert_eq!(last_clock_tick, 11);
     }
 
-
-
     #[cfg(all(feature = "zstd", feature = "wal_disable"))]
     #[tokio::test]
     async fn test_compression_overflow_bug() {
@@ -3404,7 +3402,9 @@ mod tests {
                 key.as_bytes(),
                 value.clone(),
                 &PutOptions::default(),
-                &WriteOptions { await_durable: false },
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .expect("failed to put");
