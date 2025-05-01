@@ -46,7 +46,7 @@ async fn test_concurrent_writers_and_readers() {
         Db::open_with_opts(
             Path::from("/tmp/test_concurrent_writers_readers"),
             config,
-            object_store.clone(),
+            object_store,
         )
         .await
         .unwrap(),
