@@ -1,5 +1,6 @@
 use log::warn;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::runtime::Handle;
 use tokio::select;
@@ -35,6 +36,7 @@ impl DbInner {
         &self,
         id: &db_state::SsTableId,
         imm_table: Arc<KVTable>,
+        write_cache: bool,
     ) -> Result<SsTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = imm_table.iter();
@@ -43,7 +45,10 @@ impl DbInner {
         }
 
         let encoded_sst = sst_builder.build()?;
-        let handle = self.table_store.write_sst(id, encoded_sst).await?;
+        let handle = self
+            .table_store
+            .write_sst(id, encoded_sst, write_cache)
+            .await?;
 
         self.mono_clock
             .fetch_max_last_durable_tick(imm_table.last_tick());
@@ -56,7 +61,7 @@ impl DbInner {
         imm: Arc<ImmutableWal>,
     ) -> Result<SsTableHandle, SlateDBError> {
         let wal_id = db_state::SsTableId::Wal(id);
-        self.flush_imm_table(&wal_id, imm.table()).await
+        self.flush_imm_table(&wal_id, imm.table(), false).await
     }
 
     fn flush_imm_wal_to_memtable(&self, mem_table: &mut WritableKVTable, imm_table: Arc<KVTable>) {
@@ -98,12 +103,12 @@ impl DbInner {
             this: &Arc<DbInner>,
             rx: &mut UnboundedReceiver<WalFlushMsg>,
         ) -> Result<(), SlateDBError> {
-            let Some(period) = this.options.flush_interval else {
-                // If flush_interval is not set, we do not start the flush task.
-                return Ok(());
-            };
-
+            // Periodic flushing is disabled if `flush_interval` is set to None. Even if we do
+            // not perform periodic flushing, we still need to handle manual flush requests,
+            // and the final flush when the database is closed.
+            let period = this.options.flush_interval.unwrap_or(Duration::MAX);
             let mut ticker = tokio::time::interval(period);
+
             let mut err_reader = this.state.read().error_reader();
             loop {
                 select! {
@@ -131,7 +136,6 @@ impl DbInner {
                                     error!("error from wal flush: {err}");
                                     return Err(err);
                                 }
-
                                 if let Some(rsp_sender) = sender {
                                     let res = rsp_sender.send(result);
                                     if let Err(Err(err)) = res {

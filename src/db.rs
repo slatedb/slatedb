@@ -149,7 +149,11 @@ impl DbInner {
         loop {
             let empty_wal = WritableKVTable::new();
             match self
-                .flush_imm_table(&SsTableId::Wal(empty_wal_id), empty_wal.table().clone())
+                .flush_imm_table(
+                    &SsTableId::Wal(empty_wal_id),
+                    empty_wal.table().clone(),
+                    false,
+                )
                 .await
             {
                 Ok(_) => {
@@ -1218,6 +1222,44 @@ mod tests {
         kv_store.delete(key).await.unwrap();
         assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_no_flush_interval() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_options_no_flush_interval = {
+            let mut db_options = test_db_options(0, 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            db_options_no_flush_interval,
+            object_store,
+        )
+        .await
+        .unwrap();
+        let key = b"test_key";
+        let value = b"test_value";
+
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // a sanity check: the wal contains the most recent write
+        assert!(!kv_store.inner.state.write().wal().is_empty());
+
+        // and a flush() should clear it
+        kv_store.flush().await.unwrap();
+        assert!(kv_store.inner.state.write().wal().is_empty());
     }
 
     #[tokio::test]
