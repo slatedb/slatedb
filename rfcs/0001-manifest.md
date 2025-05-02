@@ -345,7 +345,7 @@ Traditionally, LSMs store WAL data in a different format from the SSTs; this is 
 
 _NOTE: We discussed using a different format for the WAL [here](https://github.com/slatedb/slatedb/pull/39/files#r1590087062), but decided against it._
 
-This design does not use [prefixes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-prefixes.html). AWS allows, "3,500 PUT/COPY/POST/DELETE or 5,500 GET/HEAD requests per second per partitioned Amazon S3 prefix." This limits a single writer to 3,500 writes and 5,500 reads per-second. With a `flush_interval` set to 1ms, a client would write 1,000 writes per-second (not including compactions). Wth caching, the client should be far below the 5,500 reads per-second limit.
+This design does not use [prefixes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-prefixes.html). AWS allows, "3,500 PUT/COPY/POST/DELETE or 5,500 GET/HEAD requests per second per partitioned Amazon S3 prefix." This limits a single writer to 3,500 writes and 5,500 reads per-second. With a `flush_interval` set to 1ms, a client would write 1,000 writes per-second (not including compactions). With caching, the client should be far below the 5,500 reads per-second limit.
 
 This design also does not expose writer epochs in WAL SST filenames (e.g. `[writer_epoch].[sequence_number].sst`). We discussed this in detail [here](https://github.com/slatedb/slatedb/pull/39/files#r1588892292) and [here](https://github.com/slatedb/slatedb/pull/24/files#r1585569744). Ultimately, we chose "un-namespaced" filenames (i.e. filenames without epoch prefix) because it's simpler to reason about.
 

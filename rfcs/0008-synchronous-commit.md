@@ -312,7 +312,7 @@ While `SyncLevel` and `DurabilityLevel` may appear similar, they serve distinct 
 
 ## Implementation
 
-The key change is to seperate "Append to WAL" and "Commit to make it visible" into two different steps.
+The key change is to separate "Append to WAL" and "Commit to make it visible" into two different steps.
 
 In the current design, whenever a write operation is called, it'll append the data to the WAL, the data is becoming visible to readers with `DurabilityLevel::Memory` immediately, as the readers will read the data from the WAL in front of MemTable. And when the WAL buffer reaches the `flush.interval` or `flush.size`, it'll be flushed to storage, and apply to MemTable.
 
@@ -427,5 +427,5 @@ However, it's a different codebase, it would be better to keep code structure ch
 
 ## Updates
 
-- 2025-02-20: added the comparision between `sync` and `await_durable`
+- 2025-02-20: added the comparison between `sync` and `await_durable`
 - 2025-03-12: revise the api with `with_durability_filter` and `with_dirty`

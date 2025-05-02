@@ -17,6 +17,10 @@ permissions:
   # Required for storing benchmark results
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -42,6 +46,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: cargo fmt
         run: cargo fmt -- --check
+
+  # comment out for now, will added back later after typos-cli intergrated with other tools
+  # typos:
+  #   runs-on: ubuntu-latest
+  #   name: typos
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Check spelling
+  #       uses: crate-ci/typos@master
 
   flatbuffers:
     runs-on: ubuntu-latest
