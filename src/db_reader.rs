@@ -188,7 +188,7 @@ impl DbReaderInner {
         self.check_error()?;
         let snapshot = Arc::clone(&self.state.read());
         self.reader
-            .scan_with_options(range, options, snapshot.as_ref())
+            .scan_with_options(range, options, snapshot.as_ref(), None)
             .await
     }
 

@@ -133,7 +133,7 @@ impl DbInner {
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
         self.reader
-            .scan_with_options(range, options, &snapshot)
+            .scan_with_options(range, options, &snapshot, None)
             .await
     }
 
@@ -781,8 +781,8 @@ impl Db {
     ///
     /// ## Returns
     /// - `Result<Option<Bytes>, SlateDBError>`:
-    ///     - `Some(Bytes)`: the value if it exists
-    ///     - `None`: if the value does not exist
+    ///   - `Some(Bytes)`: the value if it exists
+    ///   - `None`: if the value does not exist
     ///
     /// ## Errors
     /// - `SlateDBError`: if there was an error getting the value
