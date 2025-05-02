@@ -133,7 +133,7 @@ impl DbInner {
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
         self.reader
-            .scan_with_options(range, options, &snapshot)
+            .scan_with_options(range, options, &snapshot, None)
             .await
     }
 
@@ -254,7 +254,7 @@ impl DbInner {
                         guard.state().imm_memtable.back().cloned(),
                     )
                 };
-                tracing::warn!(
+                warn!(
                     "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
                     mem_size_bytes, self.options.max_unflushed_bytes,
                 );
@@ -480,9 +480,9 @@ impl Db {
     ) -> Result<Self, SlateDBError> {
         let path = path.into();
         if let Ok(options_json) = options.to_json_string() {
-            tracing::info!(?path, options = options_json, "Opening SlateDB database");
+            info!(?path, options = options_json, "Opening SlateDB database");
         } else {
-            tracing::info!(?path, ?options, "Opening SlateDB database");
+            info!(?path, ?options, "Opening SlateDB database");
         }
 
         let stat_registry = Arc::new(StatRegistry::new());
@@ -781,8 +781,8 @@ impl Db {
     ///
     /// ## Returns
     /// - `Result<Option<Bytes>, SlateDBError>`:
-    ///     - `Some(Bytes)`: the value if it exists
-    ///     - `None`: if the value does not exist
+    ///   - `Some(Bytes)`: the value if it exists
+    ///   - `None`: if the value does not exist
     ///
     /// ## Errors
     /// - `SlateDBError`: if there was an error getting the value
@@ -3368,6 +3368,62 @@ mod tests {
         let db_state = stored_manifest.db_state();
         let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, 11);
+    }
+
+    #[cfg(all(feature = "zstd", feature = "wal_disable"))]
+    #[tokio::test]
+    async fn test_compression_overflow_bug() {
+        // This test reproduces the bug reported in issue #555
+        // https://github.com/slatedb/slatedb/issues/555
+        // where using zstd compression with flush() followed by get() causes
+        // an "attempt to subtract with overflow" error in Block::decode
+
+        use crate::config::CompressionCodec;
+        use std::str::FromStr;
+
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let compress = CompressionCodec::from_str("zstd").unwrap();
+        let db_options = DbOptions {
+            flush_interval: None,
+            wal_enabled: false,
+            compression_codec: Some(compress),
+            ..DbOptions::default()
+        };
+        let path = Path::from("/tmp/test_compression_overflow_bug");
+        let db = Db::open_with_opts(path.clone(), db_options, os.clone())
+            .await
+            .expect("failed to open db");
+
+        // Insert some data with large values to trigger compression
+        for i in 0..100 {
+            let key = format!("k{}", i);
+            let value = format!("{}{}", "v".repeat(10000), i);
+            db.put_with_options(
+                key.as_bytes(),
+                value.clone(),
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .expect("failed to put");
+        }
+
+        // Flush the database to disk - this is part of the bug reproduction
+        info!("Flushing database...");
+        let _ = db.flush().await;
+        info!("Flush completed");
+
+        // Now try to read a value back - this should trigger the overflow error
+        let read_option = ReadOptions {
+            durability_filter: Memory,
+        };
+
+        // This get operation should trigger the "attempt to subtract with overflow" error
+        let result = db.get_with_options("k5", &read_option).await.unwrap();
+        let expected_value = format!("{}{}", "v".repeat(10000), 5);
+        assert_eq!(result, Some(expected_value.into()));
     }
 
     #[tokio::test]

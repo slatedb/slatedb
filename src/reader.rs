@@ -5,7 +5,6 @@ use crate::db_stats::DbStats;
 use crate::filter_iterator::FilterIterator;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, MemTableIterator};
-use crate::merge_iterator::MergeIterator;
 use crate::reader::SstFilterResult::{
     FilterNegative, FilterPositive, RangeNegative, RangePositive,
 };
@@ -92,6 +91,7 @@ impl Reader {
         range: BytesRange,
         options: &ScanOptions,
         snapshot: &(dyn ReadSnapshot + Sync),
+        max_seq: Option<u64>,
     ) -> Result<DbIterator<'a>, SlateDBError> {
         let mut memtables = VecDeque::new();
 
@@ -112,7 +112,6 @@ impl Reader {
             .iter()
             .map(|t| t.range_ascending(range.clone()))
             .collect();
-        let mem_iter = MergeIterator::new(memtable_iters).await?;
 
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
@@ -147,7 +146,7 @@ impl Reader {
             sr_iters.push_back(iter);
         }
 
-        DbIterator::new(range.clone(), mem_iter, l0_iters, sr_iters).await
+        DbIterator::new(range.clone(), memtable_iters, l0_iters, sr_iters, max_seq).await
     }
 }
 
