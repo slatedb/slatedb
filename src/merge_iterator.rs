@@ -133,8 +133,8 @@ impl KeyValueIterator for MergeIterator<'_> {
         }
 
         for seek_result in futures::future::join_all(seek_futures).await {
-            if let Some(sought_iterator) = seek_result? {
-                self.iterators.push(Reverse(sought_iterator));
+            if let Some(seeked_iterator) = seek_result? {
+                self.iterators.push(Reverse(seeked_iterator));
             }
         }
 
