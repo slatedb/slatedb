@@ -254,7 +254,7 @@ impl DbInner {
                         guard.state().imm_memtable.back().cloned(),
                     )
                 };
-                tracing::warn!(
+                warn!(
                     "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
                     mem_size_bytes, self.options.max_unflushed_bytes,
                 );
@@ -480,9 +480,9 @@ impl Db {
     ) -> Result<Self, SlateDBError> {
         let path = path.into();
         if let Ok(options_json) = options.to_json_string() {
-            tracing::info!(?path, options = options_json, "Opening SlateDB database");
+            info!(?path, options = options_json, "Opening SlateDB database");
         } else {
-            tracing::info!(?path, ?options, "Opening SlateDB database");
+            info!(?path, ?options, "Opening SlateDB database");
         }
 
         let stat_registry = Arc::new(StatRegistry::new());
