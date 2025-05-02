@@ -333,7 +333,7 @@ impl KVTable {
         self.map.compare_insert(internal_key, row, |previous_row| {
             // Optimistically calculate the size of the previous value.
             // `compare_fn` might be called multiple times in case of concurrent
-            // writes to the same key, so we use `Cell` to avoid substracting
+            // writes to the same key, so we use `Cell` to avoid subtracting
             // the size multiple times. The last call will set the correct size.
             previous_size.set(Some(previous_row.estimated_size()));
             true
