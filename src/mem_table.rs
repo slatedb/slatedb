@@ -113,6 +113,10 @@ pub(crate) struct WritableKVTable {
 }
 
 pub(crate) struct ImmutableMemtable {
+    /// The last WAL ID of this IMM. This is used to determine the starting position of
+    /// WAL replay during recovery. After an IMM is flushed to L0, we do not need to care
+    /// about the earlier WALs which produced this IMM, all we need to know is the last
+    /// WAL ID of the last L0 compacted.
     last_wal_id: u64,
     table: Arc<KVTable>,
     flushed: WatchableOnceCell<Result<(), SlateDBError>>,
