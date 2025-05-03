@@ -6,7 +6,7 @@ use crate::manifest::store::DirtyManifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::ReadSnapshot;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
-use crate::wal_id::WalIdAccess;
+use crate::wal_id::WalIdIncrement;
 use bytes::Bytes;
 use serde::Serialize;
 use std::cmp;
@@ -491,8 +491,8 @@ impl DbState {
     }
 }
 
-impl WalIdAccess for parking_lot::RwLock<DbState> {
-    fn increment_wal_id(&self) -> u64 {
+impl WalIdIncrement for parking_lot::RwLock<DbState> {
+    fn increment(&self) -> u64 {
         let mut state = self.write();
         state.increment_next_wal_id()
     }

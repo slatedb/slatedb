@@ -14,7 +14,7 @@ use crate::{
     tablestore::TableStore,
     types::RowEntry,
     utils::{MonotonicClock, WatchableOnceCell},
-    wal_id::WalIdAccess,
+    wal_id::WalIdIncrement,
     SlateDBError,
 };
 
@@ -43,7 +43,7 @@ use crate::{
 ///   operations. The manager becomes unusable after encountering a fatal error.
 pub struct WalBufferManager {
     inner: Arc<Mutex<WalBufferManagerInner>>,
-    wal_id_accessor: Arc<dyn WalIdAccess>,
+    wal_id_incrementor: Arc<dyn WalIdIncrement>,
     fatal_once: WatchableOnceCell<SlateDBError>,
     table_store: Arc<TableStore>,
     mono_clock: Arc<MonotonicClock>,
@@ -73,7 +73,7 @@ struct WalBufferManagerInner {
 
 impl WalBufferManager {
     pub fn new(
-        wal_id_accessor: Arc<dyn WalIdAccess>,
+        wal_id_incrementor: Arc<dyn WalIdIncrement>,
         table_store: Arc<TableStore>,
         mono_clock: Arc<MonotonicClock>,
         max_wal_bytes_size: usize,
@@ -93,7 +93,7 @@ impl WalBufferManager {
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
-            wal_id_accessor,
+            wal_id_incrementor,
             fatal_once: WatchableOnceCell::new(),
             table_store,
             mono_clock,
@@ -335,7 +335,7 @@ impl WalBufferManager {
             return Ok(());
         }
 
-        let current_wal_id = self.wal_id_accessor.increment_wal_id();
+        let current_wal_id = self.wal_id_incrementor.increment();
         let mut inner = self.inner.lock().await;
         let current_wal = std::mem::replace(&mut inner.current_wal, Arc::new(KVTable::new()));
         inner
