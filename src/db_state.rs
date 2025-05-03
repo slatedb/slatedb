@@ -6,6 +6,7 @@ use crate::manifest::store::DirtyManifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::ReadSnapshot;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
+use crate::wal_id::WalIdAccess;
 use bytes::Bytes;
 use serde::Serialize;
 use std::cmp;
@@ -421,10 +422,12 @@ impl DbState {
         Ok(())
     }
 
-    pub fn increment_next_wal_id(&mut self) {
+    pub fn increment_next_wal_id(&mut self) -> u64 {
         let mut state = self.state_copy();
+        let next_wal_id = state.manifest.core.next_wal_sst_id;
         state.manifest.core.next_wal_sst_id += 1;
         self.update_state(state);
+        next_wal_id
     }
 
     pub fn set_next_wal_id(&mut self, next_wal_id: u64) {
@@ -485,6 +488,13 @@ impl DbState {
         };
         state.manifest = remote_manifest;
         self.update_state(state);
+    }
+}
+
+impl WalIdAccess for parking_lot::RwLock<DbState> {
+    fn increment_wal_id(&self) -> u64 {
+        let mut state = self.write();
+        state.increment_next_wal_id()
     }
 }
 

@@ -88,16 +88,16 @@ impl DbInner {
             manifest.core.last_l0_clock_tick,
         ));
 
+        let state = Arc::new(RwLock::new(DbState::new(manifest)));
+        let db_stats = DbStats::new(stat_registry.as_ref());
+
         let wal_buffer = Arc::new(WalBufferManager::new(
-            manifest.core.next_wal_sst_id,
+            state.clone(),
             table_store.clone(),
             mono_clock.clone(),
             options.l0_sst_size_bytes,
             options.flush_interval,
         ));
-
-        let state = Arc::new(RwLock::new(DbState::new(manifest)));
-        let db_stats = DbStats::new(stat_registry.as_ref());
 
         let reader = Reader {
             table_store: Arc::clone(&table_store),

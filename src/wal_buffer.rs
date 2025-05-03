@@ -14,6 +14,7 @@ use crate::{
     tablestore::TableStore,
     types::RowEntry,
     utils::{MonotonicClock, WatchableOnceCell},
+    wal_id::WalIdAccess,
     SlateDBError,
 };
 
@@ -42,6 +43,7 @@ use crate::{
 ///   operations. The manager becomes unusable after encountering a fatal error.
 pub struct WalBufferManager {
     inner: Arc<Mutex<WalBufferManagerInner>>,
+    wal_id_accessor: Arc<dyn WalIdAccess>,
     fatal_once: WatchableOnceCell<SlateDBError>,
     table_store: Arc<TableStore>,
     mono_clock: Arc<MonotonicClock>,
@@ -51,7 +53,6 @@ pub struct WalBufferManager {
 
 struct WalBufferManagerInner {
     current_wal: Arc<KVTable>,
-    current_wal_id: u64,
     /// When the current WAL is ready to be flushed, it'll be moved to the `immutable_wals`.
     /// The flusher will try flush all the immutable wals to remote storage.
     immutable_wals: VecDeque<(u64, Arc<KVTable>)>,
@@ -68,13 +69,11 @@ struct WalBufferManagerInner {
     last_flushed_wal_id: Option<u64>,
     /// The last flushed sequence number.
     last_flushed_seq: Option<u64>,
-    /// The last time the flush is triggered.
-    last_flush_triggered_at: Option<Instant>,
 }
 
 impl WalBufferManager {
     pub fn new(
-        current_wal_id: u64,
+        wal_id_accessor: Arc<dyn WalIdAccess>,
         table_store: Arc<TableStore>,
         mono_clock: Arc<MonotonicClock>,
         max_wal_bytes_size: usize,
@@ -84,18 +83,17 @@ impl WalBufferManager {
         let immutable_wals = VecDeque::new();
         let inner = WalBufferManagerInner {
             current_wal,
-            current_wal_id,
             immutable_wals,
             last_applied_seq: None,
             last_flushed_wal_id: None,
             last_flushed_seq: None,
-            last_flush_triggered_at: None,
             quit_tx: None,
             flush_tx: None,
             background_task: None,
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
+            wal_id_accessor,
             fatal_once: WatchableOnceCell::new(),
             table_store,
             mono_clock,
@@ -332,15 +330,17 @@ impl WalBufferManager {
     }
 
     async fn freeze_current_wal(&self) -> Result<(), SlateDBError> {
-        let mut inner = self.inner.lock().await;
-        if !inner.current_wal.is_empty() {
-            let current_wal_id = inner.current_wal_id;
-            let current_wal = std::mem::replace(&mut inner.current_wal, Arc::new(KVTable::new()));
-            inner
-                .immutable_wals
-                .push_back((current_wal_id, current_wal));
-            inner.current_wal_id += 1;
+        let is_empty = self.inner.lock().await.current_wal.is_empty();
+        if is_empty {
+            return Ok(());
         }
+
+        let current_wal_id = self.wal_id_accessor.increment_wal_id();
+        let mut inner = self.inner.lock().await;
+        let current_wal = std::mem::replace(&mut inner.current_wal, Arc::new(KVTable::new()));
+        inner
+            .immutable_wals
+            .push_back((current_wal_id, current_wal));
         Ok(())
     }
 
