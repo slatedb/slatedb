@@ -25,7 +25,6 @@
 //! _Note: The `write_batch` loop still holds a lock on the db_state. There can still
 //! be contention between `get`s, which holds a lock, and the write loop._
 
-use core::panic;
 use log::{info, warn};
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -36,7 +35,6 @@ use crate::{
     batch::{WriteBatch, WriteOp},
     db::DbInner,
     error::SlateDBError,
-    mem_table::KVTable,
 };
 
 pub(crate) enum WriteBatchMsg {
@@ -96,10 +94,12 @@ impl DbInner {
             self.state.write().memtable().table().watch_durable()
         };
 
-        // update the last_committed_seq, and trigger maybe_freeze_memtable.
+        // update the last_committed_seq, so the writes will be visible to the readers.
+        self.state.write().update_last_committed_seq(seq);
+
+        // maybe freeze the memtable.
         {
             let mut guard = self.state.write();
-            guard.update_last_committed_seq(seq);
             let last_wal_id = guard.last_written_wal_id();
             self.maybe_freeze_memtable(&mut guard, last_wal_id)?;
         }
