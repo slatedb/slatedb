@@ -1,21 +1,11 @@
 use std::sync::Arc;
 
-use tokio::sync::oneshot::Sender;
-
 use crate::db::DbInner;
 use crate::db_state;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::KVTable;
-
-#[derive(Debug)]
-pub(crate) enum WalFlushMsg {
-    Shutdown,
-    FlushImmutableWals {
-        sender: Option<Sender<Result<(), SlateDBError>>>,
-    },
-}
 
 impl DbInner {
     pub(crate) async fn flush_imm_table(
