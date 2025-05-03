@@ -441,6 +441,12 @@ impl DbState {
         self.last_seq
     }
 
+    /// update_last_committed_seq is called when a write is committed.
+    /// the only place that calls this is the commit pipeline.
+    pub fn update_last_committed_seq(&mut self, seq: u64) {
+        self.last_committed_seq = seq;
+    }
+
     /// update_last_seq is called when we replay the WALs to recover the
     /// latest sequence number.
     pub fn update_last_seq(&mut self, seq: u64) {

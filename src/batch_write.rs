@@ -85,18 +85,29 @@ impl DbInner {
             self.state.write().memtable().put(row_entry);
         }
 
+        // get the durable watcher. we'll await on current WAL table to be flushed if wal is enabled.
+        // otherwise, we'll use the memtable's durable watcher.
         let durable_watcher = if self.wal_enabled() {
             let current_wal = self.wal_buffer.maybe_trigger_flush().await?;
-            // TODO: handle sync here, if sync is enabled, we can call `flush` here.
+            // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
+            // in another Pull Request.
             current_wal.watch_durable()
         } else {
             self.state.write().memtable().table().watch_durable()
         };
 
-        // TODO: handle the last_written_wal_id here.
-        let mut guard = self.state.write();
-        let last_wal_id = guard.last_written_wal_id();
-        self.maybe_freeze_memtable(&mut guard, last_wal_id)?;
+        // update the last_committed_seq, and trigger maybe_freeze_memtable.
+        {
+            let mut guard = self.state.write();
+            guard.update_last_committed_seq(seq);
+            let last_wal_id = guard.last_written_wal_id();
+            self.maybe_freeze_memtable(&mut guard, last_wal_id)?;
+        }
+
+        // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
+        // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
+        // please note that we should call this function AFTER the write is considered as committed.
+        self.wal_buffer.track_last_applied_seq(seq).await;
 
         Ok(durable_watcher)
     }
