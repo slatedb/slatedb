@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use bytes::Bytes;
 use std::cmp::min;
 use std::collections::VecDeque;
@@ -10,7 +11,6 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
-use crate::iter::SeekToKey;
 use crate::{
     block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, partitioned_keyspace,
     tablestore::TableStore, types::RowEntry,
@@ -308,6 +308,7 @@ impl<'a> SstIterator<'a> {
     }
 }
 
+#[async_trait]
 impl KeyValueIterator for SstIterator<'_> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         while !self.state.is_finished() {
@@ -330,9 +331,7 @@ impl KeyValueIterator for SstIterator<'_> {
         }
         Ok(None)
     }
-}
 
-impl SeekToKey for SstIterator<'_> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         if !self.view.contains(next_key) {
             return Err(SlateDBError::InvalidArgument {
@@ -386,7 +385,7 @@ mod tests {
         builder.add_value(b"key4", b"value4", gen_attrs(4)).unwrap();
         let encoded = builder.build().unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded)
+            .write_sst(&SsTableId::Wal(0), encoded, false)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
@@ -446,7 +445,7 @@ mod tests {
 
         let encoded = builder.build().unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), encoded)
+            .write_sst(&SsTableId::Wal(0), encoded, false)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();

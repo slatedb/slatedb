@@ -1,27 +1,43 @@
+use async_trait::async_trait;
+
 use crate::iter::KeyValueIterator;
 use crate::types::RowEntry;
 use crate::utils::is_not_expired;
 use crate::SlateDBError;
 
+pub(crate) type FilterPredicate = Box<dyn Fn(&RowEntry) -> bool + Send + Sync>;
+
 pub(crate) struct FilterIterator<T: KeyValueIterator> {
     iterator: T,
-    predicate: Box<dyn Fn(&RowEntry) -> bool + Send>,
+    predicate: FilterPredicate,
 }
 
 impl<T: KeyValueIterator> FilterIterator<T> {
-    pub(crate) fn new(iterator: T, predicate: Box<dyn Fn(&RowEntry) -> bool + Send>) -> Self {
+    pub(crate) fn new(iterator: T, predicate: FilterPredicate) -> Self {
         Self {
             predicate,
             iterator,
         }
     }
 
-    pub(crate) fn wrap_ttl_filter_iterator(iterator: T, now: i64) -> Self {
-        let filter_entry = move |entry: &RowEntry| is_not_expired(entry, now);
-        Self::new(iterator, Box::new(filter_entry))
+    #[allow(unused)]
+    pub(crate) fn new_with_ttl_now(iterator: T, ttl_now: i64) -> Self {
+        let predicate = Box::new(move |entry: &RowEntry| is_not_expired(entry, ttl_now));
+        Self::new(iterator, predicate)
+    }
+
+    pub(crate) fn new_with_max_seq(iterator: T, max_seq: Option<u64>) -> Self {
+        match max_seq {
+            Some(max_seq) => {
+                let predicate = Box::new(move |entry: &RowEntry| entry.seq <= max_seq);
+                Self::new(iterator, predicate)
+            }
+            None => Self::new(iterator, Box::new(|_| true)),
+        }
     }
 }
 
+#[async_trait]
 impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         while let Some(entry) = self.iterator.next_entry().await? {
@@ -30,6 +46,10 @@ impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
             }
         }
         Ok(None)
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.iterator.seek(next_key).await
     }
 }
 
@@ -79,5 +99,27 @@ mod tests {
         let mut filter_iter = FilterIterator::new(iter, Box::new(filter_entry));
 
         assert_eq!(filter_iter.next().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_filter_iterator_predicate_builder() {
+        let iter = crate::test_utils::TestIterator::new()
+            .with_entry(b"a", b"val1", 5)
+            .with_entry(b"b", b"val2", 2)
+            .with_entry(b"b", b"val2", 10)
+            .with_entry(b"c", b"val3", 10)
+            .with_entry(b"d", b"val4", 8);
+
+        let mut filter_iter = FilterIterator::new_with_max_seq(iter, Some(9));
+
+        assert_iterator(
+            &mut filter_iter,
+            vec![
+                RowEntry::new_value(b"a", b"val1", 5),
+                RowEntry::new_value(b"b", b"val2", 2),
+                RowEntry::new_value(b"d", b"val4", 8),
+            ],
+        )
+        .await;
     }
 }

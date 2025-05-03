@@ -23,7 +23,6 @@
 use std::collections::HashMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
@@ -46,6 +45,7 @@ use crate::db_iter::DbIterator;
 use crate::db_state::{CoreDbState, DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
+use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{DirtyManifest, FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table::WritableKVTable;
@@ -57,7 +57,6 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::{bg_task_result_into_err, MonotonicClock};
-use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use tracing::{info, warn};
 
@@ -65,7 +64,7 @@ pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) options: DbOptions,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) wal_buffer: Arc<WalBufferManager>,
+    pub(crate) wal_flush_notifier: UnboundedSender<WalFlushMsg>,
     pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: DbStats,
@@ -79,6 +78,7 @@ impl DbInner {
         options: DbOptions,
         table_store: Arc<TableStore>,
         manifest: DirtyManifest,
+        wal_flush_notifier: UnboundedSender<WalFlushMsg>,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
         stat_registry: Arc<StatRegistry>,
@@ -87,15 +87,6 @@ impl DbInner {
             options.clock.clone(),
             manifest.core.last_l0_clock_tick,
         ));
-
-        let wal_buffer = Arc::new(WalBufferManager::new(
-            manifest.core.next_wal_sst_id,
-            table_store.clone(),
-            mono_clock.clone(),
-            options.l0_sst_size_bytes,
-            options.flush_interval,
-        ));
-
         let state = Arc::new(RwLock::new(DbState::new(manifest)));
         let db_stats = DbStats::new(stat_registry.as_ref());
 
@@ -110,7 +101,7 @@ impl DbInner {
             state,
             options,
             table_store,
-            wal_buffer,
+            wal_flush_notifier,
             memtable_flush_notifier,
             write_notifier,
             db_stats,
@@ -129,7 +120,9 @@ impl DbInner {
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
-        self.reader.get_with_options(key, options, &snapshot).await
+        self.reader
+            .get_with_options(key, options, &snapshot, None)
+            .await
     }
 
     pub async fn scan_with_options<'a>(
@@ -140,7 +133,7 @@ impl DbInner {
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
         self.reader
-            .scan_with_options(range, options, &snapshot)
+            .scan_with_options(range, options, &snapshot, None)
             .await
     }
 
@@ -156,7 +149,11 @@ impl DbInner {
         loop {
             let empty_wal = WritableKVTable::new();
             match self
-                .flush_imm_table(&SsTableId::Wal(empty_wal_id), empty_wal.table().clone())
+                .flush_imm_table(
+                    &SsTableId::Wal(empty_wal_id),
+                    empty_wal.table().clone(),
+                    false,
+                )
                 .await
             {
                 Ok(_) => {
@@ -208,11 +205,12 @@ impl DbInner {
             .expect("write notifier closed");
 
         // if the write pipeline task exits then this call to rx.await will fail because tx is dropped
-        // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
-        let mut durable_watch = rx.await??;
+        let current_table = rx.await??;
+
         if options.await_durable {
-            durable_watch.await_value().await?;
+            current_table.await_durable().await?;
         }
+
         Ok(())
     }
 
@@ -220,75 +218,82 @@ impl DbInner {
     pub(crate) async fn maybe_apply_backpressure(&self) -> Result<(), SlateDBError> {
         loop {
             let mem_size_bytes = {
-                let wal_size = self.wal_buffer.estimated_bytes().await?;
                 let guard = self.state.read();
                 // Exclude active memtable and WAL to avoid a write lock.
+                let imm_wal_size = guard
+                    .state()
+                    .imm_wal
+                    .iter()
+                    .map(|imm| {
+                        let metadata = imm.table().metadata();
+                        self.table_store.estimate_encoded_size(
+                            metadata.entry_num,
+                            metadata.entries_size_in_bytes,
+                        )
+                    })
+                    .sum::<usize>();
                 let imm_memtable_size = guard
                     .state()
                     .imm_memtable
                     .iter()
-                    .map(|imm| imm.table().size())
+                    .map(|imm| {
+                        let metadata = imm.table().metadata();
+                        self.table_store.estimate_encoded_size(
+                            metadata.entry_num,
+                            metadata.entries_size_in_bytes,
+                        )
+                    })
                     .sum::<usize>();
-                wal_size + imm_memtable_size
+                imm_wal_size + imm_memtable_size
             };
-
-            // TODO(flaneur): FIX THIS BEFORE MERGING
             if mem_size_bytes >= self.options.max_unflushed_bytes {
-                tracing::warn!(
+                let (wal_table, mem_table) = {
+                    let guard = self.state.read();
+                    (
+                        guard.state().imm_wal.back().map(|imm| imm.table().clone()),
+                        guard.state().imm_memtable.back().cloned(),
+                    )
+                };
+                warn!(
                     "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
                     mem_size_bytes, self.options.max_unflushed_bytes,
                 );
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            } else {
-                return Ok(());
-            }
 
-            /*
-                if mem_size_bytes >= self.options.max_unflushed_bytes {
-                    let (wal_table, mem_table) = {
-                        let guard = self.state.read();
-                        (
-                            guard.state().imm_wal.back().map(|imm| imm.table().clone()),
-                            guard.state().imm_memtable.back().cloned(),
-                        )
-                    };
-                    tracing::warn!(
-                        "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
-                        mem_size_bytes, self.options.max_unflushed_bytes,
-                    );
-
-                    match (wal_table, mem_table) {
-                        (Some(wal_table), Some(mem_table)) => {
-                            tokio::select! {
-                                result = wal_table.await_durable() => {
-                                    result?;
-                                }
-                                result = mem_table.await_flush_to_l0() => {
-                                    result?;
-                                }
+                match (wal_table, mem_table) {
+                    (Some(wal_table), Some(mem_table)) => {
+                        tokio::select! {
+                            result = wal_table.await_durable() => {
+                                result?;
+                            }
+                            result = mem_table.await_flush_to_l0() => {
+                                result?;
                             }
                         }
-                        (Some(wal_table), None) => {
-                            wal_table.await_durable().await?;
-                        }
-                        (None, Some(mem_table)) => {
-                            mem_table.await_flush_to_l0().await?;
-                        }
-                        _ => {
-                            // No tables to flush, so backpressure is no longer needed.
-                            break;
-                        }
                     }
-                } else {
-                    break;
+                    (Some(wal_table), None) => {
+                        wal_table.await_durable().await?;
+                    }
+                    (None, Some(mem_table)) => {
+                        mem_table.await_flush_to_l0().await?;
+                    }
+                    _ => {
+                        // No tables to flush, so backpressure is no longer needed.
+                        break;
+                    }
                 }
+            } else {
+                break;
             }
-            */
         }
+        Ok(())
     }
 
     async fn flush_wals(&self) -> Result<(), SlateDBError> {
-        self.wal_buffer.flush().await
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.wal_flush_notifier
+            .send(WalFlushMsg::FlushImmutableWals { sender: Some(tx) })
+            .map_err(|_| SlateDBError::WalFlushChannelError)?;
+        rx.await?
     }
 
     // use to manually flush memtables
@@ -355,6 +360,7 @@ impl DbInner {
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
     /// The handle for the flush thread.
+    wal_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     write_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     compactor: Mutex<Option<Compactor>>,
@@ -474,9 +480,9 @@ impl Db {
     ) -> Result<Self, SlateDBError> {
         let path = path.into();
         if let Ok(options_json) = options.to_json_string() {
-            tracing::info!(?path, options = options_json, "Opening SlateDB database");
+            info!(?path, options = options_json, "Opening SlateDB database");
         } else {
-            tracing::info!(?path, ?options, "Opening SlateDB database");
+            info!(?path, ?options, "Opening SlateDB database");
         }
 
         let stat_registry = Arc::new(StatRegistry::new());
@@ -546,12 +552,14 @@ impl Db {
 
         let mut manifest = Self::init_db(&manifest_store, latest_manifest).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (wal_flush_tx, wal_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(
             DbInner::new(
                 options.clone(),
                 table_store.clone(),
                 manifest.prepare_dirty()?,
+                wal_flush_tx,
                 memtable_flush_tx,
                 write_tx,
                 stat_registry,
@@ -563,11 +571,11 @@ impl Db {
         }
         inner.replay_wal().await?;
         let tokio_handle = Handle::current();
-
-        if inner.wal_enabled() {
-            inner.wal_buffer.start_background().await;
+        let flush_task = if inner.wal_enabled() {
+            Some(inner.spawn_flush_task(wal_flush_rx, &tokio_handle))
+        } else {
+            None
         };
-
         let memtable_flush_task =
             inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
         let write_task = inner.spawn_write_task(write_rx, &tokio_handle);
@@ -621,6 +629,7 @@ impl Db {
         };
         Ok(Self {
             inner,
+            wal_flush_task: Mutex::new(flush_task),
             memtable_flush_task: Mutex::new(memtable_flush_task),
             write_task: Mutex::new(write_task),
             compactor: Mutex::new(compactor),
@@ -688,7 +697,18 @@ impl Db {
         }
 
         // Shutdown the WAL flush thread.
-        self.inner.wal_buffer.close().await?;
+        self.inner
+            .wal_flush_notifier
+            .send(WalFlushMsg::Shutdown)
+            .ok();
+
+        if let Some(flush_task) = {
+            let mut flush_task = self.wal_flush_task.lock();
+            flush_task.take()
+        } {
+            let result = flush_task.await.expect("Failed to join flush thread");
+            info!("flush task exited with {:?}", result);
+        }
 
         // Shutdown the memtable flush thread.
         self.inner
@@ -757,12 +777,12 @@ impl Db {
     /// ## Arguments
     /// - `key`: the key to get
     /// - `options`: the read options to use (Note that [`ReadOptions::read_level`] has no effect for readers, which
-    ///    can only observe committed state).
+    ///   can only observe committed state).
     ///
     /// ## Returns
     /// - `Result<Option<Bytes>, SlateDBError>`:
-    ///     - `Some(Bytes)`: the value if it exists
-    ///     - `None`: if the value does not exist
+    ///   - `Some(Bytes)`: the value if it exists
+    ///   - `None`: if the value does not exist
     ///
     /// ## Errors
     /// - `SlateDBError`: if there was an error getting the value
@@ -1126,19 +1146,19 @@ impl Db {
     }
 
     pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
-        if self.inner.wal_enabled() {
-            self.inner.wal_buffer.await_flush().await
-        } else {
-            let table = {
-                let guard = self.inner.state.read();
-                let snapshot = guard.snapshot();
+        let table = {
+            let guard = self.inner.state.read();
+            let snapshot = guard.snapshot();
+            if self.inner.wal_enabled() {
+                snapshot.wal.clone()
+            } else {
                 snapshot.memtable.clone()
-            };
-            if table.is_empty() {
-                return Ok(());
             }
-            table.await_durable().await
+        };
+        if table.is_empty() {
+            return Ok(());
         }
+        table.await_durable().await
     }
 
     pub fn metrics(&self) -> Arc<StatRegistry> {
@@ -1148,8 +1168,10 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
+    use std::ops::Bound::Excluded;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
@@ -1170,7 +1192,7 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
-    use crate::{proptest_util, test_utils};
+    use crate::{proptest_util, test_utils, KeyValue};
     use futures::{future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
@@ -1200,6 +1222,44 @@ mod tests {
         kv_store.delete(key).await.unwrap();
         assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_no_flush_interval() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_options_no_flush_interval = {
+            let mut db_options = test_db_options(0, 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let kv_store = Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            db_options_no_flush_interval,
+            object_store,
+        )
+        .await
+        .unwrap();
+        let key = b"test_key";
+        let value = b"test_value";
+
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // a sanity check: the wal contains the most recent write
+        assert!(!kv_store.inner.state.write().wal().is_empty());
+
+        // and a flush() should clear it
+        kv_store.flush().await.unwrap();
+        assert!(kv_store.inner.state.write().wal().is_empty());
     }
 
     #[tokio::test]
@@ -1476,7 +1536,14 @@ mod tests {
             .await
             .unwrap();
             last_val = val;
-            if db.inner.state.write().memtable().size() > (SsTableFormat::default().block_size * 3)
+            if db
+                .inner
+                .state
+                .write()
+                .memtable()
+                .metadata()
+                .entries_size_in_bytes
+                > (SsTableFormat::default().block_size * 3)
             {
                 break;
             }
@@ -1771,6 +1838,57 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_should_allow_iterating_behind_box_dyn() {
+        #[async_trait]
+        trait IteratorSupplier {
+            async fn iterator<'a>(&'a self) -> Box<dyn IteratorTrait + 'a>;
+        }
+
+        struct DbHolder {
+            db: Db,
+        }
+
+        #[async_trait]
+        impl IteratorSupplier for DbHolder {
+            async fn iterator<'a>(&'a self) -> Box<dyn IteratorTrait + 'a> {
+                let range = BytesRange::new(
+                    Excluded(Bytes::from(b"foo".as_slice())),
+                    Excluded(Bytes::from(b"foo".as_slice())),
+                );
+                let iter = self
+                    .db
+                    .inner
+                    .scan_with_options(range, &ScanOptions::default())
+                    .await
+                    .unwrap();
+                Box::new(iter)
+            }
+        }
+
+        #[async_trait]
+        trait IteratorTrait {
+            async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError>;
+        }
+
+        #[async_trait]
+        impl IteratorTrait for DbIterator<'_> {
+            async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+                DbIterator::next(self).await
+            }
+        }
+
+        let db_options = test_db_options(0, 1024, None);
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::open_with_opts(Path::from("/tmp/test_kv_store"), db_options, object_store)
+            .await
+            .unwrap();
+        let db_holder = DbHolder { db };
+        let mut boxed = db_holder.iterator().await;
+        let next = boxed.next().await;
+        assert_eq!(next.unwrap(), None);
     }
 
     async fn assert_records_in_range(
@@ -2157,7 +2275,7 @@ mod tests {
         use crate::{test_utils::assert_iterator, types::RowEntry};
 
         let clock = Arc::new(TestClock::new());
-        let mut options = test_db_options_with_clock(0, 128, None, clock.clone());
+        let mut options = test_db_options_with_clock(0, 256, None, clock.clone());
         options.wal_enabled = false;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -2235,7 +2353,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let kv_store = Db::open_with_opts(
             path.clone(),
-            test_db_options(0, 128, None),
+            test_db_options(0, 256, None),
             object_store.clone(),
         )
         .await
@@ -2341,9 +2459,8 @@ mod tests {
         // Unblock WAL flush so runtime shuts down nicely even if we have a failure
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
 
-        // TODO(flaneur): FIX THIS BEFORE MERGING
         // WAL should pile up in memory since it can't be flushed
-        // assert_eq!(snapshot.state.imm_wal.len(), 1);
+        assert_eq!(snapshot.state.imm_wal.len(), 1);
     }
 
     #[tokio::test]
@@ -2398,8 +2515,6 @@ mod tests {
         .await
         .unwrap();
 
-        // TODO(flaneur): FIX THIS BEFORE MERGING
-        /*
         let memtable = {
             let mut lock = kv_store.inner.state.write();
             lock.wal()
@@ -2422,7 +2537,6 @@ mod tests {
 
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"abc3333".as_slice());
-        */
     }
 
     #[tokio::test]
@@ -2504,7 +2618,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let db = Db::open_with_opts(
             path.clone(),
-            test_db_options(0, 128, None),
+            test_db_options(0, 256, None),
             object_store.clone(),
         )
         .await
@@ -2518,7 +2632,7 @@ mod tests {
 
         let db_restored = Db::open_with_opts(
             path.clone(),
-            test_db_options(0, 128, None),
+            test_db_options(0, 256, None),
             object_store.clone(),
         )
         .await
@@ -3254,6 +3368,62 @@ mod tests {
         let db_state = stored_manifest.db_state();
         let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, 11);
+    }
+
+    #[cfg(all(feature = "zstd", feature = "wal_disable"))]
+    #[tokio::test]
+    async fn test_compression_overflow_bug() {
+        // This test reproduces the bug reported in issue #555
+        // https://github.com/slatedb/slatedb/issues/555
+        // where using zstd compression with flush() followed by get() causes
+        // an "attempt to subtract with overflow" error in Block::decode
+
+        use crate::config::CompressionCodec;
+        use std::str::FromStr;
+
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let compress = CompressionCodec::from_str("zstd").unwrap();
+        let db_options = DbOptions {
+            flush_interval: None,
+            wal_enabled: false,
+            compression_codec: Some(compress),
+            ..DbOptions::default()
+        };
+        let path = Path::from("/tmp/test_compression_overflow_bug");
+        let db = Db::open_with_opts(path.clone(), db_options, os.clone())
+            .await
+            .expect("failed to open db");
+
+        // Insert some data with large values to trigger compression
+        for i in 0..100 {
+            let key = format!("k{}", i);
+            let value = format!("{}{}", "v".repeat(10000), i);
+            db.put_with_options(
+                key.as_bytes(),
+                value.clone(),
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .expect("failed to put");
+        }
+
+        // Flush the database to disk - this is part of the bug reproduction
+        info!("Flushing database...");
+        let _ = db.flush().await;
+        info!("Flush completed");
+
+        // Now try to read a value back - this should trigger the overflow error
+        let read_option = ReadOptions {
+            durability_filter: Memory,
+        };
+
+        // This get operation should trigger the "attempt to subtract with overflow" error
+        let result = db.get_with_options("k5", &read_option).await.unwrap();
+        let expected_value = format!("{}{}", "v".repeat(10000), 5);
+        assert_eq!(result, Some(expected_value.into()));
     }
 
     #[tokio::test]

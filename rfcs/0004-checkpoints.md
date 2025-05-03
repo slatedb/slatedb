@@ -370,7 +370,7 @@ Generally to take a checkpoint from the current manifest, the client runs a proc
 3. Compute a new v4 UUID id for the checkpoint.
 4. Create a new entry in `checkpoints` with:
     - `id` set to the id computed in the previous step
-    - `manfiest_id` set to V or V+1. We use V+1 to allow addition of the checkpoint to be included with other updates.
+    - `manifest_id` set to V or V+1. We use V+1 to allow addition of the checkpoint to be included with other updates.
     - other fields set as appropriate (e.g. expiry time based on relevant checkpoint creation params)
 5. Write a new manifest M' at version V+1. If CAS fails, go to step 1.
 

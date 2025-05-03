@@ -3,6 +3,7 @@ use parking_lot::RwLockWriteGuard;
 use crate::db::DbInner;
 use crate::db_state::DbState;
 use crate::error::SlateDBError;
+use crate::flush::WalFlushMsg;
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::wal_replay::ReplayedMemtable;
 
@@ -12,7 +13,12 @@ impl DbInner {
         guard: &mut RwLockWriteGuard<'_, DbState>,
         wal_id: u64,
     ) -> Result<(), SlateDBError> {
-        if guard.memtable().size() < self.options.l0_sst_size_bytes {
+        let meta = guard.memtable().metadata();
+        if self
+            .table_store
+            .estimate_encoded_size(meta.entry_num, meta.entries_size_in_bytes)
+            < self.options.l0_sst_size_bytes
+        {
             Ok(())
         } else {
             self.freeze_memtable(guard, wal_id)
@@ -48,5 +54,28 @@ impl DbInner {
         guard.update_last_seq(replayed_memtable.last_seq);
         self.mono_clock.set_last_tick(replayed_memtable.last_tick)?;
         guard.replace_memtable(replayed_memtable.table)
+    }
+
+    pub(crate) fn maybe_freeze_wal(
+        &self,
+        guard: &mut RwLockWriteGuard<'_, DbState>,
+    ) -> Result<(), SlateDBError> {
+        // Use L0 SST size as the threshold for freezing a WAL table because
+        // a single WAL table gets added to a single L0 SST. If the WAL table
+        // were allowed to grow larger than the L0 SST threshold, the L0 SST
+        // size would be greater than the threshold.
+        let meta = guard.wal().metadata();
+        if self
+            .table_store
+            .estimate_encoded_size(meta.entry_num, meta.entries_size_in_bytes)
+            < self.options.l0_sst_size_bytes
+        {
+            return Ok(());
+        }
+        guard.freeze_wal()?;
+        self.wal_flush_notifier
+            .send(WalFlushMsg::FlushImmutableWals { sender: None })
+            .map_err(|_| SlateDBError::WalFlushChannelError)?;
+        Ok(())
     }
 }

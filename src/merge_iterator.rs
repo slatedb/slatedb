@@ -1,172 +1,23 @@
+use async_trait::async_trait;
+
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, SeekToKey};
+use crate::iter::KeyValueIterator;
 use crate::types::RowEntry;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
 
-pub(crate) struct TwoMergeIterator<T1: KeyValueIterator, T2: KeyValueIterator> {
-    iterator1: (T1, Option<RowEntry>),
-    iterator2: (T2, Option<RowEntry>),
-    max_seq: Option<u64>,
-}
-
-impl<T1: KeyValueIterator, T2: KeyValueIterator> TwoMergeIterator<T1, T2> {
-    pub(crate) async fn new(
-        mut iterator1: T1,
-        mut iterator2: T2,
-        max_seq: Option<u64>,
-    ) -> Result<Self, SlateDBError> {
-        let next1 = iterator1.next_entry().await?;
-        let next2 = iterator2.next_entry().await?;
-        Ok(Self {
-            iterator1: (iterator1, next1),
-            iterator2: (iterator2, next2),
-            max_seq,
-        })
-    }
-
-    async fn advance1(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        if self.iterator1.1.is_none() {
-            return Ok(None);
-        }
-        Ok(std::mem::replace(
-            &mut self.iterator1.1,
-            self.iterator1.0.next_entry().await?,
-        ))
-    }
-
-    async fn advance2(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        if self.iterator2.1.is_none() {
-            return Ok(None);
-        }
-        Ok(std::mem::replace(
-            &mut self.iterator2.1,
-            self.iterator2.0.next_entry().await?,
-        ))
-    }
-
-    fn peek1(&self) -> Option<&RowEntry> {
-        self.iterator1.1.as_ref()
-    }
-
-    fn peek2(&self) -> Option<&RowEntry> {
-        self.iterator2.1.as_ref()
-    }
-
-    fn peek_inner(&self) -> Option<&RowEntry> {
-        match (self.peek1(), self.peek2()) {
-            (None, None) => None,
-            (Some(v1), None) => Some(v1),
-            (None, Some(v2)) => Some(v2),
-            (Some(v1), Some(v2)) => {
-                if v1.key < v2.key {
-                    Some(v1)
-                } else {
-                    Some(v2)
-                }
-            }
-        }
-    }
-
-    async fn advance_inner(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        match (self.peek1(), self.peek2()) {
-            (None, None) => Ok(None),
-            (Some(_), None) => self.advance1().await,
-            (None, Some(_)) => self.advance2().await,
-            (Some(next1), Some(next2)) => {
-                if next1.key < next2.key {
-                    self.advance1().await
-                } else {
-                    self.advance2().await
-                }
-            }
-        }
-    }
-}
-
-impl<T1, T2> TwoMergeIterator<T1, T2>
-where
-    T1: KeyValueIterator + SeekToKey,
-    T2: KeyValueIterator + SeekToKey,
-{
-    async fn seek1(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        match &self.iterator1.1 {
-            None => Ok(()),
-            Some(val) => {
-                if val.key < next_key {
-                    self.iterator1.0.seek(next_key).await?;
-                    self.iterator1.1 = self.iterator1.0.next_entry().await?;
-                    Ok(())
-                } else {
-                    Ok(())
-                }
-            }
-        }
-    }
-
-    async fn seek2(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        match &self.iterator2.1 {
-            None => Ok(()),
-            Some(val) => {
-                if val.key < next_key {
-                    self.iterator2.0.seek(next_key).await?;
-                    self.iterator2.1 = self.iterator2.0.next_entry().await?;
-                    Ok(())
-                } else {
-                    Ok(())
-                }
-            }
-        }
-    }
-}
-
-impl<T1, T2> SeekToKey for TwoMergeIterator<T1, T2>
-where
-    T1: KeyValueIterator + SeekToKey,
-    T2: KeyValueIterator + SeekToKey,
-{
-    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        self.seek1(next_key).await?;
-        self.seek2(next_key).await
-    }
-}
-
-impl<T1: KeyValueIterator, T2: KeyValueIterator> KeyValueIterator for TwoMergeIterator<T1, T2> {
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        let mut current_kv = match self.advance_inner().await? {
-            Some(kv) => kv,
-            None => return Ok(None),
-        };
-        while let Some(peeked_kv) = self.peek_inner() {
-            if peeked_kv.key != current_kv.key {
-                break;
-            }
-            if peeked_kv.seq > current_kv.seq
-                && self
-                    .max_seq
-                    .map(|max_seq| peeked_kv.seq <= max_seq)
-                    .unwrap_or(true)
-            {
-                current_kv = peeked_kv.clone();
-            }
-            self.advance_inner().await?;
-        }
-        Ok(Some(current_kv))
-    }
-}
-
-struct MergeIteratorHeapEntry<T: KeyValueIterator> {
+struct MergeIteratorHeapEntry<'a> {
     next_kv: RowEntry,
-    index: u32,
-    iterator: T,
+    index: usize,
+    iterator: Box<dyn KeyValueIterator + 'a>,
 }
 
-impl<T: KeyValueIterator + SeekToKey> MergeIteratorHeapEntry<T> {
+impl<'a> MergeIteratorHeapEntry<'a> {
     /// Seek the iterator and return a new heap entry
     async fn seek(
         mut self,
         next_key: &[u8],
-    ) -> Result<Option<MergeIteratorHeapEntry<T>>, SlateDBError> {
+    ) -> Result<Option<MergeIteratorHeapEntry<'a>>, SlateDBError> {
         if self.next_kv.key >= next_key {
             Ok(Some(self))
         } else {
@@ -184,21 +35,21 @@ impl<T: KeyValueIterator + SeekToKey> MergeIteratorHeapEntry<T> {
     }
 }
 
-impl<T: KeyValueIterator> Eq for MergeIteratorHeapEntry<T> {}
+impl Eq for MergeIteratorHeapEntry<'_> {}
 
-impl<T: KeyValueIterator> PartialEq<Self> for MergeIteratorHeapEntry<T> {
+impl PartialEq<Self> for MergeIteratorHeapEntry<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.index == other.index && self.next_kv == other.next_kv
     }
 }
 
-impl<T: KeyValueIterator> PartialOrd<Self> for MergeIteratorHeapEntry<T> {
+impl PartialOrd<Self> for MergeIteratorHeapEntry<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<T: KeyValueIterator> Ord for MergeIteratorHeapEntry<T> {
+impl Ord for MergeIteratorHeapEntry<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         // we'll wrap a Reverse in the BinaryHeap, so the cmp here is in increasing order.
         // after Reverse is wrapped, it will return the entries with higher seqnum first.
@@ -206,33 +57,28 @@ impl<T: KeyValueIterator> Ord for MergeIteratorHeapEntry<T> {
     }
 }
 
-pub(crate) struct MergeIterator<T: KeyValueIterator> {
-    current: Option<MergeIteratorHeapEntry<T>>,
-    iterators: BinaryHeap<Reverse<MergeIteratorHeapEntry<T>>>,
-    max_seq: Option<u64>,
+pub(crate) struct MergeIterator<'a> {
+    current: Option<MergeIteratorHeapEntry<'a>>,
+    iterators: BinaryHeap<Reverse<MergeIteratorHeapEntry<'a>>>,
 }
 
-impl<T: KeyValueIterator> MergeIterator<T> {
-    pub(crate) async fn new(
-        mut iterators: VecDeque<T>,
-        max_seq: Option<u64>,
+impl<'a> MergeIterator<'a> {
+    pub(crate) async fn new<T: KeyValueIterator + 'a>(
+        iterators: impl IntoIterator<Item = T>,
     ) -> Result<Self, SlateDBError> {
         let mut heap = BinaryHeap::new();
-        let mut index = 0;
-        while let Some(mut iterator) = iterators.pop_front() {
+        for (index, mut iterator) in iterators.into_iter().enumerate() {
             if let Some(kv) = iterator.next_entry().await? {
                 heap.push(Reverse(MergeIteratorHeapEntry {
                     next_kv: kv,
                     index,
-                    iterator,
+                    iterator: Box::new(iterator),
                 }));
             }
-            index += 1;
         }
         Ok(Self {
             current: heap.pop().map(|r| r.0),
             iterators: heap,
-            max_seq,
         })
     }
 
@@ -254,7 +100,8 @@ impl<T: KeyValueIterator> MergeIterator<T> {
     }
 }
 
-impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
+#[async_trait]
+impl KeyValueIterator for MergeIterator<'_> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         let mut current_kv = match self.advance().await? {
             Some(kv) => kv,
@@ -267,21 +114,14 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeIterator<T> {
             if peeked_entry.key != current_kv.key {
                 break;
             }
-            if peeked_entry.seq > current_kv.seq
-                && self
-                    .max_seq
-                    .map(|max_seq| peeked_entry.seq <= max_seq)
-                    .unwrap_or(true)
-            {
+            if peeked_entry.seq > current_kv.seq {
                 current_kv = peeked_entry.clone();
             }
             self.advance().await?;
         }
         Ok(Some(current_kv))
     }
-}
 
-impl<T: KeyValueIterator + SeekToKey> SeekToKey for MergeIterator<T> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         let mut seek_futures = VecDeque::new();
         if let Some(iterator) = self.current.take() {
@@ -305,8 +145,8 @@ impl<T: KeyValueIterator + SeekToKey> SeekToKey for MergeIterator<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::iter::SeekToKey;
-    use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
+    use crate::iter::KeyValueIterator;
+    use crate::merge_iterator::MergeIterator;
     use crate::test_utils::{assert_iterator, assert_next_entry, TestIterator};
     use crate::types::RowEntry;
     use std::collections::VecDeque;
@@ -314,7 +154,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_iterator_should_include_entries_in_order() {
-        let mut iters = VecDeque::new();
+        let mut iters: VecDeque<TestIterator> = VecDeque::new();
         iters.push_back(
             TestIterator::new()
                 .with_entry(b"aaaa", b"1111", 0)
@@ -334,7 +174,7 @@ mod tests {
                 .with_entry(b"gggg", b"7777", 0),
         );
 
-        let mut merge_iter = MergeIterator::new(iters, None).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -355,7 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_iterator_should_write_one_entry_with_given_key() {
-        let mut iters = VecDeque::new();
+        let mut iters: VecDeque<TestIterator> = VecDeque::new();
         iters.push_back(
             TestIterator::new()
                 .with_entry(b"aaaa", b"0000", 5)
@@ -374,7 +214,7 @@ mod tests {
                 .with_entry(b"xxxx", b"badx1", 3),
         );
 
-        let mut merge_iter = MergeIterator::new(iters, None).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -399,7 +239,7 @@ mod tests {
             .with_entry(b"xxxx", b"24242424", 0)
             .with_entry(b"yyyy", b"25252525", 0);
 
-        let mut merge_iter = TwoMergeIterator::new(iter1, iter2, None).await.unwrap();
+        let mut merge_iter = MergeIterator::new([iter1, iter2]).await.unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -424,7 +264,7 @@ mod tests {
             .with_entry(b"cccc", b"badc1", 2)
             .with_entry(b"xxxx", b"24242424", 3);
 
-        let mut merge_iter = TwoMergeIterator::new(iter1, iter2, None).await.unwrap();
+        let mut merge_iter = MergeIterator::new([iter1, iter2]).await.unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -439,7 +279,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seek_merge_iter() {
-        let mut iters = VecDeque::new();
+        let mut iters: VecDeque<TestIterator> = VecDeque::new();
         iters.push_back(
             TestIterator::new()
                 .with_entry(b"aa", b"aa1", 0)
@@ -452,7 +292,7 @@ mod tests {
                 .with_entry(b"cc", b"cc2", 0),
         );
 
-        let mut merge_iter = MergeIterator::new(iters, None).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
         merge_iter.seek(b"bb".as_ref()).await.unwrap();
 
         assert_iterator(
@@ -467,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seek_merge_iter_to_current_key() {
-        let mut iters = VecDeque::new();
+        let mut iters: VecDeque<TestIterator> = VecDeque::new();
         iters.push_back(
             TestIterator::new()
                 .with_entry(b"aa", b"aa1", 0)
@@ -480,7 +320,7 @@ mod tests {
                 .with_entry(b"cc", b"cc2", 0),
         );
 
-        let mut merge_iter = MergeIterator::new(iters, None).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
         assert_next_entry(&mut merge_iter, &RowEntry::new_value(b"aa", b"aa1", 0)).await;
 
         merge_iter.seek(b"bb".as_ref()).await.unwrap();
@@ -509,7 +349,7 @@ mod tests {
             .with_entry(b"cc", b"cc2", 6)
             .with_entry(b"ee", b"ee2", 7);
 
-        let mut merge_iter = TwoMergeIterator::new(iter1, iter2, None).await.unwrap();
+        let mut merge_iter = MergeIterator::new([iter1, iter2]).await.unwrap();
         merge_iter.seek(b"b".as_ref()).await.unwrap();
 
         assert_iterator(

@@ -1,21 +1,21 @@
 use std::cell::Cell;
-use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
+use ouroboros::self_referencing;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
-use crate::iter::{IterationOrder, KeyValueIterator, SeekToKey};
-use crate::merge_iterator::MergeIterator;
+use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::types::RowEntry;
-use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
+use crate::utils::WatchableOnceCell;
 
 /// Memtable may contains multiple versions of a single user key, with a monotonically increasing sequence number.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -86,14 +86,26 @@ impl<T: RangeBounds<Bytes>> From<T> for KVTableInternalKeyRange {
 }
 
 pub(crate) struct KVTable {
-    map: SkipMap<KVTableInternalKey, RowEntry>,
+    map: Arc<SkipMap<KVTableInternalKey, RowEntry>>,
     durable: WatchableOnceCell<Result<(), SlateDBError>>,
-    size: AtomicUsize,
+    entries_size_in_bytes: AtomicUsize,
     /// this corresponds to the timestamp of the most recent
     /// modifying operation on this KVTable (insertion or deletion)
     last_tick: AtomicI64,
     /// the sequence number of the most recent operation on this KVTable
     last_seq: AtomicU64,
+}
+
+pub(crate) struct KVTableMetadata {
+    pub(crate) entry_num: usize,
+    pub(crate) entries_size_in_bytes: usize,
+    /// this corresponds to the timestamp of the most recent
+    /// modifying operation on this KVTable (insertion or deletion)
+    #[allow(dead_code)]
+    pub(crate) last_tick: i64,
+    /// the sequence number of the most recent operation on this KVTable
+    #[allow(dead_code)]
+    pub(crate) last_seq: u64,
 }
 
 pub(crate) struct WritableKVTable {
@@ -110,52 +122,29 @@ pub(crate) struct ImmutableWal {
     table: Arc<KVTable>,
 }
 
-pub(crate) struct MemTableIterator<'a, T: RangeBounds<KVTableInternalKey>> {
+#[self_referencing]
+pub(crate) struct MemTableIteratorInner<T: RangeBounds<KVTableInternalKey>> {
+    map: Arc<SkipMap<KVTableInternalKey, RowEntry>>,
     /// `inner` is the Iterator impl of SkipMap, which is the underlying data structure of MemTable.
-    inner: Range<'a, KVTableInternalKey, T, KVTableInternalKey, RowEntry>,
+    #[borrows(map)]
+    #[not_covariant]
+    inner: Range<'this, KVTableInternalKey, T, KVTableInternalKey, RowEntry>,
     ordering: IterationOrder,
+    item: Option<RowEntry>,
 }
+pub(crate) type MemTableIterator = MemTableIteratorInner<KVTableInternalKeyRange>;
 
-pub(crate) struct VecDequeKeyValueIterator {
-    rows: VecDeque<RowEntry>,
-}
-
-impl VecDequeKeyValueIterator {
-    pub(crate) fn new(rows: VecDeque<RowEntry>) -> Self {
-        Self { rows }
-    }
-
-    pub(crate) async fn materialize_range(
-        tables: VecDeque<Arc<KVTable>>,
-        range: BytesRange,
-    ) -> Result<Self, SlateDBError> {
-        let memtable_iters = tables
-            .iter()
-            .map(|t| t.range_ascending(range.clone()))
-            .collect();
-        let mut merge_iter = MergeIterator::new(memtable_iters, None).await?;
-        let mut rows = VecDeque::new();
-
-        while let Some(row_entry) = merge_iter.next_entry().await? {
-            rows.push_back(row_entry.clone());
-        }
-
-        Ok(VecDequeKeyValueIterator::new(rows))
-    }
-}
-
-impl KeyValueIterator for VecDequeKeyValueIterator {
+#[async_trait]
+impl KeyValueIterator for MemTableIterator {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        Ok(self.rows.pop_front())
+        Ok(self.next_entry_sync())
     }
-}
 
-impl SeekToKey for VecDequeKeyValueIterator {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
-            let front = self.rows.front();
+            let front = self.borrow_item().clone();
             if front.is_some_and(|record| record.key < next_key) {
-                self.rows.pop_front();
+                self.next_entry_sync();
             } else {
                 return Ok(());
             }
@@ -163,19 +152,18 @@ impl SeekToKey for VecDequeKeyValueIterator {
     }
 }
 
-impl<T: RangeBounds<KVTableInternalKey>> KeyValueIterator for MemTableIterator<'_, T> {
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        Ok(self.next_entry_sync())
-    }
-}
-
-impl<T: RangeBounds<KVTableInternalKey>> MemTableIterator<'_, T> {
+impl MemTableIterator {
     pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
-        let next_entry = match self.ordering {
-            IterationOrder::Ascending => self.inner.next(),
-            IterationOrder::Descending => self.inner.next_back(),
+        let ans = self.borrow_item().clone();
+        let next_entry = match self.borrow_ordering() {
+            IterationOrder::Ascending => self.with_inner_mut(|inner| inner.next()),
+            IterationOrder::Descending => self.with_inner_mut(|inner| inner.next_back()),
         };
-        next_entry.map(|entry| entry.value().clone())
+
+        let cloned_entry = next_entry.map(|entry| entry.value().clone());
+        self.with_item_mut(|item| *item = cloned_entry);
+
+        ans
     }
 }
 
@@ -230,32 +218,41 @@ impl WritableKVTable {
         self.table.put(row);
     }
 
-    pub(crate) fn size(&self) -> usize {
-        self.table.size()
+    pub(crate) fn metadata(&self) -> KVTableMetadata {
+        self.table.metadata()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.size() == 0
+        self.table.is_empty()
     }
 }
 
 impl KVTable {
     pub(crate) fn new() -> Self {
         Self {
-            map: SkipMap::new(),
-            size: AtomicUsize::new(0),
+            map: Arc::new(SkipMap::new()),
+            entries_size_in_bytes: AtomicUsize::new(0),
             durable: WatchableOnceCell::new(),
             last_tick: AtomicI64::new(i64::MIN),
             last_seq: AtomicU64::new(0),
         }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.map.is_empty()
+    pub(crate) fn metadata(&self) -> KVTableMetadata {
+        let entry_num = self.map.len();
+        let entries_size_in_bytes = self.entries_size_in_bytes.load(Ordering::Relaxed);
+        let last_tick = self.last_tick.load(SeqCst);
+        let last_seq = self.last_seq.load(SeqCst);
+        KVTableMetadata {
+            entry_num,
+            entries_size_in_bytes,
+            last_tick,
+            last_seq,
+        }
     }
 
-    pub(crate) fn size(&self) -> usize {
-        self.size.load(Ordering::Relaxed)
+    pub(crate) fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 
     pub(crate) fn last_tick(&self) -> i64 {
@@ -275,7 +272,7 @@ impl KVTable {
     /// Returns None if the key is not in the memtable at all,
     /// Some(None) if the key is in the memtable but has a tombstone value,
     /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
-    pub(crate) fn get(&self, key: &[u8]) -> Option<RowEntry> {
+    pub(crate) fn get(&self, key: &[u8], max_seq: Option<u64>) -> Option<RowEntry> {
         let user_key = Bytes::from(key.to_vec());
         let range = KVTableInternalKeyRange::from(BytesRange::new(
             Bound::Included(user_key.clone()),
@@ -283,18 +280,21 @@ impl KVTable {
         ));
         self.map
             .range(range)
-            .next()
+            .find(|entry| {
+                if let Some(max_seq) = max_seq {
+                    entry.key().seq <= max_seq
+                } else {
+                    true
+                }
+            })
             .map(|entry| entry.value().clone())
     }
 
-    pub(crate) fn iter(&self) -> MemTableIterator<KVTableInternalKeyRange> {
+    pub(crate) fn iter(&self) -> MemTableIterator {
         self.range_ascending(..)
     }
 
-    pub(crate) fn range_ascending<T: RangeBounds<Bytes>>(
-        &self,
-        range: T,
-    ) -> MemTableIterator<KVTableInternalKeyRange> {
+    pub(crate) fn range_ascending<T: RangeBounds<Bytes>>(&self, range: T) -> MemTableIterator {
         self.range(range, IterationOrder::Ascending)
     }
 
@@ -302,15 +302,20 @@ impl KVTable {
         &self,
         range: T,
         ordering: IterationOrder,
-    ) -> MemTableIterator<KVTableInternalKeyRange> {
-        MemTableIterator {
-            inner: self.map.range(range.into()),
+    ) -> MemTableIterator {
+        let internal_range = KVTableInternalKeyRange::from(range);
+        let mut iterator = MemTableIteratorInnerBuilder {
+            map: self.map.clone(),
+            inner_builder: |map| map.range(internal_range),
             ordering,
+            item: None,
         }
+        .build();
+        iterator.next_entry_sync();
+        iterator
     }
 
-    pub(crate) fn put(&self, row: RowEntry) {
-        self.size.fetch_add(row.estimated_size(), Ordering::Relaxed);
+    fn put(&self, row: RowEntry) {
         let internal_key = KVTableInternalKey::new(row.key.clone(), row.seq);
         let previous_size = Cell::new(None);
 
@@ -324,25 +329,28 @@ impl KVTable {
         // update the last seq number if it is greater than the current last seq
         self.last_seq.fetch_max(row.seq, atomic::Ordering::SeqCst);
 
+        let row_size = row.estimated_size();
         self.map.compare_insert(internal_key, row, |previous_row| {
             // Optimistically calculate the size of the previous value.
             // `compare_fn` might be called multiple times in case of concurrent
-            // writes to the same key, so we use `Cell` to avoid substracting
+            // writes to the same key, so we use `Cell` to avoid subtracting
             // the size multiple times. The last call will set the correct size.
             previous_size.set(Some(previous_row.estimated_size()));
             true
         });
         if let Some(size) = previous_size.take() {
-            self.size.fetch_sub(size, Ordering::Relaxed);
+            self.entries_size_in_bytes
+                .fetch_sub(size, Ordering::Relaxed);
+            self.entries_size_in_bytes
+                .fetch_add(row_size, Ordering::Relaxed);
+        } else {
+            self.entries_size_in_bytes
+                .fetch_add(row_size, Ordering::Relaxed);
         }
     }
 
     pub(crate) async fn await_durable(&self) -> Result<(), SlateDBError> {
         self.durable.reader().await_value().await
-    }
-
-    pub(crate) fn watch_durable(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
-        self.durable.reader()
     }
 
     pub(crate) fn notify_durable(&self, result: Result<(), SlateDBError>) {
@@ -352,7 +360,10 @@ impl KVTable {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
+    use crate::merge_iterator::MergeIterator;
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::assert_iterator;
     use crate::{proptest_util, test_utils};
@@ -454,7 +465,7 @@ mod tests {
 
         // in merge iterator, it should only return one entry
         let iter = table.table().iter();
-        let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter]), None)
+        let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter]))
             .await
             .unwrap();
         assert_iterator(
@@ -468,30 +479,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_memtable_track_sz() {
+    async fn test_memtable_track_sz_and_num() {
         let mut table = WritableKVTable::new();
+        let mut metadata = table.table().metadata();
 
-        assert_eq!(table.table.size(), 0);
+        assert_eq!(metadata.entry_num, 0);
+        assert_eq!(metadata.entries_size_in_bytes, 0);
         table.put(RowEntry::new_value(b"first", b"foo", 1));
-        assert_eq!(table.table.size(), 16);
+        metadata = table.table().metadata();
+        assert_eq!(metadata.entry_num, 1);
+        assert_eq!(metadata.entries_size_in_bytes, 16);
 
         table.put(RowEntry::new_tombstone(b"first", 2));
-        assert_eq!(table.table.size(), 29);
+        metadata = table.table().metadata();
+        assert_eq!(metadata.entry_num, 2);
+        assert_eq!(metadata.entries_size_in_bytes, 29);
 
         table.put(RowEntry::new_tombstone(b"first", 2));
-        assert_eq!(table.table.size(), 29);
+        metadata = table.table().metadata();
+        assert_eq!(metadata.entry_num, 2);
+        assert_eq!(metadata.entries_size_in_bytes, 29);
 
         table.put(RowEntry::new_value(b"abc333", b"val1", 1));
-        assert_eq!(table.table.size(), 47);
+        metadata = table.table().metadata();
+        assert_eq!(metadata.entry_num, 3);
+        assert_eq!(metadata.entries_size_in_bytes, 47);
 
         table.put(RowEntry::new_value(b"def456", b"blablabla", 2));
-        assert_eq!(table.table.size(), 70);
+        metadata = table.table().metadata();
+        assert_eq!(metadata.entry_num, 4);
+        assert_eq!(metadata.entries_size_in_bytes, 70);
 
         table.put(RowEntry::new_value(b"def456", b"blabla", 3));
-        assert_eq!(table.table.size(), 90);
+        metadata = table.table().metadata();
+        assert_eq!(metadata.entry_num, 5);
+        assert_eq!(metadata.entries_size_in_bytes, 90);
 
         table.put(RowEntry::new_tombstone(b"abc333", 4));
-        assert_eq!(table.table.size(), 104);
+        metadata = table.table().metadata();
+        assert_eq!(metadata.entry_num, 6);
+        assert_eq!(metadata.entries_size_in_bytes, 104);
     }
 
     #[rstest]

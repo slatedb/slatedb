@@ -341,12 +341,19 @@ impl CompactorEventHandler {
             .filter_map(|s| s.maybe_unwrap_sorted_run())
             .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
             .collect();
+        // if there are no SRs when we compact L0 then the resulting SR is the last sorted run.
+        let is_dest_last_run = db_state.compacted.is_empty()
+            || db_state
+                .compacted
+                .last()
+                .is_some_and(|sr| compaction.destination == sr.id);
         self.executor.start_compaction(CompactionJob {
             id,
             destination: compaction.destination,
             ssts,
             sorted_runs,
             compaction_ts: db_state.last_l0_clock_tick,
+            is_dest_last_run,
         });
     }
 
@@ -433,6 +440,8 @@ pub mod stats {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
@@ -452,10 +461,11 @@ mod tests {
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
     use crate::compactor_stats::LAST_COMPACTION_TS_SEC;
     use crate::config::{
-        DbOptions, PutOptions, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
+        CompactionSchedulerSupplier, DbOptions, PutOptions, SizeTieredCompactionSchedulerOptions,
+        Ttl, WriteOptions,
     };
     use crate::db::Db;
-    use crate::db_state::CoreDbState;
+    use crate::db_state::{CoreDbState, SortedRun};
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
 
@@ -475,7 +485,8 @@ mod tests {
     async fn test_compactor_compacts_l0() {
         // given:
         let clock = Arc::new(TestClock::new());
-        let options = db_options(Some(compactor_options()), clock.clone());
+        let mut options = db_options(Some(compactor_options()), clock.clone());
+        options.l0_sst_size_bytes = 128;
         let (_, manifest_store, table_store, db) = build_test_db(options).await;
         for i in 0..4 {
             db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48])
@@ -517,6 +528,80 @@ mod tests {
         }
         assert!(iter.next().await.unwrap().is_none());
         // todo: test that the db can read the k/vs (once we implement reading from compacted)
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn test_should_tombstones_in_l0() {
+        let clock = Arc::new(TestClock::new());
+        let mut compactor_opts = compactor_options();
+        let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new());
+        compactor_opts.compaction_scheduler = scheduler.clone();
+        let mut options = db_options(Some(compactor_opts), clock.clone());
+        options.wal_enabled = false;
+        options.l0_sst_size_bytes = 128;
+        let (_, manifest_store, table_store, db) = build_test_db(options).await;
+
+        // put key 'a' into L1 (and key 'b' so that when we delete 'a' the SST is non-empty)
+        db.put(&[b'a'; 16], &[b'a'; 32]).await.unwrap();
+        db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
+        db.flush().await.unwrap();
+        scheduler.scheduler.should_compact.store(true, SeqCst);
+        let db_state = await_compaction(manifest_store.clone()).await.unwrap();
+        assert_eq!(db_state.compacted.len(), 1);
+        assert_eq!(db_state.l0.len(), 0, "{}", format!("{:?}", db_state.l0));
+
+        // put tombstone for key a into L0
+        db.delete_with_options(
+            &[b'a'; 16],
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush().await.unwrap();
+
+        // Then:
+        // we should now have a tombstone in L0 and a value in L1
+        let db_state = get_db_state(manifest_store.clone()).await;
+        assert_eq!(db_state.l0.len(), 1, "{}", format!("{:?}", db_state.l0));
+        assert_eq!(db_state.compacted.len(), 1);
+
+        let l0 = db_state.l0.front().unwrap();
+        let mut iter =
+            SstIterator::new_borrowed(.., l0, table_store.clone(), SstIteratorOptions::default())
+                .await
+                .unwrap();
+
+        let tombstone = iter.next_entry().await.unwrap();
+        assert!(tombstone.unwrap().value.is_tombstone());
+
+        scheduler.scheduler.should_compact.store(true, SeqCst);
+        let db_state = await_compacted_compaction(manifest_store.clone(), db_state.compacted)
+            .await
+            .unwrap();
+        assert_eq!(db_state.compacted.len(), 1);
+
+        let compacted = &db_state.compacted.first().unwrap().ssts;
+        assert_eq!(compacted.len(), 1);
+        let handle = compacted.first().unwrap();
+
+        let mut iter = SstIterator::new_borrowed(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        // should be no tombstone for key 'a' because it was filtered
+        // out of the last run
+        let next = iter.next().await.unwrap();
+        assert_eq!(next.unwrap().key.as_ref(), &[b'b'; 16]);
+        let next = iter.next().await.unwrap();
+        assert!(next.is_none());
     }
 
     #[tokio::test]
@@ -622,7 +707,7 @@ mod tests {
                 RowEntry::new_value(&[1; 16], value, 4)
                     .with_create_ts(70)
                     .with_expire_ts(150),
-                RowEntry::new_tombstone(&[2; 16], 2).with_create_ts(10),
+                // no tombstone for &[2; 16] because this is the last layer of the tree,
                 RowEntry::new_value(&[3; 16], value, 3).with_create_ts(30),
             ],
         )
@@ -939,14 +1024,33 @@ mod tests {
 
     async fn await_compaction(manifest_store: Arc<ManifestStore>) -> Option<CoreDbState> {
         run_for(Duration::from_secs(10), || async {
-            let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
-            let db_state = stored_manifest.db_state();
+            let db_state = get_db_state(manifest_store.clone()).await;
             if db_state.l0_last_compacted.is_some() {
-                return Some(db_state.clone());
+                return Some(db_state);
             }
             None
         })
         .await
+    }
+
+    #[allow(unused)] // only used with feature(wal_disable)
+    async fn await_compacted_compaction(
+        manifest_store: Arc<ManifestStore>,
+        old_compacted: Vec<SortedRun>,
+    ) -> Option<CoreDbState> {
+        run_for(Duration::from_secs(10), || async {
+            let db_state = get_db_state(manifest_store.clone()).await;
+            if !db_state.compacted.eq(&old_compacted) {
+                return Some(db_state);
+            }
+            None
+        })
+        .await
+    }
+
+    async fn get_db_state(manifest_store: Arc<ManifestStore>) -> CoreDbState {
+        let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        stored_manifest.db_state().clone()
     }
 
     fn db_options(compactor_options: Option<CompactorOptions>, clock: Arc<TestClock>) -> DbOptions {
@@ -955,7 +1059,7 @@ mod tests {
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),
-            l0_sst_size_bytes: 128,
+            l0_sst_size_bytes: 256,
             l0_max_ssts: 8,
             compactor_options,
             clock,
@@ -1032,6 +1136,75 @@ mod tests {
 
         fn is_stopped(&self) -> bool {
             false
+        }
+    }
+
+    #[allow(unused)] // only used with feature(wal_disable)
+    #[derive(Clone)]
+    struct OnDemandCompactionScheduler {
+        should_compact: Arc<AtomicBool>,
+    }
+
+    #[allow(unused)] // only used with feature(wal_disable)
+    impl OnDemandCompactionScheduler {
+        fn new() -> Self {
+            Self {
+                should_compact: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    impl CompactionScheduler for OnDemandCompactionScheduler {
+        fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction> {
+            if !self.should_compact.load(SeqCst) {
+                return vec![];
+            }
+
+            // this compactor will only compact if there are L0s,
+            // it won't compact only lower levels for simplicity
+            let db_state = state.db_state();
+            if db_state.l0.is_empty() {
+                return vec![];
+            }
+
+            self.should_compact.store(false, SeqCst);
+
+            // always compact into sorted run 0
+            let next_sr_id = 0;
+
+            // Create a compaction of all SSTs from L0 and all sorted runs
+            let mut sources: Vec<SourceId> = db_state
+                .l0
+                .iter()
+                .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+                .collect();
+
+            // Add SSTs from all sorted runs
+            for sr in &db_state.compacted {
+                sources.push(SourceId::SortedRun(sr.id));
+            }
+
+            vec![Compaction::new(sources, next_sr_id)]
+        }
+    }
+
+    #[allow(unused)] // only used with feature(wal_disable)
+    struct OnDemandCompactionSchedulerSupplier {
+        scheduler: OnDemandCompactionScheduler,
+    }
+
+    #[allow(unused)] // only used with feature(wal_disable)
+    impl OnDemandCompactionSchedulerSupplier {
+        fn new() -> Self {
+            Self {
+                scheduler: OnDemandCompactionScheduler::new(),
+            }
+        }
+    }
+
+    impl CompactionSchedulerSupplier for OnDemandCompactionSchedulerSupplier {
+        fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler> {
+            Box::new(self.scheduler.clone())
         }
     }
 }

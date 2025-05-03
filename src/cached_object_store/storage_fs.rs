@@ -254,7 +254,7 @@ impl LocalCacheEntry for FsCacheEntry {
         for part_file_name in part_file_names.iter() {
             let part_number = part_file_name
                 .split('-')
-                .last()
+                .next_back()
                 .and_then(|part_number| part_number.parse::<usize>().ok());
             if let Some(part_number) = part_number {
                 part_numbers.push(part_number);
@@ -449,7 +449,7 @@ impl FsCacheEvictorInner {
     }
 
     // scan the cache folder, and load the cache entries into the in memory trie cache_entries.
-    // this function is only called on start up, and it's expected to runned interleavely with
+    // this function is only called on start up, and it's expected to run interleavely with
     // maybe_evict is being called.
     pub async fn scan_entries(self: Arc<Self>, evict: bool) {
         // walk the cache folder, record the files and their last access time into the cache_entries

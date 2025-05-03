@@ -215,7 +215,12 @@ impl WalReplayIterator<'_> {
             if let Some(sst_iter) = &mut self.current_iter.current_iter {
                 let wal_id = sst_iter.table_id().unwrap_wal_id();
                 while let Some(row_entry) = sst_iter.next_entry().await? {
-                    if table.size() + row_entry.estimated_size() > self.options.max_memtable_bytes {
+                    let meta = table.metadata();
+                    if self.table_store.estimate_encoded_size(
+                        meta.entry_num + 1,
+                        meta.entries_size_in_bytes + row_entry.estimated_size(),
+                    ) > self.options.max_memtable_bytes
+                    {
                         self.overflow_row.replace(ReplayedRow { row_entry, wal_id });
                         break;
                     }
@@ -232,7 +237,13 @@ impl WalReplayIterator<'_> {
                     last_wal_id = wal_id;
                 }
 
-                if table_overflowed || table.size() > self.options.min_memtable_bytes {
+                let meta = table.metadata();
+                if table_overflowed
+                    || self
+                        .table_store
+                        .estimate_encoded_size(meta.entry_num, meta.entries_size_in_bytes)
+                        > self.options.min_memtable_bytes
+                {
                     break;
                 }
             }
@@ -361,11 +372,11 @@ mod tests {
 
         while let Some(replayed_table) = replay_iter.next().await.unwrap() {
             last_wal_id = replayed_table.last_wal_id;
-            replayed_entries += replayed_table.table.size();
+            replayed_entries += replayed_table.table.metadata().entries_size_in_bytes;
 
             // The last table may be less than `min_memtable_bytes`
             if replayed_entries < num_entries {
-                assert!(replayed_table.table.size() > min_memtable_bytes);
+                assert!(replayed_table.table.metadata().entries_size_in_bytes > min_memtable_bytes);
             }
 
             let mut iter = replayed_table.table.table().iter();
@@ -413,7 +424,7 @@ mod tests {
 
         while let Some(replayed_table) = replay_iter.next().await.unwrap() {
             last_wal_id = replayed_table.last_wal_id;
-            assert!(replayed_table.table.size() <= max_memtable_bytes);
+            assert!(replayed_table.table.metadata().entries_size_in_bytes <= max_memtable_bytes);
 
             let mut iter = replayed_table.table.table().iter();
             while let Some(next_entry) = iter.next_entry().await.unwrap() {

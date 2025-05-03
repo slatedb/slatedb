@@ -14,7 +14,7 @@ use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
-use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
+use crate::merge_iterator::MergeIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
@@ -32,6 +32,7 @@ pub(crate) struct CompactionJob {
     pub(crate) ssts: Vec<SsTableHandle>,
     pub(crate) sorted_runs: Vec<SortedRun>,
     pub(crate) compaction_ts: i64,
+    pub(crate) is_dest_last_run: bool,
 }
 
 pub(crate) trait CompactionExecutor {
@@ -98,10 +99,7 @@ impl TokioCompactionExecutorInner {
     async fn load_iterators<'a>(
         &self,
         compaction: &'a CompactionJob,
-    ) -> Result<
-        TwoMergeIterator<MergeIterator<SstIterator<'a>>, MergeIterator<SortedRunIterator<'a>>>,
-        SlateDBError,
-    > {
+    ) -> Result<MergeIterator<'a>, SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 4,
             blocks_to_fetch: 256,
@@ -116,7 +114,7 @@ impl TokioCompactionExecutorInner {
                     .await?,
             );
         }
-        let l0_merge_iter = MergeIterator::new(l0_iters, None).await?;
+        let l0_merge_iter = MergeIterator::new(l0_iters).await?;
 
         let mut sr_iters = VecDeque::new();
         for sr in compaction.sorted_runs.iter() {
@@ -125,8 +123,8 @@ impl TokioCompactionExecutorInner {
                     .await?;
             sr_iters.push_back(iter);
         }
-        let sr_merge_iter = MergeIterator::new(sr_iters, None).await?;
-        TwoMergeIterator::new(l0_merge_iter, sr_merge_iter, None).await
+        let sr_merge_iter = MergeIterator::new(sr_iters).await?;
+        MergeIterator::new([l0_merge_iter, sr_merge_iter]).await
     }
 
     async fn execute_compaction(
@@ -160,6 +158,10 @@ impl TokioCompactionExecutorInner {
                 }
                 _ => raw_kv,
             };
+
+            if compaction.is_dest_last_run && kv.value.is_tombstone() {
+                continue;
+            }
 
             // Add to SST
             let key_len = kv.key.len();

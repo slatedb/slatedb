@@ -1,10 +1,11 @@
 use crate::bytes_range::BytesRange;
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, SeekToKey};
+use crate::iter::KeyValueIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstView};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
+use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
@@ -117,6 +118,7 @@ impl<'a> SortedRunIterator<'a> {
     }
 }
 
+#[async_trait]
 impl KeyValueIterator for SortedRunIterator<'_> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         while let Some(iter) = &mut self.current_iter {
@@ -128,9 +130,7 @@ impl KeyValueIterator for SortedRunIterator<'_> {
         }
         Ok(None)
     }
-}
 
-impl SeekToKey for SortedRunIterator<'_> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         while let Some(next_table) = self.view.peek_next_table() {
             if next_table.compacted_first_key() < next_key {
@@ -186,7 +186,7 @@ mod tests {
         builder.add_value(b"key3", b"value3", gen_attrs(3)).unwrap();
         let encoded = builder.build().unwrap();
         let id = SsTableId::Compacted(Ulid::new());
-        let handle = table_store.write_sst(&id, encoded).await.unwrap();
+        let handle = table_store.write_sst(&id, encoded, false).await.unwrap();
         let sr = SortedRun {
             id: 0,
             ssts: vec![handle],
@@ -229,12 +229,12 @@ mod tests {
         builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
         let encoded = builder.build().unwrap();
         let id1 = SsTableId::Compacted(Ulid::new());
-        let handle1 = table_store.write_sst(&id1, encoded).await.unwrap();
+        let handle1 = table_store.write_sst(&id1, encoded, false).await.unwrap();
         let mut builder = table_store.table_builder();
         builder.add_value(b"key3", b"value3", gen_attrs(3)).unwrap();
         let encoded = builder.build().unwrap();
         let id2 = SsTableId::Compacted(Ulid::new());
-        let handle2 = table_store.write_sst(&id2, encoded).await.unwrap();
+        let handle2 = table_store.write_sst(&id2, encoded, false).await.unwrap();
         let sr = SortedRun {
             id: 0,
             ssts: vec![handle1, handle2],
@@ -448,7 +448,7 @@ mod tests {
 
             let encoded = builder.build().unwrap();
             let id = SsTableId::Compacted(Ulid::new());
-            let handle = table_store.write_sst(&id, encoded).await.unwrap();
+            let handle = table_store.write_sst(&id, encoded, false).await.unwrap();
             ssts.push(handle);
         }
 

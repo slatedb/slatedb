@@ -1,24 +1,19 @@
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, SeekToKey};
-use crate::mem_table::VecDequeKeyValueIterator;
-use crate::merge_iterator::{MergeIterator, TwoMergeIterator};
+use crate::filter_iterator::FilterIterator;
+use crate::iter::KeyValueIterator;
+use crate::mem_table::MemTableIterator;
+use crate::merge_iterator::MergeIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::SstIterator;
 use crate::types::KeyValue;
 
 use bytes::Bytes;
-use std::collections::VecDeque;
 use std::ops::RangeBounds;
-
-type ScanIterator<'a> = TwoMergeIterator<
-    VecDequeKeyValueIterator,
-    TwoMergeIterator<MergeIterator<SstIterator<'a>>, MergeIterator<SortedRunIterator<'a>>>,
->;
 
 pub struct DbIterator<'a> {
     range: BytesRange,
-    iter: ScanIterator<'a>,
+    iter: MergeIterator<'a>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
 }
@@ -26,23 +21,52 @@ pub struct DbIterator<'a> {
 impl<'a> DbIterator<'a> {
     pub(crate) async fn new(
         range: BytesRange,
-        mem_iter: VecDequeKeyValueIterator,
-        l0_iters: VecDeque<SstIterator<'a>>,
-        sr_iters: VecDeque<SortedRunIterator<'a>>,
+        mem_iters: impl IntoIterator<Item = MemTableIterator>,
+        l0_iters: impl IntoIterator<Item = SstIterator<'a>>,
+        sr_iters: impl IntoIterator<Item = SortedRunIterator<'a>>,
         max_seq: Option<u64>,
     ) -> Result<Self, SlateDBError> {
-        let (l0_iter, sr_iter) = tokio::join!(
-            MergeIterator::new(l0_iters, max_seq),
-            MergeIterator::new(sr_iters, max_seq),
-        );
-        let sst_iter = TwoMergeIterator::new(l0_iter?, sr_iter?, max_seq).await?;
-        let iter = TwoMergeIterator::new(mem_iter, sst_iter, max_seq).await?;
+        let iters: [Box<dyn KeyValueIterator>; 3] = {
+            // Apply the max_seq filter to all the iterators. Please note that we should apply this filter BEFORE
+            // merging the iterators.
+            //
+            // For example, if have the following iterators:
+            // - Iterator A with entries [(key1, seq=96), (key1, seq=110)]
+            // - Iterator B with entries [(key1, seq=95)]
+            //
+            // If we filter the iterator after merging with max_seq=100, we'll lost the entry with seq=96 from the
+            // iterator A. But the element with seq=96 is actually the correct answer for this scan.
+            let mem_iters = Self::apply_max_seq_filter(mem_iters, max_seq);
+            let l0_iters = Self::apply_max_seq_filter(l0_iters, max_seq);
+            let sr_iters = Self::apply_max_seq_filter(sr_iters, max_seq);
+            let (mem_iter, l0_iter, sr_iter) = tokio::join!(
+                MergeIterator::new(mem_iters),
+                MergeIterator::new(l0_iters),
+                MergeIterator::new(sr_iters)
+            );
+            [Box::new(mem_iter?), Box::new(l0_iter?), Box::new(sr_iter?)]
+        };
+
+        let iter = MergeIterator::new(iters).await?;
         Ok(DbIterator {
             range,
             iter,
             invalidated_error: None,
             last_key: None,
         })
+    }
+
+    fn apply_max_seq_filter<T>(
+        iters: impl IntoIterator<Item = T>,
+        max_seq: Option<u64>,
+    ) -> Vec<FilterIterator<T>>
+    where
+        T: KeyValueIterator + 'a,
+    {
+        iters
+            .into_iter()
+            .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
+            .collect::<Vec<_>>()
     }
 
     /// Get the next record in the scan.
@@ -118,15 +142,18 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::db_iter::DbIterator;
     use crate::error::SlateDBError;
-    use crate::mem_table::VecDequeKeyValueIterator;
+    use crate::mem_table::MemTableIterator;
+    use crate::mem_table::WritableKVTable;
+    use crate::types::RowEntry;
     use bytes::Bytes;
     use std::collections::VecDeque;
 
     #[tokio::test]
     async fn test_invalidated_iterator() {
+        let mem_iters: VecDeque<MemTableIterator> = VecDeque::new();
         let mut iter = DbIterator::new(
             BytesRange::from(..),
-            VecDequeKeyValueIterator::new(VecDeque::new()),
+            mem_iters,
             VecDeque::new(),
             VecDeque::new(),
             None,
@@ -150,5 +177,38 @@ mod tests {
             panic!("Unexpected error")
         };
         assert!(matches!(*from_err, SlateDBError::ChecksumMismatch));
+    }
+
+    #[tokio::test]
+    async fn test_sequence_number_filtering() {
+        // Create two memtables with overlapping keys but different sequence numbers
+        let mut mem1 = WritableKVTable::new();
+        mem1.put(RowEntry::new_value(b"key1", b"value1", 96));
+        mem1.put(RowEntry::new_value(b"key1", b"value2", 110));
+        let mem_iter1 = mem1.table().range_ascending(BytesRange::from(..));
+
+        let mut mem2 = WritableKVTable::new();
+        mem2.put(RowEntry::new_value(b"key1", b"value3", 95));
+        let mem_iter2 = mem2.table().range_ascending(BytesRange::from(..));
+
+        // Create DbIterator with max_seq = 100
+        let mut iter = DbIterator::new(
+            BytesRange::from(..),
+            vec![mem_iter1, mem_iter2],
+            VecDeque::new(),
+            VecDeque::new(),
+            Some(100),
+        )
+        .await
+        .unwrap();
+
+        // The iterator should return the entry with seq=96 from the first memtable
+        // and not the one with seq=95 from the second memtable
+        let result = iter.next().await.unwrap();
+        assert!(result.is_some());
+        let kv = result.unwrap();
+        assert_eq!(kv.key, Bytes::from("key1"));
+        assert_eq!(kv.value, Bytes::from("value1"));
+        assert!(iter.next().await.unwrap().is_none());
     }
 }

@@ -48,6 +48,9 @@ pub enum SlateDBError {
     #[error("Invalid DB state error")]
     InvalidDBState,
 
+    #[error("Unsupported operation: {0}")]
+    Unsupported(String),
+
     #[error("Invalid Compaction")]
     InvalidCompaction,
 
@@ -149,5 +152,5 @@ pub enum DbOptionsError {
     UnknownFormat(PathBuf),
 
     #[error("Invalid configuration format: {0}")]
-    InvalidFormat(#[from] figment::Error),
+    InvalidFormat(#[from] Box<figment::Error>),
 }

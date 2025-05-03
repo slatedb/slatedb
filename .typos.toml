@@ -1,0 +1,8 @@
+# If there are words that you think should not be treated as typo.
+# Please list here along with a comment.
+[default.extend-words]
+"fpr" = "fpr"
+"Pn" = "Pn"
+"seeked" = "seeked"
+
+[files]

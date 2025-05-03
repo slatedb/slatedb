@@ -181,6 +181,7 @@ impl CompactionExecuteBench {
         manifest: &StoredManifest,
         num_ssts: usize,
         table_store: &Arc<TableStore>,
+        is_dest_last_run: bool,
     ) -> Result<CompactionJob, SlateDBError> {
         let sst_ids: Vec<SsTableId> = (0u32..num_ssts as u32)
             .map(CompactionExecuteBench::sst_id)
@@ -222,10 +223,15 @@ impl CompactionExecuteBench {
             ssts,
             sorted_runs: vec![],
             compaction_ts: manifest.db_state().last_l0_clock_tick,
+            is_dest_last_run,
         })
     }
 
-    fn load_compaction_as_job(manifest: &StoredManifest, compaction: &Compaction) -> CompactionJob {
+    fn load_compaction_as_job(
+        manifest: &StoredManifest,
+        compaction: &Compaction,
+        is_dest_last_run: bool,
+    ) -> CompactionJob {
         let state = manifest.db_state();
         let srs_by_id: HashMap<_, _> = state
             .compacted
@@ -249,6 +255,7 @@ impl CompactionExecuteBench {
             ssts: vec![],
             sorted_runs: srs,
             compaction_ts: state.last_l0_clock_tick,
+            is_dest_last_run,
         }
     }
 
@@ -294,11 +301,16 @@ impl CompactionExecuteBench {
         let job = match &compaction {
             Some(compaction) => {
                 info!("load job from existing compaction");
-                CompactionExecuteBench::load_compaction_as_job(&manifest, compaction)
+                CompactionExecuteBench::load_compaction_as_job(&manifest, compaction, false)
             }
             None => {
-                CompactionExecuteBench::load_compaction_job(&manifest, num_ssts, &table_store)
-                    .await?
+                CompactionExecuteBench::load_compaction_job(
+                    &manifest,
+                    num_ssts,
+                    &table_store,
+                    false,
+                )
+                .await?
             }
         };
         let start = std::time::Instant::now();

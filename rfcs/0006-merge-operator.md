@@ -213,7 +213,7 @@ This change is backwards compatible.
 
 ### Block Format
 
-The block format remains unchanged. It's useful to hightlight that merge operands are also stored in the bloom filters, so they have the same filtering guarantees as regular values.
+The block format remains unchanged. It's useful to highlight that merge operands are also stored in the bloom filters, so they have the same filtering guarantees as regular values.
 
 ### Read Path
 
@@ -368,7 +368,7 @@ SlateDB supports two TTL approaches:
 
 1. **Operation-Level TTL**
    - Each operation (put/merge) has its own independent TTL, specified via:
-     - `Ttl::ExpireAfter(duration)`: Expires after specified duration (interally this is implemented as `ExpireAt(Instant::now() + duration)`)
+     - `Ttl::ExpireAfter(duration)`: Expires after specified duration (internally this is implemented as `ExpireAt(Instant::now() + duration)`)
      - `Ttl::ExpireAt(timestamp)`: Expires at specified timestamp
    - Enables per-element expiration in collections
 
