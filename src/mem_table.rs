@@ -15,7 +15,7 @@ use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::types::RowEntry;
-use crate::utils::WatchableOnceCell;
+use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 
 /// Memtable may contains multiple versions of a single user key, with a monotonically increasing sequence number.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -315,7 +315,7 @@ impl KVTable {
         iterator
     }
 
-    fn put(&self, row: RowEntry) {
+    pub(crate) fn put(&self, row: RowEntry) {
         let internal_key = KVTableInternalKey::new(row.key.clone(), row.seq);
         let previous_size = Cell::new(None);
 
@@ -347,6 +347,10 @@ impl KVTable {
             self.entries_size_in_bytes
                 .fetch_add(row_size, Ordering::Relaxed);
         }
+    }
+
+    pub(crate) fn watch_durable(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
+        self.durable.reader()
     }
 
     pub(crate) async fn await_durable(&self) -> Result<(), SlateDBError> {

@@ -13,7 +13,7 @@ use crate::{
     mem_table::KVTable,
     tablestore::TableStore,
     types::RowEntry,
-    utils::{MonotonicClock, WatchableOnceCell, WatchableOnceCellReader},
+    utils::{MonotonicClock, WatchableOnceCell},
     SlateDBError,
 };
 
@@ -125,13 +125,8 @@ impl WalBufferManager {
 
     /// Returns the total size of all unflushed WALs in bytes.
     pub async fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
-        let inner = self.inner.lock().await;
-        Ok(inner.current_wal.size()
-            + inner
-                .immutable_wals
-                .iter()
-                .map(|(_, wal)| wal.size())
-                .sum::<usize>())
+        // TODO(flaneur): implement this
+        todo!()
     }
 
     /// Append row entries to the current WAL. return the last seq number of the WAL.
@@ -156,7 +151,8 @@ impl WalBufferManager {
         // check the size of the current wal
         let (current_wal, need_flush, flush_tx) = {
             let inner = self.inner.lock().await;
-            let need_flush = inner.current_wal.size() >= self.max_wal_bytes_size as usize;
+            let need_flush = inner.current_wal.metadata().entries_size_in_bytes
+                >= self.max_wal_bytes_size as usize;
             (
                 inner.current_wal.clone(),
                 need_flush,
@@ -328,7 +324,7 @@ impl WalBufferManager {
 
         let encoded_sst = sst_builder.build()?;
         self.table_store
-            .write_sst(&SsTableId::Wal(wal_id), encoded_sst)
+            .write_sst(&SsTableId::Wal(wal_id), encoded_sst, false)
             .await?;
 
         self.mono_clock.fetch_max_last_durable_tick(wal.last_tick());
