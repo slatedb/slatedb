@@ -82,6 +82,7 @@ pub(crate) struct WalReplayIterator<'a> {
     overflow_row: Option<ReplayedRow>,
     last_tick: i64,
     last_seq: u64,
+    min_seq: u64,
     next_wal_id: u64,
 }
 
@@ -99,9 +100,11 @@ impl WalReplayIterator<'_> {
             });
         }
 
-        // load the last seq number from manifest, and use it as the starting seq number.
-        // there might have bigger seq number in the WALs, we'd update the last seq number
-        // to the max seq number while iterating over the WALs.
+        // load the last seq number from manifest, and use it as the starting seq number to avoid
+        // replaying the entries that are already in the L0 SST. while replaying the WALs, we'll
+        // update the last seq number to the max seq number, and this final `last_seq` will be passed
+        // to the db_state for the further writes.
+        let min_seq = db_state.last_l0_seq;
         let last_seq = db_state.last_l0_seq;
         let last_tick = db_state.last_l0_clock_tick;
         let next_wal_id = wal_id_range.start;
@@ -115,6 +118,7 @@ impl WalReplayIterator<'_> {
             overflow_row: None,
             last_tick,
             last_seq,
+            min_seq,
             next_wal_id,
         };
 
@@ -215,6 +219,12 @@ impl WalReplayIterator<'_> {
             if let Some(sst_iter) = &mut self.current_iter.current_iter {
                 let wal_id = sst_iter.table_id().unwrap_wal_id();
                 while let Some(row_entry) = sst_iter.next_entry().await? {
+                    // skip the entries that are already in the L0 SST.
+                    if row_entry.seq <= self.min_seq {
+                        continue;
+                    }
+
+                    // if the table is full, we'll overflow the row to the next iterator.
                     let meta = table.metadata();
                     if self.table_store.estimate_encoded_size(
                         meta.entry_num + 1,
