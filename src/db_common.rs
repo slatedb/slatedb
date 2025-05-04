@@ -17,7 +17,7 @@ impl DbInner {
         if self
             .table_store
             .estimate_encoded_size(meta.entry_num, meta.entries_size_in_bytes)
-            < self.options.l0_sst_size_bytes
+            < self.settings.l0_sst_size_bytes
         {
             Ok(())
         } else {
@@ -68,7 +68,7 @@ impl DbInner {
         if self
             .table_store
             .estimate_encoded_size(meta.entry_num, meta.entries_size_in_bytes)
-            < self.options.l0_sst_size_bytes
+            < self.settings.l0_sst_size_bytes
         {
             return Ok(());
         }

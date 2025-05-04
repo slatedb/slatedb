@@ -33,9 +33,7 @@ tokio = "*"
 Then you can use SlateDB in your Rust code:
 
 ```rust
-use slatedb::Db;
-use slatedb::config::DbOptions;
-use slatedb::SlateDBError;
+use slatedb::{Db, SlateDBError};
 use slatedb::object_store::{ObjectStore, memory::InMemory};
 use std::sync::Arc;
 
@@ -43,13 +41,7 @@ use std::sync::Arc;
 async fn main() -> Result<(), SlateDBError> {
     // Setup
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let options = DbOptions::default();
-    let kv_store = Db::open_with_opts(
-        "/tmp/test_kv_store",
-        options,
-        object_store,
-    )
-    .await?;
+    let kv_store = Db::open("/tmp/test_kv_store", object_store).await?;
 
     // Put
     let key = b"test_key";

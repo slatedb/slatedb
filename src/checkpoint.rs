@@ -115,7 +115,7 @@ impl Db {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
-    use crate::config::{CheckpointOptions, CheckpointScope, DbOptions};
+    use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::error::SlateDBError;
@@ -139,7 +139,9 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         // open and close the db to init the manifest and trigger another write
-        let db = Db::open_with_opts(path.clone(), DbOptions::default(), object_store.clone())
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings::default())
+            .build()
             .await
             .unwrap();
         db.close().await.unwrap();
@@ -170,7 +172,9 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         // open and close the db to init the manifest and trigger another write
-        let db = Db::open_with_opts(path.clone(), DbOptions::default(), object_store.clone())
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings::default())
+            .build()
             .await
             .unwrap();
         db.close().await.unwrap();
@@ -209,7 +213,9 @@ mod tests {
     async fn test_should_create_checkpoint_from_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let db = Db::open_with_opts(path.clone(), DbOptions::default(), object_store.clone())
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings::default())
+            .build()
             .await
             .unwrap();
         db.close().await.unwrap();
@@ -246,7 +252,9 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         // open and close the db to init the manifest and trigger another write
-        let _ = Db::open_with_opts(path, DbOptions::default(), object_store.clone())
+        let _ = Db::builder(path, object_store.clone())
+            .with_settings(Settings::default())
+            .build()
             .await
             .unwrap();
 
@@ -287,7 +295,9 @@ mod tests {
     async fn test_should_refresh_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let _ = Db::open_with_opts(path.clone(), DbOptions::default(), object_store.clone())
+        let _ = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings::default())
+            .build()
             .await
             .unwrap();
         let CheckpointCreateResult { id, manifest_id: _ } = admin::create_checkpoint(
@@ -335,7 +345,9 @@ mod tests {
     async fn test_should_fail_refresh_checkpoint_if_checkpoint_missing() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let _ = Db::open_with_opts(path.clone(), DbOptions::default(), object_store.clone())
+        let _ = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings::default())
+            .build()
             .await
             .unwrap();
 
@@ -354,7 +366,9 @@ mod tests {
     async fn test_should_delete_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let _ = Db::open_with_opts(path.clone(), DbOptions::default(), object_store.clone())
+        let _ = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings::default())
+            .build()
             .await
             .unwrap();
         let CheckpointCreateResult { id, manifest_id: _ } = admin::create_checkpoint(
@@ -376,9 +390,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_scope_with_force_flush() {
-        let db_options = DbOptions {
+        let db_options = Settings {
             flush_interval: Some(Duration::from_millis(5000)),
-            ..DbOptions::default()
+            ..Settings::default()
         };
         test_checkpoint_scope_all(db_options, true, |manifest| {
             SsTableId::Wal(manifest.core.next_wal_sst_id - 1)
@@ -388,9 +402,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_scope_with_no_force_flush() {
-        let db_options = DbOptions {
+        let db_options = Settings {
             flush_interval: Some(Duration::from_millis(10)),
-            ..DbOptions::default()
+            ..Settings::default()
         };
         test_checkpoint_scope_all(db_options, false, |manifest| {
             SsTableId::Wal(manifest.core.next_wal_sst_id - 1)
@@ -401,10 +415,10 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_checkpoint_scope_with_force_flush_wal_disabled() {
-        let db_options = DbOptions {
+        let db_options = Settings {
             flush_interval: Some(Duration::from_millis(5000)),
             wal_enabled: false,
-            ..DbOptions::default()
+            ..Settings::default()
         };
         test_checkpoint_scope_all(db_options, true, |manifest| {
             manifest.core.l0.front().unwrap().id
@@ -415,16 +429,18 @@ mod tests {
     #[tokio::test(start_paused = true)]
     #[cfg(feature = "wal_disable")]
     async fn test_checkpoint_scope_with_no_force_flush_wal_disabled() {
-        let db_options = DbOptions {
+        let db_options = Settings {
             flush_interval: Some(Duration::from_millis(10)),
             wal_enabled: false,
-            ..DbOptions::default()
+            ..Settings::default()
         };
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
         let db = Arc::new(
-            Db::open_with_opts(path.clone(), db_options, Arc::clone(&object_store))
+            Db::builder(path, object_store.clone())
+                .with_settings(db_options)
+                .build()
                 .await
                 .unwrap(),
         );
@@ -451,7 +467,7 @@ mod tests {
 
         let checkpoint = tokio::join!(checkpoint_handle).0.unwrap().unwrap();
 
-        let manifest_store = ManifestStore::new(&path, object_store.clone());
+        let manifest_store = ManifestStore::new(&Path::from(path), object_store.clone());
         let manifest = manifest_store
             .read_manifest(checkpoint.manifest_id)
             .await
@@ -459,8 +475,8 @@ mod tests {
 
         let last_written_kv = table.last_key_value().unwrap();
         assert_flushed_entry(
-            Arc::clone(&object_store),
-            path,
+            object_store.clone(),
+            Path::from(path),
             &manifest.core.l0.front().unwrap().id,
             last_written_kv,
         )
@@ -468,13 +484,15 @@ mod tests {
     }
 
     async fn test_checkpoint_scope_all<F: FnOnce(Manifest) -> SsTableId>(
-        db_options: DbOptions,
+        db_options: Settings,
         force_flush: bool,
         last_flushed_table: F,
     ) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let db = Db::open_with_opts(path.clone(), db_options, Arc::clone(&object_store))
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(db_options)
+            .build()
             .await
             .unwrap();
 

@@ -5,33 +5,33 @@
 //!
 //! # Examples
 //!
-//! Loading the default configuration for `DbOptions`:
+//! Loading the default configuration for `Settings`:
 //!
 //! ```rust
-//! use slatedb::config::DbOptions;
-//! let config = DbOptions::default();
+//! use slatedb::config::Settings;
+//! let config = Settings::default();
 //! ```
 //!
-//! Loading `DbOptions` from a specific file:
+//! Loading `Settings` from a specific file:
 //!
 //! ```rust
-//! use slatedb::config::DbOptions;
-//! let config = DbOptions::from_file("config.toml").expect("Failed to load options from file");
+//! use slatedb::config::Settings;
+//! let config = Settings::from_file("config.toml").expect("Failed to load options from file");
 //! ```
 //!
-//! Loading `DbOptions` from environment variables:
+//! Loading `Settings` from environment variables:
 //!
 //! ```rust
-//! use slatedb::config::DbOptions;
-//! let config = DbOptions::from_env("SLATEDB_").expect("Failed to load options from env");
+//! use slatedb::config::Settings;
+//! let config = Settings::from_env("SLATEDB_").expect("Failed to load options from env");
 //! ```
 //!
-//! Loading `DbOptions` from predefined files, SlateDb.toml, SlateDb.json, SlateDb.yaml, or SlateDb.yml.
-//! This method also merges any environment variable that starts with `SLATEDB_` to the final `DbOptions` struct:
+//! Loading `Settings` from predefined files, SlateDb.toml, SlateDb.json, SlateDb.yaml, or SlateDb.yml.
+//! This method also merges any environment variable that starts with `SLATEDB_` to the final `Settings` struct:
 //!
 //! ```rust
-//! use slatedb::config::DbOptions;
-//! let config = DbOptions::load().expect("Failed to load options");
+//! use slatedb::config::Settings;
+//! let config = Settings::load().expect("Failed to load options");
 //! ```
 //!
 //! # Configuration formats
@@ -40,7 +40,7 @@
 //! Duration options in the configuration are represented as human-friendly strings,
 //! allowing you to specify time intervals in a more intuitive way, such as "100ms" or "1s".
 //!
-//! Representing `DbOptions` with TOML:
+//! Representing `Settings` with TOML:
 //!
 //! ```toml
 //! flush_interval = "100ms"
@@ -76,7 +76,7 @@
 //! min_age = "86400s"
 //! ```
 //!
-//! Representing `DbOptions` with JSON:
+//! Representing `Settings` with JSON:
 //!
 //! ```json
 //!{
@@ -117,7 +117,7 @@
 //!}
 //!```
 //!
-//! Representing `DbOptions` with YAML:
+//! Representing `Settings` with YAML:
 //!
 //! ```yaml
 //! flush_interval: '100ms'
@@ -163,12 +163,11 @@ use std::{str::FromStr, time::Duration};
 use tokio::runtime::Handle;
 use uuid::Uuid;
 
-use crate::compactor::CompactionScheduler;
+use crate::compactor::{default_compaction_scheduler, CompactionSchedulerSupplier};
 use crate::config::GcExecutionMode::Periodic;
-use crate::error::{DbOptionsError, SlateDBError};
+use crate::error::{SettingsError, SlateDBError};
 
 use crate::db_cache::DbCache;
-use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 /// Describes the durability of data based on the medium (e.g. in-memory, object storags)
 /// that the data is currently stored in. Currently this is used to define a
@@ -304,6 +303,14 @@ pub struct SystemClock {
     last_tick: AtomicI64,
 }
 
+impl SystemClock {
+    pub fn new() -> Self {
+        Self {
+            last_tick: AtomicI64::new(i64::MIN),
+        }
+    }
+}
+
 impl Clock for SystemClock {
     fn now(&self) -> i64 {
         // since SystemTime is not guaranteed to be monotonic, we enforce it here
@@ -317,9 +324,7 @@ impl Clock for SystemClock {
 }
 
 pub(crate) fn default_clock() -> Arc<dyn Clock + Send + Sync> {
-    Arc::new(SystemClock {
-        last_tick: AtomicI64::new(i64::MIN),
-    })
+    Arc::new(SystemClock::new())
 }
 
 /// Defines the scope targeted by a given checkpoint. If set to All, then the checkpoint will
@@ -359,9 +364,25 @@ pub struct CheckpointOptions {
     pub source: Option<Uuid>,
 }
 
-/// Configuration options for the database. These options are set on client startup.
-#[derive(Clone, Deserialize, Serialize)]
-pub struct DbOptions {
+/// Database options for SlateDB.
+///
+/// Note: This struct is deprecated and will be removed in a future release.
+/// Please use the `Settings` type and the builder API in `Db` instead.
+#[deprecated(
+    since = "0.7.0",
+    note = "Use `Settings` and the builder API in `Db` instead"
+)]
+pub type DbOptions = Settings;
+
+/// Settings represents the configuration options that a user can tweak to customize
+/// the database engine to their use case.
+///
+/// This is separate from components (like block_cache, clock, etc.) which are responsible
+/// for performing the work in the database.
+///
+/// For backward compatibility, DBOptions is a type alias for Settings.
+#[derive(Clone, Serialize)]
+pub struct Settings {
     /// How frequently to flush the write-ahead log to object storage.
     ///
     /// When setting this configuration, users must consider:
@@ -462,6 +483,12 @@ pub struct DbOptions {
     pub object_store_cache_options: ObjectStoreCacheOptions,
 
     /// The block cache instance used to cache SSTable blocks, indexes and bloom filters.
+    ///
+    /// Note: This is not a setting but a component. It will be moved to the builder API in a future release.
+    #[deprecated(
+        since = "0.7.0",
+        note = "Use the Db::builder.with_block_cache() method instead"
+    )]
     #[serde(skip)]
     pub block_cache: Option<Arc<dyn DbCache>>,
 
@@ -471,8 +498,13 @@ pub struct DbOptions {
     /// The Clock to use for insertion timestamps
     ///
     /// Default: the default clock uses the local system time on the machine
-    #[serde(skip)]
-    #[serde(default = "default_clock")]
+    ///
+    /// Note: This is not a setting but a component. It will be moved to the builder API in a future release.
+    #[deprecated(
+        since = "0.7.0",
+        note = "Use the Db::builder.with_clock() method instead"
+    )]
+    #[serde(skip, default = "default_clock")]
     pub clock: Arc<dyn Clock + Send + Sync>,
 
     /// The default time-to-live (TTL) for insertions (note that re-inserting a key
@@ -482,10 +514,67 @@ pub struct DbOptions {
     pub default_ttl: Option<u64>,
 }
 
+// Deserialize the settings from a JSON string.
+// This is needed because the block cache and clock are boxed trait objects
+// and the code generated by the serde macro for deserializing
+// those fields issues a warning because the fields are being accessed.
+//
+// TODO: This custom deserialization can be removed once the deprecated fields
+// are removed from Settings.
+impl<'de> Deserialize<'de> for Settings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename = "Settings")]
+        struct SettingsHelper {
+            #[serde(deserialize_with = "deserialize_option_duration")]
+            flush_interval: Option<Duration>,
+            #[cfg(feature = "wal_disable")]
+            wal_enabled: bool,
+            #[serde(deserialize_with = "deserialize_duration")]
+            manifest_poll_interval: Duration,
+            min_filter_keys: u32,
+            filter_bits_per_key: u32,
+            l0_sst_size_bytes: usize,
+            l0_max_ssts: usize,
+            max_unflushed_bytes: usize,
+            compactor_options: Option<CompactorOptions>,
+            compression_codec: Option<CompressionCodec>,
+            object_store_cache_options: ObjectStoreCacheOptions,
+            garbage_collector_options: Option<GarbageCollectorOptions>,
+            default_ttl: Option<u64>,
+        }
+
+        let helper = SettingsHelper::deserialize(deserializer)?;
+
+        #[allow(deprecated)]
+        Ok(Settings {
+            flush_interval: helper.flush_interval,
+            #[cfg(feature = "wal_disable")]
+            wal_enabled: helper.wal_enabled,
+            manifest_poll_interval: helper.manifest_poll_interval,
+            min_filter_keys: helper.min_filter_keys,
+            filter_bits_per_key: helper.filter_bits_per_key,
+            l0_sst_size_bytes: helper.l0_sst_size_bytes,
+            l0_max_ssts: helper.l0_max_ssts,
+            max_unflushed_bytes: helper.max_unflushed_bytes,
+            compactor_options: helper.compactor_options,
+            compression_codec: helper.compression_codec,
+            object_store_cache_options: helper.object_store_cache_options,
+            block_cache: default_block_cache(),
+            garbage_collector_options: helper.garbage_collector_options,
+            clock: default_clock(),
+            default_ttl: helper.default_ttl,
+        })
+    }
+}
+
 // Implement Debug manually for DbOptions.
 // This is needed because DbOptions contains several boxed trait objects
 // which doesn't implement Debug.
-impl std::fmt::Debug for DbOptions {
+impl std::fmt::Debug for Settings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut data = f.debug_struct("DbOptions");
         data.field("flush_interval", &self.flush_interval);
@@ -511,15 +600,15 @@ impl std::fmt::Debug for DbOptions {
     }
 }
 
-impl DbOptions {
-    /// Converts the DbOptions to a JSON string representation
+impl Settings {
+    /// Converts the Settings to a JSON string representation
     pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 
-    /// Loads DbOptions from a file.
+    /// Loads Settings from a file.
     ///
-    /// This function attempts to read and parse a configuration file to create a DbOptions instance.
+    /// This function attempts to read and parse a configuration file to create a Settings instance.
     /// The file format is determined by its extension:
     /// - ".json" for JSON format
     /// - ".toml" for TOML format
@@ -531,8 +620,8 @@ impl DbOptions {
     ///
     /// # Returns
     ///
-    /// * `Ok(DbOptions)` if the file was successfully read and parsed.
-    /// * `Err(DbOptionsError)` if there was an error reading or parsing the file.
+    /// * `Ok(Settings)` if the file was successfully read and parsed.
+    /// * `Err(SettingsError)` if there was an error reading or parsing the file.
     ///
     /// # Errors
     ///
@@ -543,38 +632,38 @@ impl DbOptions {
     /// # Examples
     ///
     /// ```
-    /// use slatedb::config::DbOptions;
+    /// use slatedb::config::Settings;
     /// use std::path::Path;
     ///
-    /// let config = DbOptions::from_file("config.toml").expect("Failed to load options from file");
+    /// let config = Settings::from_file("config.toml").expect("Failed to load options from file");
     /// ```
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<DbOptions, DbOptionsError> {
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Settings, SettingsError> {
         let path = path.as_ref();
         let Some(ext) = path.extension() else {
-            return Err(DbOptionsError::UnknownFormat(path.into()));
+            return Err(SettingsError::UnknownFormat(path.into()));
         };
 
-        let mut builder = Figment::from(DbOptions::default());
+        let mut builder = Figment::from(Settings::default());
         match ext.to_str().unwrap_or_default() {
             "json" => builder = builder.merge(Json::file(path)),
             "toml" => builder = builder.merge(Toml::file(path)),
             "yaml" | "yml" => builder = builder.merge(Yaml::file(path)),
-            _ => return Err(DbOptionsError::UnknownFormat(path.into())),
+            _ => return Err(SettingsError::UnknownFormat(path.into())),
         }
         builder
             .extract()
-            .map_err(|e| DbOptionsError::InvalidFormat(Box::new(e)))
+            .map_err(|e| SettingsError::InvalidFormat(Box::new(e)))
     }
 
-    /// Loads DbOptions from environment variables with a specified prefix.
+    /// Loads Settings from environment variables with a specified prefix.
     ///
-    /// This function attempts to create a DbOptions instance by reading environment variables
+    /// This function attempts to create a Settings instance by reading environment variables
     /// that start with the given prefix. Nested options are separated by a dot (.) in the environment variable names.
     ///
     /// For example, if the prefix is "SLATEDB_" and there's an environment variable named "SLATEDB_DB_FLUSH_INTERVAL",
-    /// it would correspond to the `flush_interval` field within the `DbOptions` struct.
+    /// it would correspond to the `flush_interval` field within the `Settings` struct.
     /// If there is an environment variable named "SLATEDB_OBJECT_STORE_CACHE_OPTIONS.ROOT_FOLDER",
-    /// it would correspond to the `root_folder` field within the `ObjectStoreCacheOptions` within `DbOptions`".
+    /// it would correspond to the `root_folder` field within the `ObjectStoreCacheOptions` within `Settings`".
     ///
     /// # Arguments
     ///
@@ -582,27 +671,27 @@ impl DbOptions {
     ///
     /// # Returns
     ///
-    /// * `Ok(DbOptions)` if the environment variables were successfully read and parsed.
-    /// * `Err(DbOptionsError)` if there was an error reading or parsing the environment variables.
+    /// * `Ok(Settings)` if the environment variables were successfully read and parsed.
+    /// * `Err(SettingsError)` if there was an error reading or parsing the environment variables.
     ///
     /// # Examples
     ///
     /// ```
-    /// use slatedb::config::DbOptions;
+    /// use slatedb::config::Settings;
     ///
     /// // Assuming environment variables like SLATEDB_FLUSH_INTERVAL, SLATEDB_WAL_ENABLED, etc. are set
-    /// let config = DbOptions::from_env("SLATEDB_").expect("Failed to load options from env");
+    /// let config = Settings::from_env("SLATEDB_").expect("Failed to load options from env");
     /// ```
-    pub fn from_env(prefix: &str) -> Result<DbOptions, DbOptionsError> {
-        Figment::from(DbOptions::default())
+    pub fn from_env(prefix: &str) -> Result<Settings, SettingsError> {
+        Figment::from(Settings::default())
             .merge(Env::prefixed(prefix))
             .extract()
-            .map_err(|e| DbOptionsError::InvalidFormat(Box::new(e)))
+            .map_err(|e| SettingsError::InvalidFormat(Box::new(e)))
     }
 
-    /// Loads DbOptions from multiple configuration sources in a specific order.
+    /// Loads Settings from multiple configuration sources in a specific order.
     ///
-    /// This function attempts to create a DbOptions instance by merging configurations
+    /// This function attempts to create a Settings instance by merging configurations
     /// from various sources in the following order:
     /// 1. Default options
     /// 2. JSON file ("SlateDb.json")
@@ -614,29 +703,29 @@ impl DbOptions {
     ///
     /// # Returns
     ///
-    /// * `Ok(DbOptions)` if the configuration was successfully loaded and parsed.
-    /// * `Err(DbOptionsError)` if there was an error reading or parsing the configuration.
+    /// * `Ok(Settings)` if the configuration was successfully loaded and parsed.
+    /// * `Err(SettingsError)` if there was an error reading or parsing the configuration.
     ///
     /// # Examples
     ///
     /// ```
-    /// use slatedb::config::DbOptions;
+    /// use slatedb::config::Settings;
     ///
-    /// let config = DbOptions::load().expect("Failed to load options");
+    /// let config = Settings::load().expect("Failed to load options");
     /// ```
-    pub fn load() -> Result<DbOptions, DbOptionsError> {
-        Figment::from(DbOptions::default())
+    pub fn load() -> Result<Settings, SettingsError> {
+        Figment::from(Settings::default())
             .merge(Json::file("SlateDb.json"))
             .merge(Toml::file("SlateDb.toml"))
             .merge(Yaml::file("SlateDb.yaml"))
             .merge(Yaml::file("SlateDb.yml"))
             .admerge(Env::prefixed("SLATEDB_"))
             .extract()
-            .map_err(|e| DbOptionsError::InvalidFormat(Box::new(e)))
+            .map_err(|e| SettingsError::InvalidFormat(Box::new(e)))
     }
 }
 
-impl Provider for DbOptions {
+impl Provider for Settings {
     fn metadata(&self) -> figment::Metadata {
         Metadata::named("SlateDb configuration options")
     }
@@ -644,11 +733,11 @@ impl Provider for DbOptions {
     fn data(
         &self,
     ) -> Result<figment::value::Map<figment::Profile, figment::value::Dict>, figment::Error> {
-        figment::providers::Serialized::defaults(DbOptions::default()).data()
+        figment::providers::Serialized::defaults(Settings::default()).data()
     }
 }
 
-impl Default for DbOptions {
+impl Default for Settings {
     fn default() -> Self {
         Self {
             flush_interval: Some(Duration::from_millis(100)),
@@ -662,9 +751,11 @@ impl Default for DbOptions {
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
+            #[allow(deprecated)]
             block_cache: default_block_cache(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
+            #[allow(deprecated)]
             clock: default_clock(),
             default_ttl: None,
         }
@@ -679,7 +770,7 @@ pub struct DbReaderOptions {
     pub manifest_poll_interval: Duration,
 
     /// For readers that do not provide an explicit checkpoint, the client will
-    /// maintain its own checkpoint against the latest database state. The checkpoint’s
+    /// maintain its own checkpoint against the latest database state. The checkpoint's
     /// expire time will be set to the current time plus this value. This lifetime
     /// must always be greater than manifest_poll_interval x 2.
     pub checkpoint_lifetime: Duration,
@@ -752,12 +843,8 @@ impl FromStr for CompressionCodec {
     }
 }
 
-pub trait CompactionSchedulerSupplier: Send + Sync {
-    fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler>;
-}
-
 /// Options for the compactor.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct CompactorOptions {
     /// The interval at which the compactor checks for a new manifest and decides
     /// if a compaction must be scheduled
@@ -770,19 +857,61 @@ pub struct CompactorOptions {
     /// in the Sorted Run when this size is exceeded.
     pub max_sst_size: usize,
 
-    /// Supplies the compaction scheduler to use to select the compactions that should be
-    /// scheduled. Currently, the only provided implementation is
-    /// SizeTieredCompactionSchedulerSupplier
-    #[serde(skip, default = "default_compaction_scheduler")]
-    pub compaction_scheduler: Arc<dyn CompactionSchedulerSupplier>,
-
     /// The maximum number of concurrent compactions to execute at once
     pub max_concurrent_compactions: usize,
 
+    /// Supplies the compaction scheduler to use to select the compactions that should be
+    /// scheduled. Currently, the only provided implementation is
+    /// SizeTieredCompactionSchedulerSupplier
+    #[deprecated(
+        since = "0.7.0",
+        note = "Use the Db::builder.with_compaction_scheduler_supplier() method instead"
+    )]
+    #[serde(skip, default = "default_compaction_scheduler")]
+    pub compaction_scheduler: Arc<dyn CompactionSchedulerSupplier>,
+
     /// An optional tokio runtime handle to use for scheduling compaction work. You can use
     /// this to isolate compactions to a dedicated thread pool.
+    #[deprecated(
+        since = "0.7.0",
+        note = "Use the Db::builder.with_compaction_runtime() method instead"
+    )]
     #[serde(skip)]
     pub compaction_runtime: Option<Handle>,
+}
+
+// Deserialize the compactor options from a JSON string.
+// This is needed because the compaction scheduler is a boxed trait object
+// and the code generated by the serde macro for deserializing
+// that field, it issues a warning because the field is being accessed.
+//
+// TODO: This custom deserialization can be removed once the deprecated fields
+// are removed from CompactorOptions.
+impl<'de> Deserialize<'de> for CompactorOptions {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename = "CompactorOptions")]
+        struct CompactorOptionsHelper {
+            #[serde(deserialize_with = "deserialize_duration")]
+            poll_interval: Duration,
+            max_sst_size: usize,
+            max_concurrent_compactions: usize,
+        }
+
+        let helper = CompactorOptionsHelper::deserialize(deserializer)?;
+
+        #[allow(deprecated)]
+        Ok(CompactorOptions {
+            poll_interval: helper.poll_interval,
+            max_sst_size: helper.max_sst_size,
+            max_concurrent_compactions: helper.max_concurrent_compactions,
+            compaction_scheduler: default_compaction_scheduler(),
+            compaction_runtime: None,
+        })
+    }
 }
 
 /// Default options for the compactor. Currently, only a
@@ -790,6 +919,7 @@ pub struct CompactorOptions {
 impl Default for CompactorOptions {
     /// Returns a `CompactorOptions` with a 5 second poll interval and a 1GB max
     /// SSTable size.
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(5),
@@ -815,20 +945,6 @@ impl std::fmt::Debug for CompactorOptions {
             )
             .finish()
     }
-}
-
-/// Returns the default compaction scheduler supplier.
-///
-/// This function creates and returns an `Arc<dyn CompactionSchedulerSupplier>` containing
-/// a `SizeTieredCompactionSchedulerSupplier` with default options. It is used as the default
-/// value for the `compaction_scheduler` field in `CompactorOptions`.
-///
-/// # Returns
-///
-/// An `Arc<dyn CompactionSchedulerSupplier>` wrapping a `SizeTieredCompactionSchedulerSupplier`
-/// with the default configuration.
-fn default_compaction_scheduler() -> Arc<dyn CompactionSchedulerSupplier> {
-    Arc::new(SizeTieredCompactionSchedulerSupplier::default())
 }
 
 /// Options for the Size-Tiered Compaction Scheduler
@@ -870,6 +986,10 @@ pub struct GarbageCollectorOptions {
 
     /// An optional tokio runtime handle to use for scheduling garbage collection. You can use
     /// this to isolate garbage collection to a dedicated thread pool.
+    #[deprecated(
+        since = "0.7.0",
+        note = "Use the Db::builder.with_gc_runtime() method instead"
+    )]
     #[serde(skip)]
     pub gc_runtime: Option<Handle>,
 }
@@ -915,12 +1035,10 @@ pub struct GarbageCollectorDirectoryOptions {
 impl Default for GarbageCollectorOptions {
     fn default() -> Self {
         Self {
-            manifest_options: Some(Default::default()),
-            wal_options: Some(GarbageCollectorDirectoryOptions {
-                execution_mode: Periodic(Duration::from_secs(60)),
-                min_age: Duration::from_secs(60),
-            }),
-            compacted_options: Some(Default::default()),
+            manifest_options: None,
+            wal_options: None,
+            compacted_options: None,
+            #[allow(deprecated)]
             gc_runtime: None,
         }
     }
@@ -1013,8 +1131,8 @@ mod tests {
                 "/tmp/slatedb-root",
             );
 
-            let options = DbOptions::from_env("SLATEDB_")
-                .expect("failed to load db options from environment");
+            let options =
+                Settings::from_env("SLATEDB_").expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
@@ -1041,7 +1159,7 @@ mod tests {
             )
             .expect("failed to create db options config file");
 
-            let options = DbOptions::from_file("config.json")
+            let options = Settings::from_file("config.json")
                 .expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
@@ -1065,7 +1183,7 @@ root_folder = "/tmp/slatedb-root"
             )
             .expect("failed to create db options config file");
 
-            let options = DbOptions::from_file("config.toml")
+            let options = Settings::from_file("config.toml")
                 .expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
@@ -1089,7 +1207,7 @@ object_store_cache_options:
             )
             .expect("failed to create db options config file");
 
-            let options = DbOptions::from_file("config.yaml")
+            let options = Settings::from_file("config.yaml")
                 .expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
@@ -1114,7 +1232,7 @@ object_store_cache_options:
             )
             .expect("failed to create db options config file");
 
-            let options = DbOptions::load().expect("failed to load db options from environment");
+            let options = Settings::load().expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
