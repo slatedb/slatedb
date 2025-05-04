@@ -291,7 +291,7 @@ impl GcTask for WalGcTask {
             .ok_or(SlateDBError::LatestManifestMissing)?
             .1;
 
-        let last_compacted_wal_sst_id = latest_manifest.core.last_compacted_wal_sst_id;
+        let last_compacted_wal_sst_id = latest_manifest.core.last_l0_flushed_wal_sst_id;
         let min_age = self.wal_sst_min_age();
         let sst_ids_to_delete = self
             .table_store
@@ -972,7 +972,7 @@ mod tests {
 
         // Create a manifest
         let mut state = CoreDbState::new();
-        state.last_compacted_wal_sst_id = id2.unwrap_wal_id();
+        state.last_l0_flushed_wal_sst_id = id2.unwrap_wal_id();
         StoredManifest::create_new_db(manifest_store.clone(), state.clone())
             .await
             .unwrap();
@@ -987,7 +987,7 @@ mod tests {
         assert_eq!(manifests.len(), 1);
         let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
         assert_eq!(
-            current_manifest.core.last_compacted_wal_sst_id,
+            current_manifest.core.last_l0_flushed_wal_sst_id,
             id2.unwrap_wal_id()
         );
 
@@ -1016,7 +1016,7 @@ mod tests {
 
         // Manifest 1 with table 1 eligible for deletion
         let mut state = CoreDbState::new();
-        state.last_compacted_wal_sst_id = 1;
+        state.last_l0_flushed_wal_sst_id = 1;
         state.next_wal_sst_id = 4;
         let mut stored_manifest =
             StoredManifest::create_new_db(manifest_store.clone(), state.clone())
@@ -1026,7 +1026,7 @@ mod tests {
 
         // Manifest 2 with checkpoint referencing Manifest 1
         let mut dirty = stored_manifest.prepare_dirty();
-        dirty.core.last_compacted_wal_sst_id = 3;
+        dirty.core.last_l0_flushed_wal_sst_id = 3;
         dirty.core.next_wal_sst_id = 4;
         dirty.core.checkpoints.push(new_checkpoint(1, None));
         stored_manifest.update_manifest(dirty).await.unwrap();
@@ -1085,7 +1085,7 @@ mod tests {
 
         // Create a manifest
         let mut state = CoreDbState::new();
-        state.last_compacted_wal_sst_id = id2.unwrap_wal_id();
+        state.last_l0_flushed_wal_sst_id = id2.unwrap_wal_id();
         StoredManifest::create_new_db(manifest_store.clone(), state.clone())
             .await
             .unwrap();
@@ -1101,7 +1101,7 @@ mod tests {
         assert_eq!(manifests.len(), 1);
         let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
         assert_eq!(
-            current_manifest.core.last_compacted_wal_sst_id,
+            current_manifest.core.last_l0_flushed_wal_sst_id,
             id2.unwrap_wal_id()
         );
 
@@ -1449,7 +1449,7 @@ mod tests {
             .collect::<HashSet<SsTableId>>();
 
         for manifest in manifests.values() {
-            let wal_sst_start_inclusive = manifest.core.last_compacted_wal_sst_id + 1;
+            let wal_sst_start_inclusive = manifest.core.last_l0_flushed_wal_sst_id + 1;
             let wal_sst_end_exclusive = manifest.core.next_wal_sst_id;
             for wal_sst_id in wal_sst_start_inclusive..wal_sst_end_exclusive {
                 assert!(wal_ssts.contains(&SsTableId::Wal(wal_sst_id)));

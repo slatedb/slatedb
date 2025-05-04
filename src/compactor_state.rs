@@ -178,7 +178,7 @@ impl CompactorState {
             l0: merged_l0s,
             compacted: my_db_state.compacted.clone(),
             next_wal_sst_id: remote_manifest.core.next_wal_sst_id,
-            last_compacted_wal_sst_id: remote_manifest.core.last_compacted_wal_sst_id,
+            last_l0_flushed_wal_sst_id: remote_manifest.core.last_l0_flushed_wal_sst_id,
             last_l0_clock_tick: remote_manifest.core.last_l0_clock_tick,
             last_l0_seq: remote_manifest.core.last_l0_seq,
             checkpoints: remote_manifest.core.checkpoints.clone(),
@@ -454,8 +454,8 @@ mod tests {
             compacted_to_description(&db_state_before_merge.compacted)
         );
         assert_eq!(
-            db_state.last_compacted_wal_sst_id,
-            sm.manifest().core.last_compacted_wal_sst_id
+            db_state.last_l0_flushed_wal_sst_id,
+            sm.manifest().core.last_l0_flushed_wal_sst_id
         );
         assert_eq!(db_state.next_wal_sst_id, sm.manifest().core.next_wal_sst_id);
     }

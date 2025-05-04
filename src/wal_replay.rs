@@ -132,7 +132,7 @@ impl WalReplayIterator<'_> {
         options: WalReplayOptions,
         table_store: Arc<TableStore>,
     ) -> Result<Self, SlateDBError> {
-        let wal_id_start = db_state.last_compacted_wal_sst_id + 1;
+        let wal_id_start = db_state.last_l0_flushed_wal_sst_id + 1;
         let wal_id_end = table_store.last_seen_wal_id().await?;
         let wal_id_range = wal_id_start..(wal_id_end + 1);
         Self::range(wal_id_range, db_state, options, table_store).await
@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_only_replay_wals_after_last_compacted_wal_id() {
+    async fn should_only_replay_wals_after_last_l0_flushed_wal_id() {
         let table_store = test_table_store();
         let mut rng = rng::new_test_rng(None);
         let compacted_entries = sample::table(&mut rng, 1000, 10);
@@ -460,7 +460,7 @@ mod tests {
         .await
         .unwrap();
 
-        let last_compacted_wal_id = next_wal_id - 1;
+        let last_l0_flushed_wal_id = next_wal_id - 1;
         let non_compacted_entries = sample::table(&mut rng, 1000, 10);
         next_wal_id = write_wals(
             &non_compacted_entries,
@@ -473,8 +473,8 @@ mod tests {
         .unwrap();
 
         let mut db_state = CoreDbState::new();
-        db_state.last_compacted_wal_sst_id = last_compacted_wal_id;
-        db_state.next_wal_sst_id = last_compacted_wal_id + 1;
+        db_state.last_l0_flushed_wal_sst_id = last_l0_flushed_wal_id;
+        db_state.next_wal_sst_id = last_l0_flushed_wal_id + 1;
 
         let mut replay_iter = WalReplayIterator::new(
             &db_state,
