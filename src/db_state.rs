@@ -440,7 +440,7 @@ impl DbState {
             .expect("expected imm memtable");
         assert!(Arc::ptr_eq(&popped, &imm_memtable));
         state.manifest.core.l0.push_front(sst_handle);
-        state.manifest.core.last_l0_flushed_wal_sst_id = imm_memtable.last_wal_id();
+        state.manifest.core.last_l0_flushed_wal_sst_id = imm_memtable.last_flushed_wal_id();
 
         // ensure the persisted manifest tick never goes backwards in time
         let memtable_tick = imm_memtable.table().last_tick();

@@ -2838,10 +2838,23 @@ mod tests {
 
         // one empty wal and two wals for the puts
         assert_eq!(
-            snapshot.state.imm_memtable.front().unwrap().last_wal_id(),
+            snapshot
+                .state
+                .imm_memtable
+                .front()
+                .unwrap()
+                .last_flushed_wal_id(),
             1 + 2
         );
-        assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 2);
+        assert_eq!(
+            snapshot
+                .state
+                .imm_memtable
+                .get(1)
+                .unwrap()
+                .last_flushed_wal_id(),
+            2
+        );
         assert_eq!(snapshot.state.core().next_wal_sst_id, next_wal_id);
         assert_eq!(
             reader.get(key1).await.unwrap(),
@@ -2914,7 +2927,12 @@ mod tests {
 
         // one empty wal and one wal for the first put
         assert_eq!(
-            snapshot.state.imm_memtable.front().unwrap().last_wal_id(),
+            snapshot
+                .state
+                .imm_memtable
+                .front()
+                .unwrap()
+                .last_flushed_wal_id(),
             1 + 1
         );
         assert!(snapshot.state.imm_memtable.get(1).is_none());

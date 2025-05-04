@@ -230,7 +230,7 @@ impl DbInner {
                 for imm_table in state.state().imm_memtable.iter() {
                     info!(
                         "notifying imm memtable (last_wal_id={}) of error",
-                        imm_table.last_wal_id()
+                        imm_table.last_flushed_wal_id()
                     );
                     imm_table.notify_flush_to_l0(Err(err.clone()));
                     imm_table.table().notify_durable(Err(err.clone()));

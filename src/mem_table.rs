@@ -189,7 +189,7 @@ impl ImmutableMemtable {
         self.table.clone()
     }
 
-    pub(crate) fn last_wal_id(&self) -> u64 {
+    pub(crate) fn last_flushed_wal_id(&self) -> u64 {
         self.last_flushed_wal_id
     }
 

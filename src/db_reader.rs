@@ -281,7 +281,7 @@ impl DbReaderInner {
         let imm_memtable = prior
             .imm_memtable
             .iter()
-            .filter(|table| table.last_wal_id() <= manifest.core.last_l0_flushed_wal_sst_id)
+            .filter(|table| table.last_flushed_wal_id() <= manifest.core.last_l0_flushed_wal_sst_id)
             .cloned()
             .collect();
 
@@ -437,7 +437,7 @@ impl DbReaderInner {
         };
 
         let wal_id_start = if let Some(last_replayed_table) = into_tables.back() {
-            last_replayed_table.last_wal_id() + 1
+            last_replayed_table.last_flushed_wal_id() + 1
         } else {
             core.last_l0_flushed_wal_sst_id + 1
         };
