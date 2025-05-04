@@ -277,6 +277,7 @@ impl WalReplayIterator<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::{WalReplayIterator, WalReplayOptions};
     use crate::bytes_range::BytesRange;
     use crate::db_state::{CoreDbState, SsTableId};
     use crate::iter::{IterationOrder, KeyValueIterator};
@@ -285,7 +286,6 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
-    use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
     use crate::{test_utils, SlateDBError};
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -510,6 +510,46 @@ mod tests {
         assert!(replay_iter.next().await.unwrap().is_none());
     }
 
+    #[tokio::test]
+    async fn should_replay_wals_after_min_seq() {
+        let table_store = test_table_store();
+        let mut rng = rng::new_test_rng(None);
+        let entries = sample::table(&mut rng, 1000, 10);
+        let next_wal_id = write_wals(&entries, 1, &mut rng, 200, Arc::clone(&table_store))
+            .await
+            .unwrap();
+
+        // Set min_seq to skip the first half of entries
+        let min_seq = 500;
+        let mut db_state = CoreDbState::new();
+        db_state.last_l0_seq = min_seq;
+        db_state.last_l0_clock_tick = 0;
+
+        let mut replay_iter = WalReplayIterator::new(
+            &db_state,
+            WalReplayOptions::default(),
+            Arc::clone(&table_store),
+        )
+        .await
+        .unwrap();
+
+        let Some(replayed_table) = replay_iter.next().await.unwrap() else {
+            panic!("Expected table to be returned from iterator")
+        };
+        assert_eq!(replayed_table.last_wal_id + 1, next_wal_id);
+
+        // Verify that only entries with seq > min_seq are replayed
+        let mut imm_table_iter = replayed_table.table.table().iter();
+        let mut replayed_entries = BTreeMap::new();
+        let mut total = 0;
+        while let Some(entry) = imm_table_iter.next_entry().await.unwrap() {
+            assert!(entry.seq > min_seq);
+            replayed_entries.insert(entry.key.clone(), entry.value);
+            total += 1;
+        }
+        assert_eq!(total, 500);
+    }
+
     fn test_table_store() -> Arc<TableStore> {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -531,7 +571,7 @@ mod tests {
         table_store: Arc<TableStore>,
     ) -> Result<u64, SlateDBError> {
         let mut iter = entries.iter();
-        let mut next_seq = 0;
+        let mut next_seq = 1;
         let mut total_wal_entries = 0;
         let mut next_wal_id = next_wal_id;
 
