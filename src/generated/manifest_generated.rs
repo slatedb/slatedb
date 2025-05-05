@@ -1104,7 +1104,7 @@ impl<'a> ManifestV1<'a> {
   pub const VT_INITIALIZED: flatbuffers::VOffsetT = 8;
   pub const VT_WRITER_EPOCH: flatbuffers::VOffsetT = 10;
   pub const VT_COMPACTOR_EPOCH: flatbuffers::VOffsetT = 12;
-  pub const VT_LAST_L0_FLUSHED_WAL_ID: flatbuffers::VOffsetT = 14;
+  pub const VT_LAST_L0_RECENT_FLUSHED_WAL_ID: flatbuffers::VOffsetT = 14;
   pub const VT_WAL_ID_LAST_SEEN: flatbuffers::VOffsetT = 16;
   pub const VT_L0_LAST_COMPACTED: flatbuffers::VOffsetT = 18;
   pub const VT_L0: flatbuffers::VOffsetT = 20;
@@ -1126,7 +1126,7 @@ impl<'a> ManifestV1<'a> {
     builder.add_last_l0_seq(args.last_l0_seq);
     builder.add_last_l0_clock_tick(args.last_l0_clock_tick);
     builder.add_wal_id_last_seen(args.wal_id_last_seen);
-    builder.add_last_l0_flushed_wal_id(args.last_l0_flushed_wal_id);
+    builder.add_last_l0_recent_flushed_wal_id(args.last_l0_recent_flushed_wal_id);
     builder.add_compactor_epoch(args.compactor_epoch);
     builder.add_writer_epoch(args.writer_epoch);
     builder.add_manifest_id(args.manifest_id);
@@ -1176,11 +1176,11 @@ impl<'a> ManifestV1<'a> {
     unsafe { self._tab.get::<u64>(ManifestV1::VT_COMPACTOR_EPOCH, Some(0)).unwrap()}
   }
   #[inline]
-  pub fn last_l0_flushed_wal_id(&self) -> u64 {
+  pub fn last_l0_recent_flushed_wal_id(&self) -> u64 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(ManifestV1::VT_LAST_L0_FLUSHED_WAL_ID, Some(0)).unwrap()}
+    unsafe { self._tab.get::<u64>(ManifestV1::VT_LAST_L0_RECENT_FLUSHED_WAL_ID, Some(0)).unwrap()}
   }
   #[inline]
   pub fn wal_id_last_seen(&self) -> u64 {
@@ -1245,7 +1245,7 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
      .visit_field::<bool>("initialized", Self::VT_INITIALIZED, false)?
      .visit_field::<u64>("writer_epoch", Self::VT_WRITER_EPOCH, false)?
      .visit_field::<u64>("compactor_epoch", Self::VT_COMPACTOR_EPOCH, false)?
-     .visit_field::<u64>("last_l0_flushed_wal_id", Self::VT_LAST_L0_FLUSHED_WAL_ID, false)?
+     .visit_field::<u64>("last_l0_recent_flushed_wal_id", Self::VT_LAST_L0_RECENT_FLUSHED_WAL_ID, false)?
      .visit_field::<u64>("wal_id_last_seen", Self::VT_WAL_ID_LAST_SEEN, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<CompactedSstId>>("l0_last_compacted", Self::VT_L0_LAST_COMPACTED, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("l0", Self::VT_L0, true)?
@@ -1263,7 +1263,7 @@ pub struct ManifestV1Args<'a> {
     pub initialized: bool,
     pub writer_epoch: u64,
     pub compactor_epoch: u64,
-    pub last_l0_flushed_wal_id: u64,
+    pub last_l0_recent_flushed_wal_id: u64,
     pub wal_id_last_seen: u64,
     pub l0_last_compacted: Option<flatbuffers::WIPOffset<CompactedSstId<'a>>>,
     pub l0: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
@@ -1281,7 +1281,7 @@ impl<'a> Default for ManifestV1Args<'a> {
       initialized: false,
       writer_epoch: 0,
       compactor_epoch: 0,
-      last_l0_flushed_wal_id: 0,
+      last_l0_recent_flushed_wal_id: 0,
       wal_id_last_seen: 0,
       l0_last_compacted: None,
       l0: None, // required field
@@ -1319,8 +1319,8 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
     self.fbb_.push_slot::<u64>(ManifestV1::VT_COMPACTOR_EPOCH, compactor_epoch, 0);
   }
   #[inline]
-  pub fn add_last_l0_flushed_wal_id(&mut self, last_l0_flushed_wal_id: u64) {
-    self.fbb_.push_slot::<u64>(ManifestV1::VT_LAST_L0_FLUSHED_WAL_ID, last_l0_flushed_wal_id, 0);
+  pub fn add_last_l0_recent_flushed_wal_id(&mut self, last_l0_recent_flushed_wal_id: u64) {
+    self.fbb_.push_slot::<u64>(ManifestV1::VT_LAST_L0_RECENT_FLUSHED_WAL_ID, last_l0_recent_flushed_wal_id, 0);
   }
   #[inline]
   pub fn add_wal_id_last_seen(&mut self, wal_id_last_seen: u64) {
@@ -1376,7 +1376,7 @@ impl core::fmt::Debug for ManifestV1<'_> {
       ds.field("initialized", &self.initialized());
       ds.field("writer_epoch", &self.writer_epoch());
       ds.field("compactor_epoch", &self.compactor_epoch());
-      ds.field("last_l0_flushed_wal_id", &self.last_l0_flushed_wal_id());
+      ds.field("last_l0_recent_flushed_wal_id", &self.last_l0_recent_flushed_wal_id());
       ds.field("wal_id_last_seen", &self.wal_id_last_seen());
       ds.field("l0_last_compacted", &self.l0_last_compacted());
       ds.field("l0", &self.l0());
