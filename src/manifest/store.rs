@@ -109,13 +109,15 @@ impl FenceableManifest {
                     // if we failed to get the response. Either way, refresh
                     // the manifest and try the bump again.
                     stored_manifest.refresh().await?;
-                },
+                }
                 Err(err) => return Err(err),
-                Ok(()) => return Ok(Self {
-                    stored_manifest,
-                    local_epoch,
-                    stored_epoch,
-                })
+                Ok(()) => {
+                    return Ok(Self {
+                        stored_manifest,
+                        local_epoch,
+                        stored_epoch,
+                    })
+                }
             }
         }
     }
@@ -1229,7 +1231,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_retry_epoch_bump_if_manifest_version_exists() {
+    async fn test_should_cretry_epoch_bump_if_manifest_version_exists() {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
         let state = CoreDbState::new();
@@ -1239,9 +1241,7 @@ mod tests {
             .await
             .unwrap();
 
-        let sm_b = StoredManifest::load(Arc::clone(&ms))
-            .await
-            .unwrap();
+        let sm_b = StoredManifest::load(Arc::clone(&ms)).await.unwrap();
 
         let mut fm_b = FenceableManifest::init_writer(sm_b).await.unwrap();
         assert_eq!(1, fm_b.local_epoch);
@@ -1250,7 +1250,10 @@ mod tests {
         let mut fm_a = FenceableManifest::init_writer(sm_a).await.unwrap();
         assert_eq!(2, fm_a.local_epoch);
 
-        assert!(matches!(fm_b.refresh().await.err(), Some(SlateDBError::Fenced)));
-        assert!(matches!(fm_a.refresh().await.err(), None));
+        assert!(matches!(
+            fm_b.refresh().await.err(),
+            Some(SlateDBError::Fenced)
+        ));
+        assert!(fm_a.refresh().await.is_ok());
     }
 }
