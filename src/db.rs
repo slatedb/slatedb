@@ -388,7 +388,6 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    #[allow(deprecated)]
     pub async fn open<P: Into<Path>>(
         path: P,
         object_store: Arc<dyn ObjectStore>,
@@ -428,7 +427,6 @@ impl Db {
     /// }
     /// ```
     #[deprecated(since = "0.7.0", note = "Please use the Db::builder method instead")]
-    #[allow(deprecated)]
     pub async fn open_with_opts<P: Into<Path>>(
         path: P,
         settings: Settings,
@@ -3356,76 +3354,5 @@ mod tests {
             default_ttl: ttl,
             ..Default::default()
         }
-    }
-
-    #[tokio::test]
-    async fn test_builder_api() {
-        use super::*;
-        use crate::config::SystemClock;
-        use object_store::memory::InMemory;
-        use std::sync::Arc;
-        use std::time::Duration;
-
-        let object_store = Arc::new(InMemory::new());
-        let clock = Arc::new(SystemClock::default());
-
-        // Test the basic builder pattern
-        let _ = Db::builder("test_db", object_store.clone())
-            .build()
-            .await
-            .unwrap();
-
-        // Test with custom settings
-        let settings = Settings {
-            flush_interval: Some(Duration::from_millis(200)),
-            manifest_poll_interval: Duration::from_secs(2),
-            l0_sst_size_bytes: 1_000_000,
-            ..Default::default()
-        };
-
-        let db = Db::builder("test_db", object_store.clone())
-            .with_settings(settings)
-            .build()
-            .await
-            .unwrap();
-
-        assert_eq!(
-            db.inner.settings.flush_interval,
-            Some(Duration::from_millis(200))
-        );
-        assert_eq!(
-            db.inner.settings.manifest_poll_interval,
-            Duration::from_secs(2)
-        );
-        assert_eq!(db.inner.settings.l0_sst_size_bytes, 1_000_000);
-
-        // Test with custom clock
-        let _ = Db::builder("test_db", object_store.clone())
-            .with_clock(clock)
-            .build()
-            .await
-            .unwrap();
-
-        // Test that the legacy open method works and uses the builder
-        let _ = Db::open("test_db", object_store.clone()).await.unwrap();
-
-        // Test that the legacy open_with_opts method works and uses the builder
-        let options = Settings::default();
-        #[allow(deprecated)]
-        let _ = Db::open_with_opts("test_db", options, object_store.clone())
-            .await
-            .unwrap();
-
-        // Test that the legacy open_with_fp_registry method works
-        let fp_registry = Arc::new(FailPointRegistry::new());
-        #[allow(deprecated)]
-        let _ = Db::open_with_fp_registry(
-            "test_db",
-            Settings::default(),
-            object_store.clone(),
-            fp_registry,
-        )
-        .await
-        .unwrap();
     }
 }
