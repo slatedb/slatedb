@@ -542,7 +542,7 @@ impl Db {
         ));
 
         // get the next wal id before writing manifest.
-        let wal_id_last_compacted = match &latest_manifest {
+        let last_l0_recent_flushed_wal_id = match &latest_manifest {
             Some(latest_stored_manifest) => {
                 latest_stored_manifest
                     .db_state()
@@ -550,7 +550,9 @@ impl Db {
             }
             None => 0,
         };
-        let next_wal_id = table_store.next_wal_sst_id(wal_id_last_compacted).await?;
+        let next_wal_id = table_store
+            .next_wal_sst_id(last_l0_recent_flushed_wal_id)
+            .await?;
 
         let mut manifest = Self::init_db(&manifest_store, latest_manifest).await?;
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
