@@ -55,6 +55,10 @@ impl FenceableManifest {
             set_epoch(&mut manifest, local_epoch);
             match stored_manifest.update_manifest(manifest).await {
                 Err(SlateDBError::ManifestVersionExists) => {
+                    // The manifest may have been updated by a reader, or
+                    // we may have gotten this error after successfully updating
+                    // if we failed to get the response. Either way, refresh
+                    // the manifest and try the bump again.
                     stored_manifest.refresh().await?;
                 },
                 Err(err) => return Err(err),
@@ -338,6 +342,7 @@ mod tests {
 
     use crate::db_state::CoreDbState;
     use crate::error;
+    use crate::error::SlateDBError;
     use crate::manifest_store::{FenceableManifest, ManifestStore, StoredManifest};
 
     const ROOT: &str = "/root/path";
@@ -571,4 +576,32 @@ mod tests {
         let result = ms.delete_manifest(2).await;
         assert!(matches!(result, Err(error::SlateDBError::InvalidDeletion)));
     }
+
+    #[tokio::test]
+    async fn test_should_retry_epoch_bump_if_manifest_version_exists() {
+        let os = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let state = CoreDbState::new();
+
+        // Mimic two writers A and B that try to bump the epoch at the same time
+        let sm_a = StoredManifest::init_new_db(Arc::clone(&ms), state.clone())
+            .await
+            .unwrap();
+
+        let sm_b = StoredManifest::load(Arc::clone(&ms))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut fm_b = FenceableManifest::init_writer(sm_b).await.unwrap();
+        assert_eq!(1, fm_b.local_epoch);
+
+        // The last writer always wins
+        let mut fm_a = FenceableManifest::init_writer(sm_a).await.unwrap();
+        assert_eq!(2, fm_a.local_epoch);
+
+        assert!(matches!(fm_b.refresh().await.err(), Some(SlateDBError::Fenced)));
+        assert!(matches!(fm_a.refresh().await.err(), None));
+    }
+
 }
