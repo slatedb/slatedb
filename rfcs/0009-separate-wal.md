@@ -63,7 +63,7 @@ impl Db {
 
 Once RFC-10 "Settings design" is implemented, the WAL object store configuration
 should be moved to the builder proposed in RFC-10. With this more scalable approach
-the parameter set of`open_with_opts` will be nice and clean.
+the parameter set of `open_with_opts` will be nice and clean.
 
 ## Implementation
 
