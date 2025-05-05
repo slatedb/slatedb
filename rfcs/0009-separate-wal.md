@@ -51,7 +51,7 @@ impl Db {
     pub async fn open_with_opts<P: Into<Path>>(
         path: P,
         options: DbOptions,
-        object_store: Arc<dyn ObjectStore>,
+        main_object_store: Arc<dyn ObjectStore>,
         wal_object_store: Option<Arc<dyn ObjectStore>>,
     ) -> Result<Self, SlateDBError> {
         // ...
@@ -78,12 +78,12 @@ pub struct TableStore {
     // ...
 
     /// The main object store.
-    object_store: Arc<dyn ObjectStore>,
+    main_object_store: Arc<dyn ObjectStore>,
     /// The dedicated WAL object store, if any.
     wal_object_store: Option<Arc<dyn ObjectStore>>,
 
     /// The transactional store wrapper of the main object store.
-    transactional_store: Arc<dyn TransactionalObjectStore>,
+    main_transactional_store: Arc<dyn TransactionalObjectStore>,
     /// The transactional store wrapper of the dedicated WAL object store, if any.
     wal_transactional_store: Option<Arc<dyn TransactionalObjectStore>>
 }
@@ -98,9 +98,9 @@ fn object_store_for(&self, id: &SsTableId) -> Arc<dyn ObjectStore> {
             if let Some(wal_object_store) = &self.wal_object_store {
                 wal_object_store.clone()
             } else {
-                self.object_store.clone()
+                self.main_object_store.clone()
             }
-        SsTableId::Compacted(..) => self.object_store.clone(),
+        SsTableId::Compacted(..) => self.main_object_store.clone(),
     }
 }
 ```
