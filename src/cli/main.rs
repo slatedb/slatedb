@@ -148,19 +148,16 @@ async fn exec_gc_once(
             manifest_options: create_gc_dir_opts(min_age),
             wal_options: None,
             compacted_options: None,
-            ..GarbageCollectorOptions::default()
         },
         GcResource::Wal => GarbageCollectorOptions {
             manifest_options: None,
             wal_options: create_gc_dir_opts(min_age),
             compacted_options: None,
-            ..GarbageCollectorOptions::default()
         },
         GcResource::Compacted => GarbageCollectorOptions {
             manifest_options: None,
             wal_options: None,
             compacted_options: create_gc_dir_opts(min_age),
-            ..GarbageCollectorOptions::default()
         },
     };
     run_gc_instance(path, object_store, gc_opts).await?;
@@ -184,7 +181,6 @@ async fn schedule_gc(
         manifest_options: manifest_schedule.and_then(create_gc_dir_opts),
         wal_options: wal_schedule.and_then(create_gc_dir_opts),
         compacted_options: compacted_schedule.and_then(create_gc_dir_opts),
-        ..GarbageCollectorOptions::default()
     };
     run_gc_instance(path, object_store, gc_opts).await?;
     Ok(())

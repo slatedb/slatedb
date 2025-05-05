@@ -1932,7 +1932,6 @@ mod tests {
                         poll_interval: Duration::from_millis(100),
                         max_sst_size: 256,
                         max_concurrent_compactions: 1,
-                        ..Default::default()
                     }),
                 ))
                 .with_compaction_scheduler_supplier(compaction_scheduler)
@@ -2832,7 +2831,6 @@ mod tests {
                 poll_interval: Duration::from_millis(100),
                 max_sst_size: 256,
                 max_concurrent_compactions: 1,
-                ..Default::default()
             }),
         ))
         .await;
@@ -2847,7 +2845,6 @@ mod tests {
                 poll_interval: Duration::from_millis(100),
                 max_sst_size: 256,
                 max_concurrent_compactions: 1,
-                ..Default::default()
             }),
         ))
         .await
@@ -3258,7 +3255,6 @@ mod tests {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             default_ttl: ttl,
-            ..Default::default()
         }
     }
 }
