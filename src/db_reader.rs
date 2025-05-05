@@ -74,16 +74,8 @@ impl ReadSnapshot for CheckpointState {
         Arc::clone(&EMPTY_TABLE)
     }
 
-    fn wal(&self) -> Arc<KVTable> {
-        Arc::clone(&EMPTY_TABLE)
-    }
-
     fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>> {
         &self.imm_memtable
-    }
-
-    fn imm_wal(&self) -> &VecDeque<Arc<ImmutableWal>> {
-        &EMPTY_WAL
     }
 
     fn core(&self) -> &CoreDbState {

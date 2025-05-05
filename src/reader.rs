@@ -38,9 +38,7 @@ impl SstFilterResult {
 
 pub(crate) trait ReadSnapshot {
     fn memtable(&self) -> Arc<KVTable>;
-    fn wal(&self) -> Arc<KVTable>;
     fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>>;
-    fn imm_wal(&self) -> &VecDeque<Arc<ImmutableWal>>;
     fn core(&self) -> &CoreDbState;
 }
 
@@ -96,10 +94,8 @@ impl Reader {
         let mut memtables = VecDeque::new();
 
         if self.include_wal_memtables(options.durability_filter) {
-            memtables.push_back(Arc::clone(&snapshot.wal()));
-            for imm_wal in snapshot.imm_wal() {
-                memtables.push_back(imm_wal.table());
-            }
+            // TODO(flaneur): implement this
+            todo!()
         }
 
         if self.include_memtables(options.durability_filter) {
@@ -193,12 +189,8 @@ impl<'a> LevelGet<'a> {
     fn get_memtable(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
         async move {
             if self.include_wal_memtables {
-                let maybe_val = std::iter::once(self.snapshot.wal())
-                    .chain(self.snapshot.imm_wal().iter().map(|imm| imm.table()))
-                    .find_map(|memtable| memtable.get(self.key, self.max_seq));
-                if let Some(val) = maybe_val {
-                    return Ok(Some(val));
-                }
+                // TODO(flaneur): implement this
+                todo!()
             }
 
             if self.include_memtables {
@@ -377,16 +369,8 @@ mod tests {
             self.memtable.clone()
         }
 
-        fn wal(&self) -> Arc<KVTable> {
-            self.wal.clone()
-        }
-
         fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>> {
             &self.imm_memtable
-        }
-
-        fn imm_wal(&self) -> &VecDeque<Arc<ImmutableWal>> {
-            &self.imm_wal
         }
 
         fn core(&self) -> &CoreDbState {
