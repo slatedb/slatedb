@@ -154,7 +154,3 @@ pub enum SettingsError {
     #[error("Invalid configuration format: {0}")]
     InvalidFormat(#[from] Box<figment::Error>),
 }
-
-#[deprecated(since = "0.7.0", note = "Use SettingsError instead")]
-#[allow(dead_code)]
-pub type DbOptionsError = SettingsError;

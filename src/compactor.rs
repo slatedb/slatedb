@@ -26,20 +26,6 @@ pub trait CompactionSchedulerSupplier: Send + Sync {
     fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler>;
 }
 
-/// Returns the default compaction scheduler supplier.
-///
-/// This function creates and returns an `Arc<dyn CompactionSchedulerSupplier>` containing
-/// a `SizeTieredCompactionSchedulerSupplier` with default options. It is used as the default
-/// value for the `compaction_scheduler` field in `CompactorOptions`.
-///
-/// # Returns
-///
-/// An `Arc<dyn CompactionSchedulerSupplier>` wrapping a `SizeTieredCompactionSchedulerSupplier`
-/// with the default configuration.
-pub fn default_compaction_scheduler() -> Arc<dyn CompactionSchedulerSupplier> {
-    Arc::new(SizeTieredCompactionSchedulerSupplier::default())
-}
-
 pub trait CompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
 }

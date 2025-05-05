@@ -94,7 +94,10 @@ use tracing::{info, warn};
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
+use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
+use crate::config::default_block_cache;
+use crate::config::SystemClock;
 use crate::config::{Clock, Settings};
 use crate::db::Db;
 use crate::db::DbInner;
@@ -186,7 +189,6 @@ impl<P: Into<Path>> DbBuilder<P> {
     }
 
     /// Builds and opens the database.
-    #[allow(deprecated)]
     pub async fn build(self) -> Result<Db, SlateDBError> {
         let path = self.path.into();
 
@@ -197,8 +199,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             info!(?path, ?self.settings, "Opening SlateDB database");
         }
 
-        let clock = self.clock.unwrap_or_else(|| self.settings.clock.clone());
-        let block_cache = self.block_cache.or(self.settings.block_cache.clone());
+        let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock::new()));
+        let block_cache = self.block_cache.or_else(default_block_cache);
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
@@ -330,13 +332,10 @@ impl<P: Into<Path>> DbBuilder<P> {
         if self.compaction_scheduler_supplier.is_some() || self.settings.compactor_options.is_some()
         {
             let compactor_options = self.settings.compactor_options.unwrap_or_default();
-            let compaction_handle = self
-                .compaction_runtime
-                .or(compactor_options.compaction_runtime.clone())
-                .unwrap_or_else(|| Handle::current());
+            let compaction_handle = self.compaction_runtime.unwrap_or_else(|| Handle::current());
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
-                .unwrap_or_else(|| compactor_options.compaction_scheduler.clone());
+                .unwrap_or_else(|| Arc::new(SizeTieredCompactionSchedulerSupplier::default()));
 
             // Not to pollute the cache during compaction
             let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
@@ -373,10 +372,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // If either are set, we need to initialize the garbage collector.
         if self.gc_runtime.is_some() || self.settings.garbage_collector_options.is_some() {
             let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
-            let gc_handle = self
-                .gc_runtime
-                .or(gc_options.gc_runtime.clone())
-                .unwrap_or_else(|| Handle::current());
+            let gc_handle = self.gc_runtime.unwrap_or_else(|| Handle::current());
 
             let cleanup_inner = inner.clone();
             garbage_collector = Some(

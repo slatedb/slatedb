@@ -24,7 +24,6 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
@@ -394,100 +393,6 @@ impl Db {
     ) -> Result<Self, SlateDBError> {
         // Use the builder API internally
         Self::builder(path, object_store).build().await
-    }
-
-    /// Open a new database with custom options.
-    ///
-    /// ## Arguments
-    /// - `path`: the path to the database
-    /// - `options`: the options to use for the database
-    /// - `object_store`: the object store to use for the database
-    ///
-    /// ## Returns
-    /// - `Db`: the database
-    ///
-    /// ## Errors
-    /// - `SlateDBError`: if there was an error opening the database
-    ///
-    /// ## Deprecated
-    /// This method is deprecated. Please use the `Db::builder` method instead.
-    ///
-    /// ## Examples
-    ///
-    /// ```
-    /// use slatedb::{Db, config::Settings, SlateDBError};
-    /// use slatedb::object_store::memory::InMemory;
-    /// use std::sync::Arc;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
-    ///     let object_store = Arc::new(InMemory::new());
-    ///     let db = Db::open_with_opts("test_db", Settings::default(), object_store).await?;
-    ///     Ok(())
-    /// }
-    /// ```
-    #[deprecated(since = "0.7.0", note = "Please use the Db::builder method instead")]
-    pub async fn open_with_opts<P: Into<Path>>(
-        path: P,
-        settings: Settings,
-        object_store: Arc<dyn ObjectStore>,
-    ) -> Result<Self, SlateDBError> {
-        // Use the builder API internally
-        Self::builder(path, object_store)
-            .with_settings(settings)
-            .build()
-            .await
-    }
-
-    /// Open a new database with a custom `FailPointRegistry`.
-    ///
-    /// ## Arguments
-    /// - `path`: the path to the database
-    /// - `options`: the options to use for the database
-    /// - `object_store`: the object store to use for the database
-    /// - `fp_registry`: the failpoint registry to use for the database
-    ///
-    /// ## Returns
-    /// - `Db`: the database
-    ///
-    /// ## Errors
-    /// - `SlateDBError`: if there was an error opening the database
-    ///
-    /// ## Deprecated
-    /// This method is deprecated. Please use the `Db::builder` method with `with_fp_registry` instead.
-    ///
-    /// ## Examples
-    ///
-    /// ```
-    /// use slatedb::{Db, config::Settings, SlateDBError};
-    /// use slatedb::fail_parallel::FailPointRegistry;
-    /// use slatedb::object_store::memory::InMemory;
-    /// use std::sync::Arc;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
-    ///     let object_store = Arc::new(InMemory::new());
-    ///     let fp_registry = Arc::new(FailPointRegistry::new());
-    ///     let db = Db::open_with_fp_registry("test_db", Settings::default(), object_store, fp_registry).await?;
-    ///     Ok(())
-    /// }
-    /// ```
-    #[deprecated(
-        since = "0.7.0",
-        note = "Please use Db::builder method with with_fp_registry instead"
-    )]
-    pub async fn open_with_fp_registry<P: Into<Path>>(
-        path: P,
-        settings: Settings,
-        object_store: Arc<dyn ObjectStore>,
-        fp_registry: Arc<FailPointRegistry>,
-    ) -> Result<Self, SlateDBError> {
-        // Use the builder API to create the database
-        Self::builder(path, object_store)
-            .with_settings(settings)
-            .with_fp_registry(fp_registry)
-            .build()
-            .await
     }
 
     /// Creates a new builder for a database at the given path.
@@ -1038,6 +943,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use fail_parallel::FailPointRegistry;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
     use std::ops::Bound::Excluded;

@@ -650,6 +650,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use log::info;
     use object_store::{local::LocalFileSystem, path::Path};
+    use tokio::runtime::Handle;
     use ulid::Ulid;
     use uuid::Uuid;
 
@@ -1366,10 +1367,8 @@ mod tests {
                     min_age: std::time::Duration::from_secs(3600),
                     execution_mode: Once,
                 }),
-                #[allow(deprecated)]
-                gc_runtime: None,
             },
-            tokio::runtime::Handle::current(),
+            Handle::current(),
             stats.clone(),
             |_| {},
         )
