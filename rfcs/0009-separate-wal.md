@@ -1,6 +1,6 @@
 # Separate Object Store for WAL
 
-Status: Draft
+Status: Approved
 
 Authors:
 
