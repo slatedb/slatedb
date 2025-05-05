@@ -497,6 +497,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compactor_compacts_l0() {
+        // given:
         let os = Arc::new(InMemory::new());
         let clock = Arc::new(TestClock::new());
         let mut options = db_options(Some(compactor_options()));

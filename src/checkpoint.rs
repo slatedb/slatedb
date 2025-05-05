@@ -139,11 +139,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         // open and close the db to init the manifest and trigger another write
-        let db = Db::builder(path.clone(), object_store.clone())
-            .with_settings(Settings::default())
-            .build()
-            .await
-            .unwrap();
+        let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
         db.close().await.unwrap();
         let manifest_store = ManifestStore::new(&path, object_store.clone());
         let (_, before_checkpoint) = manifest_store.read_latest_manifest().await.unwrap();
