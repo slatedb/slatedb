@@ -544,7 +544,9 @@ impl Db {
         // get the next wal id before writing manifest.
         let wal_id_last_compacted = match &latest_manifest {
             Some(latest_stored_manifest) => {
-                latest_stored_manifest.db_state().last_l0_flushed_wal_sst_id
+                latest_stored_manifest
+                    .db_state()
+                    .last_l0_recent_flushed_wal_sst_id
             }
             None => 0,
         };
@@ -2383,14 +2385,17 @@ mod tests {
             kv_store.put(&key, &value).await.unwrap();
             let db_state = wait_for_manifest_condition(
                 &mut stored_manifest,
-                |s| s.last_l0_flushed_wal_sst_id > last_compacted,
+                |s| s.last_l0_recent_flushed_wal_sst_id > last_compacted,
                 Duration::from_secs(30),
             )
             .await;
 
             // 1 empty wal at startup + 2 wal per iteration.
-            assert_eq!(db_state.last_l0_flushed_wal_sst_id, 1 + (i as u64) * 2 + 2);
-            last_compacted = db_state.last_l0_flushed_wal_sst_id
+            assert_eq!(
+                db_state.last_l0_recent_flushed_wal_sst_id,
+                1 + (i as u64) * 2 + 2
+            );
+            last_compacted = db_state.last_l0_recent_flushed_wal_sst_id
         }
 
         let manifest = stored_manifest.refresh().await.unwrap();
@@ -2843,7 +2848,7 @@ mod tests {
                 .imm_memtable
                 .front()
                 .unwrap()
-                .last_flushed_wal_id(),
+                .recent_flushed_wal_id(),
             1 + 2
         );
         assert_eq!(
@@ -2852,7 +2857,7 @@ mod tests {
                 .imm_memtable
                 .get(1)
                 .unwrap()
-                .last_flushed_wal_id(),
+                .recent_flushed_wal_id(),
             2
         );
         assert_eq!(snapshot.state.core().next_wal_sst_id, next_wal_id);
@@ -2932,7 +2937,7 @@ mod tests {
                 .imm_memtable
                 .front()
                 .unwrap()
-                .last_flushed_wal_id(),
+                .recent_flushed_wal_id(),
             1 + 1
         );
         assert!(snapshot.state.imm_memtable.get(1).is_none());

@@ -88,7 +88,7 @@ pub(crate) trait ManifestCodec: Send + Sync {
 
 impl Manifest {
     pub(crate) fn has_wal_sst_reference(&self, wal_sst_id: u64) -> bool {
-        wal_sst_id > self.core.last_l0_flushed_wal_sst_id && wal_sst_id < self.core.next_wal_sst_id
+        wal_sst_id > self.core.last_l0_recent_flushed_wal_sst_id && wal_sst_id < self.core.next_wal_sst_id
     }
 }
 

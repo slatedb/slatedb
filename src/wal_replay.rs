@@ -136,7 +136,7 @@ impl WalReplayIterator<'_> {
         options: WalReplayOptions,
         table_store: Arc<TableStore>,
     ) -> Result<Self, SlateDBError> {
-        let wal_id_start = db_state.last_l0_flushed_wal_sst_id + 1;
+        let wal_id_start = db_state.last_l0_recent_flushed_wal_sst_id + 1;
         let wal_id_end = table_store.last_seen_wal_id().await?;
         let wal_id_range = wal_id_start..(wal_id_end + 1);
         Self::range(wal_id_range, db_state, options, table_store).await
@@ -483,7 +483,7 @@ mod tests {
         .unwrap();
 
         let mut db_state = CoreDbState::new();
-        db_state.last_l0_flushed_wal_sst_id = last_l0_flushed_wal_id;
+        db_state.last_l0_recent_flushed_wal_sst_id = last_l0_flushed_wal_id;
         db_state.next_wal_sst_id = last_l0_flushed_wal_id + 1;
 
         let mut replay_iter = WalReplayIterator::new(
