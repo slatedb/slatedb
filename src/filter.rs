@@ -1,5 +1,6 @@
 use std::mem::size_of;
 
+use crate::utils::clamp_allocated_size_bytes;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use siphasher::sip::SipHasher13;
 
@@ -26,17 +27,16 @@ impl BloomFilterBuilder {
         self.key_hashes.push(filter_hash(key))
     }
 
-    fn filter_size_bytes(&self) -> usize {
-        let num_keys = self.key_hashes.len() as u32;
-        let bits_per_key = self.bits_per_key;
+    pub(crate) fn filter_size_bytes(num_keys: u32, bits_per_key: u32) -> usize {
         let filter_bits = num_keys * bits_per_key;
         // compute filter bytes rounded up to the number of bytes required to fit the filter
-        ((filter_bits + 7) / 8) as usize
+        filter_bits.div_ceil(8) as usize
     }
 
     pub(crate) fn build(&self) -> BloomFilter {
         let num_probes = optimal_num_probes(self.bits_per_key);
-        let filter_bytes = self.filter_size_bytes();
+        let filter_bytes =
+            BloomFilterBuilder::filter_size_bytes(self.key_hashes.len() as u32, self.bits_per_key);
         let filter_bits = (filter_bytes * 8) as u32;
         let mut buffer = vec![0x00; filter_bytes];
         for k in self.key_hashes.iter() {
@@ -68,6 +68,14 @@ impl BloomFilter {
         encoded.freeze()
     }
 
+    /// estimate the size of BloomFilter encoded in SST
+    pub(crate) fn estimate_encoded_size(num_keys: u32, filter_bits_per_key: u32) -> usize {
+        let filter_bytes = BloomFilterBuilder::filter_size_bytes(num_keys, filter_bits_per_key);
+        let num_probes_size = std::mem::size_of::<u16>();
+        let checksum_len = std::mem::size_of::<u32>();
+        filter_bytes + num_probes_size + checksum_len
+    }
+
     fn filter_bits(&self) -> u32 {
         (self.buffer.len() * 8) as u32
     }
@@ -79,6 +87,18 @@ impl BloomFilter {
             }
         }
         true
+    }
+
+    pub(crate) fn clamp_allocated_size(&self) -> Self {
+        Self {
+            num_probes: self.num_probes,
+            buffer: clamp_allocated_size_bytes(&self.buffer),
+        }
+    }
+
+    /// Returns the size of the bloom filter in bytes.
+    pub(crate) fn size(&self) -> usize {
+        self.buffer.len()
     }
 }
 
@@ -248,5 +268,82 @@ mod tests {
 
         // observed fp is .0087
         assert!((fp as f32 / keys_to_test as f32) < 0.01);
+    }
+
+    #[test]
+    fn test_bloom_filter_size() {
+        let mut builder = BloomFilterBuilder::new(10);
+        builder.add_key(b"test_key");
+        let filter = builder.build();
+
+        // The exact size may vary, so we'll check if it's greater than zero
+        assert!(
+            filter.size() > 0,
+            "Bloom filter size should be greater than zero"
+        );
+
+        // We can also check if the size matches the buffer length
+        assert_eq!(
+            filter.size(),
+            filter.buffer.len(),
+            "Size should match buffer length"
+        );
+    }
+
+    #[test]
+    fn test_should_clamp_allocated_bytes() {
+        let mut builder = BloomFilterBuilder::new(10);
+        for i in 0..100 {
+            builder.add_key(format!("{}", i).as_bytes());
+        }
+        let filter = builder.build();
+        let mut extended_buf = BytesMut::with_capacity(filter.size() + 100);
+        extended_buf.put(filter.buffer.as_ref());
+        extended_buf.put_bytes(0u8, 100);
+        let filter = BloomFilter {
+            buffer: extended_buf.freeze().slice(0..filter.buffer.len()),
+            ..filter
+        };
+
+        let clamped = filter.clamp_allocated_size();
+
+        assert_eq!(clamped.buffer, filter.buffer);
+        assert_eq!(clamped.num_probes, filter.num_probes);
+        assert_ne!(clamped.buffer.as_ptr(), filter.buffer.as_ptr());
+    }
+
+    #[test]
+    fn test_estimate_encoded_size() {
+        // Test with zero keys
+        assert_eq!(BloomFilter::estimate_encoded_size(0, 10), 6); // 0 bytes + 2 bytes probes + 4 bytes checksum
+
+        // Test with one key
+        let bits_per_key = 10;
+        let filter_bytes = BloomFilterBuilder::filter_size_bytes(1, bits_per_key);
+        let expected_size = filter_bytes + 2 + 4; // filter_bytes + probes + checksum
+        assert_eq!(
+            BloomFilter::estimate_encoded_size(1, bits_per_key),
+            expected_size
+        );
+
+        // Test with multiple keys
+        let num_keys = 100;
+        let bits_per_key = 10;
+        let filter_bytes = BloomFilterBuilder::filter_size_bytes(num_keys, bits_per_key);
+        let expected_size = filter_bytes + 2 + 4; // filter_bytes + probes + checksum
+        assert_eq!(
+            BloomFilter::estimate_encoded_size(num_keys, bits_per_key),
+            expected_size
+        );
+
+        // Test with large number of keys
+        let num_keys = 100_000_000;
+        let bits_per_key = 10;
+        let filter_bytes = BloomFilterBuilder::filter_size_bytes(num_keys, bits_per_key);
+        let expected_size = filter_bytes + 2 + 4; // filter_bytes + probes + checksum
+        assert_eq!(
+            BloomFilter::estimate_encoded_size(num_keys, bits_per_key),
+            expected_size
+        );
     }
 }

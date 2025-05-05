@@ -1,9 +1,40 @@
 include "sst.fbs";
 
+table Uuid {
+    high: uint64;
+    low: uint64;
+}
+
+// Reference to an external database.
+table ExternalDb {
+    // Path to root of the external database
+    path: string (required);
+
+    // Externally owned Checkpoint ID we've used to create an initial state of cloned database.
+    source_checkpoint_id: Uuid (required);
+
+    // Checkpoint ID this database has placed on the external database that prevents referenced
+    // data files from being GC'd. Both final_checkpoint_id and source_checkpoint_id should resolve
+    // to the same manifest_id as long as they both still exist.
+    final_checkpoint_id: Uuid;
+
+    // Compacted SST IDs belonging to external DB that are currently being referenced.
+    sst_ids: [CompactedSstId] (required);
+}
+
 // Manifest to persist state of DB.
 table ManifestV1 {
     // Id of manifest. Manifest file name will be derived from this id.
     manifest_id: ulong;
+
+    // List of external databases referenced by this manifest.
+    external_dbs: [ExternalDb];
+
+    // Flag to indicate whether initialization has finished. When creating the initial manifest for
+    // a root db (one that is not a clone), this flag will be set to true. When creating the initial
+    // manifest for a clone db, this flag will be set to false and then updated to true once clone
+    // initialization has completed.
+    initialized: bool;
 
     // The current writer's epoch.
     writer_epoch: ulong;
@@ -11,7 +42,9 @@ table ManifestV1 {
     // The current compactor's epoch.
     compactor_epoch: ulong;
 
-    // The most recent SST in the WAL that's been compacted.
+    // Tracks the most recent SST in the WAL that has completed compaction. When an Immutable Memtable 
+    // (IMM) is flushed to L0, we record the last WAL ID associated with this IMM here. During recovery,
+    // we use `wal_id_last_compacted + 1` as the starting point for WAL replay.
     wal_id_last_compacted: ulong;
 
     // The most recent SST in the WAL at the time manifest was updated.
@@ -26,8 +59,15 @@ table ManifestV1 {
     // A list of the sorted runs that are valid to read in the `compacted` folder.
     compacted: [SortedRun] (required);
 
-    // A list of read snapshots that are currently open.
-    snapshots: [Snapshot];
+    // The last L0 clock tick (the database should restore the latest
+    // tick when recovering from WAL if there are any WAL entries)
+    last_l0_clock_tick: long;
+
+    // A list of checkpoints that are currently open.
+    checkpoints: [Checkpoint] (required);
+
+    // The last seq number
+    last_l0_seq: ulong;
 }
 
 table SortedRun {
@@ -35,16 +75,29 @@ table SortedRun {
     ssts: [CompactedSsTable] (required);
 }
 
-// Snapshot reference to be included in manifest to record active snapshots.
-table Snapshot {
-    // Id that must be unique across all open snapshots.
-    id: ulong;
+table WriterCheckpoint {
+    epoch: uint64;
+}
 
-    // The manifest ID that this snapshot is using as its `DbState`.
+union CheckpointMetadata { WriterCheckpoint }
+
+// Checkpoint reference to be included in manifest to record active checkpoints.
+table Checkpoint {
+    // Id that must be unique across all open checkpoints.
+    id: Uuid (required);
+
+    // The manifest ID that this checkpoint is using as its `DbState`.
     manifest_id: ulong;
 
-    // The UTC unix timestamp seconds that a snapshot expires at. Clients may update this value.
-    // If `snapshot_expire_time_s` is older than now(), the snapshot is considered expired.
-    // If `snapshot_expire_time_s` is 0, the snapshot will never expire.
-    snapshot_expire_time_s: uint;
+    // The UTC unix timestamp seconds that a checkpoint expires at. Clients may update this value.
+    // If `checkpoint_expire_time_s` is older than now(), the checkpoint is considered expired.
+    // If `checkpoint_expire_time_s` is 0, the checkpoint will never expire.
+    checkpoint_expire_time_s: uint;
+
+    // The unix timestamp seconds that the checkpoint was created
+    checkpoint_create_time_s: uint;
+
+    // Optional metadata associated with the checkpoint. For example, the writer can use this to
+    // clean up checkpoints from older writers.
+    metadata: CheckpointMetadata;
 }

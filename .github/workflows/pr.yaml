@@ -2,8 +2,8 @@ name: PR Checks
 
 on:
   push:
-      branches:
-        - main
+    branches:
+      - main
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -11,22 +11,52 @@ on:
 env:
   RUSTFLAGS: "-Dwarnings"
 
-jobs:
-  clippy_check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run Clippy
-        run: cargo clippy --all-targets --all-features
+permissions:
+  # Required for PR comments
+  pull-requests: write
+  # Required for storing benchmark results
+  contents: write
 
-  style_check:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run rustfmt
+      - name: cargo install cargo-hack
+        run: cargo +stable install cargo-hack --locked
+      - name: cargo check
+        run: cargo hack check --each-feature --no-dev-deps
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo install cargo-hack
+        run: cargo +stable install cargo-hack --locked
+      - name: cargo clippy
+        run: cargo hack clippy --each-feature --no-dev-deps && cargo hack clippy --lib -p slatedb --tests
+
+  style:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo fmt
         run: cargo fmt -- --check
 
-  flatbuffers_check:
+  # comment out for now, will added back later after typos-cli intergrated with other tools
+  # typos:
+  #   runs-on: ubuntu-latest
+  #   name: typos
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Check spelling
+  #       uses: crate-ci/typos@master
+
+  flatbuffers:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,5 +81,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.84
       - name: Run Tests
-        run: cargo test --all-features --verbose
+        run: cargo nextest run --all-features --profile ci
+      - name: Run Doc Tests
+        run: cargo test --doc --all-features
+
+  microbenchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run benchmark
+        run: cargo bench -- --output-format bencher | tee output.txt
+
+      - name: Download nightly benchmark data
+        uses: actions/cache/restore@v4
+        with:
+          path: ./microbenchmarks-cache
+          key: ${{ runner.os }}-microbenchmarks
+
+      - name: Update benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: cargo bench
+          tool: 'cargo'
+          output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          external-data-json-path: ./microbenchmarks-cache/benchmark-data.json
+          comment-on-alert: true
+          summary-always: true
+          max-items-in-chart: 30

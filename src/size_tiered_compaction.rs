@@ -312,6 +312,7 @@ impl SizeTieredCompactionScheduler {
     }
 }
 
+#[derive(Default)]
 pub struct SizeTieredCompactionSchedulerSupplier {
     options: SizeTieredCompactionSchedulerOptions,
 }
@@ -336,6 +337,7 @@ mod tests {
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
     use crate::config::SizeTieredCompactionSchedulerOptions;
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
 
     #[test]
@@ -652,16 +654,22 @@ mod tests {
 
     fn create_db_state(l0: VecDeque<SsTableHandle>, srs: Vec<SortedRun>) -> CoreDbState {
         CoreDbState {
+            initialized: true,
             l0_last_compacted: None,
             l0,
             compacted: srs,
             next_wal_sst_id: 0,
             last_compacted_wal_sst_id: 0,
+            last_l0_seq: 0,
+            last_l0_clock_tick: 0,
+            checkpoints: vec![],
         }
     }
 
     fn create_compactor_state(db_state: CoreDbState) -> CompactorState {
-        CompactorState::new(db_state)
+        let mut dirty = new_dirty_manifest();
+        dirty.core = db_state;
+        CompactorState::new(dirty)
     }
 
     fn create_l0_compaction(l0: &[SsTableHandle], dst: u32) -> Compaction {

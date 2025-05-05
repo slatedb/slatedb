@@ -3,10 +3,12 @@ use std::fmt::{Display, Formatter};
 
 use tracing::info;
 use ulid::Ulid;
+use uuid::Uuid;
 
 use crate::compactor_state::CompactionStatus::Submitted;
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
+use crate::manifest::store::DirtyManifest;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum SourceId {
@@ -30,7 +32,6 @@ impl Display for SourceId {
 }
 
 impl SourceId {
-    #[allow(dead_code)]
     pub(crate) fn unwrap_sorted_run(&self) -> u32 {
         self.maybe_unwrap_sorted_run()
             .expect("tried to unwrap Sst as Sorted Run")
@@ -41,12 +42,6 @@ impl SourceId {
             SourceId::SortedRun(id) => Some(*id),
             SourceId::Sst(_) => None,
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn unwrap_sst(&self) -> Ulid {
-        self.maybe_unwrap_sst()
-            .expect("tried to unwrap Sst as Sorted Run")
     }
 
     pub(crate) fn maybe_unwrap_sst(&self) -> Option<Ulid> {
@@ -93,13 +88,17 @@ impl Compaction {
 }
 
 pub struct CompactorState {
-    db_state: CoreDbState,
-    compactions: HashMap<u32, Compaction>,
+    manifest: DirtyManifest,
+    compactions: HashMap<Uuid, Compaction>,
 }
 
 impl CompactorState {
     pub(crate) fn db_state(&self) -> &CoreDbState {
-        &self.db_state
+        &self.manifest.core
+    }
+
+    pub(crate) fn manifest(&self) -> &DirtyManifest {
+        &self.manifest
     }
 
     pub(crate) fn num_compactions(&self) -> usize {
@@ -110,22 +109,29 @@ impl CompactorState {
         self.compactions.values().cloned().collect()
     }
 
-    pub(crate) fn new(db_state: CoreDbState) -> Self {
+    pub(crate) fn new(manifest: DirtyManifest) -> Self {
         Self {
-            db_state,
-            compactions: HashMap::<u32, Compaction>::new(),
+            manifest,
+            compactions: HashMap::<Uuid, Compaction>::new(),
         }
     }
 
-    pub(crate) fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
+    pub(crate) fn submit_compaction(
+        &mut self,
+        compaction: Compaction,
+    ) -> Result<Uuid, SlateDBError> {
         // todo: validate the compaction here
         //       https://github.com/slatedb/slatedb/issues/96
-        if self.compactions.contains_key(&compaction.destination) {
+        if self
+            .compactions
+            .values()
+            .any(|c| c.destination == compaction.destination)
+        {
             // we already have an ongoing compaction for this destination
             return Err(SlateDBError::InvalidCompaction);
         }
         if self
-            .db_state
+            .db_state()
             .compacted
             .iter()
             .any(|sr| sr.id == compaction.destination)
@@ -139,15 +145,17 @@ impl CompactorState {
             }
         }
         info!("accepted submitted compaction: {:?}", compaction);
-        self.compactions.insert(compaction.destination, compaction);
-        Ok(())
+        let id = Uuid::new_v4();
+        self.compactions.insert(id, compaction);
+        Ok(id)
     }
 
-    pub(crate) fn refresh_db_state(&mut self, writer_state: &CoreDbState) {
+    pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyManifest) {
         // the writer may have added more l0 SSTs. Add these to our l0 list.
-        let last_compacted_l0 = self.db_state.l0_last_compacted;
+        let my_db_state = self.db_state();
+        let last_compacted_l0 = my_db_state.l0_last_compacted;
         let mut merged_l0s = VecDeque::new();
-        let writer_l0 = &writer_state.l0;
+        let writer_l0 = &remote_manifest.core.l0;
         for writer_l0_sst in writer_l0 {
             let writer_l0_id = writer_l0_sst.id.unwrap_compacted_id();
             // todo: this is brittle. we are relying on the l0 list always being updated in
@@ -164,15 +172,27 @@ impl CompactorState {
         }
 
         // write out the merged core db state and manifest
-        let mut merged = self.db_state.clone();
-        merged.l0 = merged_l0s;
-        merged.last_compacted_wal_sst_id = writer_state.last_compacted_wal_sst_id;
-        merged.next_wal_sst_id = writer_state.next_wal_sst_id;
-        self.db_state = merged;
+        let merged = CoreDbState {
+            initialized: remote_manifest.core.initialized,
+            l0_last_compacted: my_db_state.l0_last_compacted,
+            l0: merged_l0s,
+            compacted: my_db_state.compacted.clone(),
+            next_wal_sst_id: remote_manifest.core.next_wal_sst_id,
+            last_compacted_wal_sst_id: remote_manifest.core.last_compacted_wal_sst_id,
+            last_l0_clock_tick: remote_manifest.core.last_l0_clock_tick,
+            last_l0_seq: remote_manifest.core.last_l0_seq,
+            checkpoints: remote_manifest.core.checkpoints.clone(),
+        };
+        remote_manifest.core = merged;
+        self.manifest = remote_manifest;
     }
 
-    pub(crate) fn finish_compaction(&mut self, output_sr: SortedRun) {
-        if let Some(compaction) = self.compactions.get(&output_sr.id) {
+    pub(crate) fn finish_failed_compaction(&mut self, id: Uuid) {
+        self.compactions.remove(&id);
+    }
+
+    pub(crate) fn finish_compaction(&mut self, id: Uuid, output_sr: SortedRun) {
+        if let Some(compaction) = self.compactions.get(&id) {
             info!("finished compaction: {:?}", compaction);
             // reconstruct l0
             let compaction_l0s: HashSet<Ulid> = compaction
@@ -188,7 +208,7 @@ impl CompactorState {
                 )))
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
-            let mut db_state = self.db_state.clone();
+            let mut db_state = self.db_state().clone();
             let new_l0: VecDeque<SsTableHandle> = db_state
                 .l0
                 .iter()
@@ -226,8 +246,8 @@ impl CompactorState {
             }
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
-            self.db_state = db_state;
-            self.compactions.remove(&output_sr.id);
+            self.manifest.core = db_state;
+            self.compactions.remove(&id);
         }
     }
 
@@ -246,18 +266,20 @@ mod tests {
     use std::thread::sleep;
     use std::time::{Duration, SystemTime};
 
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
-    use tokio::runtime::{Handle, Runtime};
-
     use super::*;
+    use crate::checkpoint::Checkpoint;
     use crate::compactor_state::CompactionStatus::Submitted;
     use crate::compactor_state::SourceId::Sst;
     use crate::config::DbOptions;
     use crate::db::Db;
     use crate::db_state::SsTableId;
-    use crate::manifest_store::{ManifestStore, StoredManifest};
+    use crate::manifest::store::test_utils::new_dirty_manifest;
+    use crate::manifest::store::{ManifestStore, StoredManifest};
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+    use tokio::runtime::{Handle, Runtime};
+    use uuid::Uuid;
 
     const PATH: &str = "/test/db";
 
@@ -284,7 +306,7 @@ mod tests {
         let (_, _, mut state) = build_test_state(rt.handle());
         let before_compaction = state.db_state().clone();
         let compaction = build_l0_compaction(&before_compaction.l0, 0);
-        state.submit_compaction(compaction).unwrap();
+        let id = state.submit_compaction(compaction).unwrap();
 
         // when:
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
@@ -292,7 +314,7 @@ mod tests {
             id: 0,
             ssts: compacted_ssts,
         };
-        state.finish_compaction(sr.clone());
+        state.finish_compaction(id, sr.clone());
 
         // then:
         assert_eq!(
@@ -329,7 +351,7 @@ mod tests {
         let (_, _, mut state) = build_test_state(rt.handle());
         let before_compaction = state.db_state().clone();
         let compaction = build_l0_compaction(&before_compaction.l0, 0);
-        state.submit_compaction(compaction).unwrap();
+        let id = state.submit_compaction(compaction).unwrap();
 
         // when:
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
@@ -337,30 +359,31 @@ mod tests {
             id: 0,
             ssts: compacted_ssts,
         };
-        state.finish_compaction(sr.clone());
+        state.finish_compaction(id, sr.clone());
 
         // then:
         assert_eq!(state.compactions().len(), 0)
     }
 
     #[test]
-    fn test_should_refresh_db_state_correctly_when_never_compacted() {
+    fn test_should_merge_db_state_correctly_when_never_compacted() {
         // given:
         let rt = build_runtime();
         let (os, mut sm, mut state) = build_test_state(rt.handle());
         // open a new db and write another l0
         let db = build_db(os.clone(), rt.handle());
-        rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48]));
-        rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48]));
-        let writer_db_state =
-            wait_for_manifest_with_l0_len(&mut sm, rt.handle(), state.db_state().l0.len() + 1);
+        rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48])).unwrap();
+        rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48])).unwrap();
+        wait_for_manifest_with_l0_len(&mut sm, rt.handle(), state.db_state().l0.len() + 1);
 
         // when:
-        state.refresh_db_state(&writer_db_state);
+        state.merge_remote_manifest(sm.prepare_dirty());
 
         // then:
         assert!(state.db_state().l0_last_compacted.is_none());
-        let expected_merged_l0s: Vec<Ulid> = writer_db_state
+        let expected_merged_l0s: Vec<Ulid> = sm
+            .manifest()
+            .core
             .l0
             .iter()
             .map(|t| t.id.unwrap_compacted_id())
@@ -375,32 +398,34 @@ mod tests {
     }
 
     #[test]
-    fn test_should_refresh_db_state_correctly() {
+    fn test_should_merge_db_state_correctly() {
         // given:
         let rt = build_runtime();
         let (os, mut sm, mut state) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
-        state
+        let id = state
             .submit_compaction(Compaction::new(
                 vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
                 0,
             ))
             .unwrap();
-        state.finish_compaction(SortedRun {
-            id: 0,
-            ssts: vec![original_l0s.back().unwrap().clone()],
-        });
+        state.finish_compaction(
+            id,
+            SortedRun {
+                id: 0,
+                ssts: vec![original_l0s.back().unwrap().clone()],
+            },
+        );
         // open a new db and write another l0
         let db = build_db(os.clone(), rt.handle());
-        rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48]));
-        rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48]));
-        let writer_db_state =
-            wait_for_manifest_with_l0_len(&mut sm, rt.handle(), original_l0s.len() + 1);
+        rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48])).unwrap();
+        rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48])).unwrap();
+        wait_for_manifest_with_l0_len(&mut sm, rt.handle(), original_l0s.len() + 1);
         let db_state_before_merge = state.db_state().clone();
 
         // when:
-        state.refresh_db_state(&writer_db_state);
+        state.merge_remote_manifest(sm.prepare_dirty());
 
         // then:
         let db_state = state.db_state();
@@ -409,7 +434,14 @@ mod tests {
             .map(|h| h.id.unwrap_compacted_id())
             .collect();
         expected_merged_l0s.pop_back();
-        let new_l0 = writer_db_state.l0.front().unwrap().id.unwrap_compacted_id();
+        let new_l0 = sm
+            .manifest()
+            .core
+            .l0
+            .front()
+            .unwrap()
+            .id
+            .unwrap_compacted_id();
         expected_merged_l0s.push_front(new_l0);
         let merged_l0: VecDeque<Ulid> = db_state
             .l0
@@ -423,19 +455,19 @@ mod tests {
         );
         assert_eq!(
             db_state.last_compacted_wal_sst_id,
-            writer_db_state.last_compacted_wal_sst_id
+            sm.manifest().core.last_compacted_wal_sst_id
         );
-        assert_eq!(db_state.next_wal_sst_id, writer_db_state.next_wal_sst_id);
+        assert_eq!(db_state.next_wal_sst_id, sm.manifest().core.next_wal_sst_id);
     }
 
     #[test]
-    fn test_should_refresh_db_state_correctly_when_all_l0_compacted() {
+    fn test_should_merge_db_state_correctly_when_all_l0_compacted() {
         // given:
         let rt = build_runtime();
         let (os, mut sm, mut state) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
-        state
+        let id = state
             .submit_compaction(Compaction::new(
                 original_l0s
                     .iter()
@@ -444,25 +476,34 @@ mod tests {
                 0,
             ))
             .unwrap();
-        state.finish_compaction(SortedRun {
-            id: 0,
-            ssts: original_l0s.clone().into(),
-        });
+        state.finish_compaction(
+            id,
+            SortedRun {
+                id: 0,
+                ssts: original_l0s.clone().into(),
+            },
+        );
         assert_eq!(state.db_state().l0.len(), 0);
         // open a new db and write another l0
         let db = build_db(os.clone(), rt.handle());
-        rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48]));
-        rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48]));
-        let writer_db_state =
-            wait_for_manifest_with_l0_len(&mut sm, rt.handle(), original_l0s.len() + 1);
+        rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48])).unwrap();
+        rt.block_on(db.put(&[b'j'; 16], &[b'k'; 48])).unwrap();
+        wait_for_manifest_with_l0_len(&mut sm, rt.handle(), original_l0s.len() + 1);
 
         // when:
-        state.refresh_db_state(&writer_db_state);
+        state.merge_remote_manifest(sm.prepare_dirty());
 
         // then:
         let db_state = state.db_state();
         let mut expected_merged_l0s = VecDeque::new();
-        let new_l0 = writer_db_state.l0.front().unwrap().id.unwrap_compacted_id();
+        let new_l0 = sm
+            .manifest()
+            .core
+            .l0
+            .front()
+            .unwrap()
+            .id
+            .unwrap_compacted_id();
         expected_merged_l0s.push_front(new_l0);
         let merged_l0: VecDeque<Ulid> = db_state
             .l0
@@ -470,6 +511,27 @@ mod tests {
             .map(|h| h.id.unwrap_compacted_id())
             .collect();
         assert_eq!(merged_l0, expected_merged_l0s);
+    }
+
+    #[test]
+    fn test_should_merge_db_state_with_new_checkpoints() {
+        // given:
+        let mut state = CompactorState::new(new_dirty_manifest());
+        // mimic an externally added checkpoint
+        let mut dirty = new_dirty_manifest();
+        let checkpoint = Checkpoint {
+            id: Uuid::new_v4(),
+            manifest_id: 1,
+            expire_time: None,
+            create_time: SystemTime::now(),
+        };
+        dirty.core.checkpoints.push(checkpoint.clone());
+
+        // when:
+        state.merge_remote_manifest(dirty);
+
+        // then:
+        assert_eq!(vec![checkpoint], state.db_state().checkpoints);
     }
 
     // test helpers
@@ -517,15 +579,15 @@ mod tests {
         stored_manifest: &mut StoredManifest,
         tokio_handle: &Handle,
         len: usize,
-    ) -> CoreDbState {
+    ) {
         run_for(Duration::from_secs(30), || {
-            let db_state = tokio_handle.block_on(stored_manifest.refresh()).unwrap();
-            if db_state.l0.len() == len {
-                return Some(db_state.clone());
+            let manifest = tokio_handle.block_on(stored_manifest.refresh()).unwrap();
+            if manifest.core.l0.len() == len {
+                return Some(manifest.core.clone());
             }
             None
         })
-        .expect("no manifest found with l0 len")
+        .expect("no manifest found with l0 len");
     }
 
     fn build_l0_compaction(ssts: &VecDeque<SsTableHandle>, dst: u32) -> Compaction {
@@ -538,7 +600,7 @@ mod tests {
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
         let opts = DbOptions {
-            l0_sst_size_bytes: 128,
+            l0_sst_size_bytes: 256,
             ..Default::default()
         };
         tokio_handle
@@ -553,16 +615,19 @@ mod tests {
         let db = build_db(os.clone(), tokio_handle);
         let l0_count: u64 = 5;
         for i in 0..l0_count {
-            tokio_handle.block_on(db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48]));
-            tokio_handle.block_on(db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48]));
+            tokio_handle
+                .block_on(db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48]))
+                .unwrap();
+            tokio_handle
+                .block_on(db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48]))
+                .unwrap();
         }
         tokio_handle.block_on(db.close()).unwrap();
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let stored_manifest = tokio_handle
             .block_on(StoredManifest::load(manifest_store))
-            .unwrap()
             .unwrap();
-        let state = CompactorState::new(stored_manifest.db_state().clone());
+        let state = CompactorState::new(stored_manifest.prepare_dirty());
         (os, stored_manifest, state)
     }
 }

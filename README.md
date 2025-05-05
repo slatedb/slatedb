@@ -14,7 +14,7 @@
 
 To mitigate high write API costs (PUTs), SlateDB batches writes. Rather than writing every `put()` call to object storage, MemTables are flushed periodically to object storage as a string-sorted table (SST). The flush interval is configurable.
 
-To mitigate write latency, SlateDB provides an async `put` method. Clients that prefer strong durability can `await` on `put` until the MemTable is flushed to object storage (trading latency for durability). Clients that prefer lower latency can simply ignore the future returned by `put`.
+`put()` returns a `Future` that resolves when the data is durably persisted. Clients that prefer lower latency at the cost of durability can instead use `put_with_options` with `await_durable` set to `false`.
 
 To mitigate read latency and read API costs (GETs), SlateDB will use standard LSM-tree caching techniques: in-memory block caches, compression, bloom filters, and local SST disk caches.
 
@@ -22,56 +22,99 @@ Checkout [slatedb.io](https://slatedb.io) to learn more.
 
 ## Get Started
 
-Add the following to your `Cargo.toml` to use SlateDB:
+Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 slatedb = "*"
+tokio = "*"
 ```
 
 Then you can use SlateDB in your Rust code:
 
 ```rust
-use bytes::Bytes;
-use object_store::{ObjectStore, memory::InMemory, path::Path};
-use slatedb::db::Db;
+use slatedb::Db;
 use slatedb::config::DbOptions;
+use slatedb::SlateDBError;
+use slatedb::object_store::{ObjectStore, memory::InMemory};
 use std::sync::Arc;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), SlateDBError> {
     // Setup
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let options = DbOptions::default();
     let kv_store = Db::open_with_opts(
-        Path::from("/tmp/test_kv_store"),
+        "/tmp/test_kv_store",
         options,
         object_store,
     )
-    .await
-    .unwrap();
+    .await?;
 
     // Put
     let key = b"test_key";
     let value = b"test_value";
-    kv_store.put(key, value).await;
+    kv_store.put(key, value).await?;
 
     // Get
     assert_eq!(
-        kv_store.get(key).await.unwrap(),
-        Some(Bytes::from_static(value))
+        kv_store.get(key).await?,
+        Some("test_value".into())
     );
 
     // Delete
-    kv_store.delete(key).await;
-    assert!(kv_store.get(key).await.unwrap().is_none());
+    kv_store.delete(key).await?;
+    assert!(kv_store.get(key).await?.is_none());
+
+    kv_store.put(b"test_key1", b"test_value1").await?;
+    kv_store.put(b"test_key2", b"test_value2").await?;
+    kv_store.put(b"test_key3", b"test_value3").await?;
+    kv_store.put(b"test_key4", b"test_value4").await?;
+
+    // Scan over unbound range
+    let mut iter = kv_store.scan::<Vec<u8>, _>(..).await?;
+    let mut count = 1;
+    while let Ok(Some(item)) = iter.next().await {
+        assert_eq!(
+            item.key,
+            format!("test_key{count}").into_bytes()
+        );
+        assert_eq!(
+            item.value,
+            format!("test_value{count}").into_bytes()
+        );
+        count += 1;
+    }
+
+    // Scan over bound range
+    let mut iter = kv_store.scan("test_key1"..="test_key2").await?;
+    assert_eq!(
+        iter.next().await?,
+        Some((b"test_key1", b"test_value1").into())
+    );
+    assert_eq!(
+        iter.next().await?,
+        Some((b"test_key2", b"test_value2").into())
+    );
+
+    // Seek ahead to next key
+    let mut iter = kv_store.scan::<Vec<u8>, _>(..).await?;
+    let next_key = b"test_key4";
+    iter.seek(next_key).await?;
+    assert_eq!(
+        iter.next().await?,
+        Some((b"test_key4", b"test_value4").into())
+    );
+    assert_eq!(iter.next().await?, None);
 
     // Close
-    kv_store.close().await.unwrap();
+    kv_store.close().await?;
+
+    Ok(())
 }
 ```
 
-SlateDB uses the [`object_store`](https://docs.rs/object_store/latest/object_store/) crate to interact with object storage, and therefore supports any object storage that implements the `ObjectStore` trait.
+SlateDB uses the [`object_store`](https://docs.rs/object_store/latest/object_store/) crate to interact with object storage, and therefore supports any object storage that implements the `ObjectStore` trait. You can use the crate in your project to interact with any object storage that implements the `ObjectStore` trait. SlateDB also re-exports the [`object_store`](https://docs.rs/object_store/latest/object_store/) crate for your convenience.
 
 ## Documentation
 
@@ -83,7 +126,7 @@ SlateDB is currently in the early stages of development. It is not yet ready for
 
 - [x] Basic API (get, put, delete)
 - [x] SSTs on object storage
-- [ ] Range queries ([#8](https://github.com/slatedb/slatedb/issues/8))
+- [x] Range queries ([#8](https://github.com/slatedb/slatedb/issues/8))
 - [x] Block cache ([#15](https://github.com/slatedb/slatedb/issues/15))
 - [x] Disk cache ([#9](https://github.com/slatedb/slatedb/issues/9))
 - [x] Compression ([#10](https://github.com/slatedb/slatedb/issues/10))
@@ -91,7 +134,19 @@ SlateDB is currently in the early stages of development. It is not yet ready for
 - [x] Manifest persistence ([#14](https://github.com/slatedb/slatedb/issues/14))
 - [x] Compaction ([#7](https://github.com/slatedb/slatedb/issues/7))
 - [ ] Transactions
+- [ ] Merge operator ([#328](https://github.com/slatedb/slatedb/issues/328))
+- [x] Clones ([#49](https://github.com/slatedb/slatedb/issues/49))
 
 ## License
 
 SlateDB is licensed under the Apache License, Version 2.0.
+
+## Foundation
+
+SlateDB is a member of the [Commonhaus Foundation](https://www.commonhaus.org/).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/commonhaus/artwork/blob/main/foundation/brand/png/CF_logo_horizontal_single_reverse_200px.png?raw=true">
+  <img src="https://github.com/commonhaus/artwork/blob/main/foundation/brand/png/CF_logo_horizontal_single_default_200px.png?raw=true">
+</picture>
+
