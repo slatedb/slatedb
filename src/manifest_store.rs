@@ -49,15 +49,22 @@ impl FenceableManifest {
         stored_epoch: Box<dyn Fn(&Manifest) -> u64 + Send>,
         set_epoch: impl Fn(&mut Manifest, u64),
     ) -> Result<Self, SlateDBError> {
-        let mut manifest = stored_manifest.manifest.clone();
-        let local_epoch = stored_epoch(&manifest) + 1;
-        set_epoch(&mut manifest, local_epoch);
-        stored_manifest.update_manifest(manifest).await?;
-        Ok(Self {
-            stored_manifest,
-            local_epoch,
-            stored_epoch,
-        })
+        loop {
+            let mut manifest = stored_manifest.manifest.clone();
+            let local_epoch = stored_epoch(&manifest) + 1;
+            set_epoch(&mut manifest, local_epoch);
+            match stored_manifest.update_manifest(manifest).await {
+                Err(SlateDBError::ManifestVersionExists) => {
+                    stored_manifest.refresh().await?;
+                },
+                Err(err) => return Err(err),
+                Ok(()) => return Ok(Self {
+                    stored_manifest,
+                    local_epoch,
+                    stored_epoch,
+                })
+            }
+        }
     }
 
     pub(crate) fn db_state(&self) -> Result<&CoreDbState, SlateDBError> {
