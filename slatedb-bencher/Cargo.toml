@@ -20,7 +20,6 @@ bench = false
 bytes = { version = "1.7.1", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 chrono = { version = "0.4.38", features = ["serde"] }
-crossbeam-channel = "0.5.13"
 futures = "0.3.30"
 object_store = "0.12.0"
 rand = "0.8.5"
@@ -29,5 +28,3 @@ slatedb = { path = "../slatedb", features = ["aws", "azure", "bencher", "wal_dis
 tokio = { version = "1.40.0" }
 tracing = {version = "0.1.40", features = ["log"]}
 tracing-subscriber = {version = "0.3"}
-ulid = { version = "1.1.3", features = ["serde"] }
-uuid = { version = "1.11.0", features = ["v4", "serde"] }
