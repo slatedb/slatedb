@@ -3086,6 +3086,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "slatedb-bencher"
+version = "0.6.1"
+dependencies = [
+ "bytes",
+ "chrono",
+ "clap",
+ "crossbeam-channel",
+ "futures",
+ "object_store",
+ "rand 0.8.5",
+ "rand_xorshift",
+ "slatedb",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+ "uuid",
+]
+
+[[package]]
 name = "small_ctor"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
