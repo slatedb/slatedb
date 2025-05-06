@@ -1,6 +1,6 @@
 # Settings design
 
-Status: Draft
+Status: Approved
 
 Authors:
 
@@ -42,12 +42,11 @@ Instead of having to pass all the components to the `Db::open` method, we will p
 
 ```rust
 let object_store = Arc::new(InMemory::new());
-Db::builder("path/to/db")
+let db = Db::builder("path/to/db", object_store)
     .with_settings(Settings {
        manifest_poll_interval: Duration::from_secs(1),
        ..Default::default()
     })
-    .with_object_store(object_store)
     .build();
 ```
 

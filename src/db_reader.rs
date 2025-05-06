@@ -809,7 +809,7 @@ impl DbReader {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{CheckpointOptions, CheckpointScope, Clock, DbOptions};
+    use crate::config::{CheckpointOptions, CheckpointScope, Clock, Settings};
     use crate::db_reader::{DbReader, DbReaderOptions};
     use crate::db_state::CoreDbState;
     use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -839,7 +839,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
 
-        let db = test_provider.new_db(DbOptions::default()).await.unwrap();
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
         let key = b"test_key";
         let value1 = b"test_value";
         let value2 = b"updated_value";
@@ -876,7 +876,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
 
-        let db = test_provider.new_db(DbOptions::default()).await.unwrap();
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
         let key = b"test_key";
         let checkpoint_value = b"test_value";
         let updated_value = b"updated_value";
@@ -938,7 +938,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
 
-        let db = test_provider.new_db(DbOptions::default()).await.unwrap();
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
         let checkpoint_key = b"checkpoint_key";
         let value = b"value";
 
@@ -975,9 +975,9 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
 
-        let db_options = DbOptions {
+        let db_options = Settings {
             l0_sst_size_bytes: 256,
-            ..DbOptions::default()
+            ..Settings::default()
         };
         let db = test_provider.new_db(db_options).await.unwrap();
         let reader_options = DbReaderOptions {
@@ -1014,7 +1014,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
 
-        let _db = test_provider.new_db(DbOptions::default()).await;
+        let _db = test_provider.new_db(Settings::default()).await;
         let reader_options = DbReaderOptions {
             manifest_poll_interval: Duration::from_millis(500),
             checkpoint_lifetime: Duration::from_millis(1000),
@@ -1053,7 +1053,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
-        let db = test_provider.new_db(DbOptions::default()).await.unwrap();
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
 
         let reader_options = DbReaderOptions {
             manifest_poll_interval: Duration::from_millis(500),
@@ -1082,7 +1082,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
-        let _db = test_provider.new_db(DbOptions::default()).await.unwrap();
+        let _db = test_provider.new_db(Settings::default()).await.unwrap();
 
         let reader_options = DbReaderOptions {
             manifest_poll_interval: Duration::from_millis(500),
@@ -1127,8 +1127,11 @@ mod tests {
     }
 
     impl TestProvider {
-        async fn new_db(&self, options: DbOptions) -> Result<Db, SlateDBError> {
-            Db::open_with_opts(self.path.clone(), options, Arc::clone(&self.object_store)).await
+        async fn new_db(&self, options: Settings) -> Result<Db, SlateDBError> {
+            Db::builder(self.path.clone(), self.object_store.clone())
+                .with_settings(options)
+                .build()
+                .await
         }
 
         async fn new_db_reader(

@@ -3,9 +3,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter::Peekable;
 use std::slice::Iter;
 
-use crate::compactor::CompactionScheduler;
+use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{Compaction, CompactorState, SourceId};
-use crate::config::{CompactionSchedulerSupplier, SizeTieredCompactionSchedulerOptions};
+use crate::config::SizeTieredCompactionSchedulerOptions;
 use crate::db_state::CoreDbState;
 
 const MAX_IN_FLIGHT_COMPACTIONS: usize = 4;

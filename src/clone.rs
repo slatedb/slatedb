@@ -298,7 +298,7 @@ async fn copy_wal_ssts(
 #[cfg(test)]
 mod tests {
     use crate::clone::create_clone;
-    use crate::config::{CheckpointOptions, CheckpointScope, DbOptions};
+    use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::CoreDbState;
     use crate::error::SlateDBError;
@@ -309,7 +309,6 @@ mod tests {
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::ObjectStore;
     use std::ops::RangeFull;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -319,11 +318,11 @@ mod tests {
         let mut rng = rng::new_test_rng(None);
         let table = sample::table(&mut rng, 5000, 10);
 
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store = Arc::new(InMemory::new());
         let parent_path = Path::from("/tmp/test_parent");
         let clone_path = Path::from("/tmp/test_clone");
 
-        let parent_db = Db::open(parent_path.clone(), Arc::clone(&object_store))
+        let parent_db = Db::open(parent_path.clone(), object_store.clone())
             .await
             .unwrap();
         test_utils::seed_database(&parent_db, &table, false)
@@ -335,14 +334,14 @@ mod tests {
         create_clone(
             clone_path.clone(),
             parent_path.clone(),
-            Arc::clone(&object_store),
+            object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
         )
         .await
         .unwrap();
 
-        let clone_db = Db::open(clone_path.clone(), Arc::clone(&object_store))
+        let clone_db = Db::open(clone_path.clone(), object_store.clone())
             .await
             .unwrap();
         let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
@@ -352,29 +351,31 @@ mod tests {
 
     #[tokio::test]
     async fn should_clone_from_checkpoint_wal_enabled() {
-        should_clone_from_checkpoint(DbOptions::default()).await
+        should_clone_from_checkpoint(Settings::default()).await
     }
 
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
     async fn should_clone_from_checkpoint_wal_disabled() {
-        should_clone_from_checkpoint(DbOptions {
+        should_clone_from_checkpoint(Settings {
             wal_enabled: false,
-            ..DbOptions::default()
+            ..Settings::default()
         })
         .await
     }
 
-    async fn should_clone_from_checkpoint(db_opts: DbOptions) {
+    async fn should_clone_from_checkpoint(db_opts: Settings) {
         let mut rng = rng::new_test_rng(None);
         let checkpoint_table = sample::table(&mut rng, 5000, 10);
         let post_checkpoint_table = sample::table(&mut rng, 1000, 10);
 
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let parent_path = Path::from("/tmp/test_parent");
-        let clone_path = Path::from("/tmp/test_clone");
+        let object_store = Arc::new(InMemory::new());
+        let parent_path = "/tmp/test_parent";
+        let clone_path = "/tmp/test_clone";
 
-        let parent_db = Db::open_with_opts(parent_path.clone(), db_opts, Arc::clone(&object_store))
+        let parent_db = Db::builder(parent_path, object_store.clone())
+            .with_settings(db_opts.clone())
+            .build()
             .await
             .unwrap();
         test_utils::seed_database(&parent_db, &checkpoint_table, false)
@@ -397,16 +398,18 @@ mod tests {
         parent_db.close().await.unwrap();
 
         create_clone(
-            clone_path.clone(),
-            parent_path.clone(),
-            Arc::clone(&object_store),
+            clone_path,
+            parent_path,
+            object_store.clone(),
             Some(checkpoint.id),
             Arc::new(FailPointRegistry::new()),
         )
         .await
         .unwrap();
 
-        let clone_db = Db::open(clone_path.clone(), Arc::clone(&object_store))
+        let clone_db = Db::builder(clone_path, object_store.clone())
+            .with_settings(db_opts)
+            .build()
             .await
             .unwrap();
         let mut db_iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await.unwrap();
@@ -416,19 +419,18 @@ mod tests {
 
     #[tokio::test]
     async fn should_fail_retry_if_uninitialized_checkpoint_is_invalid() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store = Arc::new(InMemory::new());
         let parent_path = Path::from("/tmp/test_parent");
         let clone_path = Path::from("/tmp/test_clone");
 
         // Create the parent with empty state
-        let parent_db = Db::open(parent_path.clone(), Arc::clone(&object_store))
+        let parent_db = Db::open(parent_path.clone(), object_store.clone())
             .await
             .unwrap();
         parent_db.close().await.unwrap();
 
         // Create an uninitialized manifest with an invalid checkpoint id
-        let clone_manifest_store =
-            Arc::new(ManifestStore::new(&clone_path, Arc::clone(&object_store)));
+        let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
         let non_existent_source_checkpoint_id = Uuid::new_v4();
         StoredManifest::create_uninitialized_clone(
             clone_manifest_store,
@@ -457,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn should_fail_retry_if_uninitialized_checkpoint_differs_from_provided() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store = Arc::new(InMemory::new());
         let parent_path = Path::from("/tmp/test_parent");
         let clone_path = Path::from("/tmp/test_clone");
 
@@ -504,15 +506,14 @@ mod tests {
 
     #[tokio::test]
     async fn should_fail_retry_if_parent_path_is_different() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store = Arc::new(InMemory::new());
         let original_parent_path = Path::from("/tmp/test_parent");
         let updated_parent_path = Path::from("/tmp/test_parent/new");
         let clone_path = Path::from("/tmp/test_clone");
 
         // Setup an uninitialized manifest pointing to a different parent
         let parent_manifest = Manifest::initial(CoreDbState::new());
-        let clone_manifest_store =
-            Arc::new(ManifestStore::new(&clone_path, Arc::clone(&object_store)));
+        let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
         StoredManifest::create_uninitialized_clone(
             Arc::clone(&clone_manifest_store),
             &parent_manifest,
@@ -523,7 +524,7 @@ mod tests {
         .unwrap();
 
         // Initialize the parent at the updated path
-        let parent_db = Db::open(updated_parent_path.clone(), Arc::clone(&object_store))
+        let parent_db = Db::open(updated_parent_path.clone(), object_store.clone())
             .await
             .unwrap();
         parent_db.close().await.unwrap();
@@ -532,7 +533,7 @@ mod tests {
         let err = create_clone(
             clone_path.clone(),
             updated_parent_path.clone(),
-            Arc::clone(&object_store),
+            object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
         )
@@ -547,19 +548,17 @@ mod tests {
 
     #[tokio::test]
     async fn clone_retry_should_be_idempotent_after_success() -> Result<(), SlateDBError> {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store = Arc::new(InMemory::new());
         let parent_path = "/tmp/test_parent";
         let clone_path = "/tmp/test_clone";
 
-        let parent_db = Db::open(parent_path, Arc::clone(&object_store))
-            .await
-            .unwrap();
+        let parent_db = Db::open(parent_path, object_store.clone()).await.unwrap();
         parent_db.close().await.unwrap();
 
         create_clone(
             clone_path,
             parent_path,
-            Arc::clone(&object_store),
+            object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
         )
@@ -567,13 +566,13 @@ mod tests {
         .unwrap();
 
         let clone_manifest_store =
-            ManifestStore::new(&Path::from(clone_path), Arc::clone(&object_store));
+            ManifestStore::new(&Path::from(clone_path), object_store.clone());
         let (manifest_id, _) = clone_manifest_store.read_latest_manifest().await.unwrap();
 
         create_clone(
             clone_path,
             parent_path,
-            Arc::clone(&object_store),
+            object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
         )
@@ -590,11 +589,11 @@ mod tests {
     #[tokio::test]
     async fn should_retry_clone_after_io_error_copying_wals() {
         let fp_registry = Arc::new(FailPointRegistry::new());
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store = Arc::new(InMemory::new());
         let parent_path = Path::from("/tmp/test_parent");
         let clone_path = Path::from("/tmp/test_clone");
 
-        let parent_db = Db::open(parent_path.clone(), Arc::clone(&object_store))
+        let parent_db = Db::open(parent_path.clone(), object_store.clone())
             .await
             .unwrap();
         let mut rng = rng::new_test_rng(None);
@@ -619,7 +618,7 @@ mod tests {
         let err = create_clone(
             clone_path.clone(),
             parent_path.clone(),
-            Arc::clone(&object_store),
+            object_store.clone(),
             None,
             Arc::clone(&fp_registry),
         )
@@ -631,7 +630,7 @@ mod tests {
         create_clone(
             clone_path.clone(),
             parent_path.clone(),
-            Arc::clone(&object_store),
+            object_store.clone(),
             None,
             Arc::clone(&fp_registry),
         )
@@ -642,11 +641,11 @@ mod tests {
     #[tokio::test]
     async fn should_fail_retry_if_source_checkpoint_is_missing() -> Result<(), SlateDBError> {
         let fp_registry = Arc::new(FailPointRegistry::new());
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store = Arc::new(InMemory::new());
         let parent_path = Path::from("/tmp/test_parent");
         let clone_path = Path::from("/tmp/test_clone");
 
-        let parent_db = Db::open(parent_path.clone(), Arc::clone(&object_store)).await?;
+        let parent_db = Db::open(parent_path.clone(), object_store.clone()).await?;
         let mut rng = rng::new_test_rng(None);
         test_utils::seed_database(&parent_db, &sample::table(&mut rng, 100, 10), false).await?;
         let checkpoint = parent_db
@@ -667,7 +666,7 @@ mod tests {
         let err = create_clone(
             clone_path.clone(),
             parent_path.clone(),
-            Arc::clone(&object_store),
+            object_store.clone(),
             Some(checkpoint.id),
             Arc::clone(&fp_registry),
         )
@@ -692,7 +691,7 @@ mod tests {
         let err = create_clone(
             clone_path.clone(),
             parent_path.clone(),
-            Arc::clone(&object_store),
+            object_store.clone(),
             Some(checkpoint.id),
             Arc::clone(&fp_registry),
         )

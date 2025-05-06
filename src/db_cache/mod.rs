@@ -43,13 +43,11 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 ///
 /// Example:
 ///
-/// ```rust,no_run
+/// ```
 /// use async_trait::async_trait;
-/// use object_store::local::LocalFileSystem;
-/// use slatedb::Db;
-/// use slatedb::config::DbOptions;
+/// use slatedb::{Db, SlateDBError};
 /// use slatedb::db_cache::{DbCache, CachedEntry, CachedKey};
-/// use slatedb::SlateDBError;
+/// use slatedb::object_store::local::LocalFileSystem;
 /// use std::collections::HashMap;
 /// use std::sync::{Arc, Mutex};
 ///
@@ -117,16 +115,12 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 ///
 /// #[::tokio::main]
 /// async fn main() {
-///     use object_store::path::Path;
-///     use slatedb::db_cache::DbCacheWrapper;
 ///     let object_store = Arc::new(LocalFileSystem::new());
 ///     let cache = Arc::new(MyCache::new(128u64 * 1024 * 1024));
-///     let options = DbOptions {
-///         block_cache: Some(cache),
-///         ..Default::default()
-///     };
-///     let path = Path::from("/path/to/db");
-///     let db = Db::open_with_opts(path, options, object_store).await;
+///     let db = Db::builder("/path/to/db", object_store)
+///         .with_block_cache(cache)
+///         .build()
+///         .await;
 /// }
 /// ```
 #[async_trait]

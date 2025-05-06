@@ -106,7 +106,7 @@ impl DbInner {
             // Periodic flushing is disabled if `flush_interval` is set to None. Even if we do
             // not perform periodic flushing, we still need to handle manual flush requests,
             // and the final flush when the database is closed.
-            let period = this.options.flush_interval.unwrap_or(Duration::MAX);
+            let period = this.settings.flush_interval.unwrap_or(Duration::MAX);
             let mut ticker = tokio::time::interval(period);
 
             let mut err_reader = this.state.read().error_reader();

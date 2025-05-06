@@ -6,12 +6,12 @@ use std::{
 
 use clap::{builder::PossibleValue, Args, Parser, Subcommand, ValueEnum};
 use slatedb::{
-    config::{CompressionCodec, DbOptions},
+    config::{CompressionCodec, Settings},
     db_cache::{
         moka::{MokaCache, MokaCacheOptions},
         DbCache,
     },
-    DbOptionsError,
+    SettingsError,
 };
 
 use crate::db::{FixedSetKeyGenerator, KeyGenerator, RandomKeyGenerator};
@@ -57,7 +57,7 @@ pub(crate) enum BencherCommands {
 pub(crate) struct DbArgs {
     #[arg(
         long,
-        help = "Optional path to load the DbOptions configuration from. `Slatedb.toml` is used by default if this option is not present"
+        help = "Optional path to load the configuration from. `Slatedb.toml` is used by default if this option is not present"
     )]
     db_options_path: Option<PathBuf>,
 
@@ -66,22 +66,22 @@ pub(crate) struct DbArgs {
 }
 
 impl DbArgs {
-    /// Returns a `DbOptions` struct based on DbArgs's arguments.
-    pub(crate) fn config(&self) -> Result<DbOptions, DbOptionsError> {
-        let mut db_options = if let Some(path) = &self.db_options_path {
-            DbOptions::from_file(path)?
+    /// Returns a `(Settings, Option<Arc<dyn DbCache>>)` struct based on DbArgs's arguments.
+    pub(crate) fn config(&self) -> Result<(Settings, Option<Arc<dyn DbCache>>), SettingsError> {
+        let settings = if let Some(path) = &self.db_options_path {
+            Settings::from_file(path)?
         } else {
-            DbOptions::load()?
+            Settings::load()?
         };
 
-        db_options.block_cache = self.block_cache_size.map(|max_capacity| {
+        let block_cache = self.block_cache_size.map(|max_capacity| {
             Arc::new(MokaCache::new_with_opts(MokaCacheOptions {
                 max_capacity,
                 ..Default::default()
             })) as Arc<dyn DbCache>
         });
 
-        Ok(db_options)
+        Ok((settings, block_cache))
     }
 }
 

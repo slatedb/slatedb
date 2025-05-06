@@ -272,7 +272,7 @@ mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::compactor_state::CompactionStatus::Submitted;
     use crate::compactor_state::SourceId::Sst;
-    use crate::config::DbOptions;
+    use crate::config::Settings;
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::manifest::store::test_utils::new_dirty_manifest;
@@ -601,12 +601,12 @@ mod tests {
     }
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
-        let opts = DbOptions {
+        let opts = Settings {
             l0_sst_size_bytes: 256,
             ..Default::default()
         };
         tokio_handle
-            .block_on(Db::open_with_opts(Path::from(PATH), opts, os))
+            .block_on(Db::builder(PATH, os.clone()).with_settings(opts).build())
             .unwrap()
     }
 

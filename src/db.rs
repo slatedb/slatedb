@@ -9,60 +9,54 @@
 //!
 //! ```
 //! use slatedb::{Db, SlateDBError};
-//! use slatedb::object_store::{ObjectStore, memory::InMemory};
+//! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), SlateDBError> {
-//!     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+//!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::open("test_db", object_store).await?;
 //!     Ok(())
 //! }
 //! ```
 
-use std::collections::HashMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
-use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
-use crate::cached_object_store::stats::CachedObjectStoreStats;
-use crate::cached_object_store::CachedObjectStore;
-use crate::cached_object_store::FsCacheStorage;
 use crate::compactor::Compactor;
-use crate::config::{DbOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
-use crate::db_cache::{DbCache, DbCacheWrapper};
+use crate::config::{Clock, PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions};
 use crate::db_iter::DbIterator;
-use crate::db_state::{CoreDbState, DbState, SsTableId};
+use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
-use crate::manifest::store::{DirtyManifest, FenceableManifest, ManifestStore, StoredManifest};
+use crate::manifest::store::{DirtyManifest, FenceableManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushMsg;
-use crate::paths::PathResolver;
 use crate::reader::Reader;
-use crate::sst::SsTableFormat;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::{bg_task_result_into_err, MonotonicClock};
+use crate::utils::MonotonicClock;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use tracing::{info, warn};
 
+pub mod builder;
+pub use builder::DbBuilder;
+
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
-    pub(crate) options: DbOptions,
+    pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) wal_flush_notifier: UnboundedSender<WalFlushMsg>,
     pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
@@ -71,11 +65,15 @@ pub(crate) struct DbInner {
     pub(crate) stat_registry: Arc<StatRegistry>,
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) reader: Reader,
+
+    pub(crate) wal_enabled: bool,
 }
 
 impl DbInner {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
-        options: DbOptions,
+        settings: Settings,
+        clock: Arc<dyn Clock + Send + Sync>,
         table_store: Arc<TableStore>,
         manifest: DirtyManifest,
         wal_flush_notifier: UnboundedSender<WalFlushMsg>,
@@ -83,23 +81,22 @@ impl DbInner {
         write_notifier: UnboundedSender<WriteBatchMsg>,
         stat_registry: Arc<StatRegistry>,
     ) -> Result<Self, SlateDBError> {
-        let mono_clock = Arc::new(MonotonicClock::new(
-            options.clock.clone(),
-            manifest.core.last_l0_clock_tick,
-        ));
+        let mono_clock = Arc::new(MonotonicClock::new(clock, manifest.core.last_l0_clock_tick));
         let state = Arc::new(RwLock::new(DbState::new(manifest)));
         let db_stats = DbStats::new(stat_registry.as_ref());
+        let wal_enabled = DbInner::wal_enabled_in_options(&settings);
 
         let reader = Reader {
             table_store: Arc::clone(&table_store),
             db_stats: db_stats.clone(),
             mono_clock: Arc::clone(&mono_clock),
-            wal_enabled: DbInner::wal_enabled_in_options(&options),
+            wal_enabled,
         };
 
         let db_inner = Self {
             state,
-            options,
+            settings,
+            wal_enabled,
             table_store,
             wal_flush_notifier,
             memtable_flush_notifier,
@@ -173,14 +170,10 @@ impl DbInner {
         }
     }
 
-    pub(crate) fn wal_enabled(&self) -> bool {
-        Self::wal_enabled_in_options(&self.options)
-    }
-
     #[allow(unused_variables)]
-    pub(crate) fn wal_enabled_in_options(options: &DbOptions) -> bool {
+    pub(crate) fn wal_enabled_in_options(settings: &Settings) -> bool {
         #[cfg(feature = "wal_disable")]
-        return options.wal_enabled;
+        return settings.wal_enabled;
         #[cfg(not(feature = "wal_disable"))]
         return true;
     }
@@ -246,7 +239,7 @@ impl DbInner {
                     .sum::<usize>();
                 imm_wal_size + imm_memtable_size
             };
-            if mem_size_bytes >= self.options.max_unflushed_bytes {
+            if mem_size_bytes >= self.settings.max_unflushed_bytes {
                 let (wal_table, mem_table) = {
                     let guard = self.state.read();
                     (
@@ -256,7 +249,7 @@ impl DbInner {
                 };
                 warn!(
                     "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
-                    mem_size_bytes, self.options.max_unflushed_bytes,
+                    mem_size_bytes, self.settings.max_unflushed_bytes,
                 );
 
                 match (wal_table, mem_table) {
@@ -326,7 +319,7 @@ impl DbInner {
 
         let replay_options = WalReplayOptions {
             sst_batch_size: 4,
-            min_memtable_bytes: self.options.l0_sst_size_bytes,
+            min_memtable_bytes: self.settings.l0_sst_size_bytes,
             max_memtable_bytes: usize::MAX,
             sst_iter_options,
         };
@@ -384,12 +377,12 @@ impl Db {
     ///
     /// ```
     /// use slatedb::{Db, SlateDBError};
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use slatedb::object_store::memory::InMemory;
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), SlateDBError> {
-    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let object_store = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     Ok(())
     /// }
@@ -398,260 +391,37 @@ impl Db {
         path: P,
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self, SlateDBError> {
-        Self::open_with_opts(path, DbOptions::default(), object_store).await
+        // Use the builder API internally
+        Self::builder(path, object_store).build().await
     }
 
-    /// Open a new database with custom `DbOptions`.
+    /// Creates a new builder for a database at the given path.
     ///
     /// ## Arguments
     /// - `path`: the path to the database
-    /// - `options`: the options to use for the database
     /// - `object_store`: the object store to use for the database
     ///
     /// ## Returns
-    /// - `Db`: the database
-    ///
-    /// ## Errors
-    /// - `SlateDBError`: if there was an error opening the database
+    /// - `DbBuilder`: the builder to initialize the database
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, config::DbOptions, SlateDBError};
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::object_store::memory::InMemory;
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), SlateDBError> {
-    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    ///     let db = Db::open_with_opts("test_db", DbOptions::default(), object_store).await?;
+    ///     let object_store = Arc::new(InMemory::new());
+    ///     let db = Db::builder("/tmp/test_db", object_store)
+    ///         .build()
+    ///         .await?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn open_with_opts<P: Into<Path>>(
-        path: P,
-        options: DbOptions,
-        object_store: Arc<dyn ObjectStore>,
-    ) -> Result<Self, SlateDBError> {
-        Self::open_with_fp_registry(
-            path,
-            options,
-            object_store,
-            Arc::new(FailPointRegistry::new()),
-        )
-        .await
-    }
-
-    /// Open a new database with a custom `FailPointRegistry`.
-    ///
-    /// ## Arguments
-    /// - `path`: the path to the database
-    /// - `options`: the options to use for the database
-    /// - `object_store`: the object store to use for the database
-    /// - `fp_registry`: the failpoint registry to use for the database
-    ///
-    /// ## Returns
-    /// - `Db`: the database
-    ///
-    /// ## Errors
-    /// - `SlateDBError`: if there was an error opening the database
-    ///
-    /// ## Examples
-    ///
-    /// ```
-    /// use slatedb::{Db, config::DbOptions, SlateDBError};
-    /// use slatedb::fail_parallel::FailPointRegistry;
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
-    /// use std::sync::Arc;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
-    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    ///     let fp_registry = Arc::new(FailPointRegistry::new());
-    ///     let db = Db::open_with_fp_registry("test_db", DbOptions::default(), object_store, fp_registry).await?;
-    ///     Ok(())
-    /// }
-    /// ```
-    pub async fn open_with_fp_registry<P: Into<Path>>(
-        path: P,
-        options: DbOptions,
-        object_store: Arc<dyn ObjectStore>,
-        fp_registry: Arc<FailPointRegistry>,
-    ) -> Result<Self, SlateDBError> {
-        let path = path.into();
-        if let Ok(options_json) = options.to_json_string() {
-            info!(?path, options = options_json, "Opening SlateDB database");
-        } else {
-            info!(?path, ?options, "Opening SlateDB database");
-        }
-
-        let stat_registry = Arc::new(StatRegistry::new());
-        let sst_format = SsTableFormat {
-            min_filter_keys: options.min_filter_keys,
-            filter_bits_per_key: options.filter_bits_per_key,
-            compression_codec: options.compression_codec,
-            ..SsTableFormat::default()
-        };
-        let maybe_cached_object_store = match &options.object_store_cache_options.root_folder {
-            None => object_store.clone(),
-            Some(cache_root_folder) => {
-                let stats = Arc::new(CachedObjectStoreStats::new(stat_registry.as_ref()));
-                let cache_storage = Arc::new(FsCacheStorage::new(
-                    cache_root_folder.clone(),
-                    options.object_store_cache_options.max_cache_size_bytes,
-                    options.object_store_cache_options.scan_interval,
-                    stats.clone(),
-                ));
-
-                let cached_object_store = CachedObjectStore::new(
-                    object_store.clone(),
-                    cache_storage,
-                    options.object_store_cache_options.part_size_bytes,
-                    stats.clone(),
-                )?;
-                cached_object_store.start_evictor().await;
-                cached_object_store
-            }
-        };
-
-        let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
-        let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
-
-        let external_ssts = match &latest_manifest {
-            Some(latest_stored_manifest) => {
-                let mut external_ssts = HashMap::new();
-                for external_db in &latest_stored_manifest.manifest().external_dbs {
-                    for id in &external_db.sst_ids {
-                        external_ssts.insert(*id, external_db.path.clone().into());
-                    }
-                }
-                external_ssts
-            }
-            None => HashMap::new(),
-        };
-
-        let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
-        let table_store = Arc::new(TableStore::new_with_fp_registry(
-            maybe_cached_object_store.clone(),
-            sst_format.clone(),
-            path_resolver.clone(),
-            fp_registry.clone(),
-            options.block_cache.as_ref().map(|c| {
-                Arc::new(DbCacheWrapper::new(c.clone(), stat_registry.as_ref())) as Arc<dyn DbCache>
-            }),
-        ));
-
-        // get the next wal id before writing manifest.
-        let last_l0_recent_flushed_wal_id = match &latest_manifest {
-            Some(latest_stored_manifest) => {
-                latest_stored_manifest
-                    .db_state()
-                    .last_l0_recent_flushed_wal_sst_id
-            }
-            None => 0,
-        };
-        let next_wal_id = table_store
-            .next_wal_sst_id(last_l0_recent_flushed_wal_id)
-            .await?;
-
-        let mut manifest = Self::init_db(&manifest_store, latest_manifest).await?;
-        let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (wal_flush_tx, wal_flush_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
-        let inner = Arc::new(
-            DbInner::new(
-                options.clone(),
-                table_store.clone(),
-                manifest.prepare_dirty()?,
-                wal_flush_tx,
-                memtable_flush_tx,
-                write_tx,
-                stat_registry,
-            )
-            .await?,
-        );
-        if inner.wal_enabled() {
-            inner.fence_writers(&mut manifest, next_wal_id).await?;
-        }
-        inner.replay_wal().await?;
-        let tokio_handle = Handle::current();
-        let flush_task = if inner.wal_enabled() {
-            Some(inner.spawn_flush_task(wal_flush_rx, &tokio_handle))
-        } else {
-            None
-        };
-        let memtable_flush_task =
-            inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
-        let write_task = inner.spawn_write_task(write_rx, &tokio_handle);
-        let mut compactor = None;
-        if let Some(compactor_options) = &inner.options.compactor_options {
-            // not to pollute the cache during compaction
-            let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
-                object_store.clone(),
-                sst_format,
-                path_resolver,
-                fp_registry.clone(),
-                None,
-            ));
-            let cleanup_inner = inner.clone();
-            compactor = Some(
-                Compactor::new(
-                    manifest_store.clone(),
-                    uncached_table_store.clone(),
-                    compactor_options.clone(),
-                    Handle::current(),
-                    inner.stat_registry.as_ref(),
-                    move |result: &Result<(), SlateDBError>| {
-                        let err = bg_task_result_into_err(result);
-                        warn!("compactor thread exited with {:?}", err);
-                        let mut state = cleanup_inner.state.write();
-                        state.record_fatal_error(err.clone())
-                    },
-                )
-                .await?,
-            )
-        }
-        let mut garbage_collector = None;
-        if let Some(gc_options) = &inner.options.garbage_collector_options {
-            let cleanup_inner = inner.clone();
-            garbage_collector = Some(
-                GarbageCollector::new(
-                    manifest_store.clone(),
-                    table_store.clone(),
-                    gc_options.clone(),
-                    Handle::current(),
-                    inner.stat_registry.clone(),
-                    move |result| {
-                        let err = bg_task_result_into_err(result);
-                        warn!("GC thread exited with {:?}", err);
-                        let mut state = cleanup_inner.state.write();
-                        state.record_fatal_error(err.clone())
-                    },
-                )
-                .await,
-            )
-        };
-        Ok(Self {
-            inner,
-            wal_flush_task: Mutex::new(flush_task),
-            memtable_flush_task: Mutex::new(memtable_flush_task),
-            write_task: Mutex::new(write_task),
-            compactor: Mutex::new(compactor),
-            garbage_collector: Mutex::new(garbage_collector),
-        })
-    }
-
-    async fn init_db(
-        manifest_store: &Arc<ManifestStore>,
-        latest_stored_manifest: Option<StoredManifest>,
-    ) -> Result<FenceableManifest, SlateDBError> {
-        let stored_manifest = match latest_stored_manifest {
-            Some(manifest) => manifest,
-            None => {
-                StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new()).await?
-            }
-        };
-        FenceableManifest::init_writer(stored_manifest).await
+    pub fn builder<P: Into<Path>>(path: P, object_store: Arc<dyn ObjectStore>) -> DbBuilder<P> {
+        DbBuilder::new(path, object_store)
     }
 
     /// Close the database.
@@ -1142,7 +912,7 @@ impl Db {
     /// }
     /// ```
     pub async fn flush(&self) -> Result<(), SlateDBError> {
-        if self.inner.wal_enabled() {
+        if self.inner.wal_enabled {
             self.inner.flush_wals().await
         } else {
             self.inner.flush_memtables().await
@@ -1153,7 +923,7 @@ impl Db {
         let table = {
             let guard = self.inner.state.read();
             let snapshot = guard.snapshot();
-            if self.inner.wal_enabled() {
+            if self.inner.wal_enabled {
                 snapshot.wal.clone()
             } else {
                 snapshot.memtable.clone()
@@ -1173,6 +943,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use fail_parallel::FailPointRegistry;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
     use std::ops::Bound::Excluded;
@@ -1183,16 +954,21 @@ mod tests {
     use crate::cached_object_store::stats::{
         OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
     };
-    use crate::cached_object_store::FsCacheStorage;
+    use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
+    use crate::cached_object_store_stats::CachedObjectStoreStats;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
-        CompactorOptions, ObjectStoreCacheOptions, SizeTieredCompactionSchedulerOptions, Ttl,
+        CompactorOptions, ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions,
+        Ttl,
     };
+    use crate::db_state::CoreDbState;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::iter::KeyValueIterator;
+    use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
+    use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
@@ -1207,13 +983,12 @@ mod tests {
     #[tokio::test]
     async fn test_put_get_delete() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let kv_store = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            test_db_options(0, 1024, None),
-            object_store,
-        )
-        .await
-        .unwrap();
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
@@ -1236,13 +1011,11 @@ mod tests {
             db_options.flush_interval = None;
             db_options
         };
-        let kv_store = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            db_options_no_flush_interval,
-            object_store,
-        )
-        .await
-        .unwrap();
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(db_options_no_flush_interval)
+            .build()
+            .await
+            .unwrap();
         let key = b"test_key";
         let value = b"test_value";
 
@@ -1272,13 +1045,12 @@ mod tests {
         let ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let kv_store = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(ttl)),
-            object_store,
-        )
-        .await
-        .unwrap();
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
+            .with_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
 
         let key = b"test_key";
         let value = b"test_value";
@@ -1325,13 +1097,12 @@ mod tests {
         let default_ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let kv_store = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(default_ttl)),
-            object_store,
-        )
-        .await
-        .unwrap();
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(test_db_options_with_ttl(0, 1024, None, Some(default_ttl)))
+            .with_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
 
         let key = b"test_key";
         let value = b"test_value";
@@ -1388,13 +1159,12 @@ mod tests {
         let ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let kv_store = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(ttl)),
-            object_store,
-        )
-        .await
-        .unwrap();
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
+            .with_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
 
         let key = b"test_key";
         let key_other = b"time_advancing_key";
@@ -1460,13 +1230,11 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut options = test_db_options(0, 1024 * 1024, None);
         options.wal_enabled = false;
-        let db = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            options.clone(),
-            object_store,
-        )
-        .await
-        .unwrap();
+        let db = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
         let put_options = PutOptions::default();
         let write_options = WriteOptions {
             await_durable: false,
@@ -1515,13 +1283,11 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut options = test_db_options(0, 1024 * 1024, None);
         options.wal_enabled = false;
-        let db = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            options.clone(),
-            object_store,
-        )
-        .await
-        .unwrap();
+        let db = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
 
         // write enough rows with the same key that we yield an L0 SST with multiple blocks
         let mut last_val: String = "foo".to_string();
@@ -1583,13 +1349,12 @@ mod tests {
         let ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let kv_store = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            test_db_options_with_ttl(0, 1024, None, clock.clone(), Some(ttl)),
-            object_store,
-        )
-        .await
-        .unwrap();
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
+            .with_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
 
         let key = b"test_key";
         let key_other = b"time_advancing_key";
@@ -1670,11 +1435,12 @@ mod tests {
 
         opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
         opts.object_store_cache_options.part_size_bytes = 1024;
-        let kv_store = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store_with_cache_metrics"),
-            opts,
+        let kv_store = Db::builder(
+            "/tmp/test_kv_store_with_cache_metrics",
             object_store.clone(),
         )
+        .with_settings(opts)
+        .build()
         .await
         .unwrap();
 
@@ -1734,11 +1500,12 @@ mod tests {
         .unwrap();
 
         opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
-        let kv_store = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store_with_cache_stored_files"),
-            opts,
+        let kv_store = Db::builder(
+            "/tmp/test_kv_store_with_cache_stored_files",
             cached_object_store.clone(),
         )
+        .with_settings(opts)
+        .build()
         .await
         .unwrap();
         let key = b"test_key";
@@ -1801,11 +1568,13 @@ mod tests {
 
     async fn build_database_from_table(
         table: &BTreeMap<Bytes, Bytes>,
-        db_options: DbOptions,
+        db_options: Settings,
         await_durable: bool,
     ) -> Db {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::open_with_opts(Path::from("/tmp/test_kv_store"), db_options, object_store)
+        let db = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(db_options)
+            .build()
             .await
             .unwrap();
 
@@ -1886,7 +1655,9 @@ mod tests {
 
         let db_options = test_db_options(0, 1024, None);
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::open_with_opts(Path::from("/tmp/test_kv_store"), db_options, object_store)
+        let db = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(db_options)
+            .build()
             .await
             .unwrap();
         let db_holder = DbHolder { db };
@@ -2055,13 +1826,11 @@ mod tests {
     #[tokio::test]
     async fn test_write_batch() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let kv_store = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            test_db_options(0, 1024, None),
-            object_store,
-        )
-        .await
-        .unwrap();
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
 
         // Create a new WriteBatch
         let mut batch = WriteBatch::new();
@@ -2092,13 +1861,11 @@ mod tests {
         // Disable WAL
         options.wal_enabled = false;
 
-        let kv_store = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store_without_wal"),
-            options,
-            object_store,
-        )
-        .await
-        .unwrap();
+        let kv_store = Db::builder("/tmp/test_kv_store_without_wal", object_store.clone())
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
 
         // Create a new WriteBatch
         let mut batch = WriteBatch::new();
@@ -2151,10 +1918,12 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_batch_writes_consistency() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+            SizeTieredCompactionSchedulerOptions::default(),
+        ));
         let kv_store = Arc::new(
-            Db::open_with_opts(
-                Path::from("/tmp/test_concurrent_kv_store"),
-                test_db_options(
+            Db::builder("/tmp/test_concurrent_kv_store", object_store)
+                .with_settings(test_db_options(
                     0,
                     1024,
                     // Enable compactor to prevent l0 from filling up and
@@ -2162,17 +1931,13 @@ mod tests {
                     Some(CompactorOptions {
                         poll_interval: Duration::from_millis(100),
                         max_sst_size: 256,
-                        compaction_scheduler: Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-                            SizeTieredCompactionSchedulerOptions::default(),
-                        )),
                         max_concurrent_compactions: 1,
-                        compaction_runtime: None,
                     }),
-                ),
-                object_store.clone(),
-            )
-            .await
-            .unwrap(),
+                ))
+                .with_compaction_scheduler_supplier(compaction_scheduler)
+                .build()
+                .await
+                .unwrap(),
         );
 
         const NUM_KEYS: usize = 100;
@@ -2236,10 +2001,12 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     async fn test_disable_wal_after_wal_enabled() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
         // open a db and write a wal entry
         let options = test_db_options(0, 32, None);
-        let db = Db::open_with_opts(path.clone(), options, object_store.clone())
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .build()
             .await
             .unwrap();
         db.put(&[b'a'; 4], &[b'j'; 4]).await.unwrap();
@@ -2249,7 +2016,9 @@ mod tests {
         // open a db with wal disabled and write a memtable
         let mut options = test_db_options(0, 32, None);
         options.wal_enabled = false;
-        let db = Db::open_with_opts(path.clone(), options.clone(), object_store.clone())
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(options.clone())
+            .build()
             .await
             .unwrap();
         db.delete_with_options(
@@ -2264,7 +2033,9 @@ mod tests {
         db.close().await.unwrap();
 
         // ensure we don't overwrite the values we just put on a reload
-        let db = Db::open_with_opts(path.clone(), options.clone(), object_store.clone())
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(options.clone())
+            .build()
             .await
             .unwrap();
         let val = db.get(&[b'a'; 4]).await.unwrap();
@@ -2279,7 +2050,7 @@ mod tests {
         use crate::{test_utils::assert_iterator, types::RowEntry};
 
         let clock = Arc::new(TestClock::new());
-        let mut options = test_db_options_with_clock(0, 256, None, clock.clone());
+        let mut options = test_db_options(0, 256, None);
         options.wal_enabled = false;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -2290,7 +2061,10 @@ mod tests {
             path.clone(),
             None,
         ));
-        let db = Db::open_with_opts(path.clone(), options, object_store.clone())
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(options)
+            .with_clock(clock.clone())
+            .build()
             .await
             .unwrap();
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
@@ -2354,16 +2128,14 @@ mod tests {
     #[tokio::test]
     async fn test_put_flushes_memtable() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_opts(
-            path.clone(),
-            test_db_options(0, 256, None),
-            object_store.clone(),
-        )
-        .await
-        .unwrap();
+        let path = "/tmp/test_kv_store";
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 256, None))
+            .build()
+            .await
+            .unwrap();
 
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
         let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
         let sst_format = SsTableFormat {
             min_filter_keys: 10,
@@ -2372,7 +2144,7 @@ mod tests {
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
             sst_format,
-            path.clone(),
+            path,
             None,
         ));
 
@@ -2440,14 +2212,12 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let mut options = test_db_options(0, 1, None);
         options.max_unflushed_bytes = 1;
-        let db = Db::open_with_fp_registry(
-            path.clone(),
-            options,
-            object_store.clone(),
-            fp_registry.clone(),
-        )
-        .await
-        .unwrap();
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
 
         let write_opts = WriteOptions {
             await_durable: false,
@@ -2475,7 +2245,9 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut options = test_db_options(0, 1, None);
         options.l0_max_ssts = 4;
-        let db = Db::open_with_opts(Path::from("/tmp/test_kv_store"), options, object_store)
+        let db = Db::builder("/tmp/test_kv_store", object_store.clone())
+            .with_settings(options)
+            .build()
             .await
             .unwrap();
         db.put(b"key1", b"val1").await.unwrap();
@@ -2493,13 +2265,11 @@ mod tests {
     #[tokio::test]
     async fn test_put_empty_value() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let kv_store = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            test_db_options(0, 1024, None),
-            object_store,
-        )
-        .await
-        .unwrap();
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
         let key = b"test_key";
         let value = b"";
         kv_store.put(key, value).await.unwrap();
@@ -2514,13 +2284,12 @@ mod tests {
     #[tokio::test]
     async fn test_flush_while_iterating() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let kv_store = Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
-            test_db_options(0, 1024, None),
-            object_store,
-        )
-        .await
-        .unwrap();
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_clock(Arc::new(TestClock::new()))
+            .build()
+            .await
+            .unwrap();
 
         let memtable = {
             let mut lock = kv_store.inner.state.write();
@@ -2549,15 +2318,14 @@ mod tests {
     #[tokio::test]
     async fn test_basic_restore() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
         let mut next_wal_id = 1;
-        let kv_store = Db::open_with_opts(
-            path.clone(),
-            test_db_options(0, 128, None),
-            object_store.clone(),
-        )
-        .await
-        .unwrap();
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_clock(Arc::new(TestClock::new()))
+            .build()
+            .await
+            .unwrap();
         // increment wal id for the empty wal
         next_wal_id += 1;
 
@@ -2589,13 +2357,12 @@ mod tests {
         kv_store.close().await.unwrap();
 
         // recover and validate that sst files are loaded on recovery.
-        let kv_store_restored = Db::open_with_opts(
-            path.clone(),
-            test_db_options(0, 128, None),
-            object_store.clone(),
-        )
-        .await
-        .unwrap();
+        let kv_store_restored = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_clock(Arc::new(TestClock::new()))
+            .build()
+            .await
+            .unwrap();
         // increment wal id for the empty wal
         next_wal_id += 1;
 
@@ -2612,7 +2379,7 @@ mod tests {
         kv_store_restored.close().await.unwrap();
 
         // validate that the manifest file exists.
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
         let db_state = stored_manifest.db_state();
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
@@ -2622,14 +2389,13 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn test_restore_seq_number() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
-        let db = Db::open_with_opts(
-            path.clone(),
-            test_db_options(0, 256, None),
-            object_store.clone(),
-        )
-        .await
-        .unwrap();
+        let path = "/tmp/test_kv_store";
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 256, None))
+            .with_clock(Arc::new(TestClock::new()))
+            .build()
+            .await
+            .unwrap();
 
         db.put(b"key1", b"val1").await.unwrap();
         db.put(b"key2", b"val2").await.unwrap();
@@ -2637,13 +2403,12 @@ mod tests {
         db.flush().await.unwrap();
         db.close().await.unwrap();
 
-        let db_restored = Db::open_with_opts(
-            path.clone(),
-            test_db_options(0, 256, None),
-            object_store.clone(),
-        )
-        .await
-        .unwrap();
+        let db_restored = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 256, None))
+            .with_clock(Arc::new(TestClock::new()))
+            .build()
+            .await
+            .unwrap();
 
         let mut state = db_restored.inner.state.write();
         let memtable = state.memtable();
@@ -2663,15 +2428,13 @@ mod tests {
     async fn test_should_read_uncommitted_data_if_read_level_uncommitted() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_fp_registry(
-            path.clone(),
-            test_db_options(0, 1024, None),
-            object_store.clone(),
-            fp_registry.clone(),
-        )
-        .await
-        .unwrap();
+        let path = "/tmp/test_kv_store";
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
         kv_store
@@ -2710,15 +2473,13 @@ mod tests {
     async fn test_should_read_only_committed_data() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_fp_registry(
-            path.clone(),
-            test_db_options(0, 1024, None),
-            object_store.clone(),
-            fp_registry.clone(),
-        )
-        .await
-        .unwrap();
+        let path = "/tmp/test_kv_store";
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
 
         kv_store
             .put("foo".as_bytes(), "bar".as_bytes())
@@ -2758,15 +2519,13 @@ mod tests {
     async fn test_should_delete_without_awaiting_flush() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
-        let kv_store = Db::open_with_fp_registry(
-            path.clone(),
-            test_db_options(0, 1024, None),
-            object_store.clone(),
-            fp_registry.clone(),
-        )
-        .await
-        .unwrap();
+        let path = "/tmp/test_kv_store";
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
 
         kv_store
             .put("foo".as_bytes(), "bar".as_bytes())
@@ -2806,16 +2565,14 @@ mod tests {
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "pause").unwrap();
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
         let mut next_wal_id = 1;
-        let db = Db::open_with_fp_registry(
-            path.clone(),
-            test_db_options(0, 128, None),
-            object_store.clone(),
-            fp_registry.clone(),
-        )
-        .await
-        .unwrap();
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
         next_wal_id += 1;
 
         // write a few keys that will result in memtable flushes
@@ -2828,13 +2585,12 @@ mod tests {
         db.put(key2, value2).await.unwrap();
         next_wal_id += 1;
 
-        let reader = Db::open_with_opts(
-            path.clone(),
-            test_db_options(0, 128, None),
-            object_store.clone(),
-        )
-        .await
-        .unwrap();
+        let reader = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
 
         // increment wal id for the empty wal
         next_wal_id += 1;
@@ -2888,15 +2644,13 @@ mod tests {
         .unwrap();
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
-        let db = Db::open_with_fp_registry(
-            path.clone(),
-            test_db_options(0, 128, None),
-            object_store.clone(),
-            fp_registry.clone(),
-        )
-        .await
-        .unwrap();
+        let path = "/tmp/test_kv_store";
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
 
         // write a few keys that will result in memtable flushes
         let key1 = [b'a'; 32];
@@ -2914,14 +2668,12 @@ mod tests {
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "pause").unwrap();
 
         // reload the db
-        let db = Db::open_with_fp_registry(
-            path.clone(),
-            test_db_options(0, 128, None),
-            object_store.clone(),
-            fp_registry.clone(),
-        )
-        .await
-        .unwrap();
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
 
         // verify that we reload imm
         let snapshot = db.inner.state.read().snapshot();
@@ -2955,16 +2707,14 @@ mod tests {
     async fn test_should_fail_write_if_wal_flush_task_panics() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
         let db = Arc::new(
-            Db::open_with_fp_registry(
-                path.clone(),
-                test_db_options(0, 128, None),
-                object_store.clone(),
-                fp_registry.clone(),
-            )
-            .await
-            .unwrap(),
+            Db::builder(path, object_store.clone())
+                .with_settings(test_db_options(0, 128, None))
+                .with_fp_registry(fp_registry.clone())
+                .build()
+                .await
+                .unwrap(),
         );
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
@@ -2976,16 +2726,14 @@ mod tests {
     async fn test_wal_id_last_seen_should_exist_even_if_wal_write_fails() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
         let db = Arc::new(
-            Db::open_with_fp_registry(
-                path.clone(),
-                test_db_options(0, 128, None),
-                object_store.clone(),
-                fp_registry.clone(),
-            )
-            .await
-            .unwrap(),
+            Db::builder(path, object_store.clone())
+                .with_settings(test_db_options(0, 128, None))
+                .with_fp_registry(fp_registry.clone())
+                .build()
+                .await
+                .unwrap(),
         );
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
@@ -2997,11 +2745,11 @@ mod tests {
         // Close, which flushes the latest manifest to the object store
         db.close().await.unwrap();
 
-        let manifest_store = ManifestStore::new(&path, object_store.clone());
+        let manifest_store = ManifestStore::new(&Path::from(path), object_store.clone());
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
             SsTableFormat::default(),
-            path.clone(),
+            path,
             None,
         ));
 
@@ -3016,13 +2764,21 @@ mod tests {
         assert_eq!(manifest.core.next_wal_sst_id, next_wal_sst_id);
     }
 
-    async fn do_test_should_read_compacted_db(options: DbOptions) {
+    async fn do_test_should_read_compacted_db(options: Settings) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
-        let db = Db::open_with_opts(path.clone(), options, object_store.clone())
+        let path = "/tmp/test_kv_store";
+
+        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+            SizeTieredCompactionSchedulerOptions::default(),
+        ));
+
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .build()
             .await
             .unwrap();
-        let ms = ManifestStore::new(&path, object_store.clone());
+        let ms = ManifestStore::new(&Path::from(path), object_store.clone());
         let mut sm = StoredManifest::load(Arc::new(ms)).await.unwrap();
 
         // write enough to fill up a few l0 SSTs
@@ -3095,11 +2851,7 @@ mod tests {
             Some(CompactorOptions {
                 poll_interval: Duration::from_millis(100),
                 max_sst_size: 256,
-                compaction_scheduler: Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-                    SizeTieredCompactionSchedulerOptions::default(),
-                )),
                 max_concurrent_compactions: 1,
-                compaction_runtime: None,
             }),
         ))
         .await;
@@ -3113,11 +2865,7 @@ mod tests {
             Some(CompactorOptions {
                 poll_interval: Duration::from_millis(100),
                 max_sst_size: 256,
-                compaction_scheduler: Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-                    SizeTieredCompactionSchedulerOptions::default(),
-                )),
                 max_concurrent_compactions: 1,
-                compaction_runtime: None,
             }),
         ))
         .await
@@ -3126,32 +2874,28 @@ mod tests {
     #[tokio::test]
     async fn test_db_open_should_write_empty_wal() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
         // assert that open db writes an empty wal.
-        let db = Db::open_with_opts(
-            path.clone(),
-            test_db_options(0, 128, None),
-            object_store.clone(),
-        )
-        .await
-        .unwrap();
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .build()
+            .await
+            .unwrap();
         assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 2);
         db.put(b"1", b"1").await.unwrap();
         // assert that second open writes another empty wal.
-        let db = Db::open_with_opts(
-            path.clone(),
-            test_db_options(0, 128, None),
-            object_store.clone(),
-        )
-        .await
-        .unwrap();
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .build()
+            .await
+            .unwrap();
         assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 4);
     }
 
     #[tokio::test]
     async fn test_empty_wal_should_fence_old_writer() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
 
         async fn do_put(db: &Db, key: &[u8], val: &[u8]) -> Result<(), SlateDBError> {
             db.put_with_options(
@@ -3166,23 +2910,19 @@ mod tests {
         }
 
         // open db1 and assert that it can write.
-        let db1 = Db::open_with_opts(
-            path.clone(),
-            test_db_options(0, 128, None),
-            object_store.clone(),
-        )
-        .await
-        .unwrap();
+        let db1 = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .build()
+            .await
+            .unwrap();
         do_put(&db1, b"1", b"1").await.unwrap();
 
         // open db2, causing it to write an empty wal and fence db1.
-        let db2 = Db::open_with_opts(
-            path.clone(),
-            test_db_options(0, 128, None),
-            object_store.clone(),
-        )
-        .await
-        .unwrap();
+        let db2 = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .build()
+            .await
+            .unwrap();
 
         // assert that db1 can no longer write.
         let err = do_put(&db1, b"1", b"1").await;
@@ -3196,19 +2936,15 @@ mod tests {
     async fn test_invalid_clock_progression() {
         // Given:
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
 
         let clock = Arc::new(TestClock::new());
-        let db = Db::open_with_opts(
-            path.clone(),
-            DbOptions {
-                clock: clock.clone(),
-                ..test_db_options(0, 128, None)
-            },
-            object_store.clone(),
-        )
-        .await
-        .unwrap();
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
 
         // When:
         // put with time = 10
@@ -3232,19 +2968,15 @@ mod tests {
     async fn test_invalid_clock_progression_across_db_instances() {
         // Given:
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
 
         let clock = Arc::new(TestClock::new());
-        let db = Db::open_with_opts(
-            path.clone(),
-            DbOptions {
-                clock: clock.clone(),
-                ..test_db_options(0, 128, None)
-            },
-            object_store.clone(),
-        )
-        .await
-        .unwrap();
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
 
         // When:
         // put with time = 10
@@ -3252,16 +2984,12 @@ mod tests {
         db.put(b"1", b"1").await.unwrap();
         db.flush().await.unwrap();
 
-        let db2 = Db::open_with_opts(
-            path.clone(),
-            DbOptions {
-                clock: clock.clone(),
-                ..test_db_options(0, 128, None)
-            },
-            object_store.clone(),
-        )
-        .await
-        .unwrap();
+        let db2 = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 128, None))
+            .with_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
         clock.ticker.store(5, Ordering::SeqCst);
         match db2.put(b"1", b"1").await {
             Ok(_) => panic!("expected an error on inserting backwards time"),
@@ -3278,15 +3006,17 @@ mod tests {
     async fn should_flush_all_memtables_when_wal_disabled() {
         // Given:
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
 
-        let db_options = DbOptions {
+        let db_options = Settings {
             wal_enabled: false,
             flush_interval: Some(Duration::from_secs(10)),
-            ..DbOptions::default()
+            ..Settings::default()
         };
 
-        let db = Db::open_with_opts(path.clone(), db_options.clone(), Arc::clone(&object_store))
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(db_options.clone())
+            .build()
             .await
             .unwrap();
 
@@ -3296,10 +3026,11 @@ mod tests {
         db.flush().await.unwrap();
 
         // When: reopen the database without closing the old instance
-        let reopened_db =
-            Db::open_with_opts(path.clone(), db_options.clone(), Arc::clone(&object_store))
-                .await
-                .unwrap();
+        let reopened_db = Db::builder(path, object_store.clone())
+            .with_settings(db_options.clone())
+            .build()
+            .await
+            .unwrap();
 
         // Then:
         assert_records_in_range(
@@ -3315,15 +3046,14 @@ mod tests {
     async fn test_recover_clock_tick_from_wal() {
         let clock = Arc::new(TestClock::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
 
-        let db = Db::open_with_opts(
-            path.clone(),
-            test_db_options_with_clock(0, 1024, None, clock.clone()),
-            Arc::clone(&object_store),
-        )
-        .await
-        .unwrap();
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
 
         clock.ticker.store(10, Ordering::SeqCst);
         db.put(&[b'a'; 4], &[b'j'; 8])
@@ -3339,20 +3069,19 @@ mod tests {
 
         // check the last_l0_clock_tick persisted in the manifest, it should be
         // i64::MIN because no WAL SST has yet made its way into L0
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
         let db_state = stored_manifest.db_state();
         let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, i64::MIN);
 
         let clock = Arc::new(TestClock::new());
-        let db = Db::open_with_opts(
-            path.clone(),
-            test_db_options_with_clock(0, 1024, None, clock.clone()),
-            Arc::clone(&object_store),
-        )
-        .await
-        .unwrap();
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
 
         assert_eq!(db.inner.mono_clock.last_tick.load(Ordering::SeqCst), 11);
     }
@@ -3361,15 +3090,14 @@ mod tests {
     async fn test_should_update_manifest_clock_tick_on_l0_flush() {
         let clock = Arc::new(TestClock::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
+        let path = "/tmp/test_kv_store";
 
-        let db = Db::open_with_opts(
-            path.clone(),
-            test_db_options_with_clock(0, 32, None, clock.clone()),
-            Arc::clone(&object_store),
-        )
-        .await
-        .unwrap();
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 32, None))
+            .with_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
 
         // this will exceed the l0_sst_size_bytes, meaning a clean shutdown
         // will update the manifest
@@ -3388,7 +3116,7 @@ mod tests {
 
         // check the last_clock_tick persisted in the manifest, it should be
         // i64::MIN because no WAL SST has yet made its way into L0
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
         let db_state = stored_manifest.db_state();
         let last_clock_tick = db_state.last_l0_clock_tick;
@@ -3408,16 +3136,18 @@ mod tests {
 
         let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let compress = CompressionCodec::from_str("zstd").unwrap();
-        let db_options = DbOptions {
+        let db_options = Settings {
             flush_interval: None,
             wal_enabled: false,
             compression_codec: Some(compress),
-            ..DbOptions::default()
+            ..Settings::default()
         };
-        let path = Path::from("/tmp/test_compression_overflow_bug");
-        let db = Db::open_with_opts(path.clone(), db_options, os.clone())
+        let path = "/tmp/test_compression_overflow_bug";
+        let db = Db::builder(path, os.clone())
+            .with_settings(db_options)
+            .build()
             .await
-            .expect("failed to open db");
+            .unwrap();
 
         // Insert some data with large values to trigger compression
         for i in 0..100 {
@@ -3456,11 +3186,14 @@ mod tests {
     async fn test_recover_clock_tick_from_manifest() {
         let clock = Arc::new(TestClock::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
-        let mut options = test_db_options_with_clock(0, 32, None, clock.clone());
+        let path = "/tmp/test_kv_store";
+        let mut options = test_db_options(0, 32, None);
         options.wal_enabled = false;
 
-        let db = Db::open_with_opts(path.clone(), options, Arc::clone(&object_store))
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .with_clock(clock.clone())
+            .build()
             .await
             .unwrap();
 
@@ -3478,9 +3211,12 @@ mod tests {
         db.close().await.unwrap();
 
         let clock = Arc::new(TestClock::new());
-        let mut options = test_db_options_with_clock(0, 32, None, clock.clone());
+        let mut options = test_db_options(0, 32, None);
         options.wal_enabled = false;
-        let db = Db::open_with_opts(path.clone(), options, Arc::clone(&object_store))
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .with_clock(clock.clone())
+            .build()
             .await
             .unwrap();
 
@@ -3515,38 +3251,17 @@ mod tests {
         min_filter_keys: u32,
         l0_sst_size_bytes: usize,
         compactor_options: Option<CompactorOptions>,
-    ) -> DbOptions {
-        test_db_options_with_clock(
-            min_filter_keys,
-            l0_sst_size_bytes,
-            compactor_options,
-            Arc::new(TestClock::new()),
-        )
-    }
-
-    fn test_db_options_with_clock(
-        min_filter_keys: u32,
-        l0_sst_size_bytes: usize,
-        compactor_options: Option<CompactorOptions>,
-        clock: Arc<TestClock>,
-    ) -> DbOptions {
-        test_db_options_with_ttl(
-            min_filter_keys,
-            l0_sst_size_bytes,
-            compactor_options,
-            clock,
-            None,
-        )
+    ) -> Settings {
+        test_db_options_with_ttl(min_filter_keys, l0_sst_size_bytes, compactor_options, None)
     }
 
     fn test_db_options_with_ttl(
         min_filter_keys: u32,
         l0_sst_size_bytes: usize,
         compactor_options: Option<CompactorOptions>,
-        clock: Arc<TestClock>,
         ttl: Option<u64>,
-    ) -> DbOptions {
-        DbOptions {
+    ) -> Settings {
+        Settings {
             flush_interval: Some(Duration::from_millis(100)),
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
@@ -3559,9 +3274,7 @@ mod tests {
             compactor_options,
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
-            block_cache: None,
             garbage_collector_options: None,
-            clock,
             default_ttl: ttl,
         }
     }
