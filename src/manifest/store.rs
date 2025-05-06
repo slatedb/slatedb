@@ -12,6 +12,7 @@ use crate::transactional_object_store::{
 };
 use crate::utils;
 use crate::SlateDBError::ManifestVersionExists;
+use async_trait::async_trait;
 use chrono::Utc;
 use futures::StreamExt;
 use object_store::path::Path;
@@ -19,7 +20,7 @@ use object_store::Error::AlreadyExists;
 use object_store::{Error, ObjectStore};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::ops::RangeBounds;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
@@ -499,29 +500,128 @@ impl StoredManifest {
     }
 }
 
-/// Represents the metadata of a manifest file stored in the object store.
+/// Represents the metadata of a manifest stored in the backend.
 #[derive(Serialize, Debug)]
-pub(crate) struct ManifestFileMetadata {
+pub(crate) struct ManifestMetadata {
     pub(crate) id: u64,
-    #[serde(serialize_with = "serialize_path")]
-    pub(crate) location: Path,
     pub(crate) last_modified: chrono::DateTime<Utc>,
     #[allow(dead_code)]
     pub(crate) size: u32,
 }
 
-fn serialize_path<S>(path: &Path, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(path.as_ref())
+pub(crate) struct ManifestStore {
+    backend: Box<dyn ManifestStoreBackend>,
+    clock: Arc<dyn Clock + Send + Sync>,
 }
 
-pub(crate) struct ManifestStore {
+#[async_trait]
+pub trait ManifestStoreBackend: Send + Sync {
+    async fn write_manifest(&self, id: u64, manifest: &Manifest) -> Result<(), SlateDBError>;
+    async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError>;
+    async fn try_read_manifest(&self, id: u64) -> Result<Option<Manifest>, SlateDBError>;
+    async fn list_manifests(
+        &self,
+        start_bound: Bound<u64>,
+        end_bound: Bound<u64>,
+    ) -> Result<Vec<ManifestMetadata>, SlateDBError>;
+}
+
+struct ObjectStoreManifestStoreBackend {
     object_store: Box<dyn TransactionalObjectStore>,
     codec: Box<dyn ManifestCodec>,
     manifest_suffix: &'static str,
-    clock: Arc<dyn Clock + Send + Sync>,
+}
+
+impl ObjectStoreManifestStoreBackend {
+    fn get_manifest_path(&self, id: u64) -> Path {
+        Path::from(format!("{:020}.{}", id, self.manifest_suffix))
+    }
+
+    fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {
+        match path.extension() {
+            Some(ext) if ext == expected_extension => path
+                .filename()
+                .expect("invalid filename")
+                .split('.')
+                .next()
+                .ok_or_else(|| InvalidDBState)?
+                .parse()
+                .map_err(|_| InvalidDBState),
+            _ => Err(InvalidDBState),
+        }
+    }
+}
+
+#[async_trait]
+impl ManifestStoreBackend for ObjectStoreManifestStoreBackend {
+    async fn write_manifest(&self, id: u64, manifest: &Manifest) -> Result<(), SlateDBError> {
+        let manifest_path = &self.get_manifest_path(id);
+        self.object_store
+            .put_if_not_exists(manifest_path, self.codec.encode(manifest))
+            .await
+            .map_err(|err| {
+                if let AlreadyExists { path: _, source: _ } = err {
+                    SlateDBError::ManifestVersionExists
+                } else {
+                    SlateDBError::from(err)
+                }
+            })?;
+        Ok(())
+    }
+
+    async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError> {
+        let manifest_path = &self.get_manifest_path(id);
+        self.object_store.delete(manifest_path).await?;
+        Ok(())
+    }
+
+    async fn try_read_manifest(&self, id: u64) -> Result<Option<Manifest>, SlateDBError> {
+        let manifest_path = &self.get_manifest_path(id);
+        match self.object_store.get(manifest_path).await {
+            Ok(manifest) => match manifest.bytes().await {
+                Ok(bytes) => {
+                    let manifest = self.codec.decode(&bytes)?;
+                    Ok(Some(manifest))
+                }
+                Err(e) => Err(SlateDBError::from(e)),
+            },
+            Err(e) => match e {
+                Error::NotFound { .. } => Ok(None),
+                _ => Err(SlateDBError::from(e)),
+            },
+        }
+    }
+
+    async fn list_manifests(
+        &self,
+        start_bound: Bound<u64>,
+        end_bound: Bound<u64>,
+    ) -> Result<Vec<ManifestMetadata>, SlateDBError> {
+        let manifest_path = &Path::from("/");
+        let id_range = (start_bound, end_bound);
+        let mut files_stream = self.object_store.list(Some(manifest_path));
+        let mut manifests = Vec::new();
+
+        while let Some(file) = match files_stream.next().await.transpose() {
+            Ok(file) => file,
+            Err(e) => return Err(SlateDBError::from(e)),
+        } {
+            match self.parse_id(&file.location, "manifest") {
+                Ok(id) if id_range.contains(&id) => {
+                    manifests.push(ManifestMetadata {
+                        id,
+                        last_modified: file.last_modified,
+                        size: file.size as u32,
+                    });
+                }
+                Err(_) => warn!("Unknown file in manifest directory: {:?}", file.location),
+                _ => {}
+            }
+        }
+
+        manifests.sort_by_key(|m| m.id);
+        Ok(manifests)
+    }
 }
 
 impl ManifestStore {
@@ -535,31 +635,20 @@ impl ManifestStore {
         clock: Arc<dyn Clock + Send + Sync>,
     ) -> Self {
         Self {
-            object_store: Box::new(DelegatingTransactionalObjectStore::new(
-                root_path.child("manifest"),
-                object_store,
-            )),
-            codec: Box::new(FlatBufferManifestCodec {}),
-            manifest_suffix: "manifest",
+            backend: Box::new(ObjectStoreManifestStoreBackend {
+                object_store: Box::new(DelegatingTransactionalObjectStore::new(
+                    root_path.child("manifest"),
+                    object_store,
+                )),
+                codec: Box::new(FlatBufferManifestCodec {}),
+                manifest_suffix: "manifest",
+            }),
             clock,
         }
     }
 
     async fn write_manifest(&self, id: u64, manifest: &Manifest) -> Result<(), SlateDBError> {
-        let manifest_path = &self.get_manifest_path(id);
-
-        self.object_store
-            .put_if_not_exists(manifest_path, self.codec.encode(manifest))
-            .await
-            .map_err(|err| {
-                if let AlreadyExists { path: _, source: _ } = err {
-                    SlateDBError::ManifestVersionExists
-                } else {
-                    SlateDBError::from(err)
-                }
-            })?;
-
-        Ok(())
+        self.backend.write_manifest(id, manifest).await
     }
 
     /// Delete a manifest from the object store.
@@ -578,9 +667,7 @@ impl ManifestStore {
             return Err(SlateDBError::InvalidDeletion);
         }
 
-        let manifest_path = &self.get_manifest_path(id);
-        self.object_store.delete(manifest_path).await?;
-        Ok(())
+        self.backend.delete_manifest(id).await
     }
 
     /// Read a manifest from the object store. The last element in an unbounded
@@ -590,31 +677,13 @@ impl ManifestStore {
     pub(crate) async fn list_manifests<R: RangeBounds<u64>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<ManifestFileMetadata>, SlateDBError> {
-        let manifest_path = &Path::from("/");
-        let mut files_stream = self.object_store.list(Some(manifest_path));
-        let mut manifests = Vec::new();
-
-        while let Some(file) = match files_stream.next().await.transpose() {
-            Ok(file) => file,
-            Err(e) => return Err(SlateDBError::from(e)),
-        } {
-            match self.parse_id(&file.location, "manifest") {
-                Ok(id) if id_range.contains(&id) => {
-                    manifests.push(ManifestFileMetadata {
-                        id,
-                        location: file.location,
-                        last_modified: file.last_modified,
-                        size: file.size as u32,
-                    });
-                }
-                Err(_) => warn!("Unknown file in manifest directory: {:?}", file.location),
-                _ => {}
-            }
-        }
-
-        manifests.sort_by_key(|m| m.id);
-        Ok(manifests)
+    ) -> Result<Vec<ManifestMetadata>, SlateDBError> {
+        self.backend
+            .list_manifests(
+                id_range.start_bound().cloned(),
+                id_range.end_bound().cloned(),
+            )
+            .await
     }
 
     /// Active manifests include the latest manifest and all manifests referenced
@@ -662,42 +731,11 @@ impl ManifestStore {
         &self,
         id: u64,
     ) -> Result<Option<Manifest>, SlateDBError> {
-        let manifest_path = &self.get_manifest_path(id);
-        match self.object_store.get(manifest_path).await {
-            Ok(manifest) => match manifest.bytes().await {
-                Ok(bytes) => {
-                    let manifest = self.codec.decode(&bytes)?;
-                    Ok(Some(manifest))
-                }
-                Err(e) => Err(SlateDBError::from(e)),
-            },
-            Err(e) => match e {
-                Error::NotFound { .. } => Ok(None),
-                _ => Err(SlateDBError::from(e)),
-            },
-        }
+        self.backend.try_read_manifest(id).await
     }
 
     pub(crate) async fn read_manifest(&self, id: u64) -> Result<Manifest, SlateDBError> {
         self.try_read_manifest(id).await?.ok_or(ManifestMissing(id))
-    }
-
-    fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {
-        match path.extension() {
-            Some(ext) if ext == expected_extension => path
-                .filename()
-                .expect("invalid filename")
-                .split('.')
-                .next()
-                .ok_or_else(|| InvalidDBState)?
-                .parse()
-                .map_err(|_| InvalidDBState),
-            _ => Err(InvalidDBState),
-        }
-    }
-
-    fn get_manifest_path(&self, id: u64) -> Path {
-        Path::from(format!("{:020}.{}", id, self.manifest_suffix))
     }
 }
 
