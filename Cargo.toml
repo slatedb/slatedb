@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "slatedb-bencher",
+    "slatedb-cli",
 ]
 
 [workspace.package]
@@ -101,14 +102,6 @@ foyer = ["dep:foyer"]
 lto = true
 
 [lib]
-# Disable `libtest` harness because it fights with Criterion's `--output-format bencher`
-# See https://bheisler.github.io/criterion.rs/book/faq.html
-bench = false
-
-[[bin]]
-name = "slatedb"
-path = "src/cli/main.rs"
-required-features = ["cli"]
 # Disable `libtest` harness because it fights with Criterion's `--output-format bencher`
 # See https://bheisler.github.io/criterion.rs/book/faq.html
 bench = false

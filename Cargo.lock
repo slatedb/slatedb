@@ -3106,6 +3106,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "slatedb-cli"
+version = "0.6.1"
+dependencies = [
+ "clap",
+ "humantime",
+ "object_store",
+ "rstest",
+ "serde_json",
+ "slatedb",
+ "tokio",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "small_ctor"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
