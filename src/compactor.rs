@@ -17,9 +17,14 @@ use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::spawn_bg_thread;
+
+pub trait CompactionSchedulerSupplier: Send + Sync {
+    fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler>;
+}
 
 pub trait CompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
@@ -72,19 +77,20 @@ impl Compactor {
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         options: CompactorOptions,
+        scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
         tokio_handle: Handle,
         stat_registry: &StatRegistry,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let (err_tx, err_rx) = tokio::sync::oneshot::channel();
-        let tokio_handle = options.compaction_runtime.clone().unwrap_or(tokio_handle);
         let stats = Arc::new(CompactionStats::new(stat_registry));
         let main_thread = spawn_bg_thread("slatedb-compactor", cleanup_fn, move || {
             let load_result = CompactorOrchestrator::new(
                 options,
                 manifest_store.clone(),
                 table_store.clone(),
+                scheduler_supplier,
                 tokio_handle,
                 external_rx,
                 stats,
@@ -129,13 +135,14 @@ impl CompactorOrchestrator {
         options: CompactorOptions,
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
+        scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
         tokio_handle: Handle,
         external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
         stats: Arc<CompactionStats>,
     ) -> Result<Self, SlateDBError> {
         let options = Arc::new(options);
         let ticker = crossbeam_channel::tick(options.poll_interval);
-        let scheduler = Self::load_compaction_scheduler(options.as_ref());
+        let scheduler = scheduler_supplier.compaction_scheduler();
         let (worker_tx, worker_rx) = crossbeam_channel::unbounded();
         let executor = Box::new(TokioCompactionExecutor::new(
             tokio_handle.clone(),
@@ -159,10 +166,6 @@ impl CompactorOrchestrator {
             handler,
         };
         Ok(orchestrator)
-    }
-
-    fn load_compaction_scheduler(options: &CompactorOptions) -> Box<dyn CompactionScheduler> {
-        options.compaction_scheduler.compaction_scheduler()
     }
 
     fn run(&mut self) -> Result<(), SlateDBError> {
@@ -454,21 +457,18 @@ mod tests {
     use ulid::Ulid;
 
     use crate::compactor::stats::CompactionStats;
-    use crate::compactor::{
-        CompactionScheduler, CompactorEventHandler, CompactorOptions, WorkerToOrchestratorMsg,
-    };
     use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
     use crate::compactor_stats::LAST_COMPACTION_TS_SEC;
     use crate::config::{
-        CompactionSchedulerSupplier, DbOptions, PutOptions, SizeTieredCompactionSchedulerOptions,
-        Ttl, WriteOptions,
+        PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
     use crate::db::Db;
     use crate::db_state::{CoreDbState, SortedRun};
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
 
+    use super::*;
     use crate::proptest_util::rng;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
@@ -484,10 +484,19 @@ mod tests {
     #[tokio::test]
     async fn test_compactor_compacts_l0() {
         // given:
+        let os = Arc::new(InMemory::new());
         let clock = Arc::new(TestClock::new());
-        let mut options = db_options(Some(compactor_options()), clock.clone());
+        let mut options = db_options(Some(compactor_options()));
         options.l0_sst_size_bytes = 128;
-        let (_, manifest_store, table_store, db) = build_test_db(options).await;
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_clock(clock)
+            .build()
+            .await
+            .unwrap();
+
+        let (manifest_store, table_store) = build_test_stores(os.clone());
         for i in 0..4 {
             db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48])
                 .await
@@ -533,14 +542,24 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
     async fn test_should_tombstones_in_l0() {
+        let os = Arc::new(InMemory::new());
         let clock = Arc::new(TestClock::new());
-        let mut compactor_opts = compactor_options();
+
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new());
-        compactor_opts.compaction_scheduler = scheduler.clone();
-        let mut options = db_options(Some(compactor_opts), clock.clone());
+
+        let mut options = db_options(Some(compactor_options()));
         options.wal_enabled = false;
         options.l0_sst_size_bytes = 128;
-        let (_, manifest_store, table_store, db) = build_test_db(options).await;
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_clock(clock)
+            .with_compaction_scheduler_supplier(scheduler.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let (manifest_store, table_store) = build_test_stores(os.clone());
 
         // put key 'a' into L1 (and key 'b' so that when we delete 'a' the SST is non-empty)
         db.put(&[b'a'; 16], &[b'a'; 32]).await.unwrap();
@@ -549,7 +568,7 @@ mod tests {
         scheduler.scheduler.should_compact.store(true, SeqCst);
         let db_state = await_compaction(manifest_store.clone()).await.unwrap();
         assert_eq!(db_state.compacted.len(), 1);
-        assert_eq!(db_state.l0.len(), 0, "{}", format!("{:?}", db_state.l0));
+        assert_eq!(db_state.l0.len(), 0, "{:?}", db_state.l0);
 
         // put tombstone for key a into L0
         db.delete_with_options(
@@ -565,7 +584,7 @@ mod tests {
         // Then:
         // we should now have a tombstone in L0 and a value in L1
         let db_state = get_db_state(manifest_store.clone()).await;
-        assert_eq!(db_state.l0.len(), 1, "{}", format!("{:?}", db_state.l0));
+        assert_eq!(db_state.l0.len(), 1, "{:?}", db_state.l0);
         assert_eq!(db_state.compacted.len(), 1);
 
         let l0 = db_state.l0.front().unwrap();
@@ -607,24 +626,29 @@ mod tests {
     #[tokio::test]
     async fn test_should_compact_expired_entries() {
         // given:
+        let os = Arc::new(InMemory::new());
         let insert_clock = Arc::new(TestClock::new());
 
-        let compactor_opts = CompactorOptions {
-            compaction_scheduler: Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-                SizeTieredCompactionSchedulerOptions {
-                    // We'll do exactly two flushes in this test, resulting in 2 L0 files.
-                    min_compaction_sources: 2,
-                    max_compaction_sources: 2,
-                    include_size_threshold: 4.0,
-                },
-            )),
-            ..compactor_options()
-        };
-        let options = DbOptions {
-            default_ttl: Some(50),
-            ..db_options(Some(compactor_opts), insert_clock.clone())
-        };
-        let (_, manifest_store, table_store, db) = build_test_db(options).await;
+        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+            SizeTieredCompactionSchedulerOptions {
+                // We'll do exactly two flushes in this test, resulting in 2 L0 files.
+                min_compaction_sources: 2,
+                max_compaction_sources: 2,
+                include_size_threshold: 4.0,
+            },
+        ));
+
+        let mut options = db_options(Some(compactor_options()));
+        options.default_ttl = Some(50);
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_clock(insert_clock.clone())
+            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .build()
+            .await
+            .unwrap();
+
+        let (manifest_store, table_store) = build_test_stores(os.clone());
 
         let value = &[b'a'; 64];
 
@@ -718,7 +742,7 @@ mod tests {
         rt: Runtime,
         manifest: StoredManifest,
         manifest_store: Arc<ManifestStore>,
-        options: DbOptions,
+        options: Settings,
         db: Db,
         scheduler: Box<MockScheduler>,
         executor: Box<MockExecutor>,
@@ -732,8 +756,18 @@ mod tests {
         fn new() -> Self {
             let rt = build_runtime();
             let compactor_options = Arc::new(compactor_options());
-            let options = db_options(None, Arc::new(TestClock::new()));
-            let (_, manifest_store, table_store, db) = rt.block_on(build_test_db(options.clone()));
+            let options = db_options(None);
+
+            let os = Arc::new(InMemory::new());
+            let (manifest_store, table_store) = build_test_stores(os.clone());
+            let db = rt
+                .block_on(
+                    Db::builder(PATH, os.clone())
+                        .with_settings(options.clone())
+                        .build(),
+                )
+                .unwrap();
+
             let scheduler = Box::new(MockScheduler::new());
             let executor = Box::new(MockExecutor::new());
             let (real_executor_tx, real_executor_rx) = crossbeam_channel::unbounded();
@@ -994,22 +1028,10 @@ mod tests {
         None
     }
 
-    async fn build_test_db(
-        options: DbOptions,
-    ) -> (
-        Arc<dyn ObjectStore>,
-        Arc<ManifestStore>,
-        Arc<TableStore>,
-        Db,
-    ) {
-        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::open_with_opts(Path::from(PATH), options.clone(), os.clone())
-            .await
-            .unwrap();
+    fn build_test_stores(os: Arc<dyn ObjectStore>) -> (Arc<ManifestStore>, Arc<TableStore>) {
         let sst_format = SsTableFormat {
             block_size: 32,
             min_filter_keys: 10,
-            compression_codec: options.compression_codec,
             ..SsTableFormat::default()
         };
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
@@ -1019,7 +1041,7 @@ mod tests {
             Path::from(PATH),
             None,
         ));
-        (os, manifest_store, table_store, db)
+        (manifest_store, table_store)
     }
 
     async fn await_compaction(manifest_store: Arc<ManifestStore>) -> Option<CoreDbState> {
@@ -1053,8 +1075,8 @@ mod tests {
         stored_manifest.db_state().clone()
     }
 
-    fn db_options(compactor_options: Option<CompactorOptions>, clock: Arc<TestClock>) -> DbOptions {
-        DbOptions {
+    fn db_options(compactor_options: Option<CompactorOptions>) -> Settings {
+        Settings {
             flush_interval: Some(Duration::from_millis(100)),
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
@@ -1062,8 +1084,7 @@ mod tests {
             l0_sst_size_bytes: 256,
             l0_max_ssts: 8,
             compactor_options,
-            clock,
-            ..DbOptions::default()
+            ..Settings::default()
         }
     }
 

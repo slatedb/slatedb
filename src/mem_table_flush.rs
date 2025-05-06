@@ -93,11 +93,11 @@ impl MemtableFlusher {
     async fn flush_imm_memtables_to_l0(&mut self) -> Result<(), SlateDBError> {
         while let Some(imm_memtable) = {
             let rguard = self.db_inner.state.read();
-            if rguard.state().core().l0.len() >= self.db_inner.options.l0_max_ssts {
+            if rguard.state().core().l0.len() >= self.db_inner.settings.l0_max_ssts {
                 warn!(
                     "too many l0 files {} >= {}. Won't flush imm to l0",
                     rguard.state().core().l0.len(),
-                    self.db_inner.options.l0_max_ssts
+                    self.db_inner.settings.l0_max_ssts
                 );
                 rguard.state().core().log_db_runs();
                 None
@@ -150,7 +150,7 @@ impl DbInner {
             flush_rx: &mut UnboundedReceiver<MemtableFlushMsg>,
         ) -> Result<(), SlateDBError> {
             let mut manifest_poll_interval =
-                tokio::time::interval(this.options.manifest_poll_interval);
+                tokio::time::interval(this.settings.manifest_poll_interval);
             let mut err_reader = this.state.read().error_reader();
 
             // Stop the loop when the shut down has been received *and* all

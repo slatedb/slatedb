@@ -54,7 +54,6 @@ impl GarbageCollector {
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
     ) -> Self {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
-        let tokio_handle = options.gc_runtime.clone().unwrap_or(tokio_handle);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let stats = Arc::new(GcStats::new(stat_registry));
@@ -651,6 +650,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use log::info;
     use object_store::{local::LocalFileSystem, path::Path};
+    use tokio::runtime::Handle;
     use ulid::Ulid;
     use uuid::Uuid;
 
@@ -1367,9 +1367,8 @@ mod tests {
                     min_age: std::time::Duration::from_secs(3600),
                     execution_mode: Once,
                 }),
-                gc_runtime: None,
             },
-            tokio::runtime::Handle::current(),
+            Handle::current(),
             stats.clone(),
             |_| {},
         )

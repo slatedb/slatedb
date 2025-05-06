@@ -147,7 +147,7 @@ impl From<object_store::Error> for SlateDBError {
 /// when parsing or processing database configuration options.
 #[non_exhaustive]
 #[derive(Error, Debug)]
-pub enum DbOptionsError {
+pub enum SettingsError {
     #[error("Unknown configuration file format: {0}")]
     UnknownFormat(PathBuf),
 

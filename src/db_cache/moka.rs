@@ -12,21 +12,20 @@
 //!
 //! ## Examples
 //!
-//! ```rust,no_run
-//! use object_store::local::LocalFileSystem;
-//! use slatedb::Db;
-//! use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
-//! use slatedb::config::DbOptions;
+//! ```
+//! use slatedb::{Db, SlateDBError};
+//! use slatedb::db_cache::moka::MokaCache;
+//! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
-//! #[::tokio::main]
-//! async fn main() {
-//!     let object_store = Arc::new(LocalFileSystem::new());
-//!     let options = DbOptions {
-//!         block_cache: Some(Arc::new(MokaCache::new())),
-//!         ..Default::default()
-//!     };
-//!     let db = Db::open_with_opts("path/to/db", options, object_store).await;
+//! #[tokio::main]
+//! async fn main() -> Result<(), SlateDBError> {
+//!     let object_store = Arc::new(InMemory::new());
+//!     let db = Db::builder("test_db", object_store)
+//!         .with_block_cache(Arc::new(MokaCache::new()))
+//!         .build()
+//!         .await?;
+//!     Ok(())
 //! }
 //! ```
 //!

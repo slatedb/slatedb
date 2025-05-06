@@ -1,8 +1,7 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use slatedb::config::{CompactorOptions, DbOptions, PutOptions, WriteOptions};
+use slatedb::config::{CompactorOptions, PutOptions, Settings, WriteOptions};
 use slatedb::object_store::memory::InMemory;
-use slatedb::object_store::path::Path;
 use slatedb::object_store::ObjectStore;
 use slatedb::Db;
 use std::collections::HashMap;
@@ -28,7 +27,7 @@ async fn test_concurrent_writers_and_readers() {
 
     // Create an InMemory object store and DB
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let config = DbOptions {
+    let config = Settings {
         flush_interval: Some(Duration::from_millis(100)),
         manifest_poll_interval: Duration::from_millis(100),
         compactor_options: Some(CompactorOptions {
@@ -43,13 +42,11 @@ async fn test_concurrent_writers_and_readers() {
         ..Default::default()
     };
     let db = Arc::new(
-        Db::open_with_opts(
-            Path::from("/tmp/test_concurrent_writers_readers"),
-            config,
-            object_store,
-        )
-        .await
-        .unwrap(),
+        Db::builder("/tmp/test_concurrent_writers_readers", object_store.clone())
+            .with_settings(config)
+            .build()
+            .await
+            .unwrap(),
     );
 
     // Flag to signal readers to stop

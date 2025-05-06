@@ -54,7 +54,7 @@ impl DbInner {
     async fn write_batch(&self, batch: WriteBatch) -> Result<Arc<KVTable>, SlateDBError> {
         let now = self.mono_clock.now().await?;
 
-        let current_table = if self.wal_enabled() {
+        let current_table = if self.wal_enabled {
             let mut guard = self.state.write();
 
             let seq = guard.increment_seq();
@@ -66,7 +66,7 @@ impl DbInner {
                             key,
                             value: ValueDeletable::Value(value),
                             create_ts: Some(now),
-                            expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
+                            expire_ts: opts.expire_ts_from(self.settings.default_ttl, now),
                             seq,
                         });
                     }
@@ -98,7 +98,7 @@ impl DbInner {
                             key,
                             value: ValueDeletable::Value(value),
                             create_ts: Some(now),
-                            expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
+                            expire_ts: opts.expire_ts_from(self.settings.default_ttl, now),
                             seq,
                         });
                     }

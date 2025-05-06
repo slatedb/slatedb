@@ -14,18 +14,17 @@
 //!
 //! ## Examples
 //!
-//! ```rust,no_run
-//! use object_store::local::LocalFileSystem;
+//! ```
 //! use foyer::{DirectFsDeviceOptions, Engine, HybridCacheBuilder};
 //! use slatedb::Db;
 //! use slatedb::db_cache::CachedEntry;
 //! use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
-//! use slatedb::config::DbOptions;
+//! use slatedb::object_store::local::LocalFileSystem;
 //! use std::sync::Arc;
 //!
 //! #[::tokio::main]
 //! async fn main() {
-//! let object_store = Arc::new(LocalFileSystem::new());
+//!     let object_store = Arc::new(LocalFileSystem::new());
 //!     let cache = HybridCacheBuilder::new()
 //!             .with_name("hybrid_cache")
 //!             .memory(1024)
@@ -36,11 +35,11 @@
 //!             .build()
 //!             .await
 //!             .unwrap();
-//!     let options = DbOptions {
-//!         block_cache: Some(Arc::new(FoyerHybridCache::new_with_cache(cache))),
-//!         ..Default::default()
-//!     };
-//!     let db = Db::open_with_opts("path/to/db", options, object_store).await;
+//!     let cache = Arc::new(FoyerHybridCache::new_with_cache(cache));
+//!     let db = Db::builder("path/to/db", object_store)
+//!         .with_block_cache(cache)
+//!         .build()
+//!         .await;
 //! }
 //! ```
 //!
