@@ -1,5 +1,6 @@
 [package]
 name = "slatedb-bencher"
+description = "A program to benchmark SlateDB"
 readme = "README.md"
 publish = false
 version.workspace = true
@@ -7,7 +8,6 @@ edition.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description.workspace = true
 
 [[bin]]
 name = "bencher"
@@ -25,7 +25,7 @@ futures = "0.3.30"
 object_store = "0.12.0"
 rand = "0.8.5"
 rand_xorshift = "0.3.0"
-slatedb = { path = "../", features = ["aws", "azure", "bencher", "wal_disable", "moka"] }
+slatedb = { path = "../slatedb", features = ["aws", "azure", "bencher", "wal_disable", "moka"] }
 tokio = { version = "1.40.0" }
 tracing = {version = "0.1.40", features = ["log"]}
 tracing-subscriber = {version = "0.3"}
