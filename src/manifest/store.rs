@@ -98,15 +98,28 @@ impl FenceableManifest {
         stored_epoch: fn(&Manifest) -> u64,
         set_epoch: fn(&mut DirtyManifest, u64),
     ) -> Result<Self, SlateDBError> {
-        let local_epoch = stored_epoch(&stored_manifest.manifest) + 1;
-        let mut manifest = stored_manifest.prepare_dirty();
-        set_epoch(&mut manifest, local_epoch);
-        stored_manifest.update_manifest(manifest).await?;
-        Ok(Self {
-            stored_manifest,
-            local_epoch,
-            stored_epoch,
-        })
+        loop {
+            let local_epoch = stored_epoch(&stored_manifest.manifest) + 1;
+            let mut manifest = stored_manifest.prepare_dirty();
+            set_epoch(&mut manifest, local_epoch);
+            match stored_manifest.update_manifest(manifest).await {
+                Err(ManifestVersionExists) => {
+                    // The manifest may have been updated by a reader, or
+                    // we may have gotten this error after successfully updating
+                    // if we failed to get the response. Either way, refresh
+                    // the manifest and try the bump again.
+                    stored_manifest.refresh().await?;
+                }
+                Err(err) => return Err(err),
+                Ok(()) => {
+                    return Ok(Self {
+                        stored_manifest,
+                        local_epoch,
+                        stored_epoch,
+                    })
+                }
+            }
+        }
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
@@ -1215,5 +1228,32 @@ mod tests {
         sm.delete_checkpoint(checkpoint_id).await.unwrap();
         sm.refresh().await.unwrap();
         assert_eq!(manifest_id, sm.id);
+    }
+
+    #[tokio::test]
+    async fn test_should_cretry_epoch_bump_if_manifest_version_exists() {
+        let os = Arc::new(InMemory::new());
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
+        let state = CoreDbState::new();
+
+        // Mimic two writers A and B that try to bump the epoch at the same time
+        let sm_a = StoredManifest::create_new_db(Arc::clone(&ms), state.clone())
+            .await
+            .unwrap();
+
+        let sm_b = StoredManifest::load(Arc::clone(&ms)).await.unwrap();
+
+        let mut fm_b = FenceableManifest::init_writer(sm_b).await.unwrap();
+        assert_eq!(1, fm_b.local_epoch);
+
+        // The last writer always wins
+        let mut fm_a = FenceableManifest::init_writer(sm_a).await.unwrap();
+        assert_eq!(2, fm_a.local_epoch);
+
+        assert!(matches!(
+            fm_b.refresh().await.err(),
+            Some(SlateDBError::Fenced)
+        ));
+        assert!(fm_a.refresh().await.is_ok());
     }
 }

@@ -113,6 +113,10 @@ pub(crate) struct WritableKVTable {
 }
 
 pub(crate) struct ImmutableMemtable {
+    /// The last WAL ID of this IMM. This is used to determine the starting position of
+    /// WAL replay during recovery. After an IMM is flushed to L0, we do not need to care
+    /// about the earlier WALs which produced this IMM, all we need to know is the last
+    /// WAL ID of the last L0 compacted.
     last_wal_id: u64,
     table: Arc<KVTable>,
     flushed: WatchableOnceCell<Result<(), SlateDBError>>,
@@ -495,11 +499,6 @@ mod tests {
         assert_eq!(metadata.entry_num, 2);
         assert_eq!(metadata.entries_size_in_bytes, 29);
 
-        table.put(RowEntry::new_tombstone(b"first", 2));
-        metadata = table.table().metadata();
-        assert_eq!(metadata.entry_num, 2);
-        assert_eq!(metadata.entries_size_in_bytes, 29);
-
         table.put(RowEntry::new_value(b"abc333", b"val1", 1));
         metadata = table.table().metadata();
         assert_eq!(metadata.entry_num, 3);
@@ -519,6 +518,37 @@ mod tests {
         metadata = table.table().metadata();
         assert_eq!(metadata.entry_num, 6);
         assert_eq!(metadata.entries_size_in_bytes, 104);
+    }
+
+    #[tokio::test]
+    async fn test_memtable_track_last_seq() {
+        let mut table = WritableKVTable::new();
+        let mut metadata = table.table().metadata();
+
+        assert_eq!(metadata.last_seq, 0);
+        table.put(RowEntry::new_value(b"first", b"foo", 1));
+        metadata = table.table().metadata();
+        assert_eq!(metadata.last_seq, 1);
+
+        table.put(RowEntry::new_tombstone(b"first", 2));
+        metadata = table.table().metadata();
+        assert_eq!(metadata.last_seq, 2);
+
+        table.put(RowEntry::new_value(b"abc333", b"val1", 1));
+        metadata = table.table().metadata();
+        assert_eq!(metadata.last_seq, 2);
+
+        table.put(RowEntry::new_value(b"def456", b"blablabla", 2));
+        metadata = table.table().metadata();
+        assert_eq!(metadata.last_seq, 2);
+
+        table.put(RowEntry::new_value(b"def456", b"blabla", 3));
+        metadata = table.table().metadata();
+        assert_eq!(metadata.last_seq, 3);
+
+        table.put(RowEntry::new_tombstone(b"abc333", 4));
+        metadata = table.table().metadata();
+        assert_eq!(metadata.last_seq, 4);
     }
 
     #[rstest]
