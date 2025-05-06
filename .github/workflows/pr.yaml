@@ -29,7 +29,7 @@ jobs:
       - name: cargo install cargo-hack
         run: cargo +stable install cargo-hack --locked
       - name: cargo check
-        run: cargo hack check --each-feature --no-dev-deps
+        run: cargo hack check --each-feature --no-dev-deps --workspace
 
   clippy:
     runs-on: ubuntu-latest
@@ -38,7 +38,9 @@ jobs:
       - name: cargo install cargo-hack
         run: cargo +stable install cargo-hack --locked
       - name: cargo clippy
-        run: cargo hack clippy --each-feature --no-dev-deps && cargo hack clippy --lib -p slatedb --tests
+        run: |
+          cargo hack clippy --each-feature --no-dev-deps --workspace &&
+          cargo hack clippy --workspace --tests
 
   style:
     runs-on: ubuntu-latest
@@ -85,7 +87,7 @@ jobs:
         with:
           tool: nextest@0.9.84
       - name: Run Tests
-        run: cargo nextest run --all-features --profile ci
+        run: cargo nextest run --workspace --all-features --profile ci
       - name: Run Doc Tests
         run: cargo test --doc --all-features
 
