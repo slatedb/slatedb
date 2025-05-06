@@ -71,7 +71,7 @@ impl MemtableFlusher {
             self.load_manifest().await?;
             let result = self.write_checkpoint(options).await;
             if matches!(result, Err(SlateDBError::ManifestVersionExists)) {
-                error!("conflicting manifest version. retry write");
+                warn!("conflicting manifest version. updating and retrying write again.");
             } else {
                 return result;
             }
@@ -82,7 +82,7 @@ impl MemtableFlusher {
         loop {
             let result = self.write_manifest().await;
             if matches!(result, Err(SlateDBError::ManifestVersionExists)) {
-                error!("conflicting manifest version. retry write");
+                warn!("conflicting manifest version. updating and retrying write again.");
                 self.load_manifest().await?;
             } else {
                 return result;
