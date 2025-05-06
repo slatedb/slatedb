@@ -27,12 +27,12 @@ use crate::types::RowEntry;
 use crate::{blob::ReadOnlyBlob, block::Block};
 
 pub struct TableStore {
-    object_store: Arc<dyn ObjectStore>,
+    main_object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,
     path_resolver: PathResolver,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
-    transactional_wal_store: Arc<dyn TransactionalObjectStore>,
+    main_transactional_store: Arc<dyn TransactionalObjectStore>,
     /// In-memory cache for blocks
     block_cache: Option<Arc<dyn DbCache>>,
 }
@@ -87,20 +87,20 @@ impl TableStore {
     }
 
     pub fn new_with_fp_registry(
-        object_store: Arc<dyn ObjectStore>,
+        main_object_store: Arc<dyn ObjectStore>,
         sst_format: SsTableFormat,
         path_resolver: PathResolver,
         fp_registry: Arc<FailPointRegistry>,
         block_cache: Option<Arc<dyn DbCache>>,
     ) -> Self {
         Self {
-            object_store: object_store.clone(),
+            main_object_store: main_object_store.clone(),
             sst_format,
             path_resolver,
             fp_registry,
-            transactional_wal_store: Arc::new(DelegatingTransactionalObjectStore::new(
+            main_transactional_store: Arc::new(DelegatingTransactionalObjectStore::new(
                 Path::from("/"),
-                object_store.clone(),
+                main_object_store.clone(),
             )),
             block_cache,
         }
@@ -128,7 +128,7 @@ impl TableStore {
 
         let mut wal_list: Vec<SstFileMetadata> = Vec::new();
         let wal_path = &self.path_resolver.wal_path();
-        let mut files_stream = self.object_store.list(Some(wal_path));
+        let mut files_stream = self.main_object_store.list(Some(wal_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
             match self.path_resolver.parse_table_id(&file.location) {
@@ -168,7 +168,7 @@ impl TableStore {
         EncodedSsTableWriter {
             id,
             builder: self.sst_format.table_builder(),
-            writer: BufWriter::new(self.object_store.clone(), path),
+            writer: BufWriter::new(self.main_object_store.clone(), path),
             table_store: self,
             #[cfg(test)]
             blocks_written: 0,
@@ -200,7 +200,7 @@ impl TableStore {
 
         let data = encoded_sst.remaining_as_bytes();
         let path = self.path(id);
-        self.transactional_wal_store
+        self.main_transactional_store
             .put_if_not_exists(&path, data)
             .await
             .map_err(|e| match e {
@@ -253,7 +253,7 @@ impl TableStore {
     /// Delete an SSTable from the object store.
     pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
         let path = self.path(id);
-        self.object_store
+        self.main_object_store
             .delete(&path)
             .await
             .map_err(SlateDBError::from)
@@ -272,7 +272,7 @@ impl TableStore {
     ) -> Result<Vec<SstFileMetadata>, SlateDBError> {
         let mut sst_list: Vec<SstFileMetadata> = Vec::new();
         let compacted_path = self.path_resolver.compacted_path();
-        let mut files_stream = self.object_store.list(Some(&compacted_path));
+        let mut files_stream = self.main_object_store.list(Some(&compacted_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
             match self.path_resolver.parse_table_id(&file.location) {
@@ -305,7 +305,7 @@ impl TableStore {
     pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
         let path = self.path(id);
         let obj = ReadOnlyObject {
-            object_store: self.object_store.clone(),
+            object_store: self.main_object_store.clone(),
             path,
         };
         let info = self.sst_format.read_info(&obj).await?;
@@ -328,7 +328,7 @@ impl TableStore {
         }
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
-            object_store: self.object_store.clone(),
+            object_store: self.main_object_store.clone(),
             path,
         };
         let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
@@ -361,7 +361,7 @@ impl TableStore {
         }
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
-            object_store: self.object_store.clone(),
+            object_store: self.main_object_store.clone(),
             path,
         };
         let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
@@ -384,7 +384,7 @@ impl TableStore {
     ) -> Result<VecDeque<Block>, SlateDBError> {
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
-            object_store: self.object_store.clone(),
+            object_store: self.main_object_store.clone(),
             path,
         };
         let index = self.sst_format.read_index(&handle.info, &obj).await?;
@@ -409,7 +409,7 @@ impl TableStore {
         // Create a ReadOnlyObject for accessing the SSTable file
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
-            object_store: self.object_store.clone(),
+            object_store: self.main_object_store.clone(),
             path,
         };
         // Initialize the result vector and a vector to track uncached ranges
@@ -505,7 +505,7 @@ impl TableStore {
     ) -> Result<Block, SlateDBError> {
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject {
-            object_store: self.object_store.clone(),
+            object_store: self.main_object_store.clone(),
             path,
         };
         let index = self.sst_format.read_index(&handle.info, &obj).await?;

@@ -119,7 +119,7 @@ use crate::utils::bg_task_result_into_err;
 pub struct DbBuilder<P: Into<Path>> {
     path: P,
     settings: Settings,
-    object_store: Arc<dyn ObjectStore>,
+    main_object_store: Arc<dyn ObjectStore>,
     block_cache: Option<Arc<dyn DbCache>>,
     clock: Option<Arc<dyn Clock + Send + Sync>>,
     gc_runtime: Option<Handle>,
@@ -130,10 +130,10 @@ pub struct DbBuilder<P: Into<Path>> {
 
 impl<P: Into<Path>> DbBuilder<P> {
     /// Creates a new builder for a database at the given path.
-    pub fn new(path: P, object_store: Arc<dyn ObjectStore>) -> Self {
+    pub fn new(path: P, main_object_store: Arc<dyn ObjectStore>) -> Self {
         Self {
             path,
-            object_store,
+            main_object_store,
             settings: Settings::default(),
             block_cache: None,
             clock: None,
@@ -212,33 +212,36 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
 
         // Setup object store with optional caching
-        let maybe_cached_object_store = match &self.settings.object_store_cache_options.root_folder
-        {
-            None => self.object_store.clone(),
-            Some(cache_root_folder) => {
-                let stats = Arc::new(CachedObjectStoreStats::new(stat_registry.as_ref()));
-                let cache_storage = Arc::new(FsCacheStorage::new(
-                    cache_root_folder.clone(),
-                    self.settings
-                        .object_store_cache_options
-                        .max_cache_size_bytes,
-                    self.settings.object_store_cache_options.scan_interval,
-                    stats.clone(),
-                ));
+        let maybe_cached_main_object_store =
+            match &self.settings.object_store_cache_options.root_folder {
+                None => self.main_object_store.clone(),
+                Some(cache_root_folder) => {
+                    let stats = Arc::new(CachedObjectStoreStats::new(stat_registry.as_ref()));
+                    let cache_storage = Arc::new(FsCacheStorage::new(
+                        cache_root_folder.clone(),
+                        self.settings
+                            .object_store_cache_options
+                            .max_cache_size_bytes,
+                        self.settings.object_store_cache_options.scan_interval,
+                        stats.clone(),
+                    ));
 
-                let cached_object_store = CachedObjectStore::new(
-                    self.object_store.clone(),
-                    cache_storage,
-                    self.settings.object_store_cache_options.part_size_bytes,
-                    stats.clone(),
-                )?;
-                cached_object_store.start_evictor().await;
-                cached_object_store
-            }
-        };
+                    let cached_main_object_store = CachedObjectStore::new(
+                        self.main_object_store.clone(),
+                        cache_storage,
+                        self.settings.object_store_cache_options.part_size_bytes,
+                        stats.clone(),
+                    )?;
+                    cached_main_object_store.start_evictor().await;
+                    cached_main_object_store
+                }
+            };
 
         // Setup the manifest store and load latest manifest
-        let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &path,
+            maybe_cached_main_object_store.clone(),
+        ));
         let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
 
         // Extract external SSTs from manifest if available
@@ -258,7 +261,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            maybe_cached_object_store.clone(),
+            maybe_cached_main_object_store.clone(),
             sst_format.clone(),
             path_resolver.clone(),
             self.fp_registry.clone(),
@@ -339,7 +342,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
             // Not to pollute the cache during compaction
             let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
-                self.object_store.clone(),
+                self.main_object_store.clone(),
                 sst_format,
                 path_resolver,
                 self.fp_registry.clone(),
