@@ -2424,6 +2424,24 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn test_all_kv_seq_num_are_greater_than_0() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_kv_store_seq_num";
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        // Write some data to memtable
+        db.put(b"key1", b"value1").await.unwrap();
+
+        let mut state = db.inner.state.write();
+        let memtable = state.memtable();
+        assert_eq!(memtable.table().last_seq(), Some(1));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_should_read_uncommitted_data_if_read_level_uncommitted() {
         let fp_registry = Arc::new(FailPointRegistry::new());
