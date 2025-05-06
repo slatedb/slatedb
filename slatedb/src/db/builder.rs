@@ -120,6 +120,7 @@ pub struct DbBuilder<P: Into<Path>> {
     path: P,
     settings: Settings,
     main_object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
     block_cache: Option<Arc<dyn DbCache>>,
     clock: Option<Arc<dyn Clock + Send + Sync>>,
     gc_runtime: Option<Handle>,
@@ -135,6 +136,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             path,
             main_object_store,
             settings: Settings::default(),
+            wal_object_store: None,
             block_cache: None,
             clock: None,
             gc_runtime: None,
@@ -147,6 +149,16 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Sets the database settings.
     pub fn with_settings(mut self, settings: Settings) -> Self {
         self.settings = settings;
+        self
+    }
+
+    /// Sets the separate object store dedicated specifically for WAL.
+    ///
+    /// NOTE: WAL durability and availability properties depend on the properties
+    /// of the underlying object store. Make sure the configured object store is
+    /// durable and available enough for your use case.
+    pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
+        self.wal_object_store = Some(wal_object_store);
         self
     }
 
