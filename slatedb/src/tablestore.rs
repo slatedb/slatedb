@@ -6,7 +6,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::join_all, StreamExt};
-use log::warn;
+use log::{debug, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -249,7 +249,10 @@ impl TableStore {
             .await
             .map_err(|e| match e {
                 object_store::Error::AlreadyExists { path: _, source: _ } => match id {
-                    SsTableId::Wal(_) => SlateDBError::Fenced,
+                    SsTableId::Wal(_) => {
+                        debug!("Path {path} already exists");
+                        SlateDBError::Fenced
+                    }
                     SsTableId::Compacted(_) => SlateDBError::from(e),
                 },
                 _ => SlateDBError::from(e),
