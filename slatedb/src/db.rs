@@ -2057,6 +2057,7 @@ mod tests {
         let sst_format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
+            None,
             sst_format,
             path.clone(),
             None,
@@ -2143,6 +2144,7 @@ mod tests {
         };
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
+            None,
             sst_format,
             path,
             None,
@@ -2727,6 +2729,7 @@ mod tests {
         let manifest_store = ManifestStore::new(&Path::from(path), object_store.clone());
         let table_store = Arc::new(TableStore::new(
             object_store.clone(),
+            None,
             SsTableFormat::default(),
             path,
             None,
@@ -3142,6 +3145,50 @@ mod tests {
             .unwrap();
 
         assert_eq!(db.inner.mono_clock.last_tick.load(Ordering::SeqCst), 11);
+    }
+
+    #[tokio::test]
+    async fn test_put_get_reopen_delete_with_separate_wal_store() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_wal_object_store(wal_object_store.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let key = b"test_key";
+        let value = b"test_value";
+        kv_store.put(key, value).await.unwrap();
+        kv_store.flush().await.unwrap();
+
+        assert_eq!(
+            kv_store.get(key).await.unwrap(),
+            Some(Bytes::from_static(value))
+        );
+
+        kv_store.close().await.unwrap();
+
+        let wal_store_population = wal_object_store.list(None).count().await;
+        assert_ne!(wal_store_population, 0);
+
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_wal_object_store(wal_object_store.clone())
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            kv_store.get(key).await.unwrap(),
+            Some(Bytes::from_static(value))
+        );
+
+        kv_store.delete(key).await.unwrap();
+        assert_eq!(None, kv_store.get(key).await.unwrap());
+
+        kv_store.close().await.unwrap();
     }
 
     #[test]

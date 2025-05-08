@@ -28,11 +28,13 @@ use crate::{blob::ReadOnlyBlob, block::Block};
 
 pub struct TableStore {
     main_object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
     sst_format: SsTableFormat,
     path_resolver: PathResolver,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
     main_transactional_store: Arc<dyn TransactionalObjectStore>,
+    wal_transactional_store: Option<Arc<dyn TransactionalObjectStore>>,
     /// In-memory cache for blocks
     block_cache: Option<Arc<dyn DbCache>>,
 }
@@ -73,12 +75,14 @@ pub(crate) struct SstFileMetadata {
 impl TableStore {
     pub fn new<P: Into<Path>>(
         object_store: Arc<dyn ObjectStore>,
+        wal_object_store: Option<Arc<dyn ObjectStore>>,
         sst_format: SsTableFormat,
         root_path: P,
         block_cache: Option<Arc<dyn DbCache>>,
     ) -> Self {
         Self::new_with_fp_registry(
             object_store,
+            wal_object_store,
             sst_format,
             PathResolver::new(root_path),
             Arc::new(FailPointRegistry::new()),
@@ -88,6 +92,7 @@ impl TableStore {
 
     pub fn new_with_fp_registry(
         main_object_store: Arc<dyn ObjectStore>,
+        wal_object_store: Option<Arc<dyn ObjectStore>>,
         sst_format: SsTableFormat,
         path_resolver: PathResolver,
         fp_registry: Arc<FailPointRegistry>,
@@ -95,6 +100,7 @@ impl TableStore {
     ) -> Self {
         Self {
             main_object_store: main_object_store.clone(),
+            wal_object_store: wal_object_store.clone(),
             sst_format,
             path_resolver,
             fp_registry,
@@ -102,7 +108,43 @@ impl TableStore {
                 Path::from("/"),
                 main_object_store.clone(),
             )),
+            wal_transactional_store: wal_object_store.map(|wal_object_store| {
+                Arc::new(DelegatingTransactionalObjectStore::new(
+                    Path::from("/"),
+                    wal_object_store.clone(),
+                )) as Arc<dyn TransactionalObjectStore>
+            }),
             block_cache,
+        }
+    }
+
+    fn object_store_for_wal(&self) -> &Arc<dyn ObjectStore> {
+        if let Some(wal_object_store) = &self.wal_object_store {
+            wal_object_store
+        } else {
+            &self.main_object_store
+        }
+    }
+
+    fn transactional_store_for_wal(&self) -> &Arc<dyn TransactionalObjectStore> {
+        if let Some(wal_transactional_store) = &self.wal_transactional_store {
+            wal_transactional_store
+        } else {
+            &self.main_transactional_store
+        }
+    }
+
+    fn object_store_for(&self, id: &SsTableId) -> Arc<dyn ObjectStore> {
+        match id {
+            SsTableId::Wal(..) => self.object_store_for_wal().clone(),
+            SsTableId::Compacted(..) => self.main_object_store.clone(),
+        }
+    }
+
+    fn transactional_store_for(&self, id: &SsTableId) -> Arc<dyn TransactionalObjectStore> {
+        match id {
+            SsTableId::Wal(..) => self.transactional_store_for_wal().clone(),
+            SsTableId::Compacted(..) => self.main_transactional_store.clone(),
         }
     }
 
@@ -128,7 +170,7 @@ impl TableStore {
 
         let mut wal_list: Vec<SstFileMetadata> = Vec::new();
         let wal_path = &self.path_resolver.wal_path();
-        let mut files_stream = self.main_object_store.list(Some(wal_path));
+        let mut files_stream = self.object_store_for_wal().list(Some(wal_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
             match self.path_resolver.parse_table_id(&file.location) {
@@ -164,11 +206,12 @@ impl TableStore {
     }
 
     pub(crate) fn table_writer(&self, id: SsTableId) -> EncodedSsTableWriter {
+        let object_store = self.object_store_for(&id);
         let path = self.path(&id);
         EncodedSsTableWriter {
             id,
             builder: self.sst_format.table_builder(),
-            writer: BufWriter::new(self.main_object_store.clone(), path),
+            writer: BufWriter::new(object_store, path),
             table_store: self,
             #[cfg(test)]
             blocks_written: 0,
@@ -198,17 +241,15 @@ impl TableStore {
             |_| Result::Err(slatedb_io_error())
         );
 
+        let transactional_store = self.transactional_store_for(id);
         let data = encoded_sst.remaining_as_bytes();
         let path = self.path(id);
-        self.main_transactional_store
+        transactional_store
             .put_if_not_exists(&path, data)
             .await
             .map_err(|e| match e {
                 object_store::Error::AlreadyExists { path: _, source: _ } => match id {
-                    SsTableId::Wal(_) => {
-                        println!("Path {path} already exists");
-                        SlateDBError::Fenced
-                    }
+                    SsTableId::Wal(_) => SlateDBError::Fenced,
                     SsTableId::Compacted(_) => SlateDBError::from(e),
                 },
                 _ => SlateDBError::from(e),
@@ -252,11 +293,9 @@ impl TableStore {
 
     /// Delete an SSTable from the object store.
     pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
+        let object_store = self.object_store_for(&id);
         let path = self.path(id);
-        self.main_object_store
-            .delete(&path)
-            .await
-            .map_err(SlateDBError::from)
+        object_store.delete(&path).await.map_err(SlateDBError::from)
     }
 
     /// List all SSTables in the compacted directory.
@@ -303,11 +342,9 @@ impl TableStore {
     }
 
     pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
+        let object_store = self.object_store_for(&id);
         let path = self.path(id);
-        let obj = ReadOnlyObject {
-            object_store: self.main_object_store.clone(),
-            path,
-        };
+        let obj = ReadOnlyObject { object_store, path };
         let info = self.sst_format.read_info(&obj).await?;
         Ok(SsTableHandle { id: *id, info })
     }
@@ -326,11 +363,9 @@ impl TableStore {
                 return Ok(Some(filter));
             }
         }
+        let object_store = self.object_store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject {
-            object_store: self.main_object_store.clone(),
-            path,
-        };
+        let obj = ReadOnlyObject { object_store, path };
         let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
         if let Some(cache) = &self.block_cache {
             if let Some(filter) = filter.as_ref() {
@@ -359,11 +394,9 @@ impl TableStore {
                 return Ok(index);
             }
         }
+        let object_store = self.object_store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject {
-            object_store: self.main_object_store.clone(),
-            path,
-        };
+        let obj = ReadOnlyObject { object_store, path };
         let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
         if let Some(cache) = &self.block_cache {
             cache
@@ -382,11 +415,9 @@ impl TableStore {
         handle: &SsTableHandle,
         blocks: Range<usize>,
     ) -> Result<VecDeque<Block>, SlateDBError> {
+        let object_store = self.object_store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject {
-            object_store: self.main_object_store.clone(),
-            path,
-        };
+        let obj = ReadOnlyObject { object_store, path };
         let index = self.sst_format.read_index(&handle.info, &obj).await?;
         self.sst_format
             .read_blocks(&handle.info, &index, blocks, &obj)
@@ -407,11 +438,9 @@ impl TableStore {
         cache_blocks: bool,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
         // Create a ReadOnlyObject for accessing the SSTable file
+        let object_store = self.object_store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject {
-            object_store: self.main_object_store.clone(),
-            path,
-        };
+        let obj = ReadOnlyObject { object_store, path };
         // Initialize the result vector and a vector to track uncached ranges
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
@@ -503,11 +532,9 @@ impl TableStore {
         handle: &SsTableHandle,
         block: usize,
     ) -> Result<Block, SlateDBError> {
+        let object_store = self.object_store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject {
-            object_store: self.main_object_store.clone(),
-            path,
-        };
+        let obj = ReadOnlyObject { object_store, path };
         let index = self.sst_format.read_index(&handle.info, &obj).await?;
         self.sst_format
             .read_block(&handle.info, &index, block, &obj)
@@ -613,7 +640,13 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+        let ts = Arc::new(TableStore::new(
+            os.clone(),
+            None,
+            format,
+            Path::from(ROOT),
+            None,
+        ));
         let id = SsTableId::Compacted(Ulid::new());
 
         // when:
@@ -664,7 +697,13 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+        let ts = Arc::new(TableStore::new(
+            os.clone(),
+            None,
+            format,
+            Path::from(ROOT),
+            None,
+        ));
         let wal_id = SsTableId::Wal(1);
 
         // write a wal sst
@@ -699,6 +738,7 @@ mod tests {
         let wrapper = Arc::new(DbCacheWrapper::new(block_cache.clone(), &stat_registry));
         let ts = Arc::new(TableStore::new(
             os.clone(),
+            None,
             format,
             Path::from("/root"),
             Some(wrapper),
@@ -825,6 +865,7 @@ mod tests {
         let wrapper = Arc::new(DbCacheWrapper::new(cache.clone(), &stat_registry));
         let ts = Arc::new(TableStore::new(
             os.clone(),
+            None,
             SsTableFormat::default(),
             Path::from("/root"),
             Some(wrapper),
@@ -861,6 +902,7 @@ mod tests {
         let wrapper = Arc::new(DbCacheWrapper::new(cache.clone(), &stat_registry));
         let ts = Arc::new(TableStore::new(
             os.clone(),
+            None,
             SsTableFormat::default(),
             Path::from("/root"),
             Some(wrapper),
@@ -908,7 +950,13 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+        let ts = Arc::new(TableStore::new(
+            os.clone(),
+            None,
+            format,
+            Path::from(ROOT),
+            None,
+        ));
 
         // Create id1, id2, and i3 as three random UUIDs that have been sorted ascending.
         // Need to do this because the Ulids are sometimes generated in the same millisecond
@@ -967,7 +1015,13 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+        let ts = Arc::new(TableStore::new(
+            os.clone(),
+            None,
+            format,
+            Path::from(ROOT),
+            None,
+        ));
 
         let id1 = SsTableId::Wal(1);
         let id2 = SsTableId::Wal(2);
@@ -1013,7 +1067,13 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+        let ts = Arc::new(TableStore::new(
+            os.clone(),
+            None,
+            format,
+            Path::from(ROOT),
+            None,
+        ));
 
         let id1 = SsTableId::Compacted(Ulid::new());
         let id2 = SsTableId::Compacted(Ulid::new());
@@ -1040,7 +1100,7 @@ mod tests {
         ) {
             let os = Arc::new(InMemory::new());
             let format = SsTableFormat { block_size, ..SsTableFormat::default() };
-            let ts = Arc::new(TableStore::new(os.clone(), format, Path::from(ROOT), None));
+            let ts = Arc::new(TableStore::new(os.clone(), None, format, Path::from(ROOT), None));
             if let Some(bytes) = block_size.checked_mul(num_blocks) {
                 assert_eq!(num_blocks, ts.bytes_to_blocks(bytes));
             }

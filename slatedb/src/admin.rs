@@ -114,6 +114,7 @@ pub async fn run_gc_instance(
     let sst_format = SsTableFormat::default(); // read only SSTs, can use default
     let table_store = Arc::new(TableStore::new(
         object_store.clone(),
+        None,
         sst_format.clone(),
         path.clone(),
         None, // no need for cache in GC

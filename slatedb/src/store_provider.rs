@@ -21,6 +21,7 @@ impl StoreProvider for DefaultStoreProvider {
     fn table_store(&self) -> Arc<TableStore> {
         Arc::new(TableStore::new(
             Arc::clone(&self.object_store),
+            None,
             SsTableFormat::default(),
             self.path.clone(),
             self.block_cache.clone(),

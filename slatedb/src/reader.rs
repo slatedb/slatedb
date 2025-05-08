@@ -541,6 +541,7 @@ mod tests {
             snapshot: &mock_read_snapshot,
             table_store: Arc::new(TableStore::new(
                 Arc::new(InMemory::new()),
+                None,
                 SsTableFormat::default(),
                 Path::from(""),
                 None,

@@ -58,6 +58,7 @@ impl CompactionExecuteBench {
         };
         let table_store = Arc::new(TableStore::new(
             self.object_store.clone(),
+            None,
             sst_format,
             self.path.clone(),
             None,
@@ -272,6 +273,7 @@ impl CompactionExecuteBench {
         };
         let table_store = Arc::new(TableStore::new(
             self.object_store.clone(),
+            None,
             sst_format,
             self.path.clone(),
             None,
