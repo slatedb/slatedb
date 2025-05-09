@@ -203,6 +203,8 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, SlateDBError> {
         let path = self.path.into();
+        // TODO: proper URI generation, for now it works just as a flag
+        let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
 
         // Log the database opening
         if let Ok(settings_json) = self.settings.to_json_string() {
@@ -256,6 +258,15 @@ impl<P: Into<Path>> DbBuilder<P> {
         ));
         let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
 
+        // Validate WAL object store configuration
+        if let Some(latest_manifest) = &latest_manifest {
+            if latest_manifest.db_state().wal_object_store_uri != wal_object_store_uri {
+                return Err(SlateDBError::Unsupported(String::from(
+                    "WAL object store reconfiguration is not supported",
+                )));
+            }
+        }
+
         // Extract external SSTs from manifest if available
         let external_ssts = match &latest_manifest {
             Some(latest_stored_manifest) => {
@@ -296,7 +307,9 @@ impl<P: Into<Path>> DbBuilder<P> {
         let stored_manifest = match latest_manifest {
             Some(manifest) => manifest,
             None => {
-                StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new()).await?
+                let mut state = CoreDbState::new();
+                state.wal_object_store_uri = wal_object_store_uri;
+                StoredManifest::create_new_db(manifest_store.clone(), state).await?
             }
         };
         let mut manifest = FenceableManifest::init_writer(stored_manifest).await?;

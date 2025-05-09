@@ -1112,6 +1112,7 @@ impl<'a> ManifestV1<'a> {
   pub const VT_LAST_L0_CLOCK_TICK: flatbuffers::VOffsetT = 24;
   pub const VT_CHECKPOINTS: flatbuffers::VOffsetT = 26;
   pub const VT_LAST_L0_SEQ: flatbuffers::VOffsetT = 28;
+  pub const VT_WAL_OBJECT_STORE_URI: flatbuffers::VOffsetT = 30;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -1130,6 +1131,7 @@ impl<'a> ManifestV1<'a> {
     builder.add_compactor_epoch(args.compactor_epoch);
     builder.add_writer_epoch(args.writer_epoch);
     builder.add_manifest_id(args.manifest_id);
+    if let Some(x) = args.wal_object_store_uri { builder.add_wal_object_store_uri(x); }
     if let Some(x) = args.checkpoints { builder.add_checkpoints(x); }
     if let Some(x) = args.compacted { builder.add_compacted(x); }
     if let Some(x) = args.l0 { builder.add_l0(x); }
@@ -1231,6 +1233,13 @@ impl<'a> ManifestV1<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u64>(ManifestV1::VT_LAST_L0_SEQ, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn wal_object_store_uri(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(ManifestV1::VT_WAL_OBJECT_STORE_URI, None)}
+  }
 }
 
 impl flatbuffers::Verifiable for ManifestV1<'_> {
@@ -1253,6 +1262,7 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
      .visit_field::<i64>("last_l0_clock_tick", Self::VT_LAST_L0_CLOCK_TICK, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Checkpoint>>>>("checkpoints", Self::VT_CHECKPOINTS, true)?
      .visit_field::<u64>("last_l0_seq", Self::VT_LAST_L0_SEQ, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("wal_object_store_uri", Self::VT_WAL_OBJECT_STORE_URI, false)?
      .finish();
     Ok(())
   }
@@ -1271,6 +1281,7 @@ pub struct ManifestV1Args<'a> {
     pub last_l0_clock_tick: i64,
     pub checkpoints: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Checkpoint<'a>>>>>,
     pub last_l0_seq: u64,
+    pub wal_object_store_uri: Option<flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for ManifestV1Args<'a> {
   #[inline]
@@ -1289,6 +1300,7 @@ impl<'a> Default for ManifestV1Args<'a> {
       last_l0_clock_tick: 0,
       checkpoints: None, // required field
       last_l0_seq: 0,
+      wal_object_store_uri: None,
     }
   }
 }
@@ -1351,6 +1363,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
     self.fbb_.push_slot::<u64>(ManifestV1::VT_LAST_L0_SEQ, last_l0_seq, 0);
   }
   #[inline]
+  pub fn add_wal_object_store_uri(&mut self, wal_object_store_uri: flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_WAL_OBJECT_STORE_URI, wal_object_store_uri);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> ManifestV1Builder<'a, 'b, A> {
     let start = _fbb.start_table();
     ManifestV1Builder {
@@ -1384,6 +1400,7 @@ impl core::fmt::Debug for ManifestV1<'_> {
       ds.field("last_l0_clock_tick", &self.last_l0_clock_tick());
       ds.field("checkpoints", &self.checkpoints());
       ds.field("last_l0_seq", &self.last_l0_seq());
+      ds.field("wal_object_store_uri", &self.wal_object_store_uri());
       ds.finish()
   }
 }
