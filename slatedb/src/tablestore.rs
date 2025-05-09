@@ -296,7 +296,7 @@ impl TableStore {
 
     /// Delete an SSTable from the object store.
     pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
-        let object_store = self.object_store_for(&id);
+        let object_store = self.object_store_for(id);
         let path = self.path(id);
         object_store.delete(&path).await.map_err(SlateDBError::from)
     }
@@ -345,7 +345,7 @@ impl TableStore {
     }
 
     pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
-        let object_store = self.object_store_for(&id);
+        let object_store = self.object_store_for(id);
         let path = self.path(id);
         let obj = ReadOnlyObject { object_store, path };
         let info = self.sst_format.read_info(&obj).await?;
