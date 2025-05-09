@@ -273,8 +273,8 @@ impl SsTableFormat {
     ) -> Result<Block, SlateDBError> {
         let block_bytes = self.validate_checksum(bytes)?;
         let decompressed_bytes = match compression_codec {
-            Some(c) => Self::decompress(block_bytes.clone(), c)?,
-            None => block_bytes.clone(),
+            Some(c) => Self::decompress(block_bytes, c)?,
+            None => block_bytes,
         };
         Ok(Block::decode(decompressed_bytes))
     }
