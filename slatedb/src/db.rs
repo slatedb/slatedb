@@ -3191,6 +3191,26 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn test_wal_store_reconfiguration_fails() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_wal_object_store(wal_object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        kv_store.close().await.unwrap();
+
+        let result = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await;
+        assert!(matches!(result, Err(SlateDBError::Unsupported(..))));
+    }
+
     #[test]
     fn test_write_option_defaults() {
         // This is a regression test for a bug where the defaults for WriteOptions were not being

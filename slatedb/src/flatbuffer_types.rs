@@ -652,4 +652,16 @@ mod tests {
             _ => panic!("Should fail with version mismatch"),
         }
     }
+
+    #[test]
+    fn test_should_encode_decode_wal_object_store_uri() {
+        let mut manifest = Manifest::initial(CoreDbState::new());
+        manifest.core.wal_object_store_uri = Some("s3://bucket/path".to_string());
+
+        let codec = FlatBufferManifestCodec {};
+        let bytes = codec.encode(&manifest);
+        let decoded = codec.decode(&bytes).unwrap();
+
+        assert_eq!(manifest, decoded);
+    }
 }
