@@ -29,7 +29,7 @@ run_bench() {
     clean_flag="--clean"
   fi
 
-  local bench_cmd="cargo run -r --bin bencher --features=bencher -- \
+  local bench_cmd="cargo run -r --package slatedb-bencher -- \
     --path /slatedb-bencher_${put_percentage}_${concurrency} $clean_flag db \
     --db-options-path $DIR/Slatedb.toml \
     --duration 60 \
@@ -120,6 +120,17 @@ EOF
     echo "]" >> "$output_file"
     echo "Generated benchmark data in $output_file"
 }
+
+# Set CLOUD_PROVIDER to local if not already set
+export CLOUD_PROVIDER=${CLOUD_PROVIDER:-local}
+echo "Using cloud provider: $CLOUD_PROVIDER"
+
+# Set LOCAL_PATH if CLOUD_PROVIDER is local and path not already set
+if [ "$CLOUD_PROVIDER" = "local" ]; then
+    export LOCAL_PATH=${LOCAL_PATH:-/tmp/slatedb}
+    mkdir -p $LOCAL_PATH
+    echo "Using local path: $LOCAL_PATH"
+fi
 
 for put_percentage in 20 40 60 80 100; do
   for concurrency in 1 4; do

@@ -3,3 +3,4 @@
 .idea
 .env
 proptest-regressions/
+tmp

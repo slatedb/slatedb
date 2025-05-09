@@ -1,4 +1,4 @@
-#![doc = include_str!("README.md")]
+#![doc = include_str!("../README.md")]
 #![allow(clippy::result_large_err)]
 
 use crate::args::BencherArgs;
