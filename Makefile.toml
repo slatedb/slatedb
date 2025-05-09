@@ -1,0 +1,139 @@
+[config]
+default_to_workspace = false
+# Skip loading of all core tasks which saves up a bit on toml parsing and task creation
+skip_core_tasks = true
+# Skips loading Git related environment variables
+skip_git_env_info = true
+# Skips loading rust related environment variables
+skip_rust_env_info = true
+# Skips loading the current crate related environment variables
+skip_crate_env_info = true
+min_version = "0.36.10"
+
+[tasks.install-nextest]
+category = "Misc"
+description = "install cargo-nextest"
+install_crate = { crate_name = "cargo-nextest", version = "0.9.84", binary = "cargo", test_arg = [
+    "nextest",
+    "--help",
+] }
+
+[tasks.install-llvm-cov]
+category = "Misc"
+description = "install cargo-llvm-cov"
+install_crate = { crate_name = "cargo-llvm-cov", version = "0.6.16", binary = "cargo", test_arg = [
+    "llvm-cov",
+    "--help",
+] }
+
+[tasks.clean]
+category = "Dev - check"
+description = "Run cargo clean"
+command = "cargo"
+args = ["clean"]
+
+[tasks.check-clippy]
+category = "Dev - check"
+description = "Run full cargo clippy check"
+script = """
+#!/usr/bin/env bash
+
+cargo clippy --workspace --all-features --all-targets -- -D warnings
+"""
+
+[tasks.check-fmt]
+category = "Dev - check"
+description = "Run cargo fmt check"
+command = "cargo"
+args = ["fmt", "--all"]
+
+[tasks.check-typos]
+category = "Dev - check"
+description = "Run cargo typos-cli check"
+install_crate = { version = "1.32.0", crate_name = "typos-cli", binary = "typos", test_arg = [
+    "--help",
+] }
+script = """
+#!/usr/bin/env bash
+
+if ! typos ; then
+  echo "Hint: use 'typos -w' to fix."
+else
+   echo "typos check pass !"
+fi
+"""
+
+[tasks.check-hakari]
+category = "Dev - check"
+description = "Run cargo hakari check and attempt to fix"
+install_crate = { version = "0.9.36", crate_name = "cargo-hakari", binary = "cargo", test_arg = [
+    "hakari",
+    "--help",
+] }
+script = """
+#!/usr/bin/env bash
+
+cargo hakari generate --diff --quiet || cargo hakari generate
+cargo hakari verify > /dev/null
+"""
+
+[tasks.check-machete]
+category = "Dev - check"
+description = "Run cargo machete check"
+install_crate = { version = "0.8.0", crate_name = "cargo-machete", binary = "cargo", test_arg = [
+    "machete",
+    "--help",
+] }
+script = """
+#!/usr/bin/env bash
+set -e
+
+cargo machete
+"""
+
+[tasks.check-dep-sort]
+category = "Dev - check"
+description = "Run cargo sort check and attempt to fix"
+install_crate = { version = "1.0.9", crate_name = "cargo-sort", binary = "cargo", test_arg = [
+    "sort",
+    "--help",
+] }
+script = """
+#!/usr/bin/env bash
+
+ (cargo sort -w -c > /dev/null) || cargo sort -w
+"""
+
+[tasks.test-cov]
+category = "Dev - check"
+description = "Run unit tests and report coverage"
+dependencies = ["install-llvm-cov", "install-nextest"]
+script = """
+#!/usr/bin/env bash
+set -e
+
+cargo llvm-cov nextest --workspace --all-features --all-targets --html
+"""
+
+[tasks.test]
+category = "Dev - check"
+description = "Run unit tests"
+dependencies = ["install-nextest"]
+script = """
+#!/usr/bin/env bash
+set -e
+
+cargo nextest run --workspace --all-features --all-targets
+"""
+
+[tasks.check]
+category = "Dev - check"
+description = "Run all checks one by one"
+dependencies = [
+    "check-fmt",
+    "check-dep-sort",
+    "check-clippy",
+    "check-machete",
+    "test",
+    "check-typos",
+]

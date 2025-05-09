@@ -8,6 +8,7 @@ Please follow the instructions below before making a PR:
 
 - Run `cargo clippy --all-targets --all-features` and `cargo fmt` on your patch to fix lints and formatting issues.
 - Run `cargo nextest --all-features` to check that your patch doesn't break any tests.
+- or just Run `./dec check` to check everything for simplicity
 
 ## Contributor License Agreement
 
