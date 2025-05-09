@@ -111,6 +111,9 @@ pub async fn run_gc_instance(
     gc_opts: GarbageCollectorOptions,
 ) -> Result<(), Box<dyn Error>> {
     let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
+    manifest_store
+        .validate_no_wal_object_store_configured()
+        .await?;
     let sst_format = SsTableFormat::default(); // read only SSTs, can use default
     let table_store = Arc::new(TableStore::new(
         object_store.clone(),
@@ -252,6 +255,9 @@ pub async fn create_checkpoint<P: Into<Path>>(
     options: &CheckpointOptions,
 ) -> Result<CheckpointCreateResult, SlateDBError> {
     let manifest_store = Arc::new(ManifestStore::new(&path.into(), object_store));
+    manifest_store
+        .validate_no_wal_object_store_configured()
+        .await?;
     let mut stored_manifest = StoredManifest::load(manifest_store).await?;
     let checkpoint = stored_manifest.write_checkpoint(None, options).await?;
     Ok(CheckpointCreateResult {
