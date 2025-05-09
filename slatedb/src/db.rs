@@ -3176,7 +3176,7 @@ mod tests {
             let value = format!("{}{}", "v".repeat(i), i);
             let put_option = PutOptions::default();
             let write_option = WriteOptions {
-                await_durable: false,
+                await_durable: true,
             };
             db.put_with_options(key.as_bytes(), value.clone(), &put_option, &write_option)
                 .await
