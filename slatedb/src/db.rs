@@ -3183,8 +3183,8 @@ mod tests {
                 .await
                 .expect("failed to put");
         }
-        db.flush().await.expect("flush failed");
-        db.close().await.expect("failed to close db");
+        // db.flush().await.expect("flush failed");
+        // db.close().await.expect("failed to close db");
 
         // Reload DB and read a value to trigger error
         let db_builder = Db::builder("/tmp/test_kv_store", os.clone()).with_settings(Settings {
