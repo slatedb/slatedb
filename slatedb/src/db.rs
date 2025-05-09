@@ -3164,8 +3164,7 @@ mod tests {
         use std::str::FromStr;
 
         // Create and load inital database
-        let os: Arc<dyn ObjectStore> =
-            Arc::new(LocalFileSystem::new_with_prefix("/tmp/slatedb-555-data").unwrap());
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let compress = CompressionCodec::from_str("zstd").unwrap();
         let db_builder = Db::builder("/tmp/test_kv_store", os.clone()).with_settings(Settings {
             compression_codec: Some(compress),
