@@ -42,7 +42,7 @@ Options:
 The following command runs the benchmark for 120 seconds:
 
 ```bash
-cargo run -r --bin bencher --features="bencher" -- db --duration 120
+cargo run -r --package slatedb-bencher -- db --duration 120
 ```
 
 If you're using the AWS cloud provider (`CLOUD_PROVIDER=aws`), make sure to set up the
@@ -103,9 +103,9 @@ Options:
 A typical flow would load test data, run the compaction, then clear the test data:
 
 ```bash
-cargo run -r --bin bencher --features="bencher" -- compaction load
-cargo run -r --bin bencher --features="bencher" -- compaction run
-cargo run -r --bin bencher --features="bencher" -- compaction clear
+cargo run -r --package slatedb-bencher -- compaction load
+cargo run -r --package slatedb-bencher -- compaction run
+cargo run -r --package slatedb-bencher -- compaction clear
 ```
 
 See individual subcommands for more details.
@@ -115,5 +115,5 @@ rather than the generated test data. To do this, set the `--compaction-sources`
 argument:
 
 ```bash
-cargo run --bin bencher --features="bencher" -- compaction run --compaction-sources="1,2"
+cargo run -r --package slatedb-bencher -- compaction run --compaction-sources="1,2"
 ```

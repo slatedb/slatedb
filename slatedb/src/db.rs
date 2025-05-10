@@ -3141,64 +3141,6 @@ mod tests {
         assert_eq!(last_clock_tick, 11);
     }
 
-    #[cfg(all(feature = "zstd", feature = "wal_disable"))]
-    #[tokio::test]
-    async fn test_compression_overflow_bug() {
-        // This test reproduces the bug reported in issue #555
-        // https://github.com/slatedb/slatedb/issues/555
-        // where using zstd compression with flush() followed by get() causes
-        // an "attempt to subtract with overflow" error in Block::decode
-
-        use crate::config::CompressionCodec;
-        use std::str::FromStr;
-
-        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let compress = CompressionCodec::from_str("zstd").unwrap();
-        let db_options = Settings {
-            flush_interval: None,
-            wal_enabled: false,
-            compression_codec: Some(compress),
-            ..Settings::default()
-        };
-        let path = "/tmp/test_compression_overflow_bug";
-        let db = Db::builder(path, os.clone())
-            .with_settings(db_options)
-            .build()
-            .await
-            .unwrap();
-
-        // Insert some data with large values to trigger compression
-        for i in 0..100 {
-            let key = format!("k{}", i);
-            let value = format!("{}{}", "v".repeat(10000), i);
-            db.put_with_options(
-                key.as_bytes(),
-                value.clone(),
-                &PutOptions::default(),
-                &WriteOptions {
-                    await_durable: false,
-                },
-            )
-            .await
-            .expect("failed to put");
-        }
-
-        // Flush the database to disk - this is part of the bug reproduction
-        info!("Flushing database...");
-        let _ = db.flush().await;
-        info!("Flush completed");
-
-        // Now try to read a value back - this should trigger the overflow error
-        let read_option = ReadOptions {
-            durability_filter: Memory,
-        };
-
-        // This get operation should trigger the "attempt to subtract with overflow" error
-        let result = db.get_with_options("k5", &read_option).await.unwrap();
-        let expected_value = format!("{}{}", "v".repeat(10000), 5);
-        assert_eq!(result, Some(expected_value.into()));
-    }
-
     #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_recover_clock_tick_from_manifest() {
@@ -3247,6 +3189,51 @@ mod tests {
         // set correctly due to visibility issues.
         let write_options = WriteOptions::default();
         assert!(write_options.await_durable);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "zstd")]
+    async fn test_compression_overflow_bug() {
+        // This test reproduces the bug reported in https://github.com/slatedb/slatedb/issues/555
+        // where re-opening a DB using zstd compression causes "attempt to subtract with overflow"
+        // error in Block::decode
+
+        use crate::config::CompressionCodec;
+        use std::str::FromStr;
+
+        // Create and load inital database
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let compress = CompressionCodec::from_str("zstd").unwrap();
+        let db_builder = Db::builder("/tmp/test_kv_store", os.clone()).with_settings(Settings {
+            compression_codec: Some(compress),
+            ..Settings::default()
+        });
+        let db = db_builder.build().await.unwrap();
+
+        for i in 0..1000 {
+            let key = format!("k{}", i);
+            let value = format!("{}{}", "v".repeat(i), i);
+            let put_option = PutOptions::default();
+            let write_option = WriteOptions {
+                await_durable: false,
+            };
+            db.put_with_options(key.as_bytes(), value.clone(), &put_option, &write_option)
+                .await
+                .expect("failed to put");
+        }
+        db.flush().await.expect("flush failed");
+        db.close().await.expect("failed to close db");
+
+        // Reload DB and read a value to trigger error
+        let db_builder = Db::builder("/tmp/test_kv_store", os.clone()).with_settings(Settings {
+            compression_codec: Some(compress),
+            ..Settings::default()
+        });
+        let db = db_builder.build().await.unwrap();
+        let v = db.get("k1").await.expect("get failed").unwrap();
+        assert_eq!(v.as_ref(), b"v1");
+
+        db.close().await.expect("failed to close db");
     }
 
     async fn wait_for_manifest_condition(
