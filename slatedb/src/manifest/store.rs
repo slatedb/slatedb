@@ -682,6 +682,16 @@ impl ManifestStore {
         self.try_read_manifest(id).await?.ok_or(ManifestMissing(id))
     }
 
+    pub(crate) async fn validate_no_wal_object_store_configured(&self) -> Result<(), SlateDBError> {
+        let (_, manifest) = self.read_latest_manifest().await?;
+        if manifest.core.wal_object_store_uri.is_some() {
+            return Err(SlateDBError::Unsupported(
+                "WAL object store is not supported".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {
         match path.extension() {
             Some(ext) if ext == expected_extension => path

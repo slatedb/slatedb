@@ -663,6 +663,7 @@ mod tests {
             last_l0_seq: 0,
             last_l0_clock_tick: 0,
             checkpoints: vec![],
+            wal_object_store_uri: None,
         }
     }
 

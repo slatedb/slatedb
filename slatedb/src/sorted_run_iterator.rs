@@ -176,6 +176,7 @@ mod tests {
         };
         let table_store = Arc::new(TableStore::new(
             object_store,
+            None,
             format,
             root_path.clone(),
             None,
@@ -220,6 +221,7 @@ mod tests {
         };
         let table_store = Arc::new(TableStore::new(
             object_store,
+            None,
             format,
             root_path.clone(),
             None,
@@ -272,6 +274,7 @@ mod tests {
         };
         let table_store = Arc::new(TableStore::new(
             object_store,
+            None,
             format,
             root_path.clone(),
             None,
@@ -316,6 +319,7 @@ mod tests {
         };
         let table_store = Arc::new(TableStore::new(
             object_store,
+            None,
             format,
             root_path.clone(),
             None,
@@ -354,6 +358,7 @@ mod tests {
         };
         let table_store = Arc::new(TableStore::new(
             object_store,
+            None,
             format,
             root_path.clone(),
             None,
@@ -380,6 +385,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let table_store = Arc::new(TableStore::new(
             object_store,
+            None,
             SsTableFormat::default(),
             root_path.clone(),
             None,

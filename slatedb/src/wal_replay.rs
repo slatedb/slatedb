@@ -505,6 +505,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         Arc::new(TableStore::new(
             object_store.clone(),
+            None,
             SsTableFormat::default(),
             path.clone(),
             None,

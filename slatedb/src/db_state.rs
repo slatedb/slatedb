@@ -248,6 +248,7 @@ pub(crate) struct CoreDbState {
     /// SST is created in the manifest.
     pub(crate) last_l0_seq: u64,
     pub(crate) checkpoints: Vec<Checkpoint>,
+    pub(crate) wal_object_store_uri: Option<String>,
 }
 
 impl CoreDbState {
@@ -262,6 +263,7 @@ impl CoreDbState {
             last_l0_clock_tick: i64::MIN,
             last_l0_seq: 0,
             checkpoints: vec![],
+            wal_object_store_uri: None,
         }
     }
 
@@ -511,6 +513,7 @@ impl DbState {
             last_l0_clock_tick: my_db_state.last_l0_clock_tick,
             last_l0_seq: my_db_state.last_l0_seq,
             checkpoints: remote_manifest.core.checkpoints,
+            wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
         };
         state.manifest = remote_manifest;
         self.update_state(state);
