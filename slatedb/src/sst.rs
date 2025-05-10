@@ -339,10 +339,11 @@ impl SsTableFormat {
             return 0;
         }
 
+        // estimate sum of Entries
         let entries_size_encoded =
             row_codec::SstRowCodecV0::estimate_encoded_size(entry_num, estimated_entries_size);
 
-        // estimate sum of Block
+        // estimate sum of Blocks
         let number_of_blocks = usize::div_ceil(entries_size_encoded, self.block_size);
         let mut ans =
             Block::estimate_encoded_size(entry_num, entries_size_encoded, number_of_blocks);
@@ -518,8 +519,9 @@ impl EncodedSsTableBuilder<'_> {
         let index_key = compute_index_key(self.current_block_max_key.take(), &key);
         self.current_block_max_key = Some(key.clone());
 
+        // Check if the current block can accept the new entry
+        // If not, need to create a new block and add the entry to it
         if !self.builder.add(entry.clone()) {
-            // Create a new block builder and append block data
             self.finish_block()?;
 
             // New block must always accept the first KV pair
@@ -564,6 +566,7 @@ impl EncodedSsTableBuilder<'_> {
         self.block_meta.len()
     }
 
+    // Create a new block builder and append block data
     fn finish_block(&mut self) -> Result<(), SlateDBError> {
         if self.builder.is_empty() {
             return Ok(());
