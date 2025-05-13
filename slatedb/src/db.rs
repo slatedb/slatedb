@@ -3149,8 +3149,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_get_reopen_delete_with_separate_wal_store() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store = Arc::new(InMemory::new());
+        let wal_object_store = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
             .with_wal_object_store(wal_object_store.clone())
@@ -3193,8 +3193,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_wal_store_reconfiguration_fails() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store = Arc::new(InMemory::new());
+        let wal_object_store = Arc::new(InMemory::new());
 
         let kv_store = Db::builder("/tmp/test_kv_store", object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
