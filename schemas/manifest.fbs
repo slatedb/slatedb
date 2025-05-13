@@ -43,10 +43,10 @@ table ManifestV1 {
     compactor_epoch: ulong;
 
     // Tracks the most recent SST in the WAL that has been flushed on the last L0 is compacted. When an Immutable 
-    // Memtable (IMM) is flushed to L0, we record the recent flushed WAL ID at the moment. During recovery, we use 
-    // `last_l0_recent_flushed_wal_id + 1` as the starting point for WAL replay, and skip the WAL entries with
+    // Memtable (IMM) is flushed to L0, we record the recent flushed WAL ID as `replay_after_wal_id`. During recovery,
+    // we use `replay_after_wal_id + 1` as the starting point for WAL replay, and skip the WAL entries with
     // smaller `seq` than `last_l0_seq`.
-    last_l0_recent_flushed_wal_id: ulong;
+    replay_after_wal_id: ulong;
 
     // The most recent SST in the WAL at the time manifest was updated.
     wal_id_last_seen: ulong;

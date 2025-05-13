@@ -239,10 +239,11 @@ pub(crate) struct CoreDbState {
     pub(crate) l0: VecDeque<SsTableHandle>,
     pub(crate) compacted: Vec<SortedRun>,
     pub(crate) next_wal_sst_id: u64,
-    /// when a new L0 is flushed, record the last flushed WAL ID here.
-    /// This is used on determining the starting position of WAL replay during
-    /// recovery.
-    pub(crate) last_l0_recent_flushed_wal_sst_id: u64,
+    /// the WAL ID after which the WAL replay should start. Default to 0,
+    /// which means all the WAL IDs should be greater than or equal to 1.
+    /// When a new L0 is flushed, we update this field to the recent
+    /// flushed WAL ID.
+    pub(crate) replay_after_wal_id: u64,
     /// the `last_l0_clock_tick` includes all data in L0 and below --
     /// WAL entries will have their latest ticks recovered on replay
     /// into the in-memory state
@@ -261,7 +262,7 @@ impl CoreDbState {
             l0: VecDeque::new(),
             compacted: vec![],
             next_wal_sst_id: 1,
-            last_l0_recent_flushed_wal_sst_id: 0,
+            replay_after_wal_id: 0,
             last_l0_clock_tick: i64::MIN,
             last_l0_seq: 0,
             checkpoints: vec![],
@@ -440,8 +441,7 @@ impl DbState {
             .expect("expected imm memtable");
         assert!(Arc::ptr_eq(&popped, &imm_memtable));
         state.manifest.core.l0.push_front(sst_handle);
-        state.manifest.core.last_l0_recent_flushed_wal_sst_id =
-            imm_memtable.recent_flushed_wal_id();
+        state.manifest.core.replay_after_wal_id = imm_memtable.recent_flushed_wal_id();
 
         // ensure the persisted manifest tick never goes backwards in time
         let memtable_tick = imm_memtable.table().last_tick();
@@ -511,7 +511,7 @@ impl DbState {
             l0: new_l0,
             compacted: remote_manifest.core.compacted,
             next_wal_sst_id: my_db_state.next_wal_sst_id,
-            last_l0_recent_flushed_wal_sst_id: my_db_state.last_l0_recent_flushed_wal_sst_id,
+            replay_after_wal_id: my_db_state.replay_after_wal_id,
             last_l0_clock_tick: my_db_state.last_l0_clock_tick,
             last_l0_seq: my_db_state.last_l0_seq,
             checkpoints: remote_manifest.core.checkpoints,

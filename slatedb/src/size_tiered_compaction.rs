@@ -659,7 +659,7 @@ mod tests {
             l0,
             compacted: srs,
             next_wal_sst_id: 0,
-            last_l0_recent_flushed_wal_sst_id: 0,
+            replay_after_wal_id: 0,
             last_l0_seq: 0,
             last_l0_clock_tick: 0,
             checkpoints: vec![],
