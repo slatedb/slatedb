@@ -470,7 +470,7 @@ mod tests {
         .await
         .unwrap();
 
-        let last_l0_flushed_wal_id = next_wal_id - 1;
+        let replay_after_wal_id = next_wal_id - 1;
         let non_compacted_entries = sample::table(&mut rng, 1000, 10);
         next_wal_id = write_wals(
             &non_compacted_entries,
@@ -483,8 +483,8 @@ mod tests {
         .unwrap();
 
         let mut db_state = CoreDbState::new();
-        db_state.last_l0_recent_flushed_wal_sst_id = last_l0_flushed_wal_id;
-        db_state.next_wal_sst_id = last_l0_flushed_wal_id + 1;
+        db_state.replay_after_wal_id = replay_after_wal_id;
+        db_state.next_wal_sst_id = replay_after_wal_id + 1;
 
         let mut replay_iter = WalReplayIterator::new(
             &db_state,
