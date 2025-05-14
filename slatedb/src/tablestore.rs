@@ -27,13 +27,20 @@ use crate::types::RowEntry;
 use crate::{blob::ReadOnlyBlob, block::Block};
 
 pub struct TableStore {
+    /// The main object store used for everything that doesn't have a more
+    /// specific object store configured.
     main_object_store: Arc<dyn ObjectStore>,
+    /// Optional WAL object store dedicated specifically for WAL.
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     sst_format: SsTableFormat,
     path_resolver: PathResolver,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
+    /// The transactional store of the main object store used for everything
+    /// that doesn't have a more specific object store configured.
     main_transactional_store: Arc<dyn TransactionalObjectStore>,
+    /// Optional transactional store of the WAL object store dedicated
+    /// specifically for WAL.
     wal_transactional_store: Option<Arc<dyn TransactionalObjectStore>>,
     /// In-memory cache for blocks
     block_cache: Option<Arc<dyn DbCache>>,
