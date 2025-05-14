@@ -129,10 +129,6 @@ SlateDB is currently in the early stages of development. It is not yet ready for
 - [ ] Merge operator ([#328](https://github.com/slatedb/slatedb/issues/328))
 - [x] Clones ([#49](https://github.com/slatedb/slatedb/issues/49))
 
-## License
-
-SlateDB is licensed under the Apache License, Version 2.0.
-
 ## Adopters
 
 See who's using SlateDB.
@@ -147,6 +143,10 @@ See who's using SlateDB.
 - [Internals of SlateDB — by Vignesh Chandramohan](https://www.youtube.com/watch?v=qqF_zFWqFYk) (Vignesh Chandramohan, 2025)
 - [Database Internals - SlateDB](https://www.youtube.com/watch?v=wEAcNoJOBFI) (Chris Riccomini, 2024)
 - [Building a Cloud Native LSM on Object Storage](https://www.p99conf.io/session/building-a-cloud-native-lsm-on-object-storage/) (Rohan Desai/Chris Riccomini, 2024)
+
+## License
+
+SlateDB is licensed under the Apache License, Version 2.0.
 
 ## Foundation
 
