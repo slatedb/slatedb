@@ -107,18 +107,18 @@ mod tests {
         let stores = ObjectStores::new(main_store.clone(), None);
 
         assert!(Arc::ptr_eq(
-            &stores.store_of(ObjectStoreType::Main),
+            stores.store_of(ObjectStoreType::Main),
             &main_store
         ));
         assert!(Arc::ptr_eq(
-            &stores.store_of(ObjectStoreType::Wal),
+            stores.store_of(ObjectStoreType::Wal),
             &main_store
         ));
 
         let transactional_store = stores.transactional_store_of(ObjectStoreType::Main);
         assert!(Arc::ptr_eq(
-            &stores.transactional_store_of(ObjectStoreType::Wal),
-            &transactional_store
+            stores.transactional_store_of(ObjectStoreType::Wal),
+            transactional_store
         ));
 
         assert!(Arc::ptr_eq(
@@ -144,18 +144,18 @@ mod tests {
         let stores = ObjectStores::new(main_store.clone(), Some(wal_store.clone()));
 
         assert!(Arc::ptr_eq(
-            &stores.store_of(ObjectStoreType::Main),
+            stores.store_of(ObjectStoreType::Main),
             &main_store
         ));
         assert!(Arc::ptr_eq(
-            &stores.store_of(ObjectStoreType::Wal),
+            stores.store_of(ObjectStoreType::Wal),
             &wal_store
         ));
 
         let transactional_store = stores.transactional_store_of(ObjectStoreType::Main);
         assert!(!Arc::ptr_eq(
-            &stores.transactional_store_of(ObjectStoreType::Wal),
-            &transactional_store
+            stores.transactional_store_of(ObjectStoreType::Wal),
+            transactional_store
         ));
 
         assert!(Arc::ptr_eq(
