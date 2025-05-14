@@ -18,30 +18,18 @@ use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
+use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
-use crate::transactional_object_store::{
-    DelegatingTransactionalObjectStore, TransactionalObjectStore,
-};
 use crate::types::RowEntry;
 use crate::{blob::ReadOnlyBlob, block::Block};
 
 pub struct TableStore {
-    /// The main object store used for everything that doesn't have a more
-    /// specific object store configured.
-    main_object_store: Arc<dyn ObjectStore>,
-    /// Optional WAL object store dedicated specifically for WAL.
-    wal_object_store: Option<Arc<dyn ObjectStore>>,
+    object_stores: ObjectStores,
     sst_format: SsTableFormat,
     path_resolver: PathResolver,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
-    /// The transactional store of the main object store used for everything
-    /// that doesn't have a more specific object store configured.
-    main_transactional_store: Arc<dyn TransactionalObjectStore>,
-    /// Optional transactional store of the WAL object store dedicated
-    /// specifically for WAL.
-    wal_transactional_store: Option<Arc<dyn TransactionalObjectStore>>,
     /// In-memory cache for blocks
     block_cache: Option<Arc<dyn DbCache>>,
 }
@@ -106,52 +94,11 @@ impl TableStore {
         block_cache: Option<Arc<dyn DbCache>>,
     ) -> Self {
         Self {
-            main_object_store: main_object_store.clone(),
-            wal_object_store: wal_object_store.clone(),
+            object_stores: ObjectStores::new(main_object_store, wal_object_store),
             sst_format,
             path_resolver,
             fp_registry,
-            main_transactional_store: Arc::new(DelegatingTransactionalObjectStore::new(
-                Path::from("/"),
-                main_object_store.clone(),
-            )),
-            wal_transactional_store: wal_object_store.map(|wal_object_store| {
-                Arc::new(DelegatingTransactionalObjectStore::new(
-                    Path::from("/"),
-                    wal_object_store.clone(),
-                )) as Arc<dyn TransactionalObjectStore>
-            }),
             block_cache,
-        }
-    }
-
-    fn object_store_for_wal(&self) -> &Arc<dyn ObjectStore> {
-        if let Some(wal_object_store) = &self.wal_object_store {
-            wal_object_store
-        } else {
-            &self.main_object_store
-        }
-    }
-
-    fn transactional_store_for_wal(&self) -> &Arc<dyn TransactionalObjectStore> {
-        if let Some(wal_transactional_store) = &self.wal_transactional_store {
-            wal_transactional_store
-        } else {
-            &self.main_transactional_store
-        }
-    }
-
-    fn object_store_for(&self, id: &SsTableId) -> Arc<dyn ObjectStore> {
-        match id {
-            SsTableId::Wal(..) => self.object_store_for_wal().clone(),
-            SsTableId::Compacted(..) => self.main_object_store.clone(),
-        }
-    }
-
-    fn transactional_store_for(&self, id: &SsTableId) -> Arc<dyn TransactionalObjectStore> {
-        match id {
-            SsTableId::Wal(..) => self.transactional_store_for_wal().clone(),
-            SsTableId::Compacted(..) => self.main_transactional_store.clone(),
         }
     }
 
@@ -177,7 +124,10 @@ impl TableStore {
 
         let mut wal_list: Vec<SstFileMetadata> = Vec::new();
         let wal_path = &self.path_resolver.wal_path();
-        let mut files_stream = self.object_store_for_wal().list(Some(wal_path));
+        let mut files_stream = self
+            .object_stores
+            .store_of(ObjectStoreType::Wal)
+            .list(Some(wal_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
             match self.path_resolver.parse_table_id(&file.location) {
@@ -213,7 +163,7 @@ impl TableStore {
     }
 
     pub(crate) fn table_writer(&self, id: SsTableId) -> EncodedSsTableWriter {
-        let object_store = self.object_store_for(&id);
+        let object_store = self.object_stores.store_for(&id);
         let path = self.path(&id);
         EncodedSsTableWriter {
             id,
@@ -248,7 +198,7 @@ impl TableStore {
             |_| Result::Err(slatedb_io_error())
         );
 
-        let transactional_store = self.transactional_store_for(id);
+        let transactional_store = self.object_stores.transactional_store_for(id);
         let data = encoded_sst.remaining_as_bytes();
         let path = self.path(id);
         transactional_store
@@ -303,7 +253,7 @@ impl TableStore {
 
     /// Delete an SSTable from the object store.
     pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
-        let object_store = self.object_store_for(id);
+        let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
         object_store.delete(&path).await.map_err(SlateDBError::from)
     }
@@ -321,7 +271,10 @@ impl TableStore {
     ) -> Result<Vec<SstFileMetadata>, SlateDBError> {
         let mut sst_list: Vec<SstFileMetadata> = Vec::new();
         let compacted_path = self.path_resolver.compacted_path();
-        let mut files_stream = self.main_object_store.list(Some(&compacted_path));
+        let mut files_stream = self
+            .object_stores
+            .store_of(ObjectStoreType::Main)
+            .list(Some(&compacted_path));
 
         while let Some(file) = files_stream.next().await.transpose()? {
             match self.path_resolver.parse_table_id(&file.location) {
@@ -352,7 +305,7 @@ impl TableStore {
     }
 
     pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
-        let object_store = self.object_store_for(id);
+        let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
         let obj = ReadOnlyObject { object_store, path };
         let info = self.sst_format.read_info(&obj).await?;
@@ -373,7 +326,7 @@ impl TableStore {
                 return Ok(Some(filter));
             }
         }
-        let object_store = self.object_store_for(&handle.id);
+        let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
@@ -404,7 +357,7 @@ impl TableStore {
                 return Ok(index);
             }
         }
-        let object_store = self.object_store_for(&handle.id);
+        let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
@@ -425,7 +378,7 @@ impl TableStore {
         handle: &SsTableHandle,
         blocks: Range<usize>,
     ) -> Result<VecDeque<Block>, SlateDBError> {
-        let object_store = self.object_store_for(&handle.id);
+        let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         let index = self.sst_format.read_index(&handle.info, &obj).await?;
@@ -448,7 +401,7 @@ impl TableStore {
         cache_blocks: bool,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
         // Create a ReadOnlyObject for accessing the SSTable file
-        let object_store = self.object_store_for(&handle.id);
+        let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         // Initialize the result vector and a vector to track uncached ranges
@@ -542,7 +495,7 @@ impl TableStore {
         handle: &SsTableHandle,
         block: usize,
     ) -> Result<Block, SlateDBError> {
-        let object_store = self.object_store_for(&handle.id);
+        let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         let index = self.sst_format.read_index(&handle.info, &obj).await?;
