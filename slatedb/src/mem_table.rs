@@ -113,12 +113,17 @@ pub(crate) struct WritableKVTable {
 }
 
 pub(crate) struct ImmutableMemtable {
-    /// The last WAL ID of this IMM. This is used to determine the starting position of
-    /// WAL replay during recovery. After an IMM is flushed to L0, we do not need to care
-    /// about the earlier WALs which produced this IMM, all we need to know is the last
+    /// The recent flushed WAL ID when this IMM is freezed. This is used to determine the starting
+    /// position of WAL replay during recovery. After an IMM is flushed to L0, we do not need to
+    /// care about the earlier WALs which produced this IMM, all we need to know is the recent
     /// WAL ID of the last L0 compacted.
-    last_wal_id: u64,
+    ///
+    /// Please note that this recent flushed WAL ID might not exactly match the last WAL ID that
+    /// produced this IMM, we still need to take the last l0's `last_seq` to filter out the entries
+    /// that already contained in the last L0 SST.
+    recent_flushed_wal_id: u64,
     table: Arc<KVTable>,
+    /// This flushed watchable cell is useful for users who enable `await_durable` on the writes.
     flushed: WatchableOnceCell<Result<(), SlateDBError>>,
 }
 
@@ -172,10 +177,10 @@ impl MemTableIterator {
 }
 
 impl ImmutableMemtable {
-    pub(crate) fn new(table: WritableKVTable, last_wal_id: u64) -> Self {
+    pub(crate) fn new(table: WritableKVTable, recent_flushed_wal_id: u64) -> Self {
         Self {
             table: table.table,
-            last_wal_id,
+            recent_flushed_wal_id,
             flushed: WatchableOnceCell::new(),
         }
     }
@@ -184,8 +189,8 @@ impl ImmutableMemtable {
         self.table.clone()
     }
 
-    pub(crate) fn last_wal_id(&self) -> u64 {
-        self.last_wal_id
+    pub(crate) fn recent_flushed_wal_id(&self) -> u64 {
+        self.recent_flushed_wal_id
     }
 
     pub(crate) async fn await_flush_to_l0(&self) -> Result<(), SlateDBError> {

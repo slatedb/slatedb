@@ -268,13 +268,11 @@ impl<P: Into<Path>> DbBuilder<P> {
         ));
 
         // Get next WAL ID before writing manifest
-        let wal_id_last_compacted = match &latest_manifest {
-            Some(latest_stored_manifest) => {
-                latest_stored_manifest.db_state().last_compacted_wal_sst_id
-            }
+        let replay_after_wal_id = match &latest_manifest {
+            Some(latest_stored_manifest) => latest_stored_manifest.db_state().replay_after_wal_id,
             None => 0,
         };
-        let next_wal_id = table_store.next_wal_sst_id(wal_id_last_compacted).await?;
+        let next_wal_id = table_store.next_wal_sst_id(replay_after_wal_id).await?;
 
         // Initialize the database
         let stored_manifest = match latest_manifest {

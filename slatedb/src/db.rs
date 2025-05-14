@@ -2159,14 +2159,14 @@ mod tests {
             kv_store.put(&key, &value).await.unwrap();
             let db_state = wait_for_manifest_condition(
                 &mut stored_manifest,
-                |s| s.last_compacted_wal_sst_id > last_compacted,
+                |s| s.replay_after_wal_id > last_compacted,
                 Duration::from_secs(30),
             )
             .await;
 
             // 1 empty wal at startup + 2 wal per iteration.
-            assert_eq!(db_state.last_compacted_wal_sst_id, 1 + (i as u64) * 2 + 2);
-            last_compacted = db_state.last_compacted_wal_sst_id
+            assert_eq!(db_state.replay_after_wal_id, 1 + (i as u64) * 2 + 2);
+            last_compacted = db_state.replay_after_wal_id
         }
 
         let manifest = stored_manifest.refresh().await.unwrap();
@@ -2421,6 +2421,24 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn test_all_kv_seq_num_are_greater_than_0() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_kv_store_seq_num";
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024 * 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        // Write some data to memtable
+        db.put(b"key1", b"value1").await.unwrap();
+
+        let mut state = db.inner.state.write();
+        let memtable = state.memtable();
+        assert_eq!(memtable.table().last_seq(), Some(1));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_should_read_uncommitted_data_if_read_level_uncommitted() {
         let fp_registry = Arc::new(FailPointRegistry::new());
@@ -2598,10 +2616,23 @@ mod tests {
 
         // one empty wal and two wals for the puts
         assert_eq!(
-            snapshot.state.imm_memtable.front().unwrap().last_wal_id(),
+            snapshot
+                .state
+                .imm_memtable
+                .front()
+                .unwrap()
+                .recent_flushed_wal_id(),
             1 + 2
         );
-        assert_eq!(snapshot.state.imm_memtable.get(1).unwrap().last_wal_id(), 2);
+        assert_eq!(
+            snapshot
+                .state
+                .imm_memtable
+                .get(1)
+                .unwrap()
+                .recent_flushed_wal_id(),
+            2
+        );
         assert_eq!(snapshot.state.core().next_wal_sst_id, next_wal_id);
         assert_eq!(
             reader.get(key1).await.unwrap(),
@@ -2670,7 +2701,12 @@ mod tests {
 
         // one empty wal and one wal for the first put
         assert_eq!(
-            snapshot.state.imm_memtable.front().unwrap().last_wal_id(),
+            snapshot
+                .state
+                .imm_memtable
+                .front()
+                .unwrap()
+                .recent_flushed_wal_id(),
             1 + 1
         );
         assert!(snapshot.state.imm_memtable.get(1).is_none());

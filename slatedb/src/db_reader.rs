@@ -195,7 +195,7 @@ impl DbReaderInner {
     fn should_reestablish_checkpoint(&self, latest: &CoreDbState) -> bool {
         let read_guard = self.state.read();
         let current_state = read_guard.core();
-        latest.last_compacted_wal_sst_id > current_state.last_compacted_wal_sst_id
+        latest.replay_after_wal_id > current_state.replay_after_wal_id
             || latest.l0_last_compacted != current_state.l0_last_compacted
             || latest.compacted != current_state.compacted
     }
@@ -281,7 +281,7 @@ impl DbReaderInner {
         let imm_memtable = prior
             .imm_memtable
             .iter()
-            .filter(|table| table.last_wal_id() <= manifest.core.last_compacted_wal_sst_id)
+            .filter(|table| table.recent_flushed_wal_id() <= manifest.core.replay_after_wal_id)
             .cloned()
             .collect();
 
@@ -437,9 +437,9 @@ impl DbReaderInner {
         };
 
         let wal_id_start = if let Some(last_replayed_table) = into_tables.back() {
-            last_replayed_table.last_wal_id() + 1
+            last_replayed_table.recent_flushed_wal_id() + 1
         } else {
-            core.last_compacted_wal_sst_id + 1
+            core.replay_after_wal_id + 1
         };
         let wal_id_end = if replay_new_wals {
             table_store.last_seen_wal_id().await? + 1

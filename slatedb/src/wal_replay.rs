@@ -82,6 +82,7 @@ pub(crate) struct WalReplayIterator<'a> {
     overflow_row: Option<ReplayedRow>,
     last_tick: i64,
     last_seq: u64,
+    min_seq: u64,
     next_wal_id: u64,
 }
 
@@ -99,9 +100,11 @@ impl WalReplayIterator<'_> {
             });
         }
 
-        // load the last seq number from manifest, and use it as the starting seq number.
-        // there might have bigger seq number in the WALs, we'd update the last seq number
-        // to the max seq number while iterating over the WALs.
+        // load the last seq number from manifest, and use it as the starting seq number to avoid
+        // replaying the entries that are already in the L0 SST. while replaying the WALs, we'll
+        // update the last seq number to the max seq number, and this final `last_seq` will be passed
+        // to the db_state for the further writes.
+        let min_seq = db_state.last_l0_seq;
         let last_seq = db_state.last_l0_seq;
         let last_tick = db_state.last_l0_clock_tick;
         let next_wal_id = wal_id_range.start;
@@ -115,6 +118,7 @@ impl WalReplayIterator<'_> {
             overflow_row: None,
             last_tick,
             last_seq,
+            min_seq,
             next_wal_id,
         };
 
@@ -132,7 +136,7 @@ impl WalReplayIterator<'_> {
         options: WalReplayOptions,
         table_store: Arc<TableStore>,
     ) -> Result<Self, SlateDBError> {
-        let wal_id_start = db_state.last_compacted_wal_sst_id + 1;
+        let wal_id_start = db_state.replay_after_wal_id + 1;
         let wal_id_end = table_store.last_seen_wal_id().await?;
         let wal_id_range = wal_id_start..(wal_id_end + 1);
         Self::range(wal_id_range, db_state, options, table_store).await
@@ -215,6 +219,12 @@ impl WalReplayIterator<'_> {
             if let Some(sst_iter) = &mut self.current_iter.current_iter {
                 let wal_id = sst_iter.table_id().unwrap_wal_id();
                 while let Some(row_entry) = sst_iter.next_entry().await? {
+                    // skip the entries that are already in the L0 SST.
+                    if row_entry.seq <= self.min_seq {
+                        continue;
+                    }
+
+                    // if the table is full, we'll overflow the row to the next iterator.
                     let meta = table.metadata();
                     if self.table_store.estimate_encoded_size(
                         meta.entry_num + 1,
@@ -267,6 +277,7 @@ impl WalReplayIterator<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::{WalReplayIterator, WalReplayOptions};
     use crate::bytes_range::BytesRange;
     use crate::db_state::{CoreDbState, SsTableId};
     use crate::iter::{IterationOrder, KeyValueIterator};
@@ -275,7 +286,6 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
-    use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
     use crate::{test_utils, SlateDBError};
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -444,7 +454,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_only_replay_wals_after_last_compacted_wal_id() {
+    async fn should_only_replay_wals_after_last_l0_flushed_wal_id() {
         let table_store = test_table_store();
         let mut rng = rng::new_test_rng(None);
         let compacted_entries = sample::table(&mut rng, 1000, 10);
@@ -460,7 +470,7 @@ mod tests {
         .await
         .unwrap();
 
-        let last_compacted_wal_id = next_wal_id - 1;
+        let replay_after_wal_id = next_wal_id - 1;
         let non_compacted_entries = sample::table(&mut rng, 1000, 10);
         next_wal_id = write_wals(
             &non_compacted_entries,
@@ -473,8 +483,8 @@ mod tests {
         .unwrap();
 
         let mut db_state = CoreDbState::new();
-        db_state.last_compacted_wal_sst_id = last_compacted_wal_id;
-        db_state.next_wal_sst_id = last_compacted_wal_id + 1;
+        db_state.replay_after_wal_id = replay_after_wal_id;
+        db_state.next_wal_sst_id = replay_after_wal_id + 1;
 
         let mut replay_iter = WalReplayIterator::new(
             &db_state,
@@ -500,6 +510,46 @@ mod tests {
         assert!(replay_iter.next().await.unwrap().is_none());
     }
 
+    #[tokio::test]
+    async fn should_replay_wals_after_min_seq() {
+        let table_store = test_table_store();
+        let mut rng = rng::new_test_rng(None);
+        let entries = sample::table(&mut rng, 1000, 10);
+        let next_wal_id = write_wals(&entries, 1, &mut rng, 200, Arc::clone(&table_store))
+            .await
+            .unwrap();
+
+        // Set min_seq to skip the first half of entries
+        let min_seq = 500;
+        let mut db_state = CoreDbState::new();
+        db_state.last_l0_seq = min_seq;
+        db_state.last_l0_clock_tick = 0;
+
+        let mut replay_iter = WalReplayIterator::new(
+            &db_state,
+            WalReplayOptions::default(),
+            Arc::clone(&table_store),
+        )
+        .await
+        .unwrap();
+
+        let Some(replayed_table) = replay_iter.next().await.unwrap() else {
+            panic!("Expected table to be returned from iterator")
+        };
+        assert_eq!(replayed_table.last_wal_id + 1, next_wal_id);
+
+        // Verify that only entries with seq > min_seq are replayed
+        let mut imm_table_iter = replayed_table.table.table().iter();
+        let mut replayed_entries = BTreeMap::new();
+        let mut total = 0;
+        while let Some(entry) = imm_table_iter.next_entry().await.unwrap() {
+            assert!(entry.seq > min_seq);
+            replayed_entries.insert(entry.key.clone(), entry.value);
+            total += 1;
+        }
+        assert_eq!(total, 500);
+    }
+
     fn test_table_store() -> Arc<TableStore> {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -521,7 +571,7 @@ mod tests {
         table_store: Arc<TableStore>,
     ) -> Result<u64, SlateDBError> {
         let mut iter = entries.iter();
-        let mut next_seq = 0;
+        let mut next_seq = 1;
         let mut total_wal_entries = 0;
         let mut next_wal_id = next_wal_id;
 
