@@ -307,8 +307,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let stored_manifest = match latest_manifest {
             Some(manifest) => manifest,
             None => {
-                let mut state = CoreDbState::new();
-                state.wal_object_store_uri = wal_object_store_uri;
+                let state = CoreDbState::new_with_wal_object_store(wal_object_store_uri);
                 StoredManifest::create_new_db(manifest_store.clone(), state).await?
             }
         };

@@ -267,6 +267,12 @@ impl CoreDbState {
         }
     }
 
+    pub(crate) fn new_with_wal_object_store(wal_object_store_uri: Option<String>) -> Self {
+        let mut this = Self::new();
+        this.wal_object_store_uri = wal_object_store_uri;
+        this
+    }
+
     pub(crate) fn init_clone_db(&self) -> CoreDbState {
         let mut clone = self.clone();
         clone.initialized = false;
