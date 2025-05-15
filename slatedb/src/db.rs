@@ -28,6 +28,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio_util::sync::CancellationToken;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
@@ -358,6 +359,8 @@ pub struct Db {
     write_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     compactor: Mutex<Option<Compactor>>,
     garbage_collector: Mutex<Option<GarbageCollector>>,
+
+    cancellation_token: CancellationToken,
 }
 
 impl Db {
@@ -445,6 +448,8 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), SlateDBError> {
+        self.cancellation_token.cancel();
+
         if let Some(compactor) = {
             let mut maybe_compactor = self.compactor.lock();
             maybe_compactor.take()
@@ -456,7 +461,7 @@ impl Db {
             let mut maybe_gc = self.garbage_collector.lock();
             maybe_gc.take()
         } {
-            gc.close().await;
+            gc.terminate_background_task().await;
         }
 
         // Shutdown the write batch thread.

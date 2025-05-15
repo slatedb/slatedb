@@ -162,10 +162,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{str::FromStr, time::Duration};
 use uuid::Uuid;
 
-use crate::config::GcExecutionMode::Periodic;
 use crate::error::{SettingsError, SlateDBError};
 
 use crate::db_cache::DbCache;
+use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
 /// Describes the durability of data based on the medium (e.g. in-memory, object storags)
 /// that the data is currently stored in. Currently this is used to define a
@@ -656,7 +656,7 @@ impl Default for Settings {
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
-            garbage_collector_options: Some(GarbageCollectorOptions::default()),
+            garbage_collector_options: None,
             filter_bits_per_key: 10,
             default_ttl: None,
         }
@@ -830,33 +830,31 @@ pub struct GarbageCollectorOptions {
     pub compacted_options: Option<GarbageCollectorDirectoryOptions>,
 }
 
-impl Default for GarbageCollectorDirectoryOptions {
-    fn default() -> Self {
-        Self {
-            execution_mode: Periodic(Duration::from_secs(300)),
-            min_age: Duration::from_secs(86_400),
-        }
+impl GarbageCollectorOptions {
+    pub fn is_empty(&self) -> bool {
+        self.manifest_options.is_none()
+            && self.wal_options.is_none()
+            && self.compacted_options.is_none()
     }
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize, Debug)]
-#[serde(tag = "mode", content = "config")]
-pub enum GcExecutionMode {
-    /// Run garbage collection once.
-    Once,
-
-    /// Run garbage collection periodically.
-    Periodic(
-        #[serde(deserialize_with = "deserialize_duration")]
-        #[serde(serialize_with = "serialize_duration")]
-        Duration,
-    ),
+impl Default for GarbageCollectorDirectoryOptions {
+    fn default() -> Self {
+        Self {
+            interval: Some(DEFAULT_INTERVAL),
+            min_age: DEFAULT_MIN_AGE,
+        }
+    }
 }
 
 /// Garbage collector options for a directory.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct GarbageCollectorDirectoryOptions {
-    pub execution_mode: GcExecutionMode,
+    /// The interval at which the garbage collector will run
+    /// in the background thread.
+    #[serde(deserialize_with = "deserialize_option_duration")]
+    #[serde(serialize_with = "serialize_option_duration")]
+    pub interval: Option<Duration>,
 
     /// The minimum age of a file before it can be garbage collected.
     #[serde(deserialize_with = "deserialize_duration")]
