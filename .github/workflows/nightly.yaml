@@ -66,12 +66,12 @@ jobs:
           CLOUD_PROVIDER: local
           LOCAL_PATH: ${{ github.workspace }}/benchmark-data
           SLATEDB_BENCH_CLEAN: true
-        run: mkdir -p ${{ github.workspace }}/benchmark-data && ./src/bencher/benchmark-db.sh
+        run: mkdir -p ${{ github.workspace }}/benchmark-data && ./slatedb-bencher/benchmark-db.sh
 
       - name: Update benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
-          name: src/bencher/benchmark-db.sh
+          name: slatedb-bencher/benchmark-db.sh
           tool: 'customBiggerIsBetter'
           output-file-path: target/bencher/results/benchmark-data.json
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
@@ -103,7 +103,7 @@ jobs:
           SLATE_BENCH_PROFILE: true
         run: |
           # Get list of benchmarks
-          BENCHMARKS=$(cargo bench --no-run --message-format=json | jq -r 'select(.profile.test == true) | .target.name' | sort -u)
+          BENCHMARKS=$(cargo bench --no-run --message-format=json | jq -r 'select(.profile.test == true and (.target.kind | contains(["bench"]))) | .target.name' | sort -u)
 
           # Create pprofs for each benchmark
           for bench in $BENCHMARKS; do
