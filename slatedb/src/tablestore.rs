@@ -9,7 +9,7 @@ use futures::{future::join_all, StreamExt};
 use log::{debug, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
@@ -198,11 +198,15 @@ impl TableStore {
             |_| Result::Err(slatedb_io_error())
         );
 
-        let transactional_store = self.object_stores.transactional_store_for(id);
+        let object_store = self.object_stores.store_for(id);
         let data = encoded_sst.remaining_as_bytes();
         let path = self.path(id);
-        transactional_store
-            .put_if_not_exists(&path, data)
+        object_store
+            .put_opts(
+                &path,
+                PutPayload::from_bytes(data),
+                PutOptions::from(PutMode::Create),
+            )
             .await
             .map_err(|e| match e {
                 object_store::Error::AlreadyExists { path: _, source: _ } => match id {
