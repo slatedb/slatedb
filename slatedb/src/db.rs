@@ -973,7 +973,7 @@ mod tests {
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
     use crate::{proptest_util, test_utils, KeyValue};
-    use futures::{future::join_all, StreamExt};
+    use futures::{future, future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use proptest::test_runner::{TestRng, TestRunner};
@@ -3149,31 +3149,72 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_get_reopen_delete_with_separate_wal_store() {
-        let object_store = Arc::new(InMemory::new());
+        async fn count_ssts_in(store: &Arc<InMemory>) -> usize {
+            store
+                .list(None)
+                .filter(|r| {
+                    future::ready(
+                        r.as_ref()
+                            .unwrap()
+                            .location
+                            .extension()
+                            .unwrap()
+                            .to_lowercase()
+                            == "sst",
+                    )
+                })
+                .count()
+                .await
+        }
+
+        let fp_registry = Arc::new(FailPointRegistry::new());
+
+        let main_object_store = Arc::new(InMemory::new());
         let wal_object_store = Arc::new(InMemory::new());
-        let kv_store = Db::builder("/tmp/test_kv_store", object_store.clone())
+        let kv_store = Db::builder("/tmp/test_kv_store", main_object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
             .with_wal_object_store(wal_object_store.clone())
+            .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
+        assert_eq!(count_ssts_in(&main_object_store).await, 0);
+        assert_eq!(count_ssts_in(&wal_object_store).await, 1);
 
         let key = b"test_key";
         let value = b"test_value";
+
+        // pause memtable flushes
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "pause").unwrap();
         kv_store.put(key, value).await.unwrap();
         kv_store.flush().await.unwrap();
+        assert_eq!(count_ssts_in(&main_object_store).await, 0);
+        assert_eq!(count_ssts_in(&wal_object_store).await, 2);
+        assert_eq!(
+            kv_store.get(key).await.unwrap(),
+            Some(Bytes::from_static(value))
+        );
+        // resume memtable flushes
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
 
+        // write some data to force L0 SST creation
+        let mut batch = WriteBatch::default();
+        for i in 0u32..128 {
+            batch.put(i.to_be_bytes(), i.to_be_bytes());
+        }
+        kv_store.write(batch).await.unwrap();
+        kv_store.flush().await.unwrap();
+        assert_eq!(count_ssts_in(&main_object_store).await, 1);
+        assert_eq!(count_ssts_in(&wal_object_store).await, 3);
         assert_eq!(
             kv_store.get(key).await.unwrap(),
             Some(Bytes::from_static(value))
         );
 
         kv_store.close().await.unwrap();
+        assert_eq!(count_ssts_in(&wal_object_store).await, 3);
 
-        let wal_store_population = wal_object_store.list(None).count().await;
-        assert_ne!(wal_store_population, 0);
-
-        let kv_store = Db::builder("/tmp/test_kv_store", object_store)
+        let kv_store = Db::builder("/tmp/test_kv_store", main_object_store)
             .with_settings(test_db_options(0, 1024, None))
             .with_wal_object_store(wal_object_store.clone())
             .build()
