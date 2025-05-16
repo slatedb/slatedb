@@ -1145,6 +1145,7 @@ mod tests {
         fn table_store(&self) -> Arc<TableStore> {
             Arc::new(TableStore::new_with_fp_registry(
                 Arc::clone(&self.object_store),
+                None,
                 SsTableFormat::default(),
                 PathResolver::new(self.path.clone()),
                 Arc::clone(&self.fp_registry),

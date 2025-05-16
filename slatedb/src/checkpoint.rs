@@ -529,6 +529,7 @@ mod tests {
     ) {
         let table_store = Arc::new(TableStore::new(
             Arc::clone(&object_store),
+            None,
             SsTableFormat::default(),
             path.clone(),
             None,
