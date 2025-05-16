@@ -574,12 +574,14 @@ fn slatedb_io_error() -> SlateDBError {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use std::collections::VecDeque;
-    use std::sync::Arc;
-
+    use futures::future;
+    use futures::StreamExt;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use proptest::prelude::any;
     use proptest::proptest;
+    use rstest::rstest;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
     use ulid::Ulid;
 
     use crate::db_cache::test_utils::TestCache;
@@ -598,18 +600,45 @@ mod tests {
 
     const ROOT: &str = "/root";
 
+    fn make_store() -> Arc<dyn ObjectStore> {
+        Arc::new(InMemory::new())
+    }
+
+    async fn count_ssts_in(store: &Arc<dyn ObjectStore>) -> usize {
+        store
+            .list(None)
+            .filter(|r| {
+                future::ready(
+                    r.as_ref()
+                        .unwrap()
+                        .location
+                        .extension()
+                        .unwrap()
+                        .to_lowercase()
+                        == "sst",
+                )
+            })
+            .count()
+            .await
+    }
+
+    #[rstest]
+    #[case::main_only(make_store(), None)]
+    #[case::main_and_wal(make_store(), Some(make_store()))]
     #[tokio::test]
-    async fn test_sst_writer_should_write_sst() {
+    async fn test_sst_writer_should_write_compacted_sst(
+        #[case] main_store: Arc<dyn ObjectStore>,
+        #[case] wal_store: Option<Arc<dyn ObjectStore>>,
+    ) {
         // given:
-        let os = Arc::new(object_store::memory::InMemory::new());
         let format = SsTableFormat {
             block_size: 32,
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
         let ts = Arc::new(TableStore::new(
-            os.clone(),
-            None,
+            main_store.clone(),
+            wal_store.clone(),
             format,
             Path::from(ROOT),
             None,
@@ -654,11 +683,86 @@ mod tests {
             ],
         )
         .await;
+
+        assert_eq!(count_ssts_in(&main_store).await, 1);
+        if let Some(wal_store) = wal_store {
+            assert_eq!(count_ssts_in(&wal_store).await, 0);
+        }
+    }
+
+    #[rstest]
+    #[case::main_only(make_store(), None)]
+    #[case::main_and_wal(make_store(), Some(make_store()))]
+    #[tokio::test]
+    async fn test_sst_writer_should_write_wal_sst(
+        #[case] main_store: Arc<dyn ObjectStore>,
+        #[case] wal_store: Option<Arc<dyn ObjectStore>>,
+    ) {
+        // given:
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            main_store.clone(),
+            wal_store.clone(),
+            format,
+            Path::from(ROOT),
+            None,
+        ));
+        let id = SsTableId::Wal(123);
+
+        // when:
+        let mut writer = ts.table_writer(id);
+        writer
+            .add(RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0))
+            .await
+            .unwrap();
+        writer
+            .add(RowEntry::new_value(&[b'b'; 16], &[2u8; 16], 0))
+            .await
+            .unwrap();
+        writer
+            .add(RowEntry::new_tombstone(&[b'c'; 16], 0))
+            .await
+            .unwrap();
+        writer
+            .add(RowEntry::new_value(&[b'd'; 16], &[4u8; 16], 0))
+            .await
+            .unwrap();
+        let sst = writer.close().await.unwrap();
+
+        let sst_iter_options = SstIteratorOptions {
+            eager_spawn: true,
+            ..SstIteratorOptions::default()
+        };
+        // then:
+        let mut iter = SstIterator::new_owned(.., sst, ts.clone(), sst_iter_options)
+            .await
+            .unwrap();
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0),
+                RowEntry::new_value(&[b'b'; 16], &[2u8; 16], 0),
+                RowEntry::new_tombstone(&[b'c'; 16], 0),
+                RowEntry::new_value(&[b'd'; 16], &[4u8; 16], 0),
+            ],
+        )
+        .await;
+
+        if let Some(wal_store) = wal_store {
+            assert_eq!(count_ssts_in(&main_store).await, 0);
+            assert_eq!(count_ssts_in(&wal_store).await, 1);
+        } else {
+            assert_eq!(count_ssts_in(&main_store).await, 1);
+        }
     }
 
     #[tokio::test]
     async fn test_wal_write_should_fail_when_fenced() {
-        let os = Arc::new(object_store::memory::InMemory::new());
+        let os = Arc::new(InMemory::new());
         let format = SsTableFormat {
             block_size: 32,
             min_filter_keys: 1,
@@ -909,17 +1013,22 @@ mod tests {
         assert!(expected_iter.next().is_none());
     }
 
+    #[rstest]
+    #[case::main_only(make_store(), None)]
+    #[case::main_and_wal(make_store(), Some(make_store()))]
     #[tokio::test]
-    async fn test_list_compacted_ssts() {
-        let os = Arc::new(InMemory::new());
+    async fn test_list_compacted_ssts(
+        #[case] main_store: Arc<dyn ObjectStore>,
+        #[case] wal_store: Option<Arc<dyn ObjectStore>>,
+    ) {
         let format = SsTableFormat {
             block_size: 32,
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
         let ts = Arc::new(TableStore::new(
-            os.clone(),
-            None,
+            main_store.clone(),
+            wal_store,
             format,
             Path::from(ROOT),
             None,
@@ -940,9 +1049,9 @@ mod tests {
         let path2 = ts.path(&id2);
         let path3 = ts.path(&id3);
 
-        os.put(&path1, Bytes::new().into()).await.unwrap();
-        os.put(&path2, Bytes::new().into()).await.unwrap();
-        os.put(&path3, Bytes::new().into()).await.unwrap();
+        main_store.put(&path1, Bytes::new().into()).await.unwrap();
+        main_store.put(&path2, Bytes::new().into()).await.unwrap();
+        main_store.put(&path3, Bytes::new().into()).await.unwrap();
 
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 3);
@@ -974,17 +1083,22 @@ mod tests {
         assert_eq!(ssts[1].id, id2);
     }
 
+    #[rstest]
+    #[case::main_only(make_store(), None)]
+    #[case::main_and_wal(make_store(), Some(make_store()))]
     #[tokio::test]
-    async fn test_list_wal_ssts() {
-        let os = Arc::new(InMemory::new());
+    async fn test_list_wal_ssts(
+        #[case] main_store: Arc<dyn ObjectStore>,
+        #[case] wal_store: Option<Arc<dyn ObjectStore>>,
+    ) {
         let format = SsTableFormat {
             block_size: 32,
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
         let ts = Arc::new(TableStore::new(
-            os.clone(),
-            None,
+            main_store.clone(),
+            wal_store.clone(),
             format,
             Path::from(ROOT),
             None,
@@ -998,9 +1112,24 @@ mod tests {
         let path2 = ts.path(&id2);
         let path3 = ts.path(&id3);
 
-        os.put(&path1, Bytes::new().into()).await.unwrap();
-        os.put(&path2, Bytes::new().into()).await.unwrap();
-        os.put(&path3, Bytes::new().into()).await.unwrap();
+        wal_store
+            .clone()
+            .unwrap_or(main_store.clone())
+            .put(&path1, Bytes::new().into())
+            .await
+            .unwrap();
+        wal_store
+            .clone()
+            .unwrap_or(main_store.clone())
+            .put(&path2, Bytes::new().into())
+            .await
+            .unwrap();
+        wal_store
+            .clone()
+            .unwrap_or(main_store.clone())
+            .put(&path3, Bytes::new().into())
+            .await
+            .unwrap();
 
         let ssts = ts.list_wal_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 3);
@@ -1024,19 +1153,31 @@ mod tests {
         assert_eq!(ssts.len(), 2);
         assert_eq!(ssts[0].id, id1);
         assert_eq!(ssts[1].id, id2);
+
+        if let Some(wal_store) = wal_store {
+            assert_eq!(count_ssts_in(&main_store).await, 0);
+            assert_eq!(count_ssts_in(&wal_store).await, 3);
+        } else {
+            assert_eq!(count_ssts_in(&main_store).await, 3);
+        }
     }
 
+    #[rstest]
+    #[case::main_only(make_store(), None)]
+    #[case::main_and_wal(make_store(), Some(make_store()))]
     #[tokio::test]
-    async fn test_delete_sst() {
-        let os = Arc::new(InMemory::new());
+    async fn test_delete_compacted_sst(
+        #[case] main_store: Arc<dyn ObjectStore>,
+        #[case] wal_store: Option<Arc<dyn ObjectStore>>,
+    ) {
         let format = SsTableFormat {
             block_size: 32,
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
         let ts = Arc::new(TableStore::new(
-            os.clone(),
-            None,
+            main_store.clone(),
+            wal_store.clone(),
             format,
             Path::from(ROOT),
             None,
@@ -1046,8 +1187,8 @@ mod tests {
         let id2 = SsTableId::Compacted(Ulid::new());
         let path1 = ts.path(&id1);
         let path2 = ts.path(&id2);
-        os.put(&path1, Bytes::new().into()).await.unwrap();
-        os.put(&path2, Bytes::new().into()).await.unwrap();
+        main_store.put(&path1, Bytes::new().into()).await.unwrap();
+        main_store.put(&path2, Bytes::new().into()).await.unwrap();
 
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 2);
@@ -1057,6 +1198,68 @@ mod tests {
         let ssts = ts.list_compacted_ssts(..).await.unwrap();
         assert_eq!(ssts.len(), 1);
         assert_eq!(ssts[0].id, id2);
+
+        if let Some(wal_store) = wal_store {
+            assert_eq!(count_ssts_in(&main_store).await, 1);
+            assert_eq!(count_ssts_in(&wal_store).await, 0);
+        } else {
+            assert_eq!(count_ssts_in(&main_store).await, 1);
+        }
+    }
+
+    #[rstest]
+    #[case::main_only(make_store(), None)]
+    #[case::main_and_wal(make_store(), Some(make_store()))]
+    #[tokio::test]
+    async fn test_delete_wal_sst(
+        #[case] main_store: Arc<dyn ObjectStore>,
+        #[case] wal_store: Option<Arc<dyn ObjectStore>>,
+    ) {
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            main_store.clone(),
+            wal_store.clone(),
+            format,
+            Path::from(ROOT),
+            None,
+        ));
+
+        let id1 = SsTableId::Wal(123);
+        let id2 = SsTableId::Wal(321);
+        let path1 = ts.path(&id1);
+        let path2 = ts.path(&id2);
+        wal_store
+            .clone()
+            .unwrap_or(main_store.clone())
+            .put(&path1, Bytes::new().into())
+            .await
+            .unwrap();
+        wal_store
+            .clone()
+            .unwrap_or(main_store.clone())
+            .put(&path2, Bytes::new().into())
+            .await
+            .unwrap();
+
+        let ssts = ts.list_wal_ssts(..).await.unwrap();
+        assert_eq!(ssts.len(), 2);
+
+        ts.delete_sst(&id1).await.unwrap();
+
+        let ssts = ts.list_wal_ssts(..).await.unwrap();
+        assert_eq!(ssts.len(), 1);
+        assert_eq!(ssts[0].id, id2);
+
+        if let Some(wal_store) = wal_store {
+            assert_eq!(count_ssts_in(&main_store).await, 0);
+            assert_eq!(count_ssts_in(&wal_store).await, 1);
+        } else {
+            assert_eq!(count_ssts_in(&main_store).await, 1);
+        }
     }
 
     proptest! {
