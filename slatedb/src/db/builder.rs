@@ -106,6 +106,7 @@ use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
@@ -119,7 +120,8 @@ use crate::utils::bg_task_result_into_err;
 pub struct DbBuilder<P: Into<Path>> {
     path: P,
     settings: Settings,
-    object_store: Arc<dyn ObjectStore>,
+    main_object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
     block_cache: Option<Arc<dyn DbCache>>,
     clock: Option<Arc<dyn Clock + Send + Sync>>,
     gc_runtime: Option<Handle>,
@@ -130,11 +132,12 @@ pub struct DbBuilder<P: Into<Path>> {
 
 impl<P: Into<Path>> DbBuilder<P> {
     /// Creates a new builder for a database at the given path.
-    pub fn new(path: P, object_store: Arc<dyn ObjectStore>) -> Self {
+    pub fn new(path: P, main_object_store: Arc<dyn ObjectStore>) -> Self {
         Self {
             path,
-            object_store,
+            main_object_store,
             settings: Settings::default(),
+            wal_object_store: None,
             block_cache: None,
             clock: None,
             gc_runtime: None,
@@ -147,6 +150,16 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Sets the database settings.
     pub fn with_settings(mut self, settings: Settings) -> Self {
         self.settings = settings;
+        self
+    }
+
+    /// Sets the separate object store dedicated specifically for WAL.
+    ///
+    /// NOTE: WAL durability and availability properties depend on the properties
+    /// of the underlying object store. Make sure the configured object store is
+    /// durable and available enough for your use case.
+    pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
+        self.wal_object_store = Some(wal_object_store);
         self
     }
 
@@ -191,6 +204,8 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, SlateDBError> {
         let path = self.path.into();
+        // TODO: proper URI generation, for now it works just as a flag
+        let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
 
         // Log the database opening
         if let Ok(settings_json) = self.settings.to_json_string() {
@@ -212,34 +227,46 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
 
         // Setup object store with optional caching
-        let maybe_cached_object_store = match &self.settings.object_store_cache_options.root_folder
-        {
-            None => self.object_store.clone(),
-            Some(cache_root_folder) => {
-                let stats = Arc::new(CachedObjectStoreStats::new(stat_registry.as_ref()));
-                let cache_storage = Arc::new(FsCacheStorage::new(
-                    cache_root_folder.clone(),
-                    self.settings
-                        .object_store_cache_options
-                        .max_cache_size_bytes,
-                    self.settings.object_store_cache_options.scan_interval,
-                    stats.clone(),
-                ));
+        let maybe_cached_main_object_store =
+            match &self.settings.object_store_cache_options.root_folder {
+                None => self.main_object_store.clone(),
+                Some(cache_root_folder) => {
+                    let stats = Arc::new(CachedObjectStoreStats::new(stat_registry.as_ref()));
+                    let cache_storage = Arc::new(FsCacheStorage::new(
+                        cache_root_folder.clone(),
+                        self.settings
+                            .object_store_cache_options
+                            .max_cache_size_bytes,
+                        self.settings.object_store_cache_options.scan_interval,
+                        stats.clone(),
+                    ));
 
-                let cached_object_store = CachedObjectStore::new(
-                    self.object_store.clone(),
-                    cache_storage,
-                    self.settings.object_store_cache_options.part_size_bytes,
-                    stats.clone(),
-                )?;
-                cached_object_store.start_evictor().await;
-                cached_object_store
-            }
-        };
+                    let cached_main_object_store = CachedObjectStore::new(
+                        self.main_object_store.clone(),
+                        cache_storage,
+                        self.settings.object_store_cache_options.part_size_bytes,
+                        stats.clone(),
+                    )?;
+                    cached_main_object_store.start_evictor().await;
+                    cached_main_object_store
+                }
+            };
 
         // Setup the manifest store and load latest manifest
-        let manifest_store = Arc::new(ManifestStore::new(&path, maybe_cached_object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &path,
+            maybe_cached_main_object_store.clone(),
+        ));
         let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
+
+        // Validate WAL object store configuration
+        if let Some(latest_manifest) = &latest_manifest {
+            if latest_manifest.db_state().wal_object_store_uri != wal_object_store_uri {
+                return Err(SlateDBError::Unsupported(String::from(
+                    "WAL object store reconfiguration is not supported",
+                )));
+            }
+        }
 
         // Extract external SSTs from manifest if available
         let external_ssts = match &latest_manifest {
@@ -258,7 +285,10 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            maybe_cached_object_store.clone(),
+            ObjectStores::new(
+                maybe_cached_main_object_store.clone(),
+                self.wal_object_store.clone(),
+            ),
             sst_format.clone(),
             path_resolver.clone(),
             self.fp_registry.clone(),
@@ -278,7 +308,8 @@ impl<P: Into<Path>> DbBuilder<P> {
         let stored_manifest = match latest_manifest {
             Some(manifest) => manifest,
             None => {
-                StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new()).await?
+                let state = CoreDbState::new_with_wal_object_store(wal_object_store_uri);
+                StoredManifest::create_new_db(manifest_store.clone(), state).await?
             }
         };
         let mut manifest = FenceableManifest::init_writer(stored_manifest).await?;
@@ -337,7 +368,10 @@ impl<P: Into<Path>> DbBuilder<P> {
 
             // Not to pollute the cache during compaction
             let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
-                self.object_store.clone(),
+                ObjectStores::new(
+                    self.main_object_store.clone(),
+                    self.wal_object_store.clone(),
+                ),
                 sst_format,
                 path_resolver,
                 self.fp_registry.clone(),

@@ -156,6 +156,7 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::test_utils::{assert_kv, gen_attrs};
 
+    use crate::object_stores::ObjectStores;
     use bytes::{BufMut, BytesMut};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
@@ -175,7 +176,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            object_store,
+            ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
             None,
@@ -219,7 +220,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            object_store,
+            ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
             None,
@@ -271,7 +272,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            object_store,
+            ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
             None,
@@ -315,7 +316,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            object_store,
+            ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
             None,
@@ -353,7 +354,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            object_store,
+            ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
             None,
@@ -379,7 +380,7 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let table_store = Arc::new(TableStore::new(
-            object_store,
+            ObjectStores::new(object_store, None),
             SsTableFormat::default(),
             root_path.clone(),
             None,

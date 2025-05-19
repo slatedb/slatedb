@@ -33,6 +33,9 @@ pub(crate) async fn create_clone<P: Into<Path>>(
 
     let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
     let parent_manifest_store = Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
+    parent_manifest_store
+        .validate_no_wal_object_store_configured()
+        .await?;
 
     let mut clone_manifest = create_clone_manifest(
         clone_manifest_store,
@@ -700,5 +703,30 @@ mod tests {
         assert!(matches!(err, SlateDBError::CheckpointMissing(id) if id == checkpoint.id));
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn clone_should_fail_if_wal_object_is_configured() {
+        let object_store = Arc::new(InMemory::new());
+        let wal_object_store = Arc::new(InMemory::new());
+        let parent_path = "/tmp/test_parent";
+        let clone_path = "/tmp/test_clone";
+
+        let parent_db = Db::builder(parent_path, object_store.clone())
+            .with_wal_object_store(wal_object_store)
+            .build()
+            .await
+            .unwrap();
+        parent_db.close().await.unwrap();
+
+        let result = create_clone(
+            clone_path,
+            parent_path,
+            object_store.clone(),
+            None,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        assert!(matches!(result, Err(SlateDBError::Unsupported(..))));
     }
 }

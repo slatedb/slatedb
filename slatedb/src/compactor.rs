@@ -456,6 +456,7 @@ mod tests {
     use tokio::runtime::Runtime;
     use ulid::Ulid;
 
+    use super::*;
     use crate::compactor::stats::CompactionStats;
     use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
@@ -467,8 +468,7 @@ mod tests {
     use crate::db_state::{CoreDbState, SortedRun};
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-
-    use super::*;
+    use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
@@ -1036,7 +1036,7 @@ mod tests {
         };
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let table_store = Arc::new(TableStore::new(
-            os.clone(),
+            ObjectStores::new(os.clone(), None),
             sst_format,
             Path::from(PATH),
             None,

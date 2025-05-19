@@ -122,6 +122,7 @@ mod tests {
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::ManifestStore;
     use crate::manifest::Manifest;
+    use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -528,7 +529,7 @@ mod tests {
         kv: (&Bytes, &Bytes),
     ) {
         let table_store = Arc::new(TableStore::new(
-            Arc::clone(&object_store),
+            ObjectStores::new(Arc::clone(&object_store), None),
             SsTableFormat::default(),
             path.clone(),
             None,
