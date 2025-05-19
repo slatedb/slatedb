@@ -22,8 +22,8 @@ impl ObjectStores {
         wal_object_store: Option<Arc<dyn ObjectStore>>,
     ) -> Self {
         Self {
-            main_object_store: main_object_store.clone(),
-            wal_object_store: wal_object_store.clone(),
+            main_object_store,
+            wal_object_store,
         }
     }
 

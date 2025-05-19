@@ -106,6 +106,7 @@ use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
@@ -284,8 +285,10 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            maybe_cached_main_object_store.clone(),
-            self.wal_object_store.clone(),
+            ObjectStores::new(
+                maybe_cached_main_object_store.clone(),
+                self.wal_object_store.clone(),
+            ),
             sst_format.clone(),
             path_resolver.clone(),
             self.fp_registry.clone(),
@@ -367,8 +370,10 @@ impl<P: Into<Path>> DbBuilder<P> {
 
             // Not to pollute the cache during compaction
             let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
-                self.main_object_store.clone(),
-                self.wal_object_store.clone(),
+                ObjectStores::new(
+                    self.main_object_store.clone(),
+                    self.wal_object_store.clone(),
+                ),
                 sst_format,
                 path_resolver,
                 self.fp_registry.clone(),

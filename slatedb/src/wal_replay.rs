@@ -271,6 +271,7 @@ mod tests {
     use crate::db_state::{CoreDbState, SsTableId};
     use crate::iter::{IterationOrder, KeyValueIterator};
     use crate::mem_table::WritableKVTable;
+    use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
     use crate::sst::SsTableFormat;
     use crate::tablestore::TableStore;
@@ -504,8 +505,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         Arc::new(TableStore::new(
-            object_store.clone(),
-            None,
+            ObjectStores::new(object_store.clone(), None),
             SsTableFormat::default(),
             path.clone(),
             None,

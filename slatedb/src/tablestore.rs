@@ -69,15 +69,13 @@ pub(crate) struct SstFileMetadata {
 
 impl TableStore {
     pub fn new<P: Into<Path>>(
-        object_store: Arc<dyn ObjectStore>,
-        wal_object_store: Option<Arc<dyn ObjectStore>>,
+        object_stores: ObjectStores,
         sst_format: SsTableFormat,
         root_path: P,
         block_cache: Option<Arc<dyn DbCache>>,
     ) -> Self {
         Self::new_with_fp_registry(
-            object_store,
-            wal_object_store,
+            object_stores,
             sst_format,
             PathResolver::new(root_path),
             Arc::new(FailPointRegistry::new()),
@@ -86,15 +84,14 @@ impl TableStore {
     }
 
     pub fn new_with_fp_registry(
-        main_object_store: Arc<dyn ObjectStore>,
-        wal_object_store: Option<Arc<dyn ObjectStore>>,
+        object_stores: ObjectStores,
         sst_format: SsTableFormat,
         path_resolver: PathResolver,
         fp_registry: Arc<FailPointRegistry>,
         block_cache: Option<Arc<dyn DbCache>>,
     ) -> Self {
         Self {
-            object_stores: ObjectStores::new(main_object_store, wal_object_store),
+            object_stores,
             sst_format,
             path_resolver,
             fp_registry,
@@ -587,6 +584,7 @@ mod tests {
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
+    use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
@@ -637,8 +635,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let ts = Arc::new(TableStore::new(
-            main_store.clone(),
-            wal_store.clone(),
+            ObjectStores::new(main_store.clone(), wal_store.clone()),
             format,
             Path::from(ROOT),
             None,
@@ -705,8 +702,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let ts = Arc::new(TableStore::new(
-            main_store.clone(),
-            wal_store.clone(),
+            ObjectStores::new(main_store.clone(), wal_store.clone()),
             format,
             Path::from(ROOT),
             None,
@@ -769,8 +765,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let ts = Arc::new(TableStore::new(
-            os.clone(),
-            None,
+            ObjectStores::new(os.clone(), None),
             format,
             Path::from(ROOT),
             None,
@@ -808,8 +803,7 @@ mod tests {
         let block_cache = Arc::new(MokaCache::new());
         let wrapper = Arc::new(DbCacheWrapper::new(block_cache.clone(), &stat_registry));
         let ts = Arc::new(TableStore::new(
-            os.clone(),
-            None,
+            ObjectStores::new(os.clone(), None),
             format,
             Path::from("/root"),
             Some(wrapper),
@@ -935,8 +929,7 @@ mod tests {
         let cache = Arc::new(TestCache::new());
         let wrapper = Arc::new(DbCacheWrapper::new(cache.clone(), &stat_registry));
         let ts = Arc::new(TableStore::new(
-            os.clone(),
-            None,
+            ObjectStores::new(os.clone(), None),
             SsTableFormat::default(),
             Path::from("/root"),
             Some(wrapper),
@@ -972,8 +965,7 @@ mod tests {
         let cache = Arc::new(TestCache::new());
         let wrapper = Arc::new(DbCacheWrapper::new(cache.clone(), &stat_registry));
         let ts = Arc::new(TableStore::new(
-            os.clone(),
-            None,
+            ObjectStores::new(os.clone(), None),
             SsTableFormat::default(),
             Path::from("/root"),
             Some(wrapper),
@@ -1027,8 +1019,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let ts = Arc::new(TableStore::new(
-            main_store.clone(),
-            wal_store,
+            ObjectStores::new(main_store.clone(), wal_store),
             format,
             Path::from(ROOT),
             None,
@@ -1097,8 +1088,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let ts = Arc::new(TableStore::new(
-            main_store.clone(),
-            wal_store.clone(),
+            ObjectStores::new(main_store.clone(), wal_store.clone()),
             format,
             Path::from(ROOT),
             None,
@@ -1176,8 +1166,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let ts = Arc::new(TableStore::new(
-            main_store.clone(),
-            wal_store.clone(),
+            ObjectStores::new(main_store.clone(), wal_store.clone()),
             format,
             Path::from(ROOT),
             None,
@@ -1221,8 +1210,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let ts = Arc::new(TableStore::new(
-            main_store.clone(),
-            wal_store.clone(),
+            ObjectStores::new(main_store.clone(), wal_store.clone()),
             format,
             Path::from(ROOT),
             None,
@@ -1270,7 +1258,8 @@ mod tests {
         ) {
             let os = Arc::new(InMemory::new());
             let format = SsTableFormat { block_size, ..SsTableFormat::default() };
-            let ts = Arc::new(TableStore::new(os.clone(), None, format, Path::from(ROOT), None));
+            let ts = Arc::new(TableStore::new(ObjectStores::new(os.clone(), None),
+                format, Path::from(ROOT), None));
             if let Some(bytes) = block_size.checked_mul(num_blocks) {
                 assert_eq!(num_blocks, ts.bytes_to_blocks(bytes));
             }

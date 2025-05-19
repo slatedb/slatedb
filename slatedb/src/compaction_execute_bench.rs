@@ -24,6 +24,7 @@ use crate::config::{CompactorOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::manifest::store::{ManifestStore, StoredManifest};
+use crate::object_stores::ObjectStores;
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
@@ -57,8 +58,7 @@ impl CompactionExecuteBench {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            self.object_store.clone(),
-            None,
+            ObjectStores::new(self.object_store.clone(), None),
             sst_format,
             self.path.clone(),
             None,
@@ -272,8 +272,7 @@ impl CompactionExecuteBench {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            self.object_store.clone(),
-            None,
+            ObjectStores::new(self.object_store.clone(), None),
             sst_format,
             self.path.clone(),
             None,

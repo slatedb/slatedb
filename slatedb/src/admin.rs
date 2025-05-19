@@ -8,6 +8,7 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 
 use crate::clone;
+use crate::object_stores::ObjectStores;
 use fail_parallel::FailPointRegistry;
 use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
@@ -116,8 +117,7 @@ pub async fn run_gc_instance(
         .await?;
     let sst_format = SsTableFormat::default(); // read only SSTs, can use default
     let table_store = Arc::new(TableStore::new(
-        object_store.clone(),
-        None,
+        ObjectStores::new(object_store.clone(), None),
         sst_format.clone(),
         path.clone(),
         None, // no need for cache in GC

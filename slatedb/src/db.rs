@@ -965,6 +965,7 @@ mod tests {
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
@@ -2056,8 +2057,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let sst_format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
-            object_store.clone(),
-            None,
+            ObjectStores::new(object_store.clone(), None),
             sst_format,
             path.clone(),
             None,
@@ -2143,8 +2143,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            object_store.clone(),
-            None,
+            ObjectStores::new(object_store.clone(), None),
             sst_format,
             path,
             None,
@@ -2728,8 +2727,7 @@ mod tests {
 
         let manifest_store = ManifestStore::new(&Path::from(path), object_store.clone());
         let table_store = Arc::new(TableStore::new(
-            object_store.clone(),
-            None,
+            ObjectStores::new(object_store.clone(), None),
             SsTableFormat::default(),
             path,
             None,

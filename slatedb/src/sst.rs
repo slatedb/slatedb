@@ -724,6 +724,7 @@ mod tests {
     use crate::db_state::SsTableId;
     use crate::filter::filter_hash;
     use crate::iter::IterationOrder::Ascending;
+    use crate::object_stores::ObjectStores;
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, build_test_sst, gen_attrs, gen_empty_attrs};
 
@@ -771,7 +772,12 @@ mod tests {
             block_size: 32,
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(object_store, None, format, root_path, None);
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        );
         let mut builder = table_store.table_builder();
         builder
             .add_value(&[b'a'; 8], &[b'1'; 8], gen_attrs(1))
@@ -817,7 +823,12 @@ mod tests {
             block_size: 32,
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(object_store, None, format.clone(), root_path, None);
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format.clone(),
+            root_path,
+            None,
+        );
         let mut builder = table_store.table_builder();
         builder
             .add_value(&[b'a'; 8], &[b'1'; 8], gen_attrs(1))
@@ -898,7 +909,12 @@ mod tests {
     ) {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let table_store = TableStore::new(object_store, None, format.clone(), root_path, None);
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format.clone(),
+            root_path,
+            None,
+        );
         let mut builder = table_store.table_builder();
         for k in 1..=8 {
             builder
@@ -974,7 +990,12 @@ mod tests {
             compression_codec: compression,
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(object_store, None, format, root_path, None);
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        );
         let mut builder = table_store.table_builder();
         builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
         builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
@@ -1028,8 +1049,12 @@ mod tests {
             compression_codec: compression,
             ..SsTableFormat::default()
         };
-        let table_store =
-            TableStore::new(object_store.clone(), None, format, root_path.clone(), None);
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            format,
+            root_path.clone(),
+            None,
+        );
         let mut builder = table_store.table_builder();
         builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
         builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
@@ -1045,7 +1070,12 @@ mod tests {
             compression_codec: dummy_codec,
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(object_store, None, format, root_path, None);
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        );
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle).await.unwrap();
         let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
@@ -1096,7 +1126,12 @@ mod tests {
             min_filter_keys: 1,
             ..SsTableFormat::default()
         };
-        let table_store = TableStore::new(object_store, None, format.clone(), root_path, None);
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format.clone(),
+            root_path,
+            None,
+        );
         let mut builder = table_store.table_builder();
         builder
             .add_value(&[b'a'; 2], &[1u8; 2], gen_empty_attrs())
@@ -1139,7 +1174,12 @@ mod tests {
             ..SsTableFormat::default()
         };
 
-        let table_store = TableStore::new(object_store, None, format, root_path, None);
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        );
         let mut builder = table_store.table_builder();
         builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
         builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
@@ -1196,7 +1236,12 @@ mod tests {
             ..SsTableFormat::default()
         };
 
-        let table_store = TableStore::new(object_store, None, format.clone(), root_path, None);
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format.clone(),
+            root_path,
+            None,
+        );
         let mut builder = table_store.table_builder();
         builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
         builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
