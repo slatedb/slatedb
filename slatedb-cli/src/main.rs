@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         CliCommands::ListCheckpoints {} => exec_list_checkpoints(&path, object_store).await?,
         CliCommands::RunGarbageCollection { resource, min_age } => {
-            exec_gc_once(&path, object_store, resource, min_age).await
+            exec_gc_once(&path, object_store, resource, min_age).await?
         }
         CliCommands::ScheduleGarbageCollection {
             manifest,
@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 compacted,
                 cancellation_token,
             )
-            .await
+            .await?
         }
     }
 
@@ -162,7 +162,7 @@ async fn exec_gc_once(
     object_store: Arc<dyn ObjectStore>,
     resource: GcResource,
     min_age: Duration,
-) {
+) -> Result<(), Box<dyn Error>> {
     fn create_gc_dir_opts(min_age: Duration) -> Option<GarbageCollectorDirectoryOptions> {
         Some(GarbageCollectorDirectoryOptions {
             interval: None,
@@ -186,7 +186,8 @@ async fn exec_gc_once(
             compacted_options: create_gc_dir_opts(min_age),
         },
     };
-    run_gc_once(path, object_store, gc_opts).await;
+    run_gc_once(path, object_store, gc_opts).await?;
+    Ok(())
 }
 
 async fn schedule_gc(
@@ -196,7 +197,7 @@ async fn schedule_gc(
     wal_schedule: Option<GcSchedule>,
     compacted_schedule: Option<GcSchedule>,
     cancellation_token: CancellationToken,
-) {
+) -> Result<(), Box<dyn Error>> {
     fn create_gc_dir_opts(schedule: GcSchedule) -> Option<GarbageCollectorDirectoryOptions> {
         Some(GarbageCollectorDirectoryOptions {
             interval: Some(schedule.period),
@@ -209,5 +210,6 @@ async fn schedule_gc(
         compacted_options: compacted_schedule.and_then(create_gc_dir_opts),
     };
 
-    run_gc_in_background(path, object_store, gc_opts, cancellation_token).await;
+    run_gc_in_background(path, object_store, gc_opts, cancellation_token).await?;
+    Ok(())
 }
