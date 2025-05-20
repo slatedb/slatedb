@@ -280,6 +280,7 @@ mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
     use crate::error::SlateDBError;
+    use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::types::RowEntry;
     use crate::{

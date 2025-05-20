@@ -122,7 +122,7 @@ pub async fn run_gc_once(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
     gc_opts: GarbageCollectorOptions,
-) {
+) -> Result<(), Box<dyn Error>> {
     let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
     manifest_store
         .validate_no_wal_object_store_configured()
@@ -137,6 +137,7 @@ pub async fn run_gc_once(
 
     let stats = Arc::new(StatRegistry::new());
     GarbageCollector::run_gc_once(manifest_store, table_store, stats, gc_opts).await;
+    Ok(())
 }
 
 /// Run the garbage collector in the background.
@@ -154,11 +155,14 @@ pub async fn run_gc_in_background(
     object_store: Arc<dyn ObjectStore>,
     gc_opts: GarbageCollectorOptions,
     cancellation_token: CancellationToken,
-) {
+) -> Result<(), Box<dyn Error>> {
     let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
+    manifest_store
+        .validate_no_wal_object_store_configured()
+        .await?;
     let sst_format = SsTableFormat::default(); // read only SSTs, can use default
     let table_store = Arc::new(TableStore::new(
-        object_store.clone(),
+        ObjectStores::new(object_store.clone(), None),
         sst_format.clone(),
         path.clone(),
         None, // no need for cache in GC
@@ -179,6 +183,7 @@ pub async fn run_gc_in_background(
     tracker.close();
 
     tracker.wait().await;
+    Ok(())
 }
 
 /// Loads a local object store instance.
