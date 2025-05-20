@@ -203,6 +203,7 @@ impl FlatBufferManifestCodec {
             last_l0_seq: manifest.last_l0_seq(),
             last_l0_clock_tick: manifest.last_l0_clock_tick(),
             checkpoints,
+            wal_object_store_uri: manifest.wal_object_store_uri().map(|uri| uri.to_string()),
         };
         let external_dbs = manifest.external_dbs().map(|external_dbs| {
             external_dbs
@@ -415,6 +416,11 @@ impl<'b> DbFlatBufferBuilder<'b> {
             Some(self.builder.create_vector(external_dbs.as_ref()))
         };
 
+        let wal_object_store_uri = core
+            .wal_object_store_uri
+            .as_ref()
+            .map(|uri| self.builder.create_string(uri));
+
         let manifest = ManifestV1::create(
             &mut self.builder,
             &ManifestV1Args {
@@ -431,6 +437,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 last_l0_clock_tick: core.last_l0_clock_tick,
                 checkpoints: Some(checkpoints),
                 last_l0_seq: core.last_l0_seq,
+                wal_object_store_uri,
             },
         );
         self.builder.finish(manifest, None);
@@ -611,6 +618,7 @@ mod tests {
                 checkpoints: Some(checkpoints),
                 last_l0_clock_tick: 0,
                 last_l0_seq: 0,
+                wal_object_store_uri: None,
             },
         );
         fbb.finish(manifest, None);
@@ -643,5 +651,17 @@ mod tests {
             }
             _ => panic!("Should fail with version mismatch"),
         }
+    }
+
+    #[test]
+    fn test_should_encode_decode_wal_object_store_uri() {
+        let mut manifest = Manifest::initial(CoreDbState::new());
+        manifest.core.wal_object_store_uri = Some("s3://bucket/path".to_string());
+
+        let codec = FlatBufferManifestCodec {};
+        let bytes = codec.encode(&manifest);
+        let decoded = codec.decode(&bytes).unwrap();
+
+        assert_eq!(manifest, decoded);
     }
 }

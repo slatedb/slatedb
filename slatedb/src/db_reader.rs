@@ -812,6 +812,7 @@ mod tests {
     use crate::db_state::CoreDbState;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
+    use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::proptest_util::rng::new_test_rng;
     use crate::proptest_util::sample;
@@ -1144,7 +1145,7 @@ mod tests {
     impl StoreProvider for TestProvider {
         fn table_store(&self) -> Arc<TableStore> {
             Arc::new(TableStore::new_with_fp_registry(
-                Arc::clone(&self.object_store),
+                ObjectStores::new(Arc::clone(&self.object_store), None),
                 SsTableFormat::default(),
                 PathResolver::new(self.path.clone()),
                 Arc::clone(&self.fp_registry),

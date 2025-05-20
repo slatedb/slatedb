@@ -361,6 +361,7 @@ impl<'a> LevelGet<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object_stores::ObjectStores;
     use crate::{sst::SsTableFormat, stats::StatRegistry, types::ValueDeletable};
     use object_store::{memory::InMemory, path::Path};
     use rstest::rstest;
@@ -540,7 +541,7 @@ mod tests {
             max_seq: None,
             snapshot: &mock_read_snapshot,
             table_store: Arc::new(TableStore::new(
-                Arc::new(InMemory::new()),
+                ObjectStores::new(Arc::new(InMemory::new()), None),
                 SsTableFormat::default(),
                 Path::from(""),
                 None,

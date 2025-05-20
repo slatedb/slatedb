@@ -358,6 +358,7 @@ mod tests {
     use super::*;
     use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
+    use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
     use crate::test_utils::{assert_kv, gen_attrs};
     use object_store::path::Path;
@@ -373,7 +374,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            object_store,
+            ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
             None,
@@ -426,7 +427,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            object_store,
+            ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
             None,
@@ -483,7 +484,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            object_store,
+            ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
             None,
@@ -532,7 +533,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            object_store,
+            ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
             None,
@@ -575,7 +576,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            object_store,
+            ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
             None,
