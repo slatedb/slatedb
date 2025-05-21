@@ -89,6 +89,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::cached_object_store::stats::CachedObjectStoreStats;
@@ -128,6 +129,7 @@ pub struct DbBuilder<P: Into<Path>> {
     compaction_runtime: Option<Handle>,
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     fp_registry: Arc<FailPointRegistry>,
+    cancellation_token: CancellationToken,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -144,6 +146,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             compaction_runtime: None,
             compaction_scheduler_supplier: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
+            cancellation_token: CancellationToken::new(),
         }
     }
 
@@ -198,6 +201,11 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Sets the fail point registry to use for the database.
     pub fn with_fp_registry(mut self, fp_registry: Arc<FailPointRegistry>) -> Self {
         self.fp_registry = fp_registry;
+        self
+    }
+
+    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
+        self.cancellation_token = cancellation_token;
         self
     }
 
@@ -402,27 +410,24 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // To keep backwards compatibility, check if the gc_runtime or garbage_collector_options are set.
         // If either are set, we need to initialize the garbage collector.
-        if self.gc_runtime.is_some() || self.settings.garbage_collector_options.is_some() {
-            let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
+        if let Some(gc_options) = self.settings.garbage_collector_options {
             let gc_handle = self.gc_runtime.unwrap_or_else(|| Handle::current());
 
             let cleanup_inner = inner.clone();
-            garbage_collector = Some(
-                GarbageCollector::new(
-                    manifest_store.clone(),
-                    table_store.clone(),
-                    gc_options.clone(),
-                    gc_handle,
-                    inner.stat_registry.clone(),
-                    move |result| {
-                        let err = bg_task_result_into_err(result);
-                        warn!("GC thread exited with {:?}", err);
-                        let mut state = cleanup_inner.state.write();
-                        state.record_fatal_error(err.clone())
-                    },
-                )
-                .await,
-            )
+            garbage_collector = Some(GarbageCollector::start_in_bg_thread(
+                manifest_store,
+                table_store,
+                gc_options,
+                gc_handle,
+                inner.stat_registry.clone(),
+                self.cancellation_token.clone(),
+                move |result| {
+                    let err = bg_task_result_into_err(result);
+                    warn!("GC thread exited with {:?}", err);
+                    let mut state = cleanup_inner.state.write();
+                    state.record_fatal_error(err.clone())
+                },
+            ));
         }
 
         // Create and return the Db instance
@@ -433,6 +438,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             write_task: Mutex::new(write_task),
             compactor: Mutex::new(compactor),
             garbage_collector: Mutex::new(garbage_collector),
+            cancellation_token: self.cancellation_token,
         })
     }
 }

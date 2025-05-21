@@ -1,6 +1,7 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::error::SlateDBError;
+use crate::garbage_collector::stats::GcStats;
 use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::sst::SsTableFormat;
@@ -17,7 +18,8 @@ use std::env;
 use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
-use tokio::runtime::Handle;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 /// read-only access to the latest manifest file
@@ -106,7 +108,17 @@ pub fn load_object_store_from_env(
     }
 }
 
-pub async fn run_gc_instance(
+/// Run the garbage collector once in the foreground.
+///
+/// This function runs the garbage collector letting Tokio decide when to run the task.
+///
+/// # Arguments
+///
+/// * `path`: The path to the database.
+/// * `object_store`: The object store to use.
+/// * `gc_opts`: The garbage collector options.
+///
+pub async fn run_gc_once(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
     gc_opts: GarbageCollectorOptions,
@@ -123,20 +135,54 @@ pub async fn run_gc_instance(
         None, // no need for cache in GC
     ));
 
-    let tokio_handle = Handle::current();
     let stats = Arc::new(StatRegistry::new());
-    let collector = GarbageCollector::new(
+    GarbageCollector::run_gc_once(manifest_store, table_store, stats, gc_opts).await;
+    Ok(())
+}
+
+/// Run the garbage collector in the background.
+///
+/// This function runs the garbage collector in a Tokio background task.
+///
+/// # Arguments
+///
+/// * `path`: The path to the database.
+/// * `object_store`: The object store to use.
+/// * `gc_opts`: The garbage collector options.
+/// * `cancellation_token`: The cancellation token to stop the garbage collector.
+pub async fn run_gc_in_background(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    gc_opts: GarbageCollectorOptions,
+    cancellation_token: CancellationToken,
+) -> Result<(), Box<dyn Error>> {
+    let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
+    manifest_store
+        .validate_no_wal_object_store_configured()
+        .await?;
+    let sst_format = SsTableFormat::default(); // read only SSTs, can use default
+    let table_store = Arc::new(TableStore::new(
+        ObjectStores::new(object_store.clone(), None),
+        sst_format.clone(),
+        path.clone(),
+        None, // no need for cache in GC
+    ));
+
+    let stats = Arc::new(GcStats::new(Arc::new(StatRegistry::new())));
+
+    let tracker = TaskTracker::new();
+    let ct = cancellation_token.clone();
+
+    tracker.spawn(GarbageCollector::start_async_task(
         manifest_store,
         table_store,
-        gc_opts,
-        tokio_handle,
         stats,
-        |_| {},
-    )
-    .await;
+        ct,
+        gc_opts,
+    ));
+    tracker.close();
 
-    collector.register_interrupt_handler();
-    collector.await_shutdown().await;
+    tracker.wait().await;
     Ok(())
 }
 
