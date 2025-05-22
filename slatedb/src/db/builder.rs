@@ -231,7 +231,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             info!(?path, ?self.settings, "Opening SlateDB database");
         }
 
-        let rng = self.rng.unwrap_or_else(|| Arc::new(rand::rngs::StdRng::from_entropy()));
+        let rng = self
+            .rng
+            .unwrap_or_else(|| Arc::new(rand::rngs::StdRng::from_entropy()));
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock::new()));
         let block_cache = self.block_cache.or_else(default_block_cache);
 
