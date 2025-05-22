@@ -38,7 +38,7 @@ static ROOT_RNG: OnceLock<Mutex<Rng>> = OnceLock::new();
 thread_local! {
     // A thread-local random number generator used for all randomness in a single thread. Not
     // threadsafe.
-    static THREAD_RNG: RefCell<Option<Rng>> = RefCell::new(None);
+    static THREAD_RNG: RefCell<Option<Rng>> = const { RefCell::new(None) };
 }
 
 /// Initialize the global random number generator with a seed. This should only be called once
