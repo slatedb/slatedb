@@ -29,17 +29,19 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::SlateDBError;
 
+type RngAlg = Xoroshiro128Plus;
+
 // A global random number generator used for all randomness in SlateDB.
 //
 // Uses `OnceLock` to ensure that the random number generator is initialized exactly once regardless
 // of which thread it was initialized on. Uses `Mutex` so we can grab a mutable reference to the
 // random number generator when forking the root RNG in a local thread.
-static ROOT_RNG: OnceLock<Mutex<Xoroshiro128Plus>> = OnceLock::new();
+static ROOT_RNG: OnceLock<Mutex<RngAlg>> = OnceLock::new();
 
 thread_local! {
     // A thread-local random number generator used for all randomness in a single thread. Not
     // threadsafe.
-    static THREAD_RNG: RefCell<Option<Xoroshiro128Plus>> = const { RefCell::new(None) };
+    static THREAD_RNG: RefCell<Option<RngAlg>> = const { RefCell::new(None) };
 }
 
 /// Initialize the global random number generator with a seed. This should only be called once
@@ -50,7 +52,7 @@ thread_local! {
 /// Returns an error if the random number generator has already been initialized.
 pub(crate) fn seed(seed: u64) -> Result<(), SlateDBError> {
     ROOT_RNG
-        .set(Mutex::new(Xoroshiro128Plus::seed_from_u64(seed)))
+        .set(Mutex::new(RngAlg::seed_from_u64(seed)))
         .map_err(|_| SlateDBError::InvalidDBState)
 }
 
@@ -61,12 +63,12 @@ pub(crate) fn seed(seed: u64) -> Result<(), SlateDBError> {
 ///
 /// If the global random number generator hasn't been initialized, a default root random number
 /// generator will be created with a random seed.
-pub fn with_rng<T>(f: impl FnOnce(&mut Xoroshiro128Plus) -> T) -> T {
+pub fn with_rng<T>(f: impl FnOnce(&mut dyn RngCore) -> T) -> T {
     THREAD_RNG.with(|cell| {
         let mut maybe_rng = cell.borrow_mut();
         if maybe_rng.is_none() {
             let mut root_rng = ROOT_RNG
-                .get_or_init(|| Mutex::new(Xoroshiro128Plus::seed_from_u64(0)))
+                .get_or_init(|| Mutex::new(RngAlg::seed_from_u64(0)))
                 .lock()
                 .expect("mutex poisoned");
             let thread_local_rng = Xoroshiro128Plus::seed_from_u64(root_rng.next_u64());
@@ -78,8 +80,6 @@ pub fn with_rng<T>(f: impl FnOnce(&mut Xoroshiro128Plus) -> T) -> T {
 
 #[cfg(test)]
 mod tests {
-    use rand_xoshiro::rand_core::RngCore;
-
     use super::*;
 
     // Helper to force a thread-local random number generator to use a specific seed so we
