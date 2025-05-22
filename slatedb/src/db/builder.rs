@@ -88,6 +88,8 @@ use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::Mutex;
+use rand::RngCore;
+use rand::SeedableRng;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -130,6 +132,7 @@ pub struct DbBuilder<P: Into<Path>> {
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     fp_registry: Arc<FailPointRegistry>,
     cancellation_token: CancellationToken,
+    rng: Option<Arc<dyn RngCore>>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -147,6 +150,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             compaction_scheduler_supplier: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
             cancellation_token: CancellationToken::new(),
+            rng: None,
         }
     }
 
@@ -209,6 +213,11 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    pub fn with_rng(mut self, rng: Arc<dyn RngCore>) -> Self {
+        self.rng = Some(rng);
+        self
+    }
+
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, SlateDBError> {
         let path = self.path.into();
@@ -222,6 +231,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             info!(?path, ?self.settings, "Opening SlateDB database");
         }
 
+        let rng = self.rng.unwrap_or_else(|| Arc::new(rand::rngs::StdRng::from_entropy()));
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock::new()));
         let block_cache = self.block_cache.or_else(default_block_cache);
 
