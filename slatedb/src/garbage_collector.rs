@@ -127,6 +127,11 @@ impl GarbageCollector {
         loop {
             tokio::select! {
                 biased;
+                // check the cancellation token first to avoid starting new GC tasks when the runtime is shutting down
+                _ = cancellation_token.cancelled() => {
+                    info!("Garbage collector received shutdown signal... shutting down");
+                    break;
+                },
                 _ = manifest_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut manifest_gc_task).await; },
                 _ = wal_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut wal_gc_task).await; },
                 _ = compacted_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut compacted_gc_task).await; },
@@ -136,11 +141,7 @@ impl GarbageCollector {
                          stats.gc_wal_count.value.load(Ordering::SeqCst),
                          stats.gc_compacted_count.value.load(Ordering::SeqCst)
                      );
-                 },
-                _ = cancellation_token.cancelled() => {
-                    info!("Garbage collector received shutdown signal... shutting down");
-                    break;
-                }
+                 }
             }
             stats.gc_count.inc();
         }
@@ -1067,5 +1068,42 @@ mod tests {
 
         // Verify reference integrity
         assert_no_dangling_references(manifest_store, table_store).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_gc_shutdown() {
+        let (manifest_store, table_store, _) = build_objects();
+        let stats = Arc::new(StatRegistry::new());
+
+        let gc_opts = GarbageCollectorOptions {
+            manifest_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
+                interval: Some(Duration::from_secs(1)),
+            }),
+            wal_options: Some(crate::config::GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
+                interval: Some(Duration::from_secs(1)),
+            }),
+            compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
+                interval: Some(Duration::from_secs(1)),
+            }),
+        };
+
+        let cancellation_token = CancellationToken::new();
+
+        let gc = GarbageCollector::start_in_bg_thread(
+            manifest_store.clone(),
+            table_store.clone(),
+            gc_opts,
+            Handle::current(),
+            stats.clone(),
+            cancellation_token.clone(),
+            |result| assert!(result.is_ok()),
+        );
+
+        gc.terminate_background_task().await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(cancellation_token.is_cancelled());
     }
 }
