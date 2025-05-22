@@ -48,7 +48,7 @@ uuid = { version = "1.11.0", features = ["v4", "serde"] }
 walkdir = "2.3.3"
 zstd = { version = "0.13.2", optional = true }
 tokio-util = { version = "0.7.15", default-features = false, features = ["rt"] }
-fastrand = "2.3.0"
+rand_xoshiro = "0.7.0"
 
 [dev-dependencies]
 bincode = "1"
