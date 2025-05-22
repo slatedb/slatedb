@@ -8,7 +8,10 @@
 //!
 //! Each thread also has its own random number generator that is initialized from the global
 //! random number generator. This ensures that each thread has its own random number generator
-//! that is initialized with the same seed.
+//! that is initialized deterministically from the global random number generator. This is useful
+//! for deterministic simulation testing. We can seed the root RNG and have all random numbers
+//! derive from that without having to share the root RNG across threads, which would create a
+//! point of contention.
 //!
 //! ## Usage
 //!
