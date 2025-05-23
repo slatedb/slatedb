@@ -14,6 +14,10 @@
 //! - `thread_rng()` is called while the root RNG is unset. This will initialize the root RNG
 //!   with a random seed.
 //!
+//! The module currently uses Xoshiro128++ for all random number generators. The rand crate's
+//! `seed_from_u64` method uses SplitMix64 under the hood, which makes it safe to use the root
+//! RNG to seed the thread-local RNGs to avoid any correlation between the RNGs.
+//!
 //! ## Usage
 //!
 //! ```ignore
