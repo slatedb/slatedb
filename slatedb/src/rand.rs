@@ -16,14 +16,12 @@
 //!
 //! ## Usage
 //!
-//! ```rust
-//! use slate_db::rand::seed;
-//!
+//! ```ignore
 //! seed(42);
 //! let _ = rng().next_u64();
 //! ```
 
-use std::cell::RefCell;
+use std::cell::UnsafeCell;
 use std::sync::{Mutex, OnceLock};
 
 use rand_core::{RngCore, SeedableRng};
@@ -36,7 +34,7 @@ static ROOT_RNG: OnceLock<Mutex<RngAlg>> = OnceLock::new();
 /// Seed the root random number generator.
 ///
 /// This function can only be called once. If it is called multiple times, it will panic.
-pub fn seed(seed: u64) {
+pub(crate) fn seed(seed: u64) {
     let rng = RngAlg::seed_from_u64(seed);
     ROOT_RNG
         .set(Mutex::new(rng))
@@ -48,51 +46,52 @@ fn root_lock() -> &'static Mutex<RngAlg> {
 }
 
 thread_local! {
-    static THREAD_RNG: RefCell<RngAlg> = {
+    static THREAD_RNG: UnsafeCell<RngAlg> = {
         let mut guard = root_lock().lock().expect("root rng poisoned");
         let child_seed = guard.next_u64();
-        RefCell::new(RngAlg::seed_from_u64(child_seed))
+        UnsafeCell::new(RngAlg::seed_from_u64(child_seed))
     };
 }
 
 // ThreadRng is a zero-sized type that provides a handle to a thread's RNG. We have to
 // do this because the RNG needs to be mutable and we can't return a RefMut from the
 // `rng()` function (the lifetime of the RefMut would be the lifetime of the `rng()`
-// function).
+// function). We are using `UnsafeCell` because the THREAD_RNG is thread-local by
+// design. See the `rand` crate for more details:
+// https://github.com/rust-random/rand/blob/204084a35fc7289e9a38575fdd80869818484517/src/rngs/thread.rs#L24-L34
 
 /// A thread-local random number generator.
-pub struct ThreadRng;
-
-impl ThreadRng {
-    #[inline(always)]
-    fn with<R>(f: impl FnOnce(&mut RngAlg) -> R) -> R {
-        THREAD_RNG.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            f(&mut *borrow)
-        })
-    }
-}
+pub(crate) struct ThreadRng;
 
 impl RngCore for ThreadRng {
-    #[inline]
+    #[inline(always)]
     fn next_u32(&mut self) -> u32 {
-        ThreadRng::with(|rng| rng.next_u32())
+        // SAFETY: We must make sure to stop using `rng` before anyone else
+        // creates another mutable reference
+        let rng = unsafe { &mut *THREAD_RNG.with(|cell| cell.get()) };
+        rng.next_u32()
     }
 
-    #[inline]
+    #[inline(always)]
     fn next_u64(&mut self) -> u64 {
-        ThreadRng::with(|rng| rng.next_u64())
+        // SAFETY: We must make sure to stop using `rng` before anyone else
+        // creates another mutable reference
+        let rng = unsafe { &mut *THREAD_RNG.with(|cell| cell.get()) };
+        rng.next_u64()
     }
 
-    #[inline]
+    #[inline(always)]
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        ThreadRng::with(|rng| rng.fill_bytes(dest))
+        // SAFETY: We must make sure to stop using `rng` before anyone else
+        // creates another mutable reference
+        let rng = unsafe { &mut *THREAD_RNG.with(|cell| cell.get()) };
+        rng.fill_bytes(dest)
     }
 }
 
 /// Returns a handle to the thread-local random number generator.
 #[inline]
-pub fn rng() -> ThreadRng {
+pub(crate) fn rng() -> ThreadRng {
     ThreadRng
 }
 
@@ -103,7 +102,8 @@ mod tests {
     // Force a thread-local RNG to use a specific seed so we can test deterministically.
     fn seed_local(seed: u64) {
         THREAD_RNG.with(|cell| {
-            cell.replace(RngAlg::seed_from_u64(seed));
+            let rng = unsafe { &mut *cell.get() };
+            *rng = RngAlg::seed_from_u64(seed);
         });
     }
 
