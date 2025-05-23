@@ -41,13 +41,12 @@ pub(crate) fn seed(seed: u64) {
         .expect("rand::seed() can only be called once");
 }
 
-fn root_lock() -> &'static Mutex<RngAlg> {
-    ROOT_RNG.get_or_init(|| Mutex::new(RngAlg::from_os_rng()))
-}
-
 thread_local! {
     static THREAD_RNG: UnsafeCell<RngAlg> = {
-        let mut guard = root_lock().lock().expect("root rng poisoned");
+        let mut guard = ROOT_RNG
+            .get_or_init(|| Mutex::new(RngAlg::from_os_rng()))
+            .lock()
+            .expect("root rng poisoned");
         let child_seed = guard.next_u64();
         UnsafeCell::new(RngAlg::seed_from_u64(child_seed))
     };
