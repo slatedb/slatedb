@@ -24,7 +24,7 @@
 use std::cell::RefCell;
 use std::sync::{Mutex, OnceLock};
 
-use rand_core::{RngCore, SeedableRng};
+use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoroshiro128PlusPlus;
 
 type RngAlg = Xoroshiro128PlusPlus;
@@ -45,7 +45,7 @@ thread_local! {
     /// Per-thread RNG state, stored by value in a Cell.
     static THREAD_RNG: RefCell<RngAlg> = {
         let mut guard = ROOT_RNG
-            .get_or_init(|| Mutex::new(RngAlg::from_os_rng()))
+            .get_or_init(|| Mutex::new(RngAlg::from_entropy()))
             .lock()
             .expect("root rng poisoned");
         let child_seed = guard.next_u64();
@@ -70,6 +70,11 @@ impl RngCore for ThreadRng {
     #[inline(always)]
     fn fill_bytes(&mut self, dest: &mut [u8]) {
         THREAD_RNG.with(|cell| cell.borrow_mut().fill_bytes(dest))
+    }
+
+    #[inline(always)]
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+        THREAD_RNG.with(|cell| cell.borrow_mut().try_fill_bytes(dest))
     }
 }
 
