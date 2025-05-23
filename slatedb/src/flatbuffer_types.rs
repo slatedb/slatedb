@@ -510,7 +510,6 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::test_utils::build_test_sst;
     use bytes::{BufMut, BytesMut};
-    use ulid::Ulid;
 
     use super::{manifest_generated, MANIFEST_FORMAT_VERSION};
 
@@ -553,15 +552,15 @@ mod tests {
                 source_checkpoint_id: crate::utils::uuid(),
                 final_checkpoint_id: Some(crate::utils::uuid()),
                 sst_ids: vec![
-                    SsTableId::Compacted(Ulid::new()),
-                    SsTableId::Compacted(Ulid::new()),
+                    SsTableId::Compacted(crate::utils::ulid()),
+                    SsTableId::Compacted(crate::utils::ulid()),
                 ],
             },
             ExternalDb {
                 path: "/path/to/external/second".to_string(),
                 source_checkpoint_id: crate::utils::uuid(),
                 final_checkpoint_id: Some(crate::utils::uuid()),
-                sst_ids: vec![SsTableId::Compacted(Ulid::new())],
+                sst_ids: vec![SsTableId::Compacted(crate::utils::ulid())],
             },
         ];
         let codec = FlatBufferManifestCodec {};

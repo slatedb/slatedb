@@ -544,7 +544,6 @@ mod tests {
     use std::collections::Bound::Included;
     use std::ops::RangeBounds;
     use std::time::SystemTime;
-    use ulid::Ulid;
 
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
@@ -611,7 +610,10 @@ mod tests {
                 .freeze_memtable(i as u64)
                 .expect("db in error state");
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
-            let handle = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), dummy_info.clone());
+            let handle = SsTableHandle::new(
+                SsTableId::Compacted(crate::utils::ulid()),
+                dummy_info.clone(),
+            );
             db_state.move_imm_memtable_to_l0(imm, handle).unwrap();
         }
     }
@@ -668,7 +670,7 @@ mod tests {
 
     fn create_compacted_sst_handle(first_key: Option<Bytes>) -> SsTableHandle {
         let sst_info = create_sst_info(first_key);
-        let sst_id = SsTableId::Compacted(Ulid::new());
+        let sst_id = SsTableId::Compacted(crate::utils::ulid());
         SsTableHandle::new(sst_id, sst_info.clone())
     }
 

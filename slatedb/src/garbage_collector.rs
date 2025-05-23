@@ -274,7 +274,6 @@ mod tests {
 
     use chrono::{DateTime, Utc};
     use object_store::{local::LocalFileSystem, path::Path};
-    use ulid::Ulid;
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
@@ -970,7 +969,7 @@ mod tests {
         // and then ULID sorting is based on the random part.
         std::thread::sleep(std::time::Duration::from_millis(1));
 
-        let sst_id = SsTableId::Compacted(Ulid::new());
+        let sst_id = SsTableId::Compacted(crate::utils::ulid());
         let mut sst = table_store.table_builder();
         sst.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
         let table = sst.build().unwrap();

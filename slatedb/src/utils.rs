@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tracing::info;
+use ulid::Ulid;
 use uuid::{Builder, Uuid};
 
 static EMPTY_KEY: Bytes = Bytes::new();
@@ -308,6 +309,10 @@ pub(crate) fn uuid() -> Uuid {
     let mut random_bytes = [0; 16];
     crate::rand::thread_rng().fill_bytes(&mut random_bytes);
     Builder::from_random_bytes(random_bytes).into_uuid()
+}
+
+pub(crate) fn ulid() -> Ulid {
+    Ulid::with_source(&mut crate::rand::thread_rng())
 }
 
 #[cfg(test)]

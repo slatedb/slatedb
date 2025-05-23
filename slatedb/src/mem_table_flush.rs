@@ -11,7 +11,6 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot::Sender;
 use tracing::{error, info, warn};
-use ulid::Ulid;
 
 #[derive(Debug)]
 pub(crate) enum MemtableFlushMsg {
@@ -104,7 +103,7 @@ impl MemtableFlusher {
                 rguard.state().imm_memtable.back().cloned()
             }
         } {
-            let id = SsTableId::Compacted(Ulid::with_source(&mut crate::rand::thread_rng()));
+            let id = SsTableId::Compacted(crate::utils::ulid());
             let sst_handle = self
                 .db_inner
                 .flush_imm_table(&id, imm_memtable.table(), true)
