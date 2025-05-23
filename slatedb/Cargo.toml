@@ -49,6 +49,7 @@ walkdir = "2.3.3"
 zstd = { version = "0.13.2", optional = true }
 tokio-util = { version = "0.7.15", default-features = false, features = ["rt"] }
 rand_xoshiro = "0.7.0"
+rand_core = "0.9.3"
 
 [dev-dependencies]
 bincode = "1"

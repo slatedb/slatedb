@@ -2974,6 +2974,7 @@ dependencies = [
  "proptest",
  "radix_trie",
  "rand 0.8.5",
+ "rand_core 0.9.3",
  "rand_xorshift",
  "rand_xoshiro 0.7.0",
  "rstest",

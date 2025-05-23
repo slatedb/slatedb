@@ -22,7 +22,7 @@
 //! let _ = with_rng(|rng| rng.u64(..));
 //! ```
 
-use rand_xoshiro::rand_core::{RngCore, SeedableRng};
+use rand_core::{RngCore, SeedableRng};
 use rand_xoshiro::Xoroshiro128Plus;
 use std::cell::RefCell;
 use std::sync::{Mutex, OnceLock};
