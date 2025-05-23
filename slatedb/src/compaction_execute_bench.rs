@@ -13,7 +13,6 @@ use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 use ulid::Ulid;
-use uuid::Uuid;
 
 use crate::bytes_generator::OrderedBytesGenerator;
 use crate::compactor::stats::CompactionStats;
@@ -219,7 +218,7 @@ impl CompactionExecuteBench {
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
             .collect();
         Ok(CompactionJob {
-            id: Uuid::new_v4(),
+            id: crate::utils::uuid(),
             destination: 0,
             ssts,
             sorted_runs: vec![],
@@ -251,7 +250,7 @@ impl CompactionExecuteBench {
             .collect();
         info!("loaded compaction job");
         CompactionJob {
-            id: Uuid::new_v4(),
+            id: crate::utils::uuid(),
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,

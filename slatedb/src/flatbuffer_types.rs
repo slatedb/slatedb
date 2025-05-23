@@ -511,7 +511,6 @@ mod tests {
     use crate::test_utils::build_test_sst;
     use bytes::{BufMut, BytesMut};
     use ulid::Ulid;
-    use uuid::Uuid;
 
     use super::{manifest_generated, MANIFEST_FORMAT_VERSION};
 
@@ -521,13 +520,13 @@ mod tests {
         let mut core = CoreDbState::new();
         core.checkpoints = vec![
             checkpoint::Checkpoint {
-                id: uuid::Uuid::new_v4(),
+                id: crate::utils::uuid(),
                 manifest_id: 1,
                 expire_time: None,
                 create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(100),
             },
             checkpoint::Checkpoint {
-                id: uuid::Uuid::new_v4(),
+                id: crate::utils::uuid(),
                 manifest_id: 2,
                 expire_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)),
                 create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
@@ -551,8 +550,8 @@ mod tests {
         manifest.external_dbs = vec![
             ExternalDb {
                 path: "/path/to/external/first".to_string(),
-                source_checkpoint_id: Uuid::new_v4(),
-                final_checkpoint_id: Some(Uuid::new_v4()),
+                source_checkpoint_id: crate::utils::uuid(),
+                final_checkpoint_id: Some(crate::utils::uuid()),
                 sst_ids: vec![
                     SsTableId::Compacted(Ulid::new()),
                     SsTableId::Compacted(Ulid::new()),
@@ -560,8 +559,8 @@ mod tests {
             },
             ExternalDb {
                 path: "/path/to/external/second".to_string(),
-                source_checkpoint_id: Uuid::new_v4(),
-                final_checkpoint_id: Some(Uuid::new_v4()),
+                source_checkpoint_id: crate::utils::uuid(),
+                final_checkpoint_id: Some(crate::utils::uuid()),
                 sst_ids: vec![SsTableId::Compacted(Ulid::new())],
             },
         ];

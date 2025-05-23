@@ -4,6 +4,7 @@ use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
+use rand::RngCore;
 use std::cmp;
 use std::future::Future;
 use std::sync::atomic::AtomicI64;
@@ -11,6 +12,7 @@ use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tracing::info;
+use uuid::{Builder, Uuid};
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
@@ -300,6 +302,12 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
     // if we didn't find a mismatch yet then the prev block's key must be shorter,
     // so just use the common prefix plus the next byte in this block's key
     this_block_first_key.slice(..prev_block_last_key.len() + 1)
+}
+
+pub(crate) fn uuid() -> Uuid {
+    let mut random_bytes = [0; 16];
+    crate::rand::thread_rng().fill_bytes(&mut random_bytes);
+    Builder::from_random_bytes(random_bytes).into_uuid()
 }
 
 #[cfg(test)]

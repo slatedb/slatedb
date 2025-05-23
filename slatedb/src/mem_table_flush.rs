@@ -12,7 +12,6 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot::Sender;
 use tracing::{error, info, warn};
 use ulid::Ulid;
-use uuid::Uuid;
 
 #[derive(Debug)]
 pub(crate) enum MemtableFlushMsg {
@@ -47,7 +46,7 @@ impl MemtableFlusher {
             let rguard_state = self.db_inner.state.read();
             rguard_state.state().manifest.clone()
         };
-        let id = Uuid::new_v4();
+        let id = crate::utils::uuid();
         let checkpoint = self.manifest.new_checkpoint(id, options)?;
         let manifest_id = checkpoint.manifest_id;
         dirty.core.checkpoints.push(checkpoint);

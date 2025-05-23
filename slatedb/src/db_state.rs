@@ -545,7 +545,6 @@ mod tests {
     use std::ops::RangeBounds;
     use std::time::SystemTime;
     use ulid::Ulid;
-    use uuid::Uuid;
 
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
@@ -555,7 +554,7 @@ mod tests {
         let mut updated_state = new_dirty_manifest();
         updated_state.core = db_state.state.core().clone();
         let checkpoint = Checkpoint {
-            id: Uuid::new_v4(),
+            id: crate::utils::uuid(),
             manifest_id: 1,
             expire_time: None,
             create_time: SystemTime::now(),
