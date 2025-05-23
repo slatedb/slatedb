@@ -11,8 +11,6 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot::Sender;
 use tracing::{error, info, warn};
-use ulid::Ulid;
-use uuid::Uuid;
 
 #[derive(Debug)]
 pub(crate) enum MemtableFlushMsg {
@@ -47,7 +45,7 @@ impl MemtableFlusher {
             let rguard_state = self.db_inner.state.read();
             rguard_state.state().manifest.clone()
         };
-        let id = Uuid::new_v4();
+        let id = crate::utils::uuid();
         let checkpoint = self.manifest.new_checkpoint(id, options)?;
         let manifest_id = checkpoint.manifest_id;
         dirty.core.checkpoints.push(checkpoint);
@@ -105,7 +103,7 @@ impl MemtableFlusher {
                 rguard.state().imm_memtable.back().cloned()
             }
         } {
-            let id = SsTableId::Compacted(Ulid::new());
+            let id = SsTableId::Compacted(crate::utils::ulid());
             let sst_handle = self
                 .db_inner
                 .flush_imm_table(&id, imm_memtable.table(), true)

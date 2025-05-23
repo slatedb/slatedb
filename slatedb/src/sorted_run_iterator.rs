@@ -165,7 +165,6 @@ mod tests {
     use rand::Rng;
     use std::collections::BTreeMap;
     use std::sync::Arc;
-    use ulid::Ulid;
 
     #[tokio::test]
     async fn test_one_sst_sr_iter() {
@@ -186,7 +185,7 @@ mod tests {
         builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
         builder.add_value(b"key3", b"value3", gen_attrs(3)).unwrap();
         let encoded = builder.build().unwrap();
-        let id = SsTableId::Compacted(Ulid::new());
+        let id = SsTableId::Compacted(crate::utils::ulid());
         let handle = table_store.write_sst(&id, encoded, false).await.unwrap();
         let sr = SortedRun {
             id: 0,
@@ -229,12 +228,12 @@ mod tests {
         builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
         builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
         let encoded = builder.build().unwrap();
-        let id1 = SsTableId::Compacted(Ulid::new());
+        let id1 = SsTableId::Compacted(crate::utils::ulid());
         let handle1 = table_store.write_sst(&id1, encoded, false).await.unwrap();
         let mut builder = table_store.table_builder();
         builder.add_value(b"key3", b"value3", gen_attrs(3)).unwrap();
         let encoded = builder.build().unwrap();
-        let id2 = SsTableId::Compacted(Ulid::new());
+        let id2 = SsTableId::Compacted(crate::utils::ulid());
         let handle2 = table_store.write_sst(&id2, encoded, false).await.unwrap();
         let sr = SortedRun {
             id: 0,
@@ -448,7 +447,7 @@ mod tests {
             }
 
             let encoded = builder.build().unwrap();
-            let id = SsTableId::Compacted(Ulid::new());
+            let id = SsTableId::Compacted(crate::utils::ulid());
             let handle = table_store.write_sst(&id, encoded, false).await.unwrap();
             ssts.push(handle);
         }
@@ -465,7 +464,7 @@ mod tests {
     ) -> SortedRun {
         let mut ssts = Vec::<SsTableHandle>::new();
         for _ in 0..n {
-            let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+            let mut writer = table_store.table_writer(SsTableId::Compacted(crate::utils::ulid()));
             for _ in 0..keys_per_sst {
                 let entry =
                     RowEntry::new_value(key_gen.next().as_ref(), val_gen.next().as_ref(), 0);

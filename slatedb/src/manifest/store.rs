@@ -153,7 +153,7 @@ impl FenceableManifest {
         checkpoint_id: Option<Uuid>,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let checkpoint_id = checkpoint_id.unwrap_or(Uuid::new_v4());
+        let checkpoint_id = checkpoint_id.unwrap_or(crate::utils::uuid());
         self.maybe_apply_manifest_update(|stored_manifest| {
             stored_manifest
                 .apply_new_checkpoint_to_db_state(checkpoint_id, options)
@@ -361,7 +361,7 @@ impl StoredManifest {
         checkpoint_id: Option<Uuid>,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let checkpoint_id = checkpoint_id.unwrap_or(Uuid::new_v4());
+        let checkpoint_id = checkpoint_id.unwrap_or(crate::utils::uuid());
         self.maybe_apply_manifest_update(|stored_manifest| {
             stored_manifest
                 .apply_new_checkpoint_to_db_state(checkpoint_id, options)
@@ -405,7 +405,7 @@ impl StoredManifest {
         old_checkpoint_id: Uuid,
         new_checkpoint_options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let new_checkpoint_id = Uuid::new_v4();
+        let new_checkpoint_id = crate::utils::uuid();
         self.maybe_apply_manifest_update(|stored_manifest| {
             let new_checkpoint =
                 stored_manifest.new_checkpoint(new_checkpoint_id, new_checkpoint_options)?;
@@ -738,7 +738,6 @@ mod tests {
     use object_store::path::Path;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
-    use uuid::Uuid;
 
     const ROOT: &str = "/root/path";
 
@@ -1031,7 +1030,7 @@ mod tests {
 
     fn new_checkpoint(manifest_id: u64) -> Checkpoint {
         Checkpoint {
-            id: Uuid::new_v4(),
+            id: crate::utils::uuid(),
             manifest_id,
             expire_time: None,
             create_time: now_rounded_to_nearest_sec(),
@@ -1155,7 +1154,7 @@ mod tests {
             .await
             .unwrap();
 
-        let checkpoint_id = Uuid::new_v4();
+        let checkpoint_id = crate::utils::uuid();
         let result = sm
             .refresh_checkpoint(checkpoint_id, Duration::from_secs(100))
             .await;
@@ -1200,7 +1199,7 @@ mod tests {
             .await
             .unwrap();
 
-        let missing_checkpoint_id = Uuid::new_v4();
+        let missing_checkpoint_id = crate::utils::uuid();
         let replaced_checkpoint = sm
             .replace_checkpoint(missing_checkpoint_id, &CheckpointOptions::default())
             .await
@@ -1237,7 +1236,7 @@ mod tests {
             .await
             .unwrap();
 
-        let checkpoint_id = Uuid::new_v4();
+        let checkpoint_id = crate::utils::uuid();
         let manifest_id = sm.id;
         sm.delete_checkpoint(checkpoint_id).await.unwrap();
         sm.refresh().await.unwrap();

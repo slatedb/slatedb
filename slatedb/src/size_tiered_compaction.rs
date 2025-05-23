@@ -634,7 +634,7 @@ mod tests {
             compression_codec: None,
         };
         SsTableHandle {
-            id: SsTableId::Compacted(ulid::Ulid::new()),
+            id: SsTableId::Compacted(crate::utils::ulid()),
             info,
         }
     }

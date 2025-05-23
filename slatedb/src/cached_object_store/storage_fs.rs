@@ -10,7 +10,6 @@ use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
 use radix_trie::{Trie, TrieCommon};
 use rand::seq::IteratorRandom;
-use rand::SeedableRng;
 use rand::{distributions::Alphanumeric, Rng};
 use tokio::fs::File;
 use tokio::{
@@ -146,7 +145,7 @@ impl FsCacheEntry {
     }
 
     fn make_rand_suffix(&self) -> String {
-        let mut rng = rand::thread_rng();
+        let mut rng = crate::rand::thread_rng();
         (0..24).map(|_| rng.sample(Alphanumeric) as char).collect()
     }
 }
@@ -618,7 +617,7 @@ impl FsCacheEvictorInner {
 
     async fn random_pick_entry(&self) -> Option<(std::path::PathBuf, (SystemTime, usize))> {
         let cache_entries = self.cache_entries.lock().await;
-        let mut rng = rand::rngs::StdRng::from_entropy();
+        let mut rng = crate::rand::thread_rng();
 
         let mut rand_child = match cache_entries.children().choose(&mut rng) {
             None => return None,

@@ -90,7 +90,7 @@ use object_store::ObjectStore;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
@@ -130,6 +130,7 @@ pub struct DbBuilder<P: Into<Path>> {
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     fp_registry: Arc<FailPointRegistry>,
     cancellation_token: CancellationToken,
+    seed: Option<u64>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -147,6 +148,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             compaction_scheduler_supplier: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
             cancellation_token: CancellationToken::new(),
+            seed: None,
         }
     }
 
@@ -209,6 +211,16 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Sets the seed to use for the database's random number generator. All random behavior
+    /// in SlateDB will use randomm number generators based off of this seed. This includes
+    /// random bytes for UUIDs and ULIDS, as well as random pickers in cache eviction policies.
+    ///
+    /// If not set, SlateDB uses the OS's random number generator to generate a seed.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, SlateDBError> {
         let path = self.path.into();
@@ -220,6 +232,11 @@ impl<P: Into<Path>> DbBuilder<P> {
             info!(?path, settings = settings_json, "Opening SlateDB database");
         } else {
             info!(?path, ?self.settings, "Opening SlateDB database");
+        }
+
+        if let Some(seed) = self.seed {
+            debug!("Using user-specified seed");
+            crate::rand::seed(seed);
         }
 
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock::new()));

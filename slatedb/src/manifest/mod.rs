@@ -42,7 +42,7 @@ impl Manifest {
             clone_external_dbs.push(ExternalDb {
                 path: parent_external_db.path.clone(),
                 source_checkpoint_id: parent_external_db.source_checkpoint_id,
-                final_checkpoint_id: Some(Uuid::new_v4()),
+                final_checkpoint_id: Some(crate::utils::uuid()),
                 sst_ids: parent_external_db.sst_ids.clone(),
             });
         }
@@ -59,7 +59,7 @@ impl Manifest {
         clone_external_dbs.push(ExternalDb {
             path: parent_path,
             source_checkpoint_id,
-            final_checkpoint_id: Some(Uuid::new_v4()),
+            final_checkpoint_id: Some(crate::utils::uuid()),
             sst_ids: parent_owned_sst_ids,
         });
 

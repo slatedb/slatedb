@@ -579,7 +579,6 @@ mod tests {
     use rstest::rstest;
     use std::collections::VecDeque;
     use std::sync::Arc;
-    use ulid::Ulid;
 
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::{DbCache, DbCacheWrapper};
@@ -640,7 +639,7 @@ mod tests {
             Path::from(ROOT),
             None,
         ));
-        let id = SsTableId::Compacted(Ulid::new());
+        let id = SsTableId::Compacted(crate::utils::ulid());
 
         // when:
         let mut writer = ts.table_writer(id);
@@ -810,7 +809,7 @@ mod tests {
         ));
 
         // Create and write SST
-        let id = SsTableId::Compacted(Ulid::new());
+        let id = SsTableId::Compacted(crate::utils::ulid());
         let mut writer = ts.table_writer(id);
         let mut expected_data = Vec::with_capacity(20);
         for i in 0..20 {
@@ -934,7 +933,7 @@ mod tests {
             Path::from("/root"),
             Some(wrapper),
         ));
-        let id = SsTableId::Compacted(Ulid::new());
+        let id = SsTableId::Compacted(crate::utils::ulid());
         let sst = build_test_sst(&ts.sst_format, 3);
         let sst_bytes = sst.remaining_as_bytes();
         let sst_info = sst.info.clone();
@@ -970,7 +969,7 @@ mod tests {
             Path::from("/root"),
             Some(wrapper),
         ));
-        let id = SsTableId::Compacted(Ulid::new());
+        let id = SsTableId::Compacted(crate::utils::ulid());
         let sst = build_test_sst(&ts.sst_format, 3);
         let sst_bytes = sst.remaining_as_bytes();
         let sst_info = sst.info.clone();
@@ -1013,6 +1012,8 @@ mod tests {
         #[case] main_store: Arc<dyn ObjectStore>,
         #[case] wal_store: Option<Arc<dyn ObjectStore>>,
     ) {
+        use ulid::Ulid;
+
         let format = SsTableFormat {
             block_size: 32,
             min_filter_keys: 1,
@@ -1028,7 +1029,7 @@ mod tests {
         // Create id1, id2, and i3 as three random UUIDs that have been sorted ascending.
         // Need to do this because the Ulids are sometimes generated in the same millisecond
         // and the random suffix is used to break the tie, which might be out of order.
-        let mut ulids = (0..3).map(|_| Ulid::new()).collect::<Vec<Ulid>>();
+        let mut ulids = (0..3).map(|_| crate::utils::ulid()).collect::<Vec<Ulid>>();
         ulids.sort();
         let (id1, id2, id3) = (
             SsTableId::Compacted(ulids[0]),
@@ -1172,8 +1173,8 @@ mod tests {
             None,
         ));
 
-        let id1 = SsTableId::Compacted(Ulid::new());
-        let id2 = SsTableId::Compacted(Ulid::new());
+        let id1 = SsTableId::Compacted(crate::utils::ulid());
+        let id2 = SsTableId::Compacted(crate::utils::ulid());
         let path1 = ts.path(&id1);
         let path2 = ts.path(&id2);
         main_store.put(&path1, Bytes::new().into()).await.unwrap();

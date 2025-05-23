@@ -2965,6 +2965,7 @@ dependencies = [
  "radix_trie",
  "rand 0.8.5",
  "rand_xorshift",
+ "rand_xoshiro",
  "rstest",
  "serde",
  "serde_json",
@@ -3497,11 +3498,12 @@ checksum = "1dccffe3ce07af9386bfd29e80c0ab1a8205a2fc34e4bcd40364df902cfa8f3f"
 
 [[package]]
 name = "ulid"
-version = "1.2.1"
+version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
+checksum = "04f903f293d11f31c0c29e4148f6dc0d033a7f80cebc0282bea147611667d289"
 dependencies = [
- "rand 0.9.0",
+ "getrandom 0.2.15",
+ "rand 0.8.5",
  "serde",
  "web-time",
 ]

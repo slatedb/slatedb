@@ -52,7 +52,6 @@ impl ObjectStores {
 mod tests {
     use super::*;
     use object_store::memory::InMemory;
-    use ulid::Ulid;
 
     #[test]
     fn test_main_object_store_only_setup() {
@@ -73,7 +72,7 @@ mod tests {
             &main_store
         ));
         assert!(Arc::ptr_eq(
-            &stores.store_for(&SsTableId::Compacted(Ulid::new())),
+            &stores.store_for(&SsTableId::Compacted(crate::utils::ulid())),
             &main_store
         ));
     }
@@ -98,7 +97,7 @@ mod tests {
             &wal_store
         ));
         assert!(Arc::ptr_eq(
-            &stores.store_for(&SsTableId::Compacted(Ulid::new())),
+            &stores.store_for(&SsTableId::Compacted(crate::utils::ulid())),
             &main_store
         ));
     }
