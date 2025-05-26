@@ -1,111 +1,18 @@
-[package]
-name = "slatedb"
+[workspace]
+resolver = "2"
+members = [
+    "slatedb",
+    "slatedb-bencher",
+    "slatedb-cli",
+]
+
+[workspace.package]
 version = "0.6.1"
 edition = "2021"
-description = "A cloud native embedded storage engine built on object storage."
 repository = "https://github.com/slatedb/slatedb"
 license = "Apache-2.0"
 homepage = "https://slatedb.io"
 readme = "README.md"
 
-[dependencies]
-async-channel = "2.3.1"
-async-trait = "0.1.82"
-atomic = "0.6.0"
-bitflags = "2.6.0"
-bytemuck = "1.18.0"
-bytes = { version = "1.7.1", features = ["serde"] }
-clap = { version = "4.5", optional = true, features = ["derive"] }
-crc32fast = "1.4.2"
-crossbeam-channel = "0.5.13"
-crossbeam-skiplist = "0.1.3"
-dotenvy = { version = "0.15.7" }
-fail-parallel = "0.5.1"
-flatbuffers = "24.3.25"
-futures = "0.3.30"
-humantime = {  version = "2.1.0", optional = true }
-leaky-bucket = {  version = "1.1", optional = true }
-object_store = "0.12.0"
-parking_lot = "0.12.3"
-siphasher = "1"
-thiserror = "1.0.63"
-tokio = { version = "1.40.0", features = ["fs", "macros", "sync", "rt", "rt-multi-thread", "signal"] }
-ulid = { version = "1.1.3", features = ["serde"] }
-uuid = { version = "1.11.0", features = ["v4", "serde"] }
-rand = "0.8.5"
-rand_xorshift = "0.3.0"
-log = {  version = "0.4.22", features = ["std"] }
-once_cell = "1.19.0"
-tracing = {version = "0.1.40", features = ["log"]}
-tracing-subscriber = {version = "0.3"}
-snap = { version = "1.1.1", optional = true }
-flate2 = { version = "1.0.33", optional = true }
-lz4_flex = { version = "0.11.3", optional = true }
-zstd = { version = "0.13.2", optional = true }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-moka = { version = "0.12.8", features = ["future"], optional = true }
-chrono = { version = "0.4.38", features = ["serde"] }
-foyer = { version = "0.14.1", optional = true }
-walkdir = "2.3.3"
-radix_trie = "0.2.1"
-figment = { version = "0.10.19", features = ["env", "json", "toml", "yaml"] }
-duration-str = { version = "0.11.2", features = ["serde", "time"], default-features = false }
-ouroboros = "0.18"
-
-[dev-dependencies]
-bincode = "1"
-tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
-tokio-test = "0.4.4"
-fail-parallel = { version = "0.5.1", features = ["failpoints"] }
-tempfile = "3.3"
-filetime = "0.2"
-figment = { version = "0.10.19", features = ["test"] }
-rstest = "0.23.0"
-insta = "1.39.0"
-proptest = "1.5.0"
-criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
-pprof = { version = "0.14.0", features = ["criterion", "protobuf-codec"] }
-
-[features]
-default = ["aws", "moka"]
-aws = ["object_store/aws"]
-azure = ["object_store/azure"]
-cli = ["clap", "clap/derive", "humantime"]
-bencher = ["aws", "azure", "wal_disable", "clap", "clap/derive", "moka"]
-compression = ["snappy"]
-snappy = ["dep:snap"]
-zlib = ["dep:flate2"]
-lz4 = ["dep:lz4_flex"]
-zstd = ["dep:zstd"]
-wal_disable = []
-moka = ["dep:moka"]
-foyer = ["dep:foyer"]
-
 [profile.bench]
 lto = true
-
-[lib]
-# Disable `libtest` harness because it fights with Criterion's `--output-format bencher`
-# See https://bheisler.github.io/criterion.rs/book/faq.html
-bench = false
-
-[[bin]]
-name = "bencher"
-path = "src/bencher/main.rs"
-required-features = ["bencher"]
-# Disable `libtest` harness because it fights with Criterion's `--output-format bencher`
-# See https://bheisler.github.io/criterion.rs/book/faq.html
-bench = false
-
-[[bin]]
-name = "slatedb"
-path = "src/cli/main.rs"
-required-features = ["cli"]
-# Disable `libtest` harness because it fights with Criterion's `--output-format bencher`
-# See https://bheisler.github.io/criterion.rs/book/faq.html
-bench = false
-
-[[bench]]
-name = "db_operations"
-harness = false

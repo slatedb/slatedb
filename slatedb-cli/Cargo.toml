@@ -1,0 +1,28 @@
+[package]
+name = "slatedb-cli"
+description = "A command-line interface for interacting with SlateDB databases."
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+humantime = {  version = "2.1.0" }
+object_store = "0.12.0"
+serde_json = "1.0"
+slatedb = { version = "*", path = "../slatedb" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio-util = { version = "0.7.15", default-features = false, features = ["rt"] }
+tracing = { version = "0.1.40", features = ["log"] }
+tracing-subscriber = {version = "0.3"}
+uuid = { version = "1.11.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+rstest = "0.23.0"
+
+[[bin]]
+name = "slatedb"
+path = "src/main.rs"

@@ -1,0 +1,30 @@
+[package]
+name = "slatedb-bencher"
+description = "A program to benchmark SlateDB"
+readme = "README.md"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "bencher"
+path = "src/main.rs"
+# Disable `libtest` harness because it fights with Criterion's `--output-format bencher`
+# See https://bheisler.github.io/criterion.rs/book/faq.html
+bench = false
+
+[dependencies]
+bytes = { version = "1.7.1", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+chrono = { version = "0.4.38", features = ["serde"] }
+futures = "0.3.30"
+object_store = "0.12.0"
+rand = "0.8.5"
+rand_xorshift = "0.3.0"
+slatedb = { path = "../slatedb", features = ["aws", "azure", "bencher", "wal_disable", "moka"] }
+tokio = { version = "1.40.0" }
+tracing = {version = "0.1.40", features = ["log"]}
+tracing-subscriber = {version = "0.3"}

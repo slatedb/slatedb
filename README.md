@@ -33,9 +33,7 @@ tokio = "*"
 Then you can use SlateDB in your Rust code:
 
 ```rust
-use slatedb::Db;
-use slatedb::config::DbOptions;
-use slatedb::SlateDBError;
+use slatedb::{Db, SlateDBError};
 use slatedb::object_store::{ObjectStore, memory::InMemory};
 use std::sync::Arc;
 
@@ -43,13 +41,7 @@ use std::sync::Arc;
 async fn main() -> Result<(), SlateDBError> {
     // Setup
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let options = DbOptions::default();
-    let kv_store = Db::open_with_opts(
-        "/tmp/test_kv_store",
-        options,
-        object_store,
-    )
-    .await?;
+    let kv_store = Db::open("/tmp/test_kv_store", object_store).await?;
 
     // Put
     let key = b"test_key";
@@ -137,6 +129,21 @@ SlateDB is currently in the early stages of development. It is not yet ready for
 - [ ] Merge operator ([#328](https://github.com/slatedb/slatedb/issues/328))
 - [x] Clones ([#49](https://github.com/slatedb/slatedb/issues/49))
 
+## Adopters
+
+See who's using SlateDB.
+
+- [Embucket](https://www.embucket.com)
+- [Responsive](https://responsive.dev)
+- [Tensorlake](https://www.tensorlake.ai)
+
+## Talks
+
+- [Internals of SlateDB: An Embedded Key-Value Store Built on Object Storage](https://www.datacouncil.ai/talks25/internals-of-slatedb-an-embedded-key-value-store-built-on-object-storage) (Vignesh Chandramohan, 2025)
+- [Internals of SlateDB — by Vignesh Chandramohan](https://www.youtube.com/watch?v=qqF_zFWqFYk) (Vignesh Chandramohan, 2025)
+- [Database Internals - SlateDB](https://www.youtube.com/watch?v=wEAcNoJOBFI) (Chris Riccomini, 2024)
+- [Building a Cloud Native LSM on Object Storage](https://www.p99conf.io/session/building-a-cloud-native-lsm-on-object-storage/) (Rohan Desai/Chris Riccomini, 2024)
+
 ## License
 
 SlateDB is licensed under the Apache License, Version 2.0.
@@ -149,4 +156,3 @@ SlateDB is a member of the [Commonhaus Foundation](https://www.commonhaus.org/).
   <source media="(prefers-color-scheme: dark)" srcset="https://github.com/commonhaus/artwork/blob/main/foundation/brand/png/CF_logo_horizontal_single_reverse_200px.png?raw=true">
   <img src="https://github.com/commonhaus/artwork/blob/main/foundation/brand/png/CF_logo_horizontal_single_default_200px.png?raw=true">
 </picture>
-

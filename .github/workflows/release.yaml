@@ -55,7 +55,14 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       # Publish the crate to crates.io
-      - name: Publish to crates.io
+      - name: Publish SlateDB to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        working-directory: slatedb
+        run: cargo publish
+
+      - name: Publish SlateDB CLI to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        working-directory: slatedb-cli
         run: cargo publish
