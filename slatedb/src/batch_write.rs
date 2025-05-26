@@ -63,7 +63,7 @@ impl DbInner {
                     key,
                     value: ValueDeletable::Value(value),
                     create_ts: Some(now),
-                    expire_ts: opts.expire_ts_from(self.options.default_ttl, now),
+                    expire_ts: opts.expire_ts_from(self.settings.default_ttl, now),
                     seq,
                 },
                 WriteOp::Delete(key) => RowEntry {
@@ -74,7 +74,7 @@ impl DbInner {
                     seq,
                 },
             };
-            if self.wal_enabled() {
+            if self.settings.wal_enabled {
                 self.wal_buffer.append(&[row_entry.clone()]).await?;
             }
             // we do not need to lock the memtable in mid of the commit pipeline
@@ -85,7 +85,7 @@ impl DbInner {
 
         // get the durable watcher. we'll await on current WAL table to be flushed if wal is enabled.
         // otherwise, we'll use the memtable's durable watcher.
-        let durable_watcher = if self.wal_enabled() {
+        let durable_watcher = if self.settings.wal_enabled {
             let current_wal = self.wal_buffer.maybe_trigger_flush().await?;
             // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
             // in another Pull Request.

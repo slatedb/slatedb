@@ -43,7 +43,7 @@ use crate::{
 ///   operations. The manager becomes unusable after encountering a fatal error.
 pub struct WalBufferManager {
     inner: Arc<Mutex<WalBufferManagerInner>>,
-    wal_id_incrementor: Arc<dyn WalIdIncrement>,
+    wal_id_incrementor: Arc<dyn WalIdIncrement + Send + Sync>,
     fatal_once: WatchableOnceCell<SlateDBError>,
     table_store: Arc<TableStore>,
     mono_clock: Arc<MonotonicClock>,
@@ -121,10 +121,30 @@ impl WalBufferManager {
         }
     }
 
+    pub async fn immutable_wals_count(&self) -> usize {
+        let inner = self.inner.lock().await;
+        inner.immutable_wals.len()
+    }
+
     /// Returns the total size of all unflushed WALs in bytes.
     pub async fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
-        // TODO(flaneur): implement this
-        todo!()
+        let inner = self.inner.lock().await;
+        let current_wal_size = self.table_store.estimate_encoded_size(
+            inner.current_wal.metadata().entry_num,
+            inner.current_wal.metadata().entries_size_in_bytes,
+        );
+
+        let imm_wal_size = inner
+            .immutable_wals
+            .iter()
+            .map(|(_, wal)| {
+                let metadata = wal.metadata();
+                self.table_store
+                    .estimate_encoded_size(metadata.entry_num, metadata.entries_size_in_bytes)
+            })
+            .sum::<usize>();
+
+        Ok(current_wal_size + imm_wal_size)
     }
 
     /// Append row entries to the current WAL. return the last seq number of the WAL.

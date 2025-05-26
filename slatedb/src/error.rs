@@ -127,6 +127,9 @@ pub enum SlateDBError {
 
     #[error("Db Cache error: {msg}")]
     DbCacheError { msg: String },
+
+    #[error("Backpressure timeout: exceeded maximum wait time for WAL and memtable flush")]
+    BackpressureTimeout,
 }
 
 impl From<std::io::Error> for SlateDBError {
