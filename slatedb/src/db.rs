@@ -253,7 +253,7 @@ impl DbInner {
                     };
                     match imm {
                         Some(imm) => imm.await_flush_to_l0().await,
-                        None => Ok(()),
+                        None => std::future::pending().await,
                     }
                 };
 
