@@ -100,7 +100,7 @@ impl DbInner {
         // maybe freeze the memtable.
         {
             let mut guard = self.state.write();
-            let last_wal_id = guard.last_written_wal_id();
+            let last_wal_id = guard.last_flushed_wal_id();
             self.maybe_freeze_memtable(&mut guard, last_wal_id)?;
         }
 

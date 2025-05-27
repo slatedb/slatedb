@@ -1,3 +1,3 @@
-pub(crate) trait WalIdIncrement: Send + Sync + 'static {
-    fn increment(&self) -> u64;
+pub(crate) trait WalIdStore: Send + Sync + 'static {
+    fn next_wal_id(&self) -> u64;
 }

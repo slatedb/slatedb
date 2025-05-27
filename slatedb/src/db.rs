@@ -294,7 +294,7 @@ impl DbInner {
         {
             let mut guard = self.state.write();
             if !guard.memtable().is_empty() {
-                let last_wal_id = guard.last_written_wal_id();
+                let last_wal_id = guard.last_flushed_wal_id();
                 guard.freeze_memtable(last_wal_id)?;
             }
         }
@@ -2227,7 +2227,7 @@ mod tests {
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
 
         // WAL should pile up in memory since it can't be flushed
-        assert_eq!(db.inner.wal_buffer.immutable_wals_count().await, 1);
+        assert_eq!(db.inner.wal_buffer.immutable_wals_count(), 1);
     }
 
     #[tokio::test]
