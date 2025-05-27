@@ -265,6 +265,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                             .max_cache_size_bytes,
                         self.settings.object_store_cache_options.scan_interval,
                         stats.clone(),
+                        clock.clone(),
                     ));
 
                     let cached_main_object_store = CachedObjectStore::new(
@@ -319,7 +320,11 @@ impl<P: Into<Path>> DbBuilder<P> {
             path_resolver.clone(),
             self.fp_registry.clone(),
             block_cache.as_ref().map(|c| {
-                Arc::new(DbCacheWrapper::new(c.clone(), stat_registry.as_ref())) as Arc<dyn DbCache>
+                Arc::new(DbCacheWrapper::new(
+                    c.clone(),
+                    stat_registry.as_ref(),
+                    clock.clone(),
+                )) as Arc<dyn DbCache>
             }),
         ));
 
@@ -351,7 +356,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let inner = Arc::new(
             DbInner::new(
                 self.settings.clone(),
-                clock,
+                clock.clone(),
                 table_store.clone(),
                 manifest.prepare_dirty()?,
                 wal_flush_tx,
@@ -414,6 +419,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     scheduler_supplier,
                     compaction_handle,
                     inner.stat_registry.as_ref(),
+                    clock.clone(),
                     move |result: &Result<(), SlateDBError>| {
                         let err = bg_task_result_into_err(result);
                         warn!("compactor thread exited with {:?}", err);

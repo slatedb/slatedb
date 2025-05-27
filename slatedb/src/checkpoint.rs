@@ -1,3 +1,4 @@
+use crate::clock::Clock;
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
@@ -15,8 +16,20 @@ use uuid::Uuid;
 pub struct Checkpoint {
     pub id: Uuid,
     pub manifest_id: u64,
-    pub expire_time: Option<SystemTime>,
     pub create_time: SystemTime,
+    pub expire_time: Option<SystemTime>,
+}
+
+impl Checkpoint {
+    /// Creates a new checkpoint with the given manifest id, create time, and optional expire time.
+    pub fn new(manifest_id: u64, create_time: SystemTime, expire_time: Option<SystemTime>) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            manifest_id,
+            create_time,
+            expire_time,
+        }
+    }
 }
 
 #[non_exhaustive]
@@ -65,13 +78,14 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         id: Uuid,
         lifetime: Option<Duration>,
+        clock: Arc<dyn Clock>,
     ) -> Result<(), SlateDBError> {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
             .maybe_apply_manifest_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty();
-                let expire_time = lifetime.map(|l| SystemTime::now() + l);
+                let expire_time = lifetime.map(|l| clock.now_systime() + l);
                 let Some(_) = dirty.core.checkpoints.iter_mut().find_map(|c| {
                     if c.id == id {
                         c.expire_time = expire_time;
@@ -115,6 +129,7 @@ impl Db {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
+    use crate::clock::{Clock, SystemClock};
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
@@ -133,7 +148,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_should_create_checkpoint() {
@@ -176,7 +191,7 @@ mod tests {
             .unwrap();
         db.close().await.unwrap();
         let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let checkpoint_time = SystemTime::now();
+        let checkpoint_time = SystemClock::new().now_systime();
 
         let CheckpointCreateResult {
             id: checkpoint_id,
@@ -292,8 +307,10 @@ mod tests {
     async fn test_should_refresh_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
+        let clock = Arc::new(SystemClock::new());
         let _ = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
+            .with_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -322,6 +339,7 @@ mod tests {
             object_store.clone(),
             id,
             Some(Duration::from_secs(1000)),
+            clock.clone(),
         )
         .await
         .unwrap();
@@ -342,8 +360,10 @@ mod tests {
     async fn test_should_fail_refresh_checkpoint_if_checkpoint_missing() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
+        let clock = Arc::new(SystemClock::new());
         let _ = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
+            .with_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -353,6 +373,7 @@ mod tests {
             object_store.clone(),
             crate::utils::uuid(),
             Some(Duration::from_secs(1000)),
+            clock.clone(),
         )
         .await;
 

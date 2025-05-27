@@ -278,6 +278,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
+    use crate::clock::{Clock, SystemClock};
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
     use crate::error::SlateDBError;
     use crate::object_stores::ObjectStores;
@@ -362,21 +363,13 @@ mod tests {
         assert_eq!(manifests[1].id, 2);
     }
 
-    fn new_checkpoint(manifest_id: u64, expire_time: Option<SystemTime>) -> Checkpoint {
-        Checkpoint {
-            id: crate::utils::uuid(),
-            manifest_id,
-            expire_time,
-            create_time: SystemTime::now(),
-        }
-    }
-
     async fn checkpoint_current_manifest(
         stored_manifest: &mut StoredManifest,
+        clock: &dyn Clock,
         expire_time: Option<SystemTime>,
     ) -> Result<Uuid, SlateDBError> {
         let mut dirty = stored_manifest.prepare_dirty();
-        let checkpoint = new_checkpoint(stored_manifest.id(), expire_time);
+        let checkpoint = Checkpoint::new(stored_manifest.id(), clock.now_systime(), expire_time);
         let checkpoint_id = checkpoint.id;
         dirty.core.checkpoints.push(checkpoint);
         stored_manifest.update_manifest(dirty).await?;
@@ -403,6 +396,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_expired_checkpoints() {
         let (manifest_store, table_store, local_object_store) = build_objects();
+        let clock = SystemClock::new();
 
         // Manifest 1
         let state = CoreDbState::new();
@@ -412,19 +406,15 @@ mod tests {
                 .unwrap();
 
         // Manifest 2 (expired_checkpoint_id -> 1)
-        let one_day_ago = SystemTime::now()
-            .checked_sub(std::time::Duration::from_secs(86400))
-            .unwrap();
+        let one_day_ago = clock.now_systime() - Duration::from_secs(86400);
         let _expired_checkpoint_id =
-            checkpoint_current_manifest(&mut stored_manifest, Some(one_day_ago))
+            checkpoint_current_manifest(&mut stored_manifest, &clock, Some(one_day_ago))
                 .await
                 .unwrap();
         // Manifest 3 (expired_checkpoint_id -> 1, unexpired_checkpoint_id -> 2)
-        let one_day_ahead = SystemTime::now()
-            .checked_add(std::time::Duration::from_secs(86400))
-            .unwrap();
+        let one_day_ahead = clock.now_systime() + Duration::from_secs(86400);
         let unexpired_checkpoint_id =
-            checkpoint_current_manifest(&mut stored_manifest, Some(one_day_ahead))
+            checkpoint_current_manifest(&mut stored_manifest, &clock, Some(one_day_ahead))
                 .await
                 .unwrap();
 
@@ -463,7 +453,7 @@ mod tests {
     #[tokio::test]
     async fn test_collector_should_not_clean_manifests_referenced_by_checkpoints() {
         let (manifest_store, table_store, local_object_store) = build_objects();
-
+        let clock = SystemClock::new();
         // Manifest 1
         let state = CoreDbState::new();
         let mut stored_manifest =
@@ -471,13 +461,14 @@ mod tests {
                 .await
                 .unwrap();
         // Manifest 2 (active_checkpoint_id -> 1)
-        let active_checkpoint_id = checkpoint_current_manifest(&mut stored_manifest, None)
+        let active_checkpoint_id = checkpoint_current_manifest(&mut stored_manifest, &clock, None)
             .await
             .unwrap();
         // Manifest 3 (active_checkpoint_id -> 1, inactive_checkpoint_id -> 2)
-        let inactive_checkpoint_id = checkpoint_current_manifest(&mut stored_manifest, None)
-            .await
-            .unwrap();
+        let inactive_checkpoint_id =
+            checkpoint_current_manifest(&mut stored_manifest, &clock, None)
+                .await
+                .unwrap();
         // Manifest 4 (active_checkpoint_id -> 1)
         remove_checkpoint(inactive_checkpoint_id, &mut stored_manifest)
             .await
@@ -648,7 +639,11 @@ mod tests {
         let mut dirty = stored_manifest.prepare_dirty();
         dirty.core.replay_after_wal_id = 3;
         dirty.core.next_wal_sst_id = 4;
-        dirty.core.checkpoints.push(new_checkpoint(1, None));
+        let clock = SystemClock::new();
+        dirty
+            .core
+            .checkpoints
+            .push(Checkpoint::new(1, clock.now_systime(), None));
         stored_manifest.update_manifest(dirty).await.unwrap();
         assert_eq!(2, stored_manifest.id());
 
@@ -865,7 +860,7 @@ mod tests {
         let active_checkpoint_sst_handle = create_sst(table_store.clone()).await;
         let inactive_sst_handle = create_sst(table_store.clone()).await;
         let path_resolver = PathResolver::new("");
-
+        let clock = SystemClock::new();
         // Set expiration for all SSTs to make them eligible for deletion
         let all_tables = vec![
             active_sst_handle.clone(),
@@ -900,7 +895,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        let checkpoint_id = checkpoint_current_manifest(&mut stored_manifest, None)
+        let checkpoint_id = checkpoint_current_manifest(&mut stored_manifest, &clock, None)
             .await
             .unwrap();
 

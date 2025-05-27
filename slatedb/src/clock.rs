@@ -31,12 +31,32 @@ pub trait Clock: Debug + Send + Sync {
             .map(SystemTime::from)
             .expect("Failed to convert Clock time to SystemTime")
     }
+
+    /// Returns the current time plus the given duration.
+    fn add(&self, duration: Duration) -> i64 {
+        self.now() + duration.as_millis() as i64
+    }
+
+    /// Returns the time that has elapsed since the unix epoch.
+    ///
+    /// This function returns `0` if the current time is before the unix epoch.
+    fn elapsed(&self) -> Duration {
+        self.now_systime()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+    }
 }
 
 /// contains the default implementation of the Clock, and will return the system time
 #[derive(Debug)]
 pub struct SystemClock {
     last_tick: AtomicI64,
+}
+
+impl Default for SystemClock {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SystemClock {

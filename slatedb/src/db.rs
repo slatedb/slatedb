@@ -963,7 +963,7 @@ mod tests {
     };
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
-    use crate::clock::ManualClock;
+    use crate::clock::{ManualClock, SystemClock};
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions,
@@ -1492,12 +1492,14 @@ mod tests {
             .unwrap();
         let stats_registry = StatRegistry::new();
         let cache_stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
+        let clock = Arc::new(SystemClock::new());
         let part_size = 1024;
         let cache_storage = Arc::new(FsCacheStorage::new(
             temp_dir.path().to_path_buf(),
             None,
             None,
             cache_stats.clone(),
+            clock,
         ));
 
         let cached_object_store = CachedObjectStore::new(

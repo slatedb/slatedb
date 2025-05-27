@@ -235,7 +235,7 @@ mod tests {
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
-    
+
     use std::sync::Arc;
     use std::time::Duration;
 

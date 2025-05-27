@@ -446,6 +446,7 @@ mod tests {
     use crate::cached_object_store::stats::CachedObjectStoreStats;
     use crate::cached_object_store::storage_fs::FsCacheStorage;
     use crate::cached_object_store::{storage::PartID, storage_fs::FsCacheEntry};
+    use crate::clock::SystemClock;
     use crate::stats::StatRegistry;
     use crate::test_utils::gen_rand_bytes;
 
@@ -466,6 +467,7 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let stats_registry = StatRegistry::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
+        let clock = Arc::new(SystemClock::new());
         object_store
             .put(
                 &Path::from("/data/testfile1"),
@@ -480,6 +482,7 @@ mod tests {
             None,
             None,
             stats.clone(),
+            clock.clone(),
         ));
 
         let part_size = 1024;
@@ -535,6 +538,7 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let stats_registry = StatRegistry::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
+        let clock = Arc::new(SystemClock::new());
         object_store
             .put(
                 &Path::from("/data/testfile1"),
@@ -550,6 +554,7 @@ mod tests {
             None,
             None,
             stats.clone(),
+            clock.clone(),
         ));
 
         let cached_store =
@@ -588,11 +593,13 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let stats_registry = StatRegistry::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
+        let clock = Arc::new(SystemClock::new());
         let cache_storage = Arc::new(FsCacheStorage::new(
             test_cache_folder.clone(),
             None,
             None,
             stats.clone(),
+            clock.clone(),
         ));
 
         let cached_store =
@@ -676,11 +683,13 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let stats_registry = StatRegistry::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
+        let clock = Arc::new(SystemClock::new());
         let cache_storage = Arc::new(FsCacheStorage::new(
             test_cache_folder.clone(),
             None,
             None,
             stats.clone(),
+            clock.clone(),
         ));
         let cached_store =
             CachedObjectStore::new(object_store, cache_storage, 1024, stats).unwrap();
@@ -697,11 +706,13 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let stats_registry = StatRegistry::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
+        let clock = Arc::new(SystemClock::new());
         let cache_storage = Arc::new(FsCacheStorage::new(
             test_cache_folder.clone(),
             None,
             None,
             stats.clone(),
+            clock.clone(),
         ));
         let cached_store =
             CachedObjectStore::new(object_store, cache_storage, 1024, stats).unwrap();
@@ -726,11 +737,13 @@ mod tests {
         let test_cache_folder = new_test_cache_folder();
         let stats_registry = StatRegistry::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
+        let clock = Arc::new(SystemClock::new());
         let cache_storage = Arc::new(FsCacheStorage::new(
             test_cache_folder.clone(),
             None,
             None,
             stats.clone(),
+            clock.clone(),
         ));
         let cached_store =
             CachedObjectStore::new(object_store.clone(), cache_storage, 1024, stats).unwrap();

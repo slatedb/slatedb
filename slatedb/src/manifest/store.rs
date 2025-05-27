@@ -743,6 +743,7 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
+    use crate::clock::{Clock, SystemClock};
     use crate::config::CheckpointOptions;
     use crate::db_state::CoreDbState;
     use crate::error;
@@ -963,12 +964,16 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
         let state = CoreDbState::new();
+        let clock = SystemClock::new();
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
 
         let mut dirty = sm.prepare_dirty();
-        dirty.core.checkpoints.push(new_checkpoint(sm.id));
+        dirty
+            .core
+            .checkpoints
+            .push(Checkpoint::new(sm.id, clock.now_systime(), None));
         sm.update_manifest(dirty).await.unwrap();
 
         // When
@@ -1050,27 +1055,16 @@ mod tests {
         Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()))
     }
 
-    fn now_rounded_to_nearest_sec() -> SystemTime {
-        let now_secs = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+    fn now_rounded_to_nearest_sec(clock: &dyn Clock) -> SystemTime {
+        let now_secs = clock.elapsed().as_secs();
         SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs)
-    }
-
-    fn new_checkpoint(manifest_id: u64) -> Checkpoint {
-        Checkpoint {
-            id: crate::utils::uuid(),
-            manifest_id,
-            expire_time: None,
-            create_time: now_rounded_to_nearest_sec(),
-        }
     }
 
     #[tokio::test]
     async fn test_read_active_manifests_should_consider_checkpoints() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
+        let clock = SystemClock::new();
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
@@ -1086,7 +1080,11 @@ mod tests {
 
         // Add a checkpoint referencing the latest manifest
         let mut dirty = sm.prepare_dirty();
-        dirty.core.checkpoints.push(new_checkpoint(sm.id));
+        dirty.core.checkpoints.push(Checkpoint::new(
+            sm.id,
+            now_rounded_to_nearest_sec(&clock),
+            None,
+        ));
         sm.update_manifest(dirty).await.unwrap();
         let active_manifests = ms.read_active_manifests().await.unwrap();
         assert_eq!(2, active_manifests.len());

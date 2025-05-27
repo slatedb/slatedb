@@ -269,6 +269,7 @@ mod tests {
 
     use super::*;
     use crate::checkpoint::Checkpoint;
+    use crate::clock::{Clock, SystemClock};
     use crate::compactor_state::CompactionStatus::Submitted;
     use crate::compactor_state::SourceId::Sst;
     use crate::config::Settings;
@@ -517,14 +518,10 @@ mod tests {
     fn test_should_merge_db_state_with_new_checkpoints() {
         // given:
         let mut state = CompactorState::new(new_dirty_manifest());
+        let clock = SystemClock::new();
         // mimic an externally added checkpoint
         let mut dirty = new_dirty_manifest();
-        let checkpoint = Checkpoint {
-            id: crate::utils::uuid(),
-            manifest_id: 1,
-            expire_time: None,
-            create_time: SystemTime::now(),
-        };
+        let checkpoint = Checkpoint::new(1, clock.now_systime(), None);
         dirty.core.checkpoints.push(checkpoint.clone());
 
         // when:
