@@ -184,20 +184,51 @@ pub enum DurabilityLevel {
 
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ReadOptions {
     /// Specifies the minimum durability level for data returned by this read. For example,
     /// if set to Remote then slatedb returns the latest version of a row that has been durably
     /// stored in object storage.
     pub durability_filter: DurabilityLevel,
+    /// Whether to include dirty data in the scan. "dirty" means that the data is not considered
+    /// as "committed" yet, whose seq number is greater than the last committed seq number.
+    pub dirty: bool,
 }
 
+impl Default for ReadOptions {
+    fn default() -> Self {
+        Self {
+            durability_filter: DurabilityLevel::Remote,
+            dirty: false,
+        }
+    }
+}
+
+impl ReadOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_dirty(self, dirty: bool) -> Self {
+        Self { dirty, ..self }
+    }
+
+    pub fn with_durability_filter(self, durability_filter: DurabilityLevel) -> Self {
+        Self {
+            durability_filter,
+            ..self
+        }
+    }
+}
 #[derive(Clone)]
 pub struct ScanOptions {
     /// Specifies the minimum durability level for data returned by this scan. For example,
     /// if set to Remote then slatedb returns the latest version of a row that has been durably
     /// stored in object storage.
     pub durability_filter: DurabilityLevel,
+    /// Whether to include dirty data in the scan. "dirty" means that the data is not considered
+    /// as "committed" yet, whose seq number is greater than the last committed seq number.
+    pub dirty: bool,
     /// The number of bytes to read ahead. The value is rounded up to the nearest
     /// block size when fetching from object storage. The default is 1, which
     /// rounds up to one block.
@@ -211,8 +242,40 @@ impl Default for ScanOptions {
     fn default() -> Self {
         Self {
             durability_filter: DurabilityLevel::Remote,
+            dirty: false,
             read_ahead_bytes: 1,
             cache_blocks: false,
+        }
+    }
+}
+
+impl ScanOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_dirty(self, dirty: bool) -> Self {
+        Self { dirty, ..self }
+    }
+
+    pub fn with_durability_filter(self, durability_filter: DurabilityLevel) -> Self {
+        Self {
+            durability_filter,
+            ..self
+        }
+    }
+
+    pub fn with_read_ahead_bytes(self, read_ahead_bytes: usize) -> Self {
+        Self {
+            read_ahead_bytes,
+            ..self
+        }
+    }
+
+    pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
+        Self {
+            cache_blocks,
+            ..self
         }
     }
 }

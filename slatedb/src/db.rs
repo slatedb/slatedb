@@ -1060,12 +1060,7 @@ mod tests {
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Memory
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Memory))
                 .await
                 .unwrap(),
         );
@@ -1075,12 +1070,7 @@ mod tests {
         assert_eq!(
             None,
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Memory
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Memory))
                 .await
                 .unwrap(),
         );
@@ -1122,12 +1112,7 @@ mod tests {
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Memory
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Memory))
                 .await
                 .unwrap(),
         );
@@ -1137,12 +1122,7 @@ mod tests {
         assert_eq!(
             None,
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Memory
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Memory))
                 .await
                 .unwrap(),
         );
@@ -1177,12 +1157,7 @@ mod tests {
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Remote
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Remote))
                 .await
                 .unwrap(),
         );
@@ -1192,12 +1167,7 @@ mod tests {
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Remote
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Remote))
                 .await
                 .unwrap(),
         );
@@ -1208,12 +1178,7 @@ mod tests {
         assert_eq!(
             None,
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Remote
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Remote))
                 .await
                 .unwrap(),
         );
@@ -1236,12 +1201,8 @@ mod tests {
         let write_options = WriteOptions {
             await_durable: false,
         };
-        let get_memory_options = ReadOptions {
-            durability_filter: Memory,
-        };
-        let get_remote_options = ReadOptions {
-            durability_filter: Remote,
-        };
+        let get_memory_options = ReadOptions::new().with_durability_filter(Memory);
+        let get_remote_options = ReadOptions::new().with_durability_filter(Remote);
 
         db.put_with_options(b"foo", b"bar", &put_options, &write_options)
             .await
@@ -1317,14 +1278,9 @@ mod tests {
         }
         assert_eq!(
             Some(Bytes::copy_from_slice(last_val.as_bytes())),
-            db.get_with_options(
-                b"key",
-                &ReadOptions {
-                    durability_filter: Memory
-                }
-            )
-            .await
-            .unwrap()
+            db.get_with_options(b"key", &ReadOptions::new().with_durability_filter(Memory))
+                .await
+                .unwrap()
         );
         db.flush().await.unwrap();
 
@@ -1377,12 +1333,7 @@ mod tests {
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Remote
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Remote))
                 .await
                 .unwrap(),
         );
@@ -1392,12 +1343,7 @@ mod tests {
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Remote
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Remote))
                 .await
                 .unwrap(),
         );
@@ -1408,12 +1354,7 @@ mod tests {
         assert_eq!(
             None,
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Remote
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Remote))
                 .await
                 .unwrap(),
         );
@@ -2463,9 +2404,7 @@ mod tests {
         let val = kv_store
             .get_with_options(
                 "foo".as_bytes(),
-                &ReadOptions {
-                    durability_filter: Memory,
-                },
+                &ReadOptions::new().with_durability_filter(Memory),
             )
             .await
             .unwrap();
@@ -2513,9 +2452,7 @@ mod tests {
         let val = kv_store
             .get_with_options(
                 "foo".as_bytes(),
-                &ReadOptions {
-                    durability_filter: Memory,
-                },
+                &ReadOptions::new().with_durability_filter(Memory),
             )
             .await
             .unwrap();
@@ -2557,9 +2494,7 @@ mod tests {
         let val = kv_store
             .get_with_options(
                 "foo".as_bytes(),
-                &ReadOptions {
-                    durability_filter: Memory,
-                },
+                &ReadOptions::new().with_durability_filter(Memory),
             )
             .await
             .unwrap();
