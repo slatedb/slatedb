@@ -1,5 +1,6 @@
 use crate::checkpoint::Checkpoint;
-use crate::config::{CheckpointOptions, Clock, SystemClock};
+use crate::clock::{Clock, SystemClock};
+use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{
@@ -10,7 +11,6 @@ use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
-use crate::utils;
 use crate::SlateDBError::ManifestVersionExists;
 use chrono::Utc;
 use futures::StreamExt;
@@ -346,7 +346,7 @@ impl StoredManifest {
     ) -> Result<Checkpoint, SlateDBError> {
         let expire_time = options
             .lifetime
-            .map(|l| utils::now_systime(self.manifest_store.clock.as_ref()) + l);
+            .map(|l| self.manifest_store.clock.now_systime() + l);
         let db_state = self.db_state();
         let manifest_id = match options.source {
             Some(source_checkpoint_id) => {
@@ -366,7 +366,7 @@ impl StoredManifest {
             id: checkpoint_id,
             manifest_id,
             expire_time,
-            create_time: utils::now_systime(self.manifest_store.clock.as_ref()),
+            create_time: self.manifest_store.clock.now_systime(),
         })
     }
 
@@ -454,7 +454,7 @@ impl StoredManifest {
                 .iter_mut()
                 .find(|c| c.id == checkpoint_id)
                 .ok_or(CheckpointMissing(checkpoint_id))?;
-            checkpoint.expire_time = Some(utils::now_systime(clock.as_ref()) + new_lifetime);
+            checkpoint.expire_time = Some(clock.now_systime() + new_lifetime);
             Ok(Some(updated_manifest))
         })
         .await?;
@@ -535,18 +535,18 @@ pub(crate) struct ManifestStore {
     object_store: Box<dyn TransactionalObjectStore>,
     codec: Box<dyn ManifestCodec>,
     manifest_suffix: &'static str,
-    clock: Arc<dyn Clock + Send + Sync>,
+    clock: Arc<dyn Clock>,
 }
 
 impl ManifestStore {
     pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
-        Self::new_with_clock(root_path, object_store, Arc::new(SystemClock::default()))
+        Self::new_with_clock(root_path, object_store, Arc::new(SystemClock::new()))
     }
 
     pub(crate) fn new_with_clock(
         root_path: &Path,
         object_store: Arc<dyn ObjectStore>,
-        clock: Arc<dyn Clock + Send + Sync>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             object_store: Box::new(DelegatingTransactionalObjectStore::new(

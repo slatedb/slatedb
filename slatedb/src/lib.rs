@@ -42,6 +42,7 @@ pub use types::KeyValue;
 pub mod admin;
 #[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;
+pub mod clock;
 pub mod config;
 pub mod db_cache;
 pub mod db_stats;

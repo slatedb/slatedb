@@ -65,7 +65,7 @@
 //! Example with a custom clock:
 //!
 //! ```
-//! use slatedb::{config::SystemClock, Db, SlateDBError};
+//! use slatedb::{clock::SystemClock, Db, SlateDBError};
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
@@ -95,11 +95,12 @@ use tracing::{debug, info, warn};
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
+use crate::clock::Clock;
+use crate::clock::SystemClock;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::default_block_cache;
-use crate::config::SystemClock;
-use crate::config::{Clock, Settings};
+use crate::config::Settings;
 use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::{DbCache, DbCacheWrapper};
@@ -124,7 +125,7 @@ pub struct DbBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     block_cache: Option<Arc<dyn DbCache>>,
-    clock: Option<Arc<dyn Clock + Send + Sync>>,
+    clock: Option<Arc<dyn Clock>>,
     gc_runtime: Option<Handle>,
     compaction_runtime: Option<Handle>,
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
@@ -175,7 +176,7 @@ impl<P: Into<Path>> DbBuilder<P> {
     }
 
     /// Sets the clock to use for the database.
-    pub fn with_clock(mut self, clock: Arc<dyn Clock + Send + Sync>) -> Self {
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = Some(clock);
         self
     }

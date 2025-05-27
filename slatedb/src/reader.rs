@@ -1,4 +1,5 @@
 use crate::bytes_range::BytesRange;
+use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::db_stats::DbStats;
@@ -12,7 +13,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
-use crate::utils::{get_now_for_read, is_not_expired, MonotonicClock};
+use crate::utils::is_not_expired;
 use crate::{filter, DbIterator, SlateDBError};
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -72,7 +73,10 @@ impl Reader {
         snapshot: &(dyn ReadSnapshot + Sync + Send),
         max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
+        let now = self
+            .mono_clock
+            .now_by_durability(options.durability_filter)
+            .await?;
         let get = LevelGet {
             key: key.as_ref(),
             max_seq,

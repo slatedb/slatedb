@@ -1,19 +1,21 @@
-use crate::config::DurabilityLevel::{Memory, Remote};
-use crate::config::{Clock, DurabilityLevel};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
+<<<<<<< HEAD
 use rand::RngCore;
 use std::cmp;
+=======
+>>>>>>> a22af85 (Centralize all clock related code into the "clock" module.)
 use std::future::Future;
-use std::sync::atomic::AtomicI64;
-use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
+<<<<<<< HEAD
 use std::time::{Duration, SystemTime};
 use tracing::info;
 use ulid::Ulid;
 use uuid::{Builder, Uuid};
+=======
+>>>>>>> a22af85 (Centralize all clock related code into the "clock" module.)
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
@@ -140,32 +142,6 @@ where
         .expect("failed to create monitor thread")
 }
 
-pub(crate) async fn get_now_for_read(
-    mono_clock: Arc<MonotonicClock>,
-    durability_level: DurabilityLevel,
-) -> Result<i64, SlateDBError> {
-    /*
-     Note: the semantics of filtering expired records on read differ slightly depending on
-     the configured ReadLevel. For Uncommitted we can just use the actual clock's "now"
-     as this corresponds to the current time seen by uncommitted writes but is not persisted
-     and only enforces monotonicity via the local in-memory MonotonicClock. This means it's
-     possible for the mono_clock.now() to go "backwards" following a crash and recovery, which
-     could result in records that were filtered out before the crash coming back to life and being
-     returned after the crash.
-     If the read level is instead set to Committed, we only use the last_tick of the monotonic
-     clock to filter out expired records, since this corresponds to the highest time of any
-     persisted batch and is thus recoverable following a crash. Since the last tick is the
-     last persisted time we are guaranteed monotonicity of the #get_last_tick function and
-     thus will not see this "time travel" phenomenon -- with Committed, once a record is
-     filtered out due to ttl expiry, it is guaranteed not to be seen again by future Committed
-     reads.
-    */
-    match durability_level {
-        Remote => Ok(mono_clock.get_last_durable_tick()),
-        Memory => mono_clock.now().await,
-    }
-}
-
 pub(crate) fn is_not_expired(entry: &RowEntry, now: i64) -> bool {
     if let Some(expire_ts) = entry.expire_ts {
         expire_ts > now
@@ -178,68 +154,6 @@ pub(crate) fn bg_task_result_into_err(result: &Result<(), SlateDBError>) -> Slat
     match result {
         Ok(_) => SlateDBError::BackgroundTaskShutdown,
         Err(err) => err.clone(),
-    }
-}
-
-/// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
-/// from the underlying implementation are monotonically increasing
-pub(crate) struct MonotonicClock {
-    pub(crate) last_tick: AtomicI64,
-    pub(crate) last_durable_tick: AtomicI64,
-    delegate: Arc<dyn Clock + Send + Sync>,
-}
-
-impl MonotonicClock {
-    pub(crate) fn new(delegate: Arc<dyn Clock + Send + Sync>, init_tick: i64) -> Self {
-        Self {
-            delegate,
-            last_tick: AtomicI64::new(init_tick),
-            last_durable_tick: AtomicI64::new(init_tick),
-        }
-    }
-
-    pub(crate) fn set_last_tick(&self, tick: i64) -> Result<i64, SlateDBError> {
-        self.enforce_monotonic(tick)
-    }
-
-    pub(crate) fn fetch_max_last_durable_tick(&self, tick: i64) -> i64 {
-        self.last_durable_tick.fetch_max(tick, SeqCst)
-    }
-
-    pub(crate) fn get_last_durable_tick(&self) -> i64 {
-        self.last_durable_tick.load(SeqCst)
-    }
-
-    pub(crate) async fn now(&self) -> Result<i64, SlateDBError> {
-        let tick = self.delegate.now();
-        match self.enforce_monotonic(tick) {
-            Err(SlateDBError::InvalidClockTick {
-                last_tick,
-                next_tick: _,
-            }) => {
-                let sync_millis = cmp::min(10_000, 2 * (last_tick - tick).unsigned_abs());
-                info!(
-                    "Clock tick {} is lagging behind the last known tick {}. \
-                    Sleeping {}ms to potentially resolve skew before returning InvalidClockTick.",
-                    tick, last_tick, sync_millis
-                );
-                tokio::time::sleep(Duration::from_millis(sync_millis)).await;
-                self.enforce_monotonic(self.delegate.now())
-            }
-            result => result,
-        }
-    }
-
-    fn enforce_monotonic(&self, tick: i64) -> Result<i64, SlateDBError> {
-        let updated_last_tick = self.last_tick.fetch_max(tick, SeqCst);
-        if tick < updated_last_tick {
-            return Err(SlateDBError::InvalidClockTick {
-                last_tick: updated_last_tick,
-                next_tick: tick,
-            });
-        }
-
-        Ok(tick)
     }
 }
 
@@ -265,12 +179,6 @@ fn bytes_into_minimal_vec(bytes: &Bytes) -> Vec<u8> {
 
 pub(crate) fn clamp_allocated_size_bytes(bytes: &Bytes) -> Bytes {
     bytes_into_minimal_vec(bytes).into()
-}
-
-pub(crate) fn now_systime(clock: &dyn Clock) -> SystemTime {
-    chrono::DateTime::from_timestamp_millis(clock.now())
-        .map(SystemTime::from)
-        .expect("Failed to convert Clock time to SystemTime")
 }
 
 /// Computes the "index key" (lowest bound) for an SST index block, ie a key that's greater
@@ -319,15 +227,15 @@ pub(crate) fn ulid() -> Ulid {
 mod tests {
     use rstest::rstest;
 
+    use crate::clock::{ManualClock, MonotonicClock};
     use crate::error::SlateDBError;
-    use crate::test_utils::TestClock;
     use crate::utils::{
         bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key, spawn_bg_task,
-        spawn_bg_thread, MonotonicClock, WatchableOnceCell,
+        spawn_bg_thread, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
-    use std::sync::atomic::Ordering::SeqCst;
+    
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -511,13 +419,13 @@ mod tests {
     #[tokio::test]
     async fn test_monotonicity_enforcement_on_mono_clock() {
         // Given:
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(ManualClock::new());
         let mono_clock = MonotonicClock::new(clock.clone(), 0);
 
         // When:
-        clock.ticker.store(10, SeqCst);
+        clock.set(10);
         mono_clock.now().await.unwrap();
-        clock.ticker.store(5, SeqCst);
+        clock.set(5);
 
         // Then:
         if let Err(SlateDBError::InvalidClockTick {
@@ -535,11 +443,11 @@ mod tests {
     #[tokio::test]
     async fn test_monotonicity_enforcement_on_mono_clock_set_tick() {
         // Given:
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(ManualClock::new());
         let mono_clock = MonotonicClock::new(clock.clone(), 0);
 
         // When:
-        clock.ticker.store(10, SeqCst);
+        clock.set(10);
         mono_clock.now().await.unwrap();
 
         // Then:
@@ -558,7 +466,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_await_valid_tick() {
         // the delegate clock is behind the mono clock by 100ms
-        let delegate_clock = Arc::new(TestClock::new());
+        let delegate_clock = Arc::new(ManualClock::new());
         let mono_clock = MonotonicClock::new(delegate_clock.clone(), 100);
 
         tokio::spawn({
@@ -566,7 +474,7 @@ mod tests {
             async move {
                 // wait for half the time it would wait for
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                delegate_clock.ticker.store(101, SeqCst);
+                delegate_clock.set(101);
             }
         });
 
@@ -580,7 +488,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_await_valid_tick_failure() {
         // the delegate clock is behind the mono clock by 100ms
-        let delegate_clock = Arc::new(TestClock::new());
+        let delegate_clock = Arc::new(ManualClock::new());
         let mono_clock = MonotonicClock::new(delegate_clock.clone(), 100);
 
         // wait for 10ms after the maximum time it should accept to wait

@@ -460,6 +460,7 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
+    use crate::clock::ManualClock;
     use crate::compactor::stats::CompactionStats;
     use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
@@ -478,7 +479,7 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
-    use crate::test_utils::{assert_iterator, TestClock};
+    use crate::test_utils::assert_iterator;
     use crate::types::RowEntry;
     use crate::SlateDBError;
 
@@ -488,7 +489,7 @@ mod tests {
     async fn test_compactor_compacts_l0() {
         // given:
         let os = Arc::new(InMemory::new());
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(ManualClock::new());
         let mut options = db_options(Some(compactor_options()));
         options.l0_sst_size_bytes = 128;
 
@@ -546,7 +547,7 @@ mod tests {
     #[tokio::test]
     async fn test_should_tombstones_in_l0() {
         let os = Arc::new(InMemory::new());
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(ManualClock::new());
 
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new());
 
@@ -630,7 +631,7 @@ mod tests {
     async fn test_should_compact_expired_entries() {
         // given:
         let os = Arc::new(InMemory::new());
-        let insert_clock = Arc::new(TestClock::new());
+        let insert_clock = Arc::new(ManualClock::new());
 
         let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
             SizeTieredCompactionSchedulerOptions {
@@ -656,7 +657,7 @@ mod tests {
         let value = &[b'a'; 64];
 
         // ticker time = 0, expire time = 10
-        insert_clock.ticker.store(0, atomic::Ordering::SeqCst);
+        insert_clock.set(0);
         db.put_with_options(
             &[1; 16],
             value,
@@ -669,7 +670,7 @@ mod tests {
         .unwrap();
 
         // ticker time = 10, expire time = 60 (using default TTL)
-        insert_clock.ticker.store(10, atomic::Ordering::SeqCst);
+        insert_clock.set(10);
         db.put_with_options(
             &[2; 16],
             value,
@@ -682,7 +683,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // ticker time = 30, no expire time
-        insert_clock.ticker.store(30, atomic::Ordering::SeqCst);
+        insert_clock.set(30);
         db.put_with_options(
             &[3; 16],
             value,
@@ -694,7 +695,7 @@ mod tests {
 
         // this revives key 1
         // ticker time = 70, expire time 80
-        insert_clock.ticker.store(70, atomic::Ordering::SeqCst);
+        insert_clock.set(70);
         db.put_with_options(
             &[1; 16],
             value,
