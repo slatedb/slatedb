@@ -14,7 +14,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::{DefaultStoreProvider, StoreProvider};
 use crate::tablestore::TableStore;
-use crate::utils::{MonotonicClock, WatchableOnceCell};
+use crate::utils::{MonotonicClock, Sequencer, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{utils, Checkpoint, DbIterator};
 use bytes::Bytes;
@@ -44,6 +44,7 @@ struct DbReaderInner {
     options: DbReaderOptions,
     state: RwLock<Arc<CheckpointState>>,
     clock: Arc<dyn Clock + Sync + Send>,
+    last_committed_seq: Arc<Sequencer>,
     user_checkpoint_id: Option<Uuid>,
     reader: Reader,
     error_watcher: WatchableOnceCell<SlateDBError>,
@@ -114,6 +115,7 @@ impl DbReaderInner {
             clock.clone(),
             initial_state.core().last_l0_clock_tick,
         ));
+        let last_committed_seq = Arc::new(Sequencer::new(initial_state.core().last_l0_seq));
 
         let stat_registry = Arc::new(StatRegistry::new());
         let db_stats = DbStats::new(stat_registry.as_ref());
@@ -124,6 +126,7 @@ impl DbReaderInner {
             db_stats: db_stats.clone(),
             mono_clock: Arc::clone(&mono_clock),
             wal_enabled: true,
+            last_committed_seq: last_committed_seq.clone(),
         };
 
         Ok(Self {
@@ -133,6 +136,7 @@ impl DbReaderInner {
             state,
             clock,
             user_checkpoint_id: checkpoint_id,
+            last_committed_seq,
             reader,
             error_watcher: WatchableOnceCell::new(),
         })
@@ -219,7 +223,7 @@ impl DbReaderInner {
             let current_checkpoint = Arc::clone(&self.state.read());
             let mut imm_memtable = current_checkpoint.imm_memtable().clone();
 
-            let last_wal_id = Self::replay_wal_into(
+            let (last_wal_id, last_committed_seq) = Self::replay_wal_into(
                 Arc::clone(&self.table_store),
                 &self.options,
                 current_checkpoint.core(),
@@ -228,6 +232,7 @@ impl DbReaderInner {
             )
             .await?;
 
+            self.last_committed_seq.store(last_committed_seq);
             let mut write_guard = self.state.write();
             *write_guard = Arc::new(CheckpointState {
                 checkpoint: current_checkpoint.checkpoint.clone(),
@@ -295,7 +300,7 @@ impl DbReaderInner {
         table_store: Arc<TableStore>,
         options: &DbReaderOptions,
     ) -> Result<CheckpointState, SlateDBError> {
-        let last_wal_id = Self::replay_wal_into(
+        let (last_wal_id, _) = Self::replay_wal_into(
             Arc::clone(&table_store),
             options,
             &manifest.core,
@@ -412,7 +417,7 @@ impl DbReaderInner {
         core: &CoreDbState,
         into_tables: &mut VecDeque<Arc<ImmutableMemtable>>,
         replay_new_wals: bool,
-    ) -> Result<u64, SlateDBError> {
+    ) -> Result<(u64, u64), SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
@@ -447,14 +452,16 @@ impl DbReaderInner {
         .await?;
 
         let mut last_wal_id = 0;
+        let mut last_committed_seq = 0;
         while let Some(replayed_table) = replay_iter.next().await? {
             last_wal_id = replayed_table.last_wal_id;
+            last_committed_seq = replayed_table.last_seq;
             let imm_memtable =
                 ImmutableMemtable::new(replayed_table.table, replayed_table.last_wal_id);
             into_tables.push_back(Arc::new(imm_memtable));
         }
 
-        Ok(last_wal_id)
+        Ok((last_wal_id, last_committed_seq))
     }
 
     /// Return an error if the state has encountered

@@ -44,14 +44,20 @@ impl DbInner {
         &self,
         replayed_memtable: ReplayedMemtable,
     ) -> Result<(), SlateDBError> {
+        // freeze the memtable, with the recent flushed wal id memorized.
         let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
         let mut guard = self.state.write();
         self.freeze_memtable(&mut guard, last_flushed_wal_id)?;
 
         let last_wal_id = replayed_memtable.last_wal_id;
         guard.set_next_wal_id(last_wal_id + 1);
-        guard.update_last_seq(replayed_memtable.last_seq);
+
+        // update seqs and clock
+        self.last_seq.store(replayed_memtable.last_seq);
+        self.last_committed_seq.store(replayed_memtable.last_seq);
         self.mono_clock.set_last_tick(replayed_memtable.last_tick)?;
+
+        // replace the memtable
         guard.replace_memtable(replayed_memtable.table)
     }
 }

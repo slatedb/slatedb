@@ -48,7 +48,7 @@ use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::MonotonicClock;
+use crate::utils::{MonotonicClock, Sequencer};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use tracing::{info, warn};
@@ -64,10 +64,21 @@ pub(crate) struct DbInner {
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: DbStats,
     pub(crate) stat_registry: Arc<StatRegistry>,
+    /// A clock which is guaranteed to be monotonic. it's previous value is
+    /// stored in the manifest and WAL, will be updated after WAL replay.
     pub(crate) mono_clock: Arc<MonotonicClock>,
+    /// The sequence number of the most recent write operation. This sequence number
+    /// is assigned immediately when a write begins, it's possible that the write
+    /// has not been committed or finally failed.
+    pub(crate) last_seq: Arc<Sequencer>,
+    /// The sequence number of the most recent write that has been fully committed.
+    /// For reads with dirty=false, the maximum visible sequence number is capped
+    /// at last_committed_seq.
+    pub(crate) last_committed_seq: Arc<Sequencer>,
     pub(crate) reader: Reader,
+    /// [`wal_buffer`] manages the in-memory WAL buffer, it manages the flushing
+    /// of the WAL buffer to the remote storage.
     pub(crate) wal_buffer: Arc<WalBufferManager>,
-
     pub(crate) wal_enabled: bool,
 }
 
@@ -82,8 +93,17 @@ impl DbInner {
         write_notifier: UnboundedSender<WriteBatchMsg>,
         stat_registry: Arc<StatRegistry>,
     ) -> Result<Self, SlateDBError> {
+        // both last_seq and last_committed_seq will be updated after WAL replay.
+        let last_l0_seq = manifest.core.last_l0_seq;
+        let last_seq = Arc::new(Sequencer::new(last_l0_seq));
+        let last_committed_seq = Arc::new(Sequencer::new(last_l0_seq));
+
         let mono_clock = Arc::new(MonotonicClock::new(clock, manifest.core.last_l0_clock_tick));
+
+        // state are mostly manifest, including IMM, L0, etc.
+        // TODO: might consider to rename it as something like InMemoryManifest.
         let state = Arc::new(RwLock::new(DbState::new(manifest)));
+
         let db_stats = DbStats::new(stat_registry.as_ref());
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
 
@@ -91,6 +111,7 @@ impl DbInner {
             table_store: Arc::clone(&table_store),
             db_stats: db_stats.clone(),
             mono_clock: Arc::clone(&mono_clock),
+            last_committed_seq: Arc::clone(&last_committed_seq),
             wal_enabled,
         };
 
@@ -107,6 +128,8 @@ impl DbInner {
         let db_inner = Self {
             state,
             settings,
+            last_seq,
+            last_committed_seq,
             wal_enabled,
             table_store,
             memtable_flush_notifier,

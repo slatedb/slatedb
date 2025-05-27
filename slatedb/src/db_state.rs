@@ -213,8 +213,6 @@ impl SortedRun {
 pub(crate) struct DbState {
     memtable: WritableKVTable,
     state: Arc<COWDbState>,
-    last_seq: u64,
-    last_committed_seq: u64,
     error: WatchableOnceCell<SlateDBError>,
 }
 
@@ -326,7 +324,6 @@ impl ReadSnapshot for DbStateSnapshot {
 
 impl DbState {
     pub fn new(manifest: DirtyManifest) -> Self {
-        let last_l0_seq = manifest.core.last_l0_seq;
         Self {
             memtable: WritableKVTable::new(),
             state: Arc::new(COWDbState {
@@ -334,8 +331,6 @@ impl DbState {
                 manifest,
             }),
             error: WatchableOnceCell::new(),
-            last_seq: last_l0_seq,
-            last_committed_seq: last_l0_seq,
         }
     }
 
@@ -444,26 +439,6 @@ impl DbState {
         let mut state = self.state_copy();
         state.manifest.core.next_wal_sst_id = next_wal_id;
         self.update_state(state);
-    }
-
-    /// increment_seq is called whenever a new write is performed.
-    /// All the writes is done inside the commit pipeline, which
-    /// locates in a single task.
-    pub fn increment_seq(&mut self) -> u64 {
-        self.last_seq += 1;
-        self.last_seq
-    }
-
-    /// update_last_committed_seq is called when a write is committed.
-    /// the only place that calls this is the commit pipeline.
-    pub fn update_last_committed_seq(&mut self, seq: u64) {
-        self.last_committed_seq = seq;
-    }
-
-    /// update_last_seq is called when we replay the WALs to recover the
-    /// latest sequence number.
-    pub fn update_last_seq(&mut self, seq: u64) {
-        self.last_seq = seq;
     }
 
     pub fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyManifest) {

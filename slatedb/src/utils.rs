@@ -6,8 +6,8 @@ use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use std::cmp;
 use std::future::Future;
-use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tracing::info;
@@ -300,6 +300,30 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
     // if we didn't find a mismatch yet then the prev block's key must be shorter,
     // so just use the common prefix plus the next byte in this block's key
     this_block_first_key.slice(..prev_block_last_key.len() + 1)
+}
+
+pub(crate) struct Sequencer {
+    val: AtomicU64,
+}
+
+impl Sequencer {
+    pub fn new(initial_value: u64) -> Self {
+        Self {
+            val: AtomicU64::new(initial_value),
+        }
+    }
+
+    pub fn next(&self) -> u64 {
+        self.val.fetch_add(1, SeqCst)
+    }
+
+    pub fn store(&self, value: u64) {
+        self.val.store(value, SeqCst);
+    }
+
+    pub fn load(&self) -> u64 {
+        self.val.load(SeqCst)
+    }
 }
 
 #[cfg(test)]

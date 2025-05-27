@@ -12,7 +12,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
-use crate::utils::{get_now_for_read, is_not_expired, MonotonicClock};
+use crate::utils::{get_now_for_read, is_not_expired, MonotonicClock, Sequencer};
 use crate::{filter, DbIterator, SlateDBError};
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -46,6 +46,7 @@ pub(crate) struct Reader {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) db_stats: DbStats,
     pub(crate) mono_clock: Arc<MonotonicClock>,
+    pub(crate) last_committed_seq: Arc<Sequencer>,
     pub(crate) wal_enabled: bool,
 }
 
