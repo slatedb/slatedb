@@ -110,7 +110,7 @@ impl WalBufferManager {
             inner.quit_tx = Some(quit_tx);
             inner.flush_tx = Some(flush_tx);
         }
-        let max_flush_interval = self.max_flush_interval.clone();
+        let max_flush_interval = self.max_flush_interval;
         let background_fut = self
             .clone()
             .do_background_work(flush_rx, quit_rx, max_flush_interval);
@@ -170,8 +170,8 @@ impl WalBufferManager {
         // check the size of the current wal
         let (current_wal, need_flush, flush_tx) = {
             let inner = self.inner.lock().await;
-            let need_flush = inner.current_wal.metadata().entries_size_in_bytes
-                >= self.max_wal_bytes_size as usize;
+            let need_flush =
+                inner.current_wal.metadata().entries_size_in_bytes >= self.max_wal_bytes_size;
             (
                 inner.current_wal.clone(),
                 need_flush,
@@ -408,7 +408,9 @@ impl WalBufferManager {
             inner.quit_tx.take()
         };
         if let Some(quit_tx) = quit_tx {
-            quit_tx.send(()).unwrap();
+            quit_tx
+                .send(())
+                .expect("failed to send quit signal to background task of wal buffer manager");
         }
 
         Ok(())
