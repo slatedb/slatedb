@@ -127,10 +127,6 @@ pub(crate) struct ImmutableMemtable {
     flushed: WatchableOnceCell<Result<(), SlateDBError>>,
 }
 
-pub(crate) struct ImmutableWal {
-    table: Arc<KVTable>,
-}
-
 #[self_referencing]
 pub(crate) struct MemTableIteratorInner<T: RangeBounds<KVTableInternalKey>> {
     map: Arc<SkipMap<KVTableInternalKey, RowEntry>>,
@@ -199,16 +195,6 @@ impl ImmutableMemtable {
 
     pub(crate) fn notify_flush_to_l0(&self, result: Result<(), SlateDBError>) {
         self.flushed.write(result);
-    }
-}
-
-impl ImmutableWal {
-    pub(crate) fn new(table: WritableKVTable) -> Self {
-        Self { table: table.table }
-    }
-
-    pub(crate) fn table(&self) -> Arc<KVTable> {
-        self.table.clone()
     }
 }
 

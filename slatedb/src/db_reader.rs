@@ -8,7 +8,7 @@ use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
-use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable};
+use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::reader::{ReadSnapshot, Reader};
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
@@ -67,7 +67,6 @@ struct CheckpointState {
 }
 
 static EMPTY_TABLE: Lazy<Arc<KVTable>> = Lazy::new(|| Arc::new(KVTable::new()));
-static EMPTY_WAL: Lazy<VecDeque<Arc<ImmutableWal>>> = Lazy::new(VecDeque::new);
 
 impl ReadSnapshot for CheckpointState {
     fn memtable(&self) -> Arc<KVTable> {

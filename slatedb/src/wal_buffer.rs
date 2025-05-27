@@ -121,6 +121,7 @@ impl WalBufferManager {
         }
     }
 
+    #[cfg(test)]
     pub async fn immutable_wals_count(&self) -> usize {
         let inner = self.inner.lock().await;
         inner.immutable_wals.len()

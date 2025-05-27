@@ -4,7 +4,7 @@ use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::db_stats::DbStats;
 use crate::filter_iterator::FilterIterator;
 use crate::iter::KeyValueIterator;
-use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, MemTableIterator};
+use crate::mem_table::{ImmutableMemtable, KVTable, MemTableIterator};
 use crate::reader::SstFilterResult::{
     FilterNegative, FilterPositive, RangeNegative, RangePositive,
 };
@@ -360,9 +360,7 @@ mod tests {
 
     struct MockReadSnapshot {
         memtable: Arc<KVTable>,
-        wal: Arc<KVTable>,
         imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
-        imm_wal: VecDeque<Arc<ImmutableWal>>,
     }
 
     impl ReadSnapshot for MockReadSnapshot {
@@ -382,9 +380,7 @@ mod tests {
     fn mock_read_snapshot() -> MockReadSnapshot {
         MockReadSnapshot {
             memtable: Arc::new(KVTable::new()),
-            wal: Arc::new(KVTable::new()),
             imm_memtable: VecDeque::new(),
-            imm_wal: VecDeque::new(),
         }
     }
 
