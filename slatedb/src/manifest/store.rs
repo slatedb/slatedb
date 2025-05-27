@@ -1,5 +1,6 @@
 use crate::checkpoint::Checkpoint;
-use crate::config::{CheckpointOptions, Clock, SystemClock};
+use crate::clock::{Clock, SystemClock};
+use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{
@@ -10,7 +11,6 @@ use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
-use crate::utils;
 use crate::SlateDBError::ManifestVersionExists;
 use chrono::Utc;
 use futures::StreamExt;
@@ -332,7 +332,7 @@ impl StoredManifest {
     ) -> Result<Checkpoint, SlateDBError> {
         let expire_time = options
             .lifetime
-            .map(|l| utils::now_systime(self.manifest_store.clock.as_ref()) + l);
+            .map(|l| self.manifest_store.clock.now_systime() + l);
         let db_state = self.db_state();
         let manifest_id = match options.source {
             Some(source_checkpoint_id) => {
@@ -352,7 +352,7 @@ impl StoredManifest {
             id: checkpoint_id,
             manifest_id,
             expire_time,
-            create_time: utils::now_systime(self.manifest_store.clock.as_ref()),
+            create_time: self.manifest_store.clock.now_systime(),
         })
     }
 
@@ -440,7 +440,7 @@ impl StoredManifest {
                 .iter_mut()
                 .find(|c| c.id == checkpoint_id)
                 .ok_or(CheckpointMissing(checkpoint_id))?;
-            checkpoint.expire_time = Some(utils::now_systime(clock.as_ref()) + new_lifetime);
+            checkpoint.expire_time = Some(clock.now_systime() + new_lifetime);
             Ok(Some(updated_manifest))
         })
         .await?;
@@ -521,18 +521,18 @@ pub(crate) struct ManifestStore {
     object_store: Box<dyn TransactionalObjectStore>,
     codec: Box<dyn ManifestCodec>,
     manifest_suffix: &'static str,
-    clock: Arc<dyn Clock + Send + Sync>,
+    clock: Arc<dyn Clock>,
 }
 
 impl ManifestStore {
     pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
-        Self::new_with_clock(root_path, object_store, Arc::new(SystemClock::default()))
+        Self::new_with_clock(root_path, object_store, Arc::new(SystemClock::new()))
     }
 
     pub(crate) fn new_with_clock(
         root_path: &Path,
         object_store: Arc<dyn ObjectStore>,
-        clock: Arc<dyn Clock + Send + Sync>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             object_store: Box::new(DelegatingTransactionalObjectStore::new(
@@ -729,6 +729,7 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
+    use crate::clock::{Clock, SystemClock};
     use crate::config::CheckpointOptions;
     use crate::db_state::CoreDbState;
     use crate::error;
@@ -934,12 +935,16 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
         let state = CoreDbState::new();
+        let clock = SystemClock::new();
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
 
         let mut dirty = sm.prepare_dirty();
-        dirty.core.checkpoints.push(new_checkpoint(sm.id));
+        dirty
+            .core
+            .checkpoints
+            .push(Checkpoint::new(sm.id, clock.now_systime(), None));
         sm.update_manifest(dirty).await.unwrap();
 
         // When
@@ -1021,27 +1026,16 @@ mod tests {
         Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()))
     }
 
-    fn now_rounded_to_nearest_sec() -> SystemTime {
-        let now_secs = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+    fn now_rounded_to_nearest_sec(clock: &dyn Clock) -> SystemTime {
+        let now_secs = clock.elapsed().as_secs();
         SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs)
-    }
-
-    fn new_checkpoint(manifest_id: u64) -> Checkpoint {
-        Checkpoint {
-            id: Uuid::new_v4(),
-            manifest_id,
-            expire_time: None,
-            create_time: now_rounded_to_nearest_sec(),
-        }
     }
 
     #[tokio::test]
     async fn test_read_active_manifests_should_consider_checkpoints() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
+        let clock = SystemClock::new();
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
@@ -1057,7 +1051,11 @@ mod tests {
 
         // Add a checkpoint referencing the latest manifest
         let mut dirty = sm.prepare_dirty();
-        dirty.core.checkpoints.push(new_checkpoint(sm.id));
+        dirty.core.checkpoints.push(Checkpoint::new(
+            sm.id,
+            now_rounded_to_nearest_sec(&clock),
+            None,
+        ));
         sm.update_manifest(dirty).await.unwrap();
         let active_manifests = ms.read_active_manifests().await.unwrap();
         assert_eq!(2, active_manifests.len());

@@ -581,6 +581,7 @@ mod tests {
     use std::sync::Arc;
     use ulid::Ulid;
 
+    use crate::clock::SystemClock;
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
@@ -794,6 +795,7 @@ mod tests {
 
         // Setup
         let os = Arc::new(InMemory::new());
+        let clock = Arc::new(SystemClock::new());
         let format = SsTableFormat {
             block_size: 32,
             ..SsTableFormat::default()
@@ -801,7 +803,11 @@ mod tests {
 
         let stat_registry = StatRegistry::new();
         let block_cache = Arc::new(MokaCache::new());
-        let wrapper = Arc::new(DbCacheWrapper::new(block_cache.clone(), &stat_registry));
+        let wrapper = Arc::new(DbCacheWrapper::new(
+            block_cache.clone(),
+            &stat_registry,
+            clock,
+        ));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
             format,
@@ -927,7 +933,8 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let stat_registry = StatRegistry::new();
         let cache = Arc::new(TestCache::new());
-        let wrapper = Arc::new(DbCacheWrapper::new(cache.clone(), &stat_registry));
+        let clock = Arc::new(SystemClock::new());
+        let wrapper = Arc::new(DbCacheWrapper::new(cache.clone(), &stat_registry, clock));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
             SsTableFormat::default(),
@@ -963,7 +970,8 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let stat_registry = StatRegistry::new();
         let cache = Arc::new(TestCache::new());
-        let wrapper = Arc::new(DbCacheWrapper::new(cache.clone(), &stat_registry));
+        let clock = Arc::new(SystemClock::new());
+        let wrapper = Arc::new(DbCacheWrapper::new(cache.clone(), &stat_registry, clock));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
             SsTableFormat::default(),

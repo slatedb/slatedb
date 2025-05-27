@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::runtime::Handle;
 use tracing::{error, info, warn};
 use ulid::Ulid;
 use uuid::Uuid;
 
+use crate::clock::Clock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
@@ -73,6 +73,7 @@ pub(crate) struct Compactor {
 }
 
 impl Compactor {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
@@ -80,6 +81,7 @@ impl Compactor {
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
         tokio_handle: Handle,
         stat_registry: &StatRegistry,
+        clock: Arc<dyn Clock>,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
@@ -94,6 +96,7 @@ impl Compactor {
                 tokio_handle,
                 external_rx,
                 stats,
+                clock,
             );
             let mut orchestrator = match load_result {
                 Ok(orchestrator) => orchestrator,
@@ -131,6 +134,7 @@ struct CompactorOrchestrator {
 }
 
 impl CompactorOrchestrator {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         options: CompactorOptions,
         manifest_store: Arc<ManifestStore>,
@@ -139,6 +143,7 @@ impl CompactorOrchestrator {
         tokio_handle: Handle,
         external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
         stats: Arc<CompactionStats>,
+        clock: Arc<dyn Clock>,
     ) -> Result<Self, SlateDBError> {
         let options = Arc::new(options);
         let ticker = crossbeam_channel::tick(options.poll_interval);
@@ -158,6 +163,7 @@ impl CompactorOrchestrator {
             scheduler,
             executor,
             stats,
+            clock,
         )?;
         let orchestrator = Self {
             ticker,
@@ -204,6 +210,7 @@ struct CompactorEventHandler {
     scheduler: Box<dyn CompactionScheduler>,
     executor: Box<dyn CompactionExecutor>,
     stats: Arc<CompactionStats>,
+    clock: Arc<dyn Clock>,
 }
 
 impl CompactorEventHandler {
@@ -214,6 +221,7 @@ impl CompactorEventHandler {
         scheduler: Box<dyn CompactionScheduler>,
         executor: Box<dyn CompactionExecutor>,
         stats: Arc<CompactionStats>,
+        clock: Arc<dyn Clock>,
     ) -> Result<Self, SlateDBError> {
         let stored_manifest =
             tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;
@@ -227,6 +235,7 @@ impl CompactorEventHandler {
             scheduler,
             executor,
             stats,
+            clock,
         })
     }
 
@@ -370,12 +379,9 @@ impl CompactorEventHandler {
         self.log_compaction_state();
         self.write_manifest_safely()?;
         self.maybe_schedule_compactions()?;
-        self.stats.last_compaction_ts.set(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        );
+        self.stats
+            .last_compaction_ts
+            .set(self.clock.elapsed().as_secs());
         Ok(())
     }
 
@@ -457,6 +463,7 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
+    use crate::clock::{ManualClock, SystemClock};
     use crate::compactor::stats::CompactionStats;
     use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
@@ -475,7 +482,7 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
-    use crate::test_utils::{assert_iterator, TestClock};
+    use crate::test_utils::assert_iterator;
     use crate::types::RowEntry;
     use crate::SlateDBError;
 
@@ -485,7 +492,7 @@ mod tests {
     async fn test_compactor_compacts_l0() {
         // given:
         let os = Arc::new(InMemory::new());
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(ManualClock::new());
         let mut options = db_options(Some(compactor_options()));
         options.l0_sst_size_bytes = 128;
 
@@ -543,7 +550,7 @@ mod tests {
     #[tokio::test]
     async fn test_should_tombstones_in_l0() {
         let os = Arc::new(InMemory::new());
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(ManualClock::new());
 
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new());
 
@@ -627,7 +634,7 @@ mod tests {
     async fn test_should_compact_expired_entries() {
         // given:
         let os = Arc::new(InMemory::new());
-        let insert_clock = Arc::new(TestClock::new());
+        let insert_clock = Arc::new(ManualClock::new());
 
         let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
             SizeTieredCompactionSchedulerOptions {
@@ -653,7 +660,7 @@ mod tests {
         let value = &[b'a'; 64];
 
         // ticker time = 0, expire time = 10
-        insert_clock.ticker.store(0, atomic::Ordering::SeqCst);
+        insert_clock.set(0);
         db.put_with_options(
             &[1; 16],
             value,
@@ -666,7 +673,7 @@ mod tests {
         .unwrap();
 
         // ticker time = 10, expire time = 60 (using default TTL)
-        insert_clock.ticker.store(10, atomic::Ordering::SeqCst);
+        insert_clock.set(10);
         db.put_with_options(
             &[2; 16],
             value,
@@ -679,7 +686,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // ticker time = 30, no expire time
-        insert_clock.ticker.store(30, atomic::Ordering::SeqCst);
+        insert_clock.set(30);
         db.put_with_options(
             &[3; 16],
             value,
@@ -691,7 +698,7 @@ mod tests {
 
         // this revives key 1
         // ticker time = 70, expire time 80
-        insert_clock.ticker.store(70, atomic::Ordering::SeqCst);
+        insert_clock.set(70);
         db.put_with_options(
             &[1; 16],
             value,
@@ -757,7 +764,7 @@ mod tests {
             let rt = build_runtime();
             let compactor_options = Arc::new(compactor_options());
             let options = db_options(None);
-
+            let clock = Arc::new(SystemClock::new());
             let os = Arc::new(InMemory::new());
             let (manifest_store, table_store) = build_test_stores(os.clone());
             let db = rt
@@ -787,6 +794,7 @@ mod tests {
                 scheduler.clone(),
                 executor.clone(),
                 compactor_stats,
+                clock,
             )
             .unwrap();
             let manifest = rt

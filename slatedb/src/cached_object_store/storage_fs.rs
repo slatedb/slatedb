@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime};
 use std::{fmt::Display, io::SeekFrom};
 
 use crate::cached_object_store::stats::CachedObjectStoreStats;
+use crate::clock::Clock;
 use bytes::Bytes;
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
@@ -35,6 +36,7 @@ impl FsCacheStorage {
         max_cache_size_bytes: Option<usize>,
         scan_interval: Option<Duration>,
         stats: Arc<CachedObjectStoreStats>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         let evictor = max_cache_size_bytes.map(|max_cache_size_bytes| {
             Arc::new(FsCacheEvictor::new(
@@ -42,6 +44,7 @@ impl FsCacheStorage {
                 max_cache_size_bytes,
                 scan_interval,
                 stats,
+                clock,
             ))
         });
 
@@ -326,6 +329,7 @@ struct FsCacheEvictor {
     background_evict_handle: OnceCell<tokio::task::JoinHandle<()>>,
     background_scan_handle: OnceCell<tokio::task::JoinHandle<()>>,
     stats: Arc<CachedObjectStoreStats>,
+    clock: Arc<dyn Clock>,
 }
 
 impl FsCacheEvictor {
@@ -334,6 +338,7 @@ impl FsCacheEvictor {
         max_cache_size_bytes: usize,
         scan_interval: Option<Duration>,
         stats: Arc<CachedObjectStoreStats>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         Self {
@@ -345,6 +350,7 @@ impl FsCacheEvictor {
             background_evict_handle: OnceCell::new(),
             background_scan_handle: OnceCell::new(),
             stats,
+            clock,
         }
     }
 
@@ -369,7 +375,11 @@ impl FsCacheEvictor {
 
         // start the background evictor task, it'll be triggered whenever a new cache entry is added
         self.background_evict_handle
-            .set(tokio::spawn(Self::background_evict(inner, rx)))
+            .set(tokio::spawn(Self::background_evict(
+                inner,
+                rx,
+                self.clock.clone(),
+            )))
             .ok();
     }
 
@@ -380,12 +390,13 @@ impl FsCacheEvictor {
     async fn background_evict(
         inner: Arc<FsCacheEvictorInner>,
         mut rx: tokio::sync::mpsc::Receiver<FsCacheEvictorWork>,
+        clock: Arc<dyn Clock>,
     ) {
         loop {
             match rx.recv().await {
                 Some((path, bytes, evict)) => {
                     inner
-                        .track_entry_accessed(path, bytes, SystemTime::now(), evict)
+                        .track_entry_accessed(path, bytes, clock.now_systime(), evict)
                         .await;
                 }
                 None => return,
