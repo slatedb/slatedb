@@ -44,9 +44,9 @@ impl DbInner {
         &self,
         replayed_memtable: ReplayedMemtable,
     ) -> Result<(), SlateDBError> {
+        let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
         let mut guard = self.state.write();
-        let last_wal_id = guard.last_flushed_wal_id();
-        self.freeze_memtable(&mut guard, last_wal_id)?;
+        self.freeze_memtable(&mut guard, last_flushed_wal_id)?;
 
         let last_wal_id = replayed_memtable.last_wal_id;
         guard.set_next_wal_id(last_wal_id + 1);

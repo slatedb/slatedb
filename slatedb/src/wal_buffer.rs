@@ -65,8 +65,8 @@ struct WalBufferManagerInner {
     /// Whenever a WAL is applied to Memtable and successfully flushed to remote storage,
     /// the immutable wal can be recycled in memory.
     last_applied_seq: Option<u64>,
-    /// The flusher will update the last_flushed_wal_id and last_flushed_seq when the flush is done.
-    last_flushed_wal_id: Option<u64>,
+    /// The flusher will update the recent_flushed_wal_id and last_flushed_seq when the flush is done.
+    recent_flushed_wal_id: u64,
     /// The last flushed sequence number.
     last_flushed_seq: Option<u64>,
 }
@@ -74,6 +74,7 @@ struct WalBufferManagerInner {
 impl WalBufferManager {
     pub fn new(
         wal_id_incrementor: Arc<dyn WalIdStore>,
+        recent_flushed_wal_id: u64,
         table_store: Arc<TableStore>,
         mono_clock: Arc<MonotonicClock>,
         max_wal_bytes_size: usize,
@@ -85,8 +86,8 @@ impl WalBufferManager {
             current_wal,
             immutable_wals,
             last_applied_seq: None,
-            last_flushed_wal_id: None,
             last_flushed_seq: None,
+            recent_flushed_wal_id,
             quit_tx: None,
             flush_tx: None,
             background_task: None,
@@ -127,9 +128,9 @@ impl WalBufferManager {
         inner.immutable_wals.len()
     }
 
-    pub fn last_flushed_wal_id(&self) -> u64 {
+    pub fn recent_flushed_wal_id(&self) -> u64 {
         let inner = self.inner.read();
-        inner.last_flushed_wal_id.unwrap_or(0)
+        inner.recent_flushed_wal_id
     }
 
     /// Returns the total size of all unflushed WALs in bytes.
@@ -298,7 +299,7 @@ impl WalBufferManager {
         let inner = self.inner.read();
         let mut flushing_wals = Vec::new();
         for (wal_id, wal) in inner.immutable_wals.iter() {
-            if *wal_id > inner.last_flushed_wal_id.unwrap_or(0) {
+            if *wal_id > inner.recent_flushed_wal_id {
                 flushing_wals.push((*wal_id, wal.clone()));
             }
         }
@@ -326,7 +327,7 @@ impl WalBufferManager {
             // increment the last flushed wal id, and last flushed seq
             {
                 let mut inner = self.inner.write();
-                inner.last_flushed_wal_id = Some(*wal_id);
+                inner.recent_flushed_wal_id = *wal_id;
                 if let Some(seq) = wal.last_seq() {
                     inner.last_flushed_seq = Some(seq);
                 }

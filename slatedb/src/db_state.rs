@@ -350,11 +350,6 @@ impl DbState {
         }
     }
 
-    pub fn last_flushed_wal_id(&self) -> u64 {
-        assert!(self.state.core().next_wal_sst_id > 0);
-        self.state.core().next_wal_sst_id - 1
-    }
-
     pub fn error_reader(&self) -> WatchableOnceCellReader<SlateDBError> {
         self.error.reader()
     }
@@ -376,7 +371,7 @@ impl DbState {
         self.state = Arc::new(state);
     }
 
-    pub fn freeze_memtable(&mut self, wal_id: u64) -> Result<(), SlateDBError> {
+    pub fn freeze_memtable(&mut self, recent_flushed_wal_id: u64) -> Result<(), SlateDBError> {
         if let Some(err) = self.error.reader().read() {
             return Err(err.clone());
         }
@@ -384,7 +379,10 @@ impl DbState {
         let mut state = self.state_copy();
         state
             .imm_memtable
-            .push_front(Arc::new(ImmutableMemtable::new(old_memtable, wal_id)));
+            .push_front(Arc::new(ImmutableMemtable::new(
+                old_memtable,
+                recent_flushed_wal_id,
+            )));
         self.update_state(state);
         Ok(())
     }

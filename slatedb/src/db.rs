@@ -94,8 +94,10 @@ impl DbInner {
             wal_enabled,
         };
 
+        let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
         let wal_buffer = Arc::new(WalBufferManager::new(
             state.clone(),
+            recent_flushed_wal_id,
             table_store.clone(),
             mono_clock.clone(),
             settings.l0_sst_size_bytes,
@@ -292,10 +294,10 @@ impl DbInner {
 
     async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         {
+            let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
             let mut guard = self.state.write();
             if !guard.memtable().is_empty() {
-                let last_wal_id = guard.last_flushed_wal_id();
-                guard.freeze_memtable(last_wal_id)?;
+                guard.freeze_memtable(last_flushed_wal_id)?;
             }
         }
         self.flush_immutable_memtables().await

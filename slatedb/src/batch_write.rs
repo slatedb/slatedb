@@ -99,9 +99,9 @@ impl DbInner {
 
         // maybe freeze the memtable.
         {
+            let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
             let mut guard = self.state.write();
-            let last_wal_id = guard.last_flushed_wal_id();
-            self.maybe_freeze_memtable(&mut guard, last_wal_id)?;
+            self.maybe_freeze_memtable(&mut guard, last_flushed_wal_id)?;
         }
 
         // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
