@@ -314,7 +314,7 @@ impl MonotonicSeq {
     }
 
     pub fn next(&self) -> u64 {
-        self.val.fetch_add(1, SeqCst)
+        self.val.fetch_add(1, SeqCst) + 1
     }
 
     pub fn store(&self, value: u64) {
