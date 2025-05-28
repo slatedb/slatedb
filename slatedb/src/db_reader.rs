@@ -14,7 +14,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::{DefaultStoreProvider, StoreProvider};
 use crate::tablestore::TableStore;
-use crate::utils::{MonotonicClock, SequenceCell, WatchableOnceCell};
+use crate::utils::{MonotonicClock, MonotonicSeq, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{utils, Checkpoint, DbIterator};
 use bytes::Bytes;
@@ -44,7 +44,7 @@ struct DbReaderInner {
     options: DbReaderOptions,
     state: RwLock<Arc<CheckpointState>>,
     clock: Arc<dyn Clock + Sync + Send>,
-    last_committed_seq: Arc<SequenceCell>,
+    last_committed_seq: Arc<MonotonicSeq>,
     user_checkpoint_id: Option<Uuid>,
     reader: Reader,
     error_watcher: WatchableOnceCell<SlateDBError>,
@@ -115,7 +115,7 @@ impl DbReaderInner {
             clock.clone(),
             initial_state.core().last_l0_clock_tick,
         ));
-        let last_committed_seq = Arc::new(SequenceCell::new(initial_state.core().last_l0_seq));
+        let last_committed_seq = Arc::new(MonotonicSeq::new(initial_state.core().last_l0_seq));
 
         let stat_registry = Arc::new(StatRegistry::new());
         let db_stats = DbStats::new(stat_registry.as_ref());

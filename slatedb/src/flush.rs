@@ -28,6 +28,8 @@ impl DbInner {
 
         self.mono_clock
             .fetch_max_last_durable_tick(imm_table.last_tick());
+        self.last_remote_persisted_seq
+            .store_if_greater(self.last_seq.load());
         Ok(handle)
     }
 }

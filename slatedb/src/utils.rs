@@ -302,11 +302,11 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
     this_block_first_key.slice(..prev_block_last_key.len() + 1)
 }
 
-pub(crate) struct SequenceCell {
+pub(crate) struct MonotonicSeq {
     val: AtomicU64,
 }
 
-impl SequenceCell {
+impl MonotonicSeq {
     pub fn new(initial_value: u64) -> Self {
         Self {
             val: AtomicU64::new(initial_value),
@@ -323,6 +323,10 @@ impl SequenceCell {
 
     pub fn load(&self) -> u64 {
         self.val.load(SeqCst)
+    }
+
+    pub fn store_if_greater(&self, value: u64) {
+        self.val.fetch_max(value, SeqCst);
     }
 }
 

@@ -48,7 +48,7 @@ use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::{MonotonicClock, SequenceCell};
+use crate::utils::{MonotonicClock, MonotonicSeq};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use tracing::{info, warn};
@@ -70,14 +70,14 @@ pub(crate) struct DbInner {
     /// The sequence number of the most recent write operation. This sequence number
     /// is assigned immediately when a write begins, it's possible that the write
     /// has not been committed or finally failed.
-    pub(crate) last_seq: Arc<SequenceCell>,
+    pub(crate) last_seq: Arc<MonotonicSeq>,
     /// The sequence number of the most recent write that has been fully committed.
     /// For reads with dirty=false, the maximum visible sequence number is capped
     /// at last_committed_seq.
-    pub(crate) last_committed_seq: Arc<SequenceCell>,
+    pub(crate) last_committed_seq: Arc<MonotonicSeq>,
     /// The sequence number of the most recent write that has been fully durable
     /// flushed to the remote storage.
-    pub(crate) last_remote_persisted_seq: Arc<SequenceCell>,
+    pub(crate) last_remote_persisted_seq: Arc<MonotonicSeq>,
     pub(crate) reader: Reader,
     /// [`wal_buffer`] manages the in-memory WAL buffer, it manages the flushing
     /// of the WAL buffer to the remote storage.
@@ -98,9 +98,9 @@ impl DbInner {
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
-        let last_seq = Arc::new(SequenceCell::new(last_l0_seq));
-        let last_committed_seq = Arc::new(SequenceCell::new(last_l0_seq));
-        let last_remote_persisted_seq = Arc::new(SequenceCell::new(last_l0_seq));
+        let last_seq = Arc::new(MonotonicSeq::new(last_l0_seq));
+        let last_committed_seq = Arc::new(MonotonicSeq::new(last_l0_seq));
+        let last_remote_persisted_seq = Arc::new(MonotonicSeq::new(last_l0_seq));
 
         let mono_clock = Arc::new(MonotonicClock::new(clock, manifest.core.last_l0_clock_tick));
 
