@@ -75,7 +75,7 @@ impl DbInner {
                 },
             };
 
-            if self.settings.wal_enabled() {
+            if self.wal_enabled {
                 self.wal_buffer.append(&[row_entry.clone()]).await?;
             }
             // we do not need to lock the memtable in mid of the commit pipeline
@@ -86,7 +86,7 @@ impl DbInner {
 
         // get the durable watcher. we'll await on current WAL table to be flushed if wal is enabled.
         // otherwise, we'll use the memtable's durable watcher.
-        let durable_watcher = if self.settings.wal_enabled() {
+        let durable_watcher = if self.wal_enabled {
             let current_wal = self.wal_buffer.maybe_trigger_flush().await?;
             // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
             // in another Pull Request.
