@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_types)]
+
 //! SlateDB's module for generating random data.
 //!
 //! This module exists because we want to do deterministic simulation testing for SlateDB.

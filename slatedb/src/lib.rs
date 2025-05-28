@@ -4,6 +4,7 @@
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
 #![allow(clippy::result_large_err)]
+#![deny(clippy::disallowed_types)]
 
 /// Re-export the bytes crate.
 ///
