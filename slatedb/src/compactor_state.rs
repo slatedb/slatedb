@@ -145,7 +145,7 @@ impl CompactorState {
             }
         }
         info!("accepted submitted compaction: {:?}", compaction);
-        let id = Uuid::new_v4();
+        let id = crate::utils::uuid();
         self.compactions.insert(id, compaction);
         Ok(id)
     }
@@ -280,7 +280,6 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use tokio::runtime::{Handle, Runtime};
-    use uuid::Uuid;
 
     const PATH: &str = "/test/db";
 
@@ -521,7 +520,7 @@ mod tests {
         // mimic an externally added checkpoint
         let mut dirty = new_dirty_manifest();
         let checkpoint = Checkpoint {
-            id: Uuid::new_v4(),
+            id: crate::utils::uuid(),
             manifest_id: 1,
             expire_time: None,
             create_time: SystemTime::now(),
