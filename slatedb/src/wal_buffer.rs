@@ -13,7 +13,7 @@ use crate::{
     mem_table::KVTable,
     tablestore::TableStore,
     types::RowEntry,
-    utils::{MonotonicClock, WatchableOnceCell},
+    utils::{MonotonicClock, SequenceCell, WatchableOnceCell},
     wal_id::WalIdStore,
     SlateDBError,
 };
@@ -68,13 +68,14 @@ struct WalBufferManagerInner {
     /// The flusher will update the recent_flushed_wal_id and last_flushed_seq when the flush is done.
     recent_flushed_wal_id: u64,
     /// The last flushed sequence number.
-    last_flushed_seq: Option<u64>,
+    last_remote_persisted_seq: Arc<SequenceCell>,
 }
 
 impl WalBufferManager {
     pub fn new(
         wal_id_incrementor: Arc<dyn WalIdStore>,
         recent_flushed_wal_id: u64,
+        last_remote_persisted_seq: Arc<SequenceCell>,
         table_store: Arc<TableStore>,
         mono_clock: Arc<MonotonicClock>,
         max_wal_bytes_size: usize,
@@ -86,7 +87,7 @@ impl WalBufferManager {
             current_wal,
             immutable_wals,
             last_applied_seq: None,
-            last_flushed_seq: None,
+            last_remote_persisted_seq,
             recent_flushed_wal_id,
             quit_tx: None,
             flush_tx: None,
@@ -329,7 +330,7 @@ impl WalBufferManager {
                 let mut inner = self.inner.write();
                 inner.recent_flushed_wal_id = *wal_id;
                 if let Some(seq) = wal.last_seq() {
-                    inner.last_flushed_seq = Some(seq);
+                    inner.last_remote_persisted_seq.store(seq);
                 }
             }
         }

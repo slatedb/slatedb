@@ -12,7 +12,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
-use crate::utils::{get_now_for_read, is_not_expired, MonotonicClock, Sequencer};
+use crate::utils::{get_now_for_read, is_not_expired, MonotonicClock, SequenceCell};
 use crate::{filter, DbIterator, SlateDBError};
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -46,21 +46,39 @@ pub(crate) struct Reader {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) db_stats: DbStats,
     pub(crate) mono_clock: Arc<MonotonicClock>,
-    pub(crate) last_committed_seq: Arc<Sequencer>,
-    pub(crate) wal_enabled: bool,
+    pub(crate) last_committed_seq: Arc<SequenceCell>,
+    pub(crate) last_remote_persisted_seq: Arc<SequenceCell>,
 }
 
 impl Reader {
-    fn include_wal_memtables(&self, durability_filter: DurabilityLevel) -> bool {
-        matches!(durability_filter, DurabilityLevel::Memory)
-    }
+    fn prepare_max_seq(
+        &self,
+        max_seq_by_user: Option<u64>,
+        durability_filter: DurabilityLevel,
+        dirty: bool,
+    ) -> Option<u64> {
+        let mut max_seq: Option<u64> = None;
 
-    fn include_memtables(&self, durability_filter: DurabilityLevel) -> bool {
-        if self.wal_enabled {
-            true
-        } else {
-            matches!(durability_filter, DurabilityLevel::Memory)
+        // if it's required to only read persisted data, we can only read up to the last remote persisted seq
+        if matches!(durability_filter, DurabilityLevel::Remote) {
+            max_seq = Some(self.last_remote_persisted_seq.load());
         }
+
+        // if dirty read is not allowed, we can only read up to the last committed seq
+        if !dirty {
+            max_seq = max_seq
+                .map(|seq| seq.min(self.last_committed_seq.load()))
+                .or(Some(self.last_committed_seq.load()));
+        }
+
+        // if user provide a max seq (mostly from a Snapshot)
+        if let Some(max_seq_by_user) = max_seq_by_user {
+            max_seq = max_seq
+                .map(|seq| seq.min(max_seq_by_user))
+                .or(Some(max_seq_by_user));
+        }
+
+        max_seq
     }
 
     /// Get the value for the given key, and return None if the value is expired.
@@ -72,6 +90,7 @@ impl Reader {
         max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
         let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
+        let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let get = LevelGet {
             key: key.as_ref(),
             max_seq,
@@ -79,8 +98,6 @@ impl Reader {
             table_store: self.table_store.clone(),
             db_stats: self.db_stats.clone(),
             now,
-            include_wal_memtables: self.include_wal_memtables(options.durability_filter),
-            include_memtables: self.include_memtables(options.durability_filter),
         };
         get.get().await
     }
@@ -93,17 +110,9 @@ impl Reader {
         max_seq: Option<u64>,
     ) -> Result<DbIterator<'a>, SlateDBError> {
         let mut memtables = VecDeque::new();
-
-        if self.include_wal_memtables(options.durability_filter) {
-            // TODO(flaneur): implement this
-            todo!()
-        }
-
-        if self.include_memtables(options.durability_filter) {
-            memtables.push_back(Arc::clone(&snapshot.memtable()));
-            for memtable in snapshot.imm_memtable() {
-                memtables.push_back(memtable.table());
-            }
+        memtables.push_back(snapshot.memtable());
+        for memtable in snapshot.imm_memtable() {
+            memtables.push_back(memtable.table());
         }
         let memtable_iters: Vec<MemTableIterator> = memtables
             .iter()
@@ -154,8 +163,6 @@ struct LevelGet<'a> {
     table_store: Arc<TableStore>,
     db_stats: DbStats,
     now: i64,
-    include_wal_memtables: bool,
-    include_memtables: bool,
 }
 
 impl<'a> LevelGet<'a> {
@@ -189,19 +196,13 @@ impl<'a> LevelGet<'a> {
 
     fn get_memtable(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
         async move {
-            if self.include_wal_memtables {
-                // TODO(flaneur): implement this
-                todo!()
+            let maybe_val = std::iter::once(self.snapshot.memtable())
+                .chain(self.snapshot.imm_memtable().iter().map(|imm| imm.table()))
+                .find_map(|memtable| memtable.get(self.key, self.max_seq));
+            if let Some(val) = maybe_val {
+                return Ok(Some(val));
             }
 
-            if self.include_memtables {
-                let maybe_val = std::iter::once(self.snapshot.memtable())
-                    .chain(self.snapshot.imm_memtable().iter().map(|imm| imm.table()))
-                    .find_map(|memtable| memtable.get(self.key, self.max_seq));
-                if let Some(val) = maybe_val {
-                    return Ok(Some(val));
-                }
-            }
             Ok(None)
         }
         .boxed()
@@ -529,8 +530,6 @@ mod tests {
             )),
             db_stats: DbStats::new(&stat_registry),
             now: 10000,
-            include_wal_memtables: false,
-            include_memtables: false,
         };
 
         let result = get.get_inner(mock_level_getters(test_case.entries)).await?;

@@ -302,11 +302,11 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
     this_block_first_key.slice(..prev_block_last_key.len() + 1)
 }
 
-pub(crate) struct Sequencer {
+pub(crate) struct SequenceCell {
     val: AtomicU64,
 }
 
-impl Sequencer {
+impl SequenceCell {
     pub fn new(initial_value: u64) -> Self {
         Self {
             val: AtomicU64::new(initial_value),
