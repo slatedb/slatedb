@@ -187,8 +187,11 @@ impl WalBufferManager {
         // check the size of the current wal
         let (current_wal, need_flush, flush_tx) = {
             let inner = self.inner.read();
-            let need_flush =
-                inner.current_wal.metadata().entries_size_in_bytes >= self.max_wal_bytes_size;
+            let current_wal_size = self.table_store.estimate_encoded_size(
+                inner.current_wal.metadata().entry_num,
+                inner.current_wal.metadata().entries_size_in_bytes,
+            );
+            let need_flush = current_wal_size >= self.max_wal_bytes_size;
             (
                 inner.current_wal.clone(),
                 need_flush,
@@ -372,12 +375,12 @@ impl WalBufferManager {
             return Ok(());
         }
 
-        let current_wal_id = self.wal_id_incrementor.next_wal_id();
+        let next_wal_id = self.wal_id_incrementor.next_wal_id();
         let mut inner = self.inner.write();
         let current_wal = std::mem::replace(&mut inner.current_wal, Arc::new(KVTable::new()));
         inner
             .immutable_wals
-            .push_back((current_wal_id, current_wal));
+            .push_back((next_wal_id, current_wal));
         Ok(())
     }
 

@@ -2119,24 +2119,26 @@ mod tests {
         ));
 
         // Write data a few times such that each loop results in a memtable flush
-        let mut last_compacted = 0;
+        let mut last_wal_id = 0;
         for i in 0..3 {
             let key = [b'a' + i; 16];
             let value = [b'b' + i; 50];
             kv_store.put(&key, &value).await.unwrap();
+            kv_store.await_flush().await.unwrap();
             let key = [b'j' + i; 16];
             let value = [b'k' + i; 50];
             kv_store.put(&key, &value).await.unwrap();
+            kv_store.await_flush().await.unwrap();
             let db_state = wait_for_manifest_condition(
                 &mut stored_manifest,
-                |s| s.replay_after_wal_id > last_compacted,
+                |s| s.replay_after_wal_id > last_wal_id,
                 Duration::from_secs(30),
             )
             .await;
 
-            // 1 empty wal at startup + 2 wal per iteration.
-            assert_eq!(db_state.replay_after_wal_id, 1 + (i as u64) * 2 + 2);
-            last_compacted = db_state.replay_after_wal_id
+            // 2 wal per iteration.
+            assert_eq!(db_state.replay_after_wal_id, (i as u64) * 2 + 2);
+            last_wal_id = db_state.replay_after_wal_id
         }
 
         let manifest = stored_manifest.refresh().await.unwrap();
