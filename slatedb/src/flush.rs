@@ -28,6 +28,9 @@ impl DbInner {
 
         self.mono_clock
             .fetch_max_last_durable_tick(imm_table.last_tick());
+        // in no-WAL mode, the last_remote_persisted_seq is only updated when the
+        // imm table is flushed to L0. this is useful for reader to restrict to
+        // only read the persisted data.
         self.last_remote_persisted_seq
             .store_if_greater(self.last_seq.load());
         Ok(handle)
