@@ -2639,7 +2639,9 @@ mod tests {
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
         let result = db.put(&key1, &value1).await;
+        db.await_flush().await.unwrap();
         assert!(result.is_ok(), "Failed to write key1");
+        assert_eq!(db.inner.wal_buffer.recent_flushed_wal_id(), 2);
 
         let flush_result = db.inner.flush_immutable_memtables().await;
         assert!(flush_result.is_err());
