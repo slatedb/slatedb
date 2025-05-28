@@ -113,9 +113,11 @@ impl WalBufferManager {
             inner.flush_tx = Some(flush_tx);
         }
         let max_flush_interval = self.max_flush_interval;
-        let background_fut = self
-            .clone()
-            .do_background_work(flush_rx, quit_rx, max_flush_interval);
+        let background_fut = self.clone().do_background_work(
+            flush_rx,
+            quit_rx,
+            max_flush_interval.map(|d| tokio::time::interval(d)),
+        );
         let task_handle = tokio::spawn(background_fut);
         {
             let mut inner = self.inner.write();
@@ -225,19 +227,17 @@ impl WalBufferManager {
         self: Arc<Self>,
         mut flush_rx: mpsc::Receiver<WalFlushWork>,
         mut quit_rx: oneshot::Receiver<()>,
-        max_flush_interval: Option<Duration>,
+        mut max_flush_interval: Option<Interval>,
     ) {
-        let mut max_flush_interval: Option<Interval> =
-            max_flush_interval.map(|d| tokio::time::interval(d));
-        let mut ticker_fut: Pin<Box<dyn Future<Output = Instant> + Send>> =
-            match max_flush_interval.as_mut() {
-                Some(interval) => Box::pin(interval.tick()),
-                None => Box::pin(std::future::pending()),
-            };
-
         let mut contiguous_failures_count = 0;
         let mut fatal = None;
         loop {
+            let mut flush_interval_fut: Pin<Box<dyn Future<Output = Instant> + Send>> =
+                match max_flush_interval.as_mut() {
+                    Some(interval) => Box::pin(interval.tick()),
+                    None => Box::pin(std::future::pending()),
+                };
+
             let result = select! {
                 work = flush_rx.recv() => {
                     let result_tx = match work {
@@ -251,7 +251,7 @@ impl WalBufferManager {
                     }
                     result
                 }
-                _ = &mut ticker_fut => {
+                _ = &mut flush_interval_fut => {
                     self.do_flush().await
                 }
                 _ = &mut quit_rx => {
