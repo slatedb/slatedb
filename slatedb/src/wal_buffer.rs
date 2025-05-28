@@ -6,6 +6,7 @@ use tokio::{
     task::JoinHandle,
     time::{Instant, Interval},
 };
+use tracing::{info, warn};
 
 use crate::{
     db_state::SsTableId,
@@ -13,7 +14,7 @@ use crate::{
     mem_table::KVTable,
     tablestore::TableStore,
     types::RowEntry,
-    utils::{MonotonicClock, MonotonicSeq, WatchableOnceCell},
+    utils::{spawn_bg_task, MonotonicClock, MonotonicSeq, WatchableOnceCell},
     wal_id::WalIdStore,
     SlateDBError,
 };
@@ -57,11 +58,11 @@ struct WalBufferManagerInner {
     /// The flusher will try flush all the immutable wals to remote storage.
     immutable_wals: VecDeque<(u64, Arc<KVTable>)>,
     /// The channel to quit the background worker.
-    quit_tx: Option<oneshot::Sender<()>>,
+    quit_tx: Option<mpsc::Sender<()>>,
     /// The channel to send the flush work to the background worker.
     flush_tx: Option<mpsc::Sender<WalFlushWork>>,
     /// task handle of the background worker.
-    background_task: Option<JoinHandle<()>>,
+    background_task: Option<JoinHandle<Result<(), SlateDBError>>>,
     /// Whenever a WAL is applied to Memtable and successfully flushed to remote storage,
     /// the immutable wal can be recycled in memory.
     last_applied_seq: Option<u64>,
@@ -105,7 +106,7 @@ impl WalBufferManager {
     }
 
     pub async fn start_background(self: &Arc<Self>) {
-        let (quit_tx, quit_rx) = oneshot::channel();
+        let (quit_tx, quit_rx) = mpsc::channel(1);
         let (flush_tx, flush_rx) = mpsc::channel(1);
         {
             let mut inner = self.inner.write();
@@ -118,7 +119,15 @@ impl WalBufferManager {
             quit_rx,
             max_flush_interval.map(|d| tokio::time::interval(d)),
         );
-        let task_handle = tokio::spawn(background_fut);
+        let task_handle = spawn_bg_task(
+            &tokio::runtime::Handle::current(),
+            move |result| {
+                if let Err(err) = result {
+                    warn!("WAL buffer background task exited with error: {:?}", err);
+                };
+            },
+            background_fut,
+        );
         {
             let mut inner = self.inner.write();
             inner.background_task = Some(task_handle);
@@ -226,9 +235,9 @@ impl WalBufferManager {
     async fn do_background_work(
         self: Arc<Self>,
         mut flush_rx: mpsc::Receiver<WalFlushWork>,
-        mut quit_rx: oneshot::Receiver<()>,
+        mut quit_rx: mpsc::Receiver<()>,
         mut max_flush_interval: Option<Interval>,
-    ) {
+    ) -> Result<(), SlateDBError> {
         let mut contiguous_failures_count = 0;
         let mut fatal = None;
         loop {
@@ -251,11 +260,11 @@ impl WalBufferManager {
                     }
                     result
                 }
+                _ = quit_rx.recv() => {
+                    break;
+                }
                 _ = &mut flush_interval_fut => {
                     self.do_flush().await
-                }
-                _ = &mut quit_rx => {
-                    break;
                 }
             };
 
@@ -293,6 +302,8 @@ impl WalBufferManager {
                 .clone()
                 .unwrap_or(SlateDBError::BackgroundTaskShutdown)));
         }
+
+        Ok(())
     }
 
     // flush the wal from previous flush wal id to the last immutable wal
@@ -407,15 +418,21 @@ impl WalBufferManager {
         inner.immutable_wals.drain(..releaseable_count);
     }
 
-    pub async fn close(&self) -> Result<(), SlateDBError> {
+    pub fn close(&self) -> Result<(), SlateDBError> {
         let quit_tx = {
             let mut inner = self.inner.write();
             inner.quit_tx.take()
         };
         if let Some(quit_tx) = quit_tx {
-            quit_tx
-                .send(())
-                .expect("failed to send quit signal to background task of wal buffer manager");
+            match quit_tx.try_send(()) {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(
+                        "Failed to send quit signal to background task of wal buffer manager: {:?}",
+                        e
+                    );
+                }
+            }
         }
 
         Ok(())

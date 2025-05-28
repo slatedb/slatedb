@@ -504,7 +504,6 @@ impl Db {
         self.inner
             .wal_buffer
             .close()
-            .await
             .expect("Failed to close WAL buffer");
 
         // Shutdown the memtable flush thread.
