@@ -8,7 +8,7 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use rand::{RngCore, SeedableRng};
+use rand::RngCore;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
@@ -64,7 +64,7 @@ impl CompactionExecuteBench {
         ));
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
-        let mut rng = rand_xorshift::XorShiftRng::from_entropy();
+        let mut rng = crate::rand::thread_rng();
         rng.fill_bytes(key_start.as_mut_slice());
         let mut futures = FuturesUnordered::<JoinHandle<Result<(), SlateDBError>>>::new();
         for i in 0..num_ssts {
@@ -135,7 +135,7 @@ impl CompactionExecuteBench {
         num_keys: usize,
         val_bytes: usize,
     ) -> Result<(), SlateDBError> {
-        let mut rng = rand_xorshift::XorShiftRng::from_entropy();
+        let mut rng = crate::rand::thread_rng();
         let start = std::time::Instant::now();
         let mut suffix = Vec::<u8>::new();
         suffix.put_u32(i);
