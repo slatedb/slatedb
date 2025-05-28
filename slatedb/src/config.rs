@@ -539,6 +539,19 @@ pub struct Settings {
     pub default_ttl: Option<u64>,
 }
 
+impl Settings {
+    pub(crate) fn wal_enabled(&self) -> bool {
+        #[cfg(feature = "wal_disable")]
+        {
+            false
+        }
+        #[cfg(not(feature = "wal_disable"))]
+        {
+            true
+        }
+    }
+}
+
 // Implement Debug manually for DbOptions.
 // This is needed because DbOptions contains several boxed trait objects
 // which doesn't implement Debug.
