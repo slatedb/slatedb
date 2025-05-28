@@ -116,3 +116,20 @@ jobs:
           comment-on-alert: true
           summary-always: true
           max-items-in-chart: 30
+
+  dependencies:
+    name: Check dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for improper rand crate usage
+        run: |
+          echo "Scanning slatedb packages for forbidden rand crate usage…"
+          if grep -R --exclude-dir=target \
+                   --exclude='slatedb*/src/rand.rs' \
+                   -n -E '\b(rand::|extern crate rand)\b' slatedb*/; then
+            echo "::error ::❌ Forbidden rand crate usage found! Only slatedb/src/rand.rs may use rand."
+            exit 1
+          else
+            echo "✅ No forbidden rand crate usage detected."
+          fi
