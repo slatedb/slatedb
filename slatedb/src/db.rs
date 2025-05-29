@@ -282,7 +282,7 @@ impl DbInner {
         Ok(())
     }
 
-    async fn flush_wals(&self) -> Result<(), SlateDBError> {
+    pub(crate) async fn flush_wals(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.wal_flush_notifier
             .send(WalFlushMsg::FlushImmutableWals { sender: Some(tx) })
@@ -299,7 +299,7 @@ impl DbInner {
         rx.await?
     }
 
-    async fn flush_memtables(&self) -> Result<(), SlateDBError> {
+    pub(crate) async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         {
             let mut guard = self.state.write();
             if !guard.memtable().is_empty() {

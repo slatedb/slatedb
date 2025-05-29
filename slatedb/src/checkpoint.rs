@@ -36,8 +36,10 @@ impl Db {
         scope: CheckpointScope,
         options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
+        // flush all the data into SSTs
         if let CheckpointScope::All = scope {
-            self.flush().await?;
+            self.inner.flush_wals().await?;
+            self.inner.flush_memtables().await?;
         }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
