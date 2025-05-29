@@ -385,10 +385,7 @@ mod tests {
             .await
             .unwrap();
         let checkpoint = parent_db
-            .create_checkpoint(
-                CheckpointScope::All { force_flush: true },
-                &CheckpointOptions::default(),
-            )
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -652,10 +649,7 @@ mod tests {
         let mut rng = rng::new_test_rng(None);
         test_utils::seed_database(&parent_db, &sample::table(&mut rng, 100, 10), false).await?;
         let checkpoint = parent_db
-            .create_checkpoint(
-                CheckpointScope::All { force_flush: true },
-                &CheckpointOptions::default(),
-            )
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
             .await?;
         parent_db.close().await?;
 

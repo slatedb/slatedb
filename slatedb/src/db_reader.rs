@@ -847,10 +847,7 @@ mod tests {
         db.flush().await.unwrap();
         db.put(key, value2).await.unwrap();
         let checkpoint_result = db
-            .create_checkpoint(
-                CheckpointScope::All { force_flush: true },
-                &CheckpointOptions::default(),
-            )
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -882,10 +879,7 @@ mod tests {
 
         db.put(key, checkpoint_value).await.unwrap();
         let checkpoint_result = db
-            .create_checkpoint(
-                CheckpointScope::All { force_flush: true },
-                &CheckpointOptions::default(),
-            )
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
             .await
             .unwrap();
         db.put(key, updated_value).await.unwrap();
@@ -943,10 +937,7 @@ mod tests {
 
         db.put(checkpoint_key, value).await.unwrap();
         let checkpoint_result = db
-            .create_checkpoint(
-                CheckpointScope::All { force_flush: true },
-                &CheckpointOptions::default(),
-            )
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
             .await
             .unwrap();
 
