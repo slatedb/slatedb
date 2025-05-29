@@ -65,6 +65,7 @@ struct CheckpointState {
     manifest: Manifest,
     imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
     last_wal_id: u64,
+    last_committed_seq: u64,
 }
 
 static EMPTY_TABLE: Lazy<Arc<KVTable>> = Lazy::new(|| Arc::new(KVTable::new()));
@@ -115,7 +116,11 @@ impl DbReaderInner {
             clock.clone(),
             initial_state.core().last_l0_clock_tick,
         ));
-        let last_committed_seq = Arc::new(MonotonicSeq::new(initial_state.core().last_l0_seq));
+        println!(
+            "initial_state.last_committed_seq: {}",
+            initial_state.last_committed_seq
+        );
+        let last_committed_seq = Arc::new(MonotonicSeq::new(initial_state.last_committed_seq));
 
         let stat_registry = Arc::new(StatRegistry::new());
         let db_stats = DbStats::new(stat_registry.as_ref());
@@ -211,6 +216,8 @@ impl DbReaderInner {
 
     async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
         let new_checkpoint_state = self.rebuild_checkpoint_state(checkpoint).await?;
+        self.last_committed_seq
+            .store_if_greater(new_checkpoint_state.last_committed_seq);
         let mut write_guard = self.state.write();
         *write_guard = Arc::new(new_checkpoint_state);
         Ok(())
@@ -239,6 +246,7 @@ impl DbReaderInner {
                 manifest: current_checkpoint.manifest.clone(),
                 imm_memtable,
                 last_wal_id,
+                last_committed_seq,
             });
         }
         Ok(())
@@ -300,7 +308,7 @@ impl DbReaderInner {
         table_store: Arc<TableStore>,
         options: &DbReaderOptions,
     ) -> Result<CheckpointState, SlateDBError> {
-        let (last_wal_id, _) = Self::replay_wal_into(
+        let (last_wal_id, last_committed_seq) = Self::replay_wal_into(
             Arc::clone(&table_store),
             options,
             &manifest.core,
@@ -314,6 +322,7 @@ impl DbReaderInner {
             manifest,
             imm_memtable,
             last_wal_id,
+            last_committed_seq,
         })
     }
 
@@ -829,6 +838,34 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn should_get_value_from_db() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        let key = b"test_key";
+        let value = b"test_value";
+
+        db.put(key, value).await.unwrap();
+        db.flush().await.unwrap();
+
+        let reader = DbReader::open_internal(
+            &test_provider,
+            None,
+            DbReaderOptions::default(),
+            Arc::clone(&test_provider.clock),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            reader.get(key).await.unwrap(),
+            Some(Bytes::from_static(value))
+        );
+    }
 
     #[tokio::test]
     async fn should_get_latest_value_from_checkpoint() {
