@@ -908,7 +908,7 @@ mod tests {
 
         let parent_manifest = Manifest::initial(CoreDbState::new());
         let parent_path = "/tmp/parent_store".to_string();
-        let source_checkpoint_id = Uuid::new_v4();
+        let source_checkpoint_id = crate::utils::uuid();
 
         let _ = StoredManifest::create_uninitialized_clone(
             Arc::clone(&manifest_store),

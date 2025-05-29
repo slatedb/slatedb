@@ -314,7 +314,6 @@ mod tests {
     use object_store::path::Path;
     use std::ops::RangeFull;
     use std::sync::Arc;
-    use uuid::Uuid;
 
     #[tokio::test]
     async fn should_clone_latest_state_if_no_checkpoint_provided() {
@@ -431,7 +430,7 @@ mod tests {
 
         // Create an uninitialized manifest with an invalid checkpoint id
         let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
-        let non_existent_source_checkpoint_id = Uuid::new_v4();
+        let non_existent_source_checkpoint_id = crate::utils::uuid();
         StoredManifest::create_uninitialized_clone(
             clone_manifest_store,
             &Manifest::initial(CoreDbState::new()),
@@ -518,7 +517,7 @@ mod tests {
             Arc::clone(&clone_manifest_store),
             &parent_manifest,
             original_parent_path.to_string(),
-            Uuid::new_v4(),
+            crate::utils::uuid(),
         )
         .await
         .unwrap();

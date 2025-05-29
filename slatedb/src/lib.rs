@@ -4,6 +4,7 @@
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
 #![allow(clippy::result_large_err)]
+#![deny(clippy::disallowed_types)]
 
 /// Re-export the bytes crate.
 ///
@@ -85,6 +86,7 @@ mod partitioned_keyspace;
 mod paths;
 #[cfg(test)]
 mod proptest_util;
+mod rand;
 mod reader;
 mod row_codec;
 mod sorted_run_iterator;
