@@ -253,7 +253,7 @@ mod tests {
             .await
             .unwrap();
 
-        let source_checkpoint_id = uuid::Uuid::new_v4();
+        let source_checkpoint_id = crate::utils::uuid();
         let result = admin::create_checkpoint(
             path,
             object_store.clone(),
@@ -349,7 +349,7 @@ mod tests {
         let result = Db::refresh_checkpoint(
             &path,
             object_store.clone(),
-            uuid::Uuid::new_v4(),
+            crate::utils::uuid(),
             Some(Duration::from_secs(1000)),
         )
         .await;

@@ -281,7 +281,7 @@ pub(crate) mod tests {
         ops::{Bound, RangeBounds},
     };
 
-    use rand::{seq::SliceRandom, thread_rng};
+    use rand::seq::SliceRandom;
     use rstest::rstest;
 
     use crate::comparable_range::{ComparableRange, EndBound, StartBound};
@@ -337,7 +337,7 @@ pub(crate) mod tests {
         ];
         let mut shuffled_ranges = ranges.clone();
         // Shuffle the ranges to ensure the order is random
-        shuffled_ranges.shuffle(&mut thread_rng());
+        shuffled_ranges.shuffle(&mut crate::rand::thread_rng());
         // Sort the ranges to ensure the order is deterministic
         shuffled_ranges.sort();
 

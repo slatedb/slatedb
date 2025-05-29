@@ -8,12 +8,11 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use rand::{RngCore, SeedableRng};
+use rand::RngCore;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 use ulid::Ulid;
-use uuid::Uuid;
 
 use crate::bytes_generator::OrderedBytesGenerator;
 use crate::compactor::stats::CompactionStats;
@@ -65,7 +64,7 @@ impl CompactionExecuteBench {
         ));
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
-        let mut rng = rand_xorshift::XorShiftRng::from_entropy();
+        let mut rng = crate::rand::thread_rng();
         rng.fill_bytes(key_start.as_mut_slice());
         let mut futures = FuturesUnordered::<JoinHandle<Result<(), SlateDBError>>>::new();
         for i in 0..num_ssts {
@@ -136,7 +135,7 @@ impl CompactionExecuteBench {
         num_keys: usize,
         val_bytes: usize,
     ) -> Result<(), SlateDBError> {
-        let mut rng = rand_xorshift::XorShiftRng::from_entropy();
+        let mut rng = crate::rand::thread_rng();
         let start = std::time::Instant::now();
         let mut suffix = Vec::<u8>::new();
         suffix.put_u32(i);
@@ -219,7 +218,7 @@ impl CompactionExecuteBench {
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
             .collect();
         Ok(CompactionJob {
-            id: Uuid::new_v4(),
+            id: crate::utils::uuid(),
             destination: 0,
             ssts,
             sorted_runs: vec![],
@@ -251,7 +250,7 @@ impl CompactionExecuteBench {
             .collect();
         info!("loaded compaction job");
         CompactionJob {
-            id: Uuid::new_v4(),
+            id: crate::utils::uuid(),
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,

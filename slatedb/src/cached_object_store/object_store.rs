@@ -450,7 +450,7 @@ mod tests {
     use crate::test_utils::gen_rand_bytes;
 
     fn new_test_cache_folder() -> std::path::PathBuf {
-        let mut rng = rand::thread_rng();
+        let mut rng = crate::rand::thread_rng();
         let dir_name: String = (0..10)
             .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
             .collect();
