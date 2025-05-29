@@ -2183,6 +2183,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let mut options = test_db_options(0, 1, None);
         options.max_unflushed_bytes = 1;
+        options.l0_sst_size_bytes = 1;
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
             .with_fp_registry(fp_registry.clone())
@@ -2197,7 +2198,7 @@ mod tests {
         // Block WAL flush
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
 
-        // 1 imm_wal in memory
+        // 1 wal entries in memory
         db.put_with_options(b"key1", b"val1", &PutOptions::default(), &write_opts)
             .await
             .unwrap();
@@ -2206,7 +2207,7 @@ mod tests {
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
 
         // WAL should pile up in memory since it can't be flushed
-        assert_eq!(db.inner.wal_buffer.immutable_wals_count(), 1);
+        assert_eq!(db.inner.wal_buffer.unflushed_wal_entries_count(), 1);
     }
 
     #[tokio::test]

@@ -131,9 +131,16 @@ impl WalBufferManager {
     }
 
     #[cfg(test)]
-    pub fn immutable_wals_count(&self) -> usize {
-        let inner = self.inner.read();
-        inner.immutable_wals.len()
+    pub fn unflushed_wal_entries_count(&self) -> usize {
+        let flushing_wal_entries_count = self
+            .inner
+            .read()
+            .immutable_wals
+            .iter()
+            .map(|(_, wal)| wal.metadata().entry_num)
+            .sum::<usize>();
+        let current_wal_entries_count = self.inner.read().current_wal.metadata().entry_num;
+        current_wal_entries_count + flushing_wal_entries_count
     }
 
     pub fn recent_flushed_wal_id(&self) -> u64 {
