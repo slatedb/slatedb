@@ -229,6 +229,7 @@ impl WalBufferManager {
             .await
             .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
         let mut quit_rx = self.quit_once.reader();
+        // TODO: it's good to have a timeout here.
         select! {
             result = result_rx => {
                 result?
