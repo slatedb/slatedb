@@ -320,7 +320,7 @@ impl DbInner {
         rx.await?
     }
 
-    async fn flush_memtables(&self) -> Result<(), SlateDBError> {
+    pub(crate) async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         {
             let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
             let mut guard = self.state.write();
@@ -945,16 +945,17 @@ impl Db {
         if self.inner.wal_enabled {
             self.inner.wal_buffer.await_flush().await
         } else {
-            let table = {
-                let guard = self.inner.state.read();
-                let snapshot = guard.snapshot();
-                snapshot.memtable.clone()
-            };
-            if table.is_empty() {
-                return Ok(());
-            }
-            table.await_durable().await
+            self.await_flush_memtables().await
         }
+    }
+
+    pub(crate) async fn await_flush_memtables(&self) -> Result<(), SlateDBError> {
+        let table = {
+            let guard = self.inner.state.read();
+            let snapshot = guard.snapshot();
+            snapshot.memtable.clone()
+        };
+        table.await_durable().await
     }
 
     pub fn metrics(&self) -> Arc<StatRegistry> {
