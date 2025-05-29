@@ -14,7 +14,9 @@ use crate::{
     mem_table::KVTable,
     tablestore::TableStore,
     types::RowEntry,
-    utils::{spawn_bg_task, MonotonicClock, MonotonicSeq, WatchableOnceCell},
+    utils::{
+        spawn_bg_task, MonotonicClock, MonotonicSeq, WatchableOnceCell, WatchableOnceCellReader,
+    },
     wal_id::WalIdStore,
     SlateDBError,
 };
@@ -45,7 +47,7 @@ use crate::{
 pub struct WalBufferManager {
     inner: Arc<parking_lot::RwLock<WalBufferManagerInner>>,
     wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
-    fatal_once: WatchableOnceCell<SlateDBError>,
+    quit_once: WatchableOnceCell<Result<(), SlateDBError>>,
     table_store: Arc<TableStore>,
     mono_clock: Arc<MonotonicClock>,
     max_wal_bytes_size: usize,
@@ -57,8 +59,6 @@ struct WalBufferManagerInner {
     /// When the current WAL is ready to be flushed, it'll be moved to the `immutable_wals`.
     /// The flusher will try flush all the immutable wals to remote storage.
     immutable_wals: VecDeque<(u64, Arc<KVTable>)>,
-    /// The channel to quit the background worker.
-    quit_tx: Option<mpsc::Sender<()>>,
     /// The channel to send the flush work to the background worker.
     flush_tx: Option<mpsc::Sender<WalFlushWork>>,
     /// task handle of the background worker.
@@ -90,14 +90,13 @@ impl WalBufferManager {
             last_applied_seq: None,
             last_remote_persisted_seq,
             recent_flushed_wal_id,
-            quit_tx: None,
             flush_tx: None,
             background_task: None,
         };
         Self {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
             wal_id_incrementor,
-            fatal_once: WatchableOnceCell::new(),
+            quit_once: WatchableOnceCell::new(),
             table_store,
             mono_clock,
             max_wal_bytes_size,
@@ -106,17 +105,15 @@ impl WalBufferManager {
     }
 
     pub async fn start_background(self: &Arc<Self>) {
-        let (quit_tx, quit_rx) = mpsc::channel(1);
         let (flush_tx, flush_rx) = mpsc::channel(1);
         {
             let mut inner = self.inner.write();
-            inner.quit_tx = Some(quit_tx);
             inner.flush_tx = Some(flush_tx);
         }
         let max_flush_interval = self.max_flush_interval;
         let background_fut = self.clone().do_background_work(
             flush_rx,
-            quit_rx,
+            self.quit_once.reader(),
             max_flush_interval.map(|d| tokio::time::interval(d)),
         );
         let self_clone = self.clone();
@@ -231,13 +228,24 @@ impl WalBufferManager {
             })
             .await
             .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
-        result_rx.await?
+        let mut quit_rx = self.quit_once.reader();
+        select! {
+            result = result_rx => {
+                result?
+            }
+            result = quit_rx.await_value() => {
+                match result {
+                    Ok(_) => Err(SlateDBError::BackgroundTaskShutdown),
+                    Err(e) => Err(e)
+                }
+            },
+        }
     }
 
     async fn do_background_work(
         self: Arc<Self>,
         mut work_rx: mpsc::Receiver<WalFlushWork>,
-        mut quit_rx: mpsc::Receiver<()>,
+        mut quit_rx: WatchableOnceCellReader<Result<(), SlateDBError>>,
         mut max_flush_interval: Option<Interval>,
     ) -> Result<(), SlateDBError> {
         let mut contiguous_failures_count = 0;
@@ -261,8 +269,8 @@ impl WalBufferManager {
                     }
                     result
                 }
-                _ = quit_rx.recv() => {
-                    break;
+                _ = quit_rx.await_value() => {
+                    return Ok(());
                 }
                 _ = &mut flush_interval_fut => {
                     self.do_flush().await
@@ -289,15 +297,15 @@ impl WalBufferManager {
     }
 
     fn do_cleanup(self: Arc<Self>, result: Result<(), SlateDBError>) {
-        // There are two possible paths to exit the loop:
+        // There are two possible paths to exit the background loop:
         //
         // 1. Got fatal error
         // 2. Got shutdown signal
         //
         // In both cases, we need to notify all the flushing WALs to be finished with fatal error or shutdown error.
-        // If we got a fatal error, we need to set it in fatal_once to notify the database to enter fatal state.
+        // If we got a fatal error, we need to set it in quit_once to notify the database to enter fatal state.
         if let Err(e) = &result {
-            self.fatal_once.write(e.clone());
+            self.quit_once.write(Err(e.clone()));
         }
         // notify all the flushing wals to be finished with fatal error or shutdown error. we need ensure all the wal
         // tables finally get notified.
@@ -306,7 +314,6 @@ impl WalBufferManager {
         for (_, wal) in flushing_wals.iter() {
             wal.notify_durable(Err(fatal_or_shutdown.clone()));
         }
-        // consume all the flushing works
     }
 
     // flush the wal from previous flush wal id to the last immutable wal
@@ -420,21 +427,7 @@ impl WalBufferManager {
     }
 
     pub fn close(&self) -> Result<(), SlateDBError> {
-        let quit_tx = {
-            let mut inner = self.inner.write();
-            inner.quit_tx.take()
-        };
-        if let Some(quit_tx) = quit_tx {
-            match quit_tx.try_send(()) {
-                Ok(_) => {}
-                Err(e) => {
-                    warn!(
-                        "Failed to send quit signal to background task of wal buffer manager: {:?}",
-                        e
-                    );
-                }
-            }
-        }
+        self.quit_once.write(Ok(()));
 
         Ok(())
     }
