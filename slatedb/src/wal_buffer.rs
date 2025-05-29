@@ -4,7 +4,6 @@ use tokio::{
     select,
     sync::{mpsc, oneshot},
     task::JoinHandle,
-    time::{Instant, Interval},
 };
 
 use crate::{
