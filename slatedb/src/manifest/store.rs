@@ -132,7 +132,7 @@ impl FenceableManifest {
         })
         .await
         .map_err(|_| SlateDBError::Timeout {
-            msg: "Manifest initialization".to_string(),
+            msg: "Manifest update".to_string(),
         })?
     }
 
