@@ -52,7 +52,7 @@ impl DbInner {
         let recent_flushed_wal_id = if replayed_memtable.last_wal_id > 0 {
             replayed_memtable.last_wal_id - 1
         } else {
-            panic!("last_wal_id should always be greater than 0");
+            0
         };
         self.freeze_memtable(&mut guard, recent_flushed_wal_id)?;
 

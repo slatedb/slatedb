@@ -942,21 +942,18 @@ impl Db {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
         if self.inner.wal_enabled {
             self.inner.wal_buffer.await_flush().await
         } else {
-            self.await_flush_memtables().await
+            let table = {
+                let guard = self.inner.state.read();
+                let snapshot = guard.snapshot();
+                snapshot.memtable.clone()
+            };
+            table.await_durable().await
         }
-    }
-
-    pub(crate) async fn await_flush_memtables(&self) -> Result<(), SlateDBError> {
-        let table = {
-            let guard = self.inner.state.read();
-            let snapshot = guard.snapshot();
-            snapshot.memtable.clone()
-        };
-        table.await_durable().await
     }
 
     pub fn metrics(&self) -> Arc<StatRegistry> {
@@ -2130,7 +2127,6 @@ mod tests {
             let key = [b'j' + i; 16];
             let value = [b'k' + i; 50];
             kv_store.put(&key, &value).await.unwrap();
-            kv_store.await_flush().await.unwrap();
             let db_state = wait_for_manifest_condition(
                 &mut stored_manifest,
                 |s| s.replay_after_wal_id > last_wal_id,

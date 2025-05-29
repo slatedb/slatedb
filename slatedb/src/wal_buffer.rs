@@ -6,7 +6,6 @@ use tokio::{
     task::JoinHandle,
     time::{Instant, Interval},
 };
-use tracing::warn;
 
 use crate::{
     db_state::SsTableId,
