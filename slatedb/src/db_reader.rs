@@ -116,11 +116,8 @@ impl DbReaderInner {
             clock.clone(),
             initial_state.core().last_l0_clock_tick,
         ));
-        println!(
-            "initial_state.last_committed_seq: {}",
-            initial_state.last_committed_seq
-        );
-        let last_committed_seq = Arc::new(MonotonicSeq::new(initial_state.last_committed_seq));
+        let last_committed_seq = Arc::new(MonotonicSeq::new(initial_state.core().last_l0_seq));
+        last_committed_seq.store_if_greater(initial_state.last_committed_seq);
 
         let stat_registry = Arc::new(StatRegistry::new());
         let db_stats = DbStats::new(stat_registry.as_ref());
