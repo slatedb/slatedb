@@ -2730,6 +2730,8 @@ mod tests {
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
 
         // Close, which flushes the latest manifest to the object store
+        // TODO: it might make sense to return an error if there're unflushed wals in memory
+        // on close().
         db.close().await.unwrap();
 
         let manifest_store = ManifestStore::new(&Path::from(path), object_store.clone());
@@ -2746,9 +2748,10 @@ mod tests {
         // Get the latest manifest
         let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
 
-        // The manifest's next_wal_sst_id, which uses `wal_id_last_seen + 1`, should
-        // be the same as the next WAL SST ID based on what's currently in the object store
-        assert_eq!(manifest.core.next_wal_sst_id, next_wal_sst_id);
+        // It's possible that there exists buffered multiple wals in memory, so the next_wal_sst_id
+        // in manifest is greater than the next_wal_sst_id based on what's currently in the object
+        // store unless ALL the wals are flushed.
+        assert!(manifest.core.next_wal_sst_id > next_wal_sst_id);
     }
 
     async fn do_test_should_read_compacted_db(options: Settings) {
