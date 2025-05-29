@@ -119,12 +119,11 @@ impl WalBufferManager {
             quit_rx,
             max_flush_interval.map(|d| tokio::time::interval(d)),
         );
+        let self_clone = self.clone();
         let task_handle = spawn_bg_task(
             &tokio::runtime::Handle::current(),
             move |result| {
-                if let Err(err) = result {
-                    warn!("WAL buffer background task exited with error: {:?}", err);
-                };
+                Self::do_cleanup(self_clone, result.clone());
             },
             background_fut,
         );
@@ -237,12 +236,11 @@ impl WalBufferManager {
 
     async fn do_background_work(
         self: Arc<Self>,
-        mut flush_rx: mpsc::Receiver<WalFlushWork>,
+        mut work_rx: mpsc::Receiver<WalFlushWork>,
         mut quit_rx: mpsc::Receiver<()>,
         mut max_flush_interval: Option<Interval>,
     ) -> Result<(), SlateDBError> {
         let mut contiguous_failures_count = 0;
-        let mut fatal = None;
         loop {
             let mut flush_interval_fut: Pin<Box<dyn Future<Output = Instant> + Send>> =
                 match max_flush_interval.as_mut() {
@@ -251,7 +249,7 @@ impl WalBufferManager {
                 };
 
             let result = select! {
-                work = flush_rx.recv() => {
+                work = work_rx.recv() => {
                     let result_tx = match work {
                         None => break,
                         Some(work) => work.result_tx,
@@ -272,7 +270,8 @@ impl WalBufferManager {
             };
 
             // not all the flush error is fatal. on temporary network errors, we can retry later.
-            // After a few continuous failures, we'll set it into fatal state.
+            // After a few continuous failures, we'll return the error, and set it as fatal error
+            // in cleanup.
             match result {
                 Ok(_) => {
                     contiguous_failures_count = 0;
@@ -280,13 +279,16 @@ impl WalBufferManager {
                 Err(e) => {
                     contiguous_failures_count += 1;
                     if contiguous_failures_count > 3 {
-                        fatal = Some(e.clone());
-                        break;
+                        return Err(e);
                     }
                 }
             }
         }
 
+        Ok(())
+    }
+
+    fn do_cleanup(self: Arc<Self>, result: Result<(), SlateDBError>) {
         // There are two possible paths to exit the loop:
         //
         // 1. Got fatal error
@@ -294,23 +296,21 @@ impl WalBufferManager {
         //
         // In both cases, we need to notify all the flushing WALs to be finished with fatal error or shutdown error.
         // If we got a fatal error, we need to set it in fatal_once to notify the database to enter fatal state.
-        if let Some(e) = &fatal {
+        if let Err(e) = &result {
             self.fatal_once.write(e.clone());
         }
         // notify all the flushing wals to be finished with fatal error or shutdown error. we need ensure all the wal
         // tables finally get notified.
-        let flushing_wals = self.flushing_wals().await;
+        let fatal_or_shutdown = result.err().unwrap_or(SlateDBError::BackgroundTaskShutdown);
+        let flushing_wals = self.flushing_wals();
         for (_, wal) in flushing_wals.iter() {
-            wal.notify_durable(Err(fatal
-                .clone()
-                .unwrap_or(SlateDBError::BackgroundTaskShutdown)));
+            wal.notify_durable(Err(fatal_or_shutdown.clone()));
         }
-
-        Ok(())
+        // consume all the flushing works
     }
 
     // flush the wal from previous flush wal id to the last immutable wal
-    async fn flushing_wals(&self) -> Vec<(u64, Arc<KVTable>)> {
+    fn flushing_wals(&self) -> Vec<(u64, Arc<KVTable>)> {
         let inner = self.inner.read();
         let mut flushing_wals = Vec::new();
         for (wal_id, wal) in inner.immutable_wals.iter() {
@@ -323,7 +323,7 @@ impl WalBufferManager {
 
     async fn do_flush(&self) -> Result<(), SlateDBError> {
         self.freeze_current_wal().await?;
-        let flushing_wals = self.flushing_wals().await;
+        let flushing_wals = self.flushing_wals();
 
         if flushing_wals.is_empty() {
             return Ok(());
@@ -378,9 +378,7 @@ impl WalBufferManager {
         let next_wal_id = self.wal_id_incrementor.next_wal_id();
         let mut inner = self.inner.write();
         let current_wal = std::mem::replace(&mut inner.current_wal, Arc::new(KVTable::new()));
-        inner
-            .immutable_wals
-            .push_back((next_wal_id, current_wal));
+        inner.immutable_wals.push_back((next_wal_id, current_wal));
         Ok(())
     }
 
