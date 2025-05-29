@@ -924,6 +924,8 @@ impl Db {
         }
     }
 
+    /// TODO: this #[allow(unused)] will be removed soon in #519.
+    #[allow(unused)]
     pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
         let table = {
             let guard = self.inner.state.read();

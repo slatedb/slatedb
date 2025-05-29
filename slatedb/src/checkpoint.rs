@@ -38,7 +38,9 @@ impl Db {
     ) -> Result<CheckpointCreateResult, SlateDBError> {
         // flush all the data into SSTs
         if let CheckpointScope::All = scope {
-            self.inner.flush_wals().await?;
+            if self.inner.wal_enabled {
+                self.inner.flush_wals().await?;
+            }
             self.inner.flush_memtables().await?;
         }
 
