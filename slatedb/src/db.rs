@@ -1513,7 +1513,7 @@ mod tests {
             ),
             (
                 "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest",
-                0,
+                2,
             ),
             (
                 "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst",
