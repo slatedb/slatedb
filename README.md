@@ -114,8 +114,6 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 
 ## Features
 
-SlateDB is currently in the early stages of development. It is not yet ready for production use.
-
 - [x] Basic API (get, put, delete)
 - [x] SSTs on object storage
 - [x] Range queries ([#8](https://github.com/slatedb/slatedb/issues/8))
