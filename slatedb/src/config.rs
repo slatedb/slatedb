@@ -406,6 +406,11 @@ pub struct Settings {
     #[serde(serialize_with = "serialize_duration")]
     pub manifest_poll_interval: Duration,
 
+    /// The maximum amount of time to wait for a manifest update before giving up.
+    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(serialize_with = "serialize_duration")]
+    pub manifest_update_timeout: Duration,
+
     /// Write SSTables with a bloom filter if the number of keys in the SSTable
     /// is greater than or equal to this value. Reads on small SSTables might be
     /// faster without a bloom filter.
@@ -649,6 +654,7 @@ impl Default for Settings {
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
             manifest_poll_interval: Duration::from_secs(1),
+            manifest_update_timeout: Duration::from_secs(300),
             min_filter_keys: 1000,
             max_unflushed_bytes: 1_073_741_824,
             l0_sst_size_bytes: 64 * 1024 * 1024,
