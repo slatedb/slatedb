@@ -390,25 +390,11 @@ mod tests {
             ..Settings::default()
         };
         test_checkpoint_scope_all(db_options, true, |manifest| {
-            SsTableId::Wal(manifest.core.next_wal_sst_id - 1)
+            manifest.core.l0.front().unwrap().id
         })
         .await;
     }
 
-    #[ignore]
-    #[tokio::test]
-    async fn test_checkpoint_scope_with_no_force_flush() {
-        let db_options = Settings {
-            flush_interval: Some(Duration::from_millis(10)),
-            ..Settings::default()
-        };
-        test_checkpoint_scope_all(db_options, false, |manifest| {
-            SsTableId::Wal(manifest.core.next_wal_sst_id - 1)
-        })
-        .await;
-    }
-
-    #[ignore]
     #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_checkpoint_scope_with_force_flush_wal_disabled() {
@@ -534,10 +520,10 @@ mod tests {
             path.clone(),
             None,
         ));
-        let last_checkpoint_wal = table_store.open_sst(table_id).await.unwrap();
+        let sst_handle = table_store.open_sst(table_id).await.unwrap();
 
-        let mut wal_iter = SstIterator::for_key(
-            &last_checkpoint_wal,
+        let mut sst_iter = SstIterator::for_key(
+            &sst_handle,
             kv.0,
             Arc::clone(&table_store),
             SstIteratorOptions::default(),
@@ -545,7 +531,7 @@ mod tests {
         .await
         .unwrap();
 
-        let wal_entry = wal_iter.next().await.unwrap().unwrap();
-        assert_eq!(*kv.1, wal_entry.value)
+        let sst_entry = sst_iter.next().await.unwrap().unwrap();
+        assert_eq!(*kv.1, sst_entry.value)
     }
 }

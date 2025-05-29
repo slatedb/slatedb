@@ -328,6 +328,7 @@ impl DbInner {
                 guard.freeze_memtable(last_flushed_wal_id)?;
             }
         }
+
         self.flush_immutable_memtables().await
     }
 
