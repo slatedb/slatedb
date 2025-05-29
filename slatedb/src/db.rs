@@ -276,6 +276,8 @@ impl DbInner {
                     mem_size_bytes, self.settings.max_unflushed_bytes,
                 );
 
+                self.flush_immutable_memtables().await?;
+
                 let await_flush_to_l0 = async {
                     let imm = {
                         let guard = self.state.read();
