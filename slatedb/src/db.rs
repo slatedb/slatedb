@@ -507,6 +507,7 @@ impl Db {
         self.inner
             .wal_buffer
             .close()
+            .await
             .expect("Failed to close WAL buffer");
 
         // Shutdown the memtable flush thread.
@@ -2205,7 +2206,7 @@ mod tests {
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
 
         // WAL should pile up in memory since it can't be flushed
-        assert_eq!(db.inner.wal_buffer.unflushed_wal_entries_count(), 1);
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
     }
 
     #[tokio::test]

@@ -72,7 +72,7 @@ struct WalBufferManagerInner {
 
 impl WalBufferManager {
     pub fn new(
-        wal_id_incrementor: Arc<dyn WalIdStore>,
+        wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
         recent_flushed_wal_id: u64,
         last_remote_persisted_seq: Arc<MonotonicSeq>,
         table_store: Arc<TableStore>,
@@ -127,7 +127,7 @@ impl WalBufferManager {
     }
 
     #[cfg(test)]
-    pub fn unflushed_wal_entries_count(&self) -> usize {
+    pub fn buffered_wal_entries_count(&self) -> usize {
         let flushing_wal_entries_count = self
             .inner
             .read()
@@ -430,7 +430,7 @@ impl WalBufferManager {
         inner.immutable_wals.drain(..releaseable_count);
     }
 
-    pub fn close(&self) -> Result<(), SlateDBError> {
+    pub async fn close(&self) -> Result<(), SlateDBError> {
         self.quit_once.write(Ok(()));
 
         Ok(())
@@ -439,4 +439,164 @@ impl WalBufferManager {
 
 struct WalFlushWork {
     result_tx: Option<oneshot::Sender<Result<(), SlateDBError>>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object_stores::ObjectStores;
+    use crate::sst::SsTableFormat;
+    use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::tablestore::TableStore;
+    use crate::test_utils::TestClock;
+    use crate::types::{RowEntry, ValueDeletable};
+    use crate::utils::MonotonicClock;
+    use bytes::Bytes;
+    use object_store::{memory::InMemory, path::Path, ObjectStore};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct MockWalIdStore {
+        next_id: AtomicU64,
+    }
+
+    impl WalIdStore for MockWalIdStore {
+        fn next_wal_id(&self) -> u64 {
+            self.next_id.fetch_add(1, Ordering::SeqCst)
+        }
+    }
+
+    async fn setup_wal_buffer() -> (Arc<WalBufferManager>, Arc<TableStore>, Arc<TestClock>) {
+        let wal_id_store: Arc<dyn WalIdStore + Send + Sync> = Arc::new(MockWalIdStore {
+            next_id: AtomicU64::new(1),
+        });
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            SsTableFormat::default(),
+            Path::from("/root"),
+            None,
+        ));
+        let test_clock = Arc::new(TestClock::new());
+        let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
+        let last_remote_persisted_seq = Arc::new(MonotonicSeq::new(0));
+        let wal_buffer = Arc::new(WalBufferManager::new(
+            wal_id_store,
+            0, // recent_flushed_wal_id
+            last_remote_persisted_seq,
+            table_store.clone(),
+            mono_clock,
+            1000,                         // max_wal_bytes_size
+            Some(Duration::from_secs(1)), // max_flush_interval
+        ));
+        wal_buffer.start_background().await;
+        (wal_buffer, table_store, test_clock)
+    }
+
+    #[tokio::test]
+    async fn test_basic_append_and_flush_operations() {
+        let (wal_buffer, table_store, _) = setup_wal_buffer().await;
+
+        // Append some entries
+        let entry1 = RowEntry::new(
+            Bytes::from("key1"),
+            ValueDeletable::Value(Bytes::from("value1")),
+            1,
+            None,
+            None,
+        );
+        let entry2 = RowEntry::new(
+            Bytes::from("key2"),
+            ValueDeletable::Value(Bytes::from("value2")),
+            2,
+            None,
+            None,
+        );
+
+        wal_buffer.append(&[entry1.clone()]).await.unwrap();
+        wal_buffer.append(&[entry2.clone()]).await.unwrap();
+
+        // Flush the buffer
+        wal_buffer.flush().await.unwrap();
+
+        // Verify entries were written to storage
+        let sst_iter_options = SstIteratorOptions {
+            eager_spawn: true,
+            ..SstIteratorOptions::default()
+        };
+        let mut iter = SstIterator::new_owned(
+            ..,
+            table_store.open_sst(&SsTableId::Wal(1)).await.unwrap(),
+            table_store.clone(),
+            sst_iter_options,
+        )
+        .await
+        .unwrap();
+
+        let read_entry1 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(read_entry1.key, entry1.key);
+        assert_eq!(read_entry1.value, entry1.value);
+        assert_eq!(read_entry1.seq, entry1.seq);
+
+        let read_entry2 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(read_entry2.key, entry2.key);
+        assert_eq!(read_entry2.value, entry2.value);
+        assert_eq!(read_entry2.seq, entry2.seq);
+
+        assert!(iter.next_entry().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_size_based_flush_triggering() {
+        let (wal_buffer, _, _) = setup_wal_buffer().await;
+
+        // Append entries until we exceed the size threshold
+        let mut seq = 1;
+        while wal_buffer.estimated_bytes().await.unwrap() < 1024 * 16 {
+            let entry = RowEntry::new(
+                Bytes::from(format!("key{}", seq)),
+                ValueDeletable::Value(Bytes::from(format!("value{}", seq))),
+                seq,
+                None,
+                None,
+            );
+            wal_buffer.append(&[entry]).await.unwrap();
+            wal_buffer.maybe_trigger_flush().await.unwrap();
+            seq += 1;
+        }
+
+        // Wait for background flush
+        wal_buffer.await_flush().await.unwrap();
+        assert_eq!(wal_buffer.recent_flushed_wal_id(), 17);
+    }
+
+    #[tokio::test]
+    async fn test_flush_error_handling_and_retry() {
+        // TODO: use failpoint to inject hanging on flushing WAL
+    }
+
+    #[tokio::test]
+    async fn test_immutable_wal_reclaim() {
+        let (wal_buffer, _, _) = setup_wal_buffer().await;
+
+        // Append entries to create multiple WALs
+        for i in 0..100 {
+            let seq = i + 1;
+            let entry = RowEntry::new(
+                Bytes::from(format!("key{}", i)),
+                ValueDeletable::Value(Bytes::from(format!("value{}", i))),
+                seq,
+                None,
+                None,
+            );
+            wal_buffer.append(&[entry]).await.unwrap();
+            wal_buffer.flush().await.unwrap();
+        }
+        assert_eq!(wal_buffer.recent_flushed_wal_id(), 100);
+        assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 100);
+
+        wal_buffer.track_last_applied_seq(50).await;
+        assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
+    }
 }
