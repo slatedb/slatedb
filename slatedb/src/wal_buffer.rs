@@ -110,11 +110,9 @@ impl WalBufferManager {
             inner.flush_tx = Some(flush_tx);
         }
         let max_flush_interval = self.max_flush_interval;
-        let background_fut = self.clone().do_background_work(
-            flush_rx,
-            self.quit_once.reader(),
-            max_flush_interval.map(|d| tokio::time::interval(d)),
-        );
+        let background_fut =
+            self.clone()
+                .do_background_work(flush_rx, self.quit_once.reader(), max_flush_interval);
         let self_clone = self.clone();
         let task_handle = spawn_bg_task(
             &tokio::runtime::Handle::current(),
@@ -253,13 +251,13 @@ impl WalBufferManager {
         self: Arc<Self>,
         mut work_rx: mpsc::Receiver<WalFlushWork>,
         mut quit_rx: WatchableOnceCellReader<Result<(), SlateDBError>>,
-        mut max_flush_interval: Option<Interval>,
+        max_flush_interval: Option<Duration>,
     ) -> Result<(), SlateDBError> {
         let mut contiguous_failures_count = 0;
         loop {
-            let mut flush_interval_fut: Pin<Box<dyn Future<Output = Instant> + Send>> =
-                match max_flush_interval.as_mut() {
-                    Some(interval) => Box::pin(interval.tick()),
+            let mut flush_interval_fut: Pin<Box<dyn Future<Output = ()> + Send>> =
+                match max_flush_interval {
+                    Some(duration) => Box::pin(tokio::time::sleep(duration)),
                     None => Box::pin(std::future::pending()),
                 };
 
