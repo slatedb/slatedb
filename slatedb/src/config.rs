@@ -753,6 +753,11 @@ pub struct CompactorOptions {
     #[serde(serialize_with = "serialize_duration")]
     pub poll_interval: Duration,
 
+    /// Timeout to limit how long manifest updates are retried before giving up.
+    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(serialize_with = "serialize_duration")]
+    pub manifest_update_timeout: Duration,
+
     /// A compacted SSTable's maximum size (in bytes). If more data needs to be
     /// written to a Sorted Run during a compaction, a new SSTable will be created
     /// in the Sorted Run when this size is exceeded.
@@ -770,6 +775,7 @@ impl Default for CompactorOptions {
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(5),
+            manifest_update_timeout: Duration::from_secs(300),
             max_sst_size: 1024 * 1024 * 1024,
             max_concurrent_compactions: 4,
         }

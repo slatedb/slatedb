@@ -217,7 +217,10 @@ impl CompactorEventHandler {
     ) -> Result<Self, SlateDBError> {
         let stored_manifest =
             tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;
-        let manifest = tokio_handle.block_on(FenceableManifest::init_compactor(stored_manifest))?;
+        let manifest = tokio_handle.block_on(FenceableManifest::init_compactor(
+            stored_manifest,
+            options.manifest_update_timeout,
+        ))?;
         let state = CompactorState::new(manifest.prepare_dirty()?);
         Ok(Self {
             tokio_handle,

@@ -127,6 +127,9 @@ pub enum SlateDBError {
 
     #[error("Db Cache error: {msg}")]
     DbCacheError { msg: String },
+
+    #[error("Timeout: {msg}")]
+    Timeout { msg: String },
 }
 
 impl From<std::io::Error> for SlateDBError {

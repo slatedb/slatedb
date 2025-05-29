@@ -337,7 +337,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 StoredManifest::create_new_db(manifest_store.clone(), state).await?
             }
         };
-        let mut manifest = FenceableManifest::init_writer(stored_manifest).await?;
+        let mut manifest = FenceableManifest::init_writer(stored_manifest, manifest_update_timeout).await?;
 
         // Setup communication channels
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
