@@ -84,6 +84,10 @@ impl DbInner {
             self.state.write().memtable().put(row_entry);
         }
 
+        // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
+        // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
+        self.wal_buffer.track_last_applied_seq(seq).await;
+
         // get the durable watcher. we'll await on current WAL table to be flushed if wal is enabled.
         // otherwise, we'll use the memtable's durable watcher.
         let durable_watcher = if self.wal_enabled {
@@ -104,11 +108,6 @@ impl DbInner {
             let mut guard = self.state.write();
             self.maybe_freeze_memtable(&mut guard, last_flushed_wal_id)?;
         }
-
-        // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
-        // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
-        // please note that we should call this function AFTER the write is considered as committed.
-        self.wal_buffer.track_last_applied_seq(seq).await;
 
         Ok(durable_watcher)
     }
