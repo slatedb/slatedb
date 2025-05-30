@@ -137,7 +137,7 @@ See who's using SlateDB.
 
 ## Talks
 
-- [Internals of SlateDB: An Embedded Key-Value Store Built on Object Storage](https://www.datacouncil.ai/talks25/internals-of-slatedb-an-embedded-key-value-store-built-on-object-storage) (Vignesh Chandramohan, 2025)
+- [Internals of SlateDB: An Embedded Key-Value Store Built on Object Storage](https://www.youtube.com/watch?v=gcTRXZeKbNg) (Vignesh Chandramohan, 2025)
 - [Internals of SlateDB — by Vignesh Chandramohan](https://www.youtube.com/watch?v=qqF_zFWqFYk) (Vignesh Chandramohan, 2025)
 - [Database Internals - SlateDB](https://www.youtube.com/watch?v=wEAcNoJOBFI) (Chris Riccomini, 2024)
 - [Building a Cloud Native LSM on Object Storage](https://www.p99conf.io/session/building-a-cloud-native-lsm-on-object-storage/) (Rohan Desai/Chris Riccomini, 2024)
