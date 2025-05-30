@@ -46,6 +46,7 @@
 //! flush_interval = "100ms"
 //! wal_enabled = false
 //! manifest_poll_interval = "1s"
+//! manifest_update_timeout = "300s"
 //! min_filter_keys = 1000
 //! filter_bits_per_key = 10
 //! l0_sst_size_bytes = 67108864
@@ -83,6 +84,7 @@
 //!  "flush_interval": "100ms",
 //!  "wal_enabled": false,
 //!  "manifest_poll_interval": "1s",
+//!  "manifest_update_timeout": "300s",
 //!  "min_filter_keys": 1000,
 //!  "filter_bits_per_key": 10,
 //!  "l0_sst_size_bytes": 67108864,
@@ -123,6 +125,7 @@
 //! flush_interval: '100ms'
 //! wal_enabled: false
 //! manifest_poll_interval: '1s'
+//! manifest_update_timeout: '300s'
 //! min_filter_keys: 1000
 //! filter_bits_per_key: 10
 //! l0_sst_size_bytes: 67108864
@@ -406,6 +409,11 @@ pub struct Settings {
     #[serde(serialize_with = "serialize_duration")]
     pub manifest_poll_interval: Duration,
 
+    /// The maximum amount of time to wait for a manifest update before giving up.
+    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(serialize_with = "serialize_duration")]
+    pub manifest_update_timeout: Duration,
+
     /// Write SSTables with a bloom filter if the number of keys in the SSTable
     /// is greater than or equal to this value. Reads on small SSTables might be
     /// faster without a bloom filter.
@@ -488,6 +496,7 @@ impl std::fmt::Debug for Settings {
             data.field("wal_enabled", &self.wal_enabled);
         }
         data.field("manifest_poll_interval", &self.manifest_poll_interval)
+            .field("manifest_update_timeout", &self.manifest_update_timeout)
             .field("min_filter_keys", &self.min_filter_keys)
             .field("max_unflushed_bytes", &self.max_unflushed_bytes)
             .field("l0_sst_size_bytes", &self.l0_sst_size_bytes)
@@ -649,6 +658,7 @@ impl Default for Settings {
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
             manifest_poll_interval: Duration::from_secs(1),
+            manifest_update_timeout: Duration::from_secs(300),
             min_filter_keys: 1000,
             max_unflushed_bytes: 1_073_741_824,
             l0_sst_size_bytes: 64 * 1024 * 1024,
@@ -753,6 +763,11 @@ pub struct CompactorOptions {
     #[serde(serialize_with = "serialize_duration")]
     pub poll_interval: Duration,
 
+    /// Timeout to limit how long manifest updates are retried before giving up.
+    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(serialize_with = "serialize_duration")]
+    pub manifest_update_timeout: Duration,
+
     /// A compacted SSTable's maximum size (in bytes). If more data needs to be
     /// written to a Sorted Run during a compaction, a new SSTable will be created
     /// in the Sorted Run when this size is exceeded.
@@ -770,6 +785,7 @@ impl Default for CompactorOptions {
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(5),
+            manifest_update_timeout: Duration::from_secs(300),
             max_sst_size: 1024 * 1024 * 1024,
             max_concurrent_compactions: 4,
         }

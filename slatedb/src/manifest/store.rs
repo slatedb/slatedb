@@ -73,22 +73,28 @@ pub(crate) struct FenceableManifest {
 // the relevant epoch when initialized. It also detects when the current writer has been
 // fenced and fails all operations with SlateDBError::Fenced.
 impl FenceableManifest {
-    pub(crate) async fn init_writer(stored_manifest: StoredManifest) -> Result<Self, SlateDBError> {
+    pub(crate) async fn init_writer(
+        stored_manifest: StoredManifest,
+        manifest_update_timeout: Duration,
+    ) -> Result<Self, SlateDBError> {
         Self::init(
             stored_manifest,
             |m| m.writer_epoch,
             |m, e| m.writer_epoch = e,
+            manifest_update_timeout,
         )
         .await
     }
 
     pub(crate) async fn init_compactor(
         stored_manifest: StoredManifest,
+        manifest_update_timeout: Duration,
     ) -> Result<Self, SlateDBError> {
         Self::init(
             stored_manifest,
             |m| m.compactor_epoch,
             |m, e| m.compactor_epoch = e,
+            manifest_update_timeout,
         )
         .await
     }
@@ -97,29 +103,37 @@ impl FenceableManifest {
         mut stored_manifest: StoredManifest,
         stored_epoch: fn(&Manifest) -> u64,
         set_epoch: fn(&mut DirtyManifest, u64),
+        manifest_update_timeout: Duration,
     ) -> Result<Self, SlateDBError> {
-        loop {
-            let local_epoch = stored_epoch(&stored_manifest.manifest) + 1;
-            let mut manifest = stored_manifest.prepare_dirty();
-            set_epoch(&mut manifest, local_epoch);
-            match stored_manifest.update_manifest(manifest).await {
-                Err(ManifestVersionExists) => {
-                    // The manifest may have been updated by a reader, or
-                    // we may have gotten this error after successfully updating
-                    // if we failed to get the response. Either way, refresh
-                    // the manifest and try the bump again.
-                    stored_manifest.refresh().await?;
-                }
-                Err(err) => return Err(err),
-                Ok(()) => {
-                    return Ok(Self {
-                        stored_manifest,
-                        local_epoch,
-                        stored_epoch,
-                    })
+        tokio::time::timeout(manifest_update_timeout, async {
+            loop {
+                let local_epoch = stored_epoch(&stored_manifest.manifest) + 1;
+                let mut manifest = stored_manifest.prepare_dirty();
+                set_epoch(&mut manifest, local_epoch);
+                match stored_manifest.update_manifest(manifest).await {
+                    Err(ManifestVersionExists) => {
+                        // The manifest may have been updated by a reader, or
+                        // we may have gotten this error after successfully updating
+                        // if we failed to get the response. Either way, refresh
+                        // the manifest and try the bump again.
+                        stored_manifest.refresh().await?;
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                    Ok(()) => {
+                        return Ok(Self {
+                            stored_manifest,
+                            local_epoch,
+                            stored_epoch,
+                        })
+                    }
                 }
             }
-        }
+        })
+        .await
+        .map_err(|_| SlateDBError::Timeout {
+            msg: "Manifest update".to_string(),
+        })?
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
@@ -810,9 +824,10 @@ mod tests {
         StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
+        let timeout = Duration::from_secs(300);
         for i in 1..5 {
             let sm = StoredManifest::load(ms.clone()).await.unwrap();
-            FenceableManifest::init_writer(sm).await.unwrap();
+            FenceableManifest::init_writer(sm, timeout).await.unwrap();
             let (_, manifest) = ms.read_latest_manifest().await.unwrap();
             assert_eq!(manifest.writer_epoch, i);
         }
@@ -825,10 +840,11 @@ mod tests {
         let sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        let mut writer1 = FenceableManifest::init_writer(sm).await.unwrap();
+        let timeout = Duration::from_secs(300);
+        let mut writer1 = FenceableManifest::init_writer(sm, timeout).await.unwrap();
         let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
 
-        FenceableManifest::init_writer(sm2).await.unwrap();
+        FenceableManifest::init_writer(sm2, timeout).await.unwrap();
 
         let result = writer1.refresh().await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
@@ -841,9 +857,12 @@ mod tests {
         StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
+        let timeout = Duration::from_secs(300);
         for i in 1..5 {
             let sm = StoredManifest::load(ms.clone()).await.unwrap();
-            FenceableManifest::init_compactor(sm).await.unwrap();
+            FenceableManifest::init_compactor(sm, timeout)
+                .await
+                .unwrap();
             let (_, manifest) = ms.read_latest_manifest().await.unwrap();
             assert_eq!(manifest.compactor_epoch, i);
         }
@@ -856,10 +875,15 @@ mod tests {
         let sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        let mut compactor1 = FenceableManifest::init_compactor(sm).await.unwrap();
+        let timeout = Duration::from_secs(300);
+        let mut compactor1 = FenceableManifest::init_compactor(sm, timeout)
+            .await
+            .unwrap();
         let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
 
-        FenceableManifest::init_compactor(sm2).await.unwrap();
+        FenceableManifest::init_compactor(sm2, timeout)
+            .await
+            .unwrap();
 
         let result = compactor1.refresh().await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
@@ -886,9 +910,14 @@ mod tests {
         let sm = StoredManifest::create_new_db(ms.clone(), CoreDbState::new())
             .await
             .unwrap();
-        let mut compactor1 = FenceableManifest::init_compactor(sm).await.unwrap();
+        let timeout = Duration::from_secs(300);
+        let mut compactor1 = FenceableManifest::init_compactor(sm, timeout)
+            .await
+            .unwrap();
         let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
-        let mut compactor2 = FenceableManifest::init_compactor(sm2).await.unwrap();
+        let mut compactor2 = FenceableManifest::init_compactor(sm2, timeout)
+            .await
+            .unwrap();
 
         let result = compactor1
             .write_checkpoint(None, &CheckpointOptions::default())
@@ -904,9 +933,10 @@ mod tests {
         let sm = StoredManifest::create_new_db(ms.clone(), CoreDbState::new())
             .await
             .unwrap();
-        let mut fm1 = FenceableManifest::init_writer(sm).await.unwrap();
+        let timeout = Duration::from_secs(300);
+        let mut fm1 = FenceableManifest::init_writer(sm, timeout).await.unwrap();
         let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
-        let mut fm2 = FenceableManifest::init_writer(sm2).await.unwrap();
+        let mut fm2 = FenceableManifest::init_writer(sm2, timeout).await.unwrap();
 
         let result = fm1
             .maybe_apply_manifest_update(|sm| {
@@ -1255,12 +1285,13 @@ mod tests {
             .unwrap();
 
         let sm_b = StoredManifest::load(Arc::clone(&ms)).await.unwrap();
+        let timeout = Duration::from_secs(300);
 
-        let mut fm_b = FenceableManifest::init_writer(sm_b).await.unwrap();
+        let mut fm_b = FenceableManifest::init_writer(sm_b, timeout).await.unwrap();
         assert_eq!(1, fm_b.local_epoch);
 
         // The last writer always wins
-        let mut fm_a = FenceableManifest::init_writer(sm_a).await.unwrap();
+        let mut fm_a = FenceableManifest::init_writer(sm_a, timeout).await.unwrap();
         assert_eq!(2, fm_a.local_epoch);
 
         assert!(matches!(
