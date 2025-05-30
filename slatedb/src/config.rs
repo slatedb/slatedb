@@ -46,6 +46,7 @@
 //! flush_interval = "100ms"
 //! wal_enabled = false
 //! manifest_poll_interval = "1s"
+//! manifest_update_timeout = "300s"
 //! min_filter_keys = 1000
 //! filter_bits_per_key = 10
 //! l0_sst_size_bytes = 67108864
@@ -83,6 +84,7 @@
 //!  "flush_interval": "100ms",
 //!  "wal_enabled": false,
 //!  "manifest_poll_interval": "1s",
+//!  "manifest_update_timeout": "300s",
 //!  "min_filter_keys": 1000,
 //!  "filter_bits_per_key": 10,
 //!  "l0_sst_size_bytes": 67108864,
@@ -123,6 +125,7 @@
 //! flush_interval: '100ms'
 //! wal_enabled: false
 //! manifest_poll_interval: '1s'
+//! manifest_update_timeout: '300s'
 //! min_filter_keys: 1000
 //! filter_bits_per_key: 10
 //! l0_sst_size_bytes: 67108864
@@ -493,6 +496,7 @@ impl std::fmt::Debug for Settings {
             data.field("wal_enabled", &self.wal_enabled);
         }
         data.field("manifest_poll_interval", &self.manifest_poll_interval)
+            .field("manifest_update_timeout", &self.manifest_update_timeout)
             .field("min_filter_keys", &self.min_filter_keys)
             .field("max_unflushed_bytes", &self.max_unflushed_bytes)
             .field("l0_sst_size_bytes", &self.l0_sst_size_bytes)
