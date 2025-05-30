@@ -38,9 +38,7 @@ impl Db {
     ) -> Result<CheckpointCreateResult, SlateDBError> {
         if let CheckpointScope::All { force_flush } = scope {
             if force_flush {
-                self.flush().await?;
-            } else {
-                self.await_flush().await?;
+                self.inner.flush_memtables().await?;
             }
         }
 
@@ -392,19 +390,7 @@ mod tests {
             ..Settings::default()
         };
         test_checkpoint_scope_all(db_options, true, |manifest| {
-            SsTableId::Wal(manifest.core.next_wal_sst_id - 1)
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_checkpoint_scope_with_no_force_flush() {
-        let db_options = Settings {
-            flush_interval: Some(Duration::from_millis(10)),
-            ..Settings::default()
-        };
-        test_checkpoint_scope_all(db_options, false, |manifest| {
-            SsTableId::Wal(manifest.core.next_wal_sst_id - 1)
+            manifest.core.l0.front().unwrap().id
         })
         .await;
     }
@@ -421,63 +407,6 @@ mod tests {
             manifest.core.l0.front().unwrap().id
         })
         .await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    #[cfg(feature = "wal_disable")]
-    async fn test_checkpoint_scope_with_no_force_flush_wal_disabled() {
-        let db_options = Settings {
-            flush_interval: Some(Duration::from_millis(10)),
-            wal_enabled: false,
-            ..Settings::default()
-        };
-
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_kv_store";
-        let db = Arc::new(
-            Db::builder(path, object_store.clone())
-                .with_settings(db_options)
-                .build()
-                .await
-                .unwrap(),
-        );
-
-        let mut rng = rng::new_test_rng(None);
-        let table = sample::table(&mut rng, 1000, 10);
-        test_utils::seed_database(&db, &table, false).await.unwrap();
-
-        // Under the current implementation, when the WAL is disabled, we have to wait for
-        // either an explicit flush or for enough accumulated new data to force a flush of
-        // the current memtable.
-        let db_clone = Arc::clone(&db);
-        let checkpoint_handle = tokio::spawn(async move {
-            db_clone
-                .create_checkpoint(
-                    CheckpointScope::All { force_flush: false },
-                    &CheckpointOptions::default(),
-                )
-                .await
-        });
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        db.flush().await.unwrap();
-
-        let checkpoint = tokio::join!(checkpoint_handle).0.unwrap().unwrap();
-
-        let manifest_store = ManifestStore::new(&Path::from(path), object_store.clone());
-        let manifest = manifest_store
-            .read_manifest(checkpoint.manifest_id)
-            .await
-            .unwrap();
-
-        let last_written_kv = table.last_key_value().unwrap();
-        assert_flushed_entry(
-            object_store.clone(),
-            Path::from(path),
-            &manifest.core.l0.front().unwrap().id,
-            last_written_kv,
-        )
-        .await
     }
 
     async fn test_checkpoint_scope_all<F: FnOnce(Manifest) -> SsTableId>(
@@ -534,10 +463,10 @@ mod tests {
             path.clone(),
             None,
         ));
-        let last_checkpoint_wal = table_store.open_sst(table_id).await.unwrap();
+        let sst_handle = table_store.open_sst(table_id).await.unwrap();
 
-        let mut wal_iter = SstIterator::for_key(
-            &last_checkpoint_wal,
+        let mut sst_iter = SstIterator::for_key(
+            &sst_handle,
             kv.0,
             Arc::clone(&table_store),
             SstIteratorOptions::default(),
@@ -545,7 +474,7 @@ mod tests {
         .await
         .unwrap();
 
-        let wal_entry = wal_iter.next().await.unwrap().unwrap();
-        assert_eq!(*kv.1, wal_entry.value)
+        let sst_entry = sst_iter.next().await.unwrap().unwrap();
+        assert_eq!(*kv.1, sst_entry.value)
     }
 }

@@ -99,4 +99,6 @@ mod test_utils;
 mod transactional_object_store;
 mod types;
 mod utils;
+mod wal_buffer;
+mod wal_id;
 mod wal_replay;
