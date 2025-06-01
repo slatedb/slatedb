@@ -2,20 +2,11 @@ use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
-<<<<<<< HEAD
-use rand::RngCore;
-use std::cmp;
-=======
->>>>>>> a22af85 (Centralize all clock related code into the "clock" module.)
 use std::future::Future;
 use std::sync::{Arc, Mutex};
-<<<<<<< HEAD
-use std::time::{Duration, SystemTime};
-use tracing::info;
+use rand::RngCore;
 use ulid::Ulid;
 use uuid::{Builder, Uuid};
-=======
->>>>>>> a22af85 (Centralize all clock related code into the "clock" module.)
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
@@ -235,7 +226,7 @@ mod tests {
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
-
+    
     use std::sync::Arc;
     use std::time::Duration;
 

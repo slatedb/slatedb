@@ -24,7 +24,7 @@ impl Checkpoint {
     /// Creates a new checkpoint with the given manifest id, create time, and optional expire time.
     pub fn new(manifest_id: u64, create_time: SystemTime, expire_time: Option<SystemTime>) -> Self {
         Self {
-            id: Uuid::new_v4(),
+            id: crate::utils::uuid(),
             manifest_id,
             create_time,
             expire_time,

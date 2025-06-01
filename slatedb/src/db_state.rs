@@ -544,7 +544,6 @@ mod tests {
     use std::collections::BTreeSet;
     use std::collections::Bound::Included;
     use std::ops::RangeBounds;
-    use ulid::Ulid;
 
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
