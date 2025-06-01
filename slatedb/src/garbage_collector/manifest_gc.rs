@@ -1,7 +1,6 @@
 use crate::{
     config::GarbageCollectorDirectoryOptions, manifest::store::ManifestStore, SlateDBError,
 };
-use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,7 +39,8 @@ impl ManifestGcTask {
 impl GcTask for ManifestGcTask {
     /// Collect garbage from the manifest store. This will delete any manifests
     /// that are older than the minimum age specified in the options.
-    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+    async fn collect(&self, now_in_millis: i64) -> Result<(), SlateDBError> {
+        let utc_now = super::gc_task_time(now_in_millis);
         let min_age = self.manifest_min_age();
         let mut manifest_metadata_list = self.manifest_store.list_manifests(..).await?;
 

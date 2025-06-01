@@ -501,7 +501,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_clock(clock)
+            .with_user_clock(clock)
             .build()
             .await
             .unwrap();
@@ -563,7 +563,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_clock(clock)
+            .with_user_clock(clock)
             .with_compaction_scheduler_supplier(scheduler.clone())
             .build()
             .await
@@ -652,7 +652,7 @@ mod tests {
         options.default_ttl = Some(50);
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_clock(insert_clock.clone())
+            .with_user_clock(insert_clock.clone())
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await

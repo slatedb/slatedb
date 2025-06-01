@@ -64,7 +64,7 @@ pub(crate) struct DbInner {
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: DbStats,
     pub(crate) stat_registry: Arc<StatRegistry>,
-    pub(crate) mono_clock: Arc<MonotonicClock>,
+    pub(crate) user_clock: Arc<MonotonicClock>,
     pub(crate) reader: Reader,
 
     pub(crate) wal_enabled: bool,
@@ -74,7 +74,7 @@ impl DbInner {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         settings: Settings,
-        clock: Arc<dyn Clock>,
+        user_clock: Arc<dyn Clock>,
         table_store: Arc<TableStore>,
         manifest: DirtyManifest,
         wal_flush_notifier: UnboundedSender<WalFlushMsg>,
@@ -82,7 +82,10 @@ impl DbInner {
         write_notifier: UnboundedSender<WriteBatchMsg>,
         stat_registry: Arc<StatRegistry>,
     ) -> Result<Self, SlateDBError> {
-        let mono_clock = Arc::new(MonotonicClock::new(clock, manifest.core.last_l0_clock_tick));
+        let mono_clock = Arc::new(MonotonicClock::new(
+            user_clock,
+            manifest.core.last_l0_clock_tick,
+        ));
         let state = Arc::new(RwLock::new(DbState::new(manifest)));
         let db_stats = DbStats::new(stat_registry.as_ref());
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
@@ -103,7 +106,7 @@ impl DbInner {
             memtable_flush_notifier,
             write_notifier,
             db_stats,
-            mono_clock,
+            user_clock: mono_clock,
             stat_registry,
             reader,
         };
@@ -1056,7 +1059,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -1108,7 +1111,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(default_ttl)))
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -1170,7 +1173,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -1360,7 +1363,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -2075,7 +2078,7 @@ mod tests {
         ));
         let db = Db::builder(path.clone(), object_store.clone())
             .with_settings(options)
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -2295,7 +2298,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
-            .with_clock(Arc::new(ManualClock::new()))
+            .with_user_clock(Arc::new(ManualClock::new()))
             .build()
             .await
             .unwrap();
@@ -2331,7 +2334,7 @@ mod tests {
         let mut next_wal_id = 1;
         let kv_store = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_clock(Arc::new(ManualClock::new()))
+            .with_user_clock(Arc::new(ManualClock::new()))
             .build()
             .await
             .unwrap();
@@ -2368,7 +2371,7 @@ mod tests {
         // recover and validate that sst files are loaded on recovery.
         let kv_store_restored = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_clock(Arc::new(ManualClock::new()))
+            .with_user_clock(Arc::new(ManualClock::new()))
             .build()
             .await
             .unwrap();
@@ -2401,7 +2404,7 @@ mod tests {
         let path = "/tmp/test_kv_store";
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 256, None))
-            .with_clock(Arc::new(ManualClock::new()))
+            .with_user_clock(Arc::new(ManualClock::new()))
             .build()
             .await
             .unwrap();
@@ -2414,7 +2417,7 @@ mod tests {
 
         let db_restored = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 256, None))
-            .with_clock(Arc::new(ManualClock::new()))
+            .with_user_clock(Arc::new(ManualClock::new()))
             .build()
             .await
             .unwrap();
@@ -2970,7 +2973,7 @@ mod tests {
         let clock = Arc::new(ManualClock::new());
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -3002,7 +3005,7 @@ mod tests {
         let clock = Arc::new(ManualClock::new());
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -3015,7 +3018,7 @@ mod tests {
 
         let db2 = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -3079,7 +3082,7 @@ mod tests {
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -3107,12 +3110,12 @@ mod tests {
         let clock = Arc::new(ManualClock::new());
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
-        assert_eq!(db.inner.mono_clock.last_tick.load(Ordering::SeqCst), 11);
+        assert_eq!(db.inner.user_clock.last_tick.load(Ordering::SeqCst), 11);
     }
 
     #[tokio::test]
@@ -3123,7 +3126,7 @@ mod tests {
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 32, None))
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -3163,7 +3166,7 @@ mod tests {
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -3186,12 +3189,12 @@ mod tests {
         options.wal_enabled = false;
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
-        assert_eq!(db.inner.mono_clock.last_tick.load(Ordering::SeqCst), 11);
+        assert_eq!(db.inner.user_clock.last_tick.load(Ordering::SeqCst), 11);
     }
 
     #[tokio::test]

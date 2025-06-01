@@ -65,7 +65,8 @@ impl GcTask for WalGcTask {
     ///  - not referenced by an active checkpoint
     ///  - older than the minimum age specified in the options
     ///  - older than the last compacted WAL SST.
-    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+    async fn collect(&self, now_in_millis: i64) -> Result<(), SlateDBError> {
+        let utc_now = super::gc_task_time(now_in_millis);
         let active_manifests = self.manifest_store.read_active_manifests().await?;
         let latest_manifest = active_manifests
             .last_key_value()

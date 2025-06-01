@@ -50,7 +50,7 @@ impl DbInner {
             .write_sst(id, encoded_sst, write_cache)
             .await?;
 
-        self.mono_clock
+        self.user_clock
             .fetch_max_last_durable_tick(imm_table.last_tick());
         Ok(handle)
     }

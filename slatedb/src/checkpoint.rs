@@ -310,7 +310,7 @@ mod tests {
         let clock = Arc::new(SystemClock::new());
         let _ = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -363,7 +363,7 @@ mod tests {
         let clock = Arc::new(SystemClock::new());
         let _ = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
-            .with_clock(clock.clone())
+            .with_user_clock(clock.clone())
             .build()
             .await
             .unwrap();

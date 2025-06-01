@@ -62,7 +62,7 @@
 //! }
 //! ```
 //!
-//! Example with a custom clock:
+//! Example with a custom clock for user facing operations:
 //!
 //! ```
 //! use slatedb::{clock::SystemClock, Db, SlateDBError};
@@ -74,7 +74,7 @@
 //!     let object_store = Arc::new(InMemory::new());
 //!     let clock = Arc::new(SystemClock::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_clock(clock)
+//!         .with_user_clock(clock)
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -125,7 +125,8 @@ pub struct DbBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     block_cache: Option<Arc<dyn DbCache>>,
-    clock: Option<Arc<dyn Clock>>,
+    user_clock: Option<Arc<dyn Clock>>,
+    system_clock: Option<Arc<dyn Clock>>,
     gc_runtime: Option<Handle>,
     compaction_runtime: Option<Handle>,
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
@@ -143,7 +144,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             settings: Settings::default(),
             wal_object_store: None,
             block_cache: None,
-            clock: None,
+            user_clock: None,
+            system_clock: None,
             gc_runtime: None,
             compaction_runtime: None,
             compaction_scheduler_supplier: None,
@@ -175,9 +177,23 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
-    /// Sets the clock to use for the database.
-    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
-        self.clock = Some(clock);
+    /// Sets the clock to use for user facing database operations.
+    /// Operations like writing or removing data from the database will use this clock
+    /// to store the timestamp of the operation.
+    ///
+    /// If not set, SlateDB uses the system clock.
+    pub fn with_user_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.user_clock = Some(clock);
+        self
+    }
+
+    /// Sets the clock to use for system operations.
+    /// System operations are operations that are not user facing, like compaction, garbage collection,
+    /// and WAL flushing. These operations are not affected by the user clock.
+    ///
+    /// If not set, SlateDB uses the system clock.
+    pub fn with_system_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.system_clock = Some(clock);
         self
     }
 
@@ -240,7 +256,12 @@ impl<P: Into<Path>> DbBuilder<P> {
             crate::rand::seed(seed);
         }
 
-        let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock::new()));
+        let user_clock = self
+            .user_clock
+            .unwrap_or_else(|| Arc::new(SystemClock::new()));
+        let system_clock = self
+            .system_clock
+            .unwrap_or_else(|| Arc::new(SystemClock::new()));
         let block_cache = self.block_cache.or_else(default_block_cache);
 
         // Setup the components
@@ -265,7 +286,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                             .max_cache_size_bytes,
                         self.settings.object_store_cache_options.scan_interval,
                         stats.clone(),
-                        clock.clone(),
+                        user_clock.clone(),
                     ));
 
                     let cached_main_object_store = CachedObjectStore::new(
@@ -323,7 +344,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 Arc::new(DbCacheWrapper::new(
                     c.clone(),
                     stat_registry.as_ref(),
-                    clock.clone(),
+                    user_clock.clone(),
                 )) as Arc<dyn DbCache>
             }),
         ));
@@ -356,7 +377,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let inner = Arc::new(
             DbInner::new(
                 self.settings.clone(),
-                clock.clone(),
+                user_clock.clone(),
                 table_store.clone(),
                 manifest.prepare_dirty()?,
                 wal_flush_tx,
@@ -419,7 +440,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     scheduler_supplier,
                     compaction_handle,
                     inner.stat_registry.as_ref(),
-                    clock.clone(),
+                    system_clock.clone(),
                     move |result: &Result<(), SlateDBError>| {
                         let err = bg_task_result_into_err(result);
                         warn!("compactor thread exited with {:?}", err);
@@ -447,6 +468,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 gc_handle,
                 inner.stat_registry.clone(),
                 self.cancellation_token.clone(),
+                system_clock.clone(),
                 move |result| {
                     let err = bg_task_result_into_err(result);
                     warn!("GC thread exited with {:?}", err);

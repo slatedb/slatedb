@@ -1,4 +1,5 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
+use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
@@ -136,7 +137,8 @@ pub async fn run_gc_once(
     ));
 
     let stats = Arc::new(StatRegistry::new());
-    GarbageCollector::run_gc_once(manifest_store, table_store, stats, gc_opts).await;
+    let clock = Arc::new(SystemClock::new());
+    GarbageCollector::run_gc_once(manifest_store, table_store, stats, gc_opts, clock).await;
     Ok(())
 }
 
@@ -172,6 +174,7 @@ pub async fn run_gc_in_background(
 
     let tracker = TaskTracker::new();
     let ct = cancellation_token.clone();
+    let clock = Arc::new(SystemClock::new());
 
     tracker.spawn(GarbageCollector::start_async_task(
         manifest_store,
@@ -179,6 +182,7 @@ pub async fn run_gc_in_background(
         stats,
         ct,
         gc_opts,
+        clock,
     ));
     tracker.close();
 

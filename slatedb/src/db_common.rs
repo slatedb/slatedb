@@ -52,7 +52,7 @@ impl DbInner {
         let last_wal_id = replayed_memtable.last_wal_id;
         guard.set_next_wal_id(last_wal_id + 1);
         guard.update_last_seq(replayed_memtable.last_seq);
-        self.mono_clock.set_last_tick(replayed_memtable.last_tick)?;
+        self.user_clock.set_last_tick(replayed_memtable.last_tick)?;
         guard.replace_memtable(replayed_memtable.table)
     }
 
