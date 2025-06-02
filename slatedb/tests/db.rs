@@ -33,6 +33,7 @@ async fn test_concurrent_writers_and_readers() {
     let config = Settings {
         flush_interval: Some(Duration::from_millis(100)),
         manifest_poll_interval: Duration::from_millis(100),
+        manifest_update_timeout: Duration::from_secs(300),
         compactor_options: Some(CompactorOptions {
             poll_interval: Duration::from_millis(100),
             ..Default::default()

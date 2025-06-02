@@ -36,10 +36,12 @@ impl Db {
         scope: CheckpointScope,
         options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
-        if let CheckpointScope::All { force_flush } = scope {
-            if force_flush {
-                self.inner.flush_memtables().await?;
+        // flush all the data into SSTs
+        if let CheckpointScope::All = scope {
+            if self.inner.wal_enabled {
+                self.inner.flush_wals().await?;
             }
+            self.inner.flush_memtables().await?;
         }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -389,10 +391,8 @@ mod tests {
             flush_interval: Some(Duration::from_millis(5000)),
             ..Settings::default()
         };
-        test_checkpoint_scope_all(db_options, true, |manifest| {
-            manifest.core.l0.front().unwrap().id
-        })
-        .await;
+        test_checkpoint_scope_all(db_options, |manifest| manifest.core.l0.front().unwrap().id)
+            .await;
     }
 
     #[tokio::test]
@@ -403,15 +403,12 @@ mod tests {
             wal_enabled: false,
             ..Settings::default()
         };
-        test_checkpoint_scope_all(db_options, true, |manifest| {
-            manifest.core.l0.front().unwrap().id
-        })
-        .await;
+        test_checkpoint_scope_all(db_options, |manifest| manifest.core.l0.front().unwrap().id)
+            .await;
     }
 
     async fn test_checkpoint_scope_all<F: FnOnce(Manifest) -> SsTableId>(
         db_options: Settings,
-        force_flush: bool,
         last_flushed_table: F,
     ) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -427,10 +424,7 @@ mod tests {
         test_utils::seed_database(&db, &table, false).await.unwrap();
 
         let checkpoint = db
-            .create_checkpoint(
-                CheckpointScope::All { force_flush },
-                &CheckpointOptions::default(),
-            )
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
             .await
             .unwrap();
 

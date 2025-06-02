@@ -309,7 +309,7 @@ impl DbInner {
         Ok(())
     }
 
-    async fn flush_wals(&self) -> Result<(), SlateDBError> {
+    pub(crate) async fn flush_wals(&self) -> Result<(), SlateDBError> {
         self.wal_buffer.flush().await
     }
 
@@ -945,7 +945,7 @@ impl Db {
         }
     }
 
-    #[cfg(test)]
+    #[allow(unused)]
     pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
         if self.inner.wal_enabled {
             self.inner.wal_buffer.await_flush().await
@@ -1904,6 +1904,7 @@ mod tests {
                         poll_interval: Duration::from_millis(100),
                         max_sst_size: 256,
                         max_concurrent_compactions: 1,
+                        manifest_update_timeout: Duration::from_secs(300),
                     }),
                 ))
                 .with_compaction_scheduler_supplier(compaction_scheduler)
@@ -2841,6 +2842,7 @@ mod tests {
                 poll_interval: Duration::from_millis(100),
                 max_sst_size: 256,
                 max_concurrent_compactions: 1,
+                manifest_update_timeout: Duration::from_secs(300),
             }),
         ))
         .await;
@@ -2853,6 +2855,7 @@ mod tests {
             127,
             Some(CompactorOptions {
                 poll_interval: Duration::from_millis(100),
+                manifest_update_timeout: Duration::from_secs(300),
                 max_sst_size: 256,
                 max_concurrent_compactions: 1,
             }),
@@ -3347,6 +3350,7 @@ mod tests {
             #[cfg(feature = "wal_disable")]
             wal_enabled: true,
             manifest_poll_interval: Duration::from_millis(100),
+            manifest_update_timeout: Duration::from_secs(300),
             max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,
             min_filter_keys,
