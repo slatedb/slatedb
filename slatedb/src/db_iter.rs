@@ -216,7 +216,7 @@ mod tests {
         assert!(iter.next().await.unwrap().is_none());
     }
 
-        #[tokio::test]
+    #[tokio::test]
     async fn test_seek_cannot_rewind() {
         // Build a simple memtable with two keys
         let mut mem = WritableKVTable::new();
