@@ -1,10 +1,12 @@
 use std::collections::VecDeque;
+use std::ops::{Bound, RangeBounds};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
 use ulid::Ulid;
 
+use crate::bytes_range::BytesRange;
 use crate::checkpoint;
 use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SsTableHandle};
@@ -157,17 +159,40 @@ impl FlatBufferManifestCodec {
         uuid::Uuid::from_u64_pair(uuid.high(), uuid.low())
     }
 
+    fn decode_bytes_range(range: manifest_generated::BytesRange) -> BytesRange {
+        let start_key = match range.start_bound() {
+            Some(start_key) if range.start_bound_included() => {
+                Bound::Included(Bytes::copy_from_slice(start_key.bytes()))
+            }
+            Some(start_key) => Bound::Excluded(Bytes::copy_from_slice(start_key.bytes())),
+            None => Bound::Unbounded,
+        };
+        let end_key = match range.end_bound() {
+            Some(end_key) if range.end_bound_included() => {
+                Bound::Included(Bytes::copy_from_slice(end_key.bytes()))
+            }
+            Some(end_key) => Bound::Excluded(Bytes::copy_from_slice(end_key.bytes())),
+            None => Bound::Unbounded,
+        };
+        BytesRange::new(start_key, end_key)
+    }
+
     pub fn manifest(manifest: &ManifestV1) -> Manifest {
         let l0_last_compacted = manifest
             .l0_last_compacted()
             .map(|id| Ulid::from((id.high(), id.low())));
         let mut l0 = VecDeque::new();
+
         for man_sst in manifest.l0().iter() {
             let man_sst_id = man_sst.id();
             let sst_id = Compacted(Ulid::from((man_sst_id.high(), man_sst_id.low())));
 
             let sst_info = FlatBufferSsTableInfoCodec::sst_info(&man_sst.info());
-            let l0_sst = SsTableHandle::new(sst_id, sst_info);
+            let l0_sst = SsTableHandle::new_compacted(
+                sst_id,
+                sst_info,
+                man_sst.visible_range().map(Self::decode_bytes_range),
+            );
             l0.push_back(l0_sst);
         }
         let mut compacted = Vec::new();
@@ -176,7 +201,11 @@ impl FlatBufferManifestCodec {
             for manifest_sst in manifest_sr.ssts().iter() {
                 let id = Compacted(manifest_sst.id().ulid());
                 let info = FlatBufferSsTableInfoCodec::sst_info(&manifest_sst.info());
-                ssts.push(SsTableHandle::new(id, info));
+                ssts.push(SsTableHandle::new_compacted(
+                    id,
+                    info,
+                    manifest_sst.visible_range().map(Self::decode_bytes_range),
+                ));
             }
             compacted.push(db_state::SortedRun {
                 id: manifest_sr.id(),
@@ -287,25 +316,25 @@ impl<'b> DbFlatBufferBuilder<'b> {
         self.builder.create_vector(sst_ids.as_ref())
     }
 
-    #[allow(clippy::panic)]
-    fn add_compacted_sst(
-        &mut self,
-        id: &SsTableId,
-        info: &SsTableInfo,
-    ) -> WIPOffset<CompactedSsTable<'b>> {
-        let ulid = match id {
+    fn add_compacted_sst(&mut self, handle: &SsTableHandle) -> WIPOffset<CompactedSsTable<'b>> {
+        let ulid = match handle.id {
             SsTableId::Wal(_) => {
-                panic!("cannot pass WAL SST handle to create compacted sst")
+                unreachable!("cannot pass WAL SST handle to create compacted sst")
             }
-            SsTableId::Compacted(ulid) => *ulid,
+            SsTableId::Compacted(ulid) => ulid,
         };
         let compacted_sst_id = self.add_compacted_sst_id(&ulid);
-        let compacted_sst_info = self.add_sst_info(info);
+        let compacted_sst_info = self.add_sst_info(&handle.info);
+        let visible_range = handle
+            .visible_range
+            .as_ref()
+            .map(|r| self.add_bytes_range(r));
         CompactedSsTable::create(
             &mut self.builder,
             &CompactedSsTableArgs {
                 id: Some(compacted_sst_id),
                 info: Some(compacted_sst_info),
+                visible_range,
             },
         )
     }
@@ -317,9 +346,8 @@ impl<'b> DbFlatBufferBuilder<'b> {
     where
         I: Iterator<Item = &'a SsTableHandle>,
     {
-        let compacted_ssts: Vec<WIPOffset<CompactedSsTable>> = ssts
-            .map(|sst| self.add_compacted_sst(&sst.id, &sst.info))
-            .collect();
+        let compacted_ssts: Vec<WIPOffset<CompactedSsTable>> =
+            ssts.map(|sst| self.add_compacted_sst(sst)).collect();
         self.builder.create_vector(compacted_ssts.as_ref())
     }
 
@@ -384,6 +412,32 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let checkpoints_fb_vec: Vec<WIPOffset<Checkpoint>> =
             checkpoints.iter().map(|c| self.add_checkpoint(c)).collect();
         self.builder.create_vector(checkpoints_fb_vec.as_ref())
+    }
+
+    fn add_bytes_range(
+        &mut self,
+        range: &BytesRange,
+    ) -> WIPOffset<manifest_generated::BytesRange<'b>> {
+        let (start_bound, start_bound_included) = match range.start_bound() {
+            Bound::Included(key) => (Some(self.builder.create_vector(key)), true),
+            Bound::Excluded(key) => (Some(self.builder.create_vector(key)), false),
+            Bound::Unbounded => (None, false),
+        };
+
+        let (end_bound, end_bound_included) = match range.end_bound() {
+            Bound::Included(key) => (Some(self.builder.create_vector(key)), true),
+            Bound::Excluded(key) => (Some(self.builder.create_vector(key)), false),
+            Bound::Unbounded => (None, false),
+        };
+        manifest_generated::BytesRange::create(
+            &mut self.builder,
+            &manifest_generated::BytesRangeArgs {
+                start_bound,
+                start_bound_included,
+                end_bound,
+                end_bound_included,
+            },
+        )
     }
 
     fn create_manifest(&mut self, manifest: &Manifest) -> Bytes {
@@ -500,16 +554,18 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use crate::db_state::{CoreDbState, SsTableId};
+    use crate::bytes_range::BytesRange;
+    use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
     use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
     use crate::{checkpoint, SlateDBError};
+    use std::collections::VecDeque;
     use std::time::{Duration, SystemTime};
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
     use crate::sst::SsTableFormat;
     use crate::test_utils::build_test_sst;
-    use bytes::{BufMut, BytesMut};
+    use bytes::{BufMut, Bytes, BytesMut};
 
     use super::{manifest_generated, MANIFEST_FORMAT_VERSION};
 
@@ -563,6 +619,53 @@ mod tests {
                 sst_ids: vec![SsTableId::Compacted(crate::utils::ulid())],
             },
         ];
+        let codec = FlatBufferManifestCodec {};
+
+        // when:
+        let bytes = codec.encode(&manifest);
+        let decoded = codec.decode(&bytes).expect("failed to decode manifest");
+
+        // then:
+        assert_eq!(manifest, decoded);
+    }
+
+    #[test]
+    fn test_should_encode_decode_ssts_with_visible_ranges() {
+        fn new_sst_handle(first_key: &[u8], visible_range: Option<BytesRange>) -> SsTableHandle {
+            SsTableHandle::new_compacted(
+                SsTableId::Compacted(crate::utils::ulid()),
+                SsTableInfo {
+                    first_key: Some(Bytes::copy_from_slice(first_key)),
+                    ..Default::default()
+                },
+                visible_range,
+            )
+        }
+
+        // given:
+        let mut manifest = Manifest::initial(CoreDbState::new());
+        manifest.core.l0 = VecDeque::from(vec![
+            new_sst_handle(b"a", None),
+            new_sst_handle(b"a", Some(BytesRange::from_ref("c"..="d"))),
+        ]);
+        manifest.core.compacted = vec![
+            SortedRun {
+                id: 0,
+                ssts: vec![
+                    new_sst_handle(b"a", None),
+                    new_sst_handle(b"d", Some(BytesRange::from_ref("e".."f"))),
+                ],
+            },
+            SortedRun {
+                id: 0,
+                ssts: vec![
+                    new_sst_handle(b"a", None),
+                    new_sst_handle(b"c", Some(BytesRange::from_ref("c"..))),
+                    new_sst_handle(b"d", Some(BytesRange::from_ref("e".."f"))),
+                ],
+            },
+        ];
+
         let codec = FlatBufferManifestCodec {};
 
         // when:

@@ -22,6 +22,20 @@ table ExternalDb {
     sst_ids: [CompactedSstId] (required);
 }
 
+table BytesRange {
+    // Start bound of the range. Empty bound means unbounded.
+    start_bound: [ubyte];
+
+    // Whether the start bound is inclusive.
+    start_bound_included: bool;
+
+    // End bound of the range. Empty bound means unbounded.
+    end_bound: [ubyte];
+
+    // Whether the end bound is inclusive.
+    end_bound_included: bool;
+}
+
 // Manifest to persist state of DB.
 table ManifestV1 {
     // Id of manifest. Manifest file name will be derived from this id.
@@ -72,6 +86,17 @@ table ManifestV1 {
 
     // The URI of the object store dedicated specifically for WAL, if any.
     wal_object_store_uri: string;
+}
+
+table CompactedSstId {
+    high: uint64;
+    low: uint64;
+}
+
+table CompactedSsTable {
+    id: CompactedSstId (required);
+    info: SsTableInfo (required);
+    visible_range: BytesRange;
 }
 
 table SortedRun {
