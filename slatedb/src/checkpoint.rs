@@ -1,4 +1,4 @@
-use crate::clock::Clock;
+use crate::clock::SysClock;
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
@@ -78,7 +78,7 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         id: Uuid,
         lifetime: Option<Duration>,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn SysClock>,
     ) -> Result<(), SlateDBError> {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
@@ -129,7 +129,7 @@ impl Db {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
-    use crate::clock::{Clock, SystemClock};
+    use crate::clock::{SysClock, SystemClock};
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
@@ -310,7 +310,7 @@ mod tests {
         let clock = Arc::new(SystemClock::new());
         let _ = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
-            .with_user_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();

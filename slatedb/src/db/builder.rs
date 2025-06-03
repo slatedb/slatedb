@@ -96,6 +96,7 @@ use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::clock::Clock;
+use crate::clock::SysClock;
 use crate::clock::SystemClock;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
@@ -126,7 +127,7 @@ pub struct DbBuilder<P: Into<Path>> {
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     block_cache: Option<Arc<dyn DbCache>>,
     user_clock: Option<Arc<dyn Clock>>,
-    system_clock: Option<Arc<dyn Clock>>,
+    system_clock: Option<Arc<dyn SysClock>>,
     gc_runtime: Option<Handle>,
     compaction_runtime: Option<Handle>,
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
@@ -192,7 +193,7 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// and WAL flushing. These operations are not affected by the user clock.
     ///
     /// If not set, SlateDB uses the system clock.
-    pub fn with_system_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+    pub fn with_system_clock(mut self, clock: Arc<dyn SysClock>) -> Self {
         self.system_clock = Some(clock);
         self
     }
@@ -286,7 +287,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                             .max_cache_size_bytes,
                         self.settings.object_store_cache_options.scan_interval,
                         stats.clone(),
-                        user_clock.clone(),
+                        system_clock.clone(),
                     ));
 
                     let cached_main_object_store = CachedObjectStore::new(

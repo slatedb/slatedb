@@ -1,5 +1,5 @@
 use crate::checkpoint::Checkpoint;
-use crate::clock::Clock;
+use crate::clock::SysClock;
 use crate::config::GarbageCollectorOptions;
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
@@ -76,7 +76,7 @@ impl GarbageCollector {
         tokio_handle: Handle,
         stat_registry: Arc<StatRegistry>,
         cancellation_token: CancellationToken,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn SysClock>,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
     ) -> Self {
         let stats = Arc::new(GcStats::new(stat_registry));
@@ -118,7 +118,7 @@ impl GarbageCollector {
         stats: Arc<GcStats>,
         cancellation_token: CancellationToken,
         options: GarbageCollectorOptions,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn SysClock>,
     ) {
         let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
 
@@ -183,7 +183,7 @@ impl GarbageCollector {
         table_store: Arc<TableStore>,
         stat_registry: Arc<StatRegistry>,
         options: GarbageCollectorOptions,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn SysClock>,
     ) {
         let stats = Arc::new(GcStats::new(stat_registry));
 
@@ -240,7 +240,7 @@ fn gc_tasks(
 async fn run_gc_task<T: GcTask>(
     task: &mut T,
     manifest_store: Arc<ManifestStore>,
-    clock: Arc<dyn Clock>,
+    clock: Arc<dyn SysClock>,
 ) {
     debug!(
         "Scheduled garbage collection attempt for {}.",
@@ -300,7 +300,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
-    use crate::clock::{Clock, SystemClock};
+    use crate::clock::{SysClock, SystemClock};
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
     use crate::error::SlateDBError;
     use crate::object_stores::ObjectStores;
@@ -387,7 +387,7 @@ mod tests {
 
     async fn checkpoint_current_manifest(
         stored_manifest: &mut StoredManifest,
-        clock: &dyn Clock,
+        clock: &dyn SysClock,
         expire_time: Option<SystemTime>,
     ) -> Result<Uuid, SlateDBError> {
         let mut dirty = stored_manifest.prepare_dirty();

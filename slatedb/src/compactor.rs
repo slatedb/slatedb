@@ -8,7 +8,7 @@ use tracing::{error, info, warn};
 use ulid::Ulid;
 use uuid::Uuid;
 
-use crate::clock::Clock;
+use crate::clock::SysClock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
@@ -81,7 +81,7 @@ impl Compactor {
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
         tokio_handle: Handle,
         stat_registry: &StatRegistry,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn SysClock>,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
@@ -143,7 +143,7 @@ impl CompactorOrchestrator {
         tokio_handle: Handle,
         external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
         stats: Arc<CompactionStats>,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn SysClock>,
     ) -> Result<Self, SlateDBError> {
         let options = Arc::new(options);
         let ticker = crossbeam_channel::tick(options.poll_interval);
@@ -210,7 +210,7 @@ struct CompactorEventHandler {
     scheduler: Box<dyn CompactionScheduler>,
     executor: Box<dyn CompactionExecutor>,
     stats: Arc<CompactionStats>,
-    clock: Arc<dyn Clock>,
+    clock: Arc<dyn SysClock>,
 }
 
 impl CompactorEventHandler {
@@ -221,7 +221,7 @@ impl CompactorEventHandler {
         scheduler: Box<dyn CompactionScheduler>,
         executor: Box<dyn CompactionExecutor>,
         stats: Arc<CompactionStats>,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn SysClock>,
     ) -> Result<Self, SlateDBError> {
         let stored_manifest =
             tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;

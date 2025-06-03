@@ -11,7 +11,7 @@ use tracing::info;
 
 use crate::{config::DurabilityLevel, SlateDBError};
 
-/// defines the clock that SlateDB will use during this session
+/// Defines the clock that SlateDB will use for user facing operations.
 pub trait Clock: Debug + Send + Sync {
     /// Returns a timestamp (typically measured in millis since the unix epoch),
     /// must return monotonically increasing numbers (this is enforced
@@ -23,6 +23,14 @@ pub trait Clock: Debug + Send + Sync {
     /// to actions on the database.
     fn now(&self) -> i64;
 
+    /// Returns the current time plus the given duration.
+    fn add(&self, duration: Duration) -> i64 {
+        self.now() + duration.as_millis() as i64
+    }
+}
+
+/// Defines the clock that SlateDB will use for system operations.
+pub trait SysClock: Clock {
     /// Returns the current time as a SystemTime.
     ///
     /// This function panics if the Clock time cannot be converted to a SystemTime.
@@ -30,11 +38,6 @@ pub trait Clock: Debug + Send + Sync {
         chrono::DateTime::from_timestamp_millis(self.now())
             .map(SystemTime::from)
             .expect("Failed to convert Clock time to SystemTime")
-    }
-
-    /// Returns the current time plus the given duration.
-    fn add(&self, duration: Duration) -> i64 {
-        self.now() + duration.as_millis() as i64
     }
 
     /// Returns the time that has elapsed since the unix epoch.
@@ -77,6 +80,8 @@ impl Clock for SystemClock {
         self.last_tick.fetch_max(tick, Ordering::SeqCst).max(tick)
     }
 }
+
+impl SysClock for SystemClock {}
 
 /// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
 /// from the underlying implementation are monotonically increasing
@@ -194,6 +199,9 @@ impl Clock for ManualClock {
 }
 
 #[cfg(test)]
+impl SysClock for ManualClock {}
+
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct TokioClock {
     initial_ts: u128,
@@ -222,3 +230,6 @@ impl Clock for TokioClock {
         (self.initial_ts + elapsed.as_millis()) as i64
     }
 }
+
+#[cfg(test)]
+impl SysClock for TokioClock {}

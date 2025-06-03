@@ -1,5 +1,5 @@
 use crate::checkpoint::Checkpoint;
-use crate::clock::{Clock, SystemClock};
+use crate::clock::{SysClock, SystemClock};
 use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
@@ -535,7 +535,7 @@ pub(crate) struct ManifestStore {
     object_store: Box<dyn TransactionalObjectStore>,
     codec: Box<dyn ManifestCodec>,
     manifest_suffix: &'static str,
-    clock: Arc<dyn Clock>,
+    clock: Arc<dyn SysClock>,
 }
 
 impl ManifestStore {
@@ -546,7 +546,7 @@ impl ManifestStore {
     pub(crate) fn new_with_clock(
         root_path: &Path,
         object_store: Arc<dyn ObjectStore>,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn SysClock>,
     ) -> Self {
         Self {
             object_store: Box::new(DelegatingTransactionalObjectStore::new(
@@ -743,7 +743,7 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::clock::{Clock, SystemClock};
+    use crate::clock::{SysClock, SystemClock};
     use crate::config::CheckpointOptions;
     use crate::db_state::CoreDbState;
     use crate::error;
@@ -1055,7 +1055,7 @@ mod tests {
         Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()))
     }
 
-    fn now_rounded_to_nearest_sec(clock: &dyn Clock) -> SystemTime {
+    fn now_rounded_to_nearest_sec(clock: &dyn SysClock) -> SystemTime {
         let now_secs = clock.elapsed().as_secs();
         SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs)
     }

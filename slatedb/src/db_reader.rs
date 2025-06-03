@@ -1,5 +1,5 @@
 use crate::bytes_range::BytesRange;
-use crate::clock::{Clock, MonotonicClock, SystemClock};
+use crate::clock::{MonotonicClock, SysClock, SystemClock};
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
 use crate::db_reader::ManifestPollerMsg::Shutdown;
 use crate::db_state::CoreDbState;
@@ -42,7 +42,7 @@ struct DbReaderInner {
     table_store: Arc<TableStore>,
     options: DbReaderOptions,
     state: RwLock<Arc<CheckpointState>>,
-    clock: Arc<dyn Clock>,
+    clock: Arc<dyn SysClock>,
     user_checkpoint_id: Option<Uuid>,
     reader: Reader,
     error_watcher: WatchableOnceCell<SlateDBError>,
@@ -96,7 +96,7 @@ impl DbReaderInner {
         table_store: Arc<TableStore>,
         options: DbReaderOptions,
         checkpoint_id: Option<Uuid>,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn SysClock>,
     ) -> Result<Self, SlateDBError> {
         let mut manifest = StoredManifest::load(Arc::clone(&manifest_store)).await?;
         if !manifest.db_state().initialized {
@@ -532,7 +532,7 @@ impl DbReader {
         store_provider: &dyn StoreProvider,
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn SysClock>,
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
@@ -806,7 +806,7 @@ impl DbReader {
 
 #[cfg(test)]
 mod tests {
-    use crate::clock::{Clock, TokioClock};
+    use crate::clock::{SysClock, TokioClock};
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db_reader::{DbReader, DbReaderOptions};
     use crate::db_state::CoreDbState;
@@ -1100,17 +1100,16 @@ mod tests {
         object_store: Arc<dyn ObjectStore>,
         path: Path,
         fp_registry: Arc<FailPointRegistry>,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn SysClock>,
     }
 
     impl TestProvider {
         fn new(path: Path, object_store: Arc<dyn ObjectStore>) -> Self {
-            let clock = Arc::new(TokioClock::new()) as Arc<dyn Clock>;
             TestProvider {
                 object_store,
                 path,
                 fp_registry: Arc::new(FailPointRegistry::new()),
-                clock,
+                clock: Arc::new(TokioClock::new()),
             }
         }
     }
