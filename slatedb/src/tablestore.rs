@@ -580,7 +580,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
 
-    use crate::clock::SystemClock;
+    use crate::clock::DefaultSystemClock;
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
@@ -794,7 +794,7 @@ mod tests {
 
         // Setup
         let os = Arc::new(InMemory::new());
-        let clock = Arc::new(SystemClock::new());
+        let clock = Arc::new(DefaultSystemClock::new());
         let format = SsTableFormat {
             block_size: 32,
             ..SsTableFormat::default()
@@ -932,7 +932,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let stat_registry = StatRegistry::new();
         let cache = Arc::new(TestCache::new());
-        let clock = Arc::new(SystemClock::new());
+        let clock = Arc::new(DefaultSystemClock::new());
         let wrapper = Arc::new(DbCacheWrapper::new(cache.clone(), &stat_registry, clock));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
@@ -969,7 +969,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let stat_registry = StatRegistry::new();
         let cache = Arc::new(TestCache::new());
-        let clock = Arc::new(SystemClock::new());
+        let clock = Arc::new(DefaultSystemClock::new());
         let wrapper = Arc::new(DbCacheWrapper::new(cache.clone(), &stat_registry, clock));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),

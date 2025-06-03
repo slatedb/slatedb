@@ -1,5 +1,5 @@
 use crate::checkpoint::Checkpoint;
-use crate::clock::SysClock;
+use crate::clock::SystemClock;
 use crate::config::GarbageCollectorOptions;
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
@@ -76,7 +76,7 @@ impl GarbageCollector {
         tokio_handle: Handle,
         stat_registry: Arc<StatRegistry>,
         cancellation_token: CancellationToken,
-        clock: Arc<dyn SysClock>,
+        clock: Arc<dyn SystemClock>,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
     ) -> Self {
         let stats = Arc::new(GcStats::new(stat_registry));
@@ -118,7 +118,7 @@ impl GarbageCollector {
         stats: Arc<GcStats>,
         cancellation_token: CancellationToken,
         options: GarbageCollectorOptions,
-        clock: Arc<dyn SysClock>,
+        clock: Arc<dyn SystemClock>,
     ) {
         let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
 
@@ -183,7 +183,7 @@ impl GarbageCollector {
         table_store: Arc<TableStore>,
         stat_registry: Arc<StatRegistry>,
         options: GarbageCollectorOptions,
-        clock: Arc<dyn SysClock>,
+        clock: Arc<dyn SystemClock>,
     ) {
         let stats = Arc::new(GcStats::new(stat_registry));
 
@@ -240,7 +240,7 @@ fn gc_tasks(
 async fn run_gc_task<T: GcTask>(
     task: &mut T,
     manifest_store: Arc<ManifestStore>,
-    clock: Arc<dyn SysClock>,
+    clock: Arc<dyn SystemClock>,
 ) {
     debug!(
         "Scheduled garbage collection attempt for {}.",
@@ -300,7 +300,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
-    use crate::clock::{SysClock, SystemClock};
+    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
     use crate::error::SlateDBError;
     use crate::object_stores::ObjectStores;
@@ -387,7 +387,7 @@ mod tests {
 
     async fn checkpoint_current_manifest(
         stored_manifest: &mut StoredManifest,
-        clock: &dyn SysClock,
+        clock: &dyn SystemClock,
         expire_time: Option<SystemTime>,
     ) -> Result<Uuid, SlateDBError> {
         let mut dirty = stored_manifest.prepare_dirty();
@@ -418,7 +418,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_expired_checkpoints() {
         let (manifest_store, table_store, local_object_store) = build_objects();
-        let clock = SystemClock::new();
+        let clock = DefaultSystemClock::new();
 
         // Manifest 1
         let state = CoreDbState::new();
@@ -475,7 +475,7 @@ mod tests {
     #[tokio::test]
     async fn test_collector_should_not_clean_manifests_referenced_by_checkpoints() {
         let (manifest_store, table_store, local_object_store) = build_objects();
-        let clock = SystemClock::new();
+        let clock = DefaultSystemClock::new();
         // Manifest 1
         let state = CoreDbState::new();
         let mut stored_manifest =
@@ -661,7 +661,7 @@ mod tests {
         let mut dirty = stored_manifest.prepare_dirty();
         dirty.core.replay_after_wal_id = 3;
         dirty.core.next_wal_sst_id = 4;
-        let clock = SystemClock::new();
+        let clock = DefaultSystemClock::new();
         dirty
             .core
             .checkpoints
@@ -882,7 +882,7 @@ mod tests {
         let active_checkpoint_sst_handle = create_sst(table_store.clone()).await;
         let inactive_sst_handle = create_sst(table_store.clone()).await;
         let path_resolver = PathResolver::new("");
-        let clock = SystemClock::new();
+        let clock = DefaultSystemClock::new();
         // Set expiration for all SSTs to make them eligible for deletion
         let all_tables = vec![
             active_sst_handle.clone(),
@@ -1074,7 +1074,7 @@ mod tests {
             }),
         };
 
-        let clock = Arc::new(SystemClock::new());
+        let clock = Arc::new(DefaultSystemClock::new());
 
         GarbageCollector::run_gc_once(
             manifest_store.clone(),
@@ -1110,7 +1110,7 @@ mod tests {
         };
 
         let cancellation_token = CancellationToken::new();
-        let clock = Arc::new(SystemClock::new());
+        let clock = Arc::new(DefaultSystemClock::new());
 
         let gc = GarbageCollector::start_in_bg_thread(
             manifest_store.clone(),

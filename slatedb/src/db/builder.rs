@@ -65,14 +65,14 @@
 //! Example with a custom clock for user facing operations:
 //!
 //! ```
-//! use slatedb::{clock::SystemClock, Db, SlateDBError};
+//! use slatedb::{clock::DefaultSystemClock, Db, SlateDBError};
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), SlateDBError> {
 //!     let object_store = Arc::new(InMemory::new());
-//!     let clock = Arc::new(SystemClock::new());
+//!     let clock = Arc::new(DefaultSystemClock::new());
 //!     let db = Db::builder("test_db", object_store)
 //!         .with_user_clock(clock)
 //!         .build()
@@ -95,9 +95,9 @@ use tracing::{debug, info, warn};
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
-use crate::clock::Clock;
-use crate::clock::SysClock;
+use crate::clock::DefaultSystemClock;
 use crate::clock::SystemClock;
+use crate::clock::UserClock;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::default_block_cache;
@@ -126,8 +126,8 @@ pub struct DbBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     block_cache: Option<Arc<dyn DbCache>>,
-    user_clock: Option<Arc<dyn Clock>>,
-    system_clock: Option<Arc<dyn SysClock>>,
+    user_clock: Option<Arc<dyn UserClock>>,
+    system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
     compaction_runtime: Option<Handle>,
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
@@ -183,7 +183,7 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// to store the timestamp of the operation.
     ///
     /// If not set, SlateDB uses the system clock.
-    pub fn with_user_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+    pub fn with_user_clock(mut self, clock: Arc<dyn UserClock>) -> Self {
         self.user_clock = Some(clock);
         self
     }
@@ -193,7 +193,7 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// and WAL flushing. These operations are not affected by the user clock.
     ///
     /// If not set, SlateDB uses the system clock.
-    pub fn with_system_clock(mut self, clock: Arc<dyn SysClock>) -> Self {
+    pub fn with_system_clock(mut self, clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = Some(clock);
         self
     }
@@ -259,10 +259,10 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         let user_clock = self
             .user_clock
-            .unwrap_or_else(|| Arc::new(SystemClock::new()));
+            .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
         let system_clock = self
             .system_clock
-            .unwrap_or_else(|| Arc::new(SystemClock::new()));
+            .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
         let block_cache = self.block_cache.or_else(default_block_cache);
 
         // Setup the components

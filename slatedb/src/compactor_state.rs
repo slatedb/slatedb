@@ -269,7 +269,7 @@ mod tests {
 
     use super::*;
     use crate::checkpoint::Checkpoint;
-    use crate::clock::{SysClock, SystemClock};
+    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::compactor_state::CompactionStatus::Submitted;
     use crate::compactor_state::SourceId::Sst;
     use crate::config::Settings;
@@ -518,7 +518,7 @@ mod tests {
     fn test_should_merge_db_state_with_new_checkpoints() {
         // given:
         let mut state = CompactorState::new(new_dirty_manifest());
-        let clock = SystemClock::new();
+        let clock = DefaultSystemClock::new();
         // mimic an externally added checkpoint
         let mut dirty = new_dirty_manifest();
         let checkpoint = Checkpoint::new(1, clock.now_systime(), None);

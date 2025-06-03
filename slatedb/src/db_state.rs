@@ -533,7 +533,7 @@ impl DbState {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::clock::{SysClock, SystemClock};
+    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
@@ -549,7 +549,7 @@ mod tests {
     fn test_should_merge_db_state_with_new_checkpoints() {
         // given:
         let mut db_state = DbState::new(new_dirty_manifest());
-        let clock = SystemClock::new();
+        let clock = DefaultSystemClock::new();
         // mimic an externally added checkpoint
         let mut updated_state = new_dirty_manifest();
         updated_state.core = db_state.state.core().clone();

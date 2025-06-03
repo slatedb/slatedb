@@ -1,4 +1,4 @@
-use crate::clock::SysClock;
+use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
@@ -78,7 +78,7 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         id: Uuid,
         lifetime: Option<Duration>,
-        clock: Arc<dyn SysClock>,
+        clock: Arc<dyn SystemClock>,
     ) -> Result<(), SlateDBError> {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
@@ -129,7 +129,7 @@ impl Db {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
-    use crate::clock::{SysClock, SystemClock};
+    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
@@ -191,7 +191,7 @@ mod tests {
             .unwrap();
         db.close().await.unwrap();
         let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let checkpoint_time = SystemClock::new().now_systime();
+        let checkpoint_time = DefaultSystemClock::new().now_systime();
 
         let CheckpointCreateResult {
             id: checkpoint_id,
@@ -307,7 +307,7 @@ mod tests {
     async fn test_should_refresh_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let clock = Arc::new(SystemClock::new());
+        let clock = Arc::new(DefaultSystemClock::new());
         let _ = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
             .with_system_clock(clock.clone())
@@ -360,10 +360,10 @@ mod tests {
     async fn test_should_fail_refresh_checkpoint_if_checkpoint_missing() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let clock = Arc::new(SystemClock::new());
+        let clock = Arc::new(DefaultSystemClock::new());
         let _ = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
-            .with_user_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();

@@ -5,7 +5,7 @@ use slatedb::admin;
 use slatedb::admin::{
     list_checkpoints, list_manifests, read_manifest, run_gc_in_background, run_gc_once,
 };
-use slatedb::clock::SystemClock;
+use slatedb::clock::DefaultSystemClock;
 use slatedb::config::{
     CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
@@ -132,7 +132,7 @@ async fn exec_refresh_checkpoint(
     id: Uuid,
     lifetime: Option<Duration>,
 ) -> Result<(), Box<dyn Error>> {
-    let clock = Arc::new(SystemClock::new());
+    let clock = Arc::new(DefaultSystemClock::new());
     println!(
         "{:?}",
         Db::refresh_checkpoint(path, object_store, id, lifetime, clock).await?

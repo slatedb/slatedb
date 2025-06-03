@@ -8,7 +8,7 @@ use tracing::{error, info, warn};
 use ulid::Ulid;
 use uuid::Uuid;
 
-use crate::clock::SysClock;
+use crate::clock::SystemClock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
@@ -81,7 +81,7 @@ impl Compactor {
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
         tokio_handle: Handle,
         stat_registry: &StatRegistry,
-        clock: Arc<dyn SysClock>,
+        clock: Arc<dyn SystemClock>,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
@@ -143,7 +143,7 @@ impl CompactorOrchestrator {
         tokio_handle: Handle,
         external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
         stats: Arc<CompactionStats>,
-        clock: Arc<dyn SysClock>,
+        clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let options = Arc::new(options);
         let ticker = crossbeam_channel::tick(options.poll_interval);
@@ -210,7 +210,7 @@ struct CompactorEventHandler {
     scheduler: Box<dyn CompactionScheduler>,
     executor: Box<dyn CompactionExecutor>,
     stats: Arc<CompactionStats>,
-    clock: Arc<dyn SysClock>,
+    clock: Arc<dyn SystemClock>,
 }
 
 impl CompactorEventHandler {
@@ -221,7 +221,7 @@ impl CompactorEventHandler {
         scheduler: Box<dyn CompactionScheduler>,
         executor: Box<dyn CompactionExecutor>,
         stats: Arc<CompactionStats>,
-        clock: Arc<dyn SysClock>,
+        clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let stored_manifest =
             tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;
@@ -466,7 +466,7 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
-    use crate::clock::{ManualClock, SystemClock};
+    use crate::clock::{DefaultSystemClock, ManualClock};
     use crate::compactor::stats::CompactionStats;
     use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
@@ -767,7 +767,7 @@ mod tests {
             let rt = build_runtime();
             let compactor_options = Arc::new(compactor_options());
             let options = db_options(None);
-            let clock = Arc::new(SystemClock::new());
+            let clock = Arc::new(DefaultSystemClock::new());
             let os = Arc::new(InMemory::new());
             let (manifest_store, table_store) = build_test_stores(os.clone());
             let db = rt

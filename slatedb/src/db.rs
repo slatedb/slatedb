@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
-use crate::clock::{Clock, MonotonicClock};
+use crate::clock::{MonotonicClock, UserClock};
 use crate::compactor::Compactor;
 use crate::config::{PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions};
 use crate::db_iter::DbIterator;
@@ -74,7 +74,7 @@ impl DbInner {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         settings: Settings,
-        user_clock: Arc<dyn Clock>,
+        user_clock: Arc<dyn UserClock>,
         table_store: Arc<TableStore>,
         manifest: DirtyManifest,
         wal_flush_notifier: UnboundedSender<WalFlushMsg>,
@@ -966,7 +966,7 @@ mod tests {
     };
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
-    use crate::clock::{ManualClock, SystemClock};
+    use crate::clock::{DefaultSystemClock, ManualClock};
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions,
@@ -1495,7 +1495,7 @@ mod tests {
             .unwrap();
         let stats_registry = StatRegistry::new();
         let cache_stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
-        let clock = Arc::new(SystemClock::new());
+        let clock = Arc::new(DefaultSystemClock::new());
         let part_size = 1024;
         let cache_storage = Arc::new(FsCacheStorage::new(
             temp_dir.path().to_path_buf(),

@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use tracing::{debug, error};
 
-use crate::clock::Clock;
+use crate::clock::UserClock;
 use crate::db_cache::stats::DbCacheStats;
 use crate::stats::StatRegistry;
 use crate::{
@@ -240,7 +240,7 @@ impl CachedEntry {
 pub struct DbCacheWrapper {
     stats: DbCacheStats,
     cache: Arc<dyn DbCache>,
-    clock: Arc<dyn Clock>,
+    clock: Arc<dyn UserClock>,
     // Records the last time that the wrapper logged an error from the wrapped cache at error
     // level. Used to ensure we only log at error level once every ERROR_LOG_INTERVAL.
     last_err_log_instant: Mutex<Option<i64>>,
@@ -250,7 +250,7 @@ impl DbCacheWrapper {
     pub fn new(
         cache: Arc<dyn DbCache>,
         stats_registry: &StatRegistry,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn UserClock>,
     ) -> Self {
         Self {
             stats: DbCacheStats::new(stats_registry),
@@ -462,7 +462,7 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
 
-    use crate::clock::SystemClock;
+    use crate::clock::DefaultSystemClock;
     use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper};
     use crate::db_state::SsTableId;
 
@@ -622,7 +622,7 @@ mod tests {
     #[fixture]
     fn cache() -> DbCacheWrapper {
         let registry = StatRegistry::new();
-        let clock = Arc::new(SystemClock::new());
+        let clock = Arc::new(DefaultSystemClock::new());
         DbCacheWrapper::new(Arc::new(TestCache::new()), &registry, clock)
     }
 

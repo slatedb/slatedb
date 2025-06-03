@@ -1,5 +1,5 @@
 use crate::checkpoint::Checkpoint;
-use crate::clock::{SysClock, SystemClock};
+use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
@@ -535,18 +535,18 @@ pub(crate) struct ManifestStore {
     object_store: Box<dyn TransactionalObjectStore>,
     codec: Box<dyn ManifestCodec>,
     manifest_suffix: &'static str,
-    clock: Arc<dyn SysClock>,
+    clock: Arc<dyn SystemClock>,
 }
 
 impl ManifestStore {
     pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
-        Self::new_with_clock(root_path, object_store, Arc::new(SystemClock::new()))
+        Self::new_with_clock(root_path, object_store, Arc::new(DefaultSystemClock::new()))
     }
 
     pub(crate) fn new_with_clock(
         root_path: &Path,
         object_store: Arc<dyn ObjectStore>,
-        clock: Arc<dyn SysClock>,
+        clock: Arc<dyn SystemClock>,
     ) -> Self {
         Self {
             object_store: Box::new(DelegatingTransactionalObjectStore::new(
@@ -743,7 +743,7 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::clock::{SysClock, SystemClock};
+    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::config::CheckpointOptions;
     use crate::db_state::CoreDbState;
     use crate::error;
@@ -964,7 +964,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
         let state = CoreDbState::new();
-        let clock = SystemClock::new();
+        let clock = DefaultSystemClock::new();
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
@@ -1055,7 +1055,7 @@ mod tests {
         Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()))
     }
 
-    fn now_rounded_to_nearest_sec(clock: &dyn SysClock) -> SystemTime {
+    fn now_rounded_to_nearest_sec(clock: &dyn SystemClock) -> SystemTime {
         let now_secs = clock.elapsed().as_secs();
         SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs)
     }
@@ -1064,7 +1064,7 @@ mod tests {
     async fn test_read_active_manifests_should_consider_checkpoints() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let clock = SystemClock::new();
+        let clock = DefaultSystemClock::new();
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();

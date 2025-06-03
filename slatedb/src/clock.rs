@@ -11,7 +11,7 @@ use tracing::info;
 
 use crate::{config::DurabilityLevel, SlateDBError};
 
-/// Defines the clock that SlateDB will use for user facing operations.
+/// Defines the generic clock trait that SlateDB extends for user and system operations.
 pub trait Clock: Debug + Send + Sync {
     /// Returns a timestamp (typically measured in millis since the unix epoch),
     /// must return monotonically increasing numbers (this is enforced
@@ -22,7 +22,10 @@ pub trait Clock: Debug + Send + Sync {
     /// it represents a sequence that can attribute a logical ordering
     /// to actions on the database.
     fn now(&self) -> i64;
+}
 
+/// Defines the clock that SlateDB will use for user facing operations.
+pub trait UserClock: Clock {
     /// Returns the current time plus the given duration.
     fn add(&self, duration: Duration) -> i64 {
         self.now() + duration.as_millis() as i64
@@ -30,7 +33,7 @@ pub trait Clock: Debug + Send + Sync {
 }
 
 /// Defines the clock that SlateDB will use for system operations.
-pub trait SysClock: Clock {
+pub trait SystemClock: Clock {
     /// Returns the current time as a SystemTime.
     ///
     /// This function panics if the Clock time cannot be converted to a SystemTime.
@@ -52,17 +55,17 @@ pub trait SysClock: Clock {
 
 /// contains the default implementation of the Clock, and will return the system time
 #[derive(Debug)]
-pub struct SystemClock {
+pub struct DefaultSystemClock {
     last_tick: AtomicI64,
 }
 
-impl Default for SystemClock {
+impl Default for DefaultSystemClock {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SystemClock {
+impl DefaultSystemClock {
     pub fn new() -> Self {
         Self {
             last_tick: AtomicI64::new(i64::MIN),
@@ -70,7 +73,7 @@ impl SystemClock {
     }
 }
 
-impl Clock for SystemClock {
+impl Clock for DefaultSystemClock {
     fn now(&self) -> i64 {
         // since SystemTime is not guaranteed to be monotonic, we enforce it here
         let tick = match SystemTime::now().duration_since(UNIX_EPOCH) {
@@ -81,7 +84,8 @@ impl Clock for SystemClock {
     }
 }
 
-impl SysClock for SystemClock {}
+impl UserClock for DefaultSystemClock {}
+impl SystemClock for DefaultSystemClock {}
 
 /// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
 /// from the underlying implementation are monotonically increasing
@@ -132,22 +136,23 @@ impl MonotonicClock {
         }
     }
 
-    // The semantics of filtering expired records on read differ slightly depending on
-    // the configured ReadLevel.
+    // Returns the current timbase based on the semantics of the durability level, `DurabilityLevel`.
+    // This is used to filter expired records on read, because their semantics differ slightly depending on
+    // the configured `DurabilityLevel`.
     //
-    // For Uncommitted we can just use the actual clock's "now"
+    // For `DurabilityLevel::Memory`, we can just use the actual clock's "now"
     // as this corresponds to the current time seen by uncommitted writes but is not persisted
     // and only enforces monotonicity via the local in-memory MonotonicClock. This means it's
-    // possible for the mono_clock.now() to go "backwards" following a crash and recovery, which
+    // possible for the `MonotonicClock` to go "backwards" following a crash and recovery, which
     // could result in records that were filtered out before the crash coming back to life and being
     // returned after the crash.
     //
-    // If the read level is instead set to Committed, we only use the last_tick of the monotonic
-    // clock to filter out expired records, since this corresponds to the highest time of any
+    // If the read level is instead set to `DurabilityLevel::Remote`, we only use the last_tick of the monotonic
+    // to filter out expired records, since this corresponds to the highest time of any
     // persisted batch and is thus recoverable following a crash. Since the last tick is the
-    // last persisted time we are guaranteed monotonicity of the #get_last_tick function and
-    // thus will not see this "time travel" phenomenon -- with Committed, once a record is
-    // filtered out due to ttl expiry, it is guaranteed not to be seen again by future Committed
+    // last persisted time we are guaranteed monotonicity of the #get_last_durable_tick function and
+    // thus will not see this "time travel" phenomenon -- with `DurabilityLevel::Remote`, once a record is
+    // filtered out due to ttl expiry, it is guaranteed not to be seen again by future `DurabilityLevel::Remote`
     // reads.
     pub(crate) async fn now_by_durability(
         &self,
@@ -199,7 +204,10 @@ impl Clock for ManualClock {
 }
 
 #[cfg(test)]
-impl SysClock for ManualClock {}
+impl UserClock for ManualClock {}
+
+#[cfg(test)]
+impl SystemClock for ManualClock {}
 
 #[cfg(test)]
 #[derive(Debug)]
@@ -232,4 +240,7 @@ impl Clock for TokioClock {
 }
 
 #[cfg(test)]
-impl SysClock for TokioClock {}
+impl UserClock for TokioClock {}
+
+#[cfg(test)]
+impl SystemClock for TokioClock {}
