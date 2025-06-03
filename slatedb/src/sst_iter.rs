@@ -45,22 +45,20 @@ impl Default for SstIteratorOptions {
 /// needed for [`crate::db::Db::scan`] since it returns the iterator, while [`SstView::Borrowed`]
 /// accommodates access by reference which is useful for [`crate::db::Db::get`].
 pub(crate) enum SstView<'a> {
-    Owned(SsTableHandle, BytesRange),
-    Borrowed(&'a SsTableHandle, (Bound<&'a [u8]>, Bound<&'a [u8]>)),
+    Owned(Box<SsTableHandle>, BytesRange),
+    Borrowed(&'a SsTableHandle, BytesRange),
 }
 
 impl SstView<'_> {
     fn start_key(&self) -> Bound<&[u8]> {
         match self {
-            SstView::Owned(_, r) => r.start_bound().map(|b| b.as_ref()),
-            SstView::Borrowed(_, (start, _)) => *start,
+            SstView::Owned(_, r) | SstView::Borrowed(_, r) => r.start_bound().map(|b| b.as_ref()),
         }
     }
 
     fn end_key(&self) -> Bound<&[u8]> {
         match self {
-            SstView::Owned(_, r) => r.end_bound().map(|b| b.as_ref()),
-            SstView::Borrowed(_, (_, end)) => *end,
+            SstView::Owned(_, r) | SstView::Borrowed(_, r) => r.end_bound().map(|b| b.as_ref()),
         }
     }
 
@@ -75,9 +73,7 @@ impl SstView<'_> {
     fn contains(&self, key: &[u8]) -> bool {
         match self {
             SstView::Owned(_, r) => r.contains(key),
-            SstView::Borrowed(_, r) => {
-                <(Bound<&[u8]>, Bound<&[u8]>) as RangeBounds<[u8]>>::contains::<[u8]>(r, key)
-            }
+            SstView::Borrowed(_, r) => r.contains(key),
         }
     }
 
@@ -168,7 +164,13 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
-        let view = SstView::Owned(table, BytesRange::from(range));
+        let mut view_range = BytesRange::from(range);
+        if let Some(visible_range) = &table.visible_range {
+            view_range = view_range
+                .intersect(visible_range)
+                .expect("Provided range is outside of table's visible range");
+        }
+        let view = SstView::Owned(Box::new(table), view_range);
         Self::new(view, table_store.clone(), options).await
     }
 
@@ -178,8 +180,13 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
-        let bounds = (range.start_bound().cloned(), range.end_bound().cloned());
-        let view = SstView::Borrowed(table, bounds);
+        let mut view_range = BytesRange::from_slice(range);
+        if let Some(visible_range) = &table.visible_range {
+            view_range = view_range
+                .intersect(visible_range)
+                .expect("Provided range is outside of table's visible range");
+        }
+        let view = SstView::Borrowed(table, view_range);
         Self::new(view, table_store.clone(), options).await
     }
 

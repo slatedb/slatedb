@@ -1,4 +1,4 @@
-use crate::bytes_range;
+use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
@@ -12,7 +12,7 @@ use std::cmp;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::ops::{Bound, Range};
+use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 use tracing::debug;
 use ulid::Ulid;
@@ -23,50 +23,99 @@ use SsTableId::{Compacted, Wal};
 pub(crate) struct SsTableHandle {
     pub id: SsTableId,
     pub info: SsTableInfo,
+    pub visible_range: Option<BytesRange>,
+    effective_range: BytesRange,
 }
 
 impl Debug for SsTableHandle {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("SsTableHandle({:?})", self.id))
+        f.write_fmt(format_args!(
+            "SsTableHandle({:?}, {:?})",
+            self.id, self.visible_range
+        ))
     }
 }
 
 impl SsTableHandle {
     pub(crate) fn new(id: SsTableId, info: SsTableInfo) -> Self {
-        SsTableHandle { id, info }
+        let effective_range = match info.first_key.clone() {
+            Some(physical_first_key) => BytesRange::new(Included(physical_first_key), Unbounded),
+            None => {
+                // Empty range.
+                BytesRange::new(
+                    Excluded(Bytes::copy_from_slice(&[0_u8])),
+                    Excluded(Bytes::copy_from_slice(&[0_u8])),
+                )
+            }
+        };
+
+        SsTableHandle {
+            id,
+            info,
+            visible_range: None,
+            effective_range,
+        }
+    }
+
+    pub(crate) fn new_compacted(
+        id: SsTableId,
+        info: SsTableInfo,
+        visible_range: Option<BytesRange>,
+    ) -> Self {
+        let mut effective_range = match info.first_key.clone() {
+            Some(physical_first_key) => {
+                BytesRange::new(Included(physical_first_key.clone()), Unbounded)
+            }
+            None => {
+                unreachable!("SST always has a first key.")
+            }
+        };
+        if let Some(visible_range) = &visible_range {
+            assert!(
+                visible_range.is_start_bound_included_or_unbounded(),
+                "Start bound of the visible range must be either Included or Unbounded."
+            );
+            effective_range = effective_range
+                .intersect(visible_range)
+                .expect("An interesction of visible and physical range must be non-empty.")
+        }
+        SsTableHandle {
+            id,
+            info,
+            visible_range,
+            effective_range,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_visible_range(&self, visible_range: BytesRange) -> Self {
+        Self::new_compacted(self.id, self.info.clone(), Some(visible_range))
     }
 
     // Compacted (non-WAL) SSTs are never empty. They are created by compaction or
-    // memtable flushes, which should never produce empty SSTs.
-    pub(crate) fn compacted_first_key(&self) -> &Bytes {
+    // memtable flushes, which should never produce empty SSTs. This method returns
+    // the start key after applying projections.
+    pub(crate) fn compacted_effective_start_key(&self) -> &Bytes {
         assert!(matches!(self.id, Compacted(_)));
-        match &self.info.first_key {
-            Some(k) => k,
-            None => unreachable!("Compacted SSTs must be non-empty."),
+        match self.effective_range.start_bound() {
+            Included(k) => k,
+            _ => unreachable!("Invalid start bound"),
         }
     }
 
     pub(crate) fn range_covers_key(&self, key: &[u8]) -> bool {
-        if let Some(first_key) = self.info.first_key.as_ref() {
-            return key >= first_key;
-        }
-        // If there is no first key, it means the SST is empty so it doesn't cover the key.
-        false
+        self.effective_range.contains(key)
     }
 
-    pub(crate) fn intersects_range(
-        &self,
-        end_bound: Bound<&[u8]>,
-        range: (Bound<&[u8]>, Bound<&[u8]>),
-    ) -> bool {
-        let start_bound = match &self.info.first_key {
-            Some(key) => Included(key.as_ref()),
-            None => {
-                // If there is no first key, it means the SST is empty so there is no intersection.
-                return false;
-            }
-        };
-        bytes_range::has_nonempty_intersection(range, (start_bound, end_bound))
+    pub(crate) fn intersects_range(&self, end_bound: Bound<Bytes>, range: &BytesRange) -> bool {
+        let sst_range =
+            BytesRange::new(Unbounded, end_bound.clone()).intersect(&self.effective_range);
+        match sst_range {
+            Some(sst_range) => BytesRange::new(sst_range.start_bound().cloned(), end_bound)
+                .intersect(range)
+                .is_some(),
+            None => false,
+        }
     }
 
     pub(crate) fn estimate_size(&self) -> u64 {
@@ -108,7 +157,7 @@ impl SsTableId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Default)]
 pub(crate) struct SsTableInfo {
     pub(crate) first_key: Option<Bytes>,
     pub(crate) index_offset: u64,
@@ -150,7 +199,7 @@ impl SortedRun {
         // returns the sst after the one whose range includes the key
         let first_sst = self
             .ssts
-            .partition_point(|sst| sst.compacted_first_key() <= key);
+            .partition_point(|sst| sst.compacted_effective_start_key() <= key);
         if first_sst > 0 {
             return Some(first_sst - 1);
         }
@@ -163,21 +212,21 @@ impl SortedRun {
             .map(|idx| &self.ssts[idx])
     }
 
-    fn table_idx_covering_range(&self, range: (Bound<&[u8]>, Bound<&[u8]>)) -> Range<usize> {
+    fn table_idx_covering_range(&self, range: &BytesRange) -> Range<usize> {
         let mut min_idx = None;
         let mut max_idx = 0;
 
         for idx in 0..self.ssts.len() {
             let current_sst = &self.ssts[idx];
 
-            let upper_bound_key = if idx + 1 < self.ssts.len() {
+            let upper_bound = if idx + 1 < self.ssts.len() {
                 let next_sst = &self.ssts[idx + 1];
-                Excluded(next_sst.compacted_first_key().as_ref())
+                Excluded(next_sst.compacted_effective_start_key().clone())
             } else {
                 Unbounded
             };
 
-            if current_sst.intersects_range(upper_bound_key, range) {
+            if current_sst.intersects_range(upper_bound, range) {
                 if min_idx.is_none() {
                     min_idx = Some(idx);
                 }
@@ -192,17 +241,14 @@ impl SortedRun {
         }
     }
 
-    pub(crate) fn tables_covering_range(
-        &self,
-        range: (Bound<&[u8]>, Bound<&[u8]>),
-    ) -> VecDeque<&SsTableHandle> {
+    pub(crate) fn tables_covering_range(&self, range: &BytesRange) -> VecDeque<&SsTableHandle> {
         let matching_range = self.table_idx_covering_range(range);
         self.ssts[matching_range].iter().collect()
     }
 
     pub(crate) fn into_tables_covering_range(
         mut self,
-        range: (Bound<&[u8]>, Bound<&[u8]>),
+        range: &BytesRange,
     ) -> VecDeque<SsTableHandle> {
         let matching_range = self.table_idx_covering_range(range);
         self.ssts.drain(matching_range).collect()
@@ -627,7 +673,7 @@ mod tests {
         )| {
             let sorted_first_keys: BTreeSet<Bytes> = table_first_keys.into_iter().collect();
             let sorted_run = create_sorted_run(0, &sorted_first_keys);
-            let covering_tables = sorted_run.tables_covering_range(range.as_ref());
+            let covering_tables = sorted_run.tables_covering_range(&range);
             let first_key = sorted_first_keys.first().unwrap().clone();
 
             let range_start_key = test_utils::bound_as_option(range.start_bound())
@@ -641,7 +687,7 @@ mod tests {
                 assert!(range_end_key <= first_key);
             } else {
                 let covering_first_key = covering_tables.front()
-                .map(|t| t.compacted_first_key().clone())
+                .map(|t| t.compacted_effective_start_key().clone())
                 .unwrap();
 
                 if range_start_key < covering_first_key {
@@ -649,7 +695,7 @@ mod tests {
                 }
 
                 let covering_last_key = covering_tables.iter().last()
-                .map(|t| t.compacted_first_key().clone())
+                .map(|t| t.compacted_effective_start_key().clone())
                 .unwrap();
                 if covering_last_key == range_end_key {
                     assert_eq!(Included(range_end_key), range.end_bound().cloned());
