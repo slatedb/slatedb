@@ -136,24 +136,24 @@ impl MonotonicClock {
         }
     }
 
-    // Returns the current timbase based on the semantics of the durability level, `DurabilityLevel`.
-    // This is used to filter expired records on read, because their semantics differ slightly depending on
-    // the configured `DurabilityLevel`.
-    //
-    // For `DurabilityLevel::Memory`, we can just use the actual clock's "now"
-    // as this corresponds to the current time seen by uncommitted writes but is not persisted
-    // and only enforces monotonicity via the local in-memory MonotonicClock. This means it's
-    // possible for the `MonotonicClock` to go "backwards" following a crash and recovery, which
-    // could result in records that were filtered out before the crash coming back to life and being
-    // returned after the crash.
-    //
-    // If the read level is instead set to `DurabilityLevel::Remote`, we only use the last_tick of the monotonic
-    // to filter out expired records, since this corresponds to the highest time of any
-    // persisted batch and is thus recoverable following a crash. Since the last tick is the
-    // last persisted time we are guaranteed monotonicity of the #get_last_durable_tick function and
-    // thus will not see this "time travel" phenomenon -- with `DurabilityLevel::Remote`, once a record is
-    // filtered out due to ttl expiry, it is guaranteed not to be seen again by future `DurabilityLevel::Remote`
-    // reads.
+    /// Returns the current timbase based on the semantics of the durability level, `DurabilityLevel`.
+    /// This is used to filter expired records on read, because their semantics differ slightly depending on
+    /// the configured `DurabilityLevel`.
+    ///
+    /// For `DurabilityLevel::Memory`, we can just use the actual clock's "now"
+    /// as this corresponds to the current time seen by uncommitted writes but is not persisted
+    /// and only enforces monotonicity via the local in-memory MonotonicClock. This means it's
+    /// possible for the `MonotonicClock` to go "backwards" following a crash and recovery, which
+    /// could result in records that were filtered out before the crash coming back to life and being
+    /// returned after the crash.
+    ///
+    /// If the read level is instead set to `DurabilityLevel::Remote`, we only use the last_tick of the monotonic
+    /// to filter out expired records, since this corresponds to the highest time of any
+    /// persisted batch and is thus recoverable following a crash. Since the last tick is the
+    /// last persisted time we are guaranteed monotonicity of the #get_last_durable_tick function and
+    /// thus will not see this "time travel" phenomenon -- with `DurabilityLevel::Remote`, once a record is
+    /// filtered out due to ttl expiry, it is guaranteed not to be seen again by future `DurabilityLevel::Remote`
+    /// reads.
     pub(crate) async fn now_by_durability(
         &self,
         durability_level: DurabilityLevel,
