@@ -1064,8 +1064,10 @@ mod tests {
             let (empty_wal, empty_memtable) = {
                 let mut db_state = db.inner.state.write();
                 let cow_db_state = db_state.state();
-                (db_state.wal().is_empty() && cow_db_state.imm_wal.is_empty(),
-                 db_state.memtable().is_empty() && cow_db_state.imm_memtable.is_empty())
+                (
+                    db_state.wal().is_empty() && cow_db_state.imm_wal.is_empty(),
+                    db_state.memtable().is_empty() && cow_db_state.imm_memtable.is_empty(),
+                )
             };
 
             let core_db_state = get_db_state(manifest_store.clone()).await;
