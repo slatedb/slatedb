@@ -25,12 +25,7 @@ pub trait Clock: Debug + Send + Sync {
 }
 
 /// Defines the clock that SlateDB will use for user facing operations.
-pub trait UserClock: Clock {
-    /// Returns the current time plus the given duration.
-    fn add(&self, duration: Duration) -> i64 {
-        self.now() + duration.as_millis() as i64
-    }
-}
+pub trait UserClock: Clock {}
 
 /// Defines the clock that SlateDB will use for system operations.
 pub trait SystemClock: Clock {
