@@ -1068,6 +1068,7 @@ mod tests {
                 db_state.memtable().is_empty() && cow_db_state.imm_memtable.is_empty();
 
             // Don't hold lock across await boundary
+            drop(cow_db_state);
             drop(db_state);
 
             let core_db_state = get_db_state(manifest_store.clone()).await;
