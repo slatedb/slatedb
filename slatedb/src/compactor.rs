@@ -509,6 +509,8 @@ mod tests {
                 .unwrap();
         }
 
+        db.flush().await.unwrap();
+
         // when:
         let db_state = await_compaction(manifest_store).await;
 
