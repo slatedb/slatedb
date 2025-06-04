@@ -1063,14 +1063,18 @@ mod tests {
         run_for(Duration::from_secs(10), || async {
             let mut db_state = db.inner.state.write();
             let cow_db_state = db_state.state();
+            let empty_wal = db_state.wal().is_empty() && cow_db_state.imm_wal.is_empty();
+            let empty_memtable =
+                db_state.memtable().is_empty() && cow_db_state.imm_memtable.is_empty();
+
+            // Don't hold lock across await boundary
+            drop(db_state);
+
             let core_db_state = get_db_state(manifest_store.clone()).await;
-            if db_state.wal().is_empty()
-                && db_state.memtable().is_empty()
-                && cow_db_state.imm_wal.is_empty()
-                && cow_db_state.imm_memtable.is_empty()
-                && core_db_state.l0_last_compacted.is_some()
-                && core_db_state.l0.len() == 0
-            {
+            let empty_l0 = core_db_state.l0.is_empty();
+            let compaction_ran = core_db_state.l0_last_compacted.is_some();
+
+            if empty_wal && empty_memtable && empty_l0 && compaction_ran {
                 return Some(core_db_state);
             }
             None
