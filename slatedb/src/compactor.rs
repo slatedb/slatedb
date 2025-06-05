@@ -484,62 +484,72 @@ mod tests {
 
     const PATH: &str = "/test/db";
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_compactor_compacts_l0() {
         // given:
         let os = Arc::new(InMemory::new());
         let clock = Arc::new(TestClock::new());
+        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+            SizeTieredCompactionSchedulerOptions {
+                // We'll do exactly two flushes in this test, resulting in 2 L0 files.
+                min_compaction_sources: 1,
+                max_compaction_sources: 999,
+                include_size_threshold: 4.0,
+            },
+        ));
         let mut options = db_options(Some(compactor_options()));
         options.l0_sst_size_bytes = 128;
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_clock(clock)
+            .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await
             .unwrap();
 
         let (manifest_store, table_store) = build_test_stores(os.clone());
+        let mut expected = HashMap::<Vec<u8>, Vec<u8>>::new();
         for i in 0..4 {
-            db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48])
-                .await
-                .unwrap();
-            db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48])
-                .await
-                .unwrap();
+            let k = vec![b'a' + i as u8; 16];
+            let v = vec![b'b' + i as u8; 48];
+            expected.insert(k.clone(), v.clone());
+            db.put(&k, &v).await.unwrap();
+            let k = vec![b'j' + i as u8; 16];
+            let v = vec![b'k' + i as u8; 48];
+            db.put(&k, &v).await.unwrap();
+            expected.insert(k.clone(), v.clone());
         }
 
+        db.flush().await.unwrap();
+
         // when:
-        let db_state = await_compaction(manifest_store).await;
+        let db_state = await_compaction(&db, manifest_store).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
-        assert!(db_state.l0_last_compacted.is_some());
-        assert_eq!(db_state.compacted.len(), 1);
-        let compacted = &db_state.compacted.first().unwrap().ssts;
-        assert_eq!(compacted.len(), 1);
-        let handle = compacted.first().unwrap();
+        for run in db_state.compacted {
+            for sst in run.ssts {
+                let mut iter = SstIterator::new_borrowed(
+                    ..,
+                    &sst,
+                    table_store.clone(),
+                    SstIteratorOptions::default(),
+                )
+                .await
+                .unwrap();
 
-        let mut iter = SstIterator::new_borrowed(
-            ..,
-            handle,
-            table_store.clone(),
-            SstIteratorOptions::default(),
-        )
-        .await
-        .unwrap();
-        for i in 0..4 {
-            let kv = iter.next().await.unwrap().unwrap();
-            assert_eq!(kv.key.as_ref(), &[b'a' + i as u8; 16]);
-            assert_eq!(kv.value.as_ref(), &[b'b' + i as u8; 48]);
+                // remove the key from the expected map and verify that the db matches
+                while let Some(kv) = iter.next().await.unwrap() {
+                    let expected_v = expected
+                        .remove(kv.key.as_ref())
+                        .expect("removing unexpected key");
+                    let db_v = db.get(kv.key.as_ref()).await.unwrap().unwrap();
+                    assert_eq!(expected_v, db_v.as_ref());
+                }
+            }
         }
-        for i in 0..4 {
-            let kv = iter.next().await.unwrap().unwrap();
-            assert_eq!(kv.key.as_ref(), &[b'j' + i as u8; 16]);
-            assert_eq!(kv.value.as_ref(), &[b'k' + i as u8; 48]);
-        }
-        assert!(iter.next().await.unwrap().is_none());
-        // todo: test that the db can read the k/vs (once we implement reading from compacted)
+        assert!(expected.is_empty());
     }
 
     #[cfg(feature = "wal_disable")]
@@ -569,7 +579,7 @@ mod tests {
         db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
         db.flush().await.unwrap();
         scheduler.scheduler.should_compact.store(true, SeqCst);
-        let db_state = await_compaction(manifest_store.clone()).await.unwrap();
+        let db_state = await_compaction(&db, manifest_store.clone()).await.unwrap();
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.l0.len(), 0, "{:?}", db_state.l0);
 
@@ -709,7 +719,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(manifest_store).await;
+        let db_state = await_compaction(&db, manifest_store).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -1047,11 +1057,25 @@ mod tests {
         (manifest_store, table_store)
     }
 
-    async fn await_compaction(manifest_store: Arc<ManifestStore>) -> Option<CoreDbState> {
+    /// Waits until all writes have made their way to L1 or below. No data is allowed in
+    /// in-memory WALs, in-memory memtables, or L0 SSTs on object storage.
+    async fn await_compaction(db: &Db, manifest_store: Arc<ManifestStore>) -> Option<CoreDbState> {
         run_for(Duration::from_secs(10), || async {
-            let db_state = get_db_state(manifest_store.clone()).await;
-            if db_state.l0_last_compacted.is_some() {
-                return Some(db_state);
+            let (empty_wal, empty_memtable) = {
+                let mut db_state = db.inner.state.write();
+                let cow_db_state = db_state.state();
+                (
+                    db_state.wal().is_empty() && cow_db_state.imm_wal.is_empty(),
+                    db_state.memtable().is_empty() && cow_db_state.imm_memtable.is_empty(),
+                )
+            };
+
+            let core_db_state = get_db_state(manifest_store.clone()).await;
+            let empty_l0 = core_db_state.l0.is_empty();
+            let compaction_ran = core_db_state.l0_last_compacted.is_some();
+
+            if empty_wal && empty_memtable && empty_l0 && compaction_ran {
+                return Some(core_db_state);
             }
             None
         })
