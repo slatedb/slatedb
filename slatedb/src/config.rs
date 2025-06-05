@@ -391,12 +391,7 @@ pub struct Settings {
     pub wal_enabled: bool,
 
     /// How frequently to poll for new manifest files. Refreshing the manifest file
-    /// allows writers to detect fencing operations and allows readers to detect newly
-    /// compacted data.
-    ///
-    /// **NOTE: SlateDB secondary readers (i.e. non-writer clients) do not currently
-    /// read from the WAL. Such readers only read from L0+. The manifest poll intervals
-    /// allows such readers to detect new L0+ files.**
+    /// allows the db to detect fencing operations and newly compacted data.
     #[serde(deserialize_with = "deserialize_duration")]
     #[serde(serialize_with = "serialize_duration")]
     pub manifest_poll_interval: Duration,
@@ -667,9 +662,10 @@ impl Default for Settings {
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct DbReaderOptions {
-    /// How frequently to poll for new manifest files. Refreshing the manifest
-    /// file allows readers to detect newly compacted data. If the reader is
-    /// using an explicit checkpoint, then the manifest will not be polled.
+    /// How frequently to poll for new manifest files and WAL data. Refreshing the manifest
+    /// file allows readers to detect newly compacted data. The reader will also look for
+    /// new writes to the WAL at this poll interval. If the reader is using an explicit checkpoint,
+    /// then the manifest and WAL will not be polled.
     pub manifest_poll_interval: Duration,
 
     /// For readers that do not provide an explicit checkpoint, the client will
