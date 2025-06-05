@@ -491,7 +491,6 @@ mod tests {
         let clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
             SizeTieredCompactionSchedulerOptions {
-                // We'll do exactly two flushes in this test, resulting in 2 L0 files.
                 min_compaction_sources: 1,
                 max_compaction_sources: 999,
                 include_size_threshold: 4.0,
@@ -553,7 +552,7 @@ mod tests {
     }
 
     #[cfg(feature = "wal_disable")]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_tombstones_in_l0() {
         let os = Arc::new(InMemory::new());
         let clock = Arc::new(TestClock::new());
@@ -636,7 +635,7 @@ mod tests {
         assert!(next.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_compact_expired_entries() {
         // given:
         let os = Arc::new(InMemory::new());
