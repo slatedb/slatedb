@@ -132,6 +132,7 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 See who's using SlateDB.
 
 - [Embucket](https://www.embucket.com)
+- [Merklemap](https://merklemap.com)
 - [Responsive](https://responsive.dev)
 - [Tensorlake](https://www.tensorlake.ai)
 
