@@ -205,12 +205,14 @@ impl TokioCompactionExecutorInner {
             &self.handle,
             move |result| {
                 let result = result.clone();
+                {
+                    let mut tasks = this_cleanup.tasks.lock();
+                    tasks.remove(&dst);
+                }
                 this_cleanup
                     .worker_tx
                     .send(CompactionFinished { id, result })
                     .expect("failed to send compaction finished msg");
-                let mut tasks = this_cleanup.tasks.lock();
-                tasks.remove(&dst);
                 this_cleanup.stats.running_compactions.dec();
             },
             async move { this.execute_compaction(compaction).await },
