@@ -238,9 +238,9 @@ impl DbInner {
 
         // if the write pipeline task exits then this call to rx.await will fail because tx is dropped
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
-        let mut durable_watch = rx.await??;
+        let mut durable_watcher = rx.await??;
         if options.await_durable {
-            durable_watch.await_value().await?;
+            durable_watcher.await_value().await?;
         }
 
         Ok(())
