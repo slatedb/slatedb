@@ -371,7 +371,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             DbInner::new(
                 self.settings.clone(),
                 logical_clock,
-                system_clock,
+                system_clock.clone(),
                 table_store.clone(),
                 manifest.prepare_dirty()?,
                 wal_flush_tx,
@@ -440,6 +440,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                         let mut state = cleanup_inner.state.write();
                         state.record_fatal_error(err.clone())
                     },
+                    system_clock,
                 )
                 .await?,
             )

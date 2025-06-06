@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_types)]
+#![allow(clippy::disallowed_methods)]
 
 use std::{
     cmp,

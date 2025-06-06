@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use tokio::runtime::Handle;
 use tracing::{error, info, warn};
 use ulid::Ulid;
 use uuid::Uuid;
 
+use crate::clock::SystemClock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
@@ -81,6 +82,7 @@ impl Compactor {
         tokio_handle: Handle,
         stat_registry: &StatRegistry,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
+        system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let (err_tx, err_rx) = tokio::sync::oneshot::channel();
@@ -94,6 +96,7 @@ impl Compactor {
                 tokio_handle,
                 external_rx,
                 stats,
+                system_clock,
             );
             let mut orchestrator = match load_result {
                 Ok(orchestrator) => orchestrator,
@@ -142,6 +145,7 @@ impl CompactorOrchestrator {
         tokio_handle: Handle,
         external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
         stats: Arc<CompactionStats>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let options = Arc::new(options);
         let ticker = crossbeam_channel::tick(options.poll_interval);
@@ -161,6 +165,7 @@ impl CompactorOrchestrator {
             scheduler,
             executor,
             stats,
+            system_clock,
         )?;
         let orchestrator = Self {
             ticker,
@@ -207,6 +212,7 @@ struct CompactorEventHandler {
     scheduler: Box<dyn CompactionScheduler>,
     executor: Box<dyn CompactionExecutor>,
     stats: Arc<CompactionStats>,
+    system_clock: Arc<dyn SystemClock>,
 }
 
 impl CompactorEventHandler {
@@ -217,6 +223,7 @@ impl CompactorEventHandler {
         scheduler: Box<dyn CompactionScheduler>,
         executor: Box<dyn CompactionExecutor>,
         stats: Arc<CompactionStats>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let stored_manifest =
             tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;
@@ -233,6 +240,7 @@ impl CompactorEventHandler {
             scheduler,
             executor,
             stats,
+            system_clock,
         })
     }
 
@@ -377,7 +385,8 @@ impl CompactorEventHandler {
         self.write_manifest_safely()?;
         self.maybe_schedule_compactions()?;
         self.stats.last_compaction_ts.set(
-            SystemTime::now()
+            self.system_clock
+                .now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
@@ -463,6 +472,7 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
+    use crate::clock::DefaultSystemClock;
     use crate::compactor::stats::CompactionStats;
     use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
@@ -802,6 +812,7 @@ mod tests {
                 scheduler.clone(),
                 executor.clone(),
                 compactor_stats,
+                Arc::new(DefaultSystemClock::new()),
             )
             .unwrap();
             let manifest = rt
@@ -1032,6 +1043,7 @@ mod tests {
     where
         F: Future<Output = Option<T>>,
     {
+        #[allow(clippy::disallowed_methods)]
         let now = SystemTime::now();
         while now.elapsed().unwrap() < duration {
             let maybe_result = f().await;
