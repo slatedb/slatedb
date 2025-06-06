@@ -78,7 +78,7 @@ impl DbInner {
             if self.wal_enabled {
                 self.wal_buffer.append(&[row_entry.clone()]).await?;
             }
-            // we do not need to lock the memtable in mid of the commit pipeline
+            // we do not need to lock the memtable in the middle of the commit pipeline.
             // the writes will not visible to the reader until the last_committed_seq
             // is updated.
             self.state.write().memtable().put(row_entry);
