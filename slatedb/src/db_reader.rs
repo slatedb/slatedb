@@ -915,7 +915,7 @@ mod tests {
     async fn should_fail_if_db_is_uninitialized() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
         let manifest_store = test_provider.manifest_store();
 
         let parent_manifest = Manifest::initial(CoreDbState::new());
