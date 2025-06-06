@@ -40,6 +40,7 @@ pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use types::KeyValue;
 
 pub mod admin;
+pub mod clock;
 #[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;
 pub mod config;
