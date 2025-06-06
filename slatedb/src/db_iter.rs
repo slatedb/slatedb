@@ -80,7 +80,11 @@ impl<'a> DbIterator<'a> {
             Err(SlateDBError::InvalidatedIterator(Box::new(error)))
         } else {
             let result = self.iter.next().await;
-            self.maybe_invalidate(result)
+            let result = self.maybe_invalidate(result);
+            if let Ok(Some(ref kv)) = &result {
+                self.last_key = Some(kv.key.clone());
+            }
+            result
         }
     }
 
@@ -209,6 +213,46 @@ mod tests {
         let kv = result.unwrap();
         assert_eq!(kv.key, Bytes::from("key1"));
         assert_eq!(kv.value, Bytes::from("value1"));
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_seek_cannot_rewind() {
+        // Build a simple memtable with two keys
+        let mut mem = WritableKVTable::new();
+        mem.put(RowEntry::new_value(b"key1", b"value1", 1));
+        mem.put(RowEntry::new_value(b"key2", b"value2", 2));
+
+        // Create a DbIterator over the whole range
+        let mem_iter = mem.table().range_ascending(BytesRange::from(..));
+        let mut iter = DbIterator::new(
+            BytesRange::from(..),
+            vec![mem_iter],
+            VecDeque::new(),
+            VecDeque::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Consume the first record
+        let first = iter.next().await.unwrap().unwrap();
+        assert_eq!(first.key, Bytes::from_static(b"key1"));
+
+        // Seeking to the current key or a prior key should fail
+        assert!(matches!(
+            iter.seek(b"key1").await,
+            Err(SlateDBError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            iter.seek(b"key0").await,
+            Err(SlateDBError::InvalidArgument { .. })
+        ));
+
+        // Seeking forward succeeds and allows reading the next key
+        iter.seek(b"key2").await.unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key, Bytes::from_static(b"key2"));
         assert!(iter.next().await.unwrap().is_none());
     }
 }

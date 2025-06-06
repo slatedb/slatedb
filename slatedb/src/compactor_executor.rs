@@ -205,12 +205,14 @@ impl TokioCompactionExecutorInner {
             &self.handle,
             move |result| {
                 let result = result.clone();
+                {
+                    let mut tasks = this_cleanup.tasks.lock();
+                    tasks.remove(&dst);
+                }
                 this_cleanup
                     .worker_tx
                     .send(CompactionFinished { id, result })
                     .expect("failed to send compaction finished msg");
-                let mut tasks = this_cleanup.tasks.lock();
-                tasks.remove(&dst);
                 this_cleanup.stats.running_compactions.dec();
             },
             async move { this.execute_compaction(compaction).await },
@@ -219,14 +221,19 @@ impl TokioCompactionExecutorInner {
     }
 
     fn stop(&self) {
-        let mut tasks = self.tasks.lock();
-
-        for task in tasks.values() {
-            task.task.abort();
-        }
+        // Drain all tasks and abort them, then release tasks lock so
+        // the cleanup function in spawn_bg_task (above) can take the
+        // lock and remove the task from the map.
+        let task_handles = {
+            let mut tasks = self.tasks.lock();
+            for task in tasks.values() {
+                task.task.abort();
+            }
+            tasks.drain().map(|(_, task)| task.task).collect::<Vec<_>>()
+        };
 
         self.handle.block_on(async {
-            let results = join_all(tasks.drain().map(|(_, task)| task.task)).await;
+            let results = join_all(task_handles).await;
             for result in results {
                 match result {
                     Err(e) if !e.is_cancelled() => {
