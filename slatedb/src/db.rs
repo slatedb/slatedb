@@ -945,7 +945,7 @@ impl Db {
         }
     }
 
-    #[allow(unused)]
+    #[cfg(test)]
     pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
         if self.inner.wal_enabled {
             self.inner.wal_buffer.await_flush().await
