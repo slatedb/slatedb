@@ -42,4 +42,5 @@ disallowed-methods = [
     { path = "rand::thread_rng", reason = "Only our rand.rs may touch this" },
     { path = "rand::prelude::random", reason = "Only our rand.rs may touch this" },
     { path = "rand::prelude::thread_rng", reason = "Only our rand.rs may touch this" },
+    { path = "std::time::SystemTime::now", reason = "Only our clock.rs may touch this" },
 ]

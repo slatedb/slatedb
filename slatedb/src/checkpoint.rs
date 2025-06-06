@@ -1,3 +1,4 @@
+use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
@@ -66,12 +67,33 @@ impl Db {
         id: Uuid,
         lifetime: Option<Duration>,
     ) -> Result<(), SlateDBError> {
+        Self::refresh_checkpoint_with_clock(
+            path,
+            object_store,
+            id,
+            lifetime,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+    }
+
+    /// Refresh the lifetime of an existing checkpoint. Takes the id of an existing checkpoint
+    /// and a lifetime, and sets the lifetime of the checkpoint to the specified lifetime. If
+    /// there is no checkpoint with the specified id, then this fn fails with
+    /// SlateDBError::InvalidDbState
+    async fn refresh_checkpoint_with_clock(
+        path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        id: Uuid,
+        lifetime: Option<Duration>,
+        system_clock: Arc<dyn SystemClock>,
+    ) -> Result<(), SlateDBError> {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
             .maybe_apply_manifest_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty();
-                let expire_time = lifetime.map(|l| SystemTime::now() + l);
+                let expire_time = lifetime.map(|l| system_clock.now() + l);
                 let Some(_) = dirty.core.checkpoints.iter_mut().find_map(|c| {
                     if c.id == id {
                         c.expire_time = expire_time;
@@ -115,6 +137,7 @@ impl Db {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
+    use crate::clock::DefaultSystemClock;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
