@@ -22,7 +22,6 @@ pub trait SystemClock: Send + Sync {
 pub(crate) struct DefaultSystemClock {
     initial_ts: i64,
     initial_instant: tokio::time::Instant,
-    last_ts: AtomicI64,
 }
 
 impl DefaultSystemClock {
@@ -31,11 +30,9 @@ impl DefaultSystemClock {
             Ok(duration) => duration.as_millis() as i64, // Time is after the epoch
             Err(e) => -(e.duration().as_millis() as i64), // Time is before the epoch, return negative
         };
-
         Self {
             initial_ts: ts_millis,
             initial_instant: tokio::time::Instant::now(),
-            last_ts: AtomicI64::new(i64::MIN),
         }
     }
 }
@@ -49,10 +46,7 @@ impl Default for DefaultSystemClock {
 impl SystemClock for DefaultSystemClock {
     fn now(&self) -> SystemTime {
         let elapsed = tokio::time::Instant::now().duration_since(self.initial_instant);
-        let current_ts = self.initial_ts + elapsed.as_millis() as i64;
-        // since SystemTime is not guaranteed to be monotonic, we enforce it here
-        self.last_ts.fetch_max(current_ts, Ordering::SeqCst);
-        system_time_from_millis(self.last_ts.load(Ordering::SeqCst))
+        system_time_from_millis(self.initial_ts + elapsed.as_millis() as i64)
     }
 }
 
@@ -71,6 +65,7 @@ pub trait LogicalClock: Send + Sync {
 }
 
 pub struct DefaultLogicalClock {
+    last_ts: AtomicI64,
     inner: Arc<dyn SystemClock>,
 }
 
@@ -84,12 +79,15 @@ impl DefaultLogicalClock {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(DefaultSystemClock::new()),
+            last_ts: AtomicI64::new(i64::MIN),
         }
     }
 }
 
 impl LogicalClock for DefaultLogicalClock {
     fn now(&self) -> i64 {
-        system_time_to_millis(self.inner.now())
+        let current_ts = system_time_to_millis(self.inner.now());
+        self.last_ts.fetch_max(current_ts, Ordering::SeqCst);
+        self.last_ts.load(Ordering::SeqCst)
     }
 }
