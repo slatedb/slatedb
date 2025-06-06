@@ -1,4 +1,4 @@
-use crate::clock::LogicalClock;
+use crate::clock::MonotonicClock;
 use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::error::SlateDBError;
@@ -6,13 +6,9 @@ use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use rand::RngCore;
-use std::cmp;
 use std::future::Future;
-use std::sync::atomic::AtomicI64;
-use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::info;
 use ulid::Ulid;
 use uuid::{Builder, Uuid};
 
@@ -197,69 +193,6 @@ pub(crate) fn bg_task_result_into_err(result: &Result<(), SlateDBError>) -> Slat
     }
 }
 
-// TODO move this to clock.rs
-/// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
-/// from the underlying implementation are monotonically increasing
-pub(crate) struct MonotonicClock {
-    pub(crate) last_tick: AtomicI64,
-    pub(crate) last_durable_tick: AtomicI64,
-    delegate: Arc<dyn LogicalClock>,
-}
-
-impl MonotonicClock {
-    pub(crate) fn new(delegate: Arc<dyn LogicalClock>, init_tick: i64) -> Self {
-        Self {
-            delegate,
-            last_tick: AtomicI64::new(init_tick),
-            last_durable_tick: AtomicI64::new(init_tick),
-        }
-    }
-
-    pub(crate) fn set_last_tick(&self, tick: i64) -> Result<i64, SlateDBError> {
-        self.enforce_monotonic(tick)
-    }
-
-    pub(crate) fn fetch_max_last_durable_tick(&self, tick: i64) -> i64 {
-        self.last_durable_tick.fetch_max(tick, SeqCst)
-    }
-
-    pub(crate) fn get_last_durable_tick(&self) -> i64 {
-        self.last_durable_tick.load(SeqCst)
-    }
-
-    pub(crate) async fn now(&self) -> Result<i64, SlateDBError> {
-        let tick = self.delegate.now();
-        match self.enforce_monotonic(tick) {
-            Err(SlateDBError::InvalidClockTick {
-                last_tick,
-                next_tick: _,
-            }) => {
-                let sync_millis = cmp::min(10_000, 2 * (last_tick - tick).unsigned_abs());
-                info!(
-                    "Clock tick {} is lagging behind the last known tick {}. \
-                    Sleeping {}ms to potentially resolve skew before returning InvalidClockTick.",
-                    tick, last_tick, sync_millis
-                );
-                tokio::time::sleep(Duration::from_millis(sync_millis)).await;
-                self.enforce_monotonic(self.delegate.now())
-            }
-            result => result,
-        }
-    }
-
-    fn enforce_monotonic(&self, tick: i64) -> Result<i64, SlateDBError> {
-        let updated_last_tick = self.last_tick.fetch_max(tick, SeqCst);
-        if tick < updated_last_tick {
-            return Err(SlateDBError::InvalidClockTick {
-                last_tick: updated_last_tick,
-                next_tick: tick,
-            });
-        }
-
-        Ok(tick)
-    }
-}
-
 /// Merge two options using the provided function.
 pub(crate) fn merge_options<T>(
     current: Option<T>,
@@ -330,11 +263,12 @@ pub(crate) fn ulid() -> Ulid {
 mod tests {
     use rstest::rstest;
 
+    use crate::clock::MonotonicClock;
     use crate::error::SlateDBError;
     use crate::test_utils::TestClock;
     use crate::utils::{
         bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key, spawn_bg_task,
-        spawn_bg_thread, MonotonicClock, WatchableOnceCell,
+        spawn_bg_thread, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;

@@ -33,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
+use crate::clock::MonotonicClock;
 use crate::clock::{LogicalClock, SystemClock};
 use crate::compactor::Compactor;
 use crate::config::{PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions};
@@ -49,7 +50,6 @@ use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::MonotonicClock;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use tracing::{info, warn};
 
