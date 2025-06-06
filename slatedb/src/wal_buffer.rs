@@ -42,7 +42,7 @@ use crate::{
 ///   guaranteed to be written atomically to the same WAL file.
 /// - Fatal errors during flush operations are stored internally and propagated to all subsequent
 ///   operations. The manager becomes unusable after encountering a fatal error.
-pub struct WalBufferManager {
+pub(crate) struct WalBufferManager {
     inner: Arc<parking_lot::RwLock<WalBufferManagerInner>>,
     wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
     quit_once: WatchableOnceCell<Result<(), SlateDBError>>,
