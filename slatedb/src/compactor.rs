@@ -115,10 +115,13 @@ impl Compactor {
     pub(crate) async fn close(mut self) {
         if let Some(main_thread) = self.main_thread.take() {
             self.main_tx.send(Shutdown).expect("main tx disconnected");
-            let result = main_thread
-                .join()
-                .expect("failed to stop main compactor thread");
-            info!("compactor thread exited with: {:?}", result)
+            // Wait on a separate thread to avoid blocking the tokio runtime
+            tokio::task::spawn_blocking(move || {
+                let result = main_thread
+                    .join()
+                    .expect("failed to stop main compactor thread");
+                info!("compactor thread exited with: {:?}", result)
+            });
         }
     }
 }
@@ -491,7 +494,6 @@ mod tests {
         let clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
             SizeTieredCompactionSchedulerOptions {
-                // We'll do exactly two flushes in this test, resulting in 2 L0 files.
                 min_compaction_sources: 1,
                 max_compaction_sources: 999,
                 include_size_threshold: 4.0,
@@ -553,7 +555,7 @@ mod tests {
     }
 
     #[cfg(feature = "wal_disable")]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_tombstones_in_l0() {
         let os = Arc::new(InMemory::new());
         let clock = Arc::new(TestClock::new());
@@ -636,7 +638,7 @@ mod tests {
         assert!(next.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_compact_expired_entries() {
         // given:
         let os = Arc::new(InMemory::new());
