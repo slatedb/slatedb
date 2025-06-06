@@ -10,7 +10,7 @@ use std::future::Future;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::info;
 use ulid::Ulid;
 use uuid::{Builder, Uuid};
@@ -138,6 +138,21 @@ where
             }
         })
         .expect("failed to create monitor thread")
+}
+
+pub(crate) fn system_time_to_millis(system_time: SystemTime) -> i64 {
+    system_time.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+}
+
+pub(crate) fn system_time_from_millis(ms: i64) -> SystemTime {
+    if ms >= 0 {
+        // positive or zero: just add
+        UNIX_EPOCH + Duration::from_millis(ms as u64)
+    } else {
+        // negative (including i64::MIN): convert to i128, take abs, cast back to u64
+        let abs_ms = (ms as i128).abs() as u64;
+        UNIX_EPOCH - Duration::from_millis(abs_ms)
+    }
 }
 
 pub(crate) async fn get_now_for_read(
