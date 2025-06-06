@@ -414,11 +414,13 @@ impl WalBufferManager {
             None => return,
         };
 
+        let last_flushed_seq = inner.last_remote_persisted_seq.load();
+
         let mut releaseable_count = 0;
         for (_, wal) in inner.immutable_wals.iter() {
             if wal
                 .last_seq()
-                .map(|seq| seq <= last_applied_seq)
+                .map(|seq| seq <= last_applied_seq && seq <= last_flushed_seq)
                 .unwrap_or(false)
             {
                 releaseable_count += 1;
@@ -598,5 +600,35 @@ mod tests {
 
         wal_buffer.track_last_applied_seq(50).await;
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
+    }
+
+    #[tokio::test]
+    async fn test_immutable_wal_reclaim_with_flush_check() {
+        let (wal_buffer, _, _) = setup_wal_buffer().await;
+
+        // Append entries to create multiple WALs
+        for i in 0..100 {
+            let seq = i + 1;
+            let entry = RowEntry::new(
+                Bytes::from(format!("key{}", i)),
+                ValueDeletable::Value(Bytes::from(format!("value{}", i))),
+                seq,
+                None,
+                None,
+            );
+            wal_buffer.append(&[entry]).await.unwrap();
+            wal_buffer.flush().await.unwrap();
+        }
+        wal_buffer.track_last_applied_seq(50).await;
+        assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
+        assert_eq!(wal_buffer.recent_flushed_wal_id(), 100);
+
+        // set flush seq to 80, and track last applied seq to 90, it should release 20 wals
+        {
+            let inner = wal_buffer.inner.write();
+            inner.last_remote_persisted_seq.store(80);
+        }
+        wal_buffer.track_last_applied_seq(90).await;
+        assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 20);
     }
 }
