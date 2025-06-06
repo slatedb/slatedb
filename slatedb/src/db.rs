@@ -111,11 +111,11 @@ impl DbInner {
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
 
         let reader = Reader {
-            table_store: Arc::clone(&table_store),
+            table_store: table_store.clone(),
             db_stats: db_stats.clone(),
-            mono_clock: Arc::clone(&mono_clock),
-            last_committed_seq: Arc::clone(&last_committed_seq),
-            last_remote_persisted_seq: Arc::clone(&last_remote_persisted_seq),
+            mono_clock: mono_clock.clone(),
+            last_committed_seq: last_committed_seq.clone(),
+            last_remote_persisted_seq: last_remote_persisted_seq.clone(),
         };
 
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
