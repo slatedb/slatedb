@@ -97,7 +97,9 @@ use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::clock::DefaultLogicalClock;
+use crate::clock::DefaultSystemClock;
 use crate::clock::LogicalClock;
+use crate::clock::SystemClock;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::default_block_cache;
@@ -127,6 +129,7 @@ pub struct DbBuilder<P: Into<Path>> {
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     block_cache: Option<Arc<dyn DbCache>>,
     logical_clock: Option<Arc<dyn LogicalClock>>,
+    system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
     compaction_runtime: Option<Handle>,
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
@@ -145,6 +148,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             wal_object_store: None,
             block_cache: None,
             logical_clock: None,
+            system_clock: None,
             gc_runtime: None,
             compaction_runtime: None,
             compaction_scheduler_supplier: None,
@@ -176,9 +180,17 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
-    /// Sets the logical clock to use for the database.
+    /// Sets the logical clock to use for the database. Logical timestamps are used for
+    /// TTL expiration. If unset, SlateDB defaults to using system time.
     pub fn with_logical_clock(mut self, clock: Arc<dyn LogicalClock>) -> Self {
         self.logical_clock = Some(clock);
+        self
+    }
+
+    /// Sets the system clock to use for the database. System timestamps are used for
+    /// scheduling operations such as compaction and garbage collection.
+    pub fn with_system_clock(mut self, clock: Arc<dyn SystemClock>) -> Self {
+        self.system_clock = Some(clock);
         self
     }
 
@@ -241,10 +253,14 @@ impl<P: Into<Path>> DbBuilder<P> {
             crate::rand::seed(seed);
         }
 
-        let clock = self
-            .clock
+        let logical_clock = self
+            .logical_clock
             .unwrap_or_else(|| Arc::new(DefaultLogicalClock::new()));
         let block_cache = self.block_cache.or_else(default_block_cache);
+
+        let system_clock = self
+            .system_clock
+            .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
@@ -354,7 +370,8 @@ impl<P: Into<Path>> DbBuilder<P> {
         let inner = Arc::new(
             DbInner::new(
                 self.settings.clone(),
-                clock,
+                logical_clock,
+                system_clock,
                 table_store.clone(),
                 manifest.prepare_dirty()?,
                 wal_flush_tx,

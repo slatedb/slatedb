@@ -1,8 +1,10 @@
-use crate::config::{Clock, PutOptions, WriteOptions};
+use crate::clock::{LogicalClock, SystemClock};
+use crate::config::{PutOptions, WriteOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::row_codec::SstRowCodecV0;
 use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
+use crate::utils::{system_time_from_millis, system_time_to_millis};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::{Rng, RngCore};
@@ -10,7 +12,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
@@ -107,9 +109,32 @@ impl TestClock {
     }
 }
 
-impl Clock for TestClock {
+impl LogicalClock for TestClock {
     fn now(&self) -> i64 {
         self.ticker.load(Ordering::SeqCst)
+    }
+}
+
+pub(crate) struct TestSystemClock {
+    pub(crate) time_since_epoch_ms: AtomicI64,
+}
+
+impl TestSystemClock {
+    pub(crate) fn new() -> TestSystemClock {
+        TestSystemClock {
+            time_since_epoch_ms: AtomicI64::new(system_time_to_millis(SystemTime::now())),
+        }
+    }
+
+    pub(crate) fn advance(&self, duration: Duration) {
+        self.time_since_epoch_ms
+            .fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
+    }
+}
+
+impl SystemClock for TestSystemClock {
+    fn now(&self) -> SystemTime {
+        system_time_from_millis(self.time_since_epoch_ms.load(Ordering::SeqCst))
     }
 }
 
@@ -132,7 +157,7 @@ impl TokioClock {
     }
 }
 
-impl Clock for TokioClock {
+impl LogicalClock for TokioClock {
     fn now(&self) -> i64 {
         let elapsed = tokio::time::Instant::now().duration_since(self.initial_instant);
         (self.initial_ts + elapsed.as_millis()) as i64

@@ -491,7 +491,7 @@ mod tests {
     async fn test_compactor_compacts_l0() {
         // given:
         let os = Arc::new(InMemory::new());
-        let clock = Arc::new(TestClock::new());
+        let logical_clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
             SizeTieredCompactionSchedulerOptions {
                 min_compaction_sources: 1,
@@ -504,7 +504,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_clock(clock)
+            .with_logical_clock(logical_clock)
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await
@@ -558,7 +558,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_tombstones_in_l0() {
         let os = Arc::new(InMemory::new());
-        let clock = Arc::new(TestClock::new());
+        let logical_clock = Arc::new(TestClock::new());
 
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new());
 
@@ -568,7 +568,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_clock(clock)
+            .with_logical_clock(logical_clock)
             .with_compaction_scheduler_supplier(scheduler.clone())
             .build()
             .await
@@ -657,7 +657,7 @@ mod tests {
         options.default_ttl = Some(50);
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_clock(insert_clock.clone())
+            .with_logical_clock(insert_clock.clone())
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await

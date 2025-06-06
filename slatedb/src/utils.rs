@@ -1,5 +1,6 @@
+use crate::clock::LogicalClock;
+use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
-use crate::config::{Clock, DurabilityLevel};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
@@ -196,16 +197,17 @@ pub(crate) fn bg_task_result_into_err(result: &Result<(), SlateDBError>) -> Slat
     }
 }
 
+// TODO move this to clock.rs
 /// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
 /// from the underlying implementation are monotonically increasing
 pub(crate) struct MonotonicClock {
     pub(crate) last_tick: AtomicI64,
     pub(crate) last_durable_tick: AtomicI64,
-    delegate: Arc<dyn Clock + Send + Sync>,
+    delegate: Arc<dyn LogicalClock>,
 }
 
 impl MonotonicClock {
-    pub(crate) fn new(delegate: Arc<dyn Clock + Send + Sync>, init_tick: i64) -> Self {
+    pub(crate) fn new(delegate: Arc<dyn LogicalClock>, init_tick: i64) -> Self {
         Self {
             delegate,
             last_tick: AtomicI64::new(init_tick),
@@ -280,12 +282,6 @@ fn bytes_into_minimal_vec(bytes: &Bytes) -> Vec<u8> {
 
 pub(crate) fn clamp_allocated_size_bytes(bytes: &Bytes) -> Bytes {
     bytes_into_minimal_vec(bytes).into()
-}
-
-pub(crate) fn now_systime(clock: &dyn Clock) -> SystemTime {
-    chrono::DateTime::from_timestamp_millis(clock.now())
-        .map(SystemTime::from)
-        .expect("Failed to convert Clock time to SystemTime")
 }
 
 /// Computes the "index key" (lowest bound) for an SST index block, ie a key that's greater
