@@ -344,7 +344,7 @@ impl KVTable {
         }
     }
 
-    pub(crate) fn watch_durable(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
+    pub(crate) fn durable_watcher(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
         self.durable.reader()
     }
 

@@ -94,9 +94,9 @@ impl DbInner {
             let current_wal = self.wal_buffer.maybe_trigger_flush().await?;
             // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
             // in another Pull Request.
-            current_wal.watch_durable()
+            current_wal.durable_watcher()
         } else {
-            self.state.write().memtable().table().watch_durable()
+            self.state.write().memtable().table().durable_watcher()
         };
 
         // update the last_committed_seq, so the writes will be visible to the readers.
