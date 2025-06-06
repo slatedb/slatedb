@@ -1,4 +1,5 @@
 use crate::bytes_range::BytesRange;
+use crate::config::SstIteratorOptions;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::db_stats::DbStats;
@@ -9,7 +10,7 @@ use crate::reader::SstFilterResult::{
     FilterNegative, FilterPositive, RangeNegative, RangePositive,
 };
 use crate::sorted_run_iterator::SortedRunIterator;
-use crate::sst_iter::{SstIterator, SstIteratorOptions};
+use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{get_now_for_read, is_not_expired, MonotonicClock};
@@ -49,6 +50,7 @@ pub(crate) struct Reader {
     pub(crate) db_stats: DbStats,
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) wal_enabled: bool,
+    pub(crate) sst_iter_options: SstIteratorOptions,
 }
 
 impl Reader {
@@ -82,6 +84,7 @@ impl Reader {
             now,
             include_wal_memtables: self.include_wal_memtables(options.durability_filter),
             include_memtables: self.include_memtables(options.durability_filter),
+            sst_iter_options: self.sst_iter_options,
         };
         get.get().await
     }
@@ -116,10 +119,10 @@ impl Reader {
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
         let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 1,
-            blocks_to_fetch: read_ahead_blocks,
-            cache_blocks: options.cache_blocks,
-            eager_spawn: true,
+            max_fetch_tasks: self.sst_iter_options.max_fetch_tasks,
+            blocks_to_fetch: read_ahead_blocks, // Override with scan-specific value
+            cache_blocks: options.cache_blocks, // Override with scan-specific value
+            eager_spawn: self.sst_iter_options.eager_spawn,
         };
 
         let mut l0_iters = VecDeque::new();
@@ -159,6 +162,7 @@ struct LevelGet<'a> {
     now: i64,
     include_wal_memtables: bool,
     include_memtables: bool,
+    sst_iter_options: SstIteratorOptions,
 }
 
 impl<'a> LevelGet<'a> {
@@ -216,12 +220,8 @@ impl<'a> LevelGet<'a> {
 
     fn get_l0(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
         async move {
-            // cache blocks that are being read
-            let sst_iter_options = SstIteratorOptions {
-                cache_blocks: true,
-                eager_spawn: true,
-                ..SstIteratorOptions::default()
-            };
+            // Use configured options for reads
+            let sst_iter_options = self.sst_iter_options;
 
             let key_hash = filter::filter_hash(self.key);
 
@@ -256,12 +256,8 @@ impl<'a> LevelGet<'a> {
 
     fn get_compacted(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
         async move {
-            // cache blocks that are being read
-            let sst_iter_options = SstIteratorOptions {
-                cache_blocks: true,
-                eager_spawn: true,
-                ..SstIteratorOptions::default()
-            };
+            // Use configured options for reads
+            let sst_iter_options = self.sst_iter_options;
             let key_hash = filter::filter_hash(self.key);
 
             for sr in &self.snapshot.core().compacted {
@@ -550,6 +546,7 @@ mod tests {
             now: 10000,
             include_wal_memtables: false,
             include_memtables: false,
+            sst_iter_options: SstIteratorOptions::default(),
         };
 
         let result = get.get_inner(mock_level_getters(test_case.entries)).await?;
