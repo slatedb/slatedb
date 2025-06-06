@@ -151,7 +151,7 @@ pub(crate) fn system_time_from_millis(ms: i64) -> SystemTime {
         UNIX_EPOCH + Duration::from_millis(ms as u64)
     } else {
         // negative (including i64::MIN): convert to i128, take abs, cast back to u64
-        let abs_ms = (ms as i128).abs() as u64;
+        let abs_ms = (ms as i128).unsigned_abs() as u64;
         UNIX_EPOCH - Duration::from_millis(abs_ms)
     }
 }

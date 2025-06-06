@@ -42,7 +42,6 @@ struct DbReaderInner {
     table_store: Arc<TableStore>,
     options: DbReaderOptions,
     state: RwLock<Arc<CheckpointState>>,
-    logical_clock: Arc<dyn LogicalClock>,
     system_clock: Arc<dyn SystemClock>,
     user_checkpoint_id: Option<Uuid>,
     reader: Reader,
@@ -141,7 +140,6 @@ impl DbReaderInner {
             table_store,
             options,
             state,
-            logical_clock,
             system_clock,
             user_checkpoint_id: checkpoint_id,
             reader,
@@ -526,7 +524,7 @@ impl DbReader {
             &store_provider,
             checkpoint_id,
             options,
-            Arc::new(DefaultLogicalClock::default()),
+            Arc::new(DefaultLogicalClock),
             Arc::new(DefaultSystemClock::default()),
         )
         .await

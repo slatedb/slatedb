@@ -158,10 +158,7 @@ use figment::providers::{Env, Format, Json, Toml, Yaml};
 use figment::{Figment, Metadata, Provider};
 use serde::{Deserialize, Serialize, Serializer};
 use std::path::Path;
-use std::sync::atomic::AtomicI64;
-use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::{str::FromStr, time::Duration};
 use uuid::Uuid;
 

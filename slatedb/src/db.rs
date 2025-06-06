@@ -76,7 +76,8 @@ impl DbInner {
     pub async fn new(
         settings: Settings,
         logical_clock: Arc<dyn LogicalClock>,
-        system_clock: Arc<dyn SystemClock>,
+        // TODO replace all system clock usage with this
+        _system_clock: Arc<dyn SystemClock>,
         table_store: Arc<TableStore>,
         manifest: DirtyManifest,
         wal_flush_notifier: UnboundedSender<WalFlushMsg>,
