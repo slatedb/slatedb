@@ -51,6 +51,16 @@ pub(crate) struct Reader {
 }
 
 impl Reader {
+    /// Determines the maximum sequence number for read operations (get and scan). Read operations will filter
+    /// out entries with sequence numbers greater than the returned value.
+    ///
+    /// The method considers:
+    /// - User-provided sequence number (e.g., from a Snapshot)
+    /// - Durability requirements (Remote vs Local)
+    /// - Whether dirty reads are allowed
+    ///
+    /// Returns the minimum sequence number that satisfies all constraints, or None (read without filtering max seq)
+    /// if no constraints apply.
     fn prepare_max_seq(
         &self,
         max_seq_by_user: Option<u64>,
