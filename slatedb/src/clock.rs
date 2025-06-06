@@ -11,8 +11,28 @@ pub trait SystemClock: Send + Sync {
     fn now(&self) -> SystemTime;
 }
 
-pub struct DefaultSystemClock {
-    last_tick: AtomicI64,
+/// A system clock implementation that uses tokio::time::Instant to measure time. During
+/// normal usage, this is equivalent to SystemTime::now().
+///
+/// In test cases, it is possible to advance the clock manually with
+/// `#[tokio::test(start_paused = true)]` and `tokio::time::sleep`.
+pub(crate) struct DefaultSystemClock {
+    initial_ts: u128,
+    initial_instant: tokio::time::Instant,
+}
+
+impl DefaultSystemClock {
+    pub(crate) fn new() -> Self {
+        let ts_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+
+        Self {
+            initial_ts: ts_millis,
+            initial_instant: tokio::time::Instant::now(),
+        }
+    }
 }
 
 impl Default for DefaultSystemClock {
@@ -21,23 +41,10 @@ impl Default for DefaultSystemClock {
     }
 }
 
-impl DefaultSystemClock {
-    pub fn new() -> Self {
-        Self {
-            last_tick: AtomicI64::new(i64::MIN),
-        }
-    }
-}
-
 impl SystemClock for DefaultSystemClock {
     fn now(&self) -> SystemTime {
-        // since SystemTime is not guaranteed to be monotonic, we enforce it here
-        let tick = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(duration) => duration.as_millis() as i64, // Time is after the epoch
-            Err(e) => -(e.duration().as_millis() as i64), // Time is before the epoch, return negative
-        };
-        self.last_tick.fetch_max(tick, Ordering::SeqCst);
-        system_time_from_millis(self.last_tick.load(Ordering::SeqCst))
+        let elapsed = tokio::time::Instant::now().duration_since(self.initial_instant);
+        system_time_from_millis((self.initial_ts + elapsed.as_millis()) as i64)
     }
 }
 

@@ -817,7 +817,7 @@ impl DbReader {
 
 #[cfg(test)]
 mod tests {
-    use crate::clock::{LogicalClock, SystemClock};
+    use crate::clock::{DefaultSystemClock, LogicalClock, SystemClock};
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db_reader::{DbReader, DbReaderOptions};
     use crate::db_state::CoreDbState;
@@ -830,7 +830,7 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
-    use crate::test_utils::{TestSystemClock, TokioClock};
+    use crate::test_utils::TokioClock;
     use crate::{test_utils, Db, SlateDBError};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
@@ -847,7 +847,7 @@ mod tests {
     async fn should_get_latest_value_from_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let system_clock = Arc::new(TestSystemClock::new());
+        let system_clock = Arc::new(DefaultSystemClock::new());
         let test_provider = TestProvider::new(
             path.clone(),
             Arc::clone(&object_store),
@@ -887,7 +887,7 @@ mod tests {
     async fn should_get_from_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let system_clock = Arc::new(TestSystemClock::new());
+        let system_clock = Arc::new(DefaultSystemClock::new());
         let test_provider = TestProvider::new(
             path.clone(),
             Arc::clone(&object_store),
@@ -925,7 +925,7 @@ mod tests {
     async fn should_fail_if_db_is_uninitialized() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let system_clock = Arc::new(TestSystemClock::new());
+        let system_clock = Arc::new(DefaultSystemClock::new());
         let test_provider = TestProvider::new(
             path.clone(),
             Arc::clone(&object_store),
@@ -956,7 +956,7 @@ mod tests {
     async fn should_scan_from_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let system_clock = Arc::new(TestSystemClock::new());
+        let system_clock = Arc::new(DefaultSystemClock::new());
         let test_provider = TestProvider::new(
             path.clone(),
             Arc::clone(&object_store),
@@ -995,7 +995,7 @@ mod tests {
     async fn should_reestablish_reader_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let system_clock = Arc::new(TestSystemClock::new());
+        let system_clock = Arc::new(DefaultSystemClock::new());
         let test_provider = TestProvider::new(
             path.clone(),
             Arc::clone(&object_store),
@@ -1039,7 +1039,7 @@ mod tests {
     async fn should_refresh_reader_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let system_clock = Arc::new(TestSystemClock::new());
+        let system_clock = Arc::new(DefaultSystemClock::new());
         let test_provider = TestProvider::new(
             path.clone(),
             Arc::clone(&object_store),
@@ -1063,7 +1063,6 @@ mod tests {
         assert_eq!(1, initial_manifest.core.checkpoints.len());
         let initial_reader_checkpoint = initial_manifest.core.checkpoints.first().unwrap().clone();
 
-        system_clock.advance(Duration::from_millis(5000));
         tokio::time::sleep(Duration::from_millis(5000)).await;
 
         let updated_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
@@ -1085,7 +1084,7 @@ mod tests {
     async fn should_replay_new_wals() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let system_clock = Arc::new(TestSystemClock::new());
+        let system_clock = Arc::new(DefaultSystemClock::new());
         let test_provider = TestProvider::new(
             path.clone(),
             Arc::clone(&object_store),
@@ -1119,7 +1118,7 @@ mod tests {
     async fn should_fail_new_reads_if_manifest_poller_crashes() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let system_clock = Arc::new(TestSystemClock::new());
+        let system_clock = Arc::new(DefaultSystemClock::new());
         let test_provider = TestProvider::new(
             path.clone(),
             Arc::clone(&object_store),
@@ -1155,14 +1154,14 @@ mod tests {
         path: Path,
         fp_registry: Arc<FailPointRegistry>,
         logical_clock: Arc<TokioClock>,
-        system_clock: Arc<TestSystemClock>,
+        system_clock: Arc<DefaultSystemClock>,
     }
 
     impl TestProvider {
         fn new(
             path: Path,
             object_store: Arc<dyn ObjectStore>,
-            system_clock: Arc<TestSystemClock>,
+            system_clock: Arc<DefaultSystemClock>,
         ) -> Self {
             let logical_clock = Arc::new(TokioClock::new());
             TestProvider {

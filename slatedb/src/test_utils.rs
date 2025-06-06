@@ -115,29 +115,6 @@ impl LogicalClock for TestClock {
     }
 }
 
-pub(crate) struct TestSystemClock {
-    pub(crate) time_since_epoch_ms: AtomicI64,
-}
-
-impl TestSystemClock {
-    pub(crate) fn new() -> TestSystemClock {
-        TestSystemClock {
-            time_since_epoch_ms: AtomicI64::new(system_time_to_millis(SystemTime::now())),
-        }
-    }
-
-    pub(crate) fn advance(&self, duration: Duration) {
-        self.time_since_epoch_ms
-            .fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
-    }
-}
-
-impl SystemClock for TestSystemClock {
-    fn now(&self) -> SystemTime {
-        system_time_from_millis(self.time_since_epoch_ms.load(Ordering::SeqCst))
-    }
-}
-
 pub(crate) struct TokioClock {
     initial_ts: u128,
     initial_instant: tokio::time::Instant,
