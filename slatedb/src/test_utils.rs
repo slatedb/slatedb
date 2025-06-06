@@ -1,10 +1,9 @@
-use crate::clock::{LogicalClock, SystemClock};
+use crate::clock::LogicalClock;
 use crate::config::{PutOptions, WriteOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::row_codec::SstRowCodecV0;
 use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
-use crate::utils::{system_time_from_millis, system_time_to_millis};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::{Rng, RngCore};
@@ -12,7 +11,6 @@ use std::collections::{BTreeMap, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
