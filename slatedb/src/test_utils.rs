@@ -95,6 +95,7 @@ impl KeyValueIterator for TestIterator {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct TestClock {
     pub(crate) ticker: AtomicI64,
 }

@@ -74,6 +74,7 @@ pub(crate) struct Compactor {
 }
 
 impl Compactor {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
@@ -137,6 +138,7 @@ struct CompactorOrchestrator {
 }
 
 impl CompactorOrchestrator {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         options: CompactorOptions,
         manifest_store: Arc<ManifestStore>,

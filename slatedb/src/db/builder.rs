@@ -284,6 +284,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                             .max_cache_size_bytes,
                         self.settings.object_store_cache_options.scan_interval,
                         stats.clone(),
+                        system_clock.clone(),
                     ));
 
                     let cached_main_object_store = CachedObjectStore::new(

@@ -2,6 +2,7 @@
 
 use std::{
     cmp,
+    fmt::Debug,
     sync::{
         atomic::{AtomicI64, Ordering},
         Arc,
@@ -17,7 +18,7 @@ use tracing::info;
 
 /// Defines the physical clock that SlateDB will use to measure time for things
 /// like garbage collection schedule ticks, compaction schedule ticks, and so on.
-pub trait SystemClock: Send + Sync {
+pub trait SystemClock: Debug + Send + Sync {
     fn now(&self) -> SystemTime;
 }
 
@@ -26,6 +27,7 @@ pub trait SystemClock: Send + Sync {
 ///
 /// In test cases, it is possible to advance the clock manually with
 /// `#[tokio::test(start_paused = true)]` and `tokio::time::sleep`.
+#[derive(Debug)]
 pub struct DefaultSystemClock {
     initial_ts: i64,
     initial_instant: tokio::time::Instant,
@@ -59,7 +61,7 @@ impl SystemClock for DefaultSystemClock {
 
 /// Defines the logical clock that SlateDB will use to measure time for things
 /// like TTL expiration.
-pub trait LogicalClock: Send + Sync {
+pub trait LogicalClock: Debug + Send + Sync {
     /// Returns a timestamp (typically measured in millis since the unix epoch),
     /// must return monotonically increasing numbers (this is enforced
     /// at runtime and will panic if the invariant is broken).
@@ -71,6 +73,7 @@ pub trait LogicalClock: Send + Sync {
     fn now(&self) -> i64;
 }
 
+#[derive(Debug)]
 pub struct DefaultLogicalClock {
     last_ts: AtomicI64,
     inner: Arc<dyn SystemClock>,
