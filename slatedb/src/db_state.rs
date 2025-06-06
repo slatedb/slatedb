@@ -427,6 +427,7 @@ impl DbState {
         Ok(())
     }
 
+    /// increment the next wal id, and return the previous value.
     pub fn increment_next_wal_id(&mut self) -> u64 {
         let mut state = self.state_copy();
         let next_wal_id = state.manifest.core.next_wal_sst_id;
@@ -478,6 +479,7 @@ impl DbState {
 }
 
 impl WalIdStore for parking_lot::RwLock<DbState> {
+    /// increment the next wal id, and return the previous value.
     fn next_wal_id(&self) -> u64 {
         let mut state = self.write();
         state.increment_next_wal_id()
