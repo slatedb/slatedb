@@ -45,7 +45,6 @@ use crate::manifest::store::{DirtyManifest, FenceableManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::reader::Reader;
-use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::MonotonicClock;
@@ -92,6 +91,7 @@ impl DbInner {
             db_stats: db_stats.clone(),
             mono_clock: Arc::clone(&mono_clock),
             wal_enabled,
+            sst_iter_options: settings.sst_iterator_configs.read,
         };
 
         let db_inner = Self {
@@ -311,12 +311,7 @@ impl DbInner {
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
-        let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 1,
-            blocks_to_fetch: 256,
-            cache_blocks: true,
-            eager_spawn: true,
-        };
+        let sst_iter_options = self.settings.sst_iterator_configs.wal_replay;
 
         let replay_options = WalReplayOptions {
             sst_batch_size: 4,
@@ -968,6 +963,7 @@ mod tests {
         CompactorOptions, ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions,
         Ttl,
     };
+    use crate::config::{SstIteratorConfigs, SstIteratorOptions};
     use crate::db_state::CoreDbState;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::iter::KeyValueIterator;
@@ -977,7 +973,7 @@ mod tests {
     use crate::proptest_util::sample;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
-    use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::sst_iter::SstIterator;
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
     use crate::{proptest_util, test_utils, KeyValue};
@@ -1941,6 +1937,7 @@ mod tests {
                         max_sst_size: 256,
                         max_concurrent_compactions: 1,
                         manifest_update_timeout: Duration::from_secs(300),
+                        ..Default::default()
                     }),
                 ))
                 .with_compaction_scheduler_supplier(compaction_scheduler)
@@ -2877,6 +2874,7 @@ mod tests {
                 max_sst_size: 256,
                 max_concurrent_compactions: 1,
                 manifest_update_timeout: Duration::from_secs(300),
+                ..Default::default()
             }),
         ))
         .await;
@@ -2892,6 +2890,7 @@ mod tests {
                 manifest_update_timeout: Duration::from_secs(300),
                 max_sst_size: 256,
                 max_concurrent_compactions: 1,
+                ..Default::default()
             }),
         ))
         .await
@@ -3395,6 +3394,7 @@ mod tests {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             default_ttl: ttl,
+            sst_iterator_configs: SstIteratorConfigs::default(),
         }
     }
 }
