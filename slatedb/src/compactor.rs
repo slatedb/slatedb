@@ -115,10 +115,13 @@ impl Compactor {
     pub(crate) async fn close(mut self) {
         if let Some(main_thread) = self.main_thread.take() {
             self.main_tx.send(Shutdown).expect("main tx disconnected");
-            let result = main_thread
-                .join()
-                .expect("failed to stop main compactor thread");
-            info!("compactor thread exited with: {:?}", result)
+            // Wait on a separate thread to avoid blocking the tokio runtime
+            tokio::task::spawn_blocking(move || {
+                let result = main_thread
+                    .join()
+                    .expect("failed to stop main compactor thread");
+                info!("compactor thread exited with: {:?}", result)
+            });
         }
     }
 }
