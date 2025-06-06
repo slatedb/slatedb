@@ -1,5 +1,6 @@
+use crate::clock::LogicalClock;
+use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
-use crate::config::{Clock, DurabilityLevel};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
@@ -10,7 +11,7 @@ use std::future::Future;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::info;
 use ulid::Ulid;
 use uuid::{Builder, Uuid};
@@ -140,6 +141,21 @@ where
         .expect("failed to create monitor thread")
 }
 
+pub(crate) fn system_time_to_millis(system_time: SystemTime) -> i64 {
+    system_time.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+}
+
+pub(crate) fn system_time_from_millis(ms: i64) -> SystemTime {
+    if ms >= 0 {
+        // positive or zero: just add
+        UNIX_EPOCH + Duration::from_millis(ms as u64)
+    } else {
+        // negative (including i64::MIN): convert to i128, take abs, cast back to u64
+        let abs_ms = (ms as i128).unsigned_abs() as u64;
+        UNIX_EPOCH - Duration::from_millis(abs_ms)
+    }
+}
+
 pub(crate) async fn get_now_for_read(
     mono_clock: Arc<MonotonicClock>,
     durability_level: DurabilityLevel,
@@ -181,16 +197,17 @@ pub(crate) fn bg_task_result_into_err(result: &Result<(), SlateDBError>) -> Slat
     }
 }
 
+// TODO move this to clock.rs
 /// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
 /// from the underlying implementation are monotonically increasing
 pub(crate) struct MonotonicClock {
     pub(crate) last_tick: AtomicI64,
     pub(crate) last_durable_tick: AtomicI64,
-    delegate: Arc<dyn Clock + Send + Sync>,
+    delegate: Arc<dyn LogicalClock>,
 }
 
 impl MonotonicClock {
-    pub(crate) fn new(delegate: Arc<dyn Clock + Send + Sync>, init_tick: i64) -> Self {
+    pub(crate) fn new(delegate: Arc<dyn LogicalClock>, init_tick: i64) -> Self {
         Self {
             delegate,
             last_tick: AtomicI64::new(init_tick),
@@ -265,12 +282,6 @@ fn bytes_into_minimal_vec(bytes: &Bytes) -> Vec<u8> {
 
 pub(crate) fn clamp_allocated_size_bytes(bytes: &Bytes) -> Bytes {
     bytes_into_minimal_vec(bytes).into()
-}
-
-pub(crate) fn now_systime(clock: &dyn Clock) -> SystemTime {
-    chrono::DateTime::from_timestamp_millis(clock.now())
-        .map(SystemTime::from)
-        .expect("Failed to convert Clock time to SystemTime")
 }
 
 /// Computes the "index key" (lowest bound) for an SST index block, ie a key that's greater
