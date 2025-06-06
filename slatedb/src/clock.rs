@@ -1,5 +1,8 @@
 use std::{
-    sync::atomic::{AtomicI64, Ordering},
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -62,7 +65,9 @@ pub trait LogicalClock: Send + Sync {
     fn now(&self) -> i64;
 }
 
-pub struct DefaultLogicalClock;
+pub struct DefaultLogicalClock {
+    inner: Arc<dyn SystemClock>,
+}
 
 impl Default for DefaultLogicalClock {
     fn default() -> Self {
@@ -72,13 +77,14 @@ impl Default for DefaultLogicalClock {
 
 impl DefaultLogicalClock {
     pub fn new() -> Self {
-        Self
+        Self {
+            inner: Arc::new(DefaultSystemClock::new()),
+        }
     }
 }
 
 impl LogicalClock for DefaultLogicalClock {
     fn now(&self) -> i64 {
-        // TODO use DefaultSystemClock to keep it monotonic
-        system_time_to_millis(SystemTime::now())
+        system_time_to_millis(self.inner.now())
     }
 }

@@ -524,7 +524,7 @@ impl DbReader {
             &store_provider,
             checkpoint_id,
             options,
-            Arc::new(DefaultLogicalClock),
+            Arc::new(DefaultLogicalClock::default()),
             Arc::new(DefaultSystemClock::default()),
         )
         .await
@@ -817,7 +817,7 @@ impl DbReader {
 
 #[cfg(test)]
 mod tests {
-    use crate::clock::{DefaultSystemClock, LogicalClock, SystemClock};
+    use crate::clock::{DefaultLogicalClock, DefaultSystemClock, LogicalClock, SystemClock};
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db_reader::{DbReader, DbReaderOptions};
     use crate::db_state::CoreDbState;
@@ -830,7 +830,6 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
-    use crate::test_utils::TokioClock;
     use crate::{test_utils, Db, SlateDBError};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
@@ -1119,7 +1118,7 @@ mod tests {
 
     impl TestProvider {
         fn new(path: Path, object_store: Arc<dyn ObjectStore>) -> Self {
-            let logical_clock = Arc::new(TokioClock::new());
+            let logical_clock = Arc::new(DefaultLogicalClock::new());
             let system_clock = Arc::new(DefaultSystemClock::new());
             TestProvider {
                 object_store,

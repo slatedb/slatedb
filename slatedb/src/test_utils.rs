@@ -115,32 +115,6 @@ impl LogicalClock for TestClock {
     }
 }
 
-pub(crate) struct TokioClock {
-    initial_ts: u128,
-    initial_instant: tokio::time::Instant,
-}
-
-impl TokioClock {
-    pub(crate) fn new() -> Self {
-        let ts_millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-
-        Self {
-            initial_ts: ts_millis,
-            initial_instant: tokio::time::Instant::now(),
-        }
-    }
-}
-
-impl LogicalClock for TokioClock {
-    fn now(&self) -> i64 {
-        let elapsed = tokio::time::Instant::now().duration_since(self.initial_instant);
-        (self.initial_ts + elapsed.as_millis()) as i64
-    }
-}
-
 pub(crate) fn gen_rand_bytes(n: usize) -> Bytes {
     let mut rng = crate::rand::thread_rng();
     let random_bytes: Vec<u8> = (0..n).map(|_| rng.gen()).collect();
