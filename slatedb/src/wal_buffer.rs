@@ -144,6 +144,12 @@ impl WalBufferManager {
         inner.recent_flushed_wal_id
     }
 
+    #[allow(unused)] // used in compactor.rs
+    pub fn is_empty(&self) -> bool {
+        let inner = self.inner.read();
+        inner.current_wal.is_empty() && inner.immutable_wals.is_empty()
+    }
+
     /// Returns the total size of all unflushed WALs in bytes.
     pub async fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
         let inner = self.inner.read();
