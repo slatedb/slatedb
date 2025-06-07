@@ -265,7 +265,7 @@ impl CompactorState {
 mod tests {
     use std::sync::Arc;
     use std::thread::sleep;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     use super::*;
     use crate::checkpoint::Checkpoint;

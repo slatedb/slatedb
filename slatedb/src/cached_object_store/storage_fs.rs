@@ -656,8 +656,8 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{clock::DefaultSystemClock, stats::StatRegistry};
     use crate::test_utils::gen_rand_bytes;
+    use crate::{clock::DefaultSystemClock, stats::StatRegistry};
     use filetime::FileTime;
     use std::{io::Write, sync::atomic::Ordering, time::SystemTime};
 

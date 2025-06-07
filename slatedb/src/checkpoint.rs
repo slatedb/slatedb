@@ -137,7 +137,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_should_create_checkpoint() {
