@@ -158,6 +158,24 @@ impl GarbageCollector {
         );
     }
 
+    // Keep this private to protect aggainst accidentally using the default clock.
+    // External users are forced to use the clock explicitly.
+    async fn run_gc_once(
+        manifest_store: Arc<ManifestStore>,
+        table_store: Arc<TableStore>,
+        stat_registry: Arc<StatRegistry>,
+        options: GarbageCollectorOptions,
+    ) {
+        Self::run_gc_once_with_clock(
+            manifest_store,
+            table_store,
+            stat_registry,
+            options,
+            Arc::new(DefaultSystemClock::default()),
+        )
+        .await;
+    }
+
     /// Run the garbage collector once.
     ///
     /// This method will run the garbage collector just once.
@@ -169,21 +187,38 @@ impl GarbageCollector {
     /// * `table_store`: The table store to use for the garbage collector.
     /// * `stat_registry`: The stat registry to use for the garbage collector.
     /// * `options`: The options for the garbage collector.
+    /// * `system_clock`: The system clock to use for the garbage collector.
     ///
-    pub async fn run_gc_once(
+    pub async fn run_gc_once_with_clock(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         stat_registry: Arc<StatRegistry>,
         options: GarbageCollectorOptions,
+        system_clock: Arc<dyn SystemClock>,
     ) {
         let stats = Arc::new(GcStats::new(stat_registry));
 
         let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) =
             gc_tasks(&manifest_store, table_store, options, &stats);
 
-        run_gc_task(manifest_store.clone(), &mut manifest_gc_task).await;
-        run_gc_task(manifest_store.clone(), &mut wal_gc_task).await;
-        run_gc_task(manifest_store.clone(), &mut compacted_gc_task).await;
+        run_gc_task_with_clock(
+            manifest_store.clone(),
+            &mut manifest_gc_task,
+            system_clock.clone(),
+        )
+        .await;
+        run_gc_task_with_clock(
+            manifest_store.clone(),
+            &mut wal_gc_task,
+            system_clock.clone(),
+        )
+        .await;
+        run_gc_task_with_clock(
+            manifest_store.clone(),
+            &mut compacted_gc_task,
+            system_clock.clone(),
+        )
+        .await;
 
         stats.gc_count.inc();
     }

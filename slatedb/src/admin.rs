@@ -123,6 +123,7 @@ pub async fn run_gc_once(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
     gc_opts: GarbageCollectorOptions,
+    system_clock: Arc<dyn SystemClock>,
 ) -> Result<(), Box<dyn Error>> {
     let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
     manifest_store
@@ -137,7 +138,14 @@ pub async fn run_gc_once(
     ));
 
     let stats = Arc::new(StatRegistry::new());
-    GarbageCollector::run_gc_once(manifest_store, table_store, stats, gc_opts).await;
+    GarbageCollector::run_gc_once_with_clock(
+        manifest_store,
+        table_store,
+        stats,
+        gc_opts,
+        system_clock,
+    )
+    .await;
     Ok(())
 }
 

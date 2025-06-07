@@ -170,6 +170,7 @@ async fn exec_gc_once(
             min_age,
         })
     }
+    let system_clock = Arc::new(DefaultSystemClock::default());
     let gc_opts = match resource {
         GcResource::Manifest => GarbageCollectorOptions {
             manifest_options: create_gc_dir_opts(min_age),
@@ -187,7 +188,7 @@ async fn exec_gc_once(
             compacted_options: create_gc_dir_opts(min_age),
         },
     };
-    run_gc_once(path, object_store, gc_opts).await?;
+    run_gc_once(path, object_store, gc_opts, system_clock).await?;
     Ok(())
 }
 
