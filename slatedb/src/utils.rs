@@ -10,7 +10,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ulid::Ulid;
-use uuid::{Builder, Uuid};
+use uuid::Uuid;
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
@@ -249,10 +249,11 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
     this_block_first_key.slice(..prev_block_last_key.len() + 1)
 }
 
+#[allow(clippy::disallowed_types)]
 pub(crate) fn uuid() -> Uuid {
     let mut random_bytes = [0; 16];
     crate::rand::thread_rng().fill_bytes(&mut random_bytes);
-    Builder::from_random_bytes(random_bytes).into_uuid()
+    uuid::Builder::from_random_bytes(random_bytes).into_uuid()
 }
 
 pub(crate) fn ulid() -> Ulid {
