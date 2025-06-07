@@ -1,4 +1,4 @@
-use crate::clock::{DefaultSystemClock, SystemClock};
+use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
@@ -66,26 +66,6 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         id: Uuid,
         lifetime: Option<Duration>,
-    ) -> Result<(), SlateDBError> {
-        Self::refresh_checkpoint_with_clock(
-            path,
-            object_store,
-            id,
-            lifetime,
-            Arc::new(DefaultSystemClock::new()),
-        )
-        .await
-    }
-
-    /// Refresh the lifetime of an existing checkpoint. Takes the id of an existing checkpoint
-    /// and a lifetime, and sets the lifetime of the checkpoint to the specified lifetime. If
-    /// there is no checkpoint with the specified id, then this fn fails with
-    /// SlateDBError::InvalidDbState
-    async fn refresh_checkpoint_with_clock(
-        path: &Path,
-        object_store: Arc<dyn ObjectStore>,
-        id: Uuid,
-        lifetime: Option<Duration>,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<(), SlateDBError> {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
@@ -137,6 +117,7 @@ impl Db {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
+    use crate::clock::DefaultSystemClock;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
@@ -344,6 +325,7 @@ mod tests {
             object_store.clone(),
             id,
             Some(Duration::from_secs(1000)),
+            Arc::new(DefaultSystemClock::new()),
         )
         .await
         .unwrap();
@@ -375,6 +357,7 @@ mod tests {
             object_store.clone(),
             crate::utils::uuid(),
             Some(Duration::from_secs(1000)),
+            Arc::new(DefaultSystemClock::new()),
         )
         .await;
 

@@ -5,7 +5,7 @@ use slatedb::admin;
 use slatedb::admin::{
     list_checkpoints, list_manifests, read_manifest, run_gc_in_background, run_gc_once,
 };
-use slatedb::clock::DefaultSystemClock;
+use slatedb::clock::{DefaultSystemClock, SystemClock};
 use slatedb::config::{
     CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args: CliArgs = parse_args();
     let path = Path::from(args.path.as_str());
     let object_store = admin::load_object_store_from_env(args.env_file)?;
-
+    let system_clock = Arc::new(DefaultSystemClock::default());
     let cancellation_token = CancellationToken::new();
 
     let ct = cancellation_token.clone();
@@ -48,14 +48,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             exec_create_checkpoint(&path, object_store, lifetime, source).await?
         }
         CliCommands::RefreshCheckpoint { id, lifetime } => {
-            exec_refresh_checkpoint(&path, object_store, id, lifetime).await?
+            exec_refresh_checkpoint(&path, object_store, id, lifetime, system_clock).await?
         }
         CliCommands::DeleteCheckpoint { id } => {
             exec_delete_checkpoint(&path, object_store, id).await?
         }
         CliCommands::ListCheckpoints {} => exec_list_checkpoints(&path, object_store).await?,
         CliCommands::RunGarbageCollection { resource, min_age } => {
-            exec_gc_once(&path, object_store, resource, min_age).await?
+            exec_gc_once(&path, object_store, resource, min_age, system_clock).await?
         }
         CliCommands::ScheduleGarbageCollection {
             manifest,
@@ -131,10 +131,11 @@ async fn exec_refresh_checkpoint(
     object_store: Arc<dyn ObjectStore>,
     id: Uuid,
     lifetime: Option<Duration>,
+    system_clock: Arc<dyn SystemClock>,
 ) -> Result<(), Box<dyn Error>> {
     println!(
         "{:?}",
-        Db::refresh_checkpoint(path, object_store, id, lifetime).await?
+        Db::refresh_checkpoint(path, object_store, id, lifetime, system_clock).await?
     );
     Ok(())
 }
@@ -163,6 +164,7 @@ async fn exec_gc_once(
     object_store: Arc<dyn ObjectStore>,
     resource: GcResource,
     min_age: Duration,
+    system_clock: Arc<dyn SystemClock>,
 ) -> Result<(), Box<dyn Error>> {
     fn create_gc_dir_opts(min_age: Duration) -> Option<GarbageCollectorDirectoryOptions> {
         Some(GarbageCollectorDirectoryOptions {
@@ -170,7 +172,6 @@ async fn exec_gc_once(
             min_age,
         })
     }
-    let system_clock = Arc::new(DefaultSystemClock::default());
     let gc_opts = match resource {
         GcResource::Manifest => GarbageCollectorOptions {
             manifest_options: create_gc_dir_opts(min_age),
