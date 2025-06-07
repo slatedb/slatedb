@@ -747,6 +747,7 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
+    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::config::CheckpointOptions;
     use crate::db_state::CoreDbState;
     use crate::error;
@@ -1055,7 +1056,8 @@ mod tests {
     }
 
     fn now_rounded_to_nearest_sec() -> SystemTime {
-        let now_secs = SystemTime::now()
+        let now_secs = DefaultSystemClock::default()
+            .now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
