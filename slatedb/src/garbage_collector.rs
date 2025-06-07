@@ -160,6 +160,7 @@ impl GarbageCollector {
 
     // Keep this private to protect aggainst accidentally using the default clock.
     // External users are forced to use the clock explicitly.
+    #[cfg(test)]
     async fn run_gc_once(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
