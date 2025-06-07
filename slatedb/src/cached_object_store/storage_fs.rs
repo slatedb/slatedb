@@ -656,7 +656,7 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stats::StatRegistry;
+    use crate::{clock::DefaultSystemClock, stats::StatRegistry};
     use crate::test_utils::gen_rand_bytes;
     use filetime::FileTime;
     use std::{io::Write, sync::atomic::Ordering, time::SystemTime};
@@ -690,19 +690,19 @@ mod tests {
 
         let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
         let evicted = evictor
-            .track_entry_accessed(path0, 1024, SystemTime::now(), true)
+            .track_entry_accessed(path0, 1024, DefaultSystemClock::default().now(), true)
             .await;
         assert_eq!(evicted, 0);
 
         let path1 = gen_rand_file(temp_dir.path(), "file1", 1024);
         let evicted = evictor
-            .track_entry_accessed(path1, 1024, SystemTime::now(), true)
+            .track_entry_accessed(path1, 1024, DefaultSystemClock::default().now(), true)
             .await;
         assert_eq!(evicted, 0);
 
         let path2 = gen_rand_file(temp_dir.path(), "file2", 1024);
         let evicted = evictor
-            .track_entry_accessed(path2, 1024, SystemTime::now(), true)
+            .track_entry_accessed(path2, 1024, DefaultSystemClock::default().now(), true)
             .await;
         assert_eq!(evicted, 2048);
 

@@ -118,6 +118,7 @@ mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
     use crate::clock::DefaultSystemClock;
+    use crate::clock::SystemClock;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
@@ -179,7 +180,7 @@ mod tests {
             .unwrap();
         db.close().await.unwrap();
         let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let checkpoint_time = SystemTime::now();
+        let checkpoint_time = DefaultSystemClock::default().now();
 
         let CheckpointCreateResult {
             id: checkpoint_id,
