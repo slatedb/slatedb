@@ -419,7 +419,7 @@ mod tests {
             id: crate::utils::uuid(),
             manifest_id,
             expire_time,
-            create_time: SystemTime::now(),
+            create_time: DefaultSystemClock::default().now(),
         }
     }
 
@@ -464,7 +464,8 @@ mod tests {
                 .unwrap();
 
         // Manifest 2 (expired_checkpoint_id -> 1)
-        let one_day_ago = SystemTime::now()
+        let one_day_ago = DefaultSystemClock::default()
+            .now()
             .checked_sub(std::time::Duration::from_secs(86400))
             .unwrap();
         let _expired_checkpoint_id =
@@ -472,7 +473,8 @@ mod tests {
                 .await
                 .unwrap();
         // Manifest 3 (expired_checkpoint_id -> 1, unexpired_checkpoint_id -> 2)
-        let one_day_ahead = SystemTime::now()
+        let one_day_ahead = DefaultSystemClock::default()
+            .now()
             .checked_add(std::time::Duration::from_secs(86400))
             .unwrap();
         let unexpired_checkpoint_id =
@@ -1043,7 +1045,8 @@ mod tests {
     ) -> DateTime<Utc> {
         let file = local_object_store.path_to_filesystem(path).unwrap();
         let file = File::open(file).unwrap();
-        let now_minus_24h = SystemTime::now()
+        let now_minus_24h = DefaultSystemClock::default()
+            .now()
             .checked_sub(std::time::Duration::from_secs(seconds_ago))
             .unwrap();
         file.set_modified(now_minus_24h).unwrap();

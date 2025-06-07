@@ -3362,7 +3362,7 @@ mod tests {
         cond: impl Fn(&CoreDbState) -> bool,
         timeout: Duration,
     ) -> CoreDbState {
-        let start = std::time::Instant::now();
+        let start = tokio::time::Instant::now();
         while start.elapsed() < timeout {
             let manifest = sm.refresh().await.unwrap();
             if cond(&manifest.core) {
