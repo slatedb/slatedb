@@ -1,4 +1,5 @@
 use crate::checkpoint::Checkpoint;
+use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::config::GarbageCollectorOptions;
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
@@ -68,6 +69,7 @@ impl GarbageCollector {
         stat_registry: Arc<StatRegistry>,
         cancellation_token: CancellationToken,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
+        system_clock: Arc<dyn SystemClock>,
     ) -> Self {
         let stats = Arc::new(GcStats::new(stat_registry));
         let ct = cancellation_token.clone();
@@ -79,6 +81,7 @@ impl GarbageCollector {
                 stats,
                 ct,
                 options,
+                system_clock,
             ));
 
             Ok(())
@@ -107,6 +110,7 @@ impl GarbageCollector {
         stats: Arc<GcStats>,
         cancellation_token: CancellationToken,
         options: GarbageCollectorOptions,
+        system_clock: Arc<dyn SystemClock>,
     ) {
         let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
 
@@ -220,31 +224,48 @@ fn gc_tasks(
 }
 
 async fn run_gc_task<T: GcTask>(manifest_store: Arc<ManifestStore>, task: &mut T) {
+    run_gc_task_with_clock(
+        manifest_store,
+        task,
+        Arc::new(DefaultSystemClock::default()),
+    )
+    .await;
+}
+
+async fn run_gc_task_with_clock<T: GcTask>(
+    manifest_store: Arc<ManifestStore>,
+    task: &mut T,
+    system_clock: Arc<dyn SystemClock>,
+) {
     debug!(
         "Scheduled garbage collection attempt for {}.",
         task.resource()
     );
-    if let Err(e) = remove_expired_checkpoints(manifest_store).await {
+    if let Err(e) = remove_expired_checkpoints(manifest_store.clone(), system_clock.clone()).await {
         error!("Error removing expired checkpoints: {}", e);
-    } else if let Err(e) = task.collect(Utc::now()).await {
+    } else if let Err(e) = task.collect(system_clock.now().into()).await {
         error!("Error collecting compacted garbage: {}", e);
     }
 }
 
 async fn remove_expired_checkpoints(
     manifest_store: Arc<ManifestStore>,
+    system_clock: Arc<dyn SystemClock>,
 ) -> Result<(), SlateDBError> {
     let mut stored_manifest = StoredManifest::load(Arc::clone(&manifest_store)).await?;
 
     stored_manifest
-        .maybe_apply_manifest_update(filter_expired_checkpoints)
+        .maybe_apply_manifest_update(|manifest| {
+            filter_expired_checkpoints(manifest, system_clock.clone())
+        })
         .await
 }
 
 fn filter_expired_checkpoints(
     manifest: &StoredManifest,
+    system_clock: Arc<dyn SystemClock>,
 ) -> Result<Option<DirtyManifest>, SlateDBError> {
-    let utc_now = Utc::now();
+    let utc_now: DateTime<Utc> = system_clock.now().into();
     let mut dirty = manifest.prepare_dirty();
     let retained_checkpoints: Vec<Checkpoint> = dirty
         .core
@@ -278,6 +299,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
+    use crate::clock::DefaultSystemClock;
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
     use crate::error::SlateDBError;
     use crate::object_stores::ObjectStores;
@@ -1099,6 +1121,7 @@ mod tests {
             stats.clone(),
             cancellation_token.clone(),
             |result| assert!(result.is_ok()),
+            Arc::new(DefaultSystemClock::default()),
         );
 
         gc.terminate_background_task().await;

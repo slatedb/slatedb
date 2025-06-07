@@ -441,7 +441,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                         let mut state = cleanup_inner.state.write();
                         state.record_fatal_error(err.clone())
                     },
-                    system_clock,
+                    system_clock.clone(),
                 )
                 .await?,
             )
@@ -469,6 +469,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
                 },
+                system_clock.clone(),
             ));
         }
 
