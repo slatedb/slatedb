@@ -131,6 +131,10 @@ impl Compactor {
 }
 
 struct CompactorOrchestrator {
+    // TODO: We need to migrate this to tokio::time::Instant for DST
+    // The current orchestrator implementation does not use the tokio runtime
+    // for for its run loop, so we can't make a tokio ticker yet.
+    #[allow(clippy::disallowed_types)]
     ticker: crossbeam_channel::Receiver<std::time::Instant>,
     external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
     worker_rx: crossbeam_channel::Receiver<WorkerToOrchestratorMsg>,

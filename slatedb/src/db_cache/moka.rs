@@ -81,10 +81,14 @@ impl MokaCache {
             .weigher(|_, v: &CachedEntry| v.size() as u32)
             .max_capacity(options.max_capacity);
 
+        // TODO: We need to use a SystemClock for DST support
+        // Moka does not currently allow us to inject a clock.
         if let Some(ttl) = options.time_to_live {
             builder = builder.time_to_live(ttl);
         }
 
+        // TODO: We need to use a SystemClock for DST support
+        // Moka does not currently allow us to inject a clock.
         if let Some(tti) = options.time_to_idle {
             builder = builder.time_to_idle(tti);
         }

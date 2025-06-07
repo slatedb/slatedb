@@ -1,5 +1,5 @@
 use crate::checkpoint::Checkpoint;
-use crate::clock::{DefaultSystemClock, SystemClock};
+use crate::clock::SystemClock;
 use crate::config::GarbageCollectorOptions;
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
@@ -61,6 +61,7 @@ impl GarbageCollector {
     ///
     /// * `Self`: The garbage collector.
     ///
+    #[allow(clippy::too_many_arguments)]
     pub fn start_in_bg_thread(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
@@ -136,9 +137,9 @@ impl GarbageCollector {
                     info!("Garbage collector received shutdown signal... shutting down");
                     break;
                 },
-                _ = manifest_ticker.tick() => { run_gc_task_with_clock(manifest_store.clone(), &mut manifest_gc_task, system_clock.clone()).await; },
-                _ = wal_ticker.tick() => { run_gc_task_with_clock(manifest_store.clone(), &mut wal_gc_task, system_clock.clone()).await; },
-                _ = compacted_ticker.tick() => { run_gc_task_with_clock(manifest_store.clone(), &mut compacted_gc_task, system_clock.clone()).await; },
+                _ = manifest_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut manifest_gc_task, system_clock.clone()).await; },
+                _ = wal_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut wal_gc_task, system_clock.clone()).await; },
+                _ = compacted_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut compacted_gc_task, system_clock.clone()).await; },
                 _ = log_ticker.tick() => {
                     debug!("GC has collected {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
                          stats.gc_manifest_count.value.load(Ordering::SeqCst),
@@ -167,6 +168,8 @@ impl GarbageCollector {
         stat_registry: Arc<StatRegistry>,
         options: GarbageCollectorOptions,
     ) {
+        use crate::clock::DefaultSystemClock;
+
         Self::run_gc_once_with_clock(
             manifest_store,
             table_store,
@@ -202,19 +205,19 @@ impl GarbageCollector {
         let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) =
             gc_tasks(&manifest_store, table_store, options, &stats);
 
-        run_gc_task_with_clock(
+        run_gc_task(
             manifest_store.clone(),
             &mut manifest_gc_task,
             system_clock.clone(),
         )
         .await;
-        run_gc_task_with_clock(
+        run_gc_task(
             manifest_store.clone(),
             &mut wal_gc_task,
             system_clock.clone(),
         )
         .await;
-        run_gc_task_with_clock(
+        run_gc_task(
             manifest_store.clone(),
             &mut compacted_gc_task,
             system_clock.clone(),
@@ -259,16 +262,7 @@ fn gc_tasks(
     (wal_gc_task, compacted_gc_task, manifest_gc_task)
 }
 
-async fn run_gc_task<T: GcTask>(manifest_store: Arc<ManifestStore>, task: &mut T) {
-    run_gc_task_with_clock(
-        manifest_store,
-        task,
-        Arc::new(DefaultSystemClock::default()),
-    )
-    .await;
-}
-
-async fn run_gc_task_with_clock<T: GcTask>(
+async fn run_gc_task<T: GcTask>(
     manifest_store: Arc<ManifestStore>,
     task: &mut T,
     system_clock: Arc<dyn SystemClock>,
