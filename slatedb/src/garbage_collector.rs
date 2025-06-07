@@ -136,9 +136,9 @@ impl GarbageCollector {
                     info!("Garbage collector received shutdown signal... shutting down");
                     break;
                 },
-                _ = manifest_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut manifest_gc_task).await; },
-                _ = wal_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut wal_gc_task).await; },
-                _ = compacted_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut compacted_gc_task).await; },
+                _ = manifest_ticker.tick() => { run_gc_task_with_clock(manifest_store.clone(), &mut manifest_gc_task, system_clock.clone()).await; },
+                _ = wal_ticker.tick() => { run_gc_task_with_clock(manifest_store.clone(), &mut wal_gc_task, system_clock.clone()).await; },
+                _ = compacted_ticker.tick() => { run_gc_task_with_clock(manifest_store.clone(), &mut compacted_gc_task, system_clock.clone()).await; },
                 _ = log_ticker.tick() => {
                     debug!("GC has collected {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
                          stats.gc_manifest_count.value.load(Ordering::SeqCst),

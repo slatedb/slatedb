@@ -5,6 +5,7 @@ use slatedb::admin;
 use slatedb::admin::{
     list_checkpoints, list_manifests, read_manifest, run_gc_in_background, run_gc_once,
 };
+use slatedb::clock::DefaultSystemClock;
 use slatedb::config::{
     CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
@@ -204,12 +205,20 @@ async fn schedule_gc(
             min_age: schedule.min_age,
         })
     }
+    let system_clock = Arc::new(DefaultSystemClock::default());
     let gc_opts = GarbageCollectorOptions {
         manifest_options: manifest_schedule.and_then(create_gc_dir_opts),
         wal_options: wal_schedule.and_then(create_gc_dir_opts),
         compacted_options: compacted_schedule.and_then(create_gc_dir_opts),
     };
 
-    run_gc_in_background(path, object_store, gc_opts, cancellation_token).await?;
+    run_gc_in_background(
+        path,
+        object_store,
+        gc_opts,
+        cancellation_token,
+        system_clock,
+    )
+    .await?;
     Ok(())
 }
