@@ -45,7 +45,9 @@ impl DbContext {
         self.thread_rng.get_or(|| {
             let mut guard = self.root_rng.lock().expect("root rng poisoned");
             let child_seed = guard.next_u64();
-            Box::new(ThreadRng { rng: Box::new(RngAlg::seed_from_u64(child_seed)) })
+            Box::new(ThreadRng {
+                rng: Box::new(RngAlg::seed_from_u64(child_seed)),
+            })
         })
     }
 
@@ -59,7 +61,7 @@ impl DbContext {
 }
 
 pub(crate) struct ThreadRng {
-    rng: Box<RngAlg>
+    rng: Box<RngAlg>,
 }
 
 impl std::fmt::Debug for ThreadRng {
