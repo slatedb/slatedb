@@ -533,6 +533,7 @@ impl DbState {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
+    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
@@ -543,7 +544,6 @@ mod tests {
     use std::collections::BTreeSet;
     use std::collections::Bound::Included;
     use std::ops::RangeBounds;
-    use std::time::SystemTime;
 
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
@@ -556,7 +556,7 @@ mod tests {
             id: crate::utils::uuid(),
             manifest_id: 1,
             expire_time: None,
-            create_time: SystemTime::now(),
+            create_time: DefaultSystemClock::default().now(),
         };
         updated_state.core.checkpoints.push(checkpoint.clone());
 

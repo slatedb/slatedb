@@ -136,7 +136,7 @@ impl CompactionExecuteBench {
         val_bytes: usize,
     ) -> Result<(), SlateDBError> {
         let mut rng = crate::rand::thread_rng();
-        let start = std::time::Instant::now();
+        let start = tokio::time::Instant::now();
         let mut suffix = Vec::<u8>::new();
         suffix.put_u32(i);
         let mut key_gen =
@@ -313,7 +313,7 @@ impl CompactionExecuteBench {
                 .await?
             }
         };
-        let start = std::time::Instant::now();
+        let start = tokio::time::Instant::now();
         info!("start compaction job");
         tokio::task::spawn_blocking(move || executor.start_compaction(job));
         let WorkerToOrchestratorMsg::CompactionFinished { id: _, result } =

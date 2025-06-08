@@ -12,10 +12,11 @@
 //! To use the cache, you need to configure the [DbOptions](crate::config::DbOptions) with the desired cache implementation.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use tokio::time::Instant;
 use tracing::{debug, error};
 
 use crate::db_cache::stats::DbCacheStats;

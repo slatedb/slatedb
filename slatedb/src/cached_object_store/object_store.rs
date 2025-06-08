@@ -446,6 +446,7 @@ mod tests {
     use crate::cached_object_store::stats::CachedObjectStoreStats;
     use crate::cached_object_store::storage_fs::FsCacheStorage;
     use crate::cached_object_store::{storage::PartID, storage_fs::FsCacheEntry};
+    use crate::clock::DefaultSystemClock;
     use crate::stats::StatRegistry;
     use crate::test_utils::gen_rand_bytes;
 
@@ -480,6 +481,7 @@ mod tests {
             None,
             None,
             stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
         ));
 
         let part_size = 1024;
@@ -550,6 +552,7 @@ mod tests {
             None,
             None,
             stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
         ));
 
         let cached_store =
@@ -593,6 +596,7 @@ mod tests {
             None,
             None,
             stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
         ));
 
         let cached_store =
@@ -681,6 +685,7 @@ mod tests {
             None,
             None,
             stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
         ));
         let cached_store =
             CachedObjectStore::new(object_store, cache_storage, 1024, stats).unwrap();
@@ -702,6 +707,7 @@ mod tests {
             None,
             None,
             stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
         ));
         let cached_store =
             CachedObjectStore::new(object_store, cache_storage, 1024, stats).unwrap();
@@ -731,6 +737,7 @@ mod tests {
             None,
             None,
             stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
         ));
         let cached_store =
             CachedObjectStore::new(object_store.clone(), cache_storage, 1024, stats).unwrap();

@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime};
 use std::{fmt::Display, io::SeekFrom};
 
 use crate::cached_object_store::stats::CachedObjectStoreStats;
+use crate::clock::SystemClock;
 use bytes::Bytes;
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
@@ -34,6 +35,7 @@ impl FsCacheStorage {
         max_cache_size_bytes: Option<usize>,
         scan_interval: Option<Duration>,
         stats: Arc<CachedObjectStoreStats>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> Self {
         let evictor = max_cache_size_bytes.map(|max_cache_size_bytes| {
             Arc::new(FsCacheEvictor::new(
@@ -41,6 +43,7 @@ impl FsCacheStorage {
                 max_cache_size_bytes,
                 scan_interval,
                 stats,
+                system_clock,
             ))
         });
 
@@ -325,6 +328,7 @@ struct FsCacheEvictor {
     background_evict_handle: OnceCell<tokio::task::JoinHandle<()>>,
     background_scan_handle: OnceCell<tokio::task::JoinHandle<()>>,
     stats: Arc<CachedObjectStoreStats>,
+    system_clock: Arc<dyn SystemClock>,
 }
 
 impl FsCacheEvictor {
@@ -333,6 +337,7 @@ impl FsCacheEvictor {
         max_cache_size_bytes: usize,
         scan_interval: Option<Duration>,
         stats: Arc<CachedObjectStoreStats>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         Self {
@@ -344,6 +349,7 @@ impl FsCacheEvictor {
             background_evict_handle: OnceCell::new(),
             background_scan_handle: OnceCell::new(),
             stats,
+            system_clock,
         }
     }
 
@@ -368,7 +374,11 @@ impl FsCacheEvictor {
 
         // start the background evictor task, it'll be triggered whenever a new cache entry is added
         self.background_evict_handle
-            .set(tokio::spawn(Self::background_evict(inner, rx)))
+            .set(tokio::spawn(Self::background_evict(
+                inner,
+                rx,
+                self.system_clock.clone(),
+            )))
             .ok();
     }
 
@@ -379,12 +389,13 @@ impl FsCacheEvictor {
     async fn background_evict(
         inner: Arc<FsCacheEvictorInner>,
         mut rx: tokio::sync::mpsc::Receiver<FsCacheEvictorWork>,
+        system_clock: Arc<dyn SystemClock>,
     ) {
         loop {
             match rx.recv().await {
                 Some((path, bytes, evict)) => {
                     inner
-                        .track_entry_accessed(path, bytes, SystemTime::now(), evict)
+                        .track_entry_accessed(path, bytes, system_clock.now(), evict)
                         .await;
                 }
                 None => return,
@@ -645,8 +656,8 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stats::StatRegistry;
     use crate::test_utils::gen_rand_bytes;
+    use crate::{clock::DefaultSystemClock, stats::StatRegistry};
     use filetime::FileTime;
     use std::{io::Write, sync::atomic::Ordering, time::SystemTime};
 
@@ -679,19 +690,19 @@ mod tests {
 
         let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
         let evicted = evictor
-            .track_entry_accessed(path0, 1024, SystemTime::now(), true)
+            .track_entry_accessed(path0, 1024, DefaultSystemClock::default().now(), true)
             .await;
         assert_eq!(evicted, 0);
 
         let path1 = gen_rand_file(temp_dir.path(), "file1", 1024);
         let evicted = evictor
-            .track_entry_accessed(path1, 1024, SystemTime::now(), true)
+            .track_entry_accessed(path1, 1024, DefaultSystemClock::default().now(), true)
             .await;
         assert_eq!(evicted, 0);
 
         let path2 = gen_rand_file(temp_dir.path(), "file2", 1024);
         let evicted = evictor
-            .track_entry_accessed(path2, 1024, SystemTime::now(), true)
+            .track_entry_accessed(path2, 1024, DefaultSystemClock::default().now(), true)
             .await;
         assert_eq!(evicted, 2048);
 
