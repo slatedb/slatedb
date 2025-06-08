@@ -1,7 +1,8 @@
-use once_cell::unsync::OnceCell;
-use rand::{RngCore, SeedableRng};
+use rand::{Rng as _, RngCore, SeedableRng};
 use rand_xoshiro::Xoroshiro128PlusPlus;
 use thread_local::ThreadLocal;
+use ulid::Ulid;
+use uuid::Uuid;
 
 use crate::clock::{DefaultLogicalClock, DefaultSystemClock, LogicalClock, SystemClock};
 use std::sync::{Arc, Mutex};
@@ -40,7 +41,7 @@ impl DbContext {
         }
     }
 
-    pub fn rand(&self) -> &ThreadRng {
+    pub fn thread_rng(&self) -> &ThreadRng {
         self.thread_rng.get_or(|| {
             let mut guard = self.root_rng.lock().expect("root rng poisoned");
             let child_seed = guard.next_u64();
@@ -86,5 +87,19 @@ impl RngCore for ThreadRng {
     #[inline(always)]
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
         self.rng.try_fill_bytes(dest)
+    }
+}
+
+impl ThreadRng {
+    #[inline(always)]
+    fn uuid(&mut self) -> Uuid {
+        let rng = self.rng.as_mut();
+        Uuid::from_bytes(rng.gen())
+    }
+
+    #[inline(always)]
+    fn ulid(&mut self) -> Ulid {
+        let rng = self.rng.as_mut();
+        Ulid::from_bytes(rng.gen())
     }
 }
