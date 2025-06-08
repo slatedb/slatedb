@@ -1,5 +1,7 @@
 use crate::bytes_range::BytesRange;
-use crate::clock::{DefaultLogicalClock, DefaultSystemClock, LogicalClock, SystemClock};
+use crate::clock::{
+    DefaultLogicalClock, DefaultSystemClock, LogicalClock, MonotonicClock, SystemClock,
+};
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
 use crate::db_reader::ManifestPollerMsg::Shutdown;
 use crate::db_state::CoreDbState;
@@ -13,7 +15,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::{DefaultStoreProvider, StoreProvider};
 use crate::tablestore::TableStore;
-use crate::utils::{MonotonicClock, WatchableOnceCell};
+use crate::utils::WatchableOnceCell;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{utils, Checkpoint, DbIterator};
 use bytes::Bytes;

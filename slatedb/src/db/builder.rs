@@ -284,6 +284,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                             .max_cache_size_bytes,
                         self.settings.object_store_cache_options.scan_interval,
                         stats.clone(),
+                        system_clock.clone(),
                     ));
 
                     let cached_main_object_store = CachedObjectStore::new(
@@ -371,7 +372,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             DbInner::new(
                 self.settings.clone(),
                 logical_clock,
-                system_clock,
+                system_clock.clone(),
                 table_store.clone(),
                 manifest.prepare_dirty()?,
                 wal_flush_tx,
@@ -440,6 +441,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                         let mut state = cleanup_inner.state.write();
                         state.record_fatal_error(err.clone())
                     },
+                    system_clock.clone(),
                 )
                 .await?,
             )
@@ -467,6 +469,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
                 },
+                system_clock.clone(),
             ));
         }
 
