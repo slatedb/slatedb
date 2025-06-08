@@ -89,6 +89,7 @@ use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::Mutex;
+use rand::RngCore;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -107,6 +108,7 @@ use crate::config::Settings;
 use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::{DbCache, DbCacheWrapper};
+use crate::db_context::DbContext;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
@@ -248,10 +250,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             info!(?path, ?self.settings, "Opening SlateDB database");
         }
 
-        if let Some(seed) = self.seed {
-            debug!("Using user-specified seed");
-            crate::rand::seed(seed);
-        }
+        let rng_seed = self.seed.unwrap_or_else(|| rand::thread_rng().next_u64());
 
         let logical_clock = self
             .logical_clock
@@ -261,6 +260,8 @@ impl<P: Into<Path>> DbBuilder<P> {
         let system_clock = self
             .system_clock
             .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
+
+        let db_context = Arc::new(DbContext::new(rng_seed, system_clock, logical_clock));
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
@@ -284,7 +285,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                             .max_cache_size_bytes,
                         self.settings.object_store_cache_options.scan_interval,
                         stats.clone(),
-                        system_clock.clone(),
+                        db_context.clone(),
                     ));
 
                     let cached_main_object_store = CachedObjectStore::new(
@@ -371,8 +372,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let inner = Arc::new(
             DbInner::new(
                 self.settings.clone(),
-                logical_clock,
-                system_clock.clone(),
+                db_context.clone(),
                 table_store.clone(),
                 manifest.prepare_dirty()?,
                 wal_flush_tx,
@@ -441,7 +441,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                         let mut state = cleanup_inner.state.write();
                         state.record_fatal_error(err.clone())
                     },
-                    system_clock.clone(),
+                    db_context.clone(),
                 )
                 .await?,
             )
@@ -469,7 +469,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
                 },
-                system_clock.clone(),
+                db_context.system_clock().clone(),
             ));
         }
 

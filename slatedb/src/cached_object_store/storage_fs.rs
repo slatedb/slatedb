@@ -6,6 +6,7 @@ use std::{fmt::Display, io::SeekFrom};
 
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::clock::SystemClock;
+use crate::db_context::DbContext;
 use bytes::Bytes;
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
@@ -35,7 +36,7 @@ impl FsCacheStorage {
         max_cache_size_bytes: Option<usize>,
         scan_interval: Option<Duration>,
         stats: Arc<CachedObjectStoreStats>,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     ) -> Self {
         let evictor = max_cache_size_bytes.map(|max_cache_size_bytes| {
             Arc::new(FsCacheEvictor::new(
@@ -43,7 +44,7 @@ impl FsCacheStorage {
                 max_cache_size_bytes,
                 scan_interval,
                 stats,
-                system_clock,
+                db_context.system_clock(),
             ))
         });
 

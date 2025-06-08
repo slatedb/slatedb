@@ -37,6 +37,7 @@ use crate::clock::MonotonicClock;
 use crate::clock::{LogicalClock, SystemClock};
 use crate::compactor::Compactor;
 use crate::config::{PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions};
+use crate::db_context::DbContext;
 use crate::db_iter::DbIterator;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
@@ -75,9 +76,7 @@ impl DbInner {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         settings: Settings,
-        logical_clock: Arc<dyn LogicalClock>,
-        // TODO replace all system clock usage with this
-        _system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
         table_store: Arc<TableStore>,
         manifest: DirtyManifest,
         wal_flush_notifier: UnboundedSender<WalFlushMsg>,
@@ -86,7 +85,7 @@ impl DbInner {
         stat_registry: Arc<StatRegistry>,
     ) -> Result<Self, SlateDBError> {
         let mono_clock = Arc::new(MonotonicClock::new(
-            logical_clock,
+            db_context.logical_clock(),
             manifest.core.last_l0_clock_tick,
         ));
         let state = Arc::new(RwLock::new(DbState::new(manifest)));
@@ -1504,7 +1503,7 @@ mod tests {
             None,
             None,
             cache_stats.clone(),
-            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbContext::default()),
         ));
 
         let cached_object_store = CachedObjectStore::new(

@@ -15,6 +15,7 @@ use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
+use crate::db_context::DbContext;
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -83,7 +84,7 @@ impl Compactor {
         tokio_handle: Handle,
         stat_registry: &StatRegistry,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let (err_tx, err_rx) = tokio::sync::oneshot::channel();
@@ -97,7 +98,7 @@ impl Compactor {
                 tokio_handle,
                 external_rx,
                 stats,
-                system_clock,
+                db_context.system_clock(),
             );
             let mut orchestrator = match load_result {
                 Ok(orchestrator) => orchestrator,

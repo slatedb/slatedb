@@ -447,6 +447,7 @@ mod tests {
     use crate::cached_object_store::storage_fs::FsCacheStorage;
     use crate::cached_object_store::{storage::PartID, storage_fs::FsCacheEntry};
     use crate::clock::DefaultSystemClock;
+    use crate::db_context::DbContext;
     use crate::stats::StatRegistry;
     use crate::test_utils::gen_rand_bytes;
 
@@ -462,6 +463,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_result_not_aligned() -> object_store::Result<()> {
+        let db_context = Arc::new(DbContext::default());
         let payload = gen_rand_bytes(1024 * 3 + 32);
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
@@ -481,7 +483,7 @@ mod tests {
             None,
             None,
             stats.clone(),
-            Arc::new(DefaultSystemClock::new()),
+            db_context.clone(),
         ));
 
         let part_size = 1024;
@@ -532,6 +534,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_result_aligned() -> object_store::Result<()> {
+        let db_context = Arc::new(DbContext::default());
         let payload = gen_rand_bytes(1024 * 3);
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
@@ -552,7 +555,7 @@ mod tests {
             None,
             None,
             stats.clone(),
-            Arc::new(DefaultSystemClock::new()),
+            db_context.clone(),
         ));
 
         let cached_store =
@@ -587,6 +590,7 @@ mod tests {
 
     #[test]
     fn test_split_range_into_parts() {
+        let db_context = Arc::new(DbContext::default());
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
         let stats_registry = StatRegistry::new();
@@ -596,7 +600,7 @@ mod tests {
             None,
             None,
             stats.clone(),
-            Arc::new(DefaultSystemClock::new()),
+            db_context.clone(),
         ));
 
         let cached_store =
@@ -676,6 +680,7 @@ mod tests {
 
     #[test]
     fn test_align_range() {
+        let db_context = Arc::new(DbContext::default());
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
         let stats_registry = StatRegistry::new();
@@ -685,7 +690,7 @@ mod tests {
             None,
             None,
             stats.clone(),
-            Arc::new(DefaultSystemClock::new()),
+            db_context.clone(),
         ));
         let cached_store =
             CachedObjectStore::new(object_store, cache_storage, 1024, stats).unwrap();
@@ -698,6 +703,7 @@ mod tests {
 
     #[test]
     fn test_align_get_range() {
+        let db_context = Arc::new(DbContext::default());
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
         let stats_registry = StatRegistry::new();
@@ -707,7 +713,7 @@ mod tests {
             None,
             None,
             stats.clone(),
-            Arc::new(DefaultSystemClock::new()),
+            db_context.clone(),
         ));
         let cached_store =
             CachedObjectStore::new(object_store, cache_storage, 1024, stats).unwrap();
@@ -728,6 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cached_object_store_impl_object_store() -> object_store::Result<()> {
+        let db_context = Arc::new(DbContext::default());
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
         let stats_registry = StatRegistry::new();
@@ -737,7 +744,7 @@ mod tests {
             None,
             None,
             stats.clone(),
-            Arc::new(DefaultSystemClock::new()),
+            db_context.clone(),
         ));
         let cached_store =
             CachedObjectStore::new(object_store.clone(), cache_storage, 1024, stats).unwrap();

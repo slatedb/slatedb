@@ -1,6 +1,7 @@
 use crate::checkpoint::Checkpoint;
 use crate::clock::SystemClock;
 use crate::config::GarbageCollectorOptions;
+use crate::db_context::DbContext;
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
 use crate::manifest::store::{DirtyManifest, ManifestStore, StoredManifest};
