@@ -1,6 +1,7 @@
 use once_cell::unsync::OnceCell;
 use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoroshiro128PlusPlus;
+use thread_local::ThreadLocal;
 
 use crate::clock::{DefaultLogicalClock, DefaultSystemClock, LogicalClock, SystemClock};
 use std::sync::{Arc, Mutex};
@@ -10,13 +11,9 @@ type RngAlg = Xoroshiro128PlusPlus;
 #[derive(Debug)]
 pub(crate) struct DbContext {
     root_rng: Mutex<RngAlg>,
+    thread_rng: ThreadLocal<Box<ThreadRng>>,
     system_clock: Arc<dyn SystemClock>,
     logical_clock: Arc<dyn LogicalClock>,
-}
-
-thread_local! {
-    /// Per-thread RNG state, stored by value in a Cell.
-    static THREAD_RNG: OnceCell<Arc<RngAlg>> = OnceCell::new();
 }
 
 impl Default for DbContext {
@@ -37,19 +34,17 @@ impl DbContext {
     ) -> Self {
         Self {
             root_rng: Mutex::new(RngAlg::seed_from_u64(rng_seed)),
+            thread_rng: ThreadLocal::new(),
             system_clock,
             logical_clock,
         }
     }
 
-    pub fn rand(&self) -> Arc<dyn RngCore> {
-        THREAD_RNG.with(|cell| {
-            cell.get_or_init(|| {
-                let mut guard = self.root_rng.lock().unwrap();
-                let child_seed = guard.next_u64();
-                Arc::new(RngAlg::seed_from_u64(child_seed))
-            })
-            .clone()
+    pub fn rand(&self) -> &ThreadRng {
+        self.thread_rng.get_or(|| {
+            let mut guard = self.root_rng.lock().expect("root rng poisoned");
+            let child_seed = guard.next_u64();
+            Box::new(ThreadRng { rng: Box::new(RngAlg::seed_from_u64(child_seed)) })
         })
     }
 
@@ -59,5 +54,37 @@ impl DbContext {
 
     pub fn logical_clock(&self) -> Arc<dyn LogicalClock> {
         self.logical_clock.clone()
+    }
+}
+
+pub(crate) struct ThreadRng {
+    rng: Box<RngAlg>
+}
+
+impl std::fmt::Debug for ThreadRng {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadRng").finish()
+    }
+}
+
+impl RngCore for ThreadRng {
+    #[inline(always)]
+    fn next_u32(&mut self) -> u32 {
+        self.rng.next_u32()
+    }
+
+    #[inline(always)]
+    fn next_u64(&mut self) -> u64 {
+        self.rng.next_u64()
+    }
+
+    #[inline(always)]
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.rng.fill_bytes(dest)
+    }
+
+    #[inline(always)]
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+        self.rng.try_fill_bytes(dest)
     }
 }
