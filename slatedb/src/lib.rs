@@ -66,6 +66,7 @@ mod compactor_state;
 mod comparable_range;
 mod db;
 mod db_common;
+mod db_context;
 mod db_iter;
 mod db_reader;
 mod db_state;
