@@ -1,18 +1,18 @@
-use rand::{Rng as _, RngCore, SeedableRng};
-use rand_xoshiro::Xoroshiro128PlusPlus;
-use thread_local::ThreadLocal;
-use ulid::Ulid;
-use uuid::Uuid;
-
 use crate::clock::{DefaultLogicalClock, DefaultSystemClock, LogicalClock, SystemClock};
-use std::sync::{Arc, Mutex};
+use rand::{RngCore, SeedableRng};
+use rand_xoshiro::Xoroshiro128PlusPlus;
+use std::{
+    cell::RefCell,
+    sync::{Arc, Mutex},
+};
+use thread_local::ThreadLocal;
 
 type RngAlg = Xoroshiro128PlusPlus;
 
 #[derive(Debug)]
 pub(crate) struct DbContext {
     root_rng: Mutex<RngAlg>,
-    thread_rng: ThreadLocal<Box<ThreadRng>>,
+    thread_rng: ThreadLocal<RefCell<RngAlg>>,
     system_clock: Arc<dyn SystemClock>,
     logical_clock: Arc<dyn LogicalClock>,
 }
@@ -41,14 +41,16 @@ impl DbContext {
         }
     }
 
-    pub fn thread_rng(&self) -> &ThreadRng {
-        self.thread_rng.get_or(|| {
-            let mut guard = self.root_rng.lock().expect("root rng poisoned");
-            let child_seed = guard.next_u64();
-            Box::new(ThreadRng {
-                rng: Box::new(RngAlg::seed_from_u64(child_seed)),
-            })
-        })
+    #[inline]
+    pub fn new_rng(&self) -> impl RngCore {
+        let cell = self.thread_rng.get_or(|| {
+            let mut guard = self.root_rng.lock().expect("root rng mutex poisoned");
+            RefCell::new(RngAlg::seed_from_u64(guard.next_u64()))
+        });
+        let mut rng_ref = cell.borrow_mut();
+        let out = rng_ref.clone();
+        rng_ref.jump();
+        out
     }
 
     pub fn system_clock(&self) -> Arc<dyn SystemClock> {
@@ -57,51 +59,5 @@ impl DbContext {
 
     pub fn logical_clock(&self) -> Arc<dyn LogicalClock> {
         self.logical_clock.clone()
-    }
-}
-
-pub(crate) struct ThreadRng {
-    rng: Box<RngAlg>,
-}
-
-impl std::fmt::Debug for ThreadRng {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ThreadRng").finish()
-    }
-}
-
-impl RngCore for ThreadRng {
-    #[inline(always)]
-    fn next_u32(&mut self) -> u32 {
-        self.rng.next_u32()
-    }
-
-    #[inline(always)]
-    fn next_u64(&mut self) -> u64 {
-        self.rng.next_u64()
-    }
-
-    #[inline(always)]
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.rng.fill_bytes(dest)
-    }
-
-    #[inline(always)]
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.rng.try_fill_bytes(dest)
-    }
-}
-
-impl ThreadRng {
-    #[inline(always)]
-    fn uuid(&mut self) -> Uuid {
-        let rng = self.rng.as_mut();
-        Uuid::from_bytes(rng.gen())
-    }
-
-    #[inline(always)]
-    fn ulid(&mut self) -> Ulid {
-        let rng = self.rng.as_mut();
-        Ulid::from_bytes(rng.gen())
     }
 }
