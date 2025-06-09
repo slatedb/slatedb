@@ -70,7 +70,7 @@ impl CompactionExecuteBench {
         ));
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
-        let mut rng = self.db_context.new_rng();
+        let mut rng = self.db_context.thread_rng();
         rng.fill_bytes(key_start.as_mut_slice());
         let mut futures = FuturesUnordered::<JoinHandle<Result<(), SlateDBError>>>::new();
         for i in 0..num_ssts {
@@ -146,7 +146,7 @@ impl CompactionExecuteBench {
         db_context: Arc<DbContext>,
     ) -> Result<(), SlateDBError> {
         // Use OS RNG here becasue Rust complains that ChaCha (thread_rng) can't be sent between threads safely
-        let mut rng = db_context.new_rng();
+        let mut rng = db_context.thread_rng();
         let start = tokio::time::Instant::now();
         let mut suffix = Vec::<u8>::new();
         suffix.put_u32(i);
@@ -229,8 +229,8 @@ impl CompactionExecuteBench {
             .into_iter()
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
             .collect();
-        let high_bits = db_context.new_rng().next_u64();
-        let low_bits = db_context.new_rng().next_u64();
+        let high_bits = db_context.thread_rng().next_u64();
+        let low_bits = db_context.thread_rng().next_u64();
         let uuid = uuid::Uuid::from_u64_pair(high_bits, low_bits);
         Ok(CompactionJob {
             id: uuid,
@@ -265,8 +265,8 @@ impl CompactionExecuteBench {
             })
             .collect();
         info!("loaded compaction job");
-        let high_bits = db_context.new_rng().next_u64();
-        let low_bits = db_context.new_rng().next_u64();
+        let high_bits = db_context.thread_rng().next_u64();
+        let low_bits = db_context.thread_rng().next_u64();
         let uuid = uuid::Uuid::from_u64_pair(high_bits, low_bits);
         CompactionJob {
             id: uuid,

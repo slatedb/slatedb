@@ -398,7 +398,7 @@ impl StoredManifest {
         checkpoint_id: Option<Uuid>,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let checkpoint_id = checkpoint_id.unwrap_or(self.db_context.new_rng().uuid());
+        let checkpoint_id = checkpoint_id.unwrap_or(self.db_context.thread_rng().uuid());
         self.maybe_apply_manifest_update(|stored_manifest| {
             stored_manifest
                 .apply_new_checkpoint_to_db_state(checkpoint_id, options)
@@ -442,7 +442,7 @@ impl StoredManifest {
         old_checkpoint_id: Uuid,
         new_checkpoint_options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let new_checkpoint_id = self.db_context.new_rng().uuid();
+        let new_checkpoint_id = self.db_context.thread_rng().uuid();
         self.maybe_apply_manifest_update(|stored_manifest| {
             let new_checkpoint =
                 stored_manifest.new_checkpoint(new_checkpoint_id, new_checkpoint_options)?;

@@ -294,7 +294,7 @@ impl CompactorEventHandler {
         // write the checkpoint first so that it points to the manifest with the ssts
         // being removed
         self.tokio_handle.block_on(self.manifest.write_checkpoint(
-            self.db_context.new_rng().uuid(),
+            self.db_context.thread_rng().uuid(),
             &CheckpointOptions {
                 // TODO(rohan): for now, just write a checkpoint with 15-minute expiry
                 //              so that it's extremely unlikely for the gc to delete ssts
@@ -407,7 +407,7 @@ impl CompactorEventHandler {
     fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
         let result = self
             .state
-            .submit_compaction(self.db_context.new_rng().uuid(), compaction.clone());
+            .submit_compaction(self.db_context.thread_rng().uuid(), compaction.clone());
         let Ok(id) = result.as_ref() else {
             warn!("invalid compaction: {:?}", result);
             return Ok(());

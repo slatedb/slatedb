@@ -4,6 +4,7 @@ use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoroshiro128PlusPlus;
 use std::{
     cell::RefCell,
+    ops::DerefMut,
     sync::{Arc, Mutex},
 };
 use thread_local::ThreadLocal;
@@ -42,16 +43,8 @@ impl DbContext {
         }
     }
 
-    #[inline]
-    pub fn new_rng(&self) -> impl RngCore + Send + Sync {
-        let cell = self.thread_rng.get_or(|| {
-            let mut guard = self.root_rng.lock().expect("root rng mutex poisoned");
-            RefCell::new(RngAlg::seed_from_u64(guard.next_u64()))
-        });
-        let mut rng_ref = cell.borrow_mut();
-        let out = rng_ref.clone();
-        rng_ref.jump();
-        out
+    pub fn thread_rng(&self) -> ThreadRng {
+        ThreadRng::new(self)
     }
 
     pub fn system_clock(&self) -> Arc<dyn SystemClock> {
@@ -60,5 +53,47 @@ impl DbContext {
 
     pub fn logical_clock(&self) -> Arc<dyn LogicalClock> {
         self.logical_clock.clone()
+    }
+
+    #[inline]
+    fn with_rng<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut RngAlg) -> R,
+    {
+        let cell = self.thread_rng.get_or(|| {
+            let mut guard = self.root_rng.lock().expect("root rng mutex poisoned");
+            guard.jump();
+            RefCell::new(RngAlg::seed_from_u64(guard.next_u64()))
+        });
+        let mut rng_ref = cell.borrow_mut();
+        f(rng_ref.deref_mut())
+    }
+}
+
+pub struct ThreadRng<'a> {
+    context: &'a DbContext,
+}
+
+impl<'a> ThreadRng<'a> {
+    pub fn new(context: &'a DbContext) -> Self {
+        Self { context }
+    }
+}
+
+impl<'a> RngCore for ThreadRng<'a> {
+    fn next_u32(&mut self) -> u32 {
+        self.context.with_rng(|rng| rng.next_u32())
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.context.with_rng(|rng| rng.next_u64())
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.context.with_rng(|rng| rng.fill_bytes(dest))
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+        self.context.with_rng(|rng| rng.try_fill_bytes(dest))
     }
 }

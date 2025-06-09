@@ -153,7 +153,7 @@ impl FsCacheEntry {
     }
 
     fn make_rand_suffix(&self) -> String {
-        let mut rng = self.db_context.new_rng();
+        let mut rng = self.db_context.thread_rng();
         (0..24).map(|_| rng.sample(Alphanumeric) as char).collect()
     }
 }
@@ -635,7 +635,7 @@ impl FsCacheEvictorInner {
 
     async fn random_pick_entry(&self) -> Option<(std::path::PathBuf, (SystemTime, usize))> {
         let cache_entries = self.cache_entries.lock().await;
-        let mut rng = self.db_context.new_rng();
+        let mut rng = self.db_context.thread_rng();
 
         let mut rand_child = match cache_entries.children().choose(&mut rng) {
             None => return None,
