@@ -318,7 +318,8 @@ pub async fn create_checkpoint<P: Into<Path>>(
     manifest_store
         .validate_no_wal_object_store_configured()
         .await?;
-    let mut stored_manifest = StoredManifest::load(manifest_store, db_context.unwrap_or_default()).await?;
+    let mut stored_manifest =
+        StoredManifest::load(manifest_store, db_context.unwrap_or_default()).await?;
     let checkpoint = stored_manifest.write_checkpoint(None, options).await?;
     Ok(CheckpointCreateResult {
         id: checkpoint.id,

@@ -60,8 +60,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             wal,
             compacted,
         } => {
-            schedule_gc(&path, object_store, manifest, wal, compacted, cancellation_token)
-                .await?
+            schedule_gc(
+                &path,
+                object_store,
+                manifest,
+                wal,
+                compacted,
+                cancellation_token,
+            )
+            .await?
         }
     }
 
@@ -206,13 +213,6 @@ async fn schedule_gc(
         compacted_options: compacted_schedule.and_then(create_gc_dir_opts),
     };
 
-    run_gc_in_background(
-        path,
-        object_store,
-        gc_opts,
-        cancellation_token,
-        None,
-    )
-    .await?;
+    run_gc_in_background(path, object_store, gc_opts, cancellation_token, None).await?;
     Ok(())
 }

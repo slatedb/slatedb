@@ -600,6 +600,7 @@ impl DbReader {
     ///       Arc::clone(&object_store),
     ///       None,
     ///       DbReaderOptions::default(),
+    ///       None,
     ///     ).await?;
     ///     assert_eq!(reader.get(b"key").await?, Some("value".into()));
     ///     Ok(())
@@ -648,6 +649,7 @@ impl DbReader {
     ///       Arc::clone(&object_store),
     ///       None,
     ///       DbReaderOptions::default(),
+    ///       None,
     ///     ).await?;
     ///     assert_eq!(db.get_with_options(b"key", &ReadOptions::default()).await?, Some("value".into()));
     ///     Ok(())
@@ -694,6 +696,7 @@ impl DbReader {
     ///       Arc::clone(&object_store),
     ///       None,
     ///       DbReaderOptions::default(),
+    ///       None,
     ///     ).await?;
     ///     let mut iter = reader.scan("a".."b").await?;
     ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
@@ -744,6 +747,7 @@ impl DbReader {
     ///       Arc::clone(&object_store),
     ///       None,
     ///       DbReaderOptions::default(),
+    ///       None,
     ///     ).await?;
     ///     let mut iter = reader.scan_with_options("a".."b", &ScanOptions {
     ///         read_ahead_bytes: 1024 * 1024,
@@ -789,7 +793,7 @@ impl DbReader {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store.clone()).await?;
     ///     let options = DbReaderOptions::default();
-    ///     let reader = DbReader::open("test_db", object_store.clone(), None, options).await?;
+    ///     let reader = DbReader::open("test_db", object_store.clone(), None, options, None).await?;
     ///     reader.close().await?;
     ///     Ok(())
     /// }
@@ -861,7 +865,7 @@ mod tests {
             &test_provider,
             Some(checkpoint_result.id),
             DbReaderOptions::default(),
-            test_provider.db_context.clone(),
+            Some(test_provider.db_context.clone()),
         )
         .await
         .unwrap();
