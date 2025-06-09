@@ -9,7 +9,6 @@ use tracing::{error, info, warn};
 use ulid::Ulid;
 use uuid::Uuid;
 
-use crate::clock::SystemClock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
@@ -22,7 +21,7 @@ use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::spawn_bg_thread;
+use crate::utils::{spawn_bg_thread, IdGenerator};
 
 pub trait CompactionSchedulerSupplier: Send + Sync {
     fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler>;
@@ -98,7 +97,7 @@ impl Compactor {
                 tokio_handle,
                 external_rx,
                 stats,
-                db_context.system_clock(),
+                db_context.clone(),
             );
             let mut orchestrator = match load_result {
                 Ok(orchestrator) => orchestrator,
@@ -152,7 +151,7 @@ impl CompactorOrchestrator {
         tokio_handle: Handle,
         external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
         stats: Arc<CompactionStats>,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     ) -> Result<Self, SlateDBError> {
         let options = Arc::new(options);
         let ticker = crossbeam_channel::tick(options.poll_interval);
@@ -164,6 +163,7 @@ impl CompactorOrchestrator {
             worker_tx,
             table_store.clone(),
             stats.clone(),
+            db_context.clone(),
         ));
         let handler = CompactorEventHandler::new(
             tokio_handle,
@@ -172,7 +172,7 @@ impl CompactorOrchestrator {
             scheduler,
             executor,
             stats,
-            system_clock,
+            db_context.clone(),
         )?;
         let orchestrator = Self {
             ticker,
@@ -219,7 +219,7 @@ struct CompactorEventHandler {
     scheduler: Box<dyn CompactionScheduler>,
     executor: Box<dyn CompactionExecutor>,
     stats: Arc<CompactionStats>,
-    system_clock: Arc<dyn SystemClock>,
+    db_context: Arc<DbContext>,
 }
 
 impl CompactorEventHandler {
@@ -230,7 +230,7 @@ impl CompactorEventHandler {
         scheduler: Box<dyn CompactionScheduler>,
         executor: Box<dyn CompactionExecutor>,
         stats: Arc<CompactionStats>,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     ) -> Result<Self, SlateDBError> {
         let stored_manifest =
             tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;
@@ -247,7 +247,7 @@ impl CompactorEventHandler {
             scheduler,
             executor,
             stats,
-            system_clock,
+            db_context,
         })
     }
 
@@ -392,7 +392,8 @@ impl CompactorEventHandler {
         self.write_manifest_safely()?;
         self.maybe_schedule_compactions()?;
         self.stats.last_compaction_ts.set(
-            self.system_clock
+            self.db_context
+                .system_clock()
                 .now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -402,7 +403,9 @@ impl CompactorEventHandler {
     }
 
     fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
-        let result = self.state.submit_compaction(compaction.clone());
+        let result = self
+            .state
+            .submit_compaction(self.db_context.new_rng().uuid(), compaction.clone());
         let Ok(id) = result.as_ref() else {
             warn!("invalid compaction: {:?}", result);
             return Ok(());
@@ -805,12 +808,14 @@ mod tests {
             let (real_executor_tx, real_executor_rx) = crossbeam_channel::unbounded();
             let stats_registry = StatRegistry::new();
             let compactor_stats = Arc::new(CompactionStats::new(&stats_registry));
+            let db_context = Arc::new(DbContext::default());
             let real_executor = Box::new(TokioCompactionExecutor::new(
                 rt.handle().clone(),
                 compactor_options.clone(),
                 real_executor_tx,
                 table_store,
                 compactor_stats.clone(),
+                db_context.clone(),
             ));
             let handler = CompactorEventHandler::new(
                 rt.handle().clone(),
@@ -819,7 +824,7 @@ mod tests {
                 scheduler.clone(),
                 executor.clone(),
                 compactor_stats,
-                Arc::new(DefaultSystemClock::new()),
+                db_context.clone(),
             )
             .unwrap();
             let manifest = rt

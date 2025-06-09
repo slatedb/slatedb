@@ -68,8 +68,8 @@ pub(crate) struct DbInner {
     pub(crate) stat_registry: Arc<StatRegistry>,
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) reader: Reader,
-
     pub(crate) wal_enabled: bool,
+    pub(crate) db_context: Arc<DbContext>,
 }
 
 impl DbInner {
@@ -111,6 +111,7 @@ impl DbInner {
             mono_clock,
             stat_registry,
             reader,
+            db_context,
         };
         Ok(db_inner)
     }

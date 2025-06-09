@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor::WorkerToOrchestratorMsg::CompactionFinished;
 use crate::config::CompactorOptions;
+use crate::db_context::DbContext;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
@@ -21,7 +22,7 @@ use crate::tablestore::TableStore;
 use crate::compactor::stats::CompactionStats;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
-use crate::utils::spawn_bg_task;
+use crate::utils::{spawn_bg_task, IdGenerator};
 use tracing::error;
 use uuid::Uuid;
 
@@ -51,6 +52,7 @@ impl TokioCompactionExecutor {
         worker_tx: crossbeam_channel::Sender<WorkerToOrchestratorMsg>,
         table_store: Arc<TableStore>,
         stats: Arc<CompactionStats>,
+        db_context: Arc<DbContext>,
     ) -> Self {
         Self {
             inner: Arc::new(TokioCompactionExecutorInner {
@@ -61,6 +63,7 @@ impl TokioCompactionExecutor {
                 tasks: Arc::new(Mutex::new(HashMap::new())),
                 stats,
                 is_stopped: AtomicBool::new(false),
+                db_context,
             }),
         }
     }
@@ -92,6 +95,7 @@ pub(crate) struct TokioCompactionExecutorInner {
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
     stats: Arc<CompactionStats>,
     is_stopped: AtomicBool,
+    db_context: Arc<DbContext>,
 }
 
 impl TokioCompactionExecutorInner {
@@ -134,7 +138,7 @@ impl TokioCompactionExecutorInner {
         let mut output_ssts = Vec::new();
         let mut current_writer = self
             .table_store
-            .table_writer(SsTableId::Compacted(crate::utils::ulid()));
+            .table_writer(SsTableId::Compacted(self.db_context.new_rng().ulid()));
         let mut current_size = 0usize;
 
         while let Some(raw_kv) = all_iter.next_entry().await? {
@@ -172,7 +176,7 @@ impl TokioCompactionExecutorInner {
                 let finished_writer = mem::replace(
                     &mut current_writer,
                     self.table_store
-                        .table_writer(SsTableId::Compacted(crate::utils::ulid())),
+                        .table_writer(SsTableId::Compacted(self.db_context.new_rng().ulid())),
                 );
                 output_ssts.push(finished_writer.close().await?);
                 self.stats.bytes_compacted.add(current_size as u64);

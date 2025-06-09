@@ -20,6 +20,7 @@ use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, SourceId};
 use crate::config::{CompactorOptions, CompressionCodec};
+use crate::db_context::DbContext;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -267,6 +268,7 @@ impl CompactionExecuteBench {
         destination_sr_id: u32,
         compression_codec: Option<CompressionCodec>,
     ) -> Result<(), SlateDBError> {
+        let db_context = Arc::new(DbContext::default());
         let sst_format = SsTableFormat {
             compression_codec,
             ..SsTableFormat::default()
@@ -293,6 +295,7 @@ impl CompactionExecuteBench {
             tx,
             table_store.clone(),
             stats.clone(),
+            db_context.clone(),
         );
         let os = self.object_store.clone();
         info!("load compaction job");

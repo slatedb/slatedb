@@ -610,10 +610,8 @@ mod tests {
                 .freeze_memtable(i as u64)
                 .expect("db in error state");
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
-            let handle = SsTableHandle::new(
-                SsTableId::Compacted(ulid::Ulid::new()),
-                dummy_info.clone(),
-            );
+            let handle =
+                SsTableHandle::new(SsTableId::Compacted(ulid::Ulid::new()), dummy_info.clone());
             db_state.move_imm_memtable_to_l0(imm, handle).unwrap();
         }
     }
