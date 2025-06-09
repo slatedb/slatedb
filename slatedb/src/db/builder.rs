@@ -92,7 +92,7 @@ use parking_lot::Mutex;
 use rand::RngCore;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;

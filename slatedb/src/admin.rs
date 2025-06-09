@@ -1,5 +1,4 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
-use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db_context::DbContext;
 use crate::error::SlateDBError;

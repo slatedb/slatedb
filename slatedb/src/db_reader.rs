@@ -1,9 +1,9 @@
 use crate::bytes_range::BytesRange;
 use crate::clock::{
-    DefaultLogicalClock, DefaultSystemClock, LogicalClock, MonotonicClock, SystemClock,
+    LogicalClock, MonotonicClock, SystemClock,
 };
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
-use crate::db_context::{self, DbContext};
+use crate::db_context::DbContext;
 use crate::db_reader::ManifestPollerMsg::Shutdown;
 use crate::db_state::CoreDbState;
 use crate::db_stats::DbStats;
