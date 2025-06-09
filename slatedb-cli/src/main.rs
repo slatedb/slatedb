@@ -7,7 +7,6 @@ use slatedb::admin::{
 use slatedb::config::{
     CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
-use slatedb::db_context::DbContext;
 use slatedb::Db;
 use std::error::Error;
 use std::sync::Arc;
