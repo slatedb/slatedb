@@ -484,7 +484,7 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
-    
+
     use crate::compactor::stats::CompactionStats;
     use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
     use crate::compactor_state::{Compaction, CompactorState, SourceId};

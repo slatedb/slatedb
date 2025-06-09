@@ -250,6 +250,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             info!(?path, ?self.settings, "Opening SlateDB database");
         }
 
+        // RNG is allowed here because the user has not specified a seed. We need to
+        // seed the RNG with something to create the deterministic context.
+        #[allow(clippy::disallowed_methods)]
         let rng_seed = self.seed.unwrap_or_else(|| rand::thread_rng().next_u64());
 
         let logical_clock = self

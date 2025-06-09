@@ -34,11 +34,16 @@ use crate::types::ValueDeletable;
 pub struct CompactionExecuteBench {
     path: Path,
     object_store: Arc<dyn ObjectStore>,
+    db_context: Arc<DbContext>,
 }
 
 impl CompactionExecuteBench {
-    pub fn new(path: Path, object_store: Arc<dyn ObjectStore>) -> Self {
-        Self { path, object_store }
+    pub fn new(path: Path, object_store: Arc<dyn ObjectStore>, db_context: Arc<DbContext>) -> Self {
+        Self {
+            path,
+            object_store,
+            db_context,
+        }
     }
 
     fn sst_id(id: u32) -> SsTableId {
@@ -65,7 +70,7 @@ impl CompactionExecuteBench {
         ));
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
-        let mut rng = rand::thread_rng();
+        let mut rng = self.db_context.new_rng();
         rng.fill_bytes(key_start.as_mut_slice());
         let mut futures = FuturesUnordered::<JoinHandle<Result<(), SlateDBError>>>::new();
         for i in 0..num_ssts {
@@ -84,6 +89,7 @@ impl CompactionExecuteBench {
                 key_start_copy,
                 num_keys,
                 val_bytes,
+                self.db_context.clone(),
             ));
             futures.push(jh)
         }
@@ -103,6 +109,7 @@ impl CompactionExecuteBench {
         key_start: Vec<u8>,
         num_keys: usize,
         val_bytes: usize,
+        db_context: Arc<DbContext>,
     ) -> Result<(), SlateDBError> {
         let mut retries = 0;
         loop {
@@ -112,6 +119,7 @@ impl CompactionExecuteBench {
                 key_start.clone(),
                 num_keys,
                 val_bytes,
+                db_context.clone(),
             )
             .await;
             match result {
@@ -135,9 +143,10 @@ impl CompactionExecuteBench {
         key_start: Vec<u8>,
         num_keys: usize,
         val_bytes: usize,
+        db_context: Arc<DbContext>,
     ) -> Result<(), SlateDBError> {
         // Use OS RNG here becasue Rust complains that ChaCha (thread_rng) can't be sent between threads safely
-        let mut rng = rand::rngs::OsRng;
+        let mut rng = db_context.new_rng();
         let start = tokio::time::Instant::now();
         let mut suffix = Vec::<u8>::new();
         suffix.put_u32(i);
@@ -184,6 +193,7 @@ impl CompactionExecuteBench {
         num_ssts: usize,
         table_store: &Arc<TableStore>,
         is_dest_last_run: bool,
+        db_context: Arc<DbContext>,
     ) -> Result<CompactionJob, SlateDBError> {
         let sst_ids: Vec<SsTableId> = (0u32..num_ssts as u32)
             .map(CompactionExecuteBench::sst_id)
@@ -219,8 +229,11 @@ impl CompactionExecuteBench {
             .into_iter()
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
             .collect();
+        let high_bits = db_context.new_rng().next_u64();
+        let low_bits = db_context.new_rng().next_u64();
+        let uuid = uuid::Uuid::from_u64_pair(high_bits, low_bits);
         Ok(CompactionJob {
-            id: uuid::Uuid::new_v4(),
+            id: uuid,
             destination: 0,
             ssts,
             sorted_runs: vec![],
@@ -233,6 +246,7 @@ impl CompactionExecuteBench {
         manifest: &StoredManifest,
         compaction: &Compaction,
         is_dest_last_run: bool,
+        db_context: Arc<DbContext>,
     ) -> CompactionJob {
         let state = manifest.db_state();
         let srs_by_id: HashMap<_, _> = state
@@ -251,8 +265,11 @@ impl CompactionExecuteBench {
             })
             .collect();
         info!("loaded compaction job");
+        let high_bits = db_context.new_rng().next_u64();
+        let low_bits = db_context.new_rng().next_u64();
+        let uuid = uuid::Uuid::from_u64_pair(high_bits, low_bits);
         CompactionJob {
-            id: uuid::Uuid::new_v4(),
+            id: uuid,
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,
@@ -305,7 +322,12 @@ impl CompactionExecuteBench {
         let job = match &compaction {
             Some(compaction) => {
                 info!("load job from existing compaction");
-                CompactionExecuteBench::load_compaction_as_job(&manifest, compaction, false)
+                CompactionExecuteBench::load_compaction_as_job(
+                    &manifest,
+                    compaction,
+                    false,
+                    self.db_context.clone(),
+                )
             }
             None => {
                 CompactionExecuteBench::load_compaction_job(
@@ -313,6 +335,7 @@ impl CompactionExecuteBench {
                     num_ssts,
                     &table_store,
                     false,
+                    self.db_context.clone(),
                 )
                 .await?
             }

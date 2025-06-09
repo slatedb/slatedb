@@ -1,7 +1,5 @@
 use crate::bytes_range::BytesRange;
-use crate::clock::{
-    LogicalClock, MonotonicClock, SystemClock,
-};
+use crate::clock::{LogicalClock, MonotonicClock, SystemClock};
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
 use crate::db_context::DbContext;
 use crate::db_reader::ManifestPollerMsg::Shutdown;
@@ -814,7 +812,7 @@ impl DbReader {
 
 #[cfg(test)]
 mod tests {
-    
+
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db_context::DbContext;
     use crate::db_reader::{DbReader, DbReaderOptions};

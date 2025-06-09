@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use crate::clock::{DefaultLogicalClock, DefaultSystemClock, LogicalClock, SystemClock};
 use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoroshiro128PlusPlus;

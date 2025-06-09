@@ -15,6 +15,7 @@ use object_store::PutResult;
 use slatedb::admin;
 use slatedb::compaction_execute_bench::CompactionExecuteBench;
 use slatedb::config::WriteOptions;
+use slatedb::db_context::DbContext;
 use slatedb::Db;
 use std::error::Error;
 use std::sync::Arc;
@@ -87,7 +88,8 @@ async fn exec_benchmark_compaction(
     object_store: Arc<dyn ObjectStore>,
     args: BenchmarkCompactionArgs,
 ) {
-    let compaction_execute_bench = CompactionExecuteBench::new(path, object_store);
+    let db_context = Arc::new(DbContext::default());
+    let compaction_execute_bench = CompactionExecuteBench::new(path, object_store, db_context);
     match args.subcommand {
         CompactionSubcommands::Load(load_args) => {
             compaction_execute_bench
