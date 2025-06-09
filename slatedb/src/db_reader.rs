@@ -515,7 +515,7 @@ impl DbReader {
         object_store: Arc<dyn ObjectStore>,
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
-        db_context: Arc<DbContext>,
+        db_context: Option<Arc<DbContext>>,
     ) -> Result<Self, SlateDBError> {
         let path = path.into();
         let store_provider = DefaultStoreProvider {
@@ -531,7 +531,7 @@ impl DbReader {
         store_provider: &dyn StoreProvider,
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
-        db_context: Arc<DbContext>,
+        db_context: Option<Arc<DbContext>>,
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
@@ -543,7 +543,7 @@ impl DbReader {
                 table_store,
                 options,
                 checkpoint_id,
-                db_context,
+                db_context.unwrap_or_default(),
             )
             .await?,
         );
@@ -895,7 +895,7 @@ mod tests {
             Arc::clone(&object_store),
             Some(checkpoint_result.id),
             DbReaderOptions::default(),
-            test_provider.db_context.clone(),
+            Some(test_provider.db_context.clone()),
         )
         .await
         .unwrap();
@@ -1137,7 +1137,7 @@ mod tests {
             options: DbReaderOptions,
             checkpoint: Option<Uuid>,
         ) -> Result<DbReader, SlateDBError> {
-            DbReader::open_internal(self, checkpoint, options, self.db_context.clone()).await
+            DbReader::open_internal(self, checkpoint, options, Some(self.db_context.clone())).await
         }
     }
 
