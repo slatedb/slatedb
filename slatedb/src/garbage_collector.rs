@@ -417,7 +417,7 @@ mod tests {
 
     fn new_checkpoint(manifest_id: u64, expire_time: Option<SystemTime>) -> Checkpoint {
         Checkpoint {
-            id: crate::utils::uuid(),
+            id: uuid::Uuid::new_v4(),
             manifest_id,
             expire_time,
             create_time: DefaultSystemClock::default().now(),
