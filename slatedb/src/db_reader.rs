@@ -3,6 +3,7 @@ use crate::clock::{
     DefaultLogicalClock, DefaultSystemClock, LogicalClock, MonotonicClock, SystemClock,
 };
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
+use crate::db_context::{self, DbContext};
 use crate::db_reader::ManifestPollerMsg::Shutdown;
 use crate::db_state::CoreDbState;
 use crate::db_stats::DbStats;
@@ -44,10 +45,10 @@ struct DbReaderInner {
     table_store: Arc<TableStore>,
     options: DbReaderOptions,
     state: RwLock<Arc<CheckpointState>>,
-    system_clock: Arc<dyn SystemClock>,
     user_checkpoint_id: Option<Uuid>,
     reader: Reader,
     error_watcher: WatchableOnceCell<SlateDBError>,
+    db_context: Arc<DbContext>,
 }
 
 struct ManifestPoller {
@@ -98,10 +99,10 @@ impl DbReaderInner {
         table_store: Arc<TableStore>,
         options: DbReaderOptions,
         checkpoint_id: Option<Uuid>,
-        logical_clock: Arc<dyn LogicalClock>,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     ) -> Result<Self, SlateDBError> {
-        let mut manifest = StoredManifest::load(Arc::clone(&manifest_store)).await?;
+        let mut manifest =
+            StoredManifest::load(Arc::clone(&manifest_store), Arc::clone(&db_context)).await?;
         if !manifest.db_state().initialized {
             return Err(SlateDBError::InvalidDBState);
         }
@@ -122,7 +123,7 @@ impl DbReaderInner {
         );
 
         let mono_clock = Arc::new(MonotonicClock::new(
-            logical_clock.clone(),
+            db_context.logical_clock(),
             initial_state.core().last_l0_clock_tick,
         ));
 
@@ -142,10 +143,10 @@ impl DbReaderInner {
             table_store,
             options,
             state,
-            system_clock,
             user_checkpoint_id: checkpoint_id,
             reader,
             error_watcher: WatchableOnceCell::new(),
+            db_context,
         })
     }
 
@@ -337,7 +338,7 @@ impl DbReaderInner {
             .expire_time
             .expect("Expected checkpoint expiration time to be set")
             .sub(half_lifetime);
-        if self.system_clock.now() > refresh_deadline {
+        if self.db_context.system_clock().now() > refresh_deadline {
             let refreshed_checkpoint = stored_manifest
                 .refresh_checkpoint(checkpoint.id, self.options.checkpoint_lifetime)
                 .await?;
@@ -361,6 +362,7 @@ impl DbReaderInner {
                     _ = ticker.tick() => {
                         let mut manifest = StoredManifest::load(
                             Arc::clone(&this.manifest_store),
+                            Arc::clone(&this.db_context),
                         ).await?;
 
                         let latest_manifest = manifest.manifest();
@@ -378,6 +380,7 @@ impl DbReaderInner {
                             Shutdown => {
                                 let mut manifest = StoredManifest::load(
                                     Arc::clone(&this.manifest_store),
+                                    Arc::clone(&this.db_context),
                                 ).await?;
                                 let checkpoint_id = this.state.read().checkpoint.id;
                                 if Some(checkpoint_id) != this.user_checkpoint_id {
@@ -514,6 +517,7 @@ impl DbReader {
         object_store: Arc<dyn ObjectStore>,
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
+        db_context: Arc<DbContext>,
     ) -> Result<Self, SlateDBError> {
         let path = path.into();
         let store_provider = DefaultStoreProvider {
@@ -522,22 +526,14 @@ impl DbReader {
             block_cache: options.block_cache.clone(),
         };
 
-        Self::open_internal(
-            &store_provider,
-            checkpoint_id,
-            options,
-            Arc::new(DefaultLogicalClock::default()),
-            Arc::new(DefaultSystemClock::default()),
-        )
-        .await
+        Self::open_internal(&store_provider, checkpoint_id, options, db_context).await
     }
 
     async fn open_internal(
         store_provider: &dyn StoreProvider,
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
-        logical_clock: Arc<dyn LogicalClock>,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
@@ -549,8 +545,7 @@ impl DbReader {
                 table_store,
                 options,
                 checkpoint_id,
-                logical_clock,
-                system_clock,
+                db_context,
             )
             .await?,
         );
@@ -821,6 +816,7 @@ impl DbReader {
 mod tests {
     use crate::clock::{DefaultLogicalClock, DefaultSystemClock, LogicalClock, SystemClock};
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
+    use crate::db_context::DbContext;
     use crate::db_reader::{DbReader, DbReaderOptions};
     use crate::db_state::CoreDbState;
     use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -867,8 +863,7 @@ mod tests {
             &test_provider,
             Some(checkpoint_result.id),
             DbReaderOptions::default(),
-            test_provider.logical_clock.clone(),
-            test_provider.system_clock.clone(),
+            test_provider.db_context.clone(),
         )
         .await
         .unwrap();
@@ -902,6 +897,7 @@ mod tests {
             Arc::clone(&object_store),
             Some(checkpoint_result.id),
             DbReaderOptions::default(),
+            test_provider.db_context.clone(),
         )
         .await
         .unwrap();
@@ -928,6 +924,7 @@ mod tests {
             &parent_manifest,
             parent_path,
             source_checkpoint_id,
+            test_provider.db_context.clone(),
         )
         .await
         .unwrap();
@@ -1114,20 +1111,17 @@ mod tests {
         object_store: Arc<dyn ObjectStore>,
         path: Path,
         fp_registry: Arc<FailPointRegistry>,
-        logical_clock: Arc<dyn LogicalClock>,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     }
 
     impl TestProvider {
         fn new(path: Path, object_store: Arc<dyn ObjectStore>) -> Self {
-            let logical_clock = Arc::new(DefaultLogicalClock::new());
-            let system_clock = Arc::new(DefaultSystemClock::new());
+            let db_context = Arc::new(DbContext::default());
             TestProvider {
                 object_store,
                 path,
                 fp_registry: Arc::new(FailPointRegistry::new()),
-                logical_clock,
-                system_clock,
+                db_context,
             }
         }
     }
@@ -1145,14 +1139,7 @@ mod tests {
             options: DbReaderOptions,
             checkpoint: Option<Uuid>,
         ) -> Result<DbReader, SlateDBError> {
-            DbReader::open_internal(
-                self,
-                checkpoint,
-                options,
-                self.logical_clock.clone() as Arc<dyn LogicalClock>,
-                self.system_clock.clone() as Arc<dyn SystemClock>,
-            )
-            .await
+            DbReader::open_internal(self, checkpoint, options, self.db_context.clone()).await
         }
     }
 
@@ -1171,7 +1158,7 @@ mod tests {
             Arc::new(ManifestStore::new_with_clock(
                 &self.path,
                 Arc::clone(&self.object_store),
-                self.system_clock.clone(),
+                self.db_context.system_clock(),
             ))
         }
     }

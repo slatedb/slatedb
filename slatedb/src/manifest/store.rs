@@ -1,6 +1,7 @@
 use crate::checkpoint::Checkpoint;
 use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::config::CheckpointOptions;
+use crate::db_context::DbContext;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{
@@ -11,6 +12,7 @@ use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
+use crate::utils::IdGenerator;
 use crate::SlateDBError::ManifestVersionExists;
 use chrono::Utc;
 use futures::StreamExt;
@@ -164,10 +166,9 @@ impl FenceableManifest {
 
     pub(crate) async fn write_checkpoint(
         &mut self,
-        checkpoint_id: Option<Uuid>,
+        checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let checkpoint_id = checkpoint_id.unwrap_or(crate::utils::uuid());
         self.maybe_apply_manifest_update(|stored_manifest| {
             stored_manifest
                 .apply_new_checkpoint_to_db_state(checkpoint_id, options)
@@ -239,15 +240,21 @@ pub(crate) struct StoredManifest {
     id: u64,
     manifest: Manifest,
     manifest_store: Arc<ManifestStore>,
+    db_context: Arc<DbContext>,
 }
 
 impl StoredManifest {
-    async fn init(store: Arc<ManifestStore>, manifest: Manifest) -> Result<Self, SlateDBError> {
+    async fn init(
+        store: Arc<ManifestStore>,
+        manifest: Manifest,
+        db_context: Arc<DbContext>,
+    ) -> Result<Self, SlateDBError> {
         store.write_manifest(1, &manifest).await?;
         Ok(Self {
             id: 1,
             manifest,
             manifest_store: store,
+            db_context,
         })
     }
 
@@ -255,9 +262,10 @@ impl StoredManifest {
     pub(crate) async fn create_new_db(
         store: Arc<ManifestStore>,
         core: CoreDbState,
+        db_context: Arc<DbContext>,
     ) -> Result<Self, SlateDBError> {
         let manifest = Manifest::initial(core);
-        Self::init(store, manifest).await
+        Self::init(store, manifest, db_context).await
     }
 
     /// Create a new manifest for a new cloned database. The initial manifest
@@ -268,15 +276,24 @@ impl StoredManifest {
         parent_manifest: &Manifest,
         parent_path: String,
         source_checkpoint_id: Uuid,
+        db_context: Arc<DbContext>,
     ) -> Result<Self, SlateDBError> {
-        let manifest = Manifest::cloned(parent_manifest, parent_path, source_checkpoint_id);
-        Self::init(clone_manifest_store, manifest).await
+        let manifest = Manifest::cloned(
+            parent_manifest,
+            parent_path,
+            source_checkpoint_id,
+            db_context.clone(),
+        );
+        Self::init(clone_manifest_store, manifest, db_context).await
     }
 
     /// Load the current manifest from the supplied manifest store. If there is no db at the
     /// manifest store's path then this fn returns None. Otherwise, on success it returns a
     /// Result with an instance of StoredManifest.
-    pub(crate) async fn try_load(store: Arc<ManifestStore>) -> Result<Option<Self>, SlateDBError> {
+    pub(crate) async fn try_load(
+        store: Arc<ManifestStore>,
+        db_context: Arc<DbContext>,
+    ) -> Result<Option<Self>, SlateDBError> {
         let Some((id, manifest)) = store.try_read_latest_manifest().await? else {
             return Ok(None);
         };
@@ -284,14 +301,20 @@ impl StoredManifest {
             id,
             manifest,
             manifest_store: store,
+            db_context,
         }))
     }
 
     /// Load the current manifest from the supplied manifest store. If successful,
     /// this method returns a [`Result`] with an instance of [`StoredManifest`].
     /// If no manifests could be found, the error [`LatestManifestMissing`] is returned.
-    pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Self, SlateDBError> {
-        Self::try_load(store).await?.ok_or(LatestManifestMissing)
+    pub(crate) async fn load(
+        store: Arc<ManifestStore>,
+        db_context: Arc<DbContext>,
+    ) -> Result<Self, SlateDBError> {
+        Self::try_load(store, db_context)
+            .await?
+            .ok_or(LatestManifestMissing)
     }
 
     #[allow(dead_code)]
@@ -375,7 +398,7 @@ impl StoredManifest {
         checkpoint_id: Option<Uuid>,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let checkpoint_id = checkpoint_id.unwrap_or(crate::utils::uuid());
+        let checkpoint_id = checkpoint_id.unwrap_or(self.db_context.new_rng().uuid());
         self.maybe_apply_manifest_update(|stored_manifest| {
             stored_manifest
                 .apply_new_checkpoint_to_db_state(checkpoint_id, options)
@@ -419,7 +442,7 @@ impl StoredManifest {
         old_checkpoint_id: Uuid,
         new_checkpoint_options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let new_checkpoint_id = crate::utils::uuid();
+        let new_checkpoint_id = self.db_context.new_rng().uuid();
         self.maybe_apply_manifest_update(|stored_manifest| {
             let new_checkpoint =
                 stored_manifest.new_checkpoint(new_checkpoint_id, new_checkpoint_options)?;
@@ -749,6 +772,7 @@ mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::config::CheckpointOptions;
+    use crate::db_context::{self, DbContext};
     use crate::db_state::CoreDbState;
     use crate::error;
     use crate::error::SlateDBError;
@@ -764,10 +788,13 @@ mod tests {
     async fn test_should_fail_write_on_version_conflict() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
-        let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
+        let mut sm2 = StoredManifest::load(ms.clone(), db_context.clone())
+            .await
+            .unwrap();
         sm.update_manifest(sm.prepare_dirty()).await.unwrap();
 
         let result = sm2.update_manifest(sm2.prepare_dirty()).await;
@@ -782,7 +809,8 @@ mod tests {
     async fn test_should_write_with_new_version() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
         sm.update_manifest(sm.prepare_dirty()).await.unwrap();
@@ -795,9 +823,11 @@ mod tests {
     #[tokio::test]
     async fn test_should_update_local_state_on_write() {
         let ms = new_memory_manifest_store();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), CoreDbState::new())
-            .await
-            .unwrap();
+        let db_context = Arc::new(DbContext::default());
+        let mut sm =
+            StoredManifest::create_new_db(ms.clone(), CoreDbState::new(), db_context.clone())
+                .await
+                .unwrap();
         let mut dirty = sm.prepare_dirty();
         dirty.core.next_wal_sst_id = 123;
         sm.update_manifest(dirty).await.unwrap();
@@ -808,10 +838,14 @@ mod tests {
     #[tokio::test]
     async fn test_should_refresh() {
         let ms = new_memory_manifest_store();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), CoreDbState::new())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm =
+            StoredManifest::create_new_db(ms.clone(), CoreDbState::new(), db_context.clone())
+                .await
+                .unwrap();
+        let mut sm2 = StoredManifest::load(ms.clone(), db_context.clone())
             .await
             .unwrap();
-        let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
         let mut dirty = sm.prepare_dirty();
         dirty.core.next_wal_sst_id = 123;
         sm.update_manifest(dirty).await.unwrap();
@@ -825,13 +859,16 @@ mod tests {
     #[tokio::test]
     async fn test_should_bump_writer_epoch() {
         let ms = new_memory_manifest_store();
+        let db_context = Arc::new(DbContext::default());
         let state = CoreDbState::new();
-        StoredManifest::create_new_db(ms.clone(), state.clone())
+        StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
         let timeout = Duration::from_secs(300);
         for i in 1..5 {
-            let sm = StoredManifest::load(ms.clone()).await.unwrap();
+            let sm = StoredManifest::load(ms.clone(), db_context.clone())
+                .await
+                .unwrap();
             FenceableManifest::init_writer(sm, timeout).await.unwrap();
             let (_, manifest) = ms.read_latest_manifest().await.unwrap();
             assert_eq!(manifest.writer_epoch, i);
@@ -841,13 +878,16 @@ mod tests {
     #[tokio::test]
     async fn test_should_fail_refresh_on_writer_fenced() {
         let ms = new_memory_manifest_store();
+        let db_context = Arc::new(DbContext::default());
         let state = CoreDbState::new();
-        let sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
         let timeout = Duration::from_secs(300);
         let mut writer1 = FenceableManifest::init_writer(sm, timeout).await.unwrap();
-        let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
+        let sm2 = StoredManifest::load(ms.clone(), db_context.clone())
+            .await
+            .unwrap();
 
         FenceableManifest::init_writer(sm2, timeout).await.unwrap();
 
@@ -858,13 +898,16 @@ mod tests {
     #[tokio::test]
     async fn test_should_bump_compactor_epoch() {
         let ms = new_memory_manifest_store();
+        let db_context = Arc::new(DbContext::default());
         let state = CoreDbState::new();
-        StoredManifest::create_new_db(ms.clone(), state.clone())
+        StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
         let timeout = Duration::from_secs(300);
         for i in 1..5 {
-            let sm = StoredManifest::load(ms.clone()).await.unwrap();
+            let sm = StoredManifest::load(ms.clone(), db_context.clone())
+                .await
+                .unwrap();
             FenceableManifest::init_compactor(sm, timeout)
                 .await
                 .unwrap();
@@ -876,15 +919,18 @@ mod tests {
     #[tokio::test]
     async fn test_should_fail_refresh_on_compactor_fenced() {
         let ms = new_memory_manifest_store();
+        let db_context = Arc::new(DbContext::default());
         let state = CoreDbState::new();
-        let sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
         let timeout = Duration::from_secs(300);
         let mut compactor1 = FenceableManifest::init_compactor(sm, timeout)
             .await
             .unwrap();
-        let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
+        let sm2 = StoredManifest::load(ms.clone(), db_context.clone())
+            .await
+            .unwrap();
 
         FenceableManifest::init_compactor(sm2, timeout)
             .await
@@ -897,8 +943,9 @@ mod tests {
     #[tokio::test]
     async fn test_should_fail_manifest_write_of_stale_dirty_manifest() {
         let ms = new_memory_manifest_store();
+        let db_context = Arc::new(DbContext::default());
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
         let stale = sm.prepare_dirty();
@@ -912,20 +959,23 @@ mod tests {
     #[tokio::test]
     async fn test_should_fail_write_checkpoint_when_fenced() {
         let ms = new_memory_manifest_store();
-        let sm = StoredManifest::create_new_db(ms.clone(), CoreDbState::new())
+        let db_context = Arc::new(DbContext::default());
+        let sm = StoredManifest::create_new_db(ms.clone(), CoreDbState::new(), db_context.clone())
             .await
             .unwrap();
         let timeout = Duration::from_secs(300);
         let mut compactor1 = FenceableManifest::init_compactor(sm, timeout)
             .await
             .unwrap();
-        let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
+        let sm2 = StoredManifest::load(ms.clone(), db_context.clone())
+            .await
+            .unwrap();
         let mut compactor2 = FenceableManifest::init_compactor(sm2, timeout)
             .await
             .unwrap();
 
         let result = compactor1
-            .write_checkpoint(None, &CheckpointOptions::default())
+            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
             .await;
 
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
@@ -935,12 +985,15 @@ mod tests {
     #[tokio::test]
     async fn test_should_fail_state_update_when_fenced() {
         let ms = new_memory_manifest_store();
-        let sm = StoredManifest::create_new_db(ms.clone(), CoreDbState::new())
+        let db_context = Arc::new(DbContext::default());
+        let sm = StoredManifest::create_new_db(ms.clone(), CoreDbState::new(), db_context.clone())
             .await
             .unwrap();
         let timeout = Duration::from_secs(300);
         let mut fm1 = FenceableManifest::init_writer(sm, timeout).await.unwrap();
-        let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
+        let sm2 = StoredManifest::load(ms.clone(), db_context.clone())
+            .await
+            .unwrap();
         let mut fm2 = FenceableManifest::init_writer(sm2, timeout).await.unwrap();
 
         let result = fm1
@@ -968,7 +1021,8 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
 
@@ -987,7 +1041,8 @@ mod tests {
     async fn test_list_manifests_unbounded() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
         sm.update_manifest(sm.prepare_dirty()).await.unwrap();
@@ -1018,7 +1073,8 @@ mod tests {
     async fn test_delete_manifest() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
         sm.update_manifest(sm.prepare_dirty()).await.unwrap();
@@ -1037,7 +1093,8 @@ mod tests {
     async fn test_delete_active_manifest_should_fail() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
         sm.update_manifest(sm.prepare_dirty()).await.unwrap();
@@ -1077,7 +1134,8 @@ mod tests {
     async fn test_read_active_manifests_should_consider_checkpoints() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
 
@@ -1115,7 +1173,8 @@ mod tests {
     async fn test_maybe_apply_state_update() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
 
@@ -1133,7 +1192,8 @@ mod tests {
     async fn test_deletion_of_manifest_with_checkpoint_reference_not_allowed() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
 
@@ -1157,7 +1217,8 @@ mod tests {
     async fn should_refresh_checkpoint() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
 
@@ -1186,7 +1247,8 @@ mod tests {
     async fn should_fail_refresh_if_checkpoint_missing() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
 
@@ -1206,7 +1268,8 @@ mod tests {
     async fn should_replace_checkpoint() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
 
@@ -1231,7 +1294,8 @@ mod tests {
     async fn should_ignore_missing_checkpoint_if_replacing() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
 
@@ -1251,7 +1315,8 @@ mod tests {
     async fn should_delete_checkpoint() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
 
@@ -1268,7 +1333,8 @@ mod tests {
     async fn should_ignore_missing_checkpoint_if_deleting() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
-        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_context = Arc::new(DbContext::default());
+        let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
 
@@ -1284,13 +1350,17 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
         let state = CoreDbState::new();
+        let db_context = Arc::new(DbContext::default());
 
         // Mimic two writers A and B that try to bump the epoch at the same time
-        let sm_a = StoredManifest::create_new_db(Arc::clone(&ms), state.clone())
+        let sm_a =
+            StoredManifest::create_new_db(Arc::clone(&ms), state.clone(), db_context.clone())
+                .await
+                .unwrap();
+
+        let sm_b = StoredManifest::load(Arc::clone(&ms), db_context.clone())
             .await
             .unwrap();
-
-        let sm_b = StoredManifest::load(Arc::clone(&ms)).await.unwrap();
         let timeout = Duration::from_secs(300);
 
         let mut fm_b = FenceableManifest::init_writer(sm_b, timeout).await.unwrap();

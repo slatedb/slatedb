@@ -71,7 +71,7 @@ impl GarbageCollector {
         stat_registry: Arc<StatRegistry>,
         cancellation_token: CancellationToken,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     ) -> Self {
         let stats = Arc::new(GcStats::new(stat_registry));
         let ct = cancellation_token.clone();
@@ -83,7 +83,7 @@ impl GarbageCollector {
                 stats,
                 ct,
                 options,
-                system_clock,
+                db_context,
             ));
 
             Ok(())
@@ -112,7 +112,7 @@ impl GarbageCollector {
         stats: Arc<GcStats>,
         cancellation_token: CancellationToken,
         options: GarbageCollectorOptions,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     ) {
         let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
 
@@ -138,9 +138,9 @@ impl GarbageCollector {
                     info!("Garbage collector received shutdown signal... shutting down");
                     break;
                 },
-                _ = manifest_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut manifest_gc_task, system_clock.clone()).await; },
-                _ = wal_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut wal_gc_task, system_clock.clone()).await; },
-                _ = compacted_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut compacted_gc_task, system_clock.clone()).await; },
+                _ = manifest_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut manifest_gc_task, db_context.clone()).await; },
+                _ = wal_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut wal_gc_task, db_context.clone()).await; },
+                _ = compacted_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut compacted_gc_task, db_context.clone()).await; },
                 _ = log_ticker.tick() => {
                     debug!("GC has collected {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
                          stats.gc_manifest_count.value.load(Ordering::SeqCst),
@@ -168,15 +168,14 @@ impl GarbageCollector {
         table_store: Arc<TableStore>,
         stat_registry: Arc<StatRegistry>,
         options: GarbageCollectorOptions,
+        db_context: Arc<DbContext>,
     ) {
-        use crate::clock::DefaultSystemClock;
-
         Self::run_gc_once_with_clock(
             manifest_store,
             table_store,
             stat_registry,
             options,
-            Arc::new(DefaultSystemClock::default()),
+            db_context,
         )
         .await;
     }
@@ -199,7 +198,7 @@ impl GarbageCollector {
         table_store: Arc<TableStore>,
         stat_registry: Arc<StatRegistry>,
         options: GarbageCollectorOptions,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     ) {
         let stats = Arc::new(GcStats::new(stat_registry));
 
@@ -209,19 +208,14 @@ impl GarbageCollector {
         run_gc_task(
             manifest_store.clone(),
             &mut manifest_gc_task,
-            system_clock.clone(),
+            db_context.clone(),
         )
         .await;
-        run_gc_task(
-            manifest_store.clone(),
-            &mut wal_gc_task,
-            system_clock.clone(),
-        )
-        .await;
+        run_gc_task(manifest_store.clone(), &mut wal_gc_task, db_context.clone()).await;
         run_gc_task(
             manifest_store.clone(),
             &mut compacted_gc_task,
-            system_clock.clone(),
+            db_context.clone(),
         )
         .await;
 
@@ -266,28 +260,29 @@ fn gc_tasks(
 async fn run_gc_task<T: GcTask>(
     manifest_store: Arc<ManifestStore>,
     task: &mut T,
-    system_clock: Arc<dyn SystemClock>,
+    db_context: Arc<DbContext>,
 ) {
     debug!(
         "Scheduled garbage collection attempt for {}.",
         task.resource()
     );
-    if let Err(e) = remove_expired_checkpoints(manifest_store.clone(), system_clock.clone()).await {
+    if let Err(e) = remove_expired_checkpoints(manifest_store.clone(), db_context.clone()).await {
         error!("Error removing expired checkpoints: {}", e);
-    } else if let Err(e) = task.collect(system_clock.now().into()).await {
+    } else if let Err(e) = task.collect(db_context.system_clock().now().into()).await {
         error!("Error collecting compacted garbage: {}", e);
     }
 }
 
 async fn remove_expired_checkpoints(
     manifest_store: Arc<ManifestStore>,
-    system_clock: Arc<dyn SystemClock>,
+    db_context: Arc<DbContext>,
 ) -> Result<(), SlateDBError> {
-    let mut stored_manifest = StoredManifest::load(Arc::clone(&manifest_store)).await?;
+    let mut stored_manifest =
+        StoredManifest::load(Arc::clone(&manifest_store), db_context.clone()).await?;
 
     stored_manifest
         .maybe_apply_manifest_update(|manifest| {
-            filter_expired_checkpoints(manifest, system_clock.clone())
+            filter_expired_checkpoints(manifest, db_context.system_clock())
         })
         .await
 }
@@ -346,13 +341,17 @@ mod tests {
     #[tokio::test]
     async fn test_collect_garbage_manifest() {
         let (manifest_store, table_store, local_object_store) = build_objects();
+        let db_context = Arc::new(DbContext::default());
 
         // Create a manifest
         let state = CoreDbState::new();
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state.clone(),
+            db_context.clone(),
+        )
+        .await
+        .unwrap();
 
         // Add a second manifest
         stored_manifest
@@ -386,12 +385,16 @@ mod tests {
     #[tokio::test]
     async fn test_collect_garbage_only_recent_manifests() {
         let (manifest_store, table_store, _) = build_objects();
+        let db_context = Arc::new(DbContext::default());
 
         // Create a manifest
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            db_context.clone(),
+        )
+        .await
+        .unwrap();
 
         // Add a second manifest
         stored_manifest
@@ -456,13 +459,17 @@ mod tests {
     #[tokio::test]
     async fn test_remove_expired_checkpoints() {
         let (manifest_store, table_store, local_object_store) = build_objects();
+        let db_context = Arc::new(DbContext::default());
 
         // Manifest 1
         let state = CoreDbState::new();
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state.clone(),
+            db_context.clone(),
+        )
+        .await
+        .unwrap();
 
         // Manifest 2 (expired_checkpoint_id -> 1)
         let one_day_ago = DefaultSystemClock::default()
@@ -518,13 +525,17 @@ mod tests {
     #[tokio::test]
     async fn test_collector_should_not_clean_manifests_referenced_by_checkpoints() {
         let (manifest_store, table_store, local_object_store) = build_objects();
+        let db_context = Arc::new(DbContext::default());
 
         // Manifest 1
         let state = CoreDbState::new();
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state.clone(),
+            db_context.clone(),
+        )
+        .await
+        .unwrap();
         // Manifest 2 (active_checkpoint_id -> 1)
         let active_checkpoint_id = checkpoint_current_manifest(&mut stored_manifest, None)
             .await
@@ -573,12 +584,16 @@ mod tests {
     #[tokio::test]
     async fn test_collect_garbage_old_active_manifest() {
         let (manifest_store, table_store, local_object_store) = build_objects();
+        let db_context = Arc::new(DbContext::default());
 
         // Create a manifest
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            db_context.clone(),
+        )
+        .await
+        .unwrap();
 
         // Add a second manifest
         stored_manifest
@@ -630,6 +645,7 @@ mod tests {
     async fn test_collect_garbage_wal_ssts() {
         let (manifest_store, table_store, local_object_store) = build_objects();
         let path_resolver = PathResolver::new("/");
+        let db_context = Arc::new(DbContext::default());
 
         // write a wal sst
         let id1 = SsTableId::Wal(1);
@@ -648,7 +664,7 @@ mod tests {
         // Create a manifest
         let mut state = CoreDbState::new();
         state.replay_after_wal_id = id2.unwrap_wal_id();
-        StoredManifest::create_new_db(manifest_store.clone(), state.clone())
+        StoredManifest::create_new_db(manifest_store.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
 
@@ -679,6 +695,7 @@ mod tests {
     async fn test_do_not_remove_wals_referenced_by_active_checkpoints() {
         let (manifest_store, table_store, local_object_store) = build_objects();
         let path_resolver = PathResolver::new("/");
+        let db_context = Arc::new(DbContext::default());
 
         let id1 = SsTableId::Wal(1);
         write_sst(table_store.clone(), &id1).await.unwrap();
@@ -693,10 +710,13 @@ mod tests {
         let mut state = CoreDbState::new();
         state.replay_after_wal_id = 1;
         state.next_wal_sst_id = 4;
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state.clone(),
+            db_context.clone(),
+        )
+        .await
+        .unwrap();
         assert_eq!(1, stored_manifest.id());
 
         // Manifest 2 with checkpoint referencing Manifest 1
@@ -731,6 +751,7 @@ mod tests {
     async fn test_collect_garbage_wal_ssts_and_keep_expired_last_compacted() {
         let (manifest_store, table_store, local_object_store) = build_objects();
         let path_resolver = PathResolver::new("/");
+        let db_context = Arc::new(DbContext::default());
 
         // write a wal sst
         let id1 = SsTableId::Wal(1);
@@ -761,7 +782,7 @@ mod tests {
         // Create a manifest
         let mut state = CoreDbState::new();
         state.replay_after_wal_id = id2.unwrap_wal_id();
-        StoredManifest::create_new_db(manifest_store.clone(), state.clone())
+        StoredManifest::create_new_db(manifest_store.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
 
@@ -812,6 +833,7 @@ mod tests {
         let inactive_expired_sst_handle = create_sst(table_store.clone()).await;
         let inactive_unexpired_sst_handle = create_sst(table_store.clone()).await;
         let path_resolver = PathResolver::new("");
+        let db_context = Arc::new(DbContext::default());
 
         // Set expiration for the old SSTs
         let now_minus_24h_expired_l0_sst = set_modified(
@@ -845,7 +867,7 @@ mod tests {
             // Don't add inactive_expired_sst_handle
             ssts: vec![active_sst_handle.clone(), active_expired_sst_handle.clone()],
         });
-        StoredManifest::create_new_db(manifest_store.clone(), state.clone())
+        StoredManifest::create_new_db(manifest_store.clone(), state.clone(), db_context.clone())
             .await
             .unwrap();
 
@@ -920,6 +942,7 @@ mod tests {
         let active_checkpoint_sst_handle = create_sst(table_store.clone()).await;
         let inactive_sst_handle = create_sst(table_store.clone()).await;
         let path_resolver = PathResolver::new("");
+        let db_context = Arc::new(DbContext::default());
 
         // Set expiration for all SSTs to make them eligible for deletion
         let all_tables = vec![
@@ -950,10 +973,13 @@ mod tests {
             id: 2,
             ssts: vec![active_checkpoint_sst_handle.clone()],
         });
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state.clone(),
+            db_context.clone(),
+        )
+        .await
+        .unwrap();
 
         let checkpoint_id = checkpoint_current_manifest(&mut stored_manifest, None)
             .await
@@ -1097,6 +1123,7 @@ mod tests {
     async fn run_gc_once(manifest_store: Arc<ManifestStore>, table_store: Arc<TableStore>) {
         // Start the garbage collector
         let stats = Arc::new(StatRegistry::new());
+        let db_context = Arc::new(DbContext::default());
 
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
@@ -1118,6 +1145,7 @@ mod tests {
             table_store.clone(),
             stats.clone(),
             gc_opts,
+            db_context.clone(),
         )
         .await;
 
@@ -1129,6 +1157,7 @@ mod tests {
     async fn test_gc_shutdown() {
         let (manifest_store, table_store, _) = build_objects();
         let stats = Arc::new(StatRegistry::new());
+        let db_context = Arc::new(DbContext::default());
 
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
@@ -1155,7 +1184,7 @@ mod tests {
             stats.clone(),
             cancellation_token.clone(),
             |result| assert!(result.is_ok()),
-            Arc::new(DefaultSystemClock::default()),
+            db_context.clone(),
         );
 
         gc.terminate_background_task().await;

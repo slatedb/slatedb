@@ -10,7 +10,7 @@ use thread_local::ThreadLocal;
 type RngAlg = Xoroshiro128PlusPlus;
 
 #[derive(Debug)]
-pub(crate) struct DbContext {
+pub struct DbContext {
     root_rng: Mutex<RngAlg>,
     thread_rng: ThreadLocal<RefCell<RngAlg>>,
     system_clock: Arc<dyn SystemClock>,

@@ -304,7 +304,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             &path,
             maybe_cached_main_object_store.clone(),
         ));
-        let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
+        let latest_manifest =
+            StoredManifest::try_load(manifest_store.clone(), db_context.clone()).await?;
 
         // Validate WAL object store configuration
         if let Some(latest_manifest) = &latest_manifest {
@@ -356,7 +357,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             Some(manifest) => manifest,
             None => {
                 let state = CoreDbState::new_with_wal_object_store(wal_object_store_uri);
-                StoredManifest::create_new_db(manifest_store.clone(), state).await?
+                StoredManifest::create_new_db(manifest_store.clone(), state, db_context.clone())
+                    .await?
             }
         };
         let mut manifest =
@@ -469,7 +471,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
                 },
-                db_context.system_clock().clone(),
+                db_context.clone(),
             ));
         }
 

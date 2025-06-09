@@ -232,8 +232,10 @@ impl CompactorEventHandler {
         stats: Arc<CompactionStats>,
         db_context: Arc<DbContext>,
     ) -> Result<Self, SlateDBError> {
-        let stored_manifest =
-            tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;
+        let stored_manifest = tokio_handle.block_on(StoredManifest::load(
+            manifest_store.clone(),
+            db_context.clone(),
+        ))?;
         let manifest = tokio_handle.block_on(FenceableManifest::init_compactor(
             stored_manifest,
             options.manifest_update_timeout,
@@ -292,7 +294,7 @@ impl CompactorEventHandler {
         // write the checkpoint first so that it points to the manifest with the ssts
         // being removed
         self.tokio_handle.block_on(self.manifest.write_checkpoint(
-            None,
+            self.db_context.new_rng().uuid(),
             &CheckpointOptions {
                 // TODO(rohan): for now, just write a checkpoint with 15-minute expiry
                 //              so that it's extremely unlikely for the gc to delete ssts
@@ -579,7 +581,7 @@ mod tests {
     async fn test_should_tombstones_in_l0() {
         let os = Arc::new(InMemory::new());
         let logical_clock = Arc::new(TestClock::new());
-
+        let db_context = Arc::new(DbContext::default());
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new());
 
         let mut options = db_options(Some(compactor_options()));
@@ -618,7 +620,7 @@ mod tests {
 
         // Then:
         // we should now have a tombstone in L0 and a value in L1
-        let db_state = get_db_state(manifest_store.clone()).await;
+        let db_state = get_db_state(manifest_store.clone(), db_context.clone()).await;
         assert_eq!(db_state.l0.len(), 1, "{:?}", db_state.l0);
         assert_eq!(db_state.compacted.len(), 1);
 
@@ -632,9 +634,13 @@ mod tests {
         assert!(tombstone.unwrap().value.is_tombstone());
 
         scheduler.scheduler.should_compact.store(true, SeqCst);
-        let db_state = await_compacted_compaction(manifest_store.clone(), db_state.compacted)
-            .await
-            .unwrap();
+        let db_state = await_compacted_compaction(
+            manifest_store.clone(),
+            db_state.compacted,
+            db_context.clone(),
+        )
+        .await
+        .unwrap();
         assert_eq!(db_state.compacted.len(), 1);
 
         let compacted = &db_state.compacted.first().unwrap().ssts;
@@ -828,7 +834,10 @@ mod tests {
             )
             .unwrap();
             let manifest = rt
-                .block_on(StoredManifest::load(manifest_store.clone()))
+                .block_on(StoredManifest::load(
+                    manifest_store.clone(),
+                    db_context.clone(),
+                ))
                 .unwrap();
             Self {
                 rt,
@@ -1096,7 +1105,8 @@ mod tests {
                 )
             };
 
-            let core_db_state = get_db_state(manifest_store.clone()).await;
+            let core_db_state =
+                get_db_state(manifest_store.clone(), db.inner.db_context.clone()).await;
             let empty_l0 = core_db_state.l0.is_empty();
             let compaction_ran = core_db_state.l0_last_compacted.is_some();
 
@@ -1112,9 +1122,10 @@ mod tests {
     async fn await_compacted_compaction(
         manifest_store: Arc<ManifestStore>,
         old_compacted: Vec<SortedRun>,
+        db_context: Arc<DbContext>,
     ) -> Option<CoreDbState> {
         run_for(Duration::from_secs(10), || async {
-            let db_state = get_db_state(manifest_store.clone()).await;
+            let db_state = get_db_state(manifest_store.clone(), db_context.clone()).await;
             if !db_state.compacted.eq(&old_compacted) {
                 return Some(db_state);
             }
@@ -1123,8 +1134,13 @@ mod tests {
         .await
     }
 
-    async fn get_db_state(manifest_store: Arc<ManifestStore>) -> CoreDbState {
-        let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+    async fn get_db_state(
+        manifest_store: Arc<ManifestStore>,
+        db_context: Arc<DbContext>,
+    ) -> CoreDbState {
+        let stored_manifest = StoredManifest::load(manifest_store.clone(), db_context.clone())
+            .await
+            .unwrap();
         stored_manifest.db_state().clone()
     }
 

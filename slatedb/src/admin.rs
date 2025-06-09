@@ -124,7 +124,7 @@ pub async fn run_gc_once(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
     gc_opts: GarbageCollectorOptions,
-    system_clock: Arc<dyn SystemClock>,
+    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
     manifest_store
@@ -144,7 +144,7 @@ pub async fn run_gc_once(
         table_store,
         stats,
         gc_opts,
-        system_clock,
+        db_context,
     )
     .await;
     Ok(())
@@ -165,7 +165,7 @@ pub async fn run_gc_in_background(
     object_store: Arc<dyn ObjectStore>,
     gc_opts: GarbageCollectorOptions,
     cancellation_token: CancellationToken,
-    system_clock: Arc<dyn SystemClock>,
+    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
     manifest_store
@@ -190,7 +190,7 @@ pub async fn run_gc_in_background(
         stats,
         ct,
         gc_opts,
-        system_clock,
+        db_context,
     ));
     tracker.close();
 
@@ -311,12 +311,13 @@ pub async fn create_checkpoint<P: Into<Path>>(
     path: P,
     object_store: Arc<dyn ObjectStore>,
     options: &CheckpointOptions,
+    db_context: Arc<DbContext>,
 ) -> Result<CheckpointCreateResult, SlateDBError> {
     let manifest_store = Arc::new(ManifestStore::new(&path.into(), object_store));
     manifest_store
         .validate_no_wal_object_store_configured()
         .await?;
-    let mut stored_manifest = StoredManifest::load(manifest_store).await?;
+    let mut stored_manifest = StoredManifest::load(manifest_store, db_context).await?;
     let checkpoint = stored_manifest.write_checkpoint(None, options).await?;
     Ok(CheckpointCreateResult {
         id: checkpoint.id,
@@ -368,6 +369,7 @@ pub async fn create_clone<P: Into<Path>>(
     parent_path: P,
     object_store: Arc<dyn ObjectStore>,
     parent_checkpoint: Option<Uuid>,
+    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     clone::create_clone(
         clone_path,
@@ -375,6 +377,7 @@ pub async fn create_clone<P: Into<Path>>(
         object_store,
         parent_checkpoint,
         Arc::new(FailPointRegistry::new()),
+        db_context,
     )
     .await?;
     Ok(())

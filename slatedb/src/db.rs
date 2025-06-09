@@ -365,7 +365,6 @@ pub struct Db {
     write_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     compactor: Mutex<Option<Compactor>>,
     garbage_collector: Mutex<Option<GarbageCollector>>,
-
     cancellation_token: CancellationToken,
 }
 
@@ -2085,7 +2084,10 @@ mod tests {
             .await
             .unwrap();
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), db.inner.db_context.clone())
+                .await
+                .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
         };
@@ -2153,7 +2155,10 @@ mod tests {
             .unwrap();
 
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), kv_store.inner.db_context.clone())
+                .await
+                .unwrap();
         let sst_format = SsTableFormat {
             min_filter_keys: 10,
             ..SsTableFormat::default()
@@ -2394,7 +2399,12 @@ mod tests {
 
         // validate that the manifest file exists.
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        let stored_manifest = StoredManifest::load(
+            manifest_store.clone(),
+            kv_store_restored.inner.db_context.clone(),
+        )
+        .await
+        .unwrap();
         let db_state = stored_manifest.db_state();
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
     }
@@ -2811,7 +2821,9 @@ mod tests {
             .await
             .unwrap();
         let ms = ManifestStore::new(&Path::from(path), object_store.clone());
-        let mut sm = StoredManifest::load(Arc::new(ms)).await.unwrap();
+        let mut sm = StoredManifest::load(Arc::new(ms), db.inner.db_context.clone())
+            .await
+            .unwrap();
 
         // write enough to fill up a few l0 SSTs
         for i in 0..4 {
@@ -3104,7 +3116,10 @@ mod tests {
         // check the last_l0_clock_tick persisted in the manifest, it should be
         // i64::MIN because no WAL SST has yet made its way into L0
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), db.inner.db_context.clone())
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, i64::MIN);
@@ -3151,7 +3166,10 @@ mod tests {
         // check the last_clock_tick persisted in the manifest, it should be
         // i64::MIN because no WAL SST has yet made its way into L0
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), db.inner.db_context.clone())
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, 11);

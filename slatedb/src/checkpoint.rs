@@ -1,6 +1,7 @@
 use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
+use crate::db_context::DbContext;
 use crate::error::SlateDBError;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::mem_table_flush::MemtableFlushMsg;
@@ -66,10 +67,11 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         id: Uuid,
         lifetime: Option<Duration>,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     ) -> Result<(), SlateDBError> {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
-        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
+        let mut stored_manifest = StoredManifest::load(manifest_store, db_context.clone()).await?;
+        let system_clock = db_context.system_clock();
         stored_manifest
             .maybe_apply_manifest_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty();
@@ -93,9 +95,10 @@ impl Db {
         path: &Path,
         object_store: Arc<dyn ObjectStore>,
         id: Uuid,
+        db_context: Arc<DbContext>,
     ) -> Result<(), SlateDBError> {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
-        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
+        let mut stored_manifest = StoredManifest::load(manifest_store, db_context.clone()).await?;
         stored_manifest
             .maybe_apply_manifest_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty();
@@ -121,6 +124,7 @@ mod tests {
     use crate::clock::SystemClock;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
+    use crate::db_context::DbContext;
     use crate::db_state::SsTableId;
     use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
@@ -142,6 +146,7 @@ mod tests {
     #[tokio::test]
     async fn test_should_create_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_context = Arc::new(DbContext::default());
         let path = Path::from("/tmp/test_kv_store");
         // open and close the db to init the manifest and trigger another write
         let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
@@ -152,9 +157,14 @@ mod tests {
         let CheckpointCreateResult {
             id: checkpoint_id,
             manifest_id: checkpoint_manifest_id,
-        } = admin::create_checkpoint(path, object_store.clone(), &CheckpointOptions::default())
-            .await
-            .unwrap();
+        } = admin::create_checkpoint(
+            path,
+            object_store.clone(),
+            &CheckpointOptions::default(),
+            db_context.clone(),
+        )
+        .await
+        .unwrap();
 
         let (latest_manifest_id, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         assert_eq!(latest_manifest_id, checkpoint_manifest_id);
@@ -171,6 +181,7 @@ mod tests {
     #[tokio::test]
     async fn test_should_create_checkpoint_with_expiry() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_context = Arc::new(DbContext::default());
         let path = Path::from("/tmp/test_kv_store");
         // open and close the db to init the manifest and trigger another write
         let db = Db::builder(path.clone(), object_store.clone())
@@ -192,6 +203,7 @@ mod tests {
                 lifetime: Some(Duration::from_secs(3600)),
                 ..CheckpointOptions::default()
             },
+            db_context.clone(),
         )
         .await
         .unwrap();
@@ -214,6 +226,7 @@ mod tests {
     async fn test_should_create_checkpoint_from_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
+        let db_context = Arc::new(DbContext::default());
         let db = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
             .build()
@@ -227,6 +240,7 @@ mod tests {
             path.clone(),
             object_store.clone(),
             &CheckpointOptions::default(),
+            db_context.clone(),
         )
         .await
         .unwrap();
@@ -241,6 +255,7 @@ mod tests {
                 source: Some(source_checkpoint_id),
                 ..CheckpointOptions::default()
             },
+            db_context.clone(),
         )
         .await
         .unwrap();
@@ -251,6 +266,7 @@ mod tests {
     #[tokio::test]
     async fn test_should_fail_create_checkpoint_from_missing_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_context = Arc::new(DbContext::default());
         let path = "/tmp/test_kv_store";
         // open and close the db to init the manifest and trigger another write
         let _ = Db::builder(path, object_store.clone())
@@ -267,6 +283,7 @@ mod tests {
                 source: Some(source_checkpoint_id),
                 ..CheckpointOptions::default()
             },
+            db_context.clone(),
         )
         .await;
 
@@ -279,11 +296,16 @@ mod tests {
     #[tokio::test]
     async fn test_should_fail_create_checkpoint_no_manifest() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_context = Arc::new(DbContext::default());
         let path = "/tmp/test_kv_store";
 
-        let result =
-            admin::create_checkpoint(path, object_store.clone(), &CheckpointOptions::default())
-                .await;
+        let result = admin::create_checkpoint(
+            path,
+            object_store.clone(),
+            &CheckpointOptions::default(),
+            db_context.clone(),
+        )
+        .await;
 
         assert!(result.is_err());
         assert!(matches!(
@@ -295,6 +317,7 @@ mod tests {
     #[tokio::test]
     async fn test_should_refresh_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_context = Arc::new(DbContext::default());
         let path = Path::from("/tmp/test_kv_store");
         let _ = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
@@ -308,6 +331,7 @@ mod tests {
                 lifetime: Some(Duration::from_secs(100)),
                 ..CheckpointOptions::default()
             },
+            db_context.clone(),
         )
         .await
         .unwrap();
@@ -326,7 +350,7 @@ mod tests {
             object_store.clone(),
             id,
             Some(Duration::from_secs(1000)),
-            Arc::new(DefaultSystemClock::new()),
+            db_context.clone(),
         )
         .await
         .unwrap();
@@ -346,6 +370,7 @@ mod tests {
     #[tokio::test]
     async fn test_should_fail_refresh_checkpoint_if_checkpoint_missing() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_context = Arc::new(DbContext::default());
         let path = Path::from("/tmp/test_kv_store");
         let _ = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
@@ -358,7 +383,7 @@ mod tests {
             object_store.clone(),
             uuid::Uuid::new_v4(),
             Some(Duration::from_secs(1000)),
-            Arc::new(DefaultSystemClock::new()),
+            db_context.clone(),
         )
         .await;
 
@@ -368,6 +393,7 @@ mod tests {
     #[tokio::test]
     async fn test_should_delete_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_context = Arc::new(DbContext::default());
         let path = Path::from("/tmp/test_kv_store");
         let _ = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
@@ -378,11 +404,12 @@ mod tests {
             path.clone(),
             object_store.clone(),
             &CheckpointOptions::default(),
+            db_context.clone(),
         )
         .await
         .unwrap();
 
-        Db::delete_checkpoint(&path, object_store.clone(), id)
+        Db::delete_checkpoint(&path, object_store.clone(), id, db_context.clone())
             .await
             .unwrap();
 

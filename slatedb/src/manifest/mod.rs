@@ -1,7 +1,10 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
+use crate::db_context::DbContext;
 use crate::db_state::{CoreDbState, SsTableId};
 use crate::error::SlateDBError;
+use crate::utils::IdGenerator;
 use bytes::Bytes;
 use serde::Serialize;
 use uuid::Uuid;
@@ -33,6 +36,7 @@ impl Manifest {
         parent_manifest: &Manifest,
         parent_path: String,
         source_checkpoint_id: Uuid,
+        db_context: Arc<DbContext>,
     ) -> Self {
         let mut parent_external_sst_ids = HashSet::<SsTableId>::new();
         let mut clone_external_dbs = vec![];
@@ -42,7 +46,7 @@ impl Manifest {
             clone_external_dbs.push(ExternalDb {
                 path: parent_external_db.path.clone(),
                 source_checkpoint_id: parent_external_db.source_checkpoint_id,
-                final_checkpoint_id: Some(crate::utils::uuid()),
+                final_checkpoint_id: Some(db_context.new_rng().uuid()),
                 sst_ids: parent_external_db.sst_ids.clone(),
             });
         }
@@ -59,7 +63,7 @@ impl Manifest {
         clone_external_dbs.push(ExternalDb {
             path: parent_path,
             source_checkpoint_id,
-            final_checkpoint_id: Some(crate::utils::uuid()),
+            final_checkpoint_id: Some(db_context.new_rng().uuid()),
             sst_ids: parent_owned_sst_ids,
         });
 
@@ -94,6 +98,7 @@ impl Manifest {
 
 #[cfg(test)]
 mod tests {
+    use crate::db_context::{self, DbContext};
     use crate::manifest::store::{ManifestStore, StoredManifest};
 
     use crate::config::CheckpointOptions;
@@ -106,14 +111,17 @@ mod tests {
     #[tokio::test]
     async fn test_init_clone_manifest() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-
+        let db_context = Arc::new(DbContext::default());
         let parent_path = Path::from("/tmp/test_parent");
         let parent_manifest_store =
             Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
-        let mut parent_manifest =
-            StoredManifest::create_new_db(parent_manifest_store, CoreDbState::new())
-                .await
-                .unwrap();
+        let mut parent_manifest = StoredManifest::create_new_db(
+            parent_manifest_store,
+            CoreDbState::new(),
+            db_context.clone(),
+        )
+        .await
+        .unwrap();
         let checkpoint = parent_manifest
             .write_checkpoint(None, &CheckpointOptions::default())
             .await
@@ -126,6 +134,7 @@ mod tests {
             parent_manifest.manifest(),
             parent_path.to_string(),
             checkpoint.id,
+            db_context.clone(),
         )
         .await
         .unwrap();
@@ -158,13 +167,16 @@ mod tests {
     #[tokio::test]
     async fn test_write_new_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-
+        let db_context = Arc::new(DbContext::default());
         let path = Path::from("/tmp/test_db");
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
-        let mut manifest =
-            StoredManifest::create_new_db(Arc::clone(&manifest_store), CoreDbState::new())
-                .await
-                .unwrap();
+        let mut manifest = StoredManifest::create_new_db(
+            Arc::clone(&manifest_store),
+            CoreDbState::new(),
+            db_context,
+        )
+        .await
+        .unwrap();
 
         let checkpoint = manifest
             .write_checkpoint(None, &CheckpointOptions::default())
