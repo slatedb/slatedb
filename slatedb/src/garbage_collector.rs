@@ -171,7 +171,7 @@ impl GarbageCollector {
         options: GarbageCollectorOptions,
         db_context: Arc<DbContext>,
     ) {
-        Self::run_gc_once_with_clock(
+        Self::run_once_with_context(
             manifest_store,
             table_store,
             stat_registry,
@@ -194,7 +194,7 @@ impl GarbageCollector {
     /// * `options`: The options for the garbage collector.
     /// * `system_clock`: The system clock to use for the garbage collector.
     ///
-    pub async fn run_gc_once_with_clock(
+    pub async fn run_once_with_context(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         stat_registry: Arc<StatRegistry>,

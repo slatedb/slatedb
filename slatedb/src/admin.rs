@@ -139,7 +139,7 @@ pub async fn run_gc_once(
     ));
 
     let stats = Arc::new(StatRegistry::new());
-    GarbageCollector::run_gc_once_with_clock(
+    GarbageCollector::run_once_with_context(
         manifest_store,
         table_store,
         stats,
