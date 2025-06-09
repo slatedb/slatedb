@@ -249,15 +249,26 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
     this_block_first_key.slice(..prev_block_last_key.len() + 1)
 }
 
-#[allow(clippy::disallowed_types)]
-pub(crate) fn uuid() -> Uuid {
-    let mut random_bytes = [0; 16];
-    crate::rand::thread_rng().fill_bytes(&mut random_bytes);
-    uuid::Builder::from_random_bytes(random_bytes).into_uuid()
+/// Trait for generating UUIDs and ULIDs from a random number generator.
+pub trait IdGenerator {
+    fn uuid(&mut self) -> Uuid;
+    fn ulid(&mut self) -> Ulid;
 }
 
-pub(crate) fn ulid() -> Ulid {
-    Ulid::with_source(&mut crate::rand::thread_rng())
+impl<R: RngCore> IdGenerator for R {
+    fn uuid(&mut self) -> Uuid {
+        let mut bytes = [0u8; 16];
+        self.fill_bytes(&mut bytes);
+        // set version = 4
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        // set variant = RFC4122
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    fn ulid(&mut self) -> Ulid {
+        Ulid::with_source(self)
+    }
 }
 
 #[cfg(test)]

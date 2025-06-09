@@ -219,7 +219,7 @@ impl CompactionExecuteBench {
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
             .collect();
         Ok(CompactionJob {
-            id: crate::utils::uuid(),
+            id: uuid::Uuid::new_v4(),
             destination: 0,
             ssts,
             sorted_runs: vec![],
@@ -251,7 +251,7 @@ impl CompactionExecuteBench {
             .collect();
         info!("loaded compaction job");
         CompactionJob {
-            id: crate::utils::uuid(),
+            id: uuid::Uuid::new_v4(),
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,

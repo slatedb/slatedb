@@ -510,6 +510,8 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::test_utils::build_test_sst;
     use bytes::{BufMut, BytesMut};
+    use ulid::Ulid;
+    use uuid::Uuid;
 
     use super::{manifest_generated, MANIFEST_FORMAT_VERSION};
 
@@ -519,13 +521,13 @@ mod tests {
         let mut core = CoreDbState::new();
         core.checkpoints = vec![
             checkpoint::Checkpoint {
-                id: crate::utils::uuid(),
+                id: Uuid::new_v4(),
                 manifest_id: 1,
                 expire_time: None,
                 create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(100),
             },
             checkpoint::Checkpoint {
-                id: crate::utils::uuid(),
+                id: Uuid::new_v4(),
                 manifest_id: 2,
                 expire_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)),
                 create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
@@ -549,18 +551,18 @@ mod tests {
         manifest.external_dbs = vec![
             ExternalDb {
                 path: "/path/to/external/first".to_string(),
-                source_checkpoint_id: crate::utils::uuid(),
-                final_checkpoint_id: Some(crate::utils::uuid()),
+                source_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: Some(Uuid::new_v4()),
                 sst_ids: vec![
-                    SsTableId::Compacted(crate::utils::ulid()),
-                    SsTableId::Compacted(crate::utils::ulid()),
+                    SsTableId::Compacted(Ulid::new()),
+                    SsTableId::Compacted(Ulid::new()),
                 ],
             },
             ExternalDb {
                 path: "/path/to/external/second".to_string(),
-                source_checkpoint_id: crate::utils::uuid(),
-                final_checkpoint_id: Some(crate::utils::uuid()),
-                sst_ids: vec![SsTableId::Compacted(crate::utils::ulid())],
+                source_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: Some(Uuid::new_v4()),
+                sst_ids: vec![SsTableId::Compacted(Ulid::new())],
             },
         ];
         let codec = FlatBufferManifestCodec {};
