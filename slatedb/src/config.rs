@@ -167,6 +167,46 @@ use crate::error::{SettingsError, SlateDBError};
 use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
+/// Enum representing valid SST block sizes
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub enum SstBlockSize {
+    /// 1KB blocks
+    Block1Kb,
+    /// 2KB blocks
+    Block2Kb,
+    /// 4KB blocks (default)
+    Block4Kb,
+    /// 8KB blocks
+    Block8Kb,
+    /// 16KB blocks
+    Block16Kb,
+    /// 32KB blocks
+    Block32Kb,
+    /// 64KB blocks
+    Block64Kb,
+}
+
+impl SstBlockSize {
+    /// Get the block size in bytes
+    pub fn as_bytes(&self) -> usize {
+        match self {
+            SstBlockSize::Block1Kb => 1024,
+            SstBlockSize::Block2Kb => 2048,
+            SstBlockSize::Block4Kb => 4096,
+            SstBlockSize::Block8Kb => 8192,
+            SstBlockSize::Block16Kb => 16384,
+            SstBlockSize::Block32Kb => 32768,
+            SstBlockSize::Block64Kb => 65536,
+        }
+    }
+}
+
+impl Default for SstBlockSize {
+    fn default() -> Self {
+        SstBlockSize::Block4Kb
+    }
+}
+
 /// Describes the durability of data based on the medium (e.g. in-memory, object storags)
 /// that the data is currently stored in. Currently this is used to define a
 /// durability filter for data served by a read.
