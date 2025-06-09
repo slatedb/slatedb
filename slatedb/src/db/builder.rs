@@ -474,7 +474,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
                 },
-                db_context.clone(),
+                Some(db_context.clone()),
             ));
         }
 

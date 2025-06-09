@@ -71,7 +71,7 @@ impl GarbageCollector {
         stat_registry: Arc<StatRegistry>,
         cancellation_token: CancellationToken,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
-        db_context: Arc<DbContext>,
+        db_context: Option<Arc<DbContext>>,
     ) -> Self {
         let stats = Arc::new(GcStats::new(stat_registry));
         let ct = cancellation_token.clone();
@@ -112,8 +112,9 @@ impl GarbageCollector {
         stats: Arc<GcStats>,
         cancellation_token: CancellationToken,
         options: GarbageCollectorOptions,
-        db_context: Arc<DbContext>,
+        db_context: Option<Arc<DbContext>>,
     ) {
+        let db_context = db_context.unwrap_or_default();
         let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
 
         let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) =
@@ -1157,7 +1158,6 @@ mod tests {
     async fn test_gc_shutdown() {
         let (manifest_store, table_store, _) = build_objects();
         let stats = Arc::new(StatRegistry::new());
-        let db_context = Arc::new(DbContext::default());
 
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
@@ -1184,7 +1184,7 @@ mod tests {
             stats.clone(),
             cancellation_token.clone(),
             |result| assert!(result.is_ok()),
-            db_context.clone(),
+            None,
         );
 
         gc.terminate_background_task().await;

@@ -66,9 +66,10 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         id: Uuid,
         lifetime: Option<Duration>,
-        db_context: Arc<DbContext>,
+        db_context: Option<Arc<DbContext>>,
     ) -> Result<(), SlateDBError> {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
+        let db_context = db_context.unwrap_or_default();
         let mut stored_manifest = StoredManifest::load(manifest_store, db_context.clone()).await?;
         let system_clock = db_context.system_clock();
         stored_manifest
@@ -94,9 +95,10 @@ impl Db {
         path: &Path,
         object_store: Arc<dyn ObjectStore>,
         id: Uuid,
-        db_context: Arc<DbContext>,
+        db_context: Option<Arc<DbContext>>,
     ) -> Result<(), SlateDBError> {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
+        let db_context = db_context.unwrap_or_default();
         let mut stored_manifest = StoredManifest::load(manifest_store, db_context.clone()).await?;
         stored_manifest
             .maybe_apply_manifest_update(|stored_manifest| {
@@ -160,7 +162,7 @@ mod tests {
             path,
             object_store.clone(),
             &CheckpointOptions::default(),
-            db_context.clone(),
+            Some(db_context.clone()),
         )
         .await
         .unwrap();
@@ -202,7 +204,7 @@ mod tests {
                 lifetime: Some(Duration::from_secs(3600)),
                 ..CheckpointOptions::default()
             },
-            db_context.clone(),
+            Some(db_context.clone()),
         )
         .await
         .unwrap();
@@ -239,7 +241,7 @@ mod tests {
             path.clone(),
             object_store.clone(),
             &CheckpointOptions::default(),
-            db_context.clone(),
+            Some(db_context.clone()),
         )
         .await
         .unwrap();
@@ -254,7 +256,7 @@ mod tests {
                 source: Some(source_checkpoint_id),
                 ..CheckpointOptions::default()
             },
-            db_context.clone(),
+            Some(db_context.clone()),
         )
         .await
         .unwrap();
@@ -282,7 +284,7 @@ mod tests {
                 source: Some(source_checkpoint_id),
                 ..CheckpointOptions::default()
             },
-            db_context.clone(),
+            Some(db_context.clone()),
         )
         .await;
 
@@ -302,7 +304,7 @@ mod tests {
             path,
             object_store.clone(),
             &CheckpointOptions::default(),
-            db_context.clone(),
+            Some(db_context.clone()),
         )
         .await;
 
@@ -330,7 +332,7 @@ mod tests {
                 lifetime: Some(Duration::from_secs(100)),
                 ..CheckpointOptions::default()
             },
-            db_context.clone(),
+            Some(db_context.clone()),
         )
         .await
         .unwrap();
@@ -349,7 +351,7 @@ mod tests {
             object_store.clone(),
             id,
             Some(Duration::from_secs(1000)),
-            db_context.clone(),
+            Some(db_context.clone()),
         )
         .await
         .unwrap();
@@ -382,7 +384,7 @@ mod tests {
             object_store.clone(),
             uuid::Uuid::new_v4(),
             Some(Duration::from_secs(1000)),
-            db_context.clone(),
+            Some(db_context.clone()),
         )
         .await;
 
@@ -403,12 +405,12 @@ mod tests {
             path.clone(),
             object_store.clone(),
             &CheckpointOptions::default(),
-            db_context.clone(),
+            Some(db_context.clone()),
         )
         .await
         .unwrap();
 
-        Db::delete_checkpoint(&path, object_store.clone(), id, db_context.clone())
+        Db::delete_checkpoint(&path, object_store.clone(), id, Some(db_context.clone()))
             .await
             .unwrap();
 

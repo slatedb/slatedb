@@ -25,7 +25,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args: CliArgs = parse_args();
     let path = Path::from(args.path.as_str());
     let object_store = admin::load_object_store_from_env(args.env_file)?;
-    let db_context = Arc::new(DbContext::default());
     let cancellation_token = CancellationToken::new();
 
     let ct = cancellation_token.clone();
@@ -44,34 +43,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
             exec_list_manifest(&path, object_store, start, end).await?
         }
         CliCommands::CreateCheckpoint { lifetime, source } => {
-            exec_create_checkpoint(&path, object_store, lifetime, source, db_context.clone())
-                .await?
+            exec_create_checkpoint(&path, object_store, lifetime, source).await?
         }
         CliCommands::RefreshCheckpoint { id, lifetime } => {
-            exec_refresh_checkpoint(&path, object_store, id, lifetime, db_context.clone()).await?
+            exec_refresh_checkpoint(&path, object_store, id, lifetime).await?
         }
         CliCommands::DeleteCheckpoint { id } => {
-            exec_delete_checkpoint(&path, object_store, id, db_context.clone()).await?
+            exec_delete_checkpoint(&path, object_store, id).await?
         }
         CliCommands::ListCheckpoints {} => exec_list_checkpoints(&path, object_store).await?,
         CliCommands::RunGarbageCollection { resource, min_age } => {
-            exec_gc_once(&path, object_store, resource, min_age, db_context.clone()).await?
+            exec_gc_once(&path, object_store, resource, min_age).await?
         }
         CliCommands::ScheduleGarbageCollection {
             manifest,
             wal,
             compacted,
         } => {
-            schedule_gc(
-                &path,
-                object_store,
-                manifest,
-                wal,
-                compacted,
-                cancellation_token,
-                db_context.clone(),
-            )
-            .await?
+            schedule_gc(&path, object_store, manifest, wal, compacted, cancellation_token)
+                .await?
         }
     }
 
@@ -116,13 +106,12 @@ async fn exec_create_checkpoint(
     object_store: Arc<dyn ObjectStore>,
     lifetime: Option<Duration>,
     source: Option<Uuid>,
-    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     let result = admin::create_checkpoint(
         path.clone(),
         object_store,
         &CheckpointOptions { lifetime, source },
-        db_context,
+        None,
     )
     .await?;
     println!("{:?}", result);
@@ -134,11 +123,10 @@ async fn exec_refresh_checkpoint(
     object_store: Arc<dyn ObjectStore>,
     id: Uuid,
     lifetime: Option<Duration>,
-    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     println!(
         "{:?}",
-        Db::refresh_checkpoint(path, object_store, id, lifetime, db_context).await?
+        Db::refresh_checkpoint(path, object_store, id, lifetime, None).await?
     );
     Ok(())
 }
@@ -147,11 +135,10 @@ async fn exec_delete_checkpoint(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
     id: Uuid,
-    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     println!(
         "{:?}",
-        Db::delete_checkpoint(path, object_store, id, db_context).await?
+        Db::delete_checkpoint(path, object_store, id, None).await?
     );
     Ok(())
 }
@@ -171,7 +158,6 @@ async fn exec_gc_once(
     object_store: Arc<dyn ObjectStore>,
     resource: GcResource,
     min_age: Duration,
-    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     fn create_gc_dir_opts(min_age: Duration) -> Option<GarbageCollectorDirectoryOptions> {
         Some(GarbageCollectorDirectoryOptions {
@@ -196,7 +182,7 @@ async fn exec_gc_once(
             compacted_options: create_gc_dir_opts(min_age),
         },
     };
-    run_gc_once(path, object_store, gc_opts, db_context.clone()).await?;
+    run_gc_once(path, object_store, gc_opts, None).await?;
     Ok(())
 }
 
@@ -207,7 +193,6 @@ async fn schedule_gc(
     wal_schedule: Option<GcSchedule>,
     compacted_schedule: Option<GcSchedule>,
     cancellation_token: CancellationToken,
-    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     fn create_gc_dir_opts(schedule: GcSchedule) -> Option<GarbageCollectorDirectoryOptions> {
         Some(GarbageCollectorDirectoryOptions {
@@ -226,7 +211,7 @@ async fn schedule_gc(
         object_store,
         gc_opts,
         cancellation_token,
-        db_context.clone(),
+        None,
     )
     .await?;
     Ok(())
