@@ -261,9 +261,14 @@ impl<'a> SstIterator<'a> {
         }
     }
 
-    async fn next_iter(&mut self) -> Result<Option<BlockIterator<Arc<Block>>>, SlateDBError> {
+    async fn next_iter(
+        &mut self,
+        spawn_fetches: bool,
+    ) -> Result<Option<BlockIterator<Arc<Block>>>, SlateDBError> {
         loop {
-            self.spawn_fetches();
+            if spawn_fetches {
+                self.spawn_fetches();
+            }
             if let Some(fetch_task) = self.fetch_tasks.front_mut() {
                 match fetch_task {
                     FetchTask::InFlight(jh) => {
@@ -288,78 +293,11 @@ impl<'a> SstIterator<'a> {
 
     async fn advance_block(&mut self) -> Result<(), SlateDBError> {
         if !self.state.is_finished() {
-            if let Some(mut iter) = self.next_iter().await? {
+            if let Some(mut iter) = self.next_iter(true).await? {
                 match self.view.start_key() {
                     Included(start_key) | Excluded(start_key) => iter.seek(start_key).await?,
                     Unbounded => (),
                 }
-                self.state.advance(iter);
-            } else {
-                self.state.stop();
-            }
-        }
-        Ok(())
-    }
-
-    fn reset_fetch_tasks(&mut self, block_idx: usize) {
-        self.fetch_tasks.clear();
-        self.next_block_idx_to_fetch = block_idx;
-        self.spawn_fetches();
-    }
-
-    // Apply binary search to advance block in SstIterator::Seek instead of advancing one block at a time
-    async fn advance_block_with_binary_search(
-        &mut self,
-        next_key: &[u8],
-    ) -> Result<(), SlateDBError> {
-        if !self.state.is_finished() {
-            if let Some(iter) = self.state.current_iter.as_mut() {
-                iter.seek(next_key).await?;
-                if !iter.is_empty() {
-                    return Ok(());
-                }
-            }
-
-            let index = self.index.clone();
-            let block_idx =
-                Self::first_block_with_data_including_or_after_key(&index.borrow(), next_key);
-            if block_idx < self.next_block_idx_to_fetch {
-                while let Some(fetch_task) = self.fetch_tasks.front_mut() {
-                    match fetch_task {
-                        FetchTask::InFlight(jh) => {
-                            let blocks = jh.await.expect("join task failed")?;
-                            *fetch_task = FetchTask::Finished(blocks);
-                        }
-                        FetchTask::Finished(blocks) => {
-                            if let Some(block) = blocks.pop_front() {
-                                let mut iter = BlockIterator::new_ascending(block);
-                                iter.seek(next_key).await?;
-                                if !iter.is_empty() {
-                                    self.state.advance(iter);
-                                    return Ok(());
-                                }
-                            } else {
-                                self.fetch_tasks.pop_front();
-                            }
-                        }
-                    }
-                }
-            }
-
-            let table = self.view.table_as_ref().clone();
-            let mut block = self
-                .table_store
-                .read_blocks_using_index(
-                    &table,
-                    index,
-                    block_idx..block_idx + 1,
-                    self.options.cache_blocks,
-                )
-                .await?;
-            self.reset_fetch_tasks(block_idx + 1);
-            if let Some(block) = block.pop_front() {
-                let mut iter = BlockIterator::new_ascending(block);
-                iter.seek(next_key).await?;
                 self.state.advance(iter);
             } else {
                 self.state.stop();
@@ -406,7 +344,36 @@ impl KeyValueIterator for SstIterator<'_> {
                              next_key, self.view.start_key(), self.view.end_key())
             });
         }
-        self.advance_block_with_binary_search(next_key).await?;
+        if !self.state.is_finished() {
+            if let Some(iter) = self.state.current_iter.as_mut() {
+                iter.seek(next_key).await?;
+                if !iter.is_empty() {
+                    return Ok(());
+                }
+            }
+
+            let index = self.index.clone();
+            let block_idx =
+                Self::first_block_with_data_including_or_after_key(&index.borrow(), next_key);
+            if block_idx < self.next_block_idx_to_fetch {
+                while let Some(mut block_iter) = self.next_iter(false).await? {
+                    block_iter.seek(next_key).await?;
+                    if !block_iter.is_empty() {
+                        self.state.advance(block_iter);
+                        return Ok(());
+                    }
+                }
+            }
+
+            self.fetch_tasks.clear();
+            self.next_block_idx_to_fetch = block_idx;
+            if let Some(mut block_iter) = self.next_iter(true).await? {
+                block_iter.seek(next_key).await?;
+                self.state.advance(block_iter);
+            } else {
+                self.state.stop();
+            }
+        }
         Ok(())
     }
 }
