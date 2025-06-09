@@ -98,7 +98,7 @@ impl Manifest {
 
 #[cfg(test)]
 mod tests {
-    use crate::db_context::{self, DbContext};
+    use crate::db_context::DbContext;
     use crate::manifest::store::{ManifestStore, StoredManifest};
 
     use crate::config::CheckpointOptions;

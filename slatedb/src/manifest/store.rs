@@ -772,7 +772,7 @@ mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::config::CheckpointOptions;
-    use crate::db_context::{self, DbContext};
+    use crate::db_context::DbContext;
     use crate::db_state::CoreDbState;
     use crate::error;
     use crate::error::SlateDBError;

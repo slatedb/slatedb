@@ -814,7 +814,7 @@ impl DbReader {
 
 #[cfg(test)]
 mod tests {
-    use crate::clock::{DefaultLogicalClock, DefaultSystemClock, LogicalClock, SystemClock};
+    
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db_context::DbContext;
     use crate::db_reader::{DbReader, DbReaderOptions};
