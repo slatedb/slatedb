@@ -64,7 +64,7 @@ impl CompactionExecuteBench {
         ));
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
-        let mut rng = crate::rand::thread_rng();
+        let mut rng = rand::thread_rng();
         rng.fill_bytes(key_start.as_mut_slice());
         let mut futures = FuturesUnordered::<JoinHandle<Result<(), SlateDBError>>>::new();
         for i in 0..num_ssts {
@@ -135,7 +135,8 @@ impl CompactionExecuteBench {
         num_keys: usize,
         val_bytes: usize,
     ) -> Result<(), SlateDBError> {
-        let mut rng = crate::rand::thread_rng();
+        // Use OS RNG here becasue Rust complains that ChaCha (thread_rng) can't be sent between threads safely
+        let mut rng = rand::rngs::OsRng;
         let start = tokio::time::Instant::now();
         let mut suffix = Vec::<u8>::new();
         suffix.put_u32(i);

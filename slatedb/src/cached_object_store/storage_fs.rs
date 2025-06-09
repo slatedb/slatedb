@@ -28,6 +28,7 @@ use crate::cached_object_store::storage::{LocalCacheEntry, LocalCacheHead, Local
 pub struct FsCacheStorage {
     root_folder: std::path::PathBuf,
     evictor: Option<Arc<FsCacheEvictor>>,
+    db_context: Arc<DbContext>,
 }
 
 impl FsCacheStorage {
@@ -51,6 +52,7 @@ impl FsCacheStorage {
         Self {
             root_folder,
             evictor,
+            db_context,
         }
     }
 }
@@ -67,6 +69,7 @@ impl LocalCacheStorage for FsCacheStorage {
             location: location.clone(),
             evictor: self.evictor.clone(),
             part_size,
+            db_context: self.db_context.clone(),
         })
     }
 
@@ -89,6 +92,7 @@ pub(crate) struct FsCacheEntry {
     location: Path,
     part_size: usize,
     evictor: Option<Arc<FsCacheEvictor>>,
+    db_context: Arc<DbContext>,
 }
 
 impl FsCacheEntry {
@@ -149,7 +153,7 @@ impl FsCacheEntry {
     }
 
     fn make_rand_suffix(&self) -> String {
-        let mut rng = crate::rand::thread_rng();
+        let mut rng = self.db_context.new_rng();
         (0..24).map(|_| rng.sample(Alphanumeric) as char).collect()
     }
 }
@@ -440,6 +444,7 @@ struct FsCacheEvictorInner {
     cache_entries: Mutex<Trie<std::path::PathBuf, (SystemTime, usize)>>,
     cache_size_bytes: AtomicU64,
     stats: Arc<CachedObjectStoreStats>,
+    db_context: Arc<DbContext>,
 }
 
 impl FsCacheEvictorInner {
@@ -456,6 +461,7 @@ impl FsCacheEvictorInner {
             cache_entries: Mutex::new(Trie::new()),
             cache_size_bytes: AtomicU64::new(0_u64),
             stats,
+            db_context: Arc::new(DbContext::default()),
         }
     }
 
@@ -629,7 +635,7 @@ impl FsCacheEvictorInner {
 
     async fn random_pick_entry(&self) -> Option<(std::path::PathBuf, (SystemTime, usize))> {
         let cache_entries = self.cache_entries.lock().await;
-        let mut rng = crate::rand::thread_rng();
+        let mut rng = self.db_context.new_rng();
 
         let mut rand_child = match cache_entries.children().choose(&mut rng) {
             None => return None,

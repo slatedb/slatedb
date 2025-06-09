@@ -6,6 +6,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 use thread_local::ThreadLocal;
+use ulid::Ulid;
+use uuid::Uuid;
 
 type RngAlg = Xoroshiro128PlusPlus;
 
@@ -42,7 +44,7 @@ impl DbContext {
     }
 
     #[inline]
-    pub fn new_rng(&self) -> impl RngCore {
+    pub fn new_rng(&self) -> impl RngCore + Send + Sync {
         let cell = self.thread_rng.get_or(|| {
             let mut guard = self.root_rng.lock().expect("root rng mutex poisoned");
             RefCell::new(RngAlg::seed_from_u64(guard.next_u64()))

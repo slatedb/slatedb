@@ -87,7 +87,6 @@ mod partitioned_keyspace;
 mod paths;
 #[cfg(test)]
 mod proptest_util;
-mod rand;
 mod reader;
 mod row_codec;
 mod sorted_run_iterator;
