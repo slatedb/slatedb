@@ -34,7 +34,6 @@ use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
-use crate::clock::{LogicalClock, SystemClock};
 use crate::compactor::Compactor;
 use crate::config::{PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions};
 use crate::db_context::DbContext;

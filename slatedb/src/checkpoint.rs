@@ -1,4 +1,3 @@
-use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::db_context::DbContext;
