@@ -251,12 +251,12 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
 
 /// Trait for generating UUIDs and ULIDs from a random number generator.
 pub trait IdGenerator {
-    fn uuid(&mut self) -> Uuid;
-    fn ulid(&mut self) -> Ulid;
+    fn gen_uuid(&mut self) -> Uuid;
+    fn gen_ulid(&mut self) -> Ulid;
 }
 
 impl<R: RngCore> IdGenerator for R {
-    fn uuid(&mut self) -> Uuid {
+    fn gen_uuid(&mut self) -> Uuid {
         let mut bytes = [0u8; 16];
         self.fill_bytes(&mut bytes);
         // set version = 4
@@ -266,7 +266,7 @@ impl<R: RngCore> IdGenerator for R {
         Uuid::from_bytes(bytes)
     }
 
-    fn ulid(&mut self) -> Ulid {
+    fn gen_ulid(&mut self) -> Ulid {
         Ulid::with_source(self)
     }
 }

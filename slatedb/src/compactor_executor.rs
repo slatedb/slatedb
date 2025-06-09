@@ -136,9 +136,9 @@ impl TokioCompactionExecutorInner {
     ) -> Result<SortedRun, SlateDBError> {
         let mut all_iter = self.load_iterators(&compaction).await?;
         let mut output_ssts = Vec::new();
-        let mut current_writer = self
-            .table_store
-            .table_writer(SsTableId::Compacted(self.db_context.thread_rng().ulid()));
+        let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
+            self.db_context.thread_rng().gen_ulid(),
+        ));
         let mut current_size = 0usize;
 
         while let Some(raw_kv) = all_iter.next_entry().await? {
@@ -175,8 +175,9 @@ impl TokioCompactionExecutorInner {
                 current_size = 0;
                 let finished_writer = mem::replace(
                     &mut current_writer,
-                    self.table_store
-                        .table_writer(SsTableId::Compacted(self.db_context.thread_rng().ulid())),
+                    self.table_store.table_writer(SsTableId::Compacted(
+                        self.db_context.thread_rng().gen_ulid(),
+                    )),
                 );
                 output_ssts.push(finished_writer.close().await?);
                 self.stats.bytes_compacted.add(current_size as u64);
