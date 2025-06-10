@@ -1,6 +1,7 @@
 use crate::checkpoint::Checkpoint;
 use crate::clock::SystemClock;
 use crate::config::GarbageCollectorOptions;
+use crate::db_context::DbContext;
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
 use crate::manifest::store::{DirtyManifest, ManifestStore, StoredManifest};
@@ -70,7 +71,7 @@ impl GarbageCollector {
         stat_registry: Arc<StatRegistry>,
         cancellation_token: CancellationToken,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     ) -> Self {
         let stats = Arc::new(GcStats::new(stat_registry));
         let ct = cancellation_token.clone();
@@ -82,7 +83,7 @@ impl GarbageCollector {
                 stats,
                 ct,
                 options,
-                system_clock,
+                db_context.clone(),
             ));
 
             Ok(())
@@ -111,8 +112,9 @@ impl GarbageCollector {
         stats: Arc<GcStats>,
         cancellation_token: CancellationToken,
         options: GarbageCollectorOptions,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     ) {
+        let system_clock = db_context.system_clock();
         let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
 
         let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) =
@@ -1154,7 +1156,7 @@ mod tests {
             stats.clone(),
             cancellation_token.clone(),
             |result| assert!(result.is_ok()),
-            Arc::new(DefaultSystemClock::default()),
+            Arc::new(DbContext::default()),
         );
 
         gc.terminate_background_task().await;

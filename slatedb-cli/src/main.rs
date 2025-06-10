@@ -1,15 +1,14 @@
 use crate::args::{parse_args, CliArgs, CliCommands, GcResource, GcSchedule};
 use object_store::path::Path;
 use object_store::ObjectStore;
-use slatedb::admin;
 use slatedb::admin::{
     list_checkpoints, list_manifests, read_manifest, run_gc_in_background, run_gc_once,
 };
-use slatedb::clock::{DefaultSystemClock, SystemClock};
 use slatedb::config::{
     CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
 use slatedb::Db;
+use slatedb::{admin, DbContext};
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,7 +25,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args: CliArgs = parse_args();
     let path = Path::from(args.path.as_str());
     let object_store = admin::load_object_store_from_env(args.env_file)?;
-    let system_clock = Arc::new(DefaultSystemClock::default());
+    let db_context = Arc::new(DbContext::default());
     let cancellation_token = CancellationToken::new();
 
     let ct = cancellation_token.clone();
@@ -48,14 +47,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             exec_create_checkpoint(&path, object_store, lifetime, source).await?
         }
         CliCommands::RefreshCheckpoint { id, lifetime } => {
-            exec_refresh_checkpoint(&path, object_store, id, lifetime, system_clock).await?
+            exec_refresh_checkpoint(&path, object_store, id, lifetime, db_context).await?
         }
         CliCommands::DeleteCheckpoint { id } => {
             exec_delete_checkpoint(&path, object_store, id).await?
         }
         CliCommands::ListCheckpoints {} => exec_list_checkpoints(&path, object_store).await?,
         CliCommands::RunGarbageCollection { resource, min_age } => {
-            exec_gc_once(&path, object_store, resource, min_age, system_clock).await?
+            exec_gc_once(&path, object_store, resource, min_age, db_context).await?
         }
         CliCommands::ScheduleGarbageCollection {
             manifest,
@@ -69,6 +68,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 wal,
                 compacted,
                 cancellation_token,
+                db_context,
             )
             .await?
         }
@@ -131,11 +131,11 @@ async fn exec_refresh_checkpoint(
     object_store: Arc<dyn ObjectStore>,
     id: Uuid,
     lifetime: Option<Duration>,
-    system_clock: Arc<dyn SystemClock>,
+    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     println!(
         "{:?}",
-        Db::refresh_checkpoint(path, object_store, id, lifetime, system_clock).await?
+        Db::refresh_checkpoint(path, object_store, id, lifetime, db_context).await?
     );
     Ok(())
 }
@@ -164,7 +164,7 @@ async fn exec_gc_once(
     object_store: Arc<dyn ObjectStore>,
     resource: GcResource,
     min_age: Duration,
-    system_clock: Arc<dyn SystemClock>,
+    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     fn create_gc_dir_opts(min_age: Duration) -> Option<GarbageCollectorDirectoryOptions> {
         Some(GarbageCollectorDirectoryOptions {
@@ -189,7 +189,7 @@ async fn exec_gc_once(
             compacted_options: create_gc_dir_opts(min_age),
         },
     };
-    run_gc_once(path, object_store, gc_opts, system_clock).await?;
+    run_gc_once(path, object_store, gc_opts, db_context).await?;
     Ok(())
 }
 
@@ -200,6 +200,7 @@ async fn schedule_gc(
     wal_schedule: Option<GcSchedule>,
     compacted_schedule: Option<GcSchedule>,
     cancellation_token: CancellationToken,
+    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     fn create_gc_dir_opts(schedule: GcSchedule) -> Option<GarbageCollectorDirectoryOptions> {
         Some(GarbageCollectorDirectoryOptions {
@@ -207,20 +208,12 @@ async fn schedule_gc(
             min_age: schedule.min_age,
         })
     }
-    let system_clock = Arc::new(DefaultSystemClock::default());
     let gc_opts = GarbageCollectorOptions {
         manifest_options: manifest_schedule.and_then(create_gc_dir_opts),
         wal_options: wal_schedule.and_then(create_gc_dir_opts),
         compacted_options: compacted_schedule.and_then(create_gc_dir_opts),
     };
 
-    run_gc_in_background(
-        path,
-        object_store,
-        gc_opts,
-        cancellation_token,
-        system_clock,
-    )
-    .await?;
+    run_gc_in_background(path, object_store, gc_opts, cancellation_token, db_context).await?;
     Ok(())
 }

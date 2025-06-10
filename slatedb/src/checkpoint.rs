@@ -1,9 +1,9 @@
-use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::mem_table_flush::MemtableFlushMsg;
+use crate::DbContext;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
@@ -66,14 +66,14 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         id: Uuid,
         lifetime: Option<Duration>,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     ) -> Result<(), SlateDBError> {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
             .maybe_apply_manifest_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty();
-                let expire_time = lifetime.map(|l| system_clock.now() + l);
+                let expire_time = lifetime.map(|l| db_context.system_clock().now() + l);
                 let Some(_) = dirty.core.checkpoints.iter_mut().find_map(|c| {
                     if c.id == id {
                         c.expire_time = expire_time;
@@ -131,6 +131,7 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
+    use crate::DbContext;
     use crate::{admin, test_utils};
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -326,7 +327,7 @@ mod tests {
             object_store.clone(),
             id,
             Some(Duration::from_secs(1000)),
-            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbContext::default()),
         )
         .await
         .unwrap();
@@ -358,7 +359,7 @@ mod tests {
             object_store.clone(),
             crate::utils::uuid(),
             Some(Duration::from_secs(1000)),
-            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbContext::default()),
         )
         .await;
 

@@ -1,6 +1,6 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
-use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
+use crate::db_context::DbContext;
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
 use crate::garbage_collector::GarbageCollector;
@@ -123,7 +123,7 @@ pub async fn run_gc_once(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
     gc_opts: GarbageCollectorOptions,
-    system_clock: Arc<dyn SystemClock>,
+    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
     manifest_store
@@ -143,7 +143,7 @@ pub async fn run_gc_once(
         table_store,
         stats,
         gc_opts,
-        system_clock,
+        db_context.system_clock(),
     )
     .await;
     Ok(())
@@ -164,7 +164,7 @@ pub async fn run_gc_in_background(
     object_store: Arc<dyn ObjectStore>,
     gc_opts: GarbageCollectorOptions,
     cancellation_token: CancellationToken,
-    system_clock: Arc<dyn SystemClock>,
+    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
     manifest_store
@@ -189,7 +189,7 @@ pub async fn run_gc_in_background(
         stats,
         ct,
         gc_opts,
-        system_clock,
+        db_context,
     ));
     tracker.close();
 

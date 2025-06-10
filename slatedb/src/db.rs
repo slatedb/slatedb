@@ -54,6 +54,7 @@ use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use tracing::{info, warn};
 
 pub mod builder;
+pub use crate::db_context::DbContext;
 pub use builder::{DbBuilder, DbContextBuilder};
 
 pub(crate) struct DbInner {
