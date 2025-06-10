@@ -38,7 +38,14 @@ pub struct CompactionExecuteBench {
 }
 
 impl CompactionExecuteBench {
-    pub fn new(path: Path, object_store: Arc<dyn ObjectStore>, db_context: Arc<DbContext>) -> Self {
+    pub fn new(path: Path, object_store: Arc<dyn ObjectStore>) -> Self {
+        Self::new_with_context(path, object_store, Arc::new(DbContext::default()))
+    }
+    pub fn new_with_context(
+        path: Path,
+        object_store: Arc<dyn ObjectStore>,
+        db_context: Arc<DbContext>,
+    ) -> Self {
         Self {
             path,
             object_store,

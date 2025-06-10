@@ -250,21 +250,18 @@ impl<P: Into<Path>> DbBuilder<P> {
             info!(?path, ?self.settings, "Opening SlateDB database");
         }
 
-        // RNG is allowed here because the user has not specified a seed. We need to
-        // seed the RNG with something to create the deterministic context.
-        #[allow(clippy::disallowed_methods)]
-        let rng_seed = self.seed.unwrap_or_else(|| rand::thread_rng().next_u64());
-
-        let logical_clock = self
-            .logical_clock
-            .unwrap_or_else(|| Arc::new(DefaultLogicalClock::new()));
+        let mut db_builder = DbContextBuilder::new();
+        if let Some(seed) = self.seed {
+            db_builder = db_builder.with_seed(seed);
+        }
+        if let Some(system_clock) = self.system_clock {
+            db_builder = db_builder.with_system_clock(system_clock);
+        }
+        if let Some(logical_clock) = self.logical_clock {
+            db_builder = db_builder.with_logical_clock(logical_clock);
+        }
+        let db_context = db_builder.build();
         let block_cache = self.block_cache.or_else(default_block_cache);
-
-        let system_clock = self
-            .system_clock
-            .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
-
-        let db_context = Arc::new(DbContext::new(rng_seed, system_clock, logical_clock));
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
@@ -488,5 +485,49 @@ impl<P: Into<Path>> DbBuilder<P> {
             garbage_collector: Mutex::new(garbage_collector),
             cancellation_token: self.cancellation_token,
         })
+    }
+}
+
+pub struct DbContextBuilder {
+    seed: Option<u64>,
+    logical_clock: Option<Arc<dyn LogicalClock>>,
+    system_clock: Option<Arc<dyn SystemClock>>,
+}
+
+impl DbContextBuilder {
+    pub fn new() -> Self {
+        Self {
+            seed: None,
+            logical_clock: None,
+            system_clock: None,
+        }
+    }
+
+    pub fn build(self) -> Arc<DbContext> {
+        let seed = self.seed.unwrap_or_else(|| rand::random());
+        let logical_clock = self
+            .logical_clock
+            .unwrap_or_else(|| Arc::new(DefaultLogicalClock::default()));
+        let system_clock = self
+            .system_clock
+            .unwrap_or_else(|| Arc::new(DefaultSystemClock::default()));
+        Arc::new(DbContext::new(seed, system_clock, logical_clock))
+    }
+}
+
+impl DbContextBuilder {
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    pub fn with_logical_clock(mut self, clock: Arc<dyn LogicalClock>) -> Self {
+        self.logical_clock = Some(clock);
+        self
+    }
+
+    pub fn with_system_clock(mut self, clock: Arc<dyn SystemClock>) -> Self {
+        self.system_clock = Some(clock);
+        self
     }
 }

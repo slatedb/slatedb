@@ -54,7 +54,7 @@ use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use tracing::{info, warn};
 
 pub mod builder;
-pub use builder::DbBuilder;
+pub use builder::{DbBuilder, DbContextBuilder};
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,

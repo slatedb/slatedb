@@ -35,7 +35,7 @@ trait GcTask {
     async fn collect(&self, now: DateTime<Utc>) -> Result<(), SlateDBError>;
 }
 
-pub struct GarbageCollector {
+pub(crate) struct GarbageCollector {
     cancellation_token: CancellationToken,
 }
 
@@ -161,22 +161,21 @@ impl GarbageCollector {
         );
     }
 
-    // Keep this private to protect aggainst accidentally using the default clock.
-    // External users are forced to use the clock explicitly.
-    #[cfg(test)]
-    async fn run_gc_once(
+    /// Alias for [`Self::run_gc_once_with_context`].
+    ///
+    /// Use this if you don’t need to pass a custom `DbContext`.
+    pub(crate) async fn run_gc_once(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         stat_registry: Arc<StatRegistry>,
         options: GarbageCollectorOptions,
-        db_context: Arc<DbContext>,
     ) {
-        Self::run_once_with_context(
+        Self::run_gc_once_with_context(
             manifest_store,
             table_store,
             stat_registry,
             options,
-            db_context,
+            Arc::new(DbContext::default()),
         )
         .await;
     }
@@ -192,9 +191,9 @@ impl GarbageCollector {
     /// * `table_store`: The table store to use for the garbage collector.
     /// * `stat_registry`: The stat registry to use for the garbage collector.
     /// * `options`: The options for the garbage collector.
-    /// * `system_clock`: The system clock to use for the garbage collector.
+    /// * `db_context`: The database context to use for the garbage collector.
     ///
-    pub async fn run_once_with_context(
+    pub(crate) async fn run_gc_once_with_context(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         stat_registry: Arc<StatRegistry>,
@@ -227,7 +226,7 @@ impl GarbageCollector {
     ///
     /// Cancel the cancellation token and all tokens that are derived from it.
     /// This will trigger the garbage collector to terminate.
-    pub async fn terminate_background_task(self) {
+    pub(crate) async fn terminate_background_task(self) {
         self.cancellation_token.cancel();
     }
 }
@@ -1124,7 +1123,6 @@ mod tests {
     async fn run_gc_once(manifest_store: Arc<ManifestStore>, table_store: Arc<TableStore>) {
         // Start the garbage collector
         let stats = Arc::new(StatRegistry::new());
-        let db_context = Arc::new(DbContext::default());
 
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
@@ -1146,7 +1144,6 @@ mod tests {
             table_store.clone(),
             stats.clone(),
             gc_opts,
-            db_context.clone(),
         )
         .await;
 

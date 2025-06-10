@@ -123,10 +123,27 @@ pub async fn run_gc_once(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
     gc_opts: GarbageCollectorOptions,
-    db_context: Option<Arc<DbContext>>,
+) -> Result<(), Box<dyn Error>> {
+    run_gc_once_with_context(path, object_store, gc_opts, Arc::new(DbContext::default())).await
+}
+
+/// Run the garbage collector once in the foreground.
+///
+/// This function runs the garbage collector letting Tokio decide when to run the task.
+///
+/// # Arguments
+///
+/// * `path`: The path to the database.
+/// * `object_store`: The object store to use.
+/// * `gc_opts`: The garbage collector options.
+///
+pub async fn run_gc_once_with_context(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    gc_opts: GarbageCollectorOptions,
+    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
-    let db_context = db_context.unwrap_or_default();
     manifest_store
         .validate_no_wal_object_store_configured()
         .await?;
@@ -139,7 +156,7 @@ pub async fn run_gc_once(
     ));
 
     let stats = Arc::new(StatRegistry::new());
-    GarbageCollector::run_once_with_context(
+    GarbageCollector::run_gc_once_with_context(
         manifest_store,
         table_store,
         stats,
@@ -278,6 +295,18 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
 }
 
+/// Alias for [`Self::create_checkpoint_with_context`].
+///
+/// Use this if you don’t need to pass a custom `DbContext`.
+pub async fn create_checkpoint<P: Into<Path>>(
+    path: P,
+    object_store: Arc<dyn ObjectStore>,
+    options: &CheckpointOptions,
+) -> Result<CheckpointCreateResult, SlateDBError> {
+    create_checkpoint_with_context(path, object_store, options, Arc::new(DbContext::default()))
+        .await
+}
+
 /// Creates a checkpoint of the db stored in the object store at the specified path using the
 /// provided options. The checkpoint will reference the current active manifest of the db.
 ///
@@ -302,24 +331,22 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 ///      "parent_path",
 ///      object_store,
 ///      &CheckpointOptions::default(),
-///      None,
 ///    ).await?;
 ///
 ///    Ok(())
 /// }
 /// ```
-pub async fn create_checkpoint<P: Into<Path>>(
+pub async fn create_checkpoint_with_context<P: Into<Path>>(
     path: P,
     object_store: Arc<dyn ObjectStore>,
     options: &CheckpointOptions,
-    db_context: Option<Arc<DbContext>>,
+    db_context: Arc<DbContext>,
 ) -> Result<CheckpointCreateResult, SlateDBError> {
     let manifest_store = Arc::new(ManifestStore::new(&path.into(), object_store));
     manifest_store
         .validate_no_wal_object_store_configured()
         .await?;
-    let mut stored_manifest =
-        StoredManifest::load(manifest_store, db_context.unwrap_or_default()).await?;
+    let mut stored_manifest = StoredManifest::load(manifest_store, db_context).await?;
     let checkpoint = stored_manifest.write_checkpoint(None, options).await?;
     Ok(CheckpointCreateResult {
         id: checkpoint.id,

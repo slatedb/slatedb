@@ -43,15 +43,18 @@ impl DbContext {
         }
     }
 
-    pub fn thread_rng(&self) -> ThreadRng {
+    #[inline]
+    pub(crate) fn thread_rng(&self) -> ThreadRng {
         ThreadRng::new(self)
     }
 
-    pub fn system_clock(&self) -> Arc<dyn SystemClock> {
+    #[inline]
+    pub(crate) fn system_clock(&self) -> Arc<dyn SystemClock> {
         self.system_clock.clone()
     }
 
-    pub fn logical_clock(&self) -> Arc<dyn LogicalClock> {
+    #[inline]
+    pub(crate) fn logical_clock(&self) -> Arc<dyn LogicalClock> {
         self.logical_clock.clone()
     }
 
@@ -70,7 +73,7 @@ impl DbContext {
     }
 }
 
-pub struct ThreadRng<'a> {
+pub(crate) struct ThreadRng<'a> {
     context: &'a DbContext,
 }
 

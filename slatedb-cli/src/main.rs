@@ -117,7 +117,6 @@ async fn exec_create_checkpoint(
         path.clone(),
         object_store,
         &CheckpointOptions { lifetime, source },
-        None,
     )
     .await?;
     println!("{:?}", result);
@@ -132,7 +131,7 @@ async fn exec_refresh_checkpoint(
 ) -> Result<(), Box<dyn Error>> {
     println!(
         "{:?}",
-        Db::refresh_checkpoint(path, object_store, id, lifetime, None).await?
+        Db::refresh_checkpoint(path, object_store, id, lifetime).await?
     );
     Ok(())
 }
@@ -142,10 +141,7 @@ async fn exec_delete_checkpoint(
     object_store: Arc<dyn ObjectStore>,
     id: Uuid,
 ) -> Result<(), Box<dyn Error>> {
-    println!(
-        "{:?}",
-        Db::delete_checkpoint(path, object_store, id, None).await?
-    );
+    println!("{:?}", Db::delete_checkpoint(path, object_store, id).await?);
     Ok(())
 }
 
@@ -188,7 +184,7 @@ async fn exec_gc_once(
             compacted_options: create_gc_dir_opts(min_age),
         },
     };
-    run_gc_once(path, object_store, gc_opts, None).await?;
+    run_gc_once(path, object_store, gc_opts).await?;
     Ok(())
 }
 
