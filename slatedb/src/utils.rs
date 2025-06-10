@@ -256,6 +256,7 @@ pub trait IdGenerator {
 }
 
 impl<R: RngCore> IdGenerator for R {
+    /// Generates a random UUID using the provided RNG.
     fn gen_uuid(&mut self) -> Uuid {
         let mut bytes = [0u8; 16];
         self.fill_bytes(&mut bytes);
@@ -266,6 +267,7 @@ impl<R: RngCore> IdGenerator for R {
         Uuid::from_bytes(bytes)
     }
 
+    /// Generates a random ULID using the provided RNG.
     fn gen_ulid(&mut self) -> Ulid {
         Ulid::with_source(self)
     }

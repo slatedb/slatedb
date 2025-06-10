@@ -487,6 +487,23 @@ impl<P: Into<Path>> DbBuilder<P> {
     }
 }
 
+/// Builder for creating a `DbContext`. This is used to configure the random
+/// number generator seed, as well as the system and logical clocks.
+///
+/// # Examples
+///
+/// ```
+/// use slatedb::clock::DefaultLogicalClock;
+/// use slatedb::clock::DefaultSystemClock;
+/// use slatedb::DbContextBuilder;
+/// use std::sync::Arc;
+///
+/// let db_context = DbContextBuilder::new()
+///     .with_seed(42)
+///     .with_logical_clock(Arc::new(DefaultLogicalClock::new()))
+///     .with_system_clock(Arc::new(DefaultSystemClock::new()))
+///     .build();
+/// ```
 pub struct DbContextBuilder {
     seed: Option<u64>,
     logical_clock: Option<Arc<dyn LogicalClock>>,
