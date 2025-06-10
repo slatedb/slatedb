@@ -110,7 +110,7 @@ impl BytesRange {
     }
 
     #[cfg(test)]
-    pub(crate) fn is_empty(&self) -> bool {
+    pub(crate) fn empty(&self) -> bool {
         !self.inner.non_empty()
     }
 }
@@ -132,7 +132,7 @@ pub(crate) mod tests {
         });
 
         proptest!(|(range in arbitrary::empty_range(10))| {
-            assert!(range.is_empty());
+            assert!(range.empty());
         });
     }
 
