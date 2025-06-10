@@ -474,7 +474,8 @@ mod tests {
             SstIteratorOptions::default(),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
 
         let wal_entry = wal_iter.next().await.unwrap().unwrap();
         assert_eq!(*kv.1, wal_entry.value)

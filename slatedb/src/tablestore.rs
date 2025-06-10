@@ -662,7 +662,8 @@ mod tests {
         // then:
         let mut iter = SstIterator::new_owned(.., sst, ts.clone(), sst_iter_options)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("Expected Some(iter) but got None");
         assert_iterator(
             &mut iter,
             vec![
@@ -729,7 +730,8 @@ mod tests {
         // then:
         let mut iter = SstIterator::new_owned(.., sst, ts.clone(), sst_iter_options)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("Expected Some(iter) but got None");
         assert_iterator(
             &mut iter,
             vec![

@@ -163,31 +163,33 @@ impl<'a> SstIterator<'a> {
         table: SsTableHandle,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
-    ) -> Result<Self, SlateDBError> {
+    ) -> Result<Option<Self>, SlateDBError> {
         let mut view_range = BytesRange::from(range);
         if let Some(visible_range) = &table.visible_range {
-            view_range = view_range
-                .intersect(visible_range)
-                .expect("Provided range is outside of table's visible range");
+            view_range = match view_range.intersect(visible_range) {
+                Some(range) => range,
+                None => return Ok(None),
+            };
         }
         let view = SstView::Owned(Box::new(table), view_range);
-        Self::new(view, table_store.clone(), options).await
+        Ok(Some(Self::new(view, table_store.clone(), options).await?))
     }
 
-    pub(crate) async fn new_borrowed<T: RangeBounds<&'a [u8]>>(
+    pub(crate) async fn new_borrowed<T: RangeBounds<Bytes>>(
         range: T,
         table: &'a SsTableHandle,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
-    ) -> Result<Self, SlateDBError> {
-        let mut view_range = BytesRange::from_slice(range);
+    ) -> Result<Option<Self>, SlateDBError> {
+        let mut view_range = BytesRange::from(range);
         if let Some(visible_range) = &table.visible_range {
-            view_range = view_range
-                .intersect(visible_range)
-                .expect("Provided range is outside of table's visible range");
+            view_range = match view_range.intersect(visible_range) {
+                Some(range) => range,
+                None => return Ok(None),
+            };
         }
         let view = SstView::Borrowed(table, view_range);
-        Self::new(view, table_store.clone(), options).await
+        Ok(Some(Self::new(view, table_store.clone(), options).await?))
     }
 
     pub(crate) async fn for_key(
@@ -195,8 +197,14 @@ impl<'a> SstIterator<'a> {
         key: &'a [u8],
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
-    ) -> Result<Self, SlateDBError> {
-        Self::new_borrowed(key..=key, table, table_store, options).await
+    ) -> Result<Option<Self>, SlateDBError> {
+        Self::new_borrowed(
+            BytesRange::from_slice(key..=key),
+            table,
+            table_store,
+            options,
+        )
+        .await
     }
 
     fn last_block_with_data_including_key(index: &SsTableIndex, key: &[u8]) -> Option<usize> {
@@ -408,7 +416,8 @@ mod tests {
         let mut iter =
             SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options)
                 .await
-                .unwrap();
+                .unwrap()
+                .expect("Expected Some(iter) but got None");
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
@@ -470,7 +479,8 @@ mod tests {
         let mut iter =
             SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options)
                 .await
-                .unwrap();
+                .unwrap()
+                .expect("Expected Some(iter) but got None");
         for i in 0..1000 {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, format!("key{}", i));
@@ -511,13 +521,14 @@ mod tests {
             let from_key = test_case_key_gen.next();
             let _ = test_case_val_gen.next();
             let mut iter = SstIterator::new_borrowed(
-                from_key.as_ref()..,
+                BytesRange::from_slice(from_key.as_ref()..),
                 &sst,
                 table_store.clone(),
                 SstIteratorOptions::default(),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .expect("Expected Some(iter) but got None");
             for _ in 0..nkeys - i {
                 let e = iter.next().await.unwrap().unwrap();
                 assert_kv(
@@ -554,13 +565,14 @@ mod tests {
         let (sst, nkeys) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
         let mut iter = SstIterator::new_borrowed(
-            [b'a'; 16].as_ref()..,
+            BytesRange::from_slice([b'a'; 16].as_ref()..),
             &sst,
             table_store.clone(),
             SstIteratorOptions::default(),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
 
         for _ in 0..nkeys {
             let e = iter.next().await.unwrap().unwrap();
@@ -595,13 +607,14 @@ mod tests {
         let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
         let mut iter = SstIterator::new_borrowed(
-            [b'z'; 16].as_ref()..,
+            BytesRange::from_slice([b'z'; 16].as_ref()..),
             &sst,
             table_store.clone(),
             SstIteratorOptions::default(),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
 
         assert!(iter.next().await.unwrap().is_none());
     }

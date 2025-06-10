@@ -555,7 +555,8 @@ mod tests {
                     SstIteratorOptions::default(),
                 )
                 .await
-                .unwrap();
+                .unwrap()
+                .expect("Expected Some(iter) but got None");
 
                 // remove the key from the expected map and verify that the db matches
                 while let Some(kv) = iter.next().await.unwrap() {
@@ -622,7 +623,8 @@ mod tests {
         let mut iter =
             SstIterator::new_borrowed(.., l0, table_store.clone(), SstIteratorOptions::default())
                 .await
-                .unwrap();
+                .unwrap()
+                .expect("Expected Some(iter) but got None");
 
         let tombstone = iter.next_entry().await.unwrap();
         assert!(tombstone.unwrap().value.is_tombstone());
@@ -644,7 +646,8 @@ mod tests {
             SstIteratorOptions::default(),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
 
         // should be no tombstone for key 'a' because it was filtered
         // out of the last run
@@ -754,7 +757,8 @@ mod tests {
             SstIteratorOptions::default(),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
 
         assert_iterator(
             &mut iter,

@@ -1274,8 +1274,13 @@ mod tests {
         ));
     }
 
+    #[rstest]
+    #[case::owned(true)]
+    #[case::borrowed(false)]
     #[tokio::test]
-    async fn test_sst_handle_with_visible_ranges() -> Result<(), SlateDBError> {
+    async fn test_sst_handle_with_visible_ranges(
+        #[case] is_owned: bool,
+    ) -> Result<(), SlateDBError> {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
@@ -1301,20 +1306,61 @@ mod tests {
             .await?
             .with_visible_range(BytesRange::from_ref("c"..="f"));
 
-        let mut iter =
-            SstIterator::new_owned(.., sst_handle, table_store, SstIteratorOptions::default())
-                .await?;
+        let expected_entries = vec![
+            RowEntry::new_value(b"c", b"value", 0),
+            RowEntry::new_value(b"d", b"value", 0),
+            RowEntry::new_value(b"e", b"value", 0),
+            RowEntry::new_value(b"f", b"value", 0),
+        ];
 
-        assert_iterator(
-            &mut iter,
-            vec![
-                RowEntry::new_value(b"c", b"value", 0),
-                RowEntry::new_value(b"d", b"value", 0),
-                RowEntry::new_value(b"e", b"value", 0),
-                RowEntry::new_value(b"f", b"value", 0),
-            ],
-        )
-        .await;
+        if is_owned {
+            // scan the entire sst and validate that the visible range is respected.
+            let mut iter = SstIterator::new_owned(
+                ..,
+                sst_handle.clone(),
+                table_store.clone(),
+                SstIteratorOptions::default(),
+            )
+            .await?
+            .expect("Expected Some(iter) but got None");
+
+            assert_iterator(&mut iter, expected_entries).await;
+
+            // scan range outside of visible range and validate that it returns empty iterator.
+            let iter = SstIterator::new_owned(
+                Bytes::from_static(b"m")..Bytes::from_static(b"p"),
+                sst_handle,
+                table_store,
+                SstIteratorOptions::default(),
+            )
+            .await?;
+
+            assert!(iter.is_none());
+        } else {
+            // scan the entire sst and validate that the visible range is respected.
+            let mut iter = SstIterator::new_borrowed(
+                ..,
+                &sst_handle,
+                table_store.clone(),
+                SstIteratorOptions::default(),
+            )
+            .await?
+            .expect("Expected Some(iter) but got None");
+
+            assert_iterator(&mut iter, expected_entries).await;
+
+            // scan range outside of visible range and validate that it returns empty iterator.
+            let iter = SstIterator::new_borrowed(
+                Bytes::from_static(b"m")..Bytes::from_static(b"p"),
+                &sst_handle,
+                table_store,
+                SstIteratorOptions::default(),
+            )
+            .await?;
+
+            assert!(iter.is_none());
+        }
+
         Ok(())
     }
 
