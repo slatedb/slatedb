@@ -949,6 +949,10 @@ impl Db {
     pub fn metrics(&self) -> Arc<StatRegistry> {
         self.inner.stat_registry.clone()
     }
+
+    pub fn context(&self) -> Arc<DbContext> {
+        self.inner.db_context.clone()
+    }
 }
 
 #[cfg(test)]
