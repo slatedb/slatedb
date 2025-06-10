@@ -107,6 +107,7 @@ use crate::config::Settings;
 use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::{DbCache, DbCacheWrapper};
+use crate::db_context::DbContext;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
@@ -253,14 +254,18 @@ impl<P: Into<Path>> DbBuilder<P> {
             crate::rand::seed(seed);
         }
 
-        let logical_clock = self
-            .logical_clock
-            .unwrap_or_else(|| Arc::new(DefaultLogicalClock::new()));
-        let block_cache = self.block_cache.or_else(default_block_cache);
+        let mut db_context_builder = DbContextBuilder::new();
 
-        let system_clock = self
-            .system_clock
-            .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
+        if let Some(logical_clock) = self.logical_clock {
+            db_context_builder = db_context_builder.with_logical_clock(logical_clock);
+        }
+
+        if let Some(system_clock) = self.system_clock {
+            db_context_builder = db_context_builder.with_system_clock(system_clock);
+        }
+
+        let db_context = db_context_builder.build();
+        let block_cache = self.block_cache.or_else(default_block_cache);
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
@@ -284,7 +289,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                             .max_cache_size_bytes,
                         self.settings.object_store_cache_options.scan_interval,
                         stats.clone(),
-                        system_clock.clone(),
+                        db_context.system_clock(),
                     ));
 
                     let cached_main_object_store = CachedObjectStore::new(
@@ -371,8 +376,8 @@ impl<P: Into<Path>> DbBuilder<P> {
         let inner = Arc::new(
             DbInner::new(
                 self.settings.clone(),
-                logical_clock,
-                system_clock.clone(),
+                db_context.logical_clock(),
+                db_context.system_clock(),
                 table_store.clone(),
                 manifest.prepare_dirty()?,
                 wal_flush_tx,
@@ -441,7 +446,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                         let mut state = cleanup_inner.state.write();
                         state.record_fatal_error(err.clone())
                     },
-                    system_clock.clone(),
+                    db_context.system_clock(),
                 )
                 .await?,
             )
@@ -469,7 +474,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
                 },
-                system_clock.clone(),
+                db_context.system_clock(),
             ));
         }
 
@@ -483,5 +488,63 @@ impl<P: Into<Path>> DbBuilder<P> {
             garbage_collector: Mutex::new(garbage_collector),
             cancellation_token: self.cancellation_token,
         })
+    }
+}
+
+/// Builder for creating a `DbContext`. This is used to configure the random
+/// number generator seed, as well as the system and logical clocks.
+///
+/// # Examples
+///
+/// ```
+/// use slatedb::clock::DefaultLogicalClock;
+/// use slatedb::clock::DefaultSystemClock;
+/// use slatedb::DbContextBuilder;
+/// use std::sync::Arc;
+///
+/// let db_context = DbContextBuilder::new()
+///     .with_logical_clock(Arc::new(DefaultLogicalClock::new()))
+///     .with_system_clock(Arc::new(DefaultSystemClock::new()))
+///     .build();
+/// ```
+pub struct DbContextBuilder {
+    logical_clock: Option<Arc<dyn LogicalClock>>,
+    system_clock: Option<Arc<dyn SystemClock>>,
+}
+
+impl Default for DbContextBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DbContextBuilder {
+    pub fn new() -> Self {
+        Self {
+            logical_clock: None,
+            system_clock: None,
+        }
+    }
+
+    pub fn build(self) -> Arc<DbContext> {
+        let logical_clock = self
+            .logical_clock
+            .unwrap_or_else(|| Arc::new(DefaultLogicalClock::default()));
+        let system_clock = self
+            .system_clock
+            .unwrap_or_else(|| Arc::new(DefaultSystemClock::default()));
+        Arc::new(DbContext::new(system_clock, logical_clock))
+    }
+}
+
+impl DbContextBuilder {
+    pub fn with_logical_clock(mut self, clock: Arc<dyn LogicalClock>) -> Self {
+        self.logical_clock = Some(clock);
+        self
+    }
+
+    pub fn with_system_clock(mut self, clock: Arc<dyn SystemClock>) -> Self {
+        self.system_clock = Some(clock);
+        self
     }
 }
