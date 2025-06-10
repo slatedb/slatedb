@@ -7,12 +7,14 @@ use bytes::Bytes;
 use clap::Parser;
 use db::DbBench;
 use futures::StreamExt;
+use futures::TryStreamExt;
 use object_store::path::Path;
 use object_store::Error as ObjectStoreError;
 use object_store::ObjectStore;
 use object_store::PutPayload;
 use object_store::PutResult;
 use slatedb::admin;
+use slatedb::admin::AdminBuilder;
 use slatedb::compaction_execute_bench::CompactionExecuteBench;
 use slatedb::config::WriteOptions;
 use slatedb::Db;
@@ -155,7 +157,7 @@ async fn cleanup_data(
     let temp_path = path.child(CLEANUP_NAME);
     if object_store.head(&temp_path).await.is_ok() {
         info!("Cleaning up test data in: {}", path);
-        if let Err(e) = admin::delete_objects_with_prefix(object_store.clone(), Some(path)).await {
+        if let Err(e) = delete_objects_with_prefix(object_store.clone(), Some(path)).await {
             error!("Error cleaning up test data: {}", e);
         }
     } else {
@@ -165,4 +167,22 @@ async fn cleanup_data(
         );
     }
     Ok(())
+}
+
+/// Deletes all objects with the specified prefix. This includes all
+/// "subdirectories" objects, since object stores are not hierarchical.
+async fn delete_objects_with_prefix(
+    object_store: Arc<dyn ObjectStore>,
+    maybe_prefix: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
+    let stream = object_store
+        .list(maybe_prefix)
+        .map_ok(|m| m.location)
+        .boxed();
+    object_store
+        .delete_stream(stream)
+        .try_collect::<Vec<Path>>()
+        .await
+        .map(|_| ())
+        .map_err(|e| e.into())
 }

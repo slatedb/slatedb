@@ -56,65 +56,11 @@ impl Db {
 
         rx.await?
     }
-
-    /// Refresh the lifetime of an existing checkpoint. Takes the id of an existing checkpoint
-    /// and a lifetime, and sets the lifetime of the checkpoint to the specified lifetime. If
-    /// there is no checkpoint with the specified id, then this fn fails with
-    /// SlateDBError::InvalidDbState
-    pub async fn refresh_checkpoint(
-        path: &Path,
-        object_store: Arc<dyn ObjectStore>,
-        id: Uuid,
-        lifetime: Option<Duration>,
-        system_clock: Arc<dyn SystemClock>,
-    ) -> Result<(), SlateDBError> {
-        let manifest_store = Arc::new(ManifestStore::new(path, object_store));
-        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
-        stored_manifest
-            .maybe_apply_manifest_update(|stored_manifest| {
-                let mut dirty = stored_manifest.prepare_dirty();
-                let expire_time = lifetime.map(|l| system_clock.now() + l);
-                let Some(_) = dirty.core.checkpoints.iter_mut().find_map(|c| {
-                    if c.id == id {
-                        c.expire_time = expire_time;
-                        return Some(());
-                    }
-                    None
-                }) else {
-                    return Err(SlateDBError::InvalidDBState);
-                };
-                Ok(Some(dirty))
-            })
-            .await
-    }
-
-    /// Deletes the checkpoint with the specified id.
-    pub async fn delete_checkpoint(
-        path: &Path,
-        object_store: Arc<dyn ObjectStore>,
-        id: Uuid,
-    ) -> Result<(), SlateDBError> {
-        let manifest_store = Arc::new(ManifestStore::new(path, object_store));
-        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
-        stored_manifest
-            .maybe_apply_manifest_update(|stored_manifest| {
-                let mut dirty = stored_manifest.prepare_dirty();
-                let checkpoints: Vec<Checkpoint> = dirty
-                    .core
-                    .checkpoints
-                    .iter()
-                    .filter(|c| c.id != id)
-                    .cloned()
-                    .collect();
-                dirty.core.checkpoints = checkpoints;
-                Ok(Some(dirty))
-            })
-            .await
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::admin::AdminBuilder;
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
     use crate::clock::DefaultSystemClock;
@@ -143,6 +89,7 @@ mod tests {
     async fn test_should_create_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
         // open and close the db to init the manifest and trigger another write
         let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
         db.close().await.unwrap();
@@ -152,7 +99,8 @@ mod tests {
         let CheckpointCreateResult {
             id: checkpoint_id,
             manifest_id: checkpoint_manifest_id,
-        } = admin::create_checkpoint(path, object_store.clone(), &CheckpointOptions::default())
+        } = admin
+            .create_checkpoint(&CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -172,6 +120,7 @@ mod tests {
     async fn test_should_create_checkpoint_with_expiry() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
         // open and close the db to init the manifest and trigger another write
         let db = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
@@ -185,16 +134,13 @@ mod tests {
         let CheckpointCreateResult {
             id: checkpoint_id,
             manifest_id: _,
-        } = admin::create_checkpoint(
-            path,
-            object_store.clone(),
-            &CheckpointOptions {
+        } = admin
+            .create_checkpoint(&CheckpointOptions {
                 lifetime: Some(Duration::from_secs(3600)),
                 ..CheckpointOptions::default()
-            },
-        )
-        .await
-        .unwrap();
+            })
+            .await
+            .unwrap();
 
         let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         let checkpoints = &manifest.core.checkpoints;
@@ -214,6 +160,7 @@ mod tests {
     async fn test_should_create_checkpoint_from_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
         let db = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
             .build()
@@ -223,27 +170,21 @@ mod tests {
         let CheckpointCreateResult {
             id: source_checkpoint_id,
             manifest_id: source_checkpoint_manifest_id,
-        } = admin::create_checkpoint(
-            path.clone(),
-            object_store.clone(),
-            &CheckpointOptions::default(),
-        )
-        .await
-        .unwrap();
+        } = admin
+            .create_checkpoint(&CheckpointOptions::default())
+            .await
+            .unwrap();
 
         let CheckpointCreateResult {
             id: _,
             manifest_id: checkpoint_manifest_id,
-        } = admin::create_checkpoint(
-            path,
-            object_store.clone(),
-            &CheckpointOptions {
+        } = admin
+            .create_checkpoint(&CheckpointOptions {
                 source: Some(source_checkpoint_id),
                 ..CheckpointOptions::default()
-            },
-        )
-        .await
-        .unwrap();
+            })
+            .await
+            .unwrap();
 
         assert_eq!(checkpoint_manifest_id, source_checkpoint_manifest_id);
     }
@@ -252,6 +193,7 @@ mod tests {
     async fn test_should_fail_create_checkpoint_from_missing_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
         // open and close the db to init the manifest and trigger another write
         let _ = Db::builder(path, object_store.clone())
             .with_settings(Settings::default())
@@ -260,15 +202,12 @@ mod tests {
             .unwrap();
 
         let source_checkpoint_id = crate::utils::uuid();
-        let result = admin::create_checkpoint(
-            path,
-            object_store.clone(),
-            &CheckpointOptions {
+        let result = admin
+            .create_checkpoint(&CheckpointOptions {
                 source: Some(source_checkpoint_id),
                 ..CheckpointOptions::default()
-            },
-        )
-        .await;
+            })
+            .await;
 
         assert!(result.is_err());
         assert!(
@@ -280,10 +219,8 @@ mod tests {
     async fn test_should_fail_create_checkpoint_no_manifest() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
-
-        let result =
-            admin::create_checkpoint(path, object_store.clone(), &CheckpointOptions::default())
-                .await;
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+        let result = admin.create_checkpoint(&CheckpointOptions::default()).await;
 
         assert!(result.is_err());
         assert!(matches!(
@@ -296,21 +233,19 @@ mod tests {
     async fn test_should_refresh_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
         let _ = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
             .build()
             .await
             .unwrap();
-        let CheckpointCreateResult { id, manifest_id: _ } = admin::create_checkpoint(
-            path.clone(),
-            object_store.clone(),
-            &CheckpointOptions {
+        let CheckpointCreateResult { id, manifest_id: _ } = admin
+            .create_checkpoint(&CheckpointOptions {
                 lifetime: Some(Duration::from_secs(100)),
                 ..CheckpointOptions::default()
-            },
-        )
-        .await
-        .unwrap();
+            })
+            .await
+            .unwrap();
         let manifest_store = ManifestStore::new(&path, object_store.clone());
         let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         let checkpoint = manifest
@@ -321,15 +256,10 @@ mod tests {
             .unwrap();
         let expire_time = checkpoint.expire_time.unwrap();
 
-        Db::refresh_checkpoint(
-            &path,
-            object_store.clone(),
-            id,
-            Some(Duration::from_secs(1000)),
-            Arc::new(DefaultSystemClock::new()),
-        )
-        .await
-        .unwrap();
+        admin
+            .refresh_checkpoint(id, Some(Duration::from_secs(1000)))
+            .await
+            .unwrap();
 
         let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         let found: Vec<&Checkpoint> = manifest
@@ -347,20 +277,16 @@ mod tests {
     async fn test_should_fail_refresh_checkpoint_if_checkpoint_missing() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
         let _ = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
             .build()
             .await
             .unwrap();
 
-        let result = Db::refresh_checkpoint(
-            &path,
-            object_store.clone(),
-            crate::utils::uuid(),
-            Some(Duration::from_secs(1000)),
-            Arc::new(DefaultSystemClock::new()),
-        )
-        .await;
+        let result = admin
+            .refresh_checkpoint(crate::utils::uuid(), Some(Duration::from_secs(1000)))
+            .await;
 
         assert!(matches!(result, Err(SlateDBError::InvalidDBState)));
     }
@@ -369,22 +295,18 @@ mod tests {
     async fn test_should_delete_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
         let _ = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings::default())
             .build()
             .await
             .unwrap();
-        let CheckpointCreateResult { id, manifest_id: _ } = admin::create_checkpoint(
-            path.clone(),
-            object_store.clone(),
-            &CheckpointOptions::default(),
-        )
-        .await
-        .unwrap();
-
-        Db::delete_checkpoint(&path, object_store.clone(), id)
+        let CheckpointCreateResult { id, manifest_id: _ } = admin
+            .create_checkpoint(&CheckpointOptions::default())
             .await
             .unwrap();
+
+        admin.delete_checkpoint(id).await.unwrap();
 
         let manifest_store = ManifestStore::new(&path, object_store.clone());
         let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
