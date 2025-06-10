@@ -109,16 +109,9 @@ pub fn load_object_store_from_env(
     }
 }
 
-/// Run the garbage collector once in the foreground.
+/// Alias for [`GarbageCollector::run_gc_once_with_context`].
 ///
-/// This function runs the garbage collector letting Tokio decide when to run the task.
-///
-/// # Arguments
-///
-/// * `path`: The path to the database.
-/// * `object_store`: The object store to use.
-/// * `gc_opts`: The garbage collector options.
-///
+/// Use this if you don’t need to pass a custom `DbContext`.
 pub async fn run_gc_once(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
@@ -136,7 +129,7 @@ pub async fn run_gc_once(
 /// * `path`: The path to the database.
 /// * `object_store`: The object store to use.
 /// * `gc_opts`: The garbage collector options.
-///
+/// * `db_context`: The database context to use for the garbage collector.
 pub async fn run_gc_once_with_context(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
@@ -167,6 +160,25 @@ pub async fn run_gc_once_with_context(
     Ok(())
 }
 
+/// Alias for [`run_gc_in_background_with_context`].
+///
+/// Use this if you don’t need to pass a custom `DbContext`.
+pub async fn run_gc_in_background(
+    path: &Path,
+    object_store: Arc<dyn ObjectStore>,
+    gc_opts: GarbageCollectorOptions,
+    cancellation_token: CancellationToken,
+) -> Result<(), Box<dyn Error>> {
+    run_gc_in_background_with_context(
+        path,
+        object_store,
+        gc_opts,
+        cancellation_token,
+        Arc::new(DbContext::default()),
+    )
+    .await
+}
+
 /// Run the garbage collector in the background.
 ///
 /// This function runs the garbage collector in a Tokio background task.
@@ -177,12 +189,13 @@ pub async fn run_gc_once_with_context(
 /// * `object_store`: The object store to use.
 /// * `gc_opts`: The garbage collector options.
 /// * `cancellation_token`: The cancellation token to stop the garbage collector.
-pub async fn run_gc_in_background(
+/// * `db_context`: The database context to use for the garbage collector.
+pub async fn run_gc_in_background_with_context(
     path: &Path,
     object_store: Arc<dyn ObjectStore>,
     gc_opts: GarbageCollectorOptions,
     cancellation_token: CancellationToken,
-    db_context: Option<Arc<DbContext>>,
+    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     let manifest_store = Arc::new(ManifestStore::new(path, object_store.clone()));
     manifest_store
@@ -201,7 +214,7 @@ pub async fn run_gc_in_background(
     let tracker = TaskTracker::new();
     let ct = cancellation_token.clone();
 
-    tracker.spawn(GarbageCollector::start_async_task(
+    tracker.spawn(GarbageCollector::start_async_task_with_context(
         manifest_store,
         table_store,
         stats,
@@ -354,6 +367,26 @@ pub async fn create_checkpoint_with_context<P: Into<Path>>(
     })
 }
 
+/// Alias for [`Self::create_clone_with_context`].
+///
+/// Use this if you don’t need to pass a custom `DbContext`.
+#[allow(unused)]
+pub async fn create_clone<P: Into<Path>>(
+    clone_path: P,
+    parent_path: P,
+    object_store: Arc<dyn ObjectStore>,
+    parent_checkpoint: Option<Uuid>,
+) -> Result<(), Box<dyn Error>> {
+    create_clone_with_context(
+        clone_path,
+        parent_path,
+        object_store,
+        parent_checkpoint,
+        Arc::new(DbContext::default()),
+    )
+    .await
+}
+
 /// Clone a database. If no db already exists at the specified path, then this will create
 /// a new db under the path that is a clone of the db at parent_path.
 ///
@@ -388,18 +421,17 @@ pub async fn create_checkpoint_with_context<P: Into<Path>>(
 ///      "parent_path",
 ///      object_store,
 ///      None,
-///      None,
 ///    ).await?;
 ///
 ///    Ok(())
 /// }
 /// ```
-pub async fn create_clone<P: Into<Path>>(
+pub async fn create_clone_with_context<P: Into<Path>>(
     clone_path: P,
     parent_path: P,
     object_store: Arc<dyn ObjectStore>,
     parent_checkpoint: Option<Uuid>,
-    db_context: Option<Arc<DbContext>>,
+    db_context: Arc<DbContext>,
 ) -> Result<(), Box<dyn Error>> {
     clone::create_clone(
         clone_path,
@@ -407,7 +439,7 @@ pub async fn create_clone<P: Into<Path>>(
         object_store,
         parent_checkpoint,
         Arc::new(FailPointRegistry::new()),
-        db_context.unwrap_or_default(),
+        db_context,
     )
     .await?;
     Ok(())

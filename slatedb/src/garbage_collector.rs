@@ -40,6 +40,31 @@ pub(crate) struct GarbageCollector {
 }
 
 impl GarbageCollector {
+    /// Alias for [`Self::start_async_task_with_context`].
+    ///
+    /// Use this if you don’t need to pass a custom `DbContext`.
+    #[allow(unused, clippy::too_many_arguments)]
+    pub fn start_in_bg_thread(
+        manifest_store: Arc<ManifestStore>,
+        table_store: Arc<TableStore>,
+        options: GarbageCollectorOptions,
+        tokio_handle: Handle,
+        stat_registry: Arc<StatRegistry>,
+        cancellation_token: CancellationToken,
+        cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
+    ) -> Self {
+        Self::start_in_bg_thread_with_context(
+            manifest_store,
+            table_store,
+            options,
+            tokio_handle,
+            stat_registry,
+            cancellation_token,
+            cleanup_fn,
+            Arc::new(DbContext::default()),
+        )
+    }
+
     /// Start the garbage collector in a background thread.
     ///
     /// This method will start the garbage collector in a full background thread
@@ -57,13 +82,14 @@ impl GarbageCollector {
     /// * `stat_registry`: The stat registry to use for the garbage collector.
     /// * `cancellation_token`: The cancellation token to use for the garbage collector.
     /// * `cleanup_fn`: The function to call when the garbage collector is finished.
+    /// * `db_context`: The database context to use for the garbage collector.
     ///
     /// ## Returns
     ///
     /// * `Self`: The garbage collector.
     ///
     #[allow(clippy::too_many_arguments)]
-    pub fn start_in_bg_thread(
+    pub fn start_in_bg_thread_with_context(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         options: GarbageCollectorOptions,
@@ -71,13 +97,13 @@ impl GarbageCollector {
         stat_registry: Arc<StatRegistry>,
         cancellation_token: CancellationToken,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
-        db_context: Option<Arc<DbContext>>,
+        db_context: Arc<DbContext>,
     ) -> Self {
         let stats = Arc::new(GcStats::new(stat_registry));
         let ct = cancellation_token.clone();
 
         let gc_main = move || {
-            tokio_handle.block_on(Self::start_async_task(
+            tokio_handle.block_on(Self::start_async_task_with_context(
                 manifest_store,
                 table_store,
                 stats,
@@ -90,6 +116,28 @@ impl GarbageCollector {
         };
         spawn_bg_thread("slatedb-gc", cleanup_fn, gc_main);
         Self { cancellation_token }
+    }
+
+    /// Alias for [`Self::start_async_task_with_context`].
+    ///
+    /// Use this if you don’t need to pass a custom `DbContext`.
+    #[allow(unused)]
+    pub async fn start_async_task(
+        manifest_store: Arc<ManifestStore>,
+        table_store: Arc<TableStore>,
+        stats: Arc<GcStats>,
+        cancellation_token: CancellationToken,
+        options: GarbageCollectorOptions,
+    ) {
+        Self::start_async_task_with_context(
+            manifest_store,
+            table_store,
+            stats,
+            cancellation_token,
+            options,
+            Arc::new(DbContext::default()),
+        )
+        .await;
     }
 
     /// Start the garbage collector in an async task.
@@ -105,16 +153,16 @@ impl GarbageCollector {
     /// * `stats`: The stats to use for the garbage collector.
     /// * `cancellation_token`: The cancellation token to use for the garbage collector.
     /// * `options`: The options for the garbage collector.
+    /// * `db_context`: The database context to use for the garbage collector.
     ///
-    pub async fn start_async_task(
+    pub async fn start_async_task_with_context(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         stats: Arc<GcStats>,
         cancellation_token: CancellationToken,
         options: GarbageCollectorOptions,
-        db_context: Option<Arc<DbContext>>,
+        db_context: Arc<DbContext>,
     ) {
-        let db_context = db_context.unwrap_or_default();
         let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
 
         let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) =
@@ -164,6 +212,7 @@ impl GarbageCollector {
     /// Alias for [`Self::run_gc_once_with_context`].
     ///
     /// Use this if you don’t need to pass a custom `DbContext`.
+    #[allow(unused)]
     pub(crate) async fn run_gc_once(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
@@ -1181,7 +1230,6 @@ mod tests {
             stats.clone(),
             cancellation_token.clone(),
             |result| assert!(result.is_ok()),
-            None,
         );
 
         gc.terminate_background_task().await;

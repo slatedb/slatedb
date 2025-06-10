@@ -89,7 +89,6 @@ use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::Mutex;
-use rand::RngCore;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -458,7 +457,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             let gc_handle = self.gc_runtime.unwrap_or_else(|| Handle::current());
 
             let cleanup_inner = inner.clone();
-            garbage_collector = Some(GarbageCollector::start_in_bg_thread(
+            garbage_collector = Some(GarbageCollector::start_in_bg_thread_with_context(
                 manifest_store,
                 table_store,
                 gc_options,
@@ -471,7 +470,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
                 },
-                Some(db_context.clone()),
+                db_context.clone(),
             ));
         }
 
