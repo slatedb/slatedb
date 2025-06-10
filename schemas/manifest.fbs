@@ -22,18 +22,22 @@ table ExternalDb {
     sst_ids: [CompactedSstId] (required);
 }
 
+enum BoundType : byte { Unknown = 0, Unbounded, Included, Excluded }
+
+table BytesBound {
+    // Key that represenents the boundary. Might be empty if type is Unbounded.
+    key: [ubyte];
+
+    // Whether the bound is inclusive, exclusive or unbounded.
+    bound_type: BoundType;
+}
+
 table BytesRange {
-    // Start bound of the range. Empty bound means unbounded.
-    start_bound: [ubyte];
+    // Start bound of the range.
+    start_bound: BytesBound (required);
 
-    // Whether the start bound is inclusive.
-    start_bound_included: bool;
-
-    // End bound of the range. Empty bound means unbounded.
-    end_bound: [ubyte];
-
-    // Whether the end bound is inclusive.
-    end_bound_included: bool;
+    // End bound of the range.
+    end_bound: BytesBound (required);
 }
 
 // Manifest to persist state of DB.

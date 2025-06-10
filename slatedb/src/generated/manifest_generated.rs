@@ -107,6 +107,99 @@ impl<'a> flatbuffers::Verifiable for CompressionFormat {
 
 impl flatbuffers::SimpleToVerifyInSlice for CompressionFormat {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_BOUND_TYPE: i8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_BOUND_TYPE: i8 = 3;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_BOUND_TYPE: [BoundType; 4] = [
+  BoundType::Unknown,
+  BoundType::Unbounded,
+  BoundType::Included,
+  BoundType::Excluded,
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct BoundType(pub i8);
+#[allow(non_upper_case_globals)]
+impl BoundType {
+  pub const Unknown: Self = Self(0);
+  pub const Unbounded: Self = Self(1);
+  pub const Included: Self = Self(2);
+  pub const Excluded: Self = Self(3);
+
+  pub const ENUM_MIN: i8 = 0;
+  pub const ENUM_MAX: i8 = 3;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::Unknown,
+    Self::Unbounded,
+    Self::Included,
+    Self::Excluded,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::Unknown => Some("Unknown"),
+      Self::Unbounded => Some("Unbounded"),
+      Self::Included => Some("Included"),
+      Self::Excluded => Some("Excluded"),
+      _ => None,
+    }
+  }
+}
+impl core::fmt::Debug for BoundType {
+  fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> flatbuffers::Follow<'a> for BoundType {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
+    Self(b)
+  }
+}
+
+impl flatbuffers::Push for BoundType {
+    type Output = BoundType;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
+    }
+}
+
+impl flatbuffers::EndianScalar for BoundType {
+  type Scalar = i8;
+  #[inline]
+  fn to_little_endian(self) -> i8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: i8) -> Self {
+    let b = i8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> flatbuffers::Verifiable for BoundType {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    i8::run_verifier(v, pos)
+  }
+}
+
+impl flatbuffers::SimpleToVerifyInSlice for BoundType {}
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_CHECKPOINT_METADATA: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MAX_CHECKPOINT_METADATA: u8 = 1;
@@ -853,6 +946,120 @@ impl core::fmt::Debug for ExternalDb<'_> {
       ds.finish()
   }
 }
+pub enum BytesBoundOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct BytesBound<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for BytesBound<'a> {
+  type Inner = BytesBound<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> BytesBound<'a> {
+  pub const VT_KEY: flatbuffers::VOffsetT = 4;
+  pub const VT_BOUND_TYPE: flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    BytesBound { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args BytesBoundArgs<'args>
+  ) -> flatbuffers::WIPOffset<BytesBound<'bldr>> {
+    let mut builder = BytesBoundBuilder::new(_fbb);
+    if let Some(x) = args.key { builder.add_key(x); }
+    builder.add_bound_type(args.bound_type);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn key(&self) -> Option<flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(BytesBound::VT_KEY, None)}
+  }
+  #[inline]
+  pub fn bound_type(&self) -> BoundType {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<BoundType>(BytesBound::VT_BOUND_TYPE, Some(BoundType::Unknown)).unwrap()}
+  }
+}
+
+impl flatbuffers::Verifiable for BytesBound<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("key", Self::VT_KEY, false)?
+     .visit_field::<BoundType>("bound_type", Self::VT_BOUND_TYPE, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct BytesBoundArgs<'a> {
+    pub key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
+    pub bound_type: BoundType,
+}
+impl<'a> Default for BytesBoundArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    BytesBoundArgs {
+      key: None,
+      bound_type: BoundType::Unknown,
+    }
+  }
+}
+
+pub struct BytesBoundBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> BytesBoundBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_key(&mut self, key: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(BytesBound::VT_KEY, key);
+  }
+  #[inline]
+  pub fn add_bound_type(&mut self, bound_type: BoundType) {
+    self.fbb_.push_slot::<BoundType>(BytesBound::VT_BOUND_TYPE, bound_type, BoundType::Unknown);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> BytesBoundBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    BytesBoundBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<BytesBound<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for BytesBound<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("BytesBound");
+      ds.field("key", &self.key());
+      ds.field("bound_type", &self.bound_type());
+      ds.finish()
+  }
+}
 pub enum BytesRangeOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -870,9 +1077,7 @@ impl<'a> flatbuffers::Follow<'a> for BytesRange<'a> {
 
 impl<'a> BytesRange<'a> {
   pub const VT_START_BOUND: flatbuffers::VOffsetT = 4;
-  pub const VT_START_BOUND_INCLUDED: flatbuffers::VOffsetT = 6;
-  pub const VT_END_BOUND: flatbuffers::VOffsetT = 8;
-  pub const VT_END_BOUND_INCLUDED: flatbuffers::VOffsetT = 10;
+  pub const VT_END_BOUND: flatbuffers::VOffsetT = 6;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -886,39 +1091,23 @@ impl<'a> BytesRange<'a> {
     let mut builder = BytesRangeBuilder::new(_fbb);
     if let Some(x) = args.end_bound { builder.add_end_bound(x); }
     if let Some(x) = args.start_bound { builder.add_start_bound(x); }
-    builder.add_end_bound_included(args.end_bound_included);
-    builder.add_start_bound_included(args.start_bound_included);
     builder.finish()
   }
 
 
   #[inline]
-  pub fn start_bound(&self) -> Option<flatbuffers::Vector<'a, u8>> {
+  pub fn start_bound(&self) -> BytesBound<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(BytesRange::VT_START_BOUND, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<BytesBound>>(BytesRange::VT_START_BOUND, None).unwrap()}
   }
   #[inline]
-  pub fn start_bound_included(&self) -> bool {
+  pub fn end_bound(&self) -> BytesBound<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<bool>(BytesRange::VT_START_BOUND_INCLUDED, Some(false)).unwrap()}
-  }
-  #[inline]
-  pub fn end_bound(&self) -> Option<flatbuffers::Vector<'a, u8>> {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(BytesRange::VT_END_BOUND, None)}
-  }
-  #[inline]
-  pub fn end_bound_included(&self) -> bool {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<bool>(BytesRange::VT_END_BOUND_INCLUDED, Some(false)).unwrap()}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<BytesBound>>(BytesRange::VT_END_BOUND, None).unwrap()}
   }
 }
 
@@ -929,28 +1118,22 @@ impl flatbuffers::Verifiable for BytesRange<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("start_bound", Self::VT_START_BOUND, false)?
-     .visit_field::<bool>("start_bound_included", Self::VT_START_BOUND_INCLUDED, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("end_bound", Self::VT_END_BOUND, false)?
-     .visit_field::<bool>("end_bound_included", Self::VT_END_BOUND_INCLUDED, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<BytesBound>>("start_bound", Self::VT_START_BOUND, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<BytesBound>>("end_bound", Self::VT_END_BOUND, true)?
      .finish();
     Ok(())
   }
 }
 pub struct BytesRangeArgs<'a> {
-    pub start_bound: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
-    pub start_bound_included: bool,
-    pub end_bound: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
-    pub end_bound_included: bool,
+    pub start_bound: Option<flatbuffers::WIPOffset<BytesBound<'a>>>,
+    pub end_bound: Option<flatbuffers::WIPOffset<BytesBound<'a>>>,
 }
 impl<'a> Default for BytesRangeArgs<'a> {
   #[inline]
   fn default() -> Self {
     BytesRangeArgs {
-      start_bound: None,
-      start_bound_included: false,
-      end_bound: None,
-      end_bound_included: false,
+      start_bound: None, // required field
+      end_bound: None, // required field
     }
   }
 }
@@ -961,20 +1144,12 @@ pub struct BytesRangeBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
 }
 impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> BytesRangeBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_start_bound(&mut self, start_bound: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(BytesRange::VT_START_BOUND, start_bound);
+  pub fn add_start_bound(&mut self, start_bound: flatbuffers::WIPOffset<BytesBound<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<BytesBound>>(BytesRange::VT_START_BOUND, start_bound);
   }
   #[inline]
-  pub fn add_start_bound_included(&mut self, start_bound_included: bool) {
-    self.fbb_.push_slot::<bool>(BytesRange::VT_START_BOUND_INCLUDED, start_bound_included, false);
-  }
-  #[inline]
-  pub fn add_end_bound(&mut self, end_bound: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(BytesRange::VT_END_BOUND, end_bound);
-  }
-  #[inline]
-  pub fn add_end_bound_included(&mut self, end_bound_included: bool) {
-    self.fbb_.push_slot::<bool>(BytesRange::VT_END_BOUND_INCLUDED, end_bound_included, false);
+  pub fn add_end_bound(&mut self, end_bound: flatbuffers::WIPOffset<BytesBound<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<BytesBound>>(BytesRange::VT_END_BOUND, end_bound);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> BytesRangeBuilder<'a, 'b, A> {
@@ -987,6 +1162,8 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> BytesRangeBuilder<'a, 'b, A> {
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<BytesRange<'a>> {
     let o = self.fbb_.end_table(self.start_);
+    self.fbb_.required(o, BytesRange::VT_START_BOUND,"start_bound");
+    self.fbb_.required(o, BytesRange::VT_END_BOUND,"end_bound");
     flatbuffers::WIPOffset::new(o.value())
   }
 }
@@ -995,9 +1172,7 @@ impl core::fmt::Debug for BytesRange<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut ds = f.debug_struct("BytesRange");
       ds.field("start_bound", &self.start_bound());
-      ds.field("start_bound_included", &self.start_bound_included());
       ds.field("end_bound", &self.end_bound());
-      ds.field("end_bound_included", &self.end_bound_included());
       ds.finish()
   }
 }

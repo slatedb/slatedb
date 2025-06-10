@@ -25,9 +25,9 @@ use crate::db_state::SsTableId;
 use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::manifest_generated::{
-    Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable, CompactedSsTableArgs,
-    CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun, SortedRunArgs, Uuid,
-    UuidArgs,
+    BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
+    CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun,
+    SortedRunArgs, Uuid, UuidArgs,
 };
 use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
@@ -160,21 +160,24 @@ impl FlatBufferManifestCodec {
     }
 
     fn decode_bytes_range(range: manifest_generated::BytesRange) -> BytesRange {
-        let start_key = match range.start_bound() {
-            Some(start_key) if range.start_bound_included() => {
-                Bound::Included(Bytes::copy_from_slice(start_key.bytes()))
-            }
-            Some(start_key) => Bound::Excluded(Bytes::copy_from_slice(start_key.bytes())),
-            None => Bound::Unbounded,
-        };
-        let end_key = match range.end_bound() {
-            Some(end_key) if range.end_bound_included() => {
-                Bound::Included(Bytes::copy_from_slice(end_key.bytes()))
-            }
-            Some(end_key) => Bound::Excluded(Bytes::copy_from_slice(end_key.bytes())),
-            None => Bound::Unbounded,
-        };
+        let start_key = Self::decode_bytes_bound(range.start_bound());
+        let end_key = Self::decode_bytes_bound(range.end_bound());
         BytesRange::new(start_key, end_key)
+    }
+
+    fn decode_bytes_bound(bound: manifest_generated::BytesBound) -> Bound<Bytes> {
+        match (bound.bound_type(), bound.key()) {
+            (BoundType::Included, Some(key)) => {
+                Bound::Included(Bytes::copy_from_slice(key.bytes()))
+            }
+            (BoundType::Excluded, Some(key)) => {
+                Bound::Excluded(Bytes::copy_from_slice(key.bytes()))
+            }
+            (BoundType::Unbounded, None) => Bound::Unbounded,
+            (bound_type, key) => {
+                unreachable!("Unsupported bound type: {:?}, key: {:?}", bound_type, key)
+            }
+        }
     }
 
     pub fn manifest(manifest: &ManifestV1) -> Manifest {
@@ -418,25 +421,29 @@ impl<'b> DbFlatBufferBuilder<'b> {
         &mut self,
         range: &BytesRange,
     ) -> WIPOffset<manifest_generated::BytesRange<'b>> {
-        let (start_bound, start_bound_included) = match range.start_bound() {
-            Bound::Included(key) => (Some(self.builder.create_vector(key)), true),
-            Bound::Excluded(key) => (Some(self.builder.create_vector(key)), false),
-            Bound::Unbounded => (None, false),
-        };
-
-        let (end_bound, end_bound_included) = match range.end_bound() {
-            Bound::Included(key) => (Some(self.builder.create_vector(key)), true),
-            Bound::Excluded(key) => (Some(self.builder.create_vector(key)), false),
-            Bound::Unbounded => (None, false),
-        };
+        let start_bound = self.add_bytes_bound(range.start_bound());
+        let end_bound = self.add_bytes_bound(range.end_bound());
         manifest_generated::BytesRange::create(
             &mut self.builder,
             &manifest_generated::BytesRangeArgs {
-                start_bound,
-                start_bound_included,
-                end_bound,
-                end_bound_included,
+                start_bound: Some(start_bound),
+                end_bound: Some(end_bound),
             },
+        )
+    }
+
+    fn add_bytes_bound(
+        &mut self,
+        bound: Bound<&Bytes>,
+    ) -> WIPOffset<manifest_generated::BytesBound<'b>> {
+        let (bound_type, key) = match bound {
+            Bound::Included(key) => (BoundType::Included, Some(self.builder.create_vector(key))),
+            Bound::Excluded(key) => (BoundType::Excluded, Some(self.builder.create_vector(key))),
+            Bound::Unbounded => (BoundType::Unbounded, None),
+        };
+        manifest_generated::BytesBound::create(
+            &mut self.builder,
+            &manifest_generated::BytesBoundArgs { key, bound_type },
         )
     }
 
