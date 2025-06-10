@@ -499,7 +499,7 @@ mod tests {
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
-    use crate::{DbContext, DbContextBuilder, SlateDBError};
+    use crate::{DbContextBuilder, SlateDBError};
 
     const PATH: &str = "/test/db";
 
