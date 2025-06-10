@@ -65,16 +65,17 @@
 //! Example with a custom clock:
 //!
 //! ```
-//! use slatedb::{config::SystemClock, Db, SlateDBError};
+//! use slatedb::{Db, SlateDBError};
+//! use slatedb::clock::DefaultLogicalClock;
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), SlateDBError> {
 //!     let object_store = Arc::new(InMemory::new());
-//!     let clock = Arc::new(SystemClock::new());
+//!     let clock = Arc::new(DefaultLogicalClock::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_clock(clock)
+//!         .with_logical_clock(clock)
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -95,11 +96,14 @@ use tracing::{debug, info, warn};
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
+use crate::clock::DefaultLogicalClock;
+use crate::clock::DefaultSystemClock;
+use crate::clock::LogicalClock;
+use crate::clock::SystemClock;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::default_block_cache;
-use crate::config::SystemClock;
-use crate::config::{Clock, Settings};
+use crate::config::Settings;
 use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::{DbCache, DbCacheWrapper};
@@ -124,7 +128,8 @@ pub struct DbBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     block_cache: Option<Arc<dyn DbCache>>,
-    clock: Option<Arc<dyn Clock + Send + Sync>>,
+    logical_clock: Option<Arc<dyn LogicalClock>>,
+    system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
     compaction_runtime: Option<Handle>,
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
@@ -142,7 +147,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             settings: Settings::default(),
             wal_object_store: None,
             block_cache: None,
-            clock: None,
+            logical_clock: None,
+            system_clock: None,
             gc_runtime: None,
             compaction_runtime: None,
             compaction_scheduler_supplier: None,
@@ -174,9 +180,17 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
-    /// Sets the clock to use for the database.
-    pub fn with_clock(mut self, clock: Arc<dyn Clock + Send + Sync>) -> Self {
-        self.clock = Some(clock);
+    /// Sets the logical clock to use for the database. Logical timestamps are used for
+    /// TTL expiration. If unset, SlateDB defaults to using system time.
+    pub fn with_logical_clock(mut self, clock: Arc<dyn LogicalClock>) -> Self {
+        self.logical_clock = Some(clock);
+        self
+    }
+
+    /// Sets the system clock to use for the database. System timestamps are used for
+    /// scheduling operations such as compaction and garbage collection.
+    pub fn with_system_clock(mut self, clock: Arc<dyn SystemClock>) -> Self {
+        self.system_clock = Some(clock);
         self
     }
 
@@ -239,8 +253,14 @@ impl<P: Into<Path>> DbBuilder<P> {
             crate::rand::seed(seed);
         }
 
-        let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock::new()));
+        let logical_clock = self
+            .logical_clock
+            .unwrap_or_else(|| Arc::new(DefaultLogicalClock::new()));
         let block_cache = self.block_cache.or_else(default_block_cache);
+
+        let system_clock = self
+            .system_clock
+            .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
@@ -264,6 +284,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                             .max_cache_size_bytes,
                         self.settings.object_store_cache_options.scan_interval,
                         stats.clone(),
+                        system_clock.clone(),
                     ));
 
                     let cached_main_object_store = CachedObjectStore::new(
@@ -350,7 +371,8 @@ impl<P: Into<Path>> DbBuilder<P> {
         let inner = Arc::new(
             DbInner::new(
                 self.settings.clone(),
-                clock,
+                logical_clock,
+                system_clock.clone(),
                 table_store.clone(),
                 manifest.prepare_dirty()?,
                 wal_flush_tx,
@@ -419,6 +441,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                         let mut state = cleanup_inner.state.write();
                         state.record_fatal_error(err.clone())
                     },
+                    system_clock.clone(),
                 )
                 .await?,
             )
@@ -446,6 +469,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
                 },
+                system_clock.clone(),
             ));
         }
 

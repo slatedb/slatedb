@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use tokio::runtime::Handle;
 use tracing::{error, info, warn};
 use ulid::Ulid;
 use uuid::Uuid;
 
+use crate::clock::SystemClock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
@@ -73,6 +74,7 @@ pub(crate) struct Compactor {
 }
 
 impl Compactor {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
@@ -81,6 +83,7 @@ impl Compactor {
         tokio_handle: Handle,
         stat_registry: &StatRegistry,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
+        system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let (external_tx, external_rx) = crossbeam_channel::unbounded();
         let (err_tx, err_rx) = tokio::sync::oneshot::channel();
@@ -94,6 +97,7 @@ impl Compactor {
                 tokio_handle,
                 external_rx,
                 stats,
+                system_clock,
             );
             let mut orchestrator = match load_result {
                 Ok(orchestrator) => orchestrator,
@@ -115,15 +119,22 @@ impl Compactor {
     pub(crate) async fn close(mut self) {
         if let Some(main_thread) = self.main_thread.take() {
             self.main_tx.send(Shutdown).expect("main tx disconnected");
-            let result = main_thread
-                .join()
-                .expect("failed to stop main compactor thread");
-            info!("compactor thread exited with: {:?}", result)
+            // Wait on a separate thread to avoid blocking the tokio runtime
+            tokio::task::spawn_blocking(move || {
+                let result = main_thread
+                    .join()
+                    .expect("failed to stop main compactor thread");
+                info!("compactor thread exited with: {:?}", result)
+            });
         }
     }
 }
 
 struct CompactorOrchestrator {
+    // TODO: We need to migrate this to tokio::time::Instant for DST
+    // The current orchestrator implementation does not use the tokio runtime
+    // for for its run loop, so we can't make a tokio ticker yet.
+    #[allow(clippy::disallowed_types)]
     ticker: crossbeam_channel::Receiver<std::time::Instant>,
     external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
     worker_rx: crossbeam_channel::Receiver<WorkerToOrchestratorMsg>,
@@ -131,6 +142,7 @@ struct CompactorOrchestrator {
 }
 
 impl CompactorOrchestrator {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         options: CompactorOptions,
         manifest_store: Arc<ManifestStore>,
@@ -139,6 +151,7 @@ impl CompactorOrchestrator {
         tokio_handle: Handle,
         external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
         stats: Arc<CompactionStats>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let options = Arc::new(options);
         let ticker = crossbeam_channel::tick(options.poll_interval);
@@ -158,6 +171,7 @@ impl CompactorOrchestrator {
             scheduler,
             executor,
             stats,
+            system_clock,
         )?;
         let orchestrator = Self {
             ticker,
@@ -204,6 +218,7 @@ struct CompactorEventHandler {
     scheduler: Box<dyn CompactionScheduler>,
     executor: Box<dyn CompactionExecutor>,
     stats: Arc<CompactionStats>,
+    system_clock: Arc<dyn SystemClock>,
 }
 
 impl CompactorEventHandler {
@@ -214,6 +229,7 @@ impl CompactorEventHandler {
         scheduler: Box<dyn CompactionScheduler>,
         executor: Box<dyn CompactionExecutor>,
         stats: Arc<CompactionStats>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let stored_manifest =
             tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;
@@ -230,6 +246,7 @@ impl CompactorEventHandler {
             scheduler,
             executor,
             stats,
+            system_clock,
         })
     }
 
@@ -374,7 +391,8 @@ impl CompactorEventHandler {
         self.write_manifest_safely()?;
         self.maybe_schedule_compactions()?;
         self.stats.last_compaction_ts.set(
-            SystemTime::now()
+            self.system_clock
+                .now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
@@ -460,6 +478,7 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
+    use crate::clock::DefaultSystemClock;
     use crate::compactor::stats::CompactionStats;
     use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
@@ -484,69 +503,78 @@ mod tests {
 
     const PATH: &str = "/test/db";
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_compactor_compacts_l0() {
         // given:
         let os = Arc::new(InMemory::new());
-        let clock = Arc::new(TestClock::new());
+        let logical_clock = Arc::new(TestClock::new());
+        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+            SizeTieredCompactionSchedulerOptions {
+                min_compaction_sources: 1,
+                max_compaction_sources: 999,
+                include_size_threshold: 4.0,
+            },
+        ));
         let mut options = db_options(Some(compactor_options()));
         options.l0_sst_size_bytes = 128;
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_clock(clock)
+            .with_logical_clock(logical_clock)
+            .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await
             .unwrap();
 
         let (manifest_store, table_store) = build_test_stores(os.clone());
+        let mut expected = HashMap::<Vec<u8>, Vec<u8>>::new();
         for i in 0..4 {
-            db.put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48])
-                .await
-                .unwrap();
-            db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48])
-                .await
-                .unwrap();
+            let k = vec![b'a' + i as u8; 16];
+            let v = vec![b'b' + i as u8; 48];
+            expected.insert(k.clone(), v.clone());
+            db.put(&k, &v).await.unwrap();
+            let k = vec![b'j' + i as u8; 16];
+            let v = vec![b'k' + i as u8; 48];
+            db.put(&k, &v).await.unwrap();
+            expected.insert(k.clone(), v.clone());
         }
 
+        db.flush().await.unwrap();
+
         // when:
-        let db_state = await_compaction(manifest_store).await;
+        let db_state = await_compaction(&db, manifest_store).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
-        assert!(db_state.l0_last_compacted.is_some());
-        assert_eq!(db_state.compacted.len(), 1);
-        let compacted = &db_state.compacted.first().unwrap().ssts;
-        assert_eq!(compacted.len(), 1);
-        let handle = compacted.first().unwrap();
+        for run in db_state.compacted {
+            for sst in run.ssts {
+                let mut iter = SstIterator::new_borrowed(
+                    ..,
+                    &sst,
+                    table_store.clone(),
+                    SstIteratorOptions::default(),
+                )
+                .await
+                .unwrap();
 
-        let mut iter = SstIterator::new_borrowed(
-            ..,
-            handle,
-            table_store.clone(),
-            SstIteratorOptions::default(),
-        )
-        .await
-        .unwrap();
-        for i in 0..4 {
-            let kv = iter.next().await.unwrap().unwrap();
-            assert_eq!(kv.key.as_ref(), &[b'a' + i as u8; 16]);
-            assert_eq!(kv.value.as_ref(), &[b'b' + i as u8; 48]);
+                // remove the key from the expected map and verify that the db matches
+                while let Some(kv) = iter.next().await.unwrap() {
+                    let expected_v = expected
+                        .remove(kv.key.as_ref())
+                        .expect("removing unexpected key");
+                    let db_v = db.get(kv.key.as_ref()).await.unwrap().unwrap();
+                    assert_eq!(expected_v, db_v.as_ref());
+                }
+            }
         }
-        for i in 0..4 {
-            let kv = iter.next().await.unwrap().unwrap();
-            assert_eq!(kv.key.as_ref(), &[b'j' + i as u8; 16]);
-            assert_eq!(kv.value.as_ref(), &[b'k' + i as u8; 48]);
-        }
-        assert!(iter.next().await.unwrap().is_none());
-        // todo: test that the db can read the k/vs (once we implement reading from compacted)
+        assert!(expected.is_empty());
     }
 
     #[cfg(feature = "wal_disable")]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_tombstones_in_l0() {
         let os = Arc::new(InMemory::new());
-        let clock = Arc::new(TestClock::new());
+        let logical_clock = Arc::new(TestClock::new());
 
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new());
 
@@ -556,7 +584,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_clock(clock)
+            .with_logical_clock(logical_clock)
             .with_compaction_scheduler_supplier(scheduler.clone())
             .build()
             .await
@@ -569,7 +597,7 @@ mod tests {
         db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
         db.flush().await.unwrap();
         scheduler.scheduler.should_compact.store(true, SeqCst);
-        let db_state = await_compaction(manifest_store.clone()).await.unwrap();
+        let db_state = await_compaction(&db, manifest_store.clone()).await.unwrap();
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.l0.len(), 0, "{:?}", db_state.l0);
 
@@ -626,7 +654,7 @@ mod tests {
         assert!(next.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_compact_expired_entries() {
         // given:
         let os = Arc::new(InMemory::new());
@@ -645,7 +673,7 @@ mod tests {
         options.default_ttl = Some(50);
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_clock(insert_clock.clone())
+            .with_logical_clock(insert_clock.clone())
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await
@@ -709,7 +737,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(manifest_store).await;
+        let db_state = await_compaction(&db, manifest_store).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -790,6 +818,7 @@ mod tests {
                 scheduler.clone(),
                 executor.clone(),
                 compactor_stats,
+                Arc::new(DefaultSystemClock::new()),
             )
             .unwrap();
             let manifest = rt
@@ -1020,6 +1049,7 @@ mod tests {
     where
         F: Future<Output = Option<T>>,
     {
+        #[allow(clippy::disallowed_methods)]
         let now = SystemTime::now();
         while now.elapsed().unwrap() < duration {
             let maybe_result = f().await;
@@ -1047,11 +1077,25 @@ mod tests {
         (manifest_store, table_store)
     }
 
-    async fn await_compaction(manifest_store: Arc<ManifestStore>) -> Option<CoreDbState> {
+    /// Waits until all writes have made their way to L1 or below. No data is allowed in
+    /// in-memory WALs, in-memory memtables, or L0 SSTs on object storage.
+    async fn await_compaction(db: &Db, manifest_store: Arc<ManifestStore>) -> Option<CoreDbState> {
         run_for(Duration::from_secs(10), || async {
-            let db_state = get_db_state(manifest_store.clone()).await;
-            if db_state.l0_last_compacted.is_some() {
-                return Some(db_state);
+            let (empty_wal, empty_memtable) = {
+                let mut db_state = db.inner.state.write();
+                let cow_db_state = db_state.state();
+                (
+                    db_state.wal().is_empty() && cow_db_state.imm_wal.is_empty(),
+                    db_state.memtable().is_empty() && cow_db_state.imm_memtable.is_empty(),
+                )
+            };
+
+            let core_db_state = get_db_state(manifest_store.clone()).await;
+            let empty_l0 = core_db_state.l0.is_empty();
+            let compaction_ran = core_db_state.l0_last_compacted.is_some();
+
+            if empty_wal && empty_memtable && empty_l0 && compaction_ran {
+                return Some(core_db_state);
             }
             None
         })

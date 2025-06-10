@@ -1,3 +1,4 @@
+use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
@@ -65,13 +66,14 @@ impl Db {
         object_store: Arc<dyn ObjectStore>,
         id: Uuid,
         lifetime: Option<Duration>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> Result<(), SlateDBError> {
         let manifest_store = Arc::new(ManifestStore::new(path, object_store));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
             .maybe_apply_manifest_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty();
-                let expire_time = lifetime.map(|l| SystemTime::now() + l);
+                let expire_time = lifetime.map(|l| system_clock.now() + l);
                 let Some(_) = dirty.core.checkpoints.iter_mut().find_map(|c| {
                     if c.id == id {
                         c.expire_time = expire_time;
@@ -115,6 +117,8 @@ impl Db {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
+    use crate::clock::DefaultSystemClock;
+    use crate::clock::SystemClock;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
@@ -133,7 +137,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_should_create_checkpoint() {
@@ -176,7 +180,7 @@ mod tests {
             .unwrap();
         db.close().await.unwrap();
         let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let checkpoint_time = SystemTime::now();
+        let checkpoint_time = DefaultSystemClock::default().now();
 
         let CheckpointCreateResult {
             id: checkpoint_id,
@@ -322,6 +326,7 @@ mod tests {
             object_store.clone(),
             id,
             Some(Duration::from_secs(1000)),
+            Arc::new(DefaultSystemClock::new()),
         )
         .await
         .unwrap();
@@ -353,6 +358,7 @@ mod tests {
             object_store.clone(),
             crate::utils::uuid(),
             Some(Duration::from_secs(1000)),
+            Arc::new(DefaultSystemClock::new()),
         )
         .await;
 
