@@ -68,7 +68,6 @@ pub(crate) struct DbInner {
     pub(crate) stat_registry: Arc<StatRegistry>,
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) reader: Reader,
-
     pub(crate) wal_enabled: bool,
 }
 
@@ -366,7 +365,6 @@ pub struct Db {
     write_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     compactor: Mutex<Option<Compactor>>,
     garbage_collector: Mutex<Option<GarbageCollector>>,
-
     cancellation_token: CancellationToken,
 }
 
@@ -1060,10 +1058,13 @@ mod tests {
         let clock = Arc::new(TestClock::new());
         let ttl = 100;
 
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(clock.clone())
+            .build();
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_logical_clock(clock.clone())
+            .with_context(db_context)
             .build()
             .await
             .unwrap();
@@ -1112,10 +1113,13 @@ mod tests {
         let clock = Arc::new(TestClock::new());
         let default_ttl = 100;
 
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(clock.clone())
+            .build();
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(default_ttl)))
-            .with_logical_clock(clock.clone())
+            .with_context(db_context)
             .build()
             .await
             .unwrap();
@@ -1174,10 +1178,13 @@ mod tests {
         let clock = Arc::new(TestClock::new());
         let ttl = 100;
 
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(clock.clone())
+            .build();
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_logical_clock(clock.clone())
+            .with_context(db_context)
             .build()
             .await
             .unwrap();
@@ -1364,10 +1371,13 @@ mod tests {
         let clock = Arc::new(TestClock::new());
         let ttl = 100;
 
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(clock.clone())
+            .build();
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_logical_clock(clock.clone())
+            .with_context(db_context)
             .build()
             .await
             .unwrap();
@@ -2079,9 +2089,12 @@ mod tests {
             path.clone(),
             None,
         ));
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(clock.clone())
+            .build();
         let db = Db::builder(path.clone(), object_store.clone())
             .with_settings(options)
-            .with_logical_clock(clock.clone())
+            .with_context(db_context)
             .build()
             .await
             .unwrap();
@@ -2299,9 +2312,12 @@ mod tests {
     #[tokio::test]
     async fn test_flush_while_iterating() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(Arc::new(TestClock::new()))
+            .build();
         let kv_store = Db::builder("/tmp/test_kv_store", object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            .with_context(db_context)
             .build()
             .await
             .unwrap();
@@ -2335,9 +2351,12 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let mut next_wal_id = 1;
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(Arc::new(TestClock::new()))
+            .build();
         let kv_store = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            .with_context(db_context.clone())
             .build()
             .await
             .unwrap();
@@ -2374,7 +2393,7 @@ mod tests {
         // recover and validate that sst files are loaded on recovery.
         let kv_store_restored = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            .with_context(db_context)
             .build()
             .await
             .unwrap();
@@ -2405,9 +2424,12 @@ mod tests {
     async fn test_restore_seq_number() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(Arc::new(TestClock::new()))
+            .build();
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 256, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            .with_context(db_context.clone())
             .build()
             .await
             .unwrap();
@@ -2420,7 +2442,7 @@ mod tests {
 
         let db_restored = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 256, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            .with_context(db_context)
             .build()
             .await
             .unwrap();
@@ -2974,9 +2996,12 @@ mod tests {
         let path = "/tmp/test_kv_store";
 
         let clock = Arc::new(TestClock::new());
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(clock.clone())
+            .build();
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(clock.clone())
+            .with_context(db_context.clone())
             .build()
             .await
             .unwrap();
@@ -3004,11 +3029,13 @@ mod tests {
         // Given:
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
-
         let clock = Arc::new(TestClock::new());
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(clock.clone())
+            .build();
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(clock.clone())
+            .with_context(db_context.clone())
             .build()
             .await
             .unwrap();
@@ -3021,7 +3048,7 @@ mod tests {
 
         let db2 = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(clock.clone())
+            .with_context(db_context.clone())
             .build()
             .await
             .unwrap();
@@ -3082,10 +3109,13 @@ mod tests {
         let clock = Arc::new(TestClock::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(clock.clone())
+            .build();
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
-            .with_logical_clock(clock.clone())
+            .with_context(db_context.clone())
             .build()
             .await
             .unwrap();
@@ -3111,9 +3141,12 @@ mod tests {
         assert_eq!(last_clock_tick, i64::MIN);
 
         let clock = Arc::new(TestClock::new());
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(clock.clone())
+            .build();
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
-            .with_logical_clock(clock.clone())
+            .with_context(db_context.clone())
             .build()
             .await
             .unwrap();
@@ -3126,10 +3159,13 @@ mod tests {
         let clock = Arc::new(TestClock::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(clock.clone())
+            .build();
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 32, None))
-            .with_logical_clock(clock.clone())
+            .with_context(db_context.clone())
             .build()
             .await
             .unwrap();
@@ -3164,12 +3200,15 @@ mod tests {
         let clock = Arc::new(TestClock::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(clock.clone())
+            .build();
         let mut options = test_db_options(0, 32, None);
         options.wal_enabled = false;
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_logical_clock(clock.clone())
+            .with_context(db_context.clone())
             .build()
             .await
             .unwrap();
@@ -3188,11 +3227,14 @@ mod tests {
         db.close().await.unwrap();
 
         let clock = Arc::new(TestClock::new());
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(clock.clone())
+            .build();
         let mut options = test_db_options(0, 32, None);
         options.wal_enabled = false;
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_logical_clock(clock.clone())
+            .with_context(db_context.clone())
             .build()
             .await
             .unwrap();

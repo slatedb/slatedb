@@ -68,14 +68,18 @@
 //! use slatedb::{Db, SlateDBError};
 //! use slatedb::clock::DefaultLogicalClock;
 //! use slatedb::object_store::memory::InMemory;
+//! use slatedb::DbContextBuilder;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), SlateDBError> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let clock = Arc::new(DefaultLogicalClock::new());
+//!     let db_context = DbContextBuilder::new()
+//!         .with_logical_clock(clock.clone())
+//!         .build();
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_logical_clock(clock)
+//!         .with_context(db_context)
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -129,8 +133,7 @@ pub struct DbBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     block_cache: Option<Arc<dyn DbCache>>,
-    logical_clock: Option<Arc<dyn LogicalClock>>,
-    system_clock: Option<Arc<dyn SystemClock>>,
+    db_context: Option<Arc<DbContext>>,
     gc_runtime: Option<Handle>,
     compaction_runtime: Option<Handle>,
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
@@ -148,8 +151,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             settings: Settings::default(),
             wal_object_store: None,
             block_cache: None,
-            logical_clock: None,
-            system_clock: None,
+            db_context: None,
             gc_runtime: None,
             compaction_runtime: None,
             compaction_scheduler_supplier: None,
@@ -181,17 +183,8 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
-    /// Sets the logical clock to use for the database. Logical timestamps are used for
-    /// TTL expiration. If unset, SlateDB defaults to using system time.
-    pub fn with_logical_clock(mut self, clock: Arc<dyn LogicalClock>) -> Self {
-        self.logical_clock = Some(clock);
-        self
-    }
-
-    /// Sets the system clock to use for the database. System timestamps are used for
-    /// scheduling operations such as compaction and garbage collection.
-    pub fn with_system_clock(mut self, clock: Arc<dyn SystemClock>) -> Self {
-        self.system_clock = Some(clock);
+    pub fn with_context(mut self, db_context: Arc<DbContext>) -> Self {
+        self.db_context = Some(db_context);
         self
     }
 
@@ -239,6 +232,7 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, SlateDBError> {
         let path = self.path.into();
+        let db_context = self.db_context.unwrap_or_default();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
 
@@ -254,17 +248,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             crate::rand::seed(seed);
         }
 
-        let mut db_context_builder = DbContextBuilder::new();
-
-        if let Some(logical_clock) = self.logical_clock {
-            db_context_builder = db_context_builder.with_logical_clock(logical_clock);
-        }
-
-        if let Some(system_clock) = self.system_clock {
-            db_context_builder = db_context_builder.with_system_clock(system_clock);
-        }
-
-        let db_context = db_context_builder.build();
         let block_cache = self.block_cache.or_else(default_block_cache);
 
         // Setup the components

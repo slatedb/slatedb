@@ -499,7 +499,7 @@ mod tests {
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
-    use crate::SlateDBError;
+    use crate::{DbContext, DbContextBuilder, SlateDBError};
 
     const PATH: &str = "/test/db";
 
@@ -518,9 +518,12 @@ mod tests {
         let mut options = db_options(Some(compactor_options()));
         options.l0_sst_size_bytes = 128;
 
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(logical_clock)
+            .build();
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(logical_clock)
+            .with_context(db_context)
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await
@@ -582,9 +585,12 @@ mod tests {
         options.wal_enabled = false;
         options.l0_sst_size_bytes = 128;
 
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(logical_clock)
+            .build();
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(logical_clock)
+            .with_context(db_context)
             .with_compaction_scheduler_supplier(scheduler.clone())
             .build()
             .await
@@ -669,11 +675,14 @@ mod tests {
             },
         ));
 
+        let db_context = DbContextBuilder::new()
+            .with_logical_clock(insert_clock.clone())
+            .build();
         let mut options = db_options(Some(compactor_options()));
         options.default_ttl = Some(50);
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(insert_clock.clone())
+            .with_context(db_context)
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await
