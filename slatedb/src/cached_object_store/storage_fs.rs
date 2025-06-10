@@ -45,7 +45,7 @@ impl FsCacheStorage {
                 max_cache_size_bytes,
                 scan_interval,
                 stats,
-                db_context.system_clock(),
+                db_context.clone(),
             ))
         });
 
@@ -333,7 +333,7 @@ struct FsCacheEvictor {
     background_evict_handle: OnceCell<tokio::task::JoinHandle<()>>,
     background_scan_handle: OnceCell<tokio::task::JoinHandle<()>>,
     stats: Arc<CachedObjectStoreStats>,
-    system_clock: Arc<dyn SystemClock>,
+    db_context: Arc<DbContext>,
 }
 
 impl FsCacheEvictor {
@@ -342,7 +342,7 @@ impl FsCacheEvictor {
         max_cache_size_bytes: usize,
         scan_interval: Option<Duration>,
         stats: Arc<CachedObjectStoreStats>,
-        system_clock: Arc<dyn SystemClock>,
+        db_context: Arc<DbContext>,
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         Self {
@@ -354,7 +354,7 @@ impl FsCacheEvictor {
             background_evict_handle: OnceCell::new(),
             background_scan_handle: OnceCell::new(),
             stats,
-            system_clock,
+            db_context,
         }
     }
 
@@ -363,6 +363,7 @@ impl FsCacheEvictor {
             self.root_folder.clone(),
             self.max_cache_size_bytes,
             self.stats.clone(),
+            self.db_context.clone(),
         ));
 
         let guard = self.rx.lock();
@@ -382,7 +383,7 @@ impl FsCacheEvictor {
             .set(tokio::spawn(Self::background_evict(
                 inner,
                 rx,
-                self.system_clock.clone(),
+                self.db_context.system_clock(),
             )))
             .ok();
     }
@@ -452,6 +453,7 @@ impl FsCacheEvictorInner {
         root_folder: std::path::PathBuf,
         max_cache_size_bytes: usize,
         stats: Arc<CachedObjectStoreStats>,
+        db_context: Arc<DbContext>,
     ) -> Self {
         Self {
             root_folder,
@@ -461,7 +463,7 @@ impl FsCacheEvictorInner {
             cache_entries: Mutex::new(Trie::new()),
             cache_size_bytes: AtomicU64::new(0_u64),
             stats,
-            db_context: Arc::new(DbContext::default()),
+            db_context,
         }
     }
 
@@ -682,6 +684,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_evictor() {
+        let db_context = Arc::new(DbContext::default());
         let temp_dir = tempfile::Builder::new()
             .prefix("objstore_cache_test_evictor_")
             .tempdir()
@@ -692,6 +695,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             1024 * 2,
             Arc::new(CachedObjectStoreStats::new(&registry)),
+            db_context.clone(),
         );
         evictor.batch_factor = 2;
 
@@ -722,6 +726,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_evictor_pick() {
+        let db_context = Arc::new(DbContext::default());
         let temp_dir = tempfile::Builder::new()
             .prefix("objstore_cache_test_evictor_")
             .tempdir()
@@ -731,6 +736,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             1024 * 2,
             Arc::new(CachedObjectStoreStats::new(&registry)),
+            db_context.clone(),
         ));
 
         let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
@@ -748,6 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_evictor_rescan() {
+        let db_context = Arc::new(DbContext::default());
         let temp_dir = tempfile::Builder::new()
             .prefix("objstore_cache_test_evictor_")
             .tempdir()
@@ -758,6 +765,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             1024 * 2,
             Arc::new(CachedObjectStoreStats::new(&registry)),
+            db_context.clone(),
         ));
 
         gen_rand_file(temp_dir.path(), "file0", 1024);
