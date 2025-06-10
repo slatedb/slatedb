@@ -493,6 +493,12 @@ pub struct DbContextBuilder {
     system_clock: Option<Arc<dyn SystemClock>>,
 }
 
+impl Default for DbContextBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DbContextBuilder {
     pub fn new() -> Self {
         Self {
@@ -503,7 +509,8 @@ impl DbContextBuilder {
     }
 
     pub fn build(self) -> Arc<DbContext> {
-        let seed = self.seed.unwrap_or_else(|| rand::random());
+        #[allow(clippy::disallowed_types)]
+        let seed = self.seed.unwrap_or_else(rand::random);
         let logical_clock = self
             .logical_clock
             .unwrap_or_else(|| Arc::new(DefaultLogicalClock::default()));
