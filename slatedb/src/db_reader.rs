@@ -504,18 +504,37 @@ impl DbReader {
         Ok(())
     }
 
+    /// Alias for `open_with_context` with a default `DbContext`.
+    ///
+    /// Use this if you don't need to provide a custom `DbContext`.
+    pub async fn open<P: Into<Path>>(
+        path: P,
+        object_store: Arc<dyn ObjectStore>,
+        checkpoint_id: Option<Uuid>,
+        options: DbReaderOptions,
+    ) -> Result<Self, SlateDBError> {
+        Self::open_with_context(
+            path,
+            object_store,
+            checkpoint_id,
+            options,
+            Arc::new(DbContext::default()),
+        )
+        .await
+    }
+
     /// Creates a database reader that can read the contents of a database (but cannot write any
     /// data). The caller can provide an optional checkpoint. If the checkpoint is provided, the
     /// reader will read using the specified checkpoint and will not periodically refresh the
     /// checkpoint. Otherwise, the reader creates a new checkpoint pointing to the current manifest
     /// and refreshes it periodically as specified in the options. It also removes the previous
     /// checkpoint once any ongoing reads have completed.
-    pub async fn open<P: Into<Path>>(
+    pub async fn open_with_context<P: Into<Path>>(
         path: P,
         object_store: Arc<dyn ObjectStore>,
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
-        db_context: Option<Arc<DbContext>>,
+        db_context: Arc<DbContext>,
     ) -> Result<Self, SlateDBError> {
         let path = path.into();
         let store_provider = DefaultStoreProvider {
@@ -531,7 +550,7 @@ impl DbReader {
         store_provider: &dyn StoreProvider,
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
-        db_context: Option<Arc<DbContext>>,
+        db_context: Arc<DbContext>,
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
@@ -543,7 +562,7 @@ impl DbReader {
                 table_store,
                 options,
                 checkpoint_id,
-                db_context.unwrap_or_default(),
+                db_context,
             )
             .await?,
         );
@@ -600,7 +619,6 @@ impl DbReader {
     ///       Arc::clone(&object_store),
     ///       None,
     ///       DbReaderOptions::default(),
-    ///       None,
     ///     ).await?;
     ///     assert_eq!(reader.get(b"key").await?, Some("value".into()));
     ///     Ok(())
@@ -649,7 +667,6 @@ impl DbReader {
     ///       Arc::clone(&object_store),
     ///       None,
     ///       DbReaderOptions::default(),
-    ///       None,
     ///     ).await?;
     ///     assert_eq!(db.get_with_options(b"key", &ReadOptions::default()).await?, Some("value".into()));
     ///     Ok(())
@@ -696,7 +713,6 @@ impl DbReader {
     ///       Arc::clone(&object_store),
     ///       None,
     ///       DbReaderOptions::default(),
-    ///       None,
     ///     ).await?;
     ///     let mut iter = reader.scan("a".."b").await?;
     ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
@@ -747,7 +763,6 @@ impl DbReader {
     ///       Arc::clone(&object_store),
     ///       None,
     ///       DbReaderOptions::default(),
-    ///       None,
     ///     ).await?;
     ///     let mut iter = reader.scan_with_options("a".."b", &ScanOptions {
     ///         read_ahead_bytes: 1024 * 1024,
@@ -793,7 +808,7 @@ impl DbReader {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store.clone()).await?;
     ///     let options = DbReaderOptions::default();
-    ///     let reader = DbReader::open("test_db", object_store.clone(), None, options, None).await?;
+    ///     let reader = DbReader::open("test_db", object_store.clone(), None, options).await?;
     ///     reader.close().await?;
     ///     Ok(())
     /// }
@@ -865,7 +880,7 @@ mod tests {
             &test_provider,
             Some(checkpoint_result.id),
             DbReaderOptions::default(),
-            Some(test_provider.db_context.clone()),
+            test_provider.db_context.clone(),
         )
         .await
         .unwrap();
@@ -894,12 +909,12 @@ mod tests {
             .unwrap();
         db.put(key, updated_value).await.unwrap();
 
-        let reader = DbReader::open(
+        let reader = DbReader::open_with_context(
             path.clone(),
             Arc::clone(&object_store),
             Some(checkpoint_result.id),
             DbReaderOptions::default(),
-            Some(test_provider.db_context.clone()),
+            test_provider.db_context.clone(),
         )
         .await
         .unwrap();
@@ -1141,7 +1156,7 @@ mod tests {
             options: DbReaderOptions,
             checkpoint: Option<Uuid>,
         ) -> Result<DbReader, SlateDBError> {
-            DbReader::open_internal(self, checkpoint, options, Some(self.db_context.clone())).await
+            DbReader::open_internal(self, checkpoint, options, self.db_context.clone()).await
         }
     }
 

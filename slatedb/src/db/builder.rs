@@ -509,7 +509,7 @@ impl DbContextBuilder {
     }
 
     pub fn build(self) -> Arc<DbContext> {
-        #[allow(clippy::disallowed_types)]
+        #[allow(clippy::disallowed_methods)]
         let seed = self.seed.unwrap_or_else(rand::random);
         let logical_clock = self
             .logical_clock

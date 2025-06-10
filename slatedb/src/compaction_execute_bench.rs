@@ -30,6 +30,7 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable;
+use crate::utils::IdGenerator;
 
 pub struct CompactionExecuteBench {
     path: Path,
@@ -236,11 +237,8 @@ impl CompactionExecuteBench {
             .into_iter()
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
             .collect();
-        let high_bits = db_context.thread_rng().next_u64();
-        let low_bits = db_context.thread_rng().next_u64();
-        let uuid = uuid::Uuid::from_u64_pair(high_bits, low_bits);
         Ok(CompactionJob {
-            id: uuid,
+            id: db_context.thread_rng().gen_uuid(),
             destination: 0,
             ssts,
             sorted_runs: vec![],
@@ -272,11 +270,8 @@ impl CompactionExecuteBench {
             })
             .collect();
         info!("loaded compaction job");
-        let high_bits = db_context.thread_rng().next_u64();
-        let low_bits = db_context.thread_rng().next_u64();
-        let uuid = uuid::Uuid::from_u64_pair(high_bits, low_bits);
         CompactionJob {
-            id: uuid,
+            id: db_context.thread_rng().gen_uuid(),
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,
