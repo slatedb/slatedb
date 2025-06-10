@@ -14,7 +14,6 @@ use object_store::ObjectStore;
 use object_store::PutPayload;
 use object_store::PutResult;
 use slatedb::admin;
-use slatedb::admin::AdminBuilder;
 use slatedb::compaction_execute_bench::CompactionExecuteBench;
 use slatedb::config::WriteOptions;
 use slatedb::Db;

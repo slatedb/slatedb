@@ -1,14 +1,9 @@
-use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
-use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::mem_table_flush::MemtableFlushMsg;
-use object_store::path::Path;
-use object_store::ObjectStore;
 use serde::Serialize;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use uuid::Uuid;
 
 #[non_exhaustive]
@@ -77,7 +72,7 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
-    use crate::{admin, test_utils};
+    use crate::test_utils;
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -193,7 +188,7 @@ mod tests {
     async fn test_should_fail_create_checkpoint_from_missing_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
-        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+        let admin = AdminBuilder::new(path, object_store.clone()).build();
         // open and close the db to init the manifest and trigger another write
         let _ = Db::builder(path, object_store.clone())
             .with_settings(Settings::default())
@@ -219,7 +214,7 @@ mod tests {
     async fn test_should_fail_create_checkpoint_no_manifest() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
-        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+        let admin = AdminBuilder::new(path, object_store.clone()).build();
         let result = admin.create_checkpoint(&CheckpointOptions::default()).await;
 
         assert!(result.is_err());
