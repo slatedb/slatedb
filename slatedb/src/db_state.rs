@@ -23,7 +23,14 @@ use SsTableId::{Compacted, Wal};
 pub(crate) struct SsTableHandle {
     pub id: SsTableId,
     pub info: SsTableInfo,
+
+    /// The range of keys that are visible to the user. If non-empty, this handle represents a projection
+    /// over the SST file.
     pub visible_range: Option<BytesRange>,
+
+    /// The effective range of keys that are visible to the user, which is the intersection of the
+    /// physical range (first_key..unbounded) and any projection range. If a projection is specified,
+    /// this handle represents a subset of the SST file.
     effective_range: BytesRange,
 }
 
@@ -116,6 +123,21 @@ impl SsTableHandle {
                 .is_some(),
             None => false,
         }
+    }
+
+    /// Calculate the view range for the given range.
+    ///
+    /// This method determines the effective range that can be accessed within an SST by:
+    /// 1. Intersecting the requested range with the effective range
+    /// 2. Returning None if the requested range does not overlap with the effective range
+    pub(crate) fn calculate_view_range(&self, range: BytesRange) -> Option<BytesRange> {
+        if let Some(visible_range) = &self.visible_range {
+            return match range.intersect(visible_range) {
+                Some(range) => Some(range),
+                None => None,
+            };
+        }
+        Some(range)
     }
 
     pub(crate) fn estimate_size(&self) -> u64 {

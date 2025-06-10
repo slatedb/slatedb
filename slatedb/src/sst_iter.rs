@@ -164,13 +164,9 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
-        let mut view_range = BytesRange::from(range);
-        if let Some(visible_range) = &table.visible_range {
-            view_range = match view_range.intersect(visible_range) {
-                Some(range) => range,
-                None => return Ok(None),
-            };
-        }
+        let Some(view_range) = table.calculate_view_range(BytesRange::from(range)) else {
+            return Ok(None);
+        };
         let view = SstView::Owned(Box::new(table), view_range);
         Ok(Some(Self::new(view, table_store.clone(), options).await?))
     }
@@ -181,13 +177,9 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
-        let mut view_range = BytesRange::from(range);
-        if let Some(visible_range) = &table.visible_range {
-            view_range = match view_range.intersect(visible_range) {
-                Some(range) => range,
-                None => return Ok(None),
-            };
-        }
+        let Some(view_range) = table.calculate_view_range(BytesRange::from(range)) else {
+            return Ok(None);
+        };
         let view = SstView::Borrowed(table, view_range);
         Ok(Some(Self::new(view, table_store.clone(), options).await?))
     }
