@@ -3,7 +3,8 @@
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
 #![allow(clippy::result_large_err)]
-#![deny(clippy::disallowed_types)]
+// Disallow non-approved non-deterministic types and functions in production code
+#![cfg_attr(not(test), deny(clippy::disallowed_types, clippy::disallowed_methods))]
 
 /// Re-export the bytes crate.
 ///
