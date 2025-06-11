@@ -91,7 +91,7 @@ use object_store::ObjectStore;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::admin::Admin;
 use crate::cached_object_store::stats::CachedObjectStoreStats;
@@ -114,6 +114,7 @@ use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
+use crate::rand::DbRand;
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
@@ -249,10 +250,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             info!(?path, ?self.settings, "Opening SlateDB database");
         }
 
-        if let Some(seed) = self.seed {
-            debug!("Using user-specified seed");
-            crate::rand::seed(seed);
-        }
+        let rand = Arc::new(self.seed.map(DbRand::new).unwrap_or_default());
 
         let logical_clock = self
             .logical_clock
@@ -286,6 +284,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                         self.settings.object_store_cache_options.scan_interval,
                         stats.clone(),
                         system_clock.clone(),
+                        rand.clone(),
                     ));
 
                     let cached_main_object_store = CachedObjectStore::new(

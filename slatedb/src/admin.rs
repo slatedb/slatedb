@@ -304,6 +304,33 @@ impl Admin {
         .await?;
         Ok(())
     }
+
+    /// Creates a new builder for an admin client at the given path.
+    ///
+    /// ## Arguments
+    /// - `path`: the path to the database
+    /// - `object_store`: the object store to use for the database
+    ///
+    /// ## Returns
+    /// - `AdminBuilder`: the builder to initialize the admin client
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::admin::Admin;
+    /// use slatedb::SlateDBError;
+    /// use slatedb::object_store::memory::InMemory;
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let object_store = Arc::new(InMemory::new());
+    ///     let admin = Admin::builder("/tmp/test_db", object_store).build();
+    /// }
+    /// ```
+    pub fn builder<P: Into<Path>>(path: P, object_store: Arc<dyn ObjectStore>) -> AdminBuilder<P> {
+        AdminBuilder::new(path, object_store)
+    }
 }
 
 /// Loads an object store from configured environment variables.
