@@ -2,36 +2,21 @@
 
 //! SlateDB's module for generating random data.
 //!
-//! This module exists because we want to do deterministic simulation testing for SlateDB.
-//! To do so, we need a way to easily seed all random number generators in the library in a
-//! deterministic way.
+//! This module exists because we want to do deterministic simulation testing
+//! for SlateDB. To do so, we need a way to easily seed all random number
+//! generators (RNGs) in the library in a deterministic way.
 //!
-//! Each thread also has a thread-local random number generator that is initialized from a
-//! root-level random number generator. This ensures that each thread is seeded
-//! deterministically from the root RNG.
-//!
-//! The root-level random number generator starts unset. It is set in one of two ways:
-//!
-//! - `seed(seed: u64)` is called with a seed value.
-//! - `thread_rng()` is called while the root RNG is unset. This will initialize the root RNG
-//!   with a random seed.
-//!
-//! The module currently uses Xoshiro128++ for all random number generators. The rand crate's
-//! `seed_from_u64` method uses SplitMix64 under the hood, which makes it safe to use the root
-//! RNG to seed the thread-local RNGs to avoid any correlation between the RNGs.
-//!
-//! ## Usage
-//!
-//! ```ignore
-//! seed(42);
-//! let _ = rng().next_u64();
-//! ```
+//! The module currently uses Xoshiro128++ for all random number generators. The
+//! rand crate's `seed_from_u64` method uses SplitMix64 under the hood, which
+//! makes it safe to use when creating new thread-local RNGs.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoroshiro128PlusPlus;
+use thread_local::ThreadLocal;
 
 type RngAlg = Xoroshiro128PlusPlus;
 
@@ -88,6 +73,81 @@ impl RngCore for ThreadRng {
 #[inline]
 pub(crate) fn thread_rng() -> ThreadRng {
     ThreadRng
+}
+
+/// A shareable, lock-free random number generator (RNG).
+///
+/// This is a wrapper around `ThreadLocal<RngAlg>` that provides a thread-local
+/// random number generator for each thread. If a custom seed is provided,
+/// each thread will be seeded deterministically from the seed, and the seed will
+/// be incremented for the next thread.
+///
+/// Note that if there is more than one thread, the RNG's behavior is still
+/// non-deterministic since it depends on which thread is scheduled first by the
+/// OS scheduler. Only one thread must be used for the entire SlateDB runtime if
+/// deterministic behavior is desired.
+///
+/// ## Usage
+///
+/// ```ignore
+/// use slate_db::rand::DbRng;
+///
+/// let rng = DbRng::new(42);
+/// let _ = rng.next_u64();
+/// ```
+pub struct DbRng {
+    seed_counter: AtomicU64,
+    thread_rng: ThreadLocal<RefCell<RngAlg>>,
+}
+
+impl DbRng {
+    /// Create a new `DbRng` with the given 64-bit seed.
+    pub fn new(seed: u64) -> Self {
+        DbRng {
+            seed_counter: AtomicU64::new(seed),
+            thread_rng: ThreadLocal::new(),
+        }
+    }
+
+    /// Grab (or initialize) this thread’s RNG
+    fn thread_rng(&self) -> std::cell::RefMut<'_, RngAlg> {
+        self.thread_rng
+            .get_or(|| {
+                let seed = self.seed_counter.fetch_add(1, Ordering::Relaxed);
+                // seed_from_u64 inlines SplitMix64, which whitens the incremental seed
+                RefCell::new(RngAlg::seed_from_u64(seed))
+            })
+            .borrow_mut()
+    }
+}
+
+impl RngCore for DbRng {
+    /// Generate a random u64
+    fn next_u64(&mut self) -> u64 {
+        self.thread_rng().next_u64()
+    }
+
+    /// Generate a random u32
+    fn next_u32(&mut self) -> u32 {
+        self.thread_rng().next_u32()
+    }
+
+    /// Fill bytes
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.thread_rng().fill_bytes(dest)
+    }
+
+    /// Try to fill bytes
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+        self.thread_rng().try_fill_bytes(dest)
+    }
+}
+
+impl Default for DbRng {
+    fn default() -> Self {
+        #![allow(clippy::disallowed_methods)]
+        Self::new(rand::random())
+    }
 }
 
 #[cfg(test)]
