@@ -41,11 +41,8 @@ impl CompactionExecuteBench {
     pub fn new(path: Path, object_store: Arc<dyn ObjectStore>) -> Self {
         Self::new_with_rand(path, object_store, Arc::new(DbRand::default()))
     }
-    pub fn new_with_rand(
-        path: Path,
-        object_store: Arc<dyn ObjectStore>,
-        rand: Arc<DbRand>,
-    ) -> Self {
+
+    fn new_with_rand(path: Path, object_store: Arc<dyn ObjectStore>, rand: Arc<DbRand>) -> Self {
         Self {
             path,
             object_store,

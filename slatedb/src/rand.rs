@@ -18,7 +18,7 @@ use rand::SeedableRng;
 use rand_xoshiro::Xoroshiro128PlusPlus;
 use thread_local::ThreadLocal;
 
-type RngAlg = Xoroshiro128PlusPlus;
+pub(crate) type RngAlg = Xoroshiro128PlusPlus;
 
 /// A shareable, lock-free random number generator (RNG).
 ///
@@ -41,14 +41,14 @@ type RngAlg = Xoroshiro128PlusPlus;
 /// let _ = rng.next_u64();
 /// ```
 #[derive(Debug)]
-pub struct DbRand {
+pub(crate) struct DbRand {
     seed_counter: AtomicU64,
     thread_rng: ThreadLocal<RefCell<RngAlg>>,
 }
 
 impl DbRand {
     /// Create a new `DbRand` with the given 64-bit seed.
-    pub fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         DbRand {
             seed_counter: AtomicU64::new(seed),
             thread_rng: ThreadLocal::new(),
@@ -56,7 +56,7 @@ impl DbRand {
     }
 
     /// Grab this thread’s RNG. Initializes the RNG if it hasn't been initialized yet.
-    pub fn thread_rng(&self) -> std::cell::RefMut<'_, impl RngCore> {
+    pub(crate) fn thread_rng(&self) -> std::cell::RefMut<'_, impl RngCore> {
         self.thread_rng
             .get_or(|| {
                 let seed = self.seed_counter.fetch_add(1, Ordering::Relaxed);
