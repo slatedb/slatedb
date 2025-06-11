@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_types)]
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 //! SlateDB's module for generating random data.
 //!

@@ -250,7 +250,7 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
 }
 
 // TODO replace this with our rand module
-#[allow(clippy::disallowed_methods)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 pub(crate) fn uuid() -> Uuid {
     let mut random_bytes = [0; 16];
     rand::thread_rng().fill_bytes(&mut random_bytes);
