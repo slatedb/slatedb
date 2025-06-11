@@ -19,6 +19,14 @@ impl<T: Ord + Clone> Clone for StartBound<T> {
     }
 }
 
+impl<T: Ord + Clone> StartBound<&T> {
+    pub(crate) fn cloned(&self) -> StartBound<T> {
+        StartBound {
+            inner: self.inner.cloned(),
+        }
+    }
+}
+
 impl<T: Ord + Serialize> Serialize for StartBound<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -73,6 +81,14 @@ impl<T: Ord + Clone> Clone for EndBound<T> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<T: Ord + Clone> EndBound<&T> {
+    pub(crate) fn cloned(&self) -> EndBound<T> {
+        EndBound {
+            inner: self.inner.cloned(),
         }
     }
 }
@@ -212,13 +228,14 @@ impl<T: Ord + Clone> ComparableRange<T> {
             start: max_start.clone(),
             end: min_end.clone(),
         };
-        if intersection.is_non_empty() {
+        if intersection.non_empty() {
             Some(intersection)
         } else {
             None
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn union(&self, other: &Self) -> Option<Self> {
         // Sort the ranges to make the function commutative
         let (first, second) = if self < other {
@@ -245,7 +262,7 @@ impl<T: Ord + Clone> ComparableRange<T> {
         }
     }
 
-    pub(crate) fn is_non_empty(&self) -> bool {
+    pub(crate) fn non_empty(&self) -> bool {
         match (&self.start.inner, &self.end.inner) {
             (Bound::Included(a), Bound::Included(b)) => a <= b,
             (Bound::Included(a), Bound::Excluded(b)) => a < b,
@@ -253,6 +270,18 @@ impl<T: Ord + Clone> ComparableRange<T> {
             (Bound::Excluded(a), Bound::Included(b)) => a < b,
             (Bound::Unbounded, _) => true,
             (_, Bound::Unbounded) => true,
+        }
+    }
+
+    pub(crate) fn comparable_start_bound(&self) -> StartBound<&T> {
+        StartBound {
+            inner: self.start_bound(),
+        }
+    }
+
+    pub(crate) fn comparable_end_bound(&self) -> EndBound<&T> {
+        EndBound {
+            inner: self.end_bound(),
         }
     }
 }
@@ -432,7 +461,7 @@ pub(crate) mod tests {
             TestCase(Bound::Unbounded, Bound::Unbounded, true),
         ];
         for case in cases {
-            assert_eq!(ComparableRange::new(case.0, case.1).is_non_empty(), case.2);
+            assert_eq!(ComparableRange::new(case.0, case.1).non_empty(), case.2);
         }
     }
 }
