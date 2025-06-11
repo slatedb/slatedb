@@ -72,3 +72,98 @@ impl Default for DbRand {
         Self::new(rand::random())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::borrow::BorrowMut;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[test]
+    fn test_deterministic_behavior() {
+        // Same seed should produce same sequence of random numbers
+        let rng1 = DbRand::new(42);
+        let rng2 = DbRand::new(42);
+
+        let mut values1 = Vec::new();
+        let mut values2 = Vec::new();
+
+        // Generate some random numbers
+        for _ in 0..10 {
+            values1.push(rng1.thread_rng().next_u64());
+            values2.push(rng2.thread_rng().next_u64());
+        }
+
+        println!("values1: {:?}", values1);
+        println!("values2: {:?}", values2);
+
+        assert_eq!(values1, values2);
+    }
+
+    #[test]
+    fn test_different_seeds_produce_different_sequences() {
+        let rng1 = DbRand::new(42);
+        let rng2 = DbRand::new(43);
+
+        let mut values1 = Vec::new();
+        let mut values2 = Vec::new();
+
+        // Generate some random numbers
+        for _ in 0..10 {
+            values1.push(rng1.thread_rng().next_u64());
+            values2.push(rng2.thread_rng().next_u64());
+        }
+
+        println!("values1: {:?}", values1);
+        println!("values2: {:?}", values2);
+
+        // Very small chance this would randomly fail, but practically zero
+        assert_ne!(values1, values2);
+    }
+
+    #[test]
+    fn test_thread_rngs_differ_across_threads() {
+        // Create a DbRand instance with a known seed
+        let rand = Arc::new(DbRand::new(100));
+
+        // Number of threads to spawn
+        let n_threads = 4;
+
+        // Collect first random number from each thread
+        let thread_handles: Vec<_> = (0..n_threads)
+            .map(|_| {
+                let rand = Arc::clone(&rand);
+
+                thread::spawn(move || {
+                    // Get the pointer to this thread's RNG and return it as a
+                    // usize. This is used to verify that each thread has a
+                    // different RNG.
+                    let ptr = &mut *(rand.thread_rng().borrow_mut()) as *mut _;
+                    ptr as usize
+                })
+            })
+            .collect();
+
+        // Collect results from all threads
+        let results: Vec<usize> = thread_handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        // Create a HashSet to check for duplicates
+        let unique_values: HashSet<_> = results.iter().cloned().collect();
+
+        // Each thread should get a different RNG with a different seed,
+        // so we should have n_threads unique values
+        assert_eq!(
+            unique_values.len(),
+            n_threads,
+            "Expected {} unique random values from threads, got {}. \
+                   This indicates thread RNGs are not different across threads.",
+            n_threads,
+            unique_values.len()
+        );
+    }
+}
