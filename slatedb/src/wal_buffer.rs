@@ -7,14 +7,13 @@ use tokio::{
 };
 
 use crate::{
+    clock::MonotonicClock,
     db_state::SsTableId,
     iter::KeyValueIterator,
     mem_table::KVTable,
     tablestore::TableStore,
     types::RowEntry,
-    utils::{
-        spawn_bg_task, MonotonicClock, MonotonicSeq, WatchableOnceCell, WatchableOnceCellReader,
-    },
+    utils::{spawn_bg_task, MonotonicSeq, WatchableOnceCell, WatchableOnceCellReader},
     wal_id::WalIdStore,
     SlateDBError,
 };
@@ -46,8 +45,8 @@ pub(crate) struct WalBufferManager {
     inner: Arc<parking_lot::RwLock<WalBufferManagerInner>>,
     wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
     quit_once: WatchableOnceCell<Result<(), SlateDBError>>,
-    table_store: Arc<TableStore>,
     mono_clock: Arc<MonotonicClock>,
+    table_store: Arc<TableStore>,
     max_wal_bytes_size: usize,
     max_flush_interval: Option<Duration>,
 }
@@ -452,13 +451,13 @@ struct WalFlushWork {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::MonotonicClock;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
     use crate::test_utils::TestClock;
     use crate::types::{RowEntry, ValueDeletable};
-    use crate::utils::MonotonicClock;
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use std::sync::atomic::{AtomicU64, Ordering};

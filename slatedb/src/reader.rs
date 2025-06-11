@@ -13,7 +13,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
-use crate::utils::{get_now_for_read, is_not_expired, MonotonicClock, MonotonicSeq};
+use crate::utils::{get_now_for_read, is_not_expired, MonotonicSeq};
 use crate::{filter, DbIterator, SlateDBError};
 use bytes::Bytes;
 use futures::future::BoxFuture;
