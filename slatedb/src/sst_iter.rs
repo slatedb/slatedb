@@ -261,9 +261,14 @@ impl<'a> SstIterator<'a> {
         }
     }
 
-    async fn next_iter(&mut self) -> Result<Option<BlockIterator<Arc<Block>>>, SlateDBError> {
+    async fn next_iter(
+        &mut self,
+        spawn_fetches: bool,
+    ) -> Result<Option<BlockIterator<Arc<Block>>>, SlateDBError> {
         loop {
-            self.spawn_fetches();
+            if spawn_fetches {
+                self.spawn_fetches();
+            }
             if let Some(fetch_task) = self.fetch_tasks.front_mut() {
                 match fetch_task {
                     FetchTask::InFlight(jh) => {
@@ -288,7 +293,7 @@ impl<'a> SstIterator<'a> {
 
     async fn advance_block(&mut self) -> Result<(), SlateDBError> {
         if !self.state.is_finished() {
-            if let Some(mut iter) = self.next_iter().await? {
+            if let Some(mut iter) = self.next_iter(true).await? {
                 match self.view.start_key() {
                     Included(start_key) | Excluded(start_key) => iter.seek(start_key).await?,
                     Unbounded => (),
@@ -339,15 +344,35 @@ impl KeyValueIterator for SstIterator<'_> {
                              next_key, self.view.start_key(), self.view.end_key())
             });
         }
-
-        while !self.state.is_finished() {
+        if !self.state.is_finished() {
             if let Some(iter) = self.state.current_iter.as_mut() {
                 iter.seek(next_key).await?;
                 if !iter.is_empty() {
-                    break;
+                    return Ok(());
                 }
             }
-            self.advance_block().await?;
+
+            let index = self.index.clone();
+            let block_idx =
+                Self::first_block_with_data_including_or_after_key(&index.borrow(), next_key);
+            if block_idx < self.next_block_idx_to_fetch {
+                while let Some(mut block_iter) = self.next_iter(false).await? {
+                    block_iter.seek(next_key).await?;
+                    if !block_iter.is_empty() {
+                        self.state.advance(block_iter);
+                        return Ok(());
+                    }
+                }
+            }
+
+            self.fetch_tasks.clear();
+            self.next_block_idx_to_fetch = block_idx;
+            if let Some(mut block_iter) = self.next_iter(true).await? {
+                block_iter.seek(next_key).await?;
+                self.state.advance(block_iter);
+            } else {
+                self.state.stop();
+            }
         }
         Ok(())
     }
@@ -597,6 +622,77 @@ mod tests {
         .unwrap();
 
         assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_iter_seek_through_sst() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 128,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path.clone(),
+            None,
+        ));
+        let first_key = [b'b'; 16];
+        let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
+        let first_val = [2u8; 16];
+        let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
+        let (sst, nkeys) =
+            build_sst_with_n_blocks(256, table_store.clone(), key_gen, val_gen).await;
+
+        let mut iter_large_fetch = SstIterator::new_borrowed(
+            ..,
+            &sst,
+            table_store.clone(),
+            SstIteratorOptions {
+                max_fetch_tasks: 32,
+                blocks_to_fetch: 256,
+                cache_blocks: true,
+                eager_spawn: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut iter_small_fetch = SstIterator::new_borrowed(
+            ..,
+            &sst,
+            table_store.clone(),
+            SstIteratorOptions {
+                max_fetch_tasks: 1,
+                blocks_to_fetch: 1,
+                cache_blocks: true,
+                eager_spawn: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
+        let mut val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
+        let mut key_values = Vec::new();
+        for _ in 0..nkeys {
+            key_values.push((key_gen.next(), val_gen.next()));
+        }
+
+        for i in (0..nkeys).step_by(100) {
+            iter_large_fetch.seek(&key_values[i].0).await.unwrap();
+            let kv_large_fetch = iter_large_fetch.next().await.unwrap().unwrap();
+
+            iter_small_fetch.seek(&key_values[i].0).await.unwrap();
+            let kv_small_fetch = iter_small_fetch.next().await.unwrap().unwrap();
+
+            assert_eq!(kv_large_fetch.key, key_values[i].0);
+            assert_eq!(kv_large_fetch.value, key_values[i].1);
+            assert_eq!(kv_small_fetch.key, key_values[i].0);
+            assert_eq!(kv_small_fetch.value, key_values[i].1);
+        }
     }
 
     async fn build_sst_with_n_blocks(
