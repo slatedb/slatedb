@@ -158,10 +158,7 @@ use figment::providers::{Env, Format, Json, Toml, Yaml};
 use figment::{Figment, Metadata, Provider};
 use serde::{Deserialize, Serialize, Serializer};
 use std::path::Path;
-use std::sync::atomic::AtomicI64;
-use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::{str::FromStr, time::Duration};
 use uuid::Uuid;
 
@@ -346,45 +343,6 @@ pub enum Ttl {
     Default,
     NoExpiry,
     ExpireAfter(u64),
-}
-
-/// defines the clock that SlateDB will use during this session
-pub trait Clock {
-    /// Returns a timestamp (typically measured in millis since the unix epoch),
-    /// must return monotonically increasing numbers (this is enforced
-    /// at runtime and will panic if the invariant is broken).
-    ///
-    /// Note that this clock does not need to return a number that
-    /// represents the unix timestamp; the only requirement is that
-    /// it represents a sequence that can attribute a logical ordering
-    /// to actions on the database.
-    fn now(&self) -> i64;
-}
-
-/// contains the default implementation of the Clock, and will return the system time
-#[derive(Default)]
-pub struct SystemClock {
-    last_tick: AtomicI64,
-}
-
-impl SystemClock {
-    pub fn new() -> Self {
-        Self {
-            last_tick: AtomicI64::new(i64::MIN),
-        }
-    }
-}
-
-impl Clock for SystemClock {
-    fn now(&self) -> i64 {
-        // since SystemTime is not guaranteed to be monotonic, we enforce it here
-        let tick = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(duration) => duration.as_millis() as i64, // Time is after the epoch
-            Err(e) => -(e.duration().as_millis() as i64), // Time is before the epoch, return negative
-        };
-        self.last_tick.fetch_max(tick, SeqCst);
-        self.last_tick.load(SeqCst)
-    }
 }
 
 /// Defines the scope targeted by a given checkpoint. If set to All, then the checkpoint will

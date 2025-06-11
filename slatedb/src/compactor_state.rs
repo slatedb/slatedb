@@ -265,10 +265,11 @@ impl CompactorState {
 mod tests {
     use std::sync::Arc;
     use std::thread::sleep;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     use super::*;
     use crate::checkpoint::Checkpoint;
+    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::compactor_state::CompactionStatus::Submitted;
     use crate::compactor_state::SourceId::Sst;
     use crate::config::Settings;
@@ -523,7 +524,7 @@ mod tests {
             id: crate::utils::uuid(),
             manifest_id: 1,
             expire_time: None,
-            create_time: SystemTime::now(),
+            create_time: DefaultSystemClock::default().now(),
         };
         dirty.core.checkpoints.push(checkpoint.clone());
 
@@ -540,7 +541,7 @@ mod tests {
     where
         F: FnMut() -> Option<T>,
     {
-        let now = SystemTime::now();
+        let now = DefaultSystemClock::default().now();
         while now.elapsed().unwrap() < duration {
             let maybe_result = f();
             if maybe_result.is_some() {
