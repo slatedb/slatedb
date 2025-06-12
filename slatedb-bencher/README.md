@@ -66,7 +66,7 @@ a set of benchmarks suitable for your task. The script should be run from
 the repository root:
 
 ```bash
-./src/bencher/benchmark-db.sh
+./slatedb-bencher/benchmark-db.sh
 ```
 
 The command above will produce results at `target/bencher/results` directory. The results include:
