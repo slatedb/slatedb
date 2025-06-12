@@ -104,6 +104,7 @@ use crate::clock::SystemClock;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::default_block_cache;
+use crate::config::GarbageCollectorOptions;
 use crate::config::Settings;
 use crate::db::Db;
 use crate::db::DbInner;
@@ -447,31 +448,32 @@ impl<P: Into<Path>> DbBuilder<P> {
             )
         }
 
-        // Setup garbage collector if needed
-        let mut garbage_collector = None;
-
         // To keep backwards compatibility, check if the gc_runtime or garbage_collector_options are set.
         // If either are set, we need to initialize the garbage collector.
-        if let Some(gc_options) = self.settings.garbage_collector_options {
-            let gc_handle = self.gc_runtime.unwrap_or_else(|| Handle::current());
-
-            let cleanup_inner = inner.clone();
-            garbage_collector = Some(GarbageCollector::start_in_bg_thread(
-                manifest_store,
-                table_store,
-                gc_options,
-                gc_handle,
-                inner.stat_registry.clone(),
-                self.cancellation_token.clone(),
-                move |result| {
+        let garbage_collector =
+            if self.settings.garbage_collector_options.is_some() || self.gc_runtime.is_some() {
+                let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
+                let gc_handle = self.gc_runtime.unwrap_or_else(|| tokio_handle.clone());
+                let cleanup_inner = inner.clone();
+                let gc = GarbageCollector::new(
+                    manifest_store.clone(),
+                    table_store.clone(),
+                    gc_handle,
+                    gc_options,
+                    inner.stat_registry.clone(),
+                    system_clock.clone(),
+                    self.cancellation_token.clone(),
+                );
+                gc.start_in_bg_thread(move |result| {
                     let err = bg_task_result_into_err(result);
                     warn!("GC thread exited with {:?}", err);
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
-                },
-                system_clock.clone(),
-            ));
-        }
+                });
+                Some(gc)
+            } else {
+                None
+            };
 
         // Create and return the Db instance
         Ok(Db {
@@ -518,5 +520,68 @@ impl<P: Into<Path>> AdminBuilder<P> {
             object_store: self.object_store,
             system_clock: self.system_clock,
         }
+    }
+}
+
+pub struct GarbageCollectorBuilder {
+    manifest_store: Arc<ManifestStore>,
+    table_store: Arc<TableStore>,
+    tokio_handle: Handle,
+    options: GarbageCollectorOptions,
+    stat_registry: Arc<StatRegistry>,
+    cancellation_token: CancellationToken,
+    system_clock: Arc<dyn SystemClock>,
+}
+
+impl GarbageCollectorBuilder {
+    pub fn new(manifest_store: Arc<ManifestStore>, table_store: Arc<TableStore>) -> Self {
+        Self {
+            manifest_store,
+            table_store,
+            tokio_handle: Handle::current(),
+            options: GarbageCollectorOptions::default(),
+            stat_registry: Arc::new(StatRegistry::new()),
+            cancellation_token: CancellationToken::new(),
+            system_clock: Arc::new(DefaultSystemClock::default()),
+        }
+    }
+
+    #[allow(unused)]
+    pub fn with_tokio_handle(mut self, tokio_handle: Handle) -> Self {
+        self.tokio_handle = tokio_handle;
+        self
+    }
+
+    pub fn with_options(mut self, options: GarbageCollectorOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    #[allow(unused)]
+    pub fn with_stat_registry(mut self, stat_registry: Arc<StatRegistry>) -> Self {
+        self.stat_registry = stat_registry;
+        self
+    }
+
+    pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
+        self.system_clock = system_clock;
+        self
+    }
+
+    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
+        self.cancellation_token = cancellation_token;
+        self
+    }
+
+    pub fn build(self) -> GarbageCollector {
+        GarbageCollector::new(
+            self.manifest_store,
+            self.table_store,
+            self.tokio_handle,
+            self.options,
+            self.stat_registry,
+            self.system_clock,
+            self.cancellation_token,
+        )
     }
 }

@@ -1,6 +1,7 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
+use crate::db::builder::GarbageCollectorBuilder;
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
 use crate::garbage_collector::GarbageCollector;
@@ -101,16 +102,11 @@ impl Admin {
             self.path.clone(),
             None, // no need for cache in GC
         ));
-
-        let stats = Arc::new(StatRegistry::new());
-        GarbageCollector::run_gc_once_with_clock(
-            manifest_store,
-            table_store,
-            stats,
-            gc_opts,
-            self.system_clock.clone(),
-        )
-        .await;
+        let gc = GarbageCollectorBuilder::new(manifest_store, table_store)
+            .with_system_clock(self.system_clock.clone())
+            .with_options(gc_opts)
+            .build();
+        gc.run_gc_once().await;
         Ok(())
     }
 
@@ -139,22 +135,20 @@ impl Admin {
             None, // no need for cache in GC
         ));
 
-        let stats = Arc::new(GcStats::new(Arc::new(StatRegistry::new())));
-
         let tracker = TaskTracker::new();
         let ct = cancellation_token.clone();
+        let gc = GarbageCollectorBuilder::new(manifest_store, table_store)
+            .with_system_clock(self.system_clock.clone())
+            .with_options(gc_opts)
+            .with_cancellation_token(ct)
+            .build();
 
-        tracker.spawn(GarbageCollector::start_async_task(
-            manifest_store,
-            table_store,
-            stats,
-            ct,
-            gc_opts,
-            self.system_clock.clone(),
-        ));
+        tracker.spawn(async move {
+            gc.start_async_task().await;
+        });
         tracker.close();
-
         tracker.wait().await;
+
         Ok(())
     }
 

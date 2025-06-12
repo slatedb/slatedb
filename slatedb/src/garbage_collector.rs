@@ -34,11 +34,38 @@ trait GcTask {
     async fn collect(&self, now: DateTime<Utc>) -> Result<(), SlateDBError>;
 }
 
+#[derive(Clone)]
 pub struct GarbageCollector {
+    manifest_store: Arc<ManifestStore>,
+    table_store: Arc<TableStore>,
+    tokio_handle: Handle,
+    options: GarbageCollectorOptions,
+    stats: Arc<GcStats>,
+    system_clock: Arc<dyn SystemClock>,
     cancellation_token: CancellationToken,
 }
 
 impl GarbageCollector {
+    pub(crate) fn new(
+        manifest_store: Arc<ManifestStore>,
+        table_store: Arc<TableStore>,
+        tokio_handle: Handle,
+        options: GarbageCollectorOptions,
+        stat_registry: Arc<StatRegistry>,
+        system_clock: Arc<dyn SystemClock>,
+        cancellation_token: CancellationToken,
+    ) -> Self {
+        let stats = Arc::new(GcStats::new(stat_registry));
+        Self {
+            manifest_store,
+            table_store,
+            tokio_handle,
+            options,
+            stats,
+            system_clock,
+            cancellation_token,
+        }
+    }
     /// Start the garbage collector in a background thread.
     ///
     /// This method will start the garbage collector in a full background thread
@@ -63,32 +90,15 @@ impl GarbageCollector {
     ///
     #[allow(clippy::too_many_arguments)]
     pub fn start_in_bg_thread(
-        manifest_store: Arc<ManifestStore>,
-        table_store: Arc<TableStore>,
-        options: GarbageCollectorOptions,
-        tokio_handle: Handle,
-        stat_registry: Arc<StatRegistry>,
-        cancellation_token: CancellationToken,
+        &self,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
-        system_clock: Arc<dyn SystemClock>,
-    ) -> Self {
-        let stats = Arc::new(GcStats::new(stat_registry));
-        let ct = cancellation_token.clone();
-
+    ) {
+        let this = self.clone();
         let gc_main = move || {
-            tokio_handle.block_on(Self::start_async_task(
-                manifest_store,
-                table_store,
-                stats,
-                ct,
-                options,
-                system_clock,
-            ));
-
+            this.tokio_handle.block_on(this.start_async_task());
             Ok(())
         };
         spawn_bg_thread("slatedb-gc", cleanup_fn, gc_main);
-        Self { cancellation_token }
     }
 
     /// Start the garbage collector in an async task.
@@ -105,18 +115,10 @@ impl GarbageCollector {
     /// * `cancellation_token`: The cancellation token to use for the garbage collector.
     /// * `options`: The options for the garbage collector.
     ///
-    pub async fn start_async_task(
-        manifest_store: Arc<ManifestStore>,
-        table_store: Arc<TableStore>,
-        stats: Arc<GcStats>,
-        cancellation_token: CancellationToken,
-        options: GarbageCollectorOptions,
-        system_clock: Arc<dyn SystemClock>,
-    ) {
+    pub async fn start_async_task(&self) {
         let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
 
-        let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) =
-            gc_tasks(&manifest_store, table_store, options, &stats);
+        let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) = self.gc_tasks();
 
         let mut compacted_ticker = compacted_gc_task.ticker();
         let mut wal_ticker = wal_gc_task.ticker();
@@ -133,51 +135,30 @@ impl GarbageCollector {
             tokio::select! {
                 biased;
                 // check the cancellation token first to avoid starting new GC tasks when the runtime is shutting down
-                _ = cancellation_token.cancelled() => {
+                _ = self.cancellation_token.cancelled() => {
                     info!("Garbage collector received shutdown signal... shutting down");
                     break;
                 },
-                _ = manifest_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut manifest_gc_task, system_clock.clone()).await; },
-                _ = wal_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut wal_gc_task, system_clock.clone()).await; },
-                _ = compacted_ticker.tick() => { run_gc_task(manifest_store.clone(), &mut compacted_gc_task, system_clock.clone()).await; },
+                _ = manifest_ticker.tick() => { self.run_gc_task(&mut manifest_gc_task).await; },
+                _ = wal_ticker.tick() => { self.run_gc_task(&mut wal_gc_task).await; },
+                _ = compacted_ticker.tick() => { self.run_gc_task(&mut compacted_gc_task).await; },
                 _ = log_ticker.tick() => {
                     debug!("GC has collected {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
-                         stats.gc_manifest_count.value.load(Ordering::SeqCst),
-                         stats.gc_wal_count.value.load(Ordering::SeqCst),
-                         stats.gc_compacted_count.value.load(Ordering::SeqCst)
+                         self.stats.gc_manifest_count.value.load(Ordering::SeqCst),
+                         self.stats.gc_wal_count.value.load(Ordering::SeqCst),
+                         self.stats.gc_compacted_count.value.load(Ordering::SeqCst)
                      );
                  }
             }
-            stats.gc_count.inc();
+            self.stats.gc_count.inc();
         }
 
         info!(
             "GC shutdown after collecting {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
-            stats.gc_manifest_count.value.load(Ordering::SeqCst),
-            stats.gc_wal_count.value.load(Ordering::SeqCst),
-            stats.gc_compacted_count.value.load(Ordering::SeqCst)
+            self.stats.gc_manifest_count.value.load(Ordering::SeqCst),
+            self.stats.gc_wal_count.value.load(Ordering::SeqCst),
+            self.stats.gc_compacted_count.value.load(Ordering::SeqCst)
         );
-    }
-
-    // Keep this private to protect aggainst accidentally using the default clock.
-    // External users are forced to use the clock explicitly.
-    #[cfg(test)]
-    async fn run_gc_once(
-        manifest_store: Arc<ManifestStore>,
-        table_store: Arc<TableStore>,
-        stat_registry: Arc<StatRegistry>,
-        options: GarbageCollectorOptions,
-    ) {
-        use crate::clock::DefaultSystemClock;
-
-        Self::run_gc_once_with_clock(
-            manifest_store,
-            table_store,
-            stat_registry,
-            options,
-            Arc::new(DefaultSystemClock::default()),
-        )
-        .await;
     }
 
     /// Run the garbage collector once.
@@ -193,38 +174,14 @@ impl GarbageCollector {
     /// * `options`: The options for the garbage collector.
     /// * `system_clock`: The system clock to use for the garbage collector.
     ///
-    pub async fn run_gc_once_with_clock(
-        manifest_store: Arc<ManifestStore>,
-        table_store: Arc<TableStore>,
-        stat_registry: Arc<StatRegistry>,
-        options: GarbageCollectorOptions,
-        system_clock: Arc<dyn SystemClock>,
-    ) {
-        let stats = Arc::new(GcStats::new(stat_registry));
+    pub async fn run_gc_once(&self) {
+        let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) = self.gc_tasks();
 
-        let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) =
-            gc_tasks(&manifest_store, table_store, options, &stats);
+        self.run_gc_task(&mut manifest_gc_task).await;
+        self.run_gc_task(&mut wal_gc_task).await;
+        self.run_gc_task(&mut compacted_gc_task).await;
 
-        run_gc_task(
-            manifest_store.clone(),
-            &mut manifest_gc_task,
-            system_clock.clone(),
-        )
-        .await;
-        run_gc_task(
-            manifest_store.clone(),
-            &mut wal_gc_task,
-            system_clock.clone(),
-        )
-        .await;
-        run_gc_task(
-            manifest_store.clone(),
-            &mut compacted_gc_task,
-            system_clock.clone(),
-        )
-        .await;
-
-        stats.gc_count.inc();
+        self.stats.gc_count.inc();
     }
 
     /// Notify the garbage collector to terminate.
@@ -234,87 +191,73 @@ impl GarbageCollector {
     pub async fn terminate_background_task(self) {
         self.cancellation_token.cancel();
     }
-}
 
-fn gc_tasks(
-    manifest_store: &Arc<ManifestStore>,
-    table_store: Arc<TableStore>,
-    options: GarbageCollectorOptions,
-    stats: &Arc<GcStats>,
-) -> (WalGcTask, CompactedGcTask, ManifestGcTask) {
-    let wal_gc_task = WalGcTask::new(
-        manifest_store.clone(),
-        table_store.clone(),
-        stats.clone(),
-        options.wal_options,
-    );
-    let compacted_gc_task = CompactedGcTask::new(
-        manifest_store.clone(),
-        table_store.clone(),
-        stats.clone(),
-        options.compacted_options,
-    );
-    let manifest_gc_task = ManifestGcTask::new(
-        manifest_store.clone(),
-        stats.clone(),
-        options.manifest_options,
-    );
-    (wal_gc_task, compacted_gc_task, manifest_gc_task)
-}
-
-async fn run_gc_task<T: GcTask>(
-    manifest_store: Arc<ManifestStore>,
-    task: &mut T,
-    system_clock: Arc<dyn SystemClock>,
-) {
-    debug!(
-        "Scheduled garbage collection attempt for {}.",
-        task.resource()
-    );
-    if let Err(e) = remove_expired_checkpoints(manifest_store.clone(), system_clock.clone()).await {
-        error!("Error removing expired checkpoints: {}", e);
-    } else if let Err(e) = task.collect(system_clock.now().into()).await {
-        error!("Error collecting compacted garbage: {}", e);
+    fn gc_tasks(&self) -> (WalGcTask, CompactedGcTask, ManifestGcTask) {
+        let wal_gc_task = WalGcTask::new(
+            self.manifest_store.clone(),
+            self.table_store.clone(),
+            self.stats.clone(),
+            self.options.wal_options,
+        );
+        let compacted_gc_task = CompactedGcTask::new(
+            self.manifest_store.clone(),
+            self.table_store.clone(),
+            self.stats.clone(),
+            self.options.compacted_options,
+        );
+        let manifest_gc_task = ManifestGcTask::new(
+            self.manifest_store.clone(),
+            self.stats.clone(),
+            self.options.manifest_options,
+        );
+        (wal_gc_task, compacted_gc_task, manifest_gc_task)
     }
-}
 
-async fn remove_expired_checkpoints(
-    manifest_store: Arc<ManifestStore>,
-    system_clock: Arc<dyn SystemClock>,
-) -> Result<(), SlateDBError> {
-    let mut stored_manifest = StoredManifest::load(Arc::clone(&manifest_store)).await?;
+    async fn run_gc_task<T: GcTask>(&self, task: &mut T) {
+        debug!(
+            "Scheduled garbage collection attempt for {}.",
+            task.resource()
+        );
+        if let Err(e) = self.remove_expired_checkpoints().await {
+            error!("Error removing expired checkpoints: {}", e);
+        } else if let Err(e) = task.collect(self.system_clock.now().into()).await {
+            error!("Error collecting compacted garbage: {}", e);
+        }
+    }
 
-    stored_manifest
-        .maybe_apply_manifest_update(|manifest| {
-            filter_expired_checkpoints(manifest, system_clock.clone())
-        })
-        .await
-}
+    async fn remove_expired_checkpoints(&self) -> Result<(), SlateDBError> {
+        let mut stored_manifest = StoredManifest::load(Arc::clone(&self.manifest_store)).await?;
 
-fn filter_expired_checkpoints(
-    manifest: &StoredManifest,
-    system_clock: Arc<dyn SystemClock>,
-) -> Result<Option<DirtyManifest>, SlateDBError> {
-    let utc_now: DateTime<Utc> = system_clock.now().into();
-    let mut dirty = manifest.prepare_dirty();
-    let retained_checkpoints: Vec<Checkpoint> = dirty
-        .core
-        .checkpoints
-        .iter()
-        .filter(|checkpoint| match checkpoint.expire_time {
-            Some(expire_time) => DateTime::<Utc>::from(expire_time) > utc_now,
-            None => true,
-        })
-        .cloned()
-        .collect();
+        stored_manifest
+            .maybe_apply_manifest_update(|manifest| self.filter_expired_checkpoints(manifest))
+            .await
+    }
 
-    let maybe_dirty = if dirty.core.checkpoints.len() != retained_checkpoints.len() {
-        dirty.core.checkpoints = retained_checkpoints;
-        Some(dirty)
-    } else {
-        None
-    };
-    Ok(maybe_dirty)
+    fn filter_expired_checkpoints(
+        &self,
+        manifest: &StoredManifest,
+    ) -> Result<Option<DirtyManifest>, SlateDBError> {
+        let utc_now: DateTime<Utc> = self.system_clock.now().into();
+        let mut dirty = manifest.prepare_dirty();
+        let retained_checkpoints: Vec<Checkpoint> = dirty
+            .core
+            .checkpoints
+            .iter()
+            .filter(|checkpoint| match checkpoint.expire_time {
+                Some(expire_time) => DateTime::<Utc>::from(expire_time) > utc_now,
+                None => true,
+            })
+            .cloned()
+            .collect();
+
+        let maybe_dirty = if dirty.core.checkpoints.len() != retained_checkpoints.len() {
+            dirty.core.checkpoints = retained_checkpoints;
+            Some(dirty)
+        } else {
+            None
+        };
+        Ok(maybe_dirty)
+    }
 }
 
 #[cfg(test)]
@@ -331,6 +274,7 @@ mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::clock::DefaultSystemClock;
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
+    use crate::db::builder::GarbageCollectorBuilder;
     use crate::error::SlateDBError;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
@@ -1112,13 +1056,17 @@ mod tests {
             }),
         };
 
-        GarbageCollector::run_gc_once(
+        let gc = GarbageCollector::new(
             manifest_store.clone(),
             table_store.clone(),
-            stats.clone(),
+            Handle::current(),
             gc_opts,
-        )
-        .await;
+            stats.clone(),
+            Arc::new(DefaultSystemClock::default()),
+            CancellationToken::new(),
+        );
+
+        gc.run_gc_once().await;
 
         // Verify reference integrity
         assert_no_dangling_references(manifest_store, table_store).await;
@@ -1146,18 +1094,19 @@ mod tests {
 
         let cancellation_token = CancellationToken::new();
 
-        let gc = GarbageCollector::start_in_bg_thread(
+        let gc = GarbageCollector::new(
             manifest_store.clone(),
             table_store.clone(),
-            gc_opts,
             Handle::current(),
+            gc_opts,
             stats.clone(),
-            cancellation_token.clone(),
-            |result| assert!(result.is_ok()),
             Arc::new(DefaultSystemClock::default()),
+            cancellation_token.clone(),
         );
 
+        gc.start_in_bg_thread(|result| assert!(result.is_ok()));
         gc.terminate_background_task().await;
+
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(cancellation_token.is_cancelled());
     }
