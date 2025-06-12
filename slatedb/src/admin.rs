@@ -3,11 +3,8 @@ use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
 use crate::error::SlateDBError;
-use crate::garbage_collector::stats::GcStats;
-use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::sst::SsTableFormat;
-use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 
 use crate::clone;
