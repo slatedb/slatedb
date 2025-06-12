@@ -138,7 +138,7 @@ mod tests {
     }
 
     fn build_block() -> CachedEntry {
-        let mut rng = crate::rand::thread_rng();
+        let mut rng = rand::thread_rng();
         let mut builder = BlockBuilder::new(1024);
         loop {
             let mut k = vec![0u8; 32];

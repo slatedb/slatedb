@@ -24,6 +24,7 @@ use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::object_stores::ObjectStores;
+use crate::rand::DbRand;
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
@@ -33,11 +34,20 @@ use crate::types::ValueDeletable;
 pub struct CompactionExecuteBench {
     path: Path,
     object_store: Arc<dyn ObjectStore>,
+    rand: Arc<DbRand>,
 }
 
 impl CompactionExecuteBench {
     pub fn new(path: Path, object_store: Arc<dyn ObjectStore>) -> Self {
-        Self { path, object_store }
+        Self::new_with_rand(path, object_store, Arc::new(DbRand::default()))
+    }
+
+    fn new_with_rand(path: Path, object_store: Arc<dyn ObjectStore>, rand: Arc<DbRand>) -> Self {
+        Self {
+            path,
+            object_store,
+            rand,
+        }
     }
 
     fn sst_id(id: u32) -> SsTableId {
@@ -64,8 +74,8 @@ impl CompactionExecuteBench {
         ));
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
-        let mut rng = crate::rand::thread_rng();
-        rng.fill_bytes(key_start.as_mut_slice());
+        let rand = self.rand.clone();
+        rand.thread_rng().fill_bytes(key_start.as_mut_slice());
         let mut futures = FuturesUnordered::<JoinHandle<Result<(), SlateDBError>>>::new();
         for i in 0..num_ssts {
             while futures.len() >= 4 {
@@ -83,6 +93,7 @@ impl CompactionExecuteBench {
                 key_start_copy,
                 num_keys,
                 val_bytes,
+                self.rand.clone(),
             ));
             futures.push(jh)
         }
@@ -102,6 +113,7 @@ impl CompactionExecuteBench {
         key_start: Vec<u8>,
         num_keys: usize,
         val_bytes: usize,
+        rand: Arc<DbRand>,
     ) -> Result<(), SlateDBError> {
         let mut retries = 0;
         loop {
@@ -111,6 +123,7 @@ impl CompactionExecuteBench {
                 key_start.clone(),
                 num_keys,
                 val_bytes,
+                rand.clone(),
             )
             .await;
             match result {
@@ -134,8 +147,8 @@ impl CompactionExecuteBench {
         key_start: Vec<u8>,
         num_keys: usize,
         val_bytes: usize,
+        rand: Arc<DbRand>,
     ) -> Result<(), SlateDBError> {
-        let mut rng = crate::rand::thread_rng();
         let start = tokio::time::Instant::now();
         let mut suffix = Vec::<u8>::new();
         suffix.put_u32(i);
@@ -144,7 +157,7 @@ impl CompactionExecuteBench {
         let mut sst_writer = table_store.table_writer(CompactionExecuteBench::sst_id(i));
         for _ in 0..num_keys {
             let mut val = vec![0u8; val_bytes];
-            rng.fill_bytes(val.as_mut_slice());
+            rand.thread_rng().fill_bytes(val.as_mut_slice());
             let key = key_gen.next();
             let row_entry = RowEntry::new(key, ValueDeletable::Value(val.into()), 0, None, None);
             sst_writer.add(row_entry).await?;
