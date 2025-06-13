@@ -310,8 +310,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             compression_codec: self.settings.compression_codec,
             block_size: self
                 .sst_block_size
-                .map(|bs| bs.as_bytes())
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .as_bytes(),
             ..SsTableFormat::default()
         };
 
