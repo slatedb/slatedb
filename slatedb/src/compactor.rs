@@ -1071,7 +1071,7 @@ mod tests {
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
             sst_format,
-        Path::from(PATH),
+            Path::from(PATH),
             None,
         ));
         (manifest_store, table_store)
