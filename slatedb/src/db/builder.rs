@@ -94,7 +94,7 @@
 //! async fn main() -> Result<(), SlateDBError> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_sst_block_size(SstBlockSize::Block8Kb) // 8KB blocks
+//!         .with_sst_block_size(SstBlockSize::Block8Kib) // 8KiB blocks
 //!         .build()
 //!         .await?;
 //!     Ok(())

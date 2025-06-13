@@ -170,40 +170,40 @@ use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 /// Enum representing valid SST block sizes
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 pub enum SstBlockSize {
-    /// 1KB blocks
-    Block1Kb,
-    /// 2KB blocks
-    Block2Kb,
-    /// 4KB blocks (default)
-    Block4Kb,
-    /// 8KB blocks
-    Block8Kb,
-    /// 16KB blocks
-    Block16Kb,
-    /// 32KB blocks
-    Block32Kb,
-    /// 64KB blocks
-    Block64Kb,
+    /// 1KiB blocks
+    Block1Kib,
+    /// 2KiB blocks
+    Block2Kib,
+    /// 4KiB blocks (default)
+    Block4Kib,
+    /// 8KiB blocks
+    Block8Kib,
+    /// 16KiB blocks
+    Block16Kib,
+    /// 32KiB blocks
+    Block32Kib,
+    /// 64KiB blocks
+    Block64Kib,
 }
 
 impl SstBlockSize {
     /// Get the block size in bytes
     pub fn as_bytes(&self) -> usize {
         match self {
-            SstBlockSize::Block1Kb => 1024,
-            SstBlockSize::Block2Kb => 2048,
-            SstBlockSize::Block4Kb => 4096,
-            SstBlockSize::Block8Kb => 8192,
-            SstBlockSize::Block16Kb => 16384,
-            SstBlockSize::Block32Kb => 32768,
-            SstBlockSize::Block64Kb => 65536,
+            SstBlockSize::Block1Kib => 1024,
+            SstBlockSize::Block2Kib => 2048,
+            SstBlockSize::Block4Kib => 4096,
+            SstBlockSize::Block8Kib => 8192,
+            SstBlockSize::Block16Kib => 16384,
+            SstBlockSize::Block32Kib => 32768,
+            SstBlockSize::Block64Kib => 65536,
         }
     }
 }
 
 impl Default for SstBlockSize {
     fn default() -> Self {
-        SstBlockSize::Block4Kb
+        SstBlockSize::Block4Kib
     }
 }
 
