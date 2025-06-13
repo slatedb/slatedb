@@ -304,17 +304,13 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
-        let mut sst_format = SsTableFormat {
+        let sst_format = SsTableFormat {
             min_filter_keys: self.settings.min_filter_keys,
             filter_bits_per_key: self.settings.filter_bits_per_key,
             compression_codec: self.settings.compression_codec,
+            block_size: self.sst_block_size.map(|bs| bs.as_bytes()).unwrap_or_default(),
             ..SsTableFormat::default()
         };
-
-        // Set block size if configured
-        if let Some(block_size) = self.sst_block_size {
-            sst_format.block_size = block_size.as_bytes();
-        }
 
         // Setup object store with optional caching
         let maybe_cached_main_object_store =
