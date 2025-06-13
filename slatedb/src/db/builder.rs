@@ -406,7 +406,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup compactor if needed
         let mut compactor = None;
 
-        // Not to pollute the cache during compaction
+        // Not to pollute the cache during compaction or GC
         let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
                 self.main_object_store.clone(),
@@ -610,7 +610,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
                 self.main_object_store.clone(),
                 self.wal_object_store.clone(),
             ),
-            SsTableFormat::default(), // read only SSTs, can use default,
+            SsTableFormat::default(), // read only SSTs can use default
             path,
             None, // no need for cache in GC
         ));
