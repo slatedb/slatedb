@@ -392,7 +392,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup background tasks
         let tokio_handle = Handle::current();
         if inner.wal_enabled {
-            inner.wal_buffer.start_background().await;
+            inner.wal_buffer.start_background().await?;
         };
 
         let memtable_flush_task =

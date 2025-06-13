@@ -101,7 +101,13 @@ impl WalBufferManager {
         }
     }
 
-    pub async fn start_background(self: &Arc<Self>) {
+    pub async fn start_background(self: &Arc<Self>) -> Result<(), SlateDBError> {
+        if self.inner.read().background_task.is_some() {
+            return Err(SlateDBError::UnexpectedError {
+                msg: "wal_buffer already started".to_string(),
+            });
+        }
+
         let (flush_tx, flush_rx) = mpsc::channel(1);
         {
             let mut inner = self.inner.write();
@@ -123,6 +129,7 @@ impl WalBufferManager {
             let mut inner = self.inner.write();
             inner.background_task = Some(task_handle);
         }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -497,7 +504,7 @@ mod tests {
             1000,                         // max_wal_bytes_size
             Some(Duration::from_secs(1)), // max_flush_interval
         ));
-        wal_buffer.start_background().await;
+        wal_buffer.start_background().await?;
         (wal_buffer, table_store, test_clock)
     }
 
