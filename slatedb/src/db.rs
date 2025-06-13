@@ -3284,6 +3284,42 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_memtable_flush_cleanup_when_fenced() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_cleanup";
+
+        let mut options = test_db_options(0, 32, None);
+        options.flush_interval = None;
+        options.manifest_poll_interval = Duration::MAX;
+
+        let db1 = Db::builder(path, object_store.clone())
+            .with_settings(options.clone())
+            .build()
+            .await
+            .unwrap();
+
+        db1.put(b"k", b"v").await.unwrap();
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        FenceableManifest::init_writer(stored_manifest, Duration::from_secs(300))
+            .await
+            .unwrap();
+
+        let result = db1.inner.flush_memtables().await;
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
+        assert!(db1
+            .inner
+            .table_store
+            .list_compacted_ssts(..)
+            .await
+            .unwrap()
+            .is_empty());
+
+        db1.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_wal_store_reconfiguration_fails() {
         let object_store = Arc::new(InMemory::new());
