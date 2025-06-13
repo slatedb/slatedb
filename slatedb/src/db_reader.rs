@@ -11,7 +11,6 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable};
 use crate::reader::{ReadSnapshot, Reader};
-use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::{DefaultStoreProvider, StoreProvider};
 use crate::tablestore::TableStore;
@@ -135,6 +134,7 @@ impl DbReaderInner {
             db_stats: db_stats.clone(),
             mono_clock: Arc::clone(&mono_clock),
             wal_enabled: true,
+            sst_iter_options: options.sst_iterator_options,
         };
 
         Ok(Self {
@@ -424,12 +424,9 @@ impl DbReaderInner {
         into_tables: &mut VecDeque<Arc<ImmutableMemtable>>,
         replay_new_wals: bool,
     ) -> Result<u64, SlateDBError> {
-        let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 1,
-            blocks_to_fetch: 256,
-            cache_blocks: true,
-            eager_spawn: true,
-        };
+        // Use the same SST iterator options as configured for reads
+        // DbReader doesn't have a separate WAL replay config
+        let sst_iter_options = reader_options.sst_iterator_options;
 
         let replay_options = WalReplayOptions {
             sst_batch_size: 4,

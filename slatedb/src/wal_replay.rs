@@ -1,7 +1,8 @@
 use crate::db_state::{CoreDbState, SsTableId};
 use crate::iter::KeyValueIterator;
 use crate::mem_table::WritableKVTable;
-use crate::sst_iter::{SstIterator, SstIteratorOptions};
+use crate::config::SstIteratorOptions;
+use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::SlateDBError;

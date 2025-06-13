@@ -585,7 +585,8 @@ mod tests {
     use crate::error;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
-    use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::config::SstIteratorOptions;
+    use crate::sst_iter::SstIterator;
     use crate::stats::StatRegistry;
     #[cfg(feature = "moka")]
     use crate::tablestore::TableStore;

@@ -494,7 +494,8 @@ mod tests {
     use crate::proptest_util::rng;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
-    use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::config::SstIteratorOptions;
+    use crate::sst_iter::SstIterator;
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, TestClock};

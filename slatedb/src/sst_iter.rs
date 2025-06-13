@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 use crate::bytes_range::BytesRange;
+use crate::config::SstIteratorOptions;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
@@ -21,24 +22,6 @@ enum FetchTask {
     Finished(VecDeque<Arc<Block>>),
 }
 
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct SstIteratorOptions {
-    pub(crate) max_fetch_tasks: usize,
-    pub(crate) blocks_to_fetch: usize,
-    pub(crate) cache_blocks: bool,
-    pub(crate) eager_spawn: bool,
-}
-
-impl Default for SstIteratorOptions {
-    fn default() -> Self {
-        SstIteratorOptions {
-            max_fetch_tasks: 1,
-            blocks_to_fetch: 1,
-            cache_blocks: true,
-            eager_spawn: false,
-        }
-    }
-}
 
 /// This enum encapsulates access to an SST and corresponding ownership requirements.
 /// For example, [`SstView::Owned`] allows the table handle to be owned, which is

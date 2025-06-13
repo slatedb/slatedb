@@ -15,7 +15,7 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
-use crate::sst_iter::{SstIterator, SstIteratorOptions};
+use crate::sst_iter::SstIterator;
 use crate::tablestore::TableStore;
 
 use crate::compactor::stats::CompactionStats;
@@ -99,17 +99,10 @@ impl TokioCompactionExecutorInner {
         &self,
         compaction: &'a CompactionJob,
     ) -> Result<MergeIterator<'a>, SlateDBError> {
-        let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 4,
-            blocks_to_fetch: 256,
-            cache_blocks: false, // don't clobber the cache
-            eager_spawn: true,
-        };
-
         let mut l0_iters = VecDeque::new();
         for l0 in compaction.ssts.iter() {
             l0_iters.push_back(
-                SstIterator::new_borrowed(.., l0, self.table_store.clone(), sst_iter_options)
+                SstIterator::new_borrowed(.., l0, self.table_store.clone(), self.options.sst_iterator_options)
                     .await?,
             );
         }
@@ -118,7 +111,7 @@ impl TokioCompactionExecutorInner {
         let mut sr_iters = VecDeque::new();
         for sr in compaction.sorted_runs.iter() {
             let iter =
-                SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), sst_iter_options)
+                SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), self.options.sst_iterator_options)
                     .await?;
             sr_iters.push_back(iter);
         }

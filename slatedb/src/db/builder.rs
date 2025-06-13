@@ -82,6 +82,24 @@
 //! }
 //! ```
 //!
+//! Example with a custom SST block size:
+//!
+//! ```
+//! use slatedb::{Db, SlateDBError};
+//! use slatedb::object_store::memory::InMemory;
+//! use std::sync::Arc;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), SlateDBError> {
+//!     let object_store = Arc::new(InMemory::new());
+//!     let db = Db::builder("test_db", object_store)
+//!         .with_sst_block_size(8192) // 8KB blocks
+//!         .build()
+//!         .await?;
+//!     Ok(())
+//! }
+//! ```
+//!
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -138,6 +156,7 @@ pub struct DbBuilder<P: Into<Path>> {
     fp_registry: Arc<FailPointRegistry>,
     cancellation_token: CancellationToken,
     seed: Option<u64>,
+    sst_block_size: Option<usize>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -157,6 +176,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             fp_registry: Arc::new(FailPointRegistry::new()),
             cancellation_token: CancellationToken::new(),
             seed: None,
+            sst_block_size: None,
         }
     }
 
@@ -237,6 +257,35 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Sets the block size for SSTable blocks in bytes. Blocks are the unit of reading
+    /// and caching in SlateDB. Smaller blocks can reduce read amplification but
+    /// may increase metadata overhead. Larger blocks are more efficient for
+    /// sequential scans but may waste bandwidth for point lookups.
+    ///
+    /// Note: When compression is enabled, blocks are compressed individually.
+    /// Larger blocks typically achieve better compression ratios.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_size` - The block size in bytes. Must be between 1KB (1024) and 64KB (65536).
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the block size is not within the valid range.
+    pub fn with_sst_block_size(mut self, block_size: usize) -> Self {
+        assert!(
+            (1024..=65536).contains(&block_size),
+            "sst_block_size must be between 1KB (1024) and 64KB (65536), got {}",
+            block_size
+        );
+        self.sst_block_size = Some(block_size);
+        self
+    }
+
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, SlateDBError> {
         let path = self.path.into();
@@ -263,12 +312,17 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
-        let sst_format = SsTableFormat {
+        let mut sst_format = SsTableFormat {
             min_filter_keys: self.settings.min_filter_keys,
             filter_bits_per_key: self.settings.filter_bits_per_key,
             compression_codec: self.settings.compression_codec,
             ..SsTableFormat::default()
         };
+
+        // Set block size if configured
+        if let Some(block_size) = self.sst_block_size {
+            sst_format.block_size = block_size;
+        }
 
         // Setup object store with optional caching
         let maybe_cached_main_object_store =

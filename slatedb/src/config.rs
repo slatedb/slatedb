@@ -427,6 +427,9 @@ pub struct Settings {
     ///
     /// Default: no TTL (insertions will remain until deleted)
     pub default_ttl: Option<u64>,
+    
+    /// Configuration for SST iterators in different contexts (compaction, reads, WAL replay).
+    pub sst_iterator_configs: SstIteratorConfigs,
 }
 
 // Implement Debug manually for DbOptions.
@@ -455,6 +458,7 @@ impl std::fmt::Debug for Settings {
             .field("garbage_collector_options", &self.garbage_collector_options)
             .field("filter_bits_per_key", &self.filter_bits_per_key)
             .field("default_ttl", &self.default_ttl)
+            .field("sst_iterator_configs", &self.sst_iterator_configs)
             .finish()
     }
 }
@@ -614,6 +618,7 @@ impl Default for Settings {
             garbage_collector_options: None,
             filter_bits_per_key: 10,
             default_ttl: None,
+            sst_iterator_configs: SstIteratorConfigs::default(),
         }
     }
 }
@@ -638,6 +643,9 @@ pub struct DbReaderOptions {
 
     #[serde(skip)]
     pub block_cache: Option<Arc<dyn DbCache>>,
+    
+    /// Options for SST iterators used during read operations.
+    pub sst_iterator_options: SstIteratorOptions,
 }
 
 impl Default for DbReaderOptions {
@@ -647,6 +655,12 @@ impl Default for DbReaderOptions {
             checkpoint_lifetime: Duration::from_secs(10 * 60),
             max_memtable_bytes: 64 * 1024 * 1024,
             block_cache: default_block_cache(),
+            sst_iterator_options: SstIteratorOptions {
+                max_fetch_tasks: 1,
+                blocks_to_fetch: 1,
+                cache_blocks: true,
+                eager_spawn: true,
+            },
         }
     }
 }
@@ -700,6 +714,62 @@ impl FromStr for CompressionCodec {
     }
 }
 
+/// Options for SST iterators used during compaction and other operations.
+#[derive(Copy, Clone, Debug, Deserialize, Serialize)]
+pub struct SstIteratorOptions {
+    /// Maximum number of concurrent fetch tasks for reading blocks.
+    pub max_fetch_tasks: usize,
+    
+    /// Number of blocks to fetch in each fetch task.
+    pub blocks_to_fetch: usize,
+    
+    /// Whether to cache blocks after reading them.
+    pub cache_blocks: bool,
+    
+    /// Whether to spawn fetch tasks eagerly or on-demand.
+    pub eager_spawn: bool,
+}
+
+impl Default for SstIteratorOptions {
+    fn default() -> Self {
+        SstIteratorOptions {
+            max_fetch_tasks: 1,
+            blocks_to_fetch: 1,
+            cache_blocks: true,
+            eager_spawn: false,
+        }
+    }
+}
+
+/// Configuration for SST iterators in different contexts.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SstIteratorConfigs {
+    /// Options for SST iterators during read operations (get/scan).
+    pub read: SstIteratorOptions,
+    
+    /// Options for SST iterators during WAL replay.
+    pub wal_replay: SstIteratorOptions,
+}
+
+impl Default for SstIteratorConfigs {
+    fn default() -> Self {
+        Self {
+            read: SstIteratorOptions {
+                max_fetch_tasks: 1,
+                blocks_to_fetch: 1,
+                cache_blocks: true,
+                eager_spawn: true,
+            },
+            wal_replay: SstIteratorOptions {
+                max_fetch_tasks: 1,
+                blocks_to_fetch: 256,
+                cache_blocks: true,
+                eager_spawn: true,
+            },
+        }
+    }
+}
+
 /// Options for the compactor.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct CompactorOptions {
@@ -721,6 +791,9 @@ pub struct CompactorOptions {
 
     /// The maximum number of concurrent compactions to execute at once
     pub max_concurrent_compactions: usize,
+    
+    /// Options for SST iterators used during compaction.
+    pub sst_iterator_options: SstIteratorOptions,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -734,6 +807,12 @@ impl Default for CompactorOptions {
             manifest_update_timeout: Duration::from_secs(300),
             max_sst_size: 1024 * 1024 * 1024,
             max_concurrent_compactions: 4,
+            sst_iterator_options: SstIteratorOptions {
+                max_fetch_tasks: 4,
+                blocks_to_fetch: 256,
+                cache_blocks: false, // don't clobber the cache during compaction
+                eager_spawn: true,
+            },
         }
     }
 }
@@ -750,6 +829,7 @@ impl std::fmt::Debug for CompactorOptions {
                 "max_concurrent_compactions",
                 &self.max_concurrent_compactions,
             )
+            .field("sst_iterator_options", &self.sst_iterator_options)
             .finish()
     }
 }

@@ -70,7 +70,8 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
     use crate::sst::SsTableFormat;
-    use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::config::SstIteratorOptions;
+    use crate::sst_iter::SstIterator;
     use crate::tablestore::TableStore;
     use crate::test_utils;
     use bytes::Bytes;
