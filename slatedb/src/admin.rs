@@ -88,18 +88,14 @@ impl Admin {
         &self,
         gc_opts: GarbageCollectorOptions,
     ) -> Result<(), Box<dyn Error>> {
-        let manifest_store = Arc::new(ManifestStore::new(&self.path, self.object_store.clone()));
-        manifest_store
+        // TODO(criccomini): We don't really need to do this anymore. I think we can add
+        // a `AdminBuilder::with_wal_object_store` method to allow the user to specify
+        // a WAL object store. There's some weirdness about URIs in the `DbBuilder` that
+        // I don't fully understand.
+        ManifestStore::new(&self.path, self.object_store.clone())
             .validate_no_wal_object_store_configured()
             .await?;
-        let sst_format = SsTableFormat::default(); // read only SSTs, can use default
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(self.object_store.clone(), None),
-            sst_format.clone(),
-            self.path.clone(),
-            None, // no need for cache in GC
-        ));
-        let gc = GarbageCollectorBuilder::new(manifest_store, table_store)
+        let gc = GarbageCollectorBuilder::new(self.path.clone(), self.object_store.clone())
             .with_system_clock(self.system_clock.clone())
             .with_options(gc_opts)
             .build();
@@ -120,21 +116,16 @@ impl Admin {
         gc_opts: GarbageCollectorOptions,
         cancellation_token: CancellationToken,
     ) -> Result<(), Box<dyn Error>> {
-        let manifest_store = Arc::new(ManifestStore::new(&self.path, self.object_store.clone()));
-        manifest_store
+        // TODO(criccomini): We don't really need to do this anymore. I think we can add
+        // a `AdminBuilder::with_wal_object_store` method to allow the user to specify
+        // a WAL object store. There's some weirdness about URIs in the `DbBuilder` that
+        // I don't fully understand.
+        ManifestStore::new(&self.path, self.object_store.clone())
             .validate_no_wal_object_store_configured()
             .await?;
-        let sst_format = SsTableFormat::default(); // read only SSTs, can use default
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(self.object_store.clone(), None),
-            sst_format.clone(),
-            self.path.clone(),
-            None, // no need for cache in GC
-        ));
-
         let tracker = TaskTracker::new();
         let ct = cancellation_token.clone();
-        let gc = GarbageCollectorBuilder::new(manifest_store, table_store)
+        let gc = GarbageCollectorBuilder::new(self.path.clone(), self.object_store.clone())
             .with_system_clock(self.system_clock.clone())
             .with_options(gc_opts)
             .with_cancellation_token(ct)

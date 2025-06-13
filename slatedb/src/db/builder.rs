@@ -406,6 +406,18 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup compactor if needed
         let mut compactor = None;
 
+        // Not to pollute the cache during compaction
+        let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
+            ObjectStores::new(
+                self.main_object_store.clone(),
+                self.wal_object_store.clone(),
+            ),
+            sst_format,
+            path_resolver,
+            self.fp_registry.clone(),
+            None,
+        ));
+
         // To keep backwards compatibility, check if the compaction_scheduler_supplier or compactor_options are set.
         // If either are set, we need to initialize the compactor.
         if self.compaction_scheduler_supplier.is_some() || self.settings.compactor_options.is_some()
@@ -415,18 +427,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
                 .unwrap_or_else(|| Arc::new(SizeTieredCompactionSchedulerSupplier::default()));
-
-            // Not to pollute the cache during compaction
-            let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
-                ObjectStores::new(
-                    self.main_object_store.clone(),
-                    self.wal_object_store.clone(),
-                ),
-                sst_format,
-                path_resolver,
-                self.fp_registry.clone(),
-                None,
-            ));
             let cleanup_inner = inner.clone();
             compactor = Some(
                 Compactor::new(
@@ -457,7 +457,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 let cleanup_inner = inner.clone();
                 let gc = GarbageCollector::new(
                     manifest_store.clone(),
-                    table_store.clone(),
+                    uncached_table_store.clone(),
                     gc_handle,
                     gc_options,
                     inner.stat_registry.clone(),
@@ -526,26 +526,30 @@ impl<P: Into<Path>> AdminBuilder<P> {
 /// Builder for creating new GarbageCollector instances.
 ///
 /// This provides a fluent API for configuring a GarbageCollector object.
-pub struct GarbageCollectorBuilder {
-    manifest_store: Arc<ManifestStore>,
-    table_store: Arc<TableStore>,
+pub struct GarbageCollectorBuilder<P: Into<Path>> {
+    path: P,
+    main_object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
     tokio_handle: Handle,
     options: GarbageCollectorOptions,
     stat_registry: Arc<StatRegistry>,
     cancellation_token: CancellationToken,
     system_clock: Arc<dyn SystemClock>,
+    fp_registry: Arc<FailPointRegistry>,
 }
 
-impl GarbageCollectorBuilder {
-    pub fn new(manifest_store: Arc<ManifestStore>, table_store: Arc<TableStore>) -> Self {
+impl<P: Into<Path>> GarbageCollectorBuilder<P> {
+    pub fn new(path: P, main_object_store: Arc<dyn ObjectStore>) -> Self {
         Self {
-            manifest_store,
-            table_store,
+            path,
+            main_object_store,
+            wal_object_store: None,
             tokio_handle: Handle::current(),
             options: GarbageCollectorOptions::default(),
             stat_registry: Arc::new(StatRegistry::new()),
             cancellation_token: CancellationToken::new(),
             system_clock: Arc::new(DefaultSystemClock::default()),
+            fp_registry: Arc::new(FailPointRegistry::new()),
         }
     }
 
@@ -581,11 +585,35 @@ impl GarbageCollectorBuilder {
         self
     }
 
+    /// Sets the fail point registry to use for the garbage collector.
+    #[allow(unused)]
+    pub fn with_fp_registry(mut self, fp_registry: Arc<FailPointRegistry>) -> Self {
+        self.fp_registry = fp_registry;
+        self
+    }
+
+    /// Sets the WAL object store to use for the garbage collector.
+    pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
+        self.wal_object_store = Some(wal_object_store);
+        self
+    }
+
     /// Builds and returns a GarbageCollector instance.
     pub fn build(self) -> GarbageCollector {
+        let path: Path = self.path.into();
+        let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(
+                self.main_object_store.clone(),
+                self.wal_object_store.clone(),
+            ),
+            SsTableFormat::default(), // read only SSTs, can use default,
+            path,
+            None, // no need for cache in GC
+        ));
         GarbageCollector::new(
-            self.manifest_store,
-            self.table_store,
+            manifest_store,
+            table_store,
             self.tokio_handle,
             self.options,
             self.stat_registry,
