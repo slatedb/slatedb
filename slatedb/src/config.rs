@@ -168,8 +168,7 @@ use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
 /// Enum representing valid SST block sizes
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub enum SstBlockSize {
     /// 1KiB blocks
     Block1Kib,
@@ -202,7 +201,6 @@ impl SstBlockSize {
         }
     }
 }
-
 
 /// Describes the durability of data based on the medium (e.g. in-memory, object storags)
 /// that the data is currently stored in. Currently this is used to define a

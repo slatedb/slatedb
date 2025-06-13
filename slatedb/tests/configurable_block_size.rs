@@ -30,7 +30,6 @@ async fn test_configurable_block_size() {
     assert_eq!(&value2.unwrap()[..], b"value2");
 }
 
-
 #[tokio::test]
 async fn test_default_block_size() {
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -104,20 +103,23 @@ async fn test_block_size_actually_used() {
 #[case::block_32kb(SstBlockSize::Block32Kib, 32768)]
 #[case::block_64kb(SstBlockSize::Block64Kib, 65536)]
 #[tokio::test]
-async fn test_all_block_sizes(#[case] block_size_enum: SstBlockSize, #[case] expected_bytes: usize) {
+async fn test_all_block_sizes(
+    #[case] block_size_enum: SstBlockSize,
+    #[case] expected_bytes: usize,
+) {
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    
+
     // Verify the enum returns the correct byte value
     assert_eq!(block_size_enum.as_bytes(), expected_bytes);
-    
+
     // Verify we can create a DB with each size
     let db = Db::builder(
         format!("/tmp/test_block_size_{}", expected_bytes),
-        object_store.clone()
+        object_store.clone(),
     )
     .with_sst_block_size(block_size_enum)
     .build()
     .await;
-    
+
     assert!(db.is_ok());
 }
