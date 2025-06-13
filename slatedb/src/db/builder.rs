@@ -308,10 +308,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             min_filter_keys: self.settings.min_filter_keys,
             filter_bits_per_key: self.settings.filter_bits_per_key,
             compression_codec: self.settings.compression_codec,
-            block_size: self
-                .sst_block_size
-                .unwrap_or_default()
-                .as_bytes(),
+            block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
             ..SsTableFormat::default()
         };
 
