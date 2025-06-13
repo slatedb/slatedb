@@ -523,6 +523,9 @@ impl<P: Into<Path>> AdminBuilder<P> {
     }
 }
 
+/// Builder for creating new GarbageCollector instances.
+///
+/// This provides a fluent API for configuring a GarbageCollector object.
 pub struct GarbageCollectorBuilder {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
@@ -546,33 +549,39 @@ impl GarbageCollectorBuilder {
         }
     }
 
+    /// Sets the tokio handle to use for background tasks.
     #[allow(unused)]
     pub fn with_tokio_handle(mut self, tokio_handle: Handle) -> Self {
         self.tokio_handle = tokio_handle;
         self
     }
 
+    /// Sets the options to use for the garbage collector.
     pub fn with_options(mut self, options: GarbageCollectorOptions) -> Self {
         self.options = options;
         self
     }
 
+    /// Sets the stats registry to use for the garbage collector.
     #[allow(unused)]
     pub fn with_stat_registry(mut self, stat_registry: Arc<StatRegistry>) -> Self {
         self.stat_registry = stat_registry;
         self
     }
 
+    /// Sets the system clock to use for the garbage collector.
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = system_clock;
         self
     }
 
+    /// Sets the cancellation token to use for the garbage collector.
     pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
         self.cancellation_token = cancellation_token;
         self
     }
 
+    /// Builds and returns a GarbageCollector instance.
     pub fn build(self) -> GarbageCollector {
         GarbageCollector::new(
             self.manifest_store,

@@ -1,3 +1,16 @@
+//! This module contains SlateDB's garbage collector.
+//!
+//! The garbage collector is responsible for removing obsolete data from SlateDB storage:
+//! - Write-ahead log (WAL) SSTs that are no longer referenced by active manifests or
+//!   checkpoints
+//! - Compacted SSTs that are no longer referenced by active manifests or checkpoints
+//! - Old manifests that are not needed for recovery or checkpoints
+//!
+//! The garbage collector runs periodically in the background, with configurable intervals
+//! and minimum age thresholds for each type of data. This ensures that recently created
+//! data isn't immediately deleted, which would risk removing files that might still be
+//! referenced by in-flight operations.
+
 use crate::checkpoint::Checkpoint;
 use crate::clock::SystemClock;
 use crate::config::GarbageCollectorOptions;
@@ -34,6 +47,23 @@ trait GcTask {
     async fn collect(&self, now: DateTime<Utc>) -> Result<(), SlateDBError>;
 }
 
+/// SlateDB's garbage collector.
+///
+/// The `GarbageCollector` is responsible for cleaning up obsolete data in SlateDB:
+///
+/// - Write-ahead log (WAL) SSTs that are no longer referenced by active manifests or checkpoints
+/// - Compacted SSTs that are no longer referenced by active manifests or checkpoints
+/// - Old manifests that are not needed for recovery or checkpoints
+///
+/// The garbage collector can run in three modes:
+///
+/// - As a background thread with [`start_in_bg_thread`](GarbageCollector::start_in_bg_thread)
+/// - As an async task with [`start_async_task`](GarbageCollector::start_async_task)
+/// - As a one-time operation with [`run_gc_once`](GarbageCollector::run_gc_once)
+///
+/// The garbage collector uses configurable intervals and minimum age thresholds for each
+/// type of data to ensure that recently created data isn't immediately deleted, which
+/// helps prevent removing files that might still be referenced by in-flight operations.
 #[derive(Clone)]
 pub struct GarbageCollector {
     manifest_store: Arc<ManifestStore>,
@@ -46,6 +76,21 @@ pub struct GarbageCollector {
 }
 
 impl GarbageCollector {
+    /// Creates a new `GarbageCollector` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest_store` - The manifest store to use for garbage collection.
+    /// * `table_store` - The table store to use for garbage collection.
+    /// * `tokio_handle` - The Tokio runtime handle to use for async operations.
+    /// * `options` - Configuration options for the garbage collector.
+    /// * `stat_registry` - Registry for tracking garbage collection metrics.
+    /// * `system_clock` - Clock implementation for time-based decisions.
+    /// * `cancellation_token` - Token used to signal cancellation of garbage collection tasks.
+    ///
+    /// # Returns
+    ///
+    /// A new `GarbageCollector` instance configured with the provided components.
     pub(crate) fn new(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
@@ -66,29 +111,18 @@ impl GarbageCollector {
             cancellation_token,
         }
     }
-    /// Start the garbage collector in a background thread.
+
+    /// Starts the garbage collector in a background thread.
     ///
-    /// This method will start the garbage collector in a full background thread
-    /// and return a handle to the garbage collector.
-    /// The garbage collector runs until the cancellation token is cancelled,
-    /// but it returns right away with a handle to the garbage collector.
-    /// You can use the method `GarbageCollector::terminate_background_task` to stop the garbage collector.
+    /// This method launches the garbage collector in a dedicated background thread
+    /// and returns immediately. The garbage collector will run until its cancellation
+    /// token is cancelled. Use [`terminate_background_task`](GarbageCollector::terminate_background_task)
+    /// to stop the garbage collector.
     ///
-    /// ## Arguments
+    /// # Arguments
     ///
-    /// * `manifest_store`: The manifest store to use for the garbage collector.
-    /// * `table_store`: The table store to use for the garbage collector.
-    /// * `options`: The options for the garbage collector.
-    /// * `tokio_handle`: The tokio handle to use for the garbage collector.
-    /// * `stat_registry`: The stat registry to use for the garbage collector.
-    /// * `cancellation_token`: The cancellation token to use for the garbage collector.
-    /// * `cleanup_fn`: The function to call when the garbage collector is finished.
-    ///
-    /// ## Returns
-    ///
-    /// * `Self`: The garbage collector.
-    ///
-    #[allow(clippy::too_many_arguments)]
+    /// * `cleanup_fn` - A function that will be called when the garbage collector
+    ///   thread completes, with the final result (success or error).
     pub fn start_in_bg_thread(
         &self,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
@@ -101,20 +135,12 @@ impl GarbageCollector {
         spawn_bg_thread("slatedb-gc", cleanup_fn, gc_main);
     }
 
-    /// Start the garbage collector in an async task.
-    ///
-    /// This method will start the garbage collector task that performs the actual garbage collection
-    /// in a Tokio asyn task.
+    /// Starts the garbage collector. This method performs the actual garbage collection.
     /// The garbage collector runs until the cancellation token is cancelled.
     ///
-    /// ## Arguments
-    ///
-    /// * `manifest_store`: The manifest store to use for the garbage collector.
-    /// * `table_store`: The table store to use for the garbage collector.
-    /// * `stats`: The stats to use for the garbage collector.
-    /// * `cancellation_token`: The cancellation token to use for the garbage collector.
-    /// * `options`: The options for the garbage collector.
-    ///
+    /// Unlike [`start_in_bg_thread`](GarbageCollector::start_in_bg_thread), this method
+    /// uses the provided Tokio runtime instead of creating a new thread. This is useful
+    /// when you want to run the garbage collector within an existing async runtime.
     pub async fn start_async_task(&self) {
         let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
 
@@ -163,17 +189,11 @@ impl GarbageCollector {
 
     /// Run the garbage collector once.
     ///
-    /// This method will run the garbage collector just once.
-    /// It's useful to run the garbage collector from the admin interface in the foreground.
+    /// This method runs all three garbage collection tasks:
     ///
-    /// ## Arguments
-    ///
-    /// * `manifest_store`: The manifest store to use for the garbage collector.
-    /// * `table_store`: The table store to use for the garbage collector.
-    /// * `stat_registry`: The stat registry to use for the garbage collector.
-    /// * `options`: The options for the garbage collector.
-    /// * `system_clock`: The system clock to use for the garbage collector.
-    ///
+    /// - WAL SST garbage collection
+    /// - Compacted SST garbage collection
+    /// - Manifest garbage collection
     pub async fn run_gc_once(&self) {
         let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) = self.gc_tasks();
 
@@ -185,9 +205,6 @@ impl GarbageCollector {
     }
 
     /// Notify the garbage collector to terminate.
-    ///
-    /// Cancel the cancellation token and all tokens that are derived from it.
-    /// This will trigger the garbage collector to terminate.
     pub async fn terminate_background_task(self) {
         self.cancellation_token.cancel();
     }
