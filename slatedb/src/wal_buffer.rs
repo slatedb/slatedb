@@ -189,9 +189,8 @@ impl WalBufferManager {
         Ok(entries.last().map(|entry| entry.seq))
     }
 
-    /// Check if we need to flush the wal with considering max_wal_size and max_flush_interval.
-    /// the checking over `max_wal_size` is not very strict, we have to ensure a write batch
-    /// into a single WAL file.
+    /// Check if we need to flush the wal with considering max_wal_size. the checking over `max_wal_size`
+    /// is not very strict, we have to ensure a write batch into a single WAL file.
     ///
     /// It's the caller's duty to call `maybe_trigger_flush` after calling `append`.
     pub async fn maybe_trigger_flush(&self) -> Result<Arc<KVTable>, SlateDBError> {
