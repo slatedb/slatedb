@@ -118,6 +118,9 @@ impl DbReaderInner {
             logical_clock.clone(),
             initial_state.core().last_l0_clock_tick,
         ));
+
+        // initial_state contains the last_committed_seq after WAL replay. in no-wal mode, we can simply fallback
+        // to last_l0_seq.
         let last_committed_seq = Arc::new(MonotonicSeq::new(initial_state.core().last_l0_seq));
         last_committed_seq.store_if_greater(initial_state.last_committed_seq);
 
