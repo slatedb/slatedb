@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::ops::{DerefMut, Range};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -6,6 +6,7 @@ use std::{fmt::Display, io::SeekFrom};
 
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::clock::SystemClock;
+use crate::rand::DbRand;
 use bytes::Bytes;
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
@@ -27,6 +28,7 @@ use crate::cached_object_store::storage::{LocalCacheEntry, LocalCacheHead, Local
 pub struct FsCacheStorage {
     root_folder: std::path::PathBuf,
     evictor: Option<Arc<FsCacheEvictor>>,
+    rand: Arc<DbRand>,
 }
 
 impl FsCacheStorage {
@@ -36,6 +38,7 @@ impl FsCacheStorage {
         scan_interval: Option<Duration>,
         stats: Arc<CachedObjectStoreStats>,
         system_clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
     ) -> Self {
         let evictor = max_cache_size_bytes.map(|max_cache_size_bytes| {
             Arc::new(FsCacheEvictor::new(
@@ -44,12 +47,14 @@ impl FsCacheStorage {
                 scan_interval,
                 stats,
                 system_clock,
+                rand.clone(),
             ))
         });
 
         Self {
             root_folder,
             evictor,
+            rand,
         }
     }
 }
@@ -66,6 +71,7 @@ impl LocalCacheStorage for FsCacheStorage {
             location: location.clone(),
             evictor: self.evictor.clone(),
             part_size,
+            rand: self.rand.clone(),
         })
     }
 
@@ -88,6 +94,7 @@ pub(crate) struct FsCacheEntry {
     location: Path,
     part_size: usize,
     evictor: Option<Arc<FsCacheEvictor>>,
+    rand: Arc<DbRand>,
 }
 
 impl FsCacheEntry {
@@ -148,7 +155,7 @@ impl FsCacheEntry {
     }
 
     fn make_rand_suffix(&self) -> String {
-        let mut rng = crate::rand::thread_rng();
+        let mut rng = self.rand.thread_rng();
         (0..24).map(|_| rng.sample(Alphanumeric) as char).collect()
     }
 }
@@ -329,6 +336,7 @@ struct FsCacheEvictor {
     background_scan_handle: OnceCell<tokio::task::JoinHandle<()>>,
     stats: Arc<CachedObjectStoreStats>,
     system_clock: Arc<dyn SystemClock>,
+    rand: Arc<DbRand>,
 }
 
 impl FsCacheEvictor {
@@ -338,6 +346,7 @@ impl FsCacheEvictor {
         scan_interval: Option<Duration>,
         stats: Arc<CachedObjectStoreStats>,
         system_clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         Self {
@@ -350,6 +359,7 @@ impl FsCacheEvictor {
             background_scan_handle: OnceCell::new(),
             stats,
             system_clock,
+            rand,
         }
     }
 
@@ -358,6 +368,7 @@ impl FsCacheEvictor {
             self.root_folder.clone(),
             self.max_cache_size_bytes,
             self.stats.clone(),
+            self.rand.clone(),
         ));
 
         let guard = self.rx.lock();
@@ -439,6 +450,7 @@ struct FsCacheEvictorInner {
     cache_entries: Mutex<Trie<std::path::PathBuf, (SystemTime, usize)>>,
     cache_size_bytes: AtomicU64,
     stats: Arc<CachedObjectStoreStats>,
+    rand: Arc<DbRand>,
 }
 
 impl FsCacheEvictorInner {
@@ -446,6 +458,7 @@ impl FsCacheEvictorInner {
         root_folder: std::path::PathBuf,
         max_cache_size_bytes: usize,
         stats: Arc<CachedObjectStoreStats>,
+        rand: Arc<DbRand>,
     ) -> Self {
         Self {
             root_folder,
@@ -455,6 +468,7 @@ impl FsCacheEvictorInner {
             cache_entries: Mutex::new(Trie::new()),
             cache_size_bytes: AtomicU64::new(0_u64),
             stats,
+            rand,
         }
     }
 
@@ -628,9 +642,9 @@ impl FsCacheEvictorInner {
 
     async fn random_pick_entry(&self) -> Option<(std::path::PathBuf, (SystemTime, usize))> {
         let cache_entries = self.cache_entries.lock().await;
-        let mut rng = crate::rand::thread_rng();
+        let mut rng = self.rand.thread_rng();
 
-        let mut rand_child = match cache_entries.children().choose(&mut rng) {
+        let mut rand_child = match cache_entries.children().choose(rng.deref_mut()) {
             None => return None,
             Some(child) => child,
         };
@@ -638,7 +652,7 @@ impl FsCacheEvictorInner {
             if rand_child.is_leaf() {
                 return rand_child.key().cloned().zip(rand_child.value().cloned());
             }
-            rand_child = match rand_child.children().choose(&mut rng) {
+            rand_child = match rand_child.children().choose(rng.deref_mut()) {
                 None => return None,
                 Some(child) => child,
             };
@@ -685,6 +699,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             1024 * 2,
             Arc::new(CachedObjectStoreStats::new(&registry)),
+            Arc::new(DbRand::default()),
         );
         evictor.batch_factor = 2;
 
@@ -724,6 +739,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             1024 * 2,
             Arc::new(CachedObjectStoreStats::new(&registry)),
+            Arc::new(DbRand::default()),
         ));
 
         let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
@@ -751,6 +767,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             1024 * 2,
             Arc::new(CachedObjectStoreStats::new(&registry)),
+            Arc::new(DbRand::default()),
         ));
 
         gen_rand_file(temp_dir.path(), "file0", 1024);

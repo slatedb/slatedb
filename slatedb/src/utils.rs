@@ -279,15 +279,18 @@ impl MonotonicSeq {
     }
 }
 
-#[allow(clippy::disallowed_types)]
+// TODO replace this with our rand module
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 pub(crate) fn uuid() -> Uuid {
     let mut random_bytes = [0; 16];
-    crate::rand::thread_rng().fill_bytes(&mut random_bytes);
+    rand::thread_rng().fill_bytes(&mut random_bytes);
     uuid::Builder::from_random_bytes(random_bytes).into_uuid()
 }
 
+// TODO replace this with our rand module
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn ulid() -> Ulid {
-    Ulid::with_source(&mut crate::rand::thread_rng())
+    Ulid::with_source(&mut rand::thread_rng())
 }
 
 #[cfg(test)]

@@ -447,11 +447,12 @@ mod tests {
     use crate::cached_object_store::storage_fs::FsCacheStorage;
     use crate::cached_object_store::{storage::PartID, storage_fs::FsCacheEntry};
     use crate::clock::DefaultSystemClock;
+    use crate::rand::DbRand;
     use crate::stats::StatRegistry;
     use crate::test_utils::gen_rand_bytes;
 
     fn new_test_cache_folder() -> std::path::PathBuf {
-        let mut rng = crate::rand::thread_rng();
+        let mut rng = rand::thread_rng();
         let dir_name: String = (0..10)
             .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
             .collect();
@@ -482,6 +483,7 @@ mod tests {
             None,
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
         ));
 
         let part_size = 1024;
@@ -553,6 +555,7 @@ mod tests {
             None,
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
         ));
 
         let cached_store =
@@ -597,6 +600,7 @@ mod tests {
             None,
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
         ));
 
         let cached_store =
@@ -686,6 +690,7 @@ mod tests {
             None,
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
         ));
         let cached_store =
             CachedObjectStore::new(object_store, cache_storage, 1024, stats).unwrap();
@@ -708,6 +713,7 @@ mod tests {
             None,
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
         ));
         let cached_store =
             CachedObjectStore::new(object_store, cache_storage, 1024, stats).unwrap();
@@ -738,6 +744,7 @@ mod tests {
             None,
             stats.clone(),
             Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
         ));
         let cached_store =
             CachedObjectStore::new(object_store.clone(), cache_storage, 1024, stats).unwrap();

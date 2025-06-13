@@ -1,132 +1,169 @@
-#![allow(clippy::disallowed_types)]
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 //! SlateDB's module for generating random data.
 //!
-//! This module exists because we want to do deterministic simulation testing for SlateDB.
-//! To do so, we need a way to easily seed all random number generators in the library in a
-//! deterministic way.
+//! This module exists because we want to do deterministic simulation testing
+//! for SlateDB. To do so, we need a way to easily seed all random number
+//! generators (RNGs) in the library in a deterministic way.
 //!
-//! Each thread also has a thread-local random number generator that is initialized from a
-//! root-level random number generator. This ensures that each thread is seeded
-//! deterministically from the root RNG.
-//!
-//! The root-level random number generator starts unset. It is set in one of two ways:
-//!
-//! - `seed(seed: u64)` is called with a seed value.
-//! - `thread_rng()` is called while the root RNG is unset. This will initialize the root RNG
-//!   with a random seed.
-//!
-//! The module currently uses Xoshiro128++ for all random number generators. The rand crate's
-//! `seed_from_u64` method uses SplitMix64 under the hood, which makes it safe to use the root
-//! RNG to seed the thread-local RNGs to avoid any correlation between the RNGs.
-//!
-//! ## Usage
-//!
-//! ```ignore
-//! seed(42);
-//! let _ = rng().next_u64();
-//! ```
+//! The module currently uses Xoshiro128++ for all random number generators. The
+//! rand crate's `seed_from_u64` method uses SplitMix64 under the hood, which
+//! makes it safe to use when creating new thread-local RNGs.
 
 use std::cell::RefCell;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use rand::{RngCore, SeedableRng};
+use rand::RngCore;
+use rand::SeedableRng;
 use rand_xoshiro::Xoroshiro128PlusPlus;
+use thread_local::ThreadLocal;
 
-type RngAlg = Xoroshiro128PlusPlus;
+pub(crate) type RngAlg = Xoroshiro128PlusPlus;
 
-static ROOT_RNG: OnceLock<Mutex<RngAlg>> = OnceLock::new();
-
-/// Seed the root random number generator.
+/// A shareable, lock-free random number generator (RNG).
 ///
-/// This function can only be called once. If it is called multiple times, it will panic.
-pub(crate) fn seed(seed: u64) {
-    let rng = RngAlg::seed_from_u64(seed);
-    ROOT_RNG
-        .set(Mutex::new(rng))
-        .expect("rand::seed() can only be called once");
+/// This is a wrapper around `ThreadLocal<RngAlg>` that provides a thread-local
+/// random number generator for each thread. If a custom seed is provided,
+/// each thread will be seeded deterministically from the seed, and the seed will
+/// be incremented for the next thread.
+///
+/// Note that if there is more than one thread, the RNG's behavior is still
+/// non-deterministic since it depends on which thread is scheduled first by the
+/// OS scheduler. Only one thread must be used for the entire SlateDB runtime if
+/// deterministic behavior is desired.
+///
+/// ## Usage
+///
+/// ```ignore
+/// use slate_db::rand::DbRand;
+///
+/// let rng = DbRand::new(42);
+/// let _ = rng.next_u64();
+/// ```
+#[derive(Debug)]
+pub(crate) struct DbRand {
+    seed_counter: AtomicU64,
+    thread_rng: ThreadLocal<RefCell<RngAlg>>,
 }
 
-thread_local! {
-    /// Per-thread RNG state, stored by value in a Cell.
-    static THREAD_RNG: RefCell<RngAlg> = {
-        let mut guard = ROOT_RNG
-            .get_or_init(|| Mutex::new(RngAlg::from_entropy()))
-            .lock()
-            .expect("root rng poisoned");
-        let child_seed = guard.next_u64();
-        RefCell::new(RngAlg::seed_from_u64(child_seed))
-    };
-}
-
-/// A thread-local random number generator.
-pub(crate) struct ThreadRng;
-
-impl RngCore for ThreadRng {
-    #[inline(always)]
-    fn next_u32(&mut self) -> u32 {
-        THREAD_RNG.with(|cell| cell.borrow_mut().next_u32())
+impl DbRand {
+    /// Create a new `DbRand` with the given 64-bit seed.
+    pub(crate) fn new(seed: u64) -> Self {
+        DbRand {
+            seed_counter: AtomicU64::new(seed),
+            thread_rng: ThreadLocal::new(),
+        }
     }
 
-    #[inline(always)]
-    fn next_u64(&mut self) -> u64 {
-        THREAD_RNG.with(|cell| cell.borrow_mut().next_u64())
-    }
-
-    #[inline(always)]
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        THREAD_RNG.with(|cell| cell.borrow_mut().fill_bytes(dest))
-    }
-
-    #[inline(always)]
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        THREAD_RNG.with(|cell| cell.borrow_mut().try_fill_bytes(dest))
+    /// Grab this thread’s RNG. Initializes the RNG if it hasn't been initialized yet.
+    pub(crate) fn thread_rng(&self) -> std::cell::RefMut<'_, impl RngCore> {
+        self.thread_rng
+            .get_or(|| {
+                let seed = self.seed_counter.fetch_add(1, Ordering::Relaxed);
+                // seed_from_u64 inlines SplitMix64, which whitens the incremental seed
+                RefCell::new(RngAlg::seed_from_u64(seed))
+            })
+            .borrow_mut()
     }
 }
 
-/// Returns a handle to the thread-local random number generator.
-#[inline]
-pub(crate) fn thread_rng() -> ThreadRng {
-    ThreadRng
+impl Default for DbRand {
+    fn default() -> Self {
+        Self::new(rand::random())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::BorrowMut;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::thread;
 
-    // Force a thread-local RNG to use a specific seed so we can test deterministically.
-    fn seed_local(seed: u64) {
-        THREAD_RNG.with(|cell| {
-            *cell.borrow_mut() = RngAlg::seed_from_u64(seed);
-        });
+    #[test]
+    fn test_deterministic_behavior() {
+        // Same seed should produce same sequence of random numbers
+        let rng1 = DbRand::new(42);
+        let rng2 = DbRand::new(42);
+
+        let mut values1 = Vec::new();
+        let mut values2 = Vec::new();
+
+        // Generate some random numbers
+        for _ in 0..10 {
+            values1.push(rng1.thread_rng().next_u64());
+            values2.push(rng2.thread_rng().next_u64());
+        }
+
+        println!("values1: {:?}", values1);
+        println!("values2: {:?}", values2);
+
+        assert_eq!(values1, values2);
     }
 
     #[test]
-    fn test_rng() {
-        std::thread::spawn(move || {
-            seed_local(42);
-            let rand_u64 = thread_rng().next_u64();
-            assert_eq!(rand_u64, 16756476715040848931);
-        })
-        .join()
-        .unwrap();
+    fn test_different_seeds_produce_different_sequences() {
+        let rng1 = DbRand::new(42);
+        let rng2 = DbRand::new(43);
+
+        let mut values1 = Vec::new();
+        let mut values2 = Vec::new();
+
+        // Generate some random numbers
+        for _ in 0..10 {
+            values1.push(rng1.thread_rng().next_u64());
+            values2.push(rng2.thread_rng().next_u64());
+        }
+
+        println!("values1: {:?}", values1);
+        println!("values2: {:?}", values2);
+
+        // Very small chance this would randomly fail, but practically zero
+        assert_ne!(values1, values2);
     }
 
     #[test]
-    fn test_rng_thread_local() {
-        std::thread::spawn(move || {
-            seed_local(42);
-            let outer_u64 = thread_rng().next_u64();
-            let inner_u64 = std::thread::spawn(move || {
-                seed_local(64);
-                thread_rng().next_u64()
+    fn test_thread_rngs_differ_across_threads() {
+        // Create a DbRand instance with a known seed
+        let rand = Arc::new(DbRand::new(100));
+
+        // Number of threads to spawn
+        let n_threads = 4;
+
+        // Collect first random number from each thread
+        let thread_handles: Vec<_> = (0..n_threads)
+            .map(|_| {
+                let rand = Arc::clone(&rand);
+
+                thread::spawn(move || {
+                    // Get the pointer to this thread's RNG and return it as a
+                    // usize. This is used to verify that each thread has a
+                    // different RNG.
+                    let ptr = &mut *(rand.thread_rng().borrow_mut()) as *mut _;
+                    ptr as usize
+                })
             })
-            .join()
-            .unwrap();
-            assert_eq!(inner_u64, 12172458793332410705);
-            assert_eq!(outer_u64, 16756476715040848931);
-        })
-        .join()
-        .unwrap();
+            .collect();
+
+        // Collect results from all threads
+        let results: Vec<usize> = thread_handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        // Create a HashSet to check for duplicates
+        let unique_values: HashSet<_> = results.iter().cloned().collect();
+
+        // Each thread should get a different RNG with a different seed,
+        // so we should have n_threads unique values
+        assert_eq!(
+            unique_values.len(),
+            n_threads,
+            "Expected {} unique random values from threads, got {}. \
+                   This indicates thread RNGs are not different across threads.",
+            n_threads,
+            unique_values.len()
+        );
     }
 }
