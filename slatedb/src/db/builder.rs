@@ -493,16 +493,18 @@ impl<P: Into<Path>> DbBuilder<P> {
 /// This provides a fluent API for configuring an Admin object.
 pub struct AdminBuilder<P: Into<Path>> {
     path: P,
-    object_store: Arc<dyn ObjectStore>,
+    main_object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
     system_clock: Arc<dyn SystemClock>,
 }
 
 impl<P: Into<Path>> AdminBuilder<P> {
     /// Creates a new AdminBuilder with the given path and object store.
-    pub fn new(path: P, object_store: Arc<dyn ObjectStore>) -> Self {
+    pub fn new(path: P, main_object_store: Arc<dyn ObjectStore>) -> Self {
         Self {
             path,
-            object_store,
+            main_object_store,
+            wal_object_store: None,
             system_clock: Arc::new(DefaultSystemClock::new()),
         }
     }
@@ -517,7 +519,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
     pub fn build(self) -> Admin {
         Admin {
             path: self.path.into(),
-            object_store: self.object_store,
+            object_stores: ObjectStores::new(self.main_object_store, self.wal_object_store),
             system_clock: self.system_clock,
         }
     }
@@ -593,6 +595,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     }
 
     /// Sets the WAL object store to use for the garbage collector.
+    #[allow(unused)]
     pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
         self.wal_object_store = Some(wal_object_store);
         self

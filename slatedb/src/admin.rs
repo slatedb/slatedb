@@ -4,11 +4,9 @@ use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
 use crate::error::SlateDBError;
 use crate::manifest::store::{ManifestStore, StoredManifest};
-use crate::sst::SsTableFormat;
-use crate::tablestore::TableStore;
 
 use crate::clone;
-use crate::object_stores::ObjectStores;
+use crate::object_stores::{ObjectStoreType, ObjectStores};
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -30,11 +28,11 @@ pub use crate::db::builder::AdminBuilder;
 /// running garbage collection.
 pub struct Admin {
     /// The path to the database.
-    pub path: Path,
-    /// The object store to use for the database.
-    pub object_store: Arc<dyn ObjectStore>,
+    pub(crate) path: Path,
+    /// The object stores to use for the main database and WAL.
+    pub(crate) object_stores: ObjectStores,
     /// The system clock to use for operations.
-    pub system_clock: Arc<dyn SystemClock>,
+    pub(crate) system_clock: Arc<dyn SystemClock>,
 }
 
 impl Admin {
@@ -43,7 +41,10 @@ impl Admin {
         &self,
         maybe_id: Option<u64>,
     ) -> Result<Option<String>, Box<dyn Error>> {
-        let manifest_store = ManifestStore::new(&self.path, self.object_store.clone());
+        let manifest_store = ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        );
         let id_manifest = if let Some(id) = maybe_id {
             manifest_store
                 .try_read_manifest(id)
@@ -64,14 +65,20 @@ impl Admin {
         &self,
         range: R,
     ) -> Result<String, Box<dyn Error>> {
-        let manifest_store = ManifestStore::new(&self.path, self.object_store.clone());
+        let manifest_store = ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        );
         let manifests = manifest_store.list_manifests(range).await?;
         Ok(serde_json::to_string(&manifests)?)
     }
 
     /// List checkpoints
     pub async fn list_checkpoints(&self) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
-        let manifest_store = ManifestStore::new(&self.path, self.object_store.clone());
+        let manifest_store = ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        );
         let (_, manifest) = manifest_store.read_latest_manifest().await?;
         Ok(manifest.core.checkpoints)
     }
@@ -88,17 +95,14 @@ impl Admin {
         &self,
         gc_opts: GarbageCollectorOptions,
     ) -> Result<(), Box<dyn Error>> {
-        // TODO(criccomini): We don't really need to do this anymore. I think we can add
-        // a `AdminBuilder::with_wal_object_store` method to allow the user to specify
-        // a WAL object store. There's some weirdness about URIs in the `DbBuilder` that
-        // I don't fully understand.
-        ManifestStore::new(&self.path, self.object_store.clone())
-            .validate_no_wal_object_store_configured()
-            .await?;
-        let gc = GarbageCollectorBuilder::new(self.path.clone(), self.object_store.clone())
-            .with_system_clock(self.system_clock.clone())
-            .with_options(gc_opts)
-            .build();
+        let gc = GarbageCollectorBuilder::new(
+            self.path.clone(),
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        )
+        .with_system_clock(self.system_clock.clone())
+        .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
+        .with_options(gc_opts)
+        .build();
         gc.run_gc_once().await;
         Ok(())
     }
@@ -116,20 +120,17 @@ impl Admin {
         gc_opts: GarbageCollectorOptions,
         cancellation_token: CancellationToken,
     ) -> Result<(), Box<dyn Error>> {
-        // TODO(criccomini): We don't really need to do this anymore. I think we can add
-        // a `AdminBuilder::with_wal_object_store` method to allow the user to specify
-        // a WAL object store. There's some weirdness about URIs in the `DbBuilder` that
-        // I don't fully understand.
-        ManifestStore::new(&self.path, self.object_store.clone())
-            .validate_no_wal_object_store_configured()
-            .await?;
         let tracker = TaskTracker::new();
         let ct = cancellation_token.clone();
-        let gc = GarbageCollectorBuilder::new(self.path.clone(), self.object_store.clone())
-            .with_system_clock(self.system_clock.clone())
-            .with_options(gc_opts)
-            .with_cancellation_token(ct)
-            .build();
+        let gc = GarbageCollectorBuilder::new(
+            self.path.clone(),
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        )
+        .with_system_clock(self.system_clock.clone())
+        .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
+        .with_options(gc_opts)
+        .with_cancellation_token(ct)
+        .build();
 
         tracker.spawn(async move {
             gc.start_async_task().await;
@@ -172,7 +173,10 @@ impl Admin {
         &self,
         options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
-        let manifest_store = Arc::new(ManifestStore::new(&self.path, self.object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        ));
         manifest_store
             .validate_no_wal_object_store_configured()
             .await?;
@@ -193,7 +197,10 @@ impl Admin {
         id: Uuid,
         lifetime: Option<Duration>,
     ) -> Result<(), SlateDBError> {
-        let manifest_store = Arc::new(ManifestStore::new(&self.path, self.object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        ));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
             .maybe_apply_manifest_update(|stored_manifest| {
@@ -215,7 +222,10 @@ impl Admin {
 
     /// Deletes the checkpoint with the specified id.
     pub async fn delete_checkpoint(&self, id: Uuid) -> Result<(), SlateDBError> {
-        let manifest_store = Arc::new(ManifestStore::new(&self.path, self.object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        ));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
             .maybe_apply_manifest_update(|stored_manifest| {
@@ -279,7 +289,7 @@ impl Admin {
         clone::create_clone(
             self.path.clone(),
             parent_path.into(),
-            self.object_store.clone(),
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
             parent_checkpoint,
             Arc::new(FailPointRegistry::new()),
         )
