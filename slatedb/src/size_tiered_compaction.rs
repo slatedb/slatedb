@@ -633,10 +633,7 @@ mod tests {
             filter_len: 0,
             compression_codec: None,
         };
-        SsTableHandle {
-            id: SsTableId::Compacted(crate::utils::ulid()),
-            info,
-        }
+        SsTableHandle::new(SsTableId::Compacted(crate::utils::ulid()), info)
     }
 
     fn create_sr2(id: u32, size: u64) -> SortedRun {

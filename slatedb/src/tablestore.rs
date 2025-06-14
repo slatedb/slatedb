@@ -235,10 +235,7 @@ impl TableStore {
         }
         self.cache_filter(*id, encoded_sst.info.filter_offset, encoded_sst.filter)
             .await;
-        Ok(SsTableHandle {
-            id: *id,
-            info: encoded_sst.info,
-        })
+        Ok(SsTableHandle::new(*id, encoded_sst.info))
     }
 
     async fn cache_filter(&self, sst: SsTableId, id: u64, filter: Option<Arc<BloomFilter>>) {
@@ -310,7 +307,7 @@ impl TableStore {
         let path = self.path(id);
         let obj = ReadOnlyObject { object_store, path };
         let info = self.sst_format.read_info(&obj).await?;
-        Ok(SsTableHandle { id: *id, info })
+        Ok(SsTableHandle::new(*id, info))
     }
 
     pub(crate) async fn read_filter(
@@ -540,10 +537,7 @@ impl EncodedSsTableWriter<'_> {
         self.table_store
             .cache_filter(self.id, encoded_sst.info.filter_offset, encoded_sst.filter)
             .await;
-        Ok(SsTableHandle {
-            id: self.id,
-            info: encoded_sst.info,
-        })
+        Ok(SsTableHandle::new(self.id, encoded_sst.info))
     }
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {
@@ -668,7 +662,8 @@ mod tests {
         // then:
         let mut iter = SstIterator::new_owned(.., sst, ts.clone(), sst_iter_options)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("Expected Some(iter) but got None");
         assert_iterator(
             &mut iter,
             vec![
@@ -735,7 +730,8 @@ mod tests {
         // then:
         let mut iter = SstIterator::new_owned(.., sst, ts.clone(), sst_iter_options)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("Expected Some(iter) but got None");
         assert_iterator(
             &mut iter,
             vec![

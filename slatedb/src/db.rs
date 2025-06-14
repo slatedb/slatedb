@@ -2132,7 +2132,8 @@ mod tests {
         let mut iter =
             SstIterator::new_borrowed(.., l0, table_store.clone(), SstIteratorOptions::default())
                 .await
-                .unwrap();
+                .unwrap()
+                .expect("Expected Some(iter) but got None");
         assert_iterator(
             &mut iter,
             vec![
@@ -2198,7 +2199,8 @@ mod tests {
             let mut iter =
                 SstIterator::new_borrowed(.., sst1, table_store.clone(), sst_iter_options)
                     .await
-                    .unwrap();
+                    .unwrap()
+                    .expect("Expected Some(iter) but got None");
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);
