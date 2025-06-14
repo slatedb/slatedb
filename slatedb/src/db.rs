@@ -46,6 +46,7 @@ use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{DirtyManifest, FenceableManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushMsg;
+use crate::oracle::Oracle;
 use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
@@ -69,17 +70,7 @@ pub(crate) struct DbInner {
     /// A clock which is guaranteed to be monotonic. it's previous value is
     /// stored in the manifest and WAL, will be updated after WAL replay.
     pub(crate) mono_clock: Arc<MonotonicClock>,
-    /// The sequence number of the most recent write operation. This sequence number
-    /// is assigned immediately when a write begins, it's possible that the write
-    /// has not been committed or finally failed.
-    pub(crate) last_seq: Arc<MonotonicSeq>,
-    /// The sequence number of the most recent write that has been fully committed.
-    /// For reads with dirty=false, the maximum visible sequence number is capped
-    /// at last_committed_seq.
-    pub(crate) last_committed_seq: Arc<MonotonicSeq>,
-    /// The sequence number of the most recent write that has been fully durable
-    /// flushed to the remote storage.
-    pub(crate) last_remote_persisted_seq: Arc<MonotonicSeq>,
+    pub(crate) oracle: Arc<Oracle>,
     pub(crate) reader: Reader,
     /// [`wal_buffer`] manages the in-memory WAL buffer, it manages the flushing
     /// of the WAL buffer to the remote storage.
@@ -102,9 +93,14 @@ impl DbInner {
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
-        let last_seq = Arc::new(MonotonicSeq::new(last_l0_seq));
-        let last_committed_seq = Arc::new(MonotonicSeq::new(last_l0_seq));
-        let last_remote_persisted_seq = Arc::new(MonotonicSeq::new(last_l0_seq));
+        let last_seq = MonotonicSeq::new(last_l0_seq);
+        let last_committed_seq = MonotonicSeq::new(last_l0_seq);
+        let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
+        let oracle = Arc::new(
+            Oracle::new(last_committed_seq)
+                .with_last_seq(last_seq)
+                .with_last_remote_persisted_seq(last_remote_persisted_seq),
+        );
 
         let mono_clock = Arc::new(MonotonicClock::new(
             logical_clock,
@@ -121,15 +117,14 @@ impl DbInner {
             table_store: table_store.clone(),
             db_stats: db_stats.clone(),
             mono_clock: mono_clock.clone(),
-            last_committed_seq: last_committed_seq.clone(),
-            last_remote_persisted_seq: last_remote_persisted_seq.clone(),
+            oracle: oracle.clone(),
         };
 
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
         let wal_buffer = Arc::new(WalBufferManager::new(
             state.clone(),
             recent_flushed_wal_id,
-            last_remote_persisted_seq.clone(),
+            oracle.clone(),
             table_store.clone(),
             mono_clock.clone(),
             settings.l0_sst_size_bytes,
@@ -139,9 +134,7 @@ impl DbInner {
         let db_inner = Self {
             state,
             settings,
-            last_seq,
-            last_committed_seq,
-            last_remote_persisted_seq,
+            oracle,
             wal_enabled,
             table_store,
             memtable_flush_notifier,
@@ -367,8 +360,9 @@ impl DbInner {
 
         // last_committed_seq is updated as WAL is replayed. after replay,
         // the last_committed_seq is considered same as the last_remote_persisted_seq.
-        self.last_remote_persisted_seq
-            .store(self.last_committed_seq.load());
+        self.oracle
+            .last_remote_persisted_seq
+            .store(self.oracle.last_committed_seq.load());
 
         Ok(())
     }

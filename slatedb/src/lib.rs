@@ -84,6 +84,7 @@ mod mem_table_flush;
 mod merge_iterator;
 mod merge_operator;
 mod object_stores;
+mod oracle;
 mod partitioned_keyspace;
 mod paths;
 #[cfg(test)]

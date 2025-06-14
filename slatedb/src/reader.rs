@@ -6,6 +6,7 @@ use crate::db_stats::DbStats;
 use crate::filter_iterator::FilterIterator;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::{ImmutableMemtable, KVTable, MemTableIterator};
+use crate::oracle::Oracle;
 use crate::reader::SstFilterResult::{
     FilterNegative, FilterPositive, RangeNegative, RangePositive,
 };
@@ -13,7 +14,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
-use crate::utils::{get_now_for_read, is_not_expired, MonotonicSeq};
+use crate::utils::{get_now_for_read, is_not_expired};
 use crate::{filter, DbIterator, SlateDBError};
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -47,8 +48,7 @@ pub(crate) struct Reader {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) db_stats: DbStats,
     pub(crate) mono_clock: Arc<MonotonicClock>,
-    pub(crate) last_committed_seq: Arc<MonotonicSeq>,
-    pub(crate) last_remote_persisted_seq: Arc<MonotonicSeq>,
+    pub(crate) oracle: Arc<Oracle>,
 }
 
 impl Reader {
@@ -72,14 +72,14 @@ impl Reader {
 
         // if it's required to only read persisted data, we can only read up to the last remote persisted seq
         if matches!(durability_filter, DurabilityLevel::Remote) {
-            max_seq = Some(self.last_remote_persisted_seq.load());
+            max_seq = Some(self.oracle.last_remote_persisted_seq.load());
         }
 
         // if dirty read is not allowed, we can only read up to the last committed seq
         if !dirty {
             max_seq = max_seq
-                .map(|seq| seq.min(self.last_committed_seq.load()))
-                .or(Some(self.last_committed_seq.load()));
+                .map(|seq| seq.min(self.oracle.last_committed_seq.load()))
+                .or(Some(self.oracle.last_committed_seq.load()));
         }
 
         // if user provide a max seq (mostly from a Snapshot)

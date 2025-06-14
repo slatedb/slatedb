@@ -56,7 +56,7 @@ impl DbInner {
         batch: WriteBatch,
     ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
         let now = self.mono_clock.now().await?;
-        let seq = self.last_seq.next();
+        let seq = self.oracle.last_seq.next();
         for op in batch.ops {
             let row_entry = match op {
                 WriteOp::Put(key, value, opts) => RowEntry {
@@ -100,7 +100,7 @@ impl DbInner {
         };
 
         // update the last_committed_seq, so the writes will be visible to the readers.
-        self.last_committed_seq.store(seq);
+        self.oracle.last_committed_seq.store(seq);
 
         // maybe freeze the memtable.
         {

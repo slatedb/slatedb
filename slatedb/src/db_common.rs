@@ -60,8 +60,10 @@ impl DbInner {
         guard.set_next_wal_id(last_wal + 1);
 
         // update seqs and clock
-        self.last_seq.store(replayed_memtable.last_seq);
-        self.last_committed_seq.store(replayed_memtable.last_seq);
+        self.oracle.last_seq.store(replayed_memtable.last_seq);
+        self.oracle
+            .last_committed_seq
+            .store(replayed_memtable.last_seq);
         self.mono_clock.set_last_tick(replayed_memtable.last_tick)?;
 
         // replace the memtable

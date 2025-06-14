@@ -10,6 +10,7 @@ use crate::error::SlateDBError;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable};
+use crate::oracle::Oracle;
 use crate::reader::{ReadSnapshot, Reader};
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
@@ -45,8 +46,8 @@ struct DbReaderInner {
     options: DbReaderOptions,
     state: RwLock<Arc<CheckpointState>>,
     system_clock: Arc<dyn SystemClock>,
-    last_committed_seq: Arc<MonotonicSeq>,
     user_checkpoint_id: Option<Uuid>,
+    oracle: Arc<Oracle>,
     reader: Reader,
     error_watcher: WatchableOnceCell<SlateDBError>,
 }
@@ -121,8 +122,9 @@ impl DbReaderInner {
 
         // initial_state contains the last_committed_seq after WAL replay. in no-wal mode, we can simply fallback
         // to last_l0_seq.
-        let last_committed_seq = Arc::new(MonotonicSeq::new(initial_state.core().last_l0_seq));
+        let last_committed_seq = MonotonicSeq::new(initial_state.core().last_l0_seq);
         last_committed_seq.store_if_greater(initial_state.last_committed_seq);
+        let oracle = Arc::new(Oracle::new(last_committed_seq));
 
         let stat_registry = Arc::new(StatRegistry::new());
         let db_stats = DbStats::new(stat_registry.as_ref());
@@ -132,8 +134,7 @@ impl DbReaderInner {
             table_store: Arc::clone(&table_store),
             db_stats: db_stats.clone(),
             mono_clock: Arc::clone(&mono_clock),
-            last_committed_seq: last_committed_seq.clone(),
-            last_remote_persisted_seq: last_committed_seq.clone(),
+            oracle: oracle.clone(),
         };
 
         Ok(Self {
@@ -143,7 +144,7 @@ impl DbReaderInner {
             state,
             system_clock,
             user_checkpoint_id: checkpoint_id,
-            last_committed_seq,
+            oracle,
             reader,
             error_watcher: WatchableOnceCell::new(),
         })
@@ -218,7 +219,8 @@ impl DbReaderInner {
 
     async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
         let new_checkpoint_state = self.rebuild_checkpoint_state(checkpoint).await?;
-        self.last_committed_seq
+        self.oracle
+            .last_committed_seq
             .store_if_greater(new_checkpoint_state.last_committed_seq);
         let mut write_guard = self.state.write();
         *write_guard = Arc::new(new_checkpoint_state);
@@ -241,7 +243,7 @@ impl DbReaderInner {
             )
             .await?;
 
-            self.last_committed_seq.store(last_committed_seq);
+            self.oracle.last_committed_seq.store(last_committed_seq);
             let mut write_guard = self.state.write();
             *write_guard = Arc::new(CheckpointState {
                 checkpoint: current_checkpoint.checkpoint.clone(),

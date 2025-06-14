@@ -11,9 +11,10 @@ use crate::{
     db_state::SsTableId,
     iter::KeyValueIterator,
     mem_table::KVTable,
+    oracle::Oracle,
     tablestore::TableStore,
     types::RowEntry,
-    utils::{spawn_bg_task, MonotonicSeq, WatchableOnceCell, WatchableOnceCellReader},
+    utils::{spawn_bg_task, WatchableOnceCell, WatchableOnceCellReader},
     wal_id::WalIdStore,
     SlateDBError,
 };
@@ -65,15 +66,15 @@ struct WalBufferManagerInner {
     last_applied_seq: Option<u64>,
     /// The flusher will update the recent_flushed_wal_id and last_flushed_seq when the flush is done.
     recent_flushed_wal_id: u64,
-    /// The last flushed sequence number.
-    last_remote_persisted_seq: Arc<MonotonicSeq>,
+    /// The oracle to track the last flushed sequence number.
+    oracle: Arc<Oracle>,
 }
 
 impl WalBufferManager {
     pub fn new(
         wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
         recent_flushed_wal_id: u64,
-        last_remote_persisted_seq: Arc<MonotonicSeq>,
+        oracle: Arc<Oracle>,
         table_store: Arc<TableStore>,
         mono_clock: Arc<MonotonicClock>,
         max_wal_bytes_size: usize,
@@ -85,10 +86,10 @@ impl WalBufferManager {
             current_wal,
             immutable_wals,
             last_applied_seq: None,
-            last_remote_persisted_seq,
             recent_flushed_wal_id,
             flush_tx: None,
             background_task: None,
+            oracle,
         };
         Self {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
@@ -366,7 +367,7 @@ impl WalBufferManager {
                 let mut inner = self.inner.write();
                 inner.recent_flushed_wal_id = *wal_id;
                 if let Some(seq) = wal.last_seq() {
-                    inner.last_remote_persisted_seq.store_if_greater(seq);
+                    inner.oracle.last_remote_persisted_seq.store_if_greater(seq);
                 }
             }
         }
@@ -425,7 +426,7 @@ impl WalBufferManager {
             None => return,
         };
 
-        let last_flushed_seq = inner.last_remote_persisted_seq.load();
+        let last_flushed_seq = inner.oracle.last_remote_persisted_seq.load();
 
         let mut releaseable_count = 0;
         for (_, wal) in inner.immutable_wals.iter() {
@@ -464,6 +465,7 @@ mod tests {
     use crate::tablestore::TableStore;
     use crate::test_utils::TestClock;
     use crate::types::{RowEntry, ValueDeletable};
+    use crate::utils::MonotonicSeq;
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -493,11 +495,11 @@ mod tests {
         ));
         let test_clock = Arc::new(TestClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
-        let last_remote_persisted_seq = Arc::new(MonotonicSeq::new(0));
+        let oracle = Arc::new(Oracle::new(MonotonicSeq::new(0)));
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
             0, // recent_flushed_wal_id
-            last_remote_persisted_seq,
+            oracle,
             table_store.clone(),
             mono_clock,
             1000,                         // max_wal_bytes_size
@@ -637,7 +639,7 @@ mod tests {
         // set flush seq to 80, and track last applied seq to 90, it should release 20 wals
         {
             let inner = wal_buffer.inner.write();
-            inner.last_remote_persisted_seq.store(80);
+            inner.oracle.last_remote_persisted_seq.store(80);
         }
         wal_buffer.track_last_applied_seq(90).await;
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 20);
