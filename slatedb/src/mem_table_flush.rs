@@ -113,8 +113,22 @@ impl MemtableFlusher {
                 guard.move_imm_memtable_to_l0(imm_memtable.clone(), sst_handle)?;
             }
             imm_memtable.notify_flush_to_l0(Ok(()));
-            self.write_manifest_safely().await?;
-            imm_memtable.table().notify_durable(Ok(()));
+            match self.write_manifest_safely().await {
+                Ok(_) => {
+                    imm_memtable.table().notify_durable(Ok(()));
+                }
+                Err(err) => {
+                    if matches!(err, SlateDBError::Fenced) {
+                        if let Err(delete_err) = self.db_inner.table_store.delete_sst(&id).await {
+                            warn!("failed to delete fenced SST {id:?}: {delete_err}");
+                        }
+                        // refresh manifest and state so that local state reflects remote
+                        self.load_manifest().await?;
+                    }
+                    imm_memtable.table().notify_durable(Err(err.clone()));
+                    return Err(err);
+                }
+            }
         }
         Ok(())
     }
