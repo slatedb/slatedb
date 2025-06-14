@@ -982,6 +982,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
+    use crate::rand::DbRand;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -1505,6 +1506,7 @@ mod tests {
             None,
             cache_stats.clone(),
             Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
         ));
 
         let cached_object_store = CachedObjectStore::new(

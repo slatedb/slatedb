@@ -116,7 +116,7 @@ impl LogicalClock for TestClock {
 }
 
 pub(crate) fn gen_rand_bytes(n: usize) -> Bytes {
-    let mut rng = crate::rand::thread_rng();
+    let mut rng = rand::thread_rng();
     let random_bytes: Vec<u8> = (0..n).map(|_| rng.gen()).collect();
     Bytes::from(random_bytes)
 }
@@ -248,7 +248,7 @@ pub(crate) async fn seed_database(
 }
 
 pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> EncodedSsTable {
-    let mut rng = crate::rand::thread_rng();
+    let mut rng = rand::thread_rng();
     let mut keygen = OrderedBytesGenerator::new_with_suffix(&[], &[0u8; 16]);
     let mut encoded_sst_builder = format.table_builder();
     while encoded_sst_builder.num_blocks() < num_blocks {

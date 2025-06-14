@@ -82,6 +82,25 @@
 //! }
 //! ```
 //!
+//! Example with a custom SST block size:
+//!
+//! ```
+//! use slatedb::{Db, SlateDBError};
+//! use slatedb::config::SstBlockSize;
+//! use slatedb::object_store::memory::InMemory;
+//! use std::sync::Arc;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), SlateDBError> {
+//!     let object_store = Arc::new(InMemory::new());
+//!     let db = Db::builder("test_db", object_store)
+//!         .with_sst_block_size(SstBlockSize::Block8Kib) // 8KiB blocks
+//!         .build()
+//!         .await?;
+//!     Ok(())
+//! }
+//! ```
+//!
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -91,8 +110,9 @@ use object_store::ObjectStore;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
+use crate::admin::Admin;
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
@@ -103,7 +123,7 @@ use crate::clock::SystemClock;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::default_block_cache;
-use crate::config::Settings;
+use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::{DbCache, DbCacheWrapper};
@@ -113,6 +133,7 @@ use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
+use crate::rand::DbRand;
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
@@ -136,6 +157,7 @@ pub struct DbBuilder<P: Into<Path>> {
     fp_registry: Arc<FailPointRegistry>,
     cancellation_token: CancellationToken,
     seed: Option<u64>,
+    sst_block_size: Option<SstBlockSize>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -155,6 +177,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             fp_registry: Arc::new(FailPointRegistry::new()),
             cancellation_token: CancellationToken::new(),
             seed: None,
+            sst_block_size: None,
         }
     }
 
@@ -235,6 +258,26 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Sets the block size for SSTable blocks. Blocks are the unit of reading
+    /// and caching in SlateDB. Smaller blocks can reduce read amplification but
+    /// may increase metadata overhead. Larger blocks are more efficient for
+    /// sequential scans but may waste bandwidth for point lookups.
+    ///
+    /// Note: When compression is enabled, blocks are compressed individually.
+    /// Larger blocks typically achieve better compression ratios.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_size` - The block size variant to use (1KB, 2KB, 4KB, 8KB, 16KB, 32KB, or 64KB).
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
+    pub fn with_sst_block_size(mut self, block_size: SstBlockSize) -> Self {
+        self.sst_block_size = Some(block_size);
+        self
+    }
+
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, SlateDBError> {
         let path = self.path.into();
@@ -248,10 +291,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             info!(?path, ?self.settings, "Opening SlateDB database");
         }
 
-        if let Some(seed) = self.seed {
-            debug!("Using user-specified seed");
-            crate::rand::seed(seed);
-        }
+        let rand = Arc::new(self.seed.map(DbRand::new).unwrap_or_default());
 
         let logical_clock = self
             .logical_clock
@@ -268,6 +308,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             min_filter_keys: self.settings.min_filter_keys,
             filter_bits_per_key: self.settings.filter_bits_per_key,
             compression_codec: self.settings.compression_codec,
+            block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
             ..SsTableFormat::default()
         };
 
@@ -285,6 +326,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                         self.settings.object_store_cache_options.scan_interval,
                         stats.clone(),
                         system_clock.clone(),
+                        rand.clone(),
                     ));
 
                     let cached_main_object_store = CachedObjectStore::new(
@@ -483,5 +525,40 @@ impl<P: Into<Path>> DbBuilder<P> {
             garbage_collector: Mutex::new(garbage_collector),
             cancellation_token: self.cancellation_token,
         })
+    }
+}
+
+/// Builder for creating new Admin instances.
+///
+/// This provides a fluent API for configuring an Admin object.
+pub struct AdminBuilder<P: Into<Path>> {
+    path: P,
+    object_store: Arc<dyn ObjectStore>,
+    system_clock: Arc<dyn SystemClock>,
+}
+
+impl<P: Into<Path>> AdminBuilder<P> {
+    /// Creates a new AdminBuilder with the given path and object store.
+    pub fn new(path: P, object_store: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            path,
+            object_store,
+            system_clock: Arc::new(DefaultSystemClock::new()),
+        }
+    }
+
+    /// Sets the system clock to use for administrative functions.
+    pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
+        self.system_clock = system_clock;
+        self
+    }
+
+    /// Builds and returns an Admin instance.
+    pub fn build(self) -> Admin {
+        Admin {
+            path: self.path.into(),
+            object_store: self.object_store,
+            system_clock: self.system_clock,
+        }
     }
 }

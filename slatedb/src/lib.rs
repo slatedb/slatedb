@@ -3,7 +3,9 @@
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
 #![allow(clippy::result_large_err)]
-#![deny(clippy::disallowed_types)]
+// Disallow non-approved non-deterministic types and functions in production code
+#![deny(clippy::disallowed_types, clippy::disallowed_methods)]
+#![cfg_attr(test, allow(clippy::disallowed_types, clippy::disallowed_methods))]
 
 /// Re-export the bytes crate.
 ///
@@ -28,7 +30,7 @@ pub use batch::WriteBatch;
 pub use cached_object_store::stats as cached_object_store_stats;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};
 pub use compactor::stats as compactor_stats;
-pub use config::Settings;
+pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder};
 pub use db_cache::stats as db_cache_stats;
 pub use db_iter::DbIterator;
