@@ -3251,6 +3251,7 @@ mod tests {
     async fn test_memtable_flush_cleanup_when_fenced() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_flush_cleanup";
+        let fp_registry = Arc::new(FailPointRegistry::new());
 
         let mut options = test_db_options(0, 32, None);
         options.flush_interval = None;
@@ -3258,18 +3259,28 @@ mod tests {
 
         let db1 = Db::builder(path, object_store.clone())
             .with_settings(options.clone())
+            .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
 
+        // Allow WAL flushes, but pause compacted (L0 SST) flushes. Have to do this because the
+        // WAL sometimes triggers a maybe_memtable_flush. We don't want the memtable flush to
+        // proceed until the fence happens below..
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "pause").unwrap();
         db1.put(b"k", b"v").await.unwrap();
 
+        // Fence the db by opening a new one
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
         let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
         FenceableManifest::init_writer(stored_manifest, Duration::from_secs(300))
             .await
             .unwrap();
 
+        // Unpause to allow L0 SST writes to proceed
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
+
+        // Try to flush memtables, but they should fail due to the fence
         let result = db1.inner.flush_memtables().await;
         assert!(matches!(result, Err(SlateDBError::Fenced)));
         assert!(db1
