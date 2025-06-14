@@ -82,6 +82,25 @@
 //! }
 //! ```
 //!
+//! Example with a custom SST block size:
+//!
+//! ```
+//! use slatedb::{Db, SlateDBError};
+//! use slatedb::config::SstBlockSize;
+//! use slatedb::object_store::memory::InMemory;
+//! use std::sync::Arc;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), SlateDBError> {
+//!     let object_store = Arc::new(InMemory::new());
+//!     let db = Db::builder("test_db", object_store)
+//!         .with_sst_block_size(SstBlockSize::Block8Kib) // 8KiB blocks
+//!         .build()
+//!         .await?;
+//!     Ok(())
+//! }
+//! ```
+//!
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -105,7 +124,7 @@ use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::default_block_cache;
 use crate::config::GarbageCollectorOptions;
-use crate::config::Settings;
+use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::{DbCache, DbCacheWrapper};
@@ -139,6 +158,7 @@ pub struct DbBuilder<P: Into<Path>> {
     fp_registry: Arc<FailPointRegistry>,
     cancellation_token: CancellationToken,
     seed: Option<u64>,
+    sst_block_size: Option<SstBlockSize>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -158,6 +178,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             fp_registry: Arc::new(FailPointRegistry::new()),
             cancellation_token: CancellationToken::new(),
             seed: None,
+            sst_block_size: None,
         }
     }
 
@@ -238,6 +259,26 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Sets the block size for SSTable blocks. Blocks are the unit of reading
+    /// and caching in SlateDB. Smaller blocks can reduce read amplification but
+    /// may increase metadata overhead. Larger blocks are more efficient for
+    /// sequential scans but may waste bandwidth for point lookups.
+    ///
+    /// Note: When compression is enabled, blocks are compressed individually.
+    /// Larger blocks typically achieve better compression ratios.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_size` - The block size variant to use (1KB, 2KB, 4KB, 8KB, 16KB, 32KB, or 64KB).
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
+    pub fn with_sst_block_size(mut self, block_size: SstBlockSize) -> Self {
+        self.sst_block_size = Some(block_size);
+        self
+    }
+
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, SlateDBError> {
         let path = self.path.into();
@@ -268,6 +309,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             min_filter_keys: self.settings.min_filter_keys,
             filter_bits_per_key: self.settings.filter_bits_per_key,
             compression_codec: self.settings.compression_codec,
+            block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
             ..SsTableFormat::default()
         };
 
