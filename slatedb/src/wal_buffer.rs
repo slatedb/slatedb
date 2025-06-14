@@ -503,7 +503,7 @@ mod tests {
             1000,                         // max_wal_bytes_size
             Some(Duration::from_secs(1)), // max_flush_interval
         ));
-        wal_buffer.start_background().await?;
+        wal_buffer.start_background().await.unwrap();
         (wal_buffer, table_store, test_clock)
     }
 
