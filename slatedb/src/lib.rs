@@ -84,6 +84,7 @@ mod mem_table_flush;
 mod merge_iterator;
 mod merge_operator;
 mod object_stores;
+mod oracle;
 mod partitioned_keyspace;
 mod paths;
 #[cfg(test)]
@@ -101,4 +102,6 @@ mod test_utils;
 mod transactional_object_store;
 mod types;
 mod utils;
+mod wal_buffer;
+mod wal_id;
 mod wal_replay;

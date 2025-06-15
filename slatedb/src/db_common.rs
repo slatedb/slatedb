@@ -3,7 +3,6 @@ use parking_lot::RwLockWriteGuard;
 use crate::db::DbInner;
 use crate::db_state::DbState;
 use crate::error::SlateDBError;
-use crate::flush::WalFlushMsg;
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::wal_replay::ReplayedMemtable;
 
@@ -46,36 +45,28 @@ impl DbInner {
         replayed_memtable: ReplayedMemtable,
     ) -> Result<(), SlateDBError> {
         let mut guard = self.state.write();
-        let last_wal_id = guard.last_written_wal_id();
-        self.freeze_memtable(&mut guard, last_wal_id)?;
 
-        let last_wal_id = replayed_memtable.last_wal_id;
-        guard.set_next_wal_id(last_wal_id + 1);
-        guard.update_last_seq(replayed_memtable.last_seq);
+        // a WAL might contain the data across multiple memtables. we can only consider
+        // last_wal_id - 1 as the recent persisted wal id when the memtable is reconstructed.
+        // or when we need to replay again, we might risks to lose some WAL entries.
+        let recent_flushed_wal_id = if replayed_memtable.last_wal_id > 0 {
+            replayed_memtable.last_wal_id - 1
+        } else {
+            0
+        };
+        self.freeze_memtable(&mut guard, recent_flushed_wal_id)?;
+
+        let last_wal = replayed_memtable.last_wal_id;
+        guard.set_next_wal_id(last_wal + 1);
+
+        // update seqs and clock
+        self.oracle.last_seq.store(replayed_memtable.last_seq);
+        self.oracle
+            .last_committed_seq
+            .store(replayed_memtable.last_seq);
         self.mono_clock.set_last_tick(replayed_memtable.last_tick)?;
-        guard.replace_memtable(replayed_memtable.table)
-    }
 
-    pub(crate) fn maybe_freeze_wal(
-        &self,
-        guard: &mut RwLockWriteGuard<'_, DbState>,
-    ) -> Result<(), SlateDBError> {
-        // Use L0 SST size as the threshold for freezing a WAL table because
-        // a single WAL table gets added to a single L0 SST. If the WAL table
-        // were allowed to grow larger than the L0 SST threshold, the L0 SST
-        // size would be greater than the threshold.
-        let meta = guard.wal().metadata();
-        if self
-            .table_store
-            .estimate_encoded_size(meta.entry_num, meta.entries_size_in_bytes)
-            < self.settings.l0_sst_size_bytes
-        {
-            return Ok(());
-        }
-        guard.freeze_wal()?;
-        self.wal_flush_notifier
-            .send(WalFlushMsg::FlushImmutableWals { sender: None })
-            .map_err(|_| SlateDBError::WalFlushChannelError)?;
-        Ok(())
+        // replace the memtable
+        guard.replace_memtable(replayed_memtable.table)
     }
 }
