@@ -123,6 +123,7 @@ use crate::clock::SystemClock;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::default_block_cache;
+use crate::config::GarbageCollectorOptions;
 use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
@@ -447,6 +448,18 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup compactor if needed
         let mut compactor = None;
 
+        // Not to pollute the cache during compaction or GC
+        let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
+            ObjectStores::new(
+                self.main_object_store.clone(),
+                self.wal_object_store.clone(),
+            ),
+            sst_format,
+            path_resolver,
+            self.fp_registry.clone(),
+            None,
+        ));
+
         // To keep backwards compatibility, check if the compaction_scheduler_supplier or compactor_options are set.
         // If either are set, we need to initialize the compactor.
         if self.compaction_scheduler_supplier.is_some() || self.settings.compactor_options.is_some()
@@ -456,18 +469,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
                 .unwrap_or_else(|| Arc::new(SizeTieredCompactionSchedulerSupplier::default()));
-
-            // Not to pollute the cache during compaction
-            let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
-                ObjectStores::new(
-                    self.main_object_store.clone(),
-                    self.wal_object_store.clone(),
-                ),
-                sst_format,
-                path_resolver,
-                self.fp_registry.clone(),
-                None,
-            ));
             let cleanup_inner = inner.clone();
             compactor = Some(
                 Compactor::new(
@@ -489,31 +490,32 @@ impl<P: Into<Path>> DbBuilder<P> {
             )
         }
 
-        // Setup garbage collector if needed
-        let mut garbage_collector = None;
-
         // To keep backwards compatibility, check if the gc_runtime or garbage_collector_options are set.
         // If either are set, we need to initialize the garbage collector.
-        if let Some(gc_options) = self.settings.garbage_collector_options {
-            let gc_handle = self.gc_runtime.unwrap_or_else(|| Handle::current());
-
-            let cleanup_inner = inner.clone();
-            garbage_collector = Some(GarbageCollector::start_in_bg_thread(
-                manifest_store,
-                table_store,
-                gc_options,
-                gc_handle,
-                inner.stat_registry.clone(),
-                self.cancellation_token.clone(),
-                move |result| {
+        let garbage_collector =
+            if self.settings.garbage_collector_options.is_some() || self.gc_runtime.is_some() {
+                let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
+                let gc_handle = self.gc_runtime.unwrap_or_else(|| tokio_handle.clone());
+                let cleanup_inner = inner.clone();
+                let gc = GarbageCollector::new(
+                    manifest_store.clone(),
+                    uncached_table_store.clone(),
+                    gc_handle,
+                    gc_options,
+                    inner.stat_registry.clone(),
+                    system_clock.clone(),
+                    self.cancellation_token.clone(),
+                );
+                gc.start_in_bg_thread(move |result| {
                     let err = bg_task_result_into_err(result);
                     warn!("GC thread exited with {:?}", err);
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
-                },
-                system_clock.clone(),
-            ));
-        }
+                });
+                Some(gc)
+            } else {
+                None
+            };
 
         // Create and return the Db instance
         Ok(Db {
@@ -533,16 +535,18 @@ impl<P: Into<Path>> DbBuilder<P> {
 /// This provides a fluent API for configuring an Admin object.
 pub struct AdminBuilder<P: Into<Path>> {
     path: P,
-    object_store: Arc<dyn ObjectStore>,
+    main_object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
     system_clock: Arc<dyn SystemClock>,
 }
 
 impl<P: Into<Path>> AdminBuilder<P> {
     /// Creates a new AdminBuilder with the given path and object store.
-    pub fn new(path: P, object_store: Arc<dyn ObjectStore>) -> Self {
+    pub fn new(path: P, main_object_store: Arc<dyn ObjectStore>) -> Self {
         Self {
             path,
-            object_store,
+            main_object_store,
+            wal_object_store: None,
             system_clock: Arc::new(DefaultSystemClock::new()),
         }
     }
@@ -557,8 +561,109 @@ impl<P: Into<Path>> AdminBuilder<P> {
     pub fn build(self) -> Admin {
         Admin {
             path: self.path.into(),
-            object_store: self.object_store,
+            object_stores: ObjectStores::new(self.main_object_store, self.wal_object_store),
             system_clock: self.system_clock,
         }
+    }
+}
+
+/// Builder for creating new GarbageCollector instances.
+///
+/// This provides a fluent API for configuring a GarbageCollector object.
+pub struct GarbageCollectorBuilder<P: Into<Path>> {
+    path: P,
+    main_object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
+    tokio_handle: Handle,
+    options: GarbageCollectorOptions,
+    stat_registry: Arc<StatRegistry>,
+    cancellation_token: CancellationToken,
+    system_clock: Arc<dyn SystemClock>,
+    fp_registry: Arc<FailPointRegistry>,
+}
+
+impl<P: Into<Path>> GarbageCollectorBuilder<P> {
+    pub fn new(path: P, main_object_store: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            path,
+            main_object_store,
+            wal_object_store: None,
+            tokio_handle: Handle::current(),
+            options: GarbageCollectorOptions::default(),
+            stat_registry: Arc::new(StatRegistry::new()),
+            cancellation_token: CancellationToken::new(),
+            system_clock: Arc::new(DefaultSystemClock::default()),
+            fp_registry: Arc::new(FailPointRegistry::new()),
+        }
+    }
+
+    /// Sets the tokio handle to use for background tasks.
+    #[allow(unused)]
+    pub fn with_tokio_handle(mut self, tokio_handle: Handle) -> Self {
+        self.tokio_handle = tokio_handle;
+        self
+    }
+
+    /// Sets the options to use for the garbage collector.
+    pub fn with_options(mut self, options: GarbageCollectorOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Sets the stats registry to use for the garbage collector.
+    #[allow(unused)]
+    pub fn with_stat_registry(mut self, stat_registry: Arc<StatRegistry>) -> Self {
+        self.stat_registry = stat_registry;
+        self
+    }
+
+    /// Sets the system clock to use for the garbage collector.
+    pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
+        self.system_clock = system_clock;
+        self
+    }
+
+    /// Sets the cancellation token to use for the garbage collector.
+    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
+        self.cancellation_token = cancellation_token;
+        self
+    }
+
+    /// Sets the fail point registry to use for the garbage collector.
+    #[allow(unused)]
+    pub fn with_fp_registry(mut self, fp_registry: Arc<FailPointRegistry>) -> Self {
+        self.fp_registry = fp_registry;
+        self
+    }
+
+    /// Sets the WAL object store to use for the garbage collector.
+    #[allow(unused)]
+    pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
+        self.wal_object_store = Some(wal_object_store);
+        self
+    }
+
+    /// Builds and returns a GarbageCollector instance.
+    pub fn build(self) -> GarbageCollector {
+        let path: Path = self.path.into();
+        let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(
+                self.main_object_store.clone(),
+                self.wal_object_store.clone(),
+            ),
+            SsTableFormat::default(), // read only SSTs can use default
+            path,
+            None, // no need for cache in GC
+        ));
+        GarbageCollector::new(
+            manifest_store,
+            table_store,
+            self.tokio_handle,
+            self.options,
+            self.stat_registry,
+            self.system_clock,
+            self.cancellation_token,
+        )
     }
 }
