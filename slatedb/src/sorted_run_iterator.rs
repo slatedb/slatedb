@@ -25,10 +25,10 @@ impl<'a> SortedRunView<'a> {
         match self {
             SortedRunView::Owned(tables, r) => tables
                 .pop_front()
-                .map(|table| SstView::Owned(table, r.clone())),
-            SortedRunView::Borrowed(tables, r) => {
-                tables.pop_front().map(|table| SstView::Borrowed(table, *r))
-            }
+                .map(|table| SstView::Owned(Box::new(table), r.clone())),
+            SortedRunView::Borrowed(tables, r) => tables
+                .pop_front()
+                .map(|table| SstView::Borrowed(table, BytesRange::from_slice(*r))),
         }
     }
 
@@ -83,7 +83,7 @@ impl<'a> SortedRunIterator<'a> {
         sst_iter_options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
         let range = BytesRange::from(range);
-        let tables = sorted_run.into_tables_covering_range(range.as_ref());
+        let tables = sorted_run.into_tables_covering_range(&range);
         let view = SortedRunView::Owned(tables, range);
         SortedRunIterator::new(view, table_store, sst_iter_options).await
     }
@@ -95,7 +95,8 @@ impl<'a> SortedRunIterator<'a> {
         sst_iter_options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
         let range = (range.start_bound().cloned(), range.end_bound().cloned());
-        let tables = sorted_run.tables_covering_range(range);
+        // todo remove conversion to bytesrange
+        let tables = sorted_run.tables_covering_range(&BytesRange::from_slice(range));
         let view = SortedRunView::Borrowed(tables, range);
         SortedRunIterator::new(view, table_store, sst_iter_options).await
     }
@@ -133,7 +134,7 @@ impl KeyValueIterator for SortedRunIterator<'_> {
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         while let Some(next_table) = self.view.peek_next_table() {
-            if next_table.compacted_first_key() < next_key {
+            if next_table.compacted_effective_start_key() < next_key {
                 self.advance_table().await?;
             } else {
                 break;

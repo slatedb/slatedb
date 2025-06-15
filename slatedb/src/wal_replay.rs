@@ -78,7 +78,7 @@ pub(crate) struct WalReplayIterator<'a> {
     wal_id_range: Range<u64>,
     table_store: Arc<TableStore>,
     current_iter: IteratorHolder<SstIterator<'a>>,
-    next_iters: VecDeque<JoinHandle<Result<SstIterator<'a>, SlateDBError>>>,
+    next_iters: VecDeque<JoinHandle<Result<Option<SstIterator<'a>>, SlateDBError>>>,
     overflow_row: Option<ReplayedRow>,
     last_tick: i64,
     last_seq: u64,
@@ -156,7 +156,7 @@ impl WalReplayIterator<'_> {
             wal_id: u64,
             sst_iter_options: SstIteratorOptions,
             table_store: Arc<TableStore>,
-        ) -> Result<SstIterator<'a>, SlateDBError> {
+        ) -> Result<Option<SstIterator<'a>>, SlateDBError> {
             let sst = table_store.open_sst(&SsTableId::Wal(wal_id)).await?;
             SstIterator::new_owned(.., sst, Arc::clone(&table_store), sst_iter_options).await
         }
@@ -172,7 +172,7 @@ impl WalReplayIterator<'_> {
 
     async fn advance_current_iter(&mut self) -> Result<(), SlateDBError> {
         let next_iter = if let Some(join_handle) = self.next_iters.pop_front() {
-            let sst_iter = match join_handle.await {
+            match join_handle.await {
                 Ok(Ok(sst_iter)) => sst_iter,
                 Ok(Err(slate_err)) => return Err(slate_err),
                 Err(join_err) => {
@@ -182,8 +182,7 @@ impl WalReplayIterator<'_> {
                         }),
                     ))))
                 }
-            };
-            Some(sst_iter)
+            }
         } else {
             None
         };
