@@ -54,7 +54,7 @@ pub(crate) mod arbitrary {
     }
 
     fn nonempty_bounded_range(size: usize) -> impl Strategy<Value = BytesRange> {
-        (bytes(size), bytes(size))
+        (nonempty_bytes(size), nonempty_bytes(size))
             .prop_filter_map("Filter non-empty ranges", nonempty_range_filter)
             .prop_flat_map(|(start, end)| {
                 prop_oneof![
@@ -96,7 +96,7 @@ pub(crate) mod arbitrary {
     }
 
     fn arbitrary_single_point_bounded_range(size: usize) -> impl Strategy<Value = BytesRange> {
-        bytes(size).prop_flat_map(|a| {
+        nonempty_bytes(size).prop_flat_map(|a| {
             let a_extended = extend_bytes(&a, u8::MIN);
             prop_oneof![
                 Just(BytesRange::new(Included(a.clone()), Included(a.clone()))),
@@ -110,18 +110,6 @@ pub(crate) mod arbitrary {
                 )),
             ]
         })
-    }
-
-    /// Valid ranges which just have the single empty byte array.
-    /// Handled as a special case because an exclusive upper bounded
-    /// range with empty bytes (i.e. `..Bytes::new()`) is empty.
-    fn nonempty_range_edge_cases() -> impl Strategy<Value = BytesRange> {
-        let empty_bytes = Bytes::new();
-        prop_oneof![
-            Just(BytesRange::new(Unbounded, Included(empty_bytes.clone()))),
-            Just(BytesRange::new(Included(empty_bytes.clone()), Unbounded)),
-            Just(BytesRange::new(Excluded(empty_bytes.clone()), Unbounded)),
-        ]
     }
 
     fn min_and_max(a: Bytes, b: Bytes) -> (Bytes, Bytes) {
@@ -147,16 +135,13 @@ pub(crate) mod arbitrary {
     }
 
     pub(crate) fn empty_range(size: usize) -> impl Strategy<Value = BytesRange> {
-        prop_oneof![
-            Just(BytesRange::new(Unbounded, Excluded(Bytes::new()))),
-            bytes(size).prop_flat_map(|a| {
-                prop_oneof![
-                    Just(BytesRange::new(Excluded(a.clone()), Excluded(a.clone()))),
-                    Just(BytesRange::new(Included(a.clone()), Excluded(a.clone()))),
-                    Just(BytesRange::new(Excluded(a.clone()), Included(a.clone()))),
-                ]
-            })
-        ]
+        nonempty_bytes(size).prop_flat_map(|a| {
+            prop_oneof![
+                Just(BytesRange::new(Excluded(a.clone()), Excluded(a.clone()))),
+                Just(BytesRange::new(Included(a.clone()), Excluded(a.clone()))),
+                Just(BytesRange::new(Excluded(a.clone()), Included(a.clone()))),
+            ]
+        })
     }
 
     pub(crate) fn nonempty_range(size: usize) -> impl Strategy<Value = BytesRange> {
@@ -165,7 +150,6 @@ pub(crate) mod arbitrary {
             arbitrary_single_point_bounded_range(size),
             nonempty_partial_bounded_range(size),
             nonempty_bounded_range(size),
-            nonempty_range_edge_cases()
         ]
     }
 
