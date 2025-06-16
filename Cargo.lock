@@ -2973,6 +2973,7 @@ dependencies = [
  "snap",
  "tempfile",
  "thiserror 1.0.69",
+ "thread_local",
  "tokio",
  "tokio-test",
  "tokio-util",

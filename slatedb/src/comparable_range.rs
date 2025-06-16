@@ -338,7 +338,7 @@ pub(crate) mod tests {
         ];
         let mut shuffled_ranges = ranges.clone();
         // Shuffle the ranges to ensure the order is random
-        shuffled_ranges.shuffle(&mut crate::rand::thread_rng());
+        shuffled_ranges.shuffle(&mut rand::thread_rng());
         // Sort the ranges to ensure the order is deterministic
         shuffled_ranges.sort();
 

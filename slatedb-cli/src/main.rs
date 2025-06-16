@@ -1,17 +1,10 @@
 use crate::args::{parse_args, CliArgs, CliCommands, GcResource, GcSchedule};
 use object_store::path::Path;
-use object_store::ObjectStore;
-use slatedb::admin;
-use slatedb::admin::{
-    list_checkpoints, list_manifests, read_manifest, run_gc_in_background, run_gc_once,
-};
-use slatedb::clock::{DefaultSystemClock, SystemClock};
+use slatedb::admin::{self, Admin, AdminBuilder};
 use slatedb::config::{
     CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
-use slatedb::Db;
 use std::error::Error;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -26,8 +19,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args: CliArgs = parse_args();
     let path = Path::from(args.path.as_str());
     let object_store = admin::load_object_store_from_env(args.env_file)?;
-    let system_clock = Arc::new(DefaultSystemClock::default());
     let cancellation_token = CancellationToken::new();
+    let admin = AdminBuilder::new(path, object_store).build();
 
     let ct = cancellation_token.clone();
     tokio::spawn(async move {
@@ -40,49 +33,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     match args.command {
-        CliCommands::ReadManifest { id } => exec_read_manifest(&path, object_store, id).await?,
-        CliCommands::ListManifests { start, end } => {
-            exec_list_manifest(&path, object_store, start, end).await?
-        }
+        CliCommands::ReadManifest { id } => exec_read_manifest(&admin, id).await?,
+        CliCommands::ListManifests { start, end } => exec_list_manifest(&admin, start, end).await?,
         CliCommands::CreateCheckpoint { lifetime, source } => {
-            exec_create_checkpoint(&path, object_store, lifetime, source).await?
+            exec_create_checkpoint(&admin, lifetime, source).await?
         }
         CliCommands::RefreshCheckpoint { id, lifetime } => {
-            exec_refresh_checkpoint(&path, object_store, id, lifetime, system_clock).await?
+            exec_refresh_checkpoint(&admin, id, lifetime).await?;
         }
-        CliCommands::DeleteCheckpoint { id } => {
-            exec_delete_checkpoint(&path, object_store, id).await?
-        }
-        CliCommands::ListCheckpoints {} => exec_list_checkpoints(&path, object_store).await?,
+        CliCommands::DeleteCheckpoint { id } => exec_delete_checkpoint(&admin, id).await?,
+        CliCommands::ListCheckpoints {} => exec_list_checkpoints(&admin).await?,
         CliCommands::RunGarbageCollection { resource, min_age } => {
-            exec_gc_once(&path, object_store, resource, min_age, system_clock).await?
+            exec_gc_once(&admin, resource, min_age).await?
         }
         CliCommands::ScheduleGarbageCollection {
             manifest,
             wal,
             compacted,
-        } => {
-            schedule_gc(
-                &path,
-                object_store,
-                manifest,
-                wal,
-                compacted,
-                cancellation_token,
-            )
-            .await?
-        }
+        } => schedule_gc(&admin, manifest, wal, compacted, cancellation_token).await?,
     }
 
     Ok(())
 }
 
-async fn exec_read_manifest(
-    path: &Path,
-    object_store: Arc<dyn ObjectStore>,
-    id: Option<u64>,
-) -> Result<(), Box<dyn Error>> {
-    match read_manifest(path, object_store, id).await? {
+async fn exec_read_manifest(admin: &Admin, id: Option<u64>) -> Result<(), Box<dyn Error>> {
+    match admin.read_manifest(id).await? {
         None => {
             println!("No manifest file found.")
         }
@@ -94,8 +69,7 @@ async fn exec_read_manifest(
 }
 
 async fn exec_list_manifest(
-    path: &Path,
-    object_store: Arc<dyn ObjectStore>,
+    admin: &Admin,
     start: Option<u64>,
     end: Option<u64>,
 ) -> Result<(), Box<dyn Error>> {
@@ -106,65 +80,47 @@ async fn exec_list_manifest(
         _ => u64::MIN..u64::MAX,
     };
 
-    println!("{}", list_manifests(path, object_store, range).await?);
+    println!("{}", admin.list_manifests(range).await?);
     Ok(())
 }
 
 async fn exec_create_checkpoint(
-    path: &Path,
-    object_store: Arc<dyn ObjectStore>,
+    admin: &Admin,
     lifetime: Option<Duration>,
     source: Option<Uuid>,
 ) -> Result<(), Box<dyn Error>> {
-    let result = admin::create_checkpoint(
-        path.clone(),
-        object_store,
-        &CheckpointOptions { lifetime, source },
-    )
-    .await?;
+    let result = admin
+        .create_checkpoint(&CheckpointOptions { lifetime, source })
+        .await?;
     println!("{:?}", result);
     Ok(())
 }
 
 async fn exec_refresh_checkpoint(
-    path: &Path,
-    object_store: Arc<dyn ObjectStore>,
+    admin: &Admin,
     id: Uuid,
     lifetime: Option<Duration>,
-    system_clock: Arc<dyn SystemClock>,
 ) -> Result<(), Box<dyn Error>> {
-    println!(
-        "{:?}",
-        Db::refresh_checkpoint(path, object_store, id, lifetime, system_clock).await?
-    );
+    println!("{:?}", admin.refresh_checkpoint(id, lifetime).await?);
     Ok(())
 }
 
-async fn exec_delete_checkpoint(
-    path: &Path,
-    object_store: Arc<dyn ObjectStore>,
-    id: Uuid,
-) -> Result<(), Box<dyn Error>> {
-    println!("{:?}", Db::delete_checkpoint(path, object_store, id).await?);
+async fn exec_delete_checkpoint(admin: &Admin, id: Uuid) -> Result<(), Box<dyn Error>> {
+    println!("{:?}", admin.delete_checkpoint(id).await?);
     Ok(())
 }
 
-async fn exec_list_checkpoints(
-    path: &Path,
-    object_store: Arc<dyn ObjectStore>,
-) -> Result<(), Box<dyn Error>> {
-    let checkpoint = list_checkpoints(path, object_store).await?;
+async fn exec_list_checkpoints(admin: &Admin) -> Result<(), Box<dyn Error>> {
+    let checkpoint = admin.list_checkpoints().await?;
     let checkpoint_json = serde_json::to_string(&checkpoint)?;
     println!("{}", checkpoint_json);
     Ok(())
 }
 
 async fn exec_gc_once(
-    path: &Path,
-    object_store: Arc<dyn ObjectStore>,
+    admin: &Admin,
     resource: GcResource,
     min_age: Duration,
-    system_clock: Arc<dyn SystemClock>,
 ) -> Result<(), Box<dyn Error>> {
     fn create_gc_dir_opts(min_age: Duration) -> Option<GarbageCollectorDirectoryOptions> {
         Some(GarbageCollectorDirectoryOptions {
@@ -189,13 +145,12 @@ async fn exec_gc_once(
             compacted_options: create_gc_dir_opts(min_age),
         },
     };
-    run_gc_once(path, object_store, gc_opts, system_clock).await?;
+    admin.run_gc_once(gc_opts).await?;
     Ok(())
 }
 
 async fn schedule_gc(
-    path: &Path,
-    object_store: Arc<dyn ObjectStore>,
+    admin: &Admin,
     manifest_schedule: Option<GcSchedule>,
     wal_schedule: Option<GcSchedule>,
     compacted_schedule: Option<GcSchedule>,
@@ -207,20 +162,14 @@ async fn schedule_gc(
             min_age: schedule.min_age,
         })
     }
-    let system_clock = Arc::new(DefaultSystemClock::default());
     let gc_opts = GarbageCollectorOptions {
         manifest_options: manifest_schedule.and_then(create_gc_dir_opts),
         wal_options: wal_schedule.and_then(create_gc_dir_opts),
         compacted_options: compacted_schedule.and_then(create_gc_dir_opts),
     };
 
-    run_gc_in_background(
-        path,
-        object_store,
-        gc_opts,
-        cancellation_token,
-        system_clock,
-    )
-    .await?;
+    admin
+        .run_gc_in_background(gc_opts, cancellation_token)
+        .await?;
     Ok(())
 }

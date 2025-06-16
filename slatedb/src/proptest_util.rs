@@ -192,7 +192,7 @@ pub(crate) mod rng {
 
     pub(crate) fn new_test_rng(seed: Option<[u8; 32]>) -> TestRng {
         let seed = seed.unwrap_or_else(|| {
-            let mut thread_rng = crate::rand::thread_rng();
+            let mut thread_rng = rand::thread_rng();
             let random_bytes: [u8; 32] = thread_rng.gen();
             random_bytes
         });
