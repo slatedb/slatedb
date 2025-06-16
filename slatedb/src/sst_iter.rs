@@ -670,7 +670,8 @@ mod tests {
             },
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
 
         let mut iter_small_fetch = SstIterator::new_borrowed(
             ..,
@@ -684,7 +685,8 @@ mod tests {
             },
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
 
         let mut key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
         let mut val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
