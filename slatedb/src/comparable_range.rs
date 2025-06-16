@@ -212,13 +212,14 @@ impl<T: Ord + Clone> ComparableRange<T> {
             start: max_start.clone(),
             end: min_end.clone(),
         };
-        if intersection.is_non_empty() {
+        if intersection.non_empty() {
             Some(intersection)
         } else {
             None
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn union(&self, other: &Self) -> Option<Self> {
         // Sort the ranges to make the function commutative
         let (first, second) = if self < other {
@@ -245,7 +246,7 @@ impl<T: Ord + Clone> ComparableRange<T> {
         }
     }
 
-    pub(crate) fn is_non_empty(&self) -> bool {
+    pub(crate) fn non_empty(&self) -> bool {
         match (&self.start.inner, &self.end.inner) {
             (Bound::Included(a), Bound::Included(b)) => a <= b,
             (Bound::Included(a), Bound::Excluded(b)) => a < b,
@@ -432,7 +433,7 @@ pub(crate) mod tests {
             TestCase(Bound::Unbounded, Bound::Unbounded, true),
         ];
         for case in cases {
-            assert_eq!(ComparableRange::new(case.0, case.1).is_non_empty(), case.2);
+            assert_eq!(ComparableRange::new(case.0, case.1).non_empty(), case.2);
         }
     }
 }
