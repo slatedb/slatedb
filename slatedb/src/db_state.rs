@@ -132,10 +132,7 @@ impl SsTableHandle {
     /// 2. Returning None if the requested range does not overlap with the effective range
     pub(crate) fn calculate_view_range(&self, range: BytesRange) -> Option<BytesRange> {
         if let Some(visible_range) = &self.visible_range {
-            return match range.intersect(visible_range) {
-                Some(range) => Some(range),
-                None => None,
-            };
+            return range.intersect(visible_range);
         }
         Some(range)
     }
