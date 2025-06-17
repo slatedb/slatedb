@@ -45,16 +45,15 @@ pub(crate) enum WorkerToOrchestratorMsg {
 /// and read amplification (by reducing the number of sorted runs that need to be searched on
 /// a read). It's made up of a few different components:
 ///
-/// The Orchestrator is responsible for orchestrating the ongoing process of compacting
-/// the db. It periodically polls the manifest for changes, calls into the Scheduler
-/// to discover compactions that should be performed, schedules those compactions on the
-/// Executor, and when they are completed, updates the manifest. The Orchestrator is made
-/// up of [`CompactorOrchestrator`] and [`CompactorEventHandler`]. [`CompactorOrchestrator`]
-/// runs the main event loop on a background thread. The event loop listens on the manifest
-/// poll ticker to react to manifest poll ticks, the executor worker channel to react to
-/// updates about running compactions, and the shutdown channel to discover when it should
-/// terminate. It doesn't actually implement the logic for reacting to these events. This
-/// is implemented by [`CompactorEventHandler`].
+/// - [`Compactor`]: The main event loop that orchestrates the compaction process.
+/// - [`CompactorEventHandler`]: The event handler that handles events from the compactor.
+/// - [`CompactionScheduler`]: The scheduler that discovers compactions that should be performed.
+/// - [`CompactionExecutor`]: The executor that runs the compaction tasks.
+///
+/// The main event loop listens on the manifest poll ticker to react to manifest poll ticks, the
+/// executor worker channel to react to updates about running compactions, and the shutdown
+/// channel to discover when it should terminate. It doesn't actually implement the logic for
+/// reacting to these events. This is implemented by [`CompactorEventHandler`].
 ///
 /// The Scheduler is responsible for deciding what sorted runs should be compacted together.
 /// It implements the [`CompactionScheduler`] trait. The implementation is specified by providing
