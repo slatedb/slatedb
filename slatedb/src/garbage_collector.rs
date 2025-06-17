@@ -117,6 +117,7 @@ impl GarbageCollector {
     ///
     /// # Arguments
     ///
+    /// * `tokio_handle` - The tokio handle to use in the background thread.
     /// * `cleanup_fn` - A function that will be called when the garbage collector
     ///   thread completes, with the final result (success or error).
     pub fn start_in_bg_thread(
@@ -133,10 +134,12 @@ impl GarbageCollector {
     }
 
     /// Starts the garbage collector. This method performs the actual garbage collection.
-    /// The garbage collector runs until the cancellation token is cancelled.
+    /// The garbage collector runs until the cancellation token is cancelled. Use
+    /// [`terminate_background_task`](GarbageCollector::terminate_background_task) to stop the
+    /// garbage collector.
     ///
     /// Unlike [`start_in_bg_thread`](GarbageCollector::start_in_bg_thread), this method
-    /// uses the provided Tokio runtime instead of creating a new thread. This is useful
+    /// uses the current Tokio runtime instead of creating a new thread. This is useful
     /// when you want to run the garbage collector within an existing async runtime.
     pub async fn start_async_task(&self) {
         let mut log_ticker = tokio::time::interval(Duration::from_secs(60));

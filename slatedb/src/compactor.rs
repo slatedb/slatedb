@@ -106,12 +106,13 @@ impl Compactor {
     ///
     /// This method launches the compactor in a dedicated background thread
     /// and returns immediately. The compactor will run until its cancellation
-    /// token is cancelled. Use [`terminate_background_task`](GarbageCollector::terminate_background_task)
+    /// token is cancelled. Use [`terminate_background_task`](Compactor::terminate_background_task)
     /// to stop the compactor.
     ///
     /// # Arguments
     ///
-    /// * `cleanup_fn` - A function that will be called when the garbage collector
+    /// * `tokio_handle` - The tokio handle to use in the background thread.
+    /// * `cleanup_fn` - A function that will be called when the compactor
     ///   thread completes, with the final result (success or error).
     pub fn start_in_bg_thread(
         &self,
@@ -123,6 +124,14 @@ impl Compactor {
         spawn_bg_thread("slatedb-compactor", cleanup_fn, compactor_main);
     }
 
+    /// Starts the compactor. This method performs the actual compaction event loop.
+    /// The compactor runs until the cancellation token is cancelled. Use
+    /// [`terminate_background_task`](Compactor::terminate_background_task) to stop the
+    /// compactor.
+    ///
+    /// Unlike [`start_in_bg_thread`](Compactor::start_in_bg_thread), this method
+    /// uses the current Tokio runtime instead of creating a new thread. This is useful
+    /// when you want to run the compactor within an existing async runtime.
     pub async fn start_async_task(&self) -> Result<(), SlateDBError> {
         let mut db_runs_log_ticker = tokio::time::interval(Duration::from_secs(10));
         let mut manifest_poll_ticker = tokio::time::interval(self.options.poll_interval);
