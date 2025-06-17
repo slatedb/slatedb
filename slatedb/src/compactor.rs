@@ -30,10 +30,6 @@ pub trait CompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
 }
 
-enum CompactorMainMsg {
-    Shutdown,
-}
-
 pub(crate) enum WorkerToOrchestratorMsg {
     CompactionFinished {
         id: Uuid,
@@ -119,8 +115,7 @@ impl Compactor {
     ) {
         let this = self.clone();
         let compactor_main = move || {
-            tokio_handle.block_on(this.start_async_task());
-            Ok(())
+            tokio_handle.block_on(this.start_async_task())
         };
         spawn_bg_thread("slatedb-compactor", cleanup_fn, compactor_main);
     }
@@ -163,10 +158,10 @@ impl Compactor {
                     handler.handle_log_ticker();
                 }
                 _ = manifest_poll_ticker.tick() => {
-                    handler.handle_ticker();
+                    handler.handle_ticker().await;
                 }
                 msg = worker_rx.recv() => {
-                    handler.handle_worker_rx(msg.expect("fatal error receiving worker msg"));
+                    handler.handle_worker_rx(msg.expect("fatal error receiving worker msg")).await;
                 }
             }
         }
@@ -447,7 +442,6 @@ mod tests {
     use object_store::ObjectStore;
     use parking_lot::Mutex;
     use rand::RngCore;
-    use tokio::runtime::Runtime;
     use ulid::Ulid;
 
     use super::*;
@@ -747,7 +741,6 @@ mod tests {
     }
 
     struct CompactorEventHandlerTestFixture {
-        rt: Runtime,
         manifest: StoredManifest,
         manifest_store: Arc<ManifestStore>,
         options: Settings,
@@ -762,18 +755,15 @@ mod tests {
 
     impl CompactorEventHandlerTestFixture {
         async fn new() -> Self {
-            let rt = build_runtime();
             let compactor_options = Arc::new(compactor_options());
             let options = db_options(None);
 
             let os = Arc::new(InMemory::new());
             let (manifest_store, table_store) = build_test_stores(os.clone());
-            let db = rt
-                .block_on(
-                    Db::builder(PATH, os.clone())
-                        .with_settings(options.clone())
-                        .build(),
-                )
+            let db = Db::builder(PATH, os.clone())
+                .with_settings(options.clone())
+                .build()
+                .await
                 .unwrap();
 
             let scheduler = Box::new(MockScheduler::new());
@@ -782,7 +772,7 @@ mod tests {
             let stats_registry = Arc::new(StatRegistry::new());
             let compactor_stats = Arc::new(CompactionStats::new(stats_registry.clone()));
             let real_executor = Box::new(TokioCompactionExecutor::new(
-                rt.handle().clone(),
+                Handle::current(),
                 compactor_options.clone(),
                 real_executor_tx,
                 table_store,
@@ -798,11 +788,8 @@ mod tests {
             )
             .await
             .unwrap();
-            let manifest = rt
-                .block_on(StoredManifest::load(manifest_store.clone()))
-                .unwrap();
+            let manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
             Self {
-                rt,
                 manifest,
                 manifest_store,
                 options,
@@ -816,37 +803,31 @@ mod tests {
             }
         }
 
-        fn latest_db_state(&mut self) -> CoreDbState {
-            self.rt
-                .block_on(self.manifest.refresh())
-                .unwrap()
-                .core
-                .clone()
+        async fn latest_db_state(&mut self) -> CoreDbState {
+            self.manifest.refresh().await.unwrap().core.clone()
         }
 
-        fn write_l0(&mut self) {
-            let fut = async {
-                let mut rng = rng::new_test_rng(None);
-                let manifest = self.manifest.refresh().await.unwrap();
-                let l0s = manifest.core.l0.len();
-                // TODO: add an explicit flush_memtable fn to db and use that instead
-                let mut k = vec![0u8; self.options.l0_sst_size_bytes];
-                rng.fill_bytes(&mut k);
-                self.db.put(&k, &[b'x'; 10]).await.unwrap();
-                self.db.flush().await.unwrap();
-                loop {
-                    let manifest = self.manifest.refresh().await.unwrap().clone();
-                    if manifest.core.l0.len() > l0s {
-                        break;
-                    }
+        async fn write_l0(&mut self) {
+            let mut rng = rng::new_test_rng(None);
+            let manifest = self.manifest.refresh().await.unwrap();
+            let l0s = manifest.core.l0.len();
+            // TODO: add an explicit flush_memtable fn to db and use that instead
+            let mut k = vec![0u8; self.options.l0_sst_size_bytes];
+            rng.fill_bytes(&mut k);
+            self.db.put(&k, &[b'x'; 10]).await.unwrap();
+            self.db.flush().await.unwrap();
+            loop {
+                let manifest = self.manifest.refresh().await.unwrap().clone();
+                if manifest.core.l0.len() > l0s {
+                    break;
                 }
-            };
-            self.rt.block_on(fut);
+            }
         }
 
-        fn build_l0_compaction(&mut self) -> Compaction {
+        async fn build_l0_compaction(&mut self) -> Compaction {
             let l0_ids_to_compact: Vec<SourceId> = self
                 .latest_db_state()
+                .await
                 .l0
                 .iter()
                 .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
@@ -871,10 +852,10 @@ mod tests {
     async fn test_should_record_last_compaction_ts() {
         // given:
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
-        fixture.write_l0();
-        let compaction = fixture.build_l0_compaction();
+        fixture.write_l0().await;
+        let compaction = fixture.build_l0_compaction().await;
         fixture.scheduler.inject_compaction(compaction.clone());
-        fixture.handler.handle_ticker();
+        fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
             .await
@@ -887,7 +868,7 @@ mod tests {
             .get();
 
         // when:
-        fixture.handler.handle_worker_rx(msg);
+        fixture.handler.handle_worker_rx(msg).await;
 
         // then:
         assert!(
@@ -904,23 +885,23 @@ mod tests {
     async fn test_should_write_manifest_safely() {
         // given:
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
-        fixture.write_l0();
-        let compaction = fixture.build_l0_compaction();
+        fixture.write_l0().await;
+        let compaction = fixture.build_l0_compaction().await;
         fixture.scheduler.inject_compaction(compaction.clone());
-        fixture.handler.handle_ticker();
+        fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
             .await
             .unwrap()
             .expect("timeout");
         // write an l0 before handling compaction finished
-        fixture.write_l0();
+        fixture.write_l0().await;
 
         // when:
-        fixture.handler.handle_worker_rx(msg);
+        fixture.handler.handle_worker_rx(msg).await;
 
         // then:
-        let db_state = fixture.latest_db_state();
+        let db_state = fixture.latest_db_state().await;
         assert_eq!(db_state.l0.len(), 1);
         assert_eq!(db_state.compacted.len(), 1);
         let l0_id = db_state.l0.front().unwrap().id.unwrap_compacted_id();
@@ -947,10 +928,10 @@ mod tests {
     async fn test_should_clear_compaction_on_failure_and_retry() {
         // given:
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
-        fixture.write_l0();
-        let compaction = fixture.build_l0_compaction();
+        fixture.write_l0().await;
+        let compaction = fixture.build_l0_compaction().await;
         fixture.scheduler.inject_compaction(compaction.clone());
-        fixture.handler.handle_ticker();
+        fixture.handler.handle_ticker().await;
         let job = fixture.assert_started_compaction(1).pop().unwrap();
         let msg = WorkerToOrchestratorMsg::CompactionFinished {
             id: job.id,
@@ -958,11 +939,11 @@ mod tests {
         };
 
         // when:
-        fixture.handler.handle_worker_rx(msg);
+        fixture.handler.handle_worker_rx(msg).await;
 
         // then:
         fixture.scheduler.inject_compaction(compaction.clone());
-        fixture.handler.handle_ticker();
+        fixture.handler.handle_ticker().await;
         fixture.assert_started_compaction(1);
     }
 
@@ -970,16 +951,16 @@ mod tests {
     async fn test_should_not_schedule_conflicting_compaction() {
         // given:
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
-        fixture.write_l0();
-        let compaction = fixture.build_l0_compaction();
+        fixture.write_l0().await;
+        let compaction = fixture.build_l0_compaction().await;
         fixture.scheduler.inject_compaction(compaction.clone());
-        fixture.handler.handle_ticker();
+        fixture.handler.handle_ticker().await;
         fixture.assert_started_compaction(1);
-        fixture.write_l0();
+        fixture.write_l0().await;
         fixture.scheduler.inject_compaction(compaction.clone());
 
         // when:
-        fixture.handler.handle_ticker();
+        fixture.handler.handle_ticker().await;
 
         // then:
         assert_eq!(0, fixture.executor.pop_jobs().len())
@@ -989,10 +970,10 @@ mod tests {
     async fn test_should_leave_checkpoint_when_removing_ssts_after_compaction() {
         // given:
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
-        fixture.write_l0();
-        let compaction = fixture.build_l0_compaction();
+        fixture.write_l0().await;
+        let compaction = fixture.build_l0_compaction().await;
         fixture.scheduler.inject_compaction(compaction.clone());
-        fixture.handler.handle_ticker();
+        fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
             .await
@@ -1000,15 +981,12 @@ mod tests {
             .expect("timeout");
 
         // when:
-        fixture.handler.handle_worker_rx(msg);
+        fixture.handler.handle_worker_rx(msg).await;
 
         // then:
-        let current_dbstate = fixture.latest_db_state();
+        let current_dbstate = fixture.latest_db_state().await;
         let checkpoint = current_dbstate.checkpoints.last().unwrap();
-        let old_manifest = fixture
-            .rt
-            .block_on(fixture.manifest_store.read_manifest(checkpoint.manifest_id))
-            .unwrap();
+        let old_manifest = fixture.manifest_store.read_manifest(checkpoint.manifest_id).await.unwrap();
         let l0_ids: Vec<SourceId> = old_manifest
             .core
             .l0
@@ -1016,13 +994,6 @@ mod tests {
             .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
             .collect();
         assert_eq!(l0_ids, compaction.sources);
-    }
-
-    fn build_runtime() -> Runtime {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap()
     }
 
     async fn run_for<T, F>(duration: Duration, f: impl Fn() -> F) -> Option<T>
