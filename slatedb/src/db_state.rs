@@ -95,9 +95,16 @@ impl SsTableHandle {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn with_visible_range(&self, visible_range: BytesRange) -> Self {
         Self::new_compacted(self.id, self.info.clone(), Some(visible_range))
+    }
+
+    // Compacted (non-WAL) SSTs are never empty. They are created by compaction or
+    // memtable flushes, which should never produce empty SSTs. This method returns
+    // the start bound after applying projections.
+    pub(crate) fn compacted_effective_start_bound(&self) -> Bound<Bytes> {
+        assert!(matches!(self.id, Compacted(_)));
+        self.effective_range.start_bound().cloned()
     }
 
     // Compacted (non-WAL) SSTs are never empty. They are created by compaction or
@@ -113,6 +120,27 @@ impl SsTableHandle {
 
     pub(crate) fn range_covers_key(&self, key: &[u8]) -> bool {
         self.effective_range.contains(key)
+    }
+
+    pub(crate) fn compacted_effective_range(&self) -> &BytesRange {
+        &self.effective_range
+    }
+
+    pub(crate) fn compacted_intersection(
+        &self,
+        next_handle: Option<&SsTableHandle>,
+        range: &BytesRange,
+    ) -> Option<BytesRange> {
+        assert!(matches!(self.id, Compacted(_)));
+        if let Some(next_handle) = next_handle {
+            BytesRange::new(
+                self.compacted_effective_start_bound(),
+                Excluded(next_handle.compacted_effective_start_key().clone()),
+            )
+            .intersect(range)
+        } else {
+            self.effective_range.intersect(range)
+        }
     }
 
     pub(crate) fn intersects_range(&self, end_bound: Bound<Bytes>, range: &BytesRange) -> bool {
