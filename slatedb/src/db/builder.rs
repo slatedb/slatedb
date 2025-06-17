@@ -474,7 +474,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 uncached_table_store.clone(),
                 compactor_options.clone(),
                 scheduler_supplier,
-                inner.stat_registry.as_ref(),
+                inner.stat_registry.clone(),
                 system_clock.clone(),
                 self.cancellation_token.clone(),
             );

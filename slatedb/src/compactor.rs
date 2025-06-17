@@ -67,10 +67,11 @@ pub(crate) enum WorkerToOrchestratorMsg {
 /// The Executor does the actual work of compacting sorted runs by sort-merging them into a new
 /// sorted run. It implements the [`CompactionExecutor`] trait. Currently, the only implementation
 /// is the [`TokioCompactionExecutor`] which runs compaction on a local tokio runtime.
+#[derive(Clone)]
 pub(crate) struct Compactor {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
-    options: CompactorOptions,
+    options: Arc<CompactorOptions>,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
@@ -92,7 +93,7 @@ impl Compactor {
         Self {
             manifest_store,
             table_store,
-            options,
+            options: Arc::new(options),
             scheduler_supplier,
             stats,
             cancellation_token,
@@ -125,20 +126,20 @@ impl Compactor {
     }
 
     pub async fn start_async_task(&self) -> Result<(), SlateDBError> {
-        let options = Arc::new(self.options);
-        let db_runs_log_ticker = tokio::time::interval(Duration::from_secs(10));
-        let manifest_poll_ticker = tokio::time::interval(self.options.poll_interval);
-        let (worker_tx, worker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut db_runs_log_ticker = tokio::time::interval(Duration::from_secs(10));
+        let mut manifest_poll_ticker = tokio::time::interval(self.options.poll_interval);
+        let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = self.scheduler_supplier.compaction_scheduler();
         let executor = Box::new(TokioCompactionExecutor::new(
-            options.clone(),
+            Handle::current(),
+            self.options.clone(),
             worker_tx,
             self.table_store.clone(),
             self.stats.clone(),
         ));
-        let handler = CompactorEventHandler::new(
+        let mut handler = CompactorEventHandler::new(
             &self.manifest_store,
-            options.clone(),
+            self.options.clone(),
             scheduler,
             executor,
             self.stats.clone(),
