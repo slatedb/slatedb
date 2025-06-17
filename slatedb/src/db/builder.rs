@@ -673,6 +673,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     system_clock: Arc<dyn SystemClock>,
 }
 
+#[allow(unused)]
 impl<P: Into<Path>> CompactorBuilder<P> {
     pub fn new(path: P, main_object_store: Arc<dyn ObjectStore>) -> Self {
         Self {

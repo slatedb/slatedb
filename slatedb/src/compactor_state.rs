@@ -602,6 +602,8 @@ mod tests {
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
         let opts = Settings {
             l0_sst_size_bytes: 256,
+            // Disable compactor to prevent it from compacting L0s unpredictably
+            compactor_options: None,
             ..Default::default()
         };
         tokio_handle

@@ -67,7 +67,6 @@ pub(crate) struct DbInner {
     pub(crate) stat_registry: Arc<StatRegistry>,
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) reader: Reader,
-
     pub(crate) wal_enabled: bool,
 }
 
