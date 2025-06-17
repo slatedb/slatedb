@@ -500,13 +500,12 @@ impl<P: Into<Path>> DbBuilder<P> {
                 let gc = GarbageCollector::new(
                     manifest_store.clone(),
                     uncached_table_store.clone(),
-                    gc_handle,
                     gc_options,
                     inner.stat_registry.clone(),
                     system_clock.clone(),
                     self.cancellation_token.clone(),
                 );
-                gc.start_in_bg_thread(move |result| {
+                gc.start_in_bg_thread(gc_handle, move |result| {
                     let err = bg_task_result_into_err(result);
                     warn!("GC thread exited with {:?}", err);
                     let mut state = cleanup_inner.state.write();
@@ -574,7 +573,6 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     path: P,
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
-    tokio_handle: Handle,
     options: GarbageCollectorOptions,
     stat_registry: Arc<StatRegistry>,
     cancellation_token: CancellationToken,
@@ -588,20 +586,12 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             path,
             main_object_store,
             wal_object_store: None,
-            tokio_handle: Handle::current(),
             options: GarbageCollectorOptions::default(),
             stat_registry: Arc::new(StatRegistry::new()),
             cancellation_token: CancellationToken::new(),
             system_clock: Arc::new(DefaultSystemClock::default()),
             fp_registry: Arc::new(FailPointRegistry::new()),
         }
-    }
-
-    /// Sets the tokio handle to use for background tasks.
-    #[allow(unused)]
-    pub fn with_tokio_handle(mut self, tokio_handle: Handle) -> Self {
-        self.tokio_handle = tokio_handle;
-        self
     }
 
     /// Sets the options to use for the garbage collector.
@@ -659,7 +649,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         GarbageCollector::new(
             manifest_store,
             table_store,
-            self.tokio_handle,
             self.options,
             self.stat_registry,
             self.system_clock,
