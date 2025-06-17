@@ -1,17 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::UNIX_EPOCH;
 
 use tokio::runtime::Handle;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use ulid::Ulid;
 use uuid::Uuid;
 
 use crate::clock::SystemClock;
 use crate::compactor::stats::CompactionStats;
-use crate::compactor::CompactorMainMsg::Shutdown;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
@@ -69,149 +68,118 @@ pub(crate) enum WorkerToOrchestratorMsg {
 /// sorted run. It implements the [`CompactionExecutor`] trait. Currently, the only implementation
 /// is the [`TokioCompactionExecutor`] which runs compaction on a local tokio runtime.
 pub(crate) struct Compactor {
-    main_tx: crossbeam_channel::Sender<CompactorMainMsg>,
-    main_thread: Option<JoinHandle<Result<(), SlateDBError>>>,
+    manifest_store: Arc<ManifestStore>,
+    table_store: Arc<TableStore>,
+    options: CompactorOptions,
+    scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    stats: Arc<CompactionStats>,
+    system_clock: Arc<dyn SystemClock>,
+    cancellation_token: CancellationToken,
 }
 
 impl Compactor {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn new(
+    pub(crate) fn new(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         options: CompactorOptions,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
-        tokio_handle: Handle,
-        stat_registry: &StatRegistry,
-        cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
+        stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
-    ) -> Result<Self, SlateDBError> {
-        let (external_tx, external_rx) = crossbeam_channel::unbounded();
-        let (err_tx, err_rx) = tokio::sync::oneshot::channel();
+        cancellation_token: CancellationToken,
+    ) -> Self {
         let stats = Arc::new(CompactionStats::new(stat_registry));
-        let main_thread = spawn_bg_thread("slatedb-compactor", cleanup_fn, move || {
-            let load_result = CompactorOrchestrator::new(
-                options,
-                manifest_store.clone(),
-                table_store.clone(),
-                scheduler_supplier,
-                tokio_handle,
-                external_rx,
-                stats,
-                system_clock,
-            );
-            let mut orchestrator = match load_result {
-                Ok(orchestrator) => orchestrator,
-                Err(err) => {
-                    err_tx.send(Err(err)).expect("err channel failure");
-                    return Ok(());
-                }
-            };
-            err_tx.send(Ok(())).expect("err channel failure");
-            orchestrator.run()
-        });
-        err_rx.await.expect("err channel failure")?;
-        Ok(Self {
-            main_thread: Some(main_thread),
-            main_tx: external_tx,
-        })
-    }
-
-    pub(crate) async fn close(mut self) {
-        if let Some(main_thread) = self.main_thread.take() {
-            self.main_tx.send(Shutdown).expect("main tx disconnected");
-            // Wait on a separate thread to avoid blocking the tokio runtime
-            tokio::task::spawn_blocking(move || {
-                let result = main_thread
-                    .join()
-                    .expect("failed to stop main compactor thread");
-                info!("compactor thread exited with: {:?}", result)
-            });
+        Self {
+            manifest_store,
+            table_store,
+            options,
+            scheduler_supplier,
+            stats,
+            cancellation_token,
+            system_clock,
         }
     }
-}
 
-struct CompactorOrchestrator {
-    // TODO: We need to migrate this to tokio::time::Instant for DST
-    // The current orchestrator implementation does not use the tokio runtime
-    // for for its run loop, so we can't make a tokio ticker yet.
-    #[allow(clippy::disallowed_types)]
-    ticker: crossbeam_channel::Receiver<std::time::Instant>,
-    external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
-    worker_rx: crossbeam_channel::Receiver<WorkerToOrchestratorMsg>,
-    handler: CompactorEventHandler,
-}
-
-impl CompactorOrchestrator {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        options: CompactorOptions,
-        manifest_store: Arc<ManifestStore>,
-        table_store: Arc<TableStore>,
-        scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    /// Starts the compactor in a background thread.
+    ///
+    /// This method launches the compactor in a dedicated background thread
+    /// and returns immediately. The compactor will run until its cancellation
+    /// token is cancelled. Use [`terminate_background_task`](GarbageCollector::terminate_background_task)
+    /// to stop the compactor.
+    ///
+    /// # Arguments
+    ///
+    /// * `cleanup_fn` - A function that will be called when the garbage collector
+    ///   thread completes, with the final result (success or error).
+    pub fn start_in_bg_thread(
+        &self,
         tokio_handle: Handle,
-        external_rx: crossbeam_channel::Receiver<CompactorMainMsg>,
-        stats: Arc<CompactionStats>,
-        system_clock: Arc<dyn SystemClock>,
-    ) -> Result<Self, SlateDBError> {
-        let options = Arc::new(options);
-        let ticker = crossbeam_channel::tick(options.poll_interval);
-        let scheduler = scheduler_supplier.compaction_scheduler();
-        let (worker_tx, worker_rx) = crossbeam_channel::unbounded();
-        let executor = Box::new(TokioCompactionExecutor::new(
-            tokio_handle.clone(),
-            options.clone(),
-            worker_tx,
-            table_store.clone(),
-            stats.clone(),
-        ));
-        let handler = CompactorEventHandler::new(
-            tokio_handle,
-            &manifest_store,
-            options,
-            scheduler,
-            executor,
-            stats,
-            system_clock,
-        )?;
-        let orchestrator = Self {
-            ticker,
-            external_rx,
-            worker_rx,
-            handler,
+        cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
+    ) {
+        let this = self.clone();
+        let compactor_main = move || {
+            tokio_handle.block_on(this.start_async_task());
+            Ok(())
         };
-        Ok(orchestrator)
+        spawn_bg_thread("slatedb-compactor", cleanup_fn, compactor_main);
     }
 
-    fn run(&mut self) -> Result<(), SlateDBError> {
-        let db_runs_log_ticker = crossbeam_channel::tick(Duration::from_secs(10));
+    pub async fn start_async_task(&self) -> Result<(), SlateDBError> {
+        let options = Arc::new(self.options);
+        let db_runs_log_ticker = tokio::time::interval(Duration::from_secs(10));
+        let manifest_poll_ticker = tokio::time::interval(self.options.poll_interval);
+        let (worker_tx, worker_rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = self.scheduler_supplier.compaction_scheduler();
+        let executor = Box::new(TokioCompactionExecutor::new(
+            options.clone(),
+            worker_tx,
+            self.table_store.clone(),
+            self.stats.clone(),
+        ));
+        let handler = CompactorEventHandler::new(
+            &self.manifest_store,
+            options.clone(),
+            scheduler,
+            executor,
+            self.stats.clone(),
+            self.system_clock.clone(),
+        )
+        .await?;
 
         // Stop the loop when the executor is shut down *and* all remaining
         // `worker_rx` messages have been drained.
-        while !(self.handler.is_executor_stopped() && self.worker_rx.is_empty()) {
-            crossbeam_channel::select! {
-                recv(db_runs_log_ticker) -> _ => {
-                    self.handler.handle_log_ticker();
-                }
-                recv(self.ticker) -> _ => {
-                    self.handler.handle_ticker();
-                }
-                recv(self.worker_rx) -> msg => {
-                    self.handler.handle_worker_rx(msg.expect("fatal error receiving worker msg"));
-                }
-                recv(self.external_rx) -> _ => {
+        while !(self.cancellation_token.is_cancelled() && worker_rx.is_empty()) {
+            tokio::select! {
+                biased;
+                // check the cancellation token first to avoid starting new compaction tasks when the runtime is shutting down
+                _ = self.cancellation_token.cancelled() => {
                     // Stop the executor. Don't return because there might
                     // still be messages in `worker_rx`. Let the loop continue
                     // to drain them until empty.
-                    self.handler.stop_executor();
+                    handler.stop_executor();
+                }
+                _ = db_runs_log_ticker.tick() => {
+                    handler.handle_log_ticker();
+                }
+                _ = manifest_poll_ticker.tick() => {
+                    handler.handle_ticker();
+                }
+                msg = worker_rx.recv() => {
+                    handler.handle_worker_rx(msg.expect("fatal error receiving worker msg"));
                 }
             }
         }
+
         Ok(())
+    }
+
+    /// Notify the compactor to terminate.
+    pub async fn terminate_background_task(self) {
+        self.cancellation_token.cancel();
     }
 }
 
 struct CompactorEventHandler {
-    tokio_handle: tokio::runtime::Handle,
     state: CompactorState,
     manifest: FenceableManifest,
     options: Arc<CompactorOptions>,
@@ -222,8 +190,7 @@ struct CompactorEventHandler {
 }
 
 impl CompactorEventHandler {
-    fn new(
-        tokio_handle: tokio::runtime::Handle,
+    async fn new(
         manifest_store: &Arc<ManifestStore>,
         options: Arc<CompactorOptions>,
         scheduler: Box<dyn CompactionScheduler>,
@@ -231,15 +198,12 @@ impl CompactorEventHandler {
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
-        let stored_manifest =
-            tokio_handle.block_on(StoredManifest::load(manifest_store.clone()))?;
-        let manifest = tokio_handle.block_on(FenceableManifest::init_compactor(
-            stored_manifest,
-            options.manifest_update_timeout,
-        ))?;
+        let stored_manifest = StoredManifest::load(manifest_store.clone()).await?;
+        let manifest =
+            FenceableManifest::init_compactor(stored_manifest, options.manifest_update_timeout)
+                .await?;
         let state = CompactorState::new(manifest.prepare_dirty()?);
         Ok(Self {
-            tokio_handle,
             state,
             manifest,
             options,
@@ -254,17 +218,20 @@ impl CompactorEventHandler {
         self.log_compaction_state();
     }
 
-    fn handle_ticker(&mut self) {
+    async fn handle_ticker(&mut self) {
         if !self.is_executor_stopped() {
-            self.load_manifest().expect("fatal error loading manifest");
+            self.load_manifest()
+                .await
+                .expect("fatal error loading manifest");
         }
     }
 
-    fn handle_worker_rx(&mut self, msg: WorkerToOrchestratorMsg) {
+    async fn handle_worker_rx(&mut self, msg: WorkerToOrchestratorMsg) {
         let WorkerToOrchestratorMsg::CompactionFinished { id, result } = msg;
         match result {
             Ok(sr) => self
                 .finish_compaction(id, sr)
+                .await
                 .expect("fatal error finishing compaction"),
             Err(err) => {
                 error!("error executing compaction: {:#?}", err);
@@ -281,39 +248,40 @@ impl CompactorEventHandler {
         self.executor.is_stopped()
     }
 
-    fn load_manifest(&mut self) -> Result<(), SlateDBError> {
-        self.tokio_handle.block_on(self.manifest.refresh())?;
+    async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
+        self.manifest.refresh().await?;
         self.refresh_db_state()?;
         Ok(())
     }
 
-    fn write_manifest(&mut self) -> Result<(), SlateDBError> {
+    async fn write_manifest(&mut self) -> Result<(), SlateDBError> {
         // write the checkpoint first so that it points to the manifest with the ssts
         // being removed
-        self.tokio_handle.block_on(self.manifest.write_checkpoint(
-            None,
-            &CheckpointOptions {
-                // TODO(rohan): for now, just write a checkpoint with 15-minute expiry
-                //              so that it's extremely unlikely for the gc to delete ssts
-                //              out from underneath the writer. In a follow up, we'll write
-                //              a checkpoint with no expiry and with metadata indicating its
-                //              a compactor checkpoint. Then, the gc will delete the checkpoint
-                //              based on a configurable timeout
-                lifetime: Some(Duration::from_secs(900)),
-                ..CheckpointOptions::default()
-            },
-        ))?;
+        self.manifest
+            .write_checkpoint(
+                None,
+                &CheckpointOptions {
+                    // TODO(rohan): for now, just write a checkpoint with 15-minute expiry
+                    //              so that it's extremely unlikely for the gc to delete ssts
+                    //              out from underneath the writer. In a follow up, we'll write
+                    //              a checkpoint with no expiry and with metadata indicating its
+                    //              a compactor checkpoint. Then, the gc will delete the checkpoint
+                    //              based on a configurable timeout
+                    lifetime: Some(Duration::from_secs(900)),
+                    ..CheckpointOptions::default()
+                },
+            )
+            .await?;
         self.state
             .merge_remote_manifest(self.manifest.prepare_dirty()?);
         let dirty = self.state.manifest().clone();
-        self.tokio_handle
-            .block_on(self.manifest.update_manifest(dirty))
+        self.manifest.update_manifest(dirty).await
     }
 
-    fn write_manifest_safely(&mut self) -> Result<(), SlateDBError> {
+    async fn write_manifest_safely(&mut self) -> Result<(), SlateDBError> {
         loop {
-            self.load_manifest()?;
-            match self.write_manifest() {
+            self.load_manifest().await?;
+            match self.write_manifest().await {
                 Ok(_) => return Ok(()),
                 Err(SlateDBError::ManifestVersionExists) => {
                     warn!("conflicting manifest version. updating and retrying write again.");
@@ -385,10 +353,14 @@ impl CompactorEventHandler {
         self.state.finish_failed_compaction(id);
     }
 
-    fn finish_compaction(&mut self, id: Uuid, output_sr: SortedRun) -> Result<(), SlateDBError> {
+    async fn finish_compaction(
+        &mut self,
+        id: Uuid,
+        output_sr: SortedRun,
+    ) -> Result<(), SlateDBError> {
         self.state.finish_compaction(id, output_sr);
         self.log_compaction_state();
-        self.write_manifest_safely()?;
+        self.write_manifest_safely().await?;
         self.maybe_schedule_compactions()?;
         self.stats.last_compaction_ts.set(
             self.system_clock
@@ -447,7 +419,7 @@ pub mod stats {
     }
 
     impl CompactionStats {
-        pub(crate) fn new(stat_registry: &StatRegistry) -> Self {
+        pub(crate) fn new(stat_registry: Arc<StatRegistry>) -> Self {
             let stats = Self {
                 last_compaction_ts: Arc::new(Gauge::default()),
                 running_compactions: Arc::new(Gauge::default()),
