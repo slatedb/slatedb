@@ -460,7 +460,7 @@ impl Db {
             let mut maybe_compactor = self.compactor.lock();
             maybe_compactor.take()
         } {
-            compactor.close().await;
+            compactor.terminate_background_task().await;
         }
 
         if let Some(gc) = {

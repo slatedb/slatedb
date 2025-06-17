@@ -138,7 +138,7 @@ impl Compactor {
             self.stats.clone(),
         ));
         let mut handler = CompactorEventHandler::new(
-            &self.manifest_store,
+            self.manifest_store.clone(),
             self.options.clone(),
             scheduler,
             executor,
@@ -192,7 +192,7 @@ struct CompactorEventHandler {
 
 impl CompactorEventHandler {
     async fn new(
-        manifest_store: &Arc<ManifestStore>,
+        manifest_store: Arc<ManifestStore>,
         options: Arc<CompactorOptions>,
         scheduler: Box<dyn CompactionScheduler>,
         executor: Box<dyn CompactionExecutor>,
@@ -755,13 +755,13 @@ mod tests {
         scheduler: Box<MockScheduler>,
         executor: Box<MockExecutor>,
         real_executor: Box<dyn CompactionExecutor>,
-        real_executor_rx: crossbeam_channel::Receiver<WorkerToOrchestratorMsg>,
-        stats_registry: StatRegistry,
+        real_executor_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerToOrchestratorMsg>,
+        stats_registry: Arc<StatRegistry>,
         handler: CompactorEventHandler,
     }
 
     impl CompactorEventHandlerTestFixture {
-        fn new() -> Self {
+        async fn new() -> Self {
             let rt = build_runtime();
             let compactor_options = Arc::new(compactor_options());
             let options = db_options(None);
@@ -778,9 +778,9 @@ mod tests {
 
             let scheduler = Box::new(MockScheduler::new());
             let executor = Box::new(MockExecutor::new());
-            let (real_executor_tx, real_executor_rx) = crossbeam_channel::unbounded();
-            let stats_registry = StatRegistry::new();
-            let compactor_stats = Arc::new(CompactionStats::new(&stats_registry));
+            let (real_executor_tx, real_executor_rx) = tokio::sync::mpsc::unbounded_channel();
+            let stats_registry = Arc::new(StatRegistry::new());
+            let compactor_stats = Arc::new(CompactionStats::new(stats_registry.clone()));
             let real_executor = Box::new(TokioCompactionExecutor::new(
                 rt.handle().clone(),
                 compactor_options.clone(),
@@ -789,14 +789,14 @@ mod tests {
                 compactor_stats.clone(),
             ));
             let handler = CompactorEventHandler::new(
-                rt.handle().clone(),
-                &manifest_store,
-                compactor_options,
+                manifest_store.clone(),
+                compactor_options.clone(),
                 scheduler.clone(),
                 executor.clone(),
-                compactor_stats,
+                compactor_stats.clone(),
                 Arc::new(DefaultSystemClock::new()),
             )
+            .await
             .unwrap();
             let manifest = rt
                 .block_on(StoredManifest::load(manifest_store.clone()))
@@ -867,19 +867,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_should_record_last_compaction_ts() {
+    #[tokio::test]
+    async fn test_should_record_last_compaction_ts() {
         // given:
-        let mut fixture = CompactorEventHandlerTestFixture::new();
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
         fixture.write_l0();
         let compaction = fixture.build_l0_compaction();
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker();
         fixture.assert_and_forward_compactions(1);
-        let msg = fixture
-            .real_executor_rx
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap();
+        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+            .await
+            .unwrap()
+            .expect("timeout");
         let starting_last_ts = fixture
             .stats_registry
             .lookup(LAST_COMPACTION_TS_SEC)
@@ -900,19 +900,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_should_write_manifest_safely() {
+    #[tokio::test]
+    async fn test_should_write_manifest_safely() {
         // given:
-        let mut fixture = CompactorEventHandlerTestFixture::new();
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
         fixture.write_l0();
         let compaction = fixture.build_l0_compaction();
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker();
         fixture.assert_and_forward_compactions(1);
-        let msg = fixture
-            .real_executor_rx
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap();
+        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+            .await
+            .unwrap()
+            .expect("timeout");
         // write an l0 before handling compaction finished
         fixture.write_l0();
 
@@ -943,10 +943,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_should_clear_compaction_on_failure_and_retry() {
+    #[tokio::test]
+    async fn test_should_clear_compaction_on_failure_and_retry() {
         // given:
-        let mut fixture = CompactorEventHandlerTestFixture::new();
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
         fixture.write_l0();
         let compaction = fixture.build_l0_compaction();
         fixture.scheduler.inject_compaction(compaction.clone());
@@ -966,10 +966,10 @@ mod tests {
         fixture.assert_started_compaction(1);
     }
 
-    #[test]
-    fn test_should_not_schedule_conflicting_compaction() {
+    #[tokio::test]
+    async fn test_should_not_schedule_conflicting_compaction() {
         // given:
-        let mut fixture = CompactorEventHandlerTestFixture::new();
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
         fixture.write_l0();
         let compaction = fixture.build_l0_compaction();
         fixture.scheduler.inject_compaction(compaction.clone());
@@ -985,16 +985,19 @@ mod tests {
         assert_eq!(0, fixture.executor.pop_jobs().len())
     }
 
-    #[test]
-    fn test_should_leave_checkpoint_when_removing_ssts_after_compaction() {
+    #[tokio::test]
+    async fn test_should_leave_checkpoint_when_removing_ssts_after_compaction() {
         // given:
-        let mut fixture = CompactorEventHandlerTestFixture::new();
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
         fixture.write_l0();
         let compaction = fixture.build_l0_compaction();
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker();
         fixture.assert_and_forward_compactions(1);
-        let msg = fixture.real_executor_rx.recv().unwrap();
+        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+            .await
+            .unwrap()
+            .expect("timeout");
 
         // when:
         fixture.handler.handle_worker_rx(msg);
