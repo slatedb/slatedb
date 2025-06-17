@@ -464,7 +464,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             || self.settings.compactor_options.is_some()
         {
             let compactor_options = self.settings.compactor_options.unwrap_or_default();
-            let compaction_handle = self.compaction_runtime.unwrap_or_else(|| Handle::current());
+            let compaction_handle = self.compaction_runtime.unwrap_or_else(|| tokio_handle.clone());
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
                 .unwrap_or_else(|| Arc::new(SizeTieredCompactionSchedulerSupplier::default()));
