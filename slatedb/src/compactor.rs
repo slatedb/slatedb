@@ -149,7 +149,7 @@ impl Compactor {
         // `worker_rx` messages have been drained.
         while !(self.cancellation_token.is_cancelled() && worker_rx.is_empty()) {
             fail_point!(Arc::clone(&self.fp_registry), "compactor-main-loop", |_| {
-                return Err(SlateDBError::InvalidCompaction);
+                Err(SlateDBError::InvalidCompaction)
             });
 
             tokio::select! {
