@@ -2802,7 +2802,7 @@ mod tests {
     async fn do_test_should_read_compacted_db(options: Settings) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
-
+        let fp_registry = Arc::new(FailPointRegistry::new());
         let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
             SizeTieredCompactionSchedulerOptions::default(),
         ));
@@ -2810,17 +2810,20 @@ mod tests {
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
             .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
         let ms = ManifestStore::new(&Path::from(path), object_store.clone());
         let mut sm = StoredManifest::load(Arc::new(ms)).await.unwrap();
 
+        fail_parallel::cfg(fp_registry.clone(), "compactor-main-loop", "pause").unwrap();
         // write enough to fill up a few l0 SSTs
         for i in 0..4 {
             db.put(&[b'a' + i; 32], &[1u8 + i; 32]).await.unwrap();
             db.put(&[b'm' + i; 32], &[13u8 + i; 32]).await.unwrap();
         }
+        fail_parallel::cfg(fp_registry.clone(), "compactor-main-loop", "off").unwrap();
         // wait for compactor to compact them
         wait_for_manifest_condition(
             &mut sm,
@@ -2833,11 +2836,13 @@ mod tests {
             db.inner.state.read().state().core().l0.len(),
             db.inner.state.read().state().core().compacted.len()
         );
+        fail_parallel::cfg(fp_registry.clone(), "compactor-main-loop", "pause").unwrap();
         // write more l0s and wait for compaction
         for i in 0..4 {
             db.put(&[b'f' + i; 32], &[6u8 + i; 32]).await.unwrap();
             db.put(&[b's' + i; 32], &[19u8 + i; 32]).await.unwrap();
         }
+        fail_parallel::cfg(fp_registry.clone(), "compactor-main-loop", "off").unwrap();
         wait_for_manifest_condition(
             &mut sm,
             |s| s.l0_last_compacted.is_some() && s.l0.is_empty(),

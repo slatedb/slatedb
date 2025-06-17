@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::UNIX_EPOCH;
 
+use fail_parallel::fail_point;
+use fail_parallel::FailPointRegistry;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -72,6 +74,7 @@ pub(crate) struct Compactor {
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
     cancellation_token: CancellationToken,
+    fp_registry: Arc<FailPointRegistry>,
 }
 
 impl Compactor {
@@ -84,6 +87,7 @@ impl Compactor {
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
         cancellation_token: CancellationToken,
+        fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
         let stats = Arc::new(CompactionStats::new(stat_registry));
         Self {
@@ -94,6 +98,7 @@ impl Compactor {
             stats,
             cancellation_token,
             system_clock,
+            fp_registry,
         }
     }
 
@@ -114,9 +119,7 @@ impl Compactor {
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
     ) {
         let this = self.clone();
-        let compactor_main = move || {
-            tokio_handle.block_on(this.start_async_task())
-        };
+        let compactor_main = move || tokio_handle.block_on(this.start_async_task());
         spawn_bg_thread("slatedb-compactor", cleanup_fn, compactor_main);
     }
 
@@ -145,6 +148,10 @@ impl Compactor {
         // Stop the loop when the executor is shut down *and* all remaining
         // `worker_rx` messages have been drained.
         while !(self.cancellation_token.is_cancelled() && worker_rx.is_empty()) {
+            fail_point!(Arc::clone(&self.fp_registry), "compactor-main-loop", |_| {
+                return Err(SlateDBError::InvalidCompaction);
+            });
+
             tokio::select! {
                 biased;
                 // check the cancellation token first to avoid starting new compaction tasks when the runtime is shutting down
@@ -986,7 +993,11 @@ mod tests {
         // then:
         let current_dbstate = fixture.latest_db_state().await;
         let checkpoint = current_dbstate.checkpoints.last().unwrap();
-        let old_manifest = fixture.manifest_store.read_manifest(checkpoint.manifest_id).await.unwrap();
+        let old_manifest = fixture
+            .manifest_store
+            .read_manifest(checkpoint.manifest_id)
+            .await
+            .unwrap();
         let l0_ids: Vec<SourceId> = old_manifest
             .core
             .l0

@@ -464,7 +464,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             || self.settings.compactor_options.is_some()
         {
             let compactor_options = self.settings.compactor_options.unwrap_or_default();
-            let compaction_handle = self.compaction_runtime.unwrap_or_else(|| tokio_handle.clone());
+            let compaction_handle = self
+                .compaction_runtime
+                .unwrap_or_else(|| tokio_handle.clone());
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
                 .unwrap_or_else(|| Arc::new(SizeTieredCompactionSchedulerSupplier::default()));
@@ -477,6 +479,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 inner.stat_registry.clone(),
                 system_clock.clone(),
                 self.cancellation_token.clone(),
+                self.fp_registry.clone(),
             );
             compactor.start_in_bg_thread(
                 compaction_handle,
@@ -671,6 +674,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     stat_registry: Arc<StatRegistry>,
     cancellation_token: CancellationToken,
     system_clock: Arc<dyn SystemClock>,
+    fp_registry: Arc<FailPointRegistry>,
 }
 
 #[allow(unused)]
@@ -685,6 +689,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             stat_registry: Arc::new(StatRegistry::new()),
             cancellation_token: CancellationToken::new(),
             system_clock: Arc::new(DefaultSystemClock::default()),
+            fp_registry: Arc::new(FailPointRegistry::new()),
         }
     }
 
@@ -720,6 +725,12 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
+    /// Sets the fail point registry to use for the compactor.
+    pub fn with_fp_registry(mut self, fp_registry: Arc<FailPointRegistry>) -> Self {
+        self.fp_registry = fp_registry;
+        self
+    }
+
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
@@ -738,6 +749,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.stat_registry,
             self.system_clock,
             self.cancellation_token,
+            self.fp_registry,
         )
     }
 }
