@@ -297,7 +297,6 @@ impl Admin {
         Ok(())
     }
 
-    /// Creates a new builder for an admin client at the given path.
     ///
     /// ## Arguments
     /// - `path`: the path to the database
