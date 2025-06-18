@@ -93,6 +93,34 @@ jobs:
       - name: Run Doc Tests
         run: cargo test --doc --all-features
 
+  bindings:
+    runs-on: ubuntu-latest
+    needs: tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build and install package with test dependencies
+        working-directory: ./slatedb-py
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          maturin develop
+          pip install -e .[test]
+
+      - name: Run Python tests
+        working-directory: ./slatedb-py
+        run: |
+          source .venv/bin/activate
+          pytest -xvs
+
   microbenchmarks:
     runs-on: ubuntu-latest
     steps:
