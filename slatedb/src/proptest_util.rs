@@ -39,7 +39,9 @@ pub(crate) mod arbitrary {
     }
 
     pub(crate) fn nonempty_bytes(size: usize) -> impl Strategy<Value = Bytes> {
-        vec(any::<u8>(), 1..size).prop_map(Bytes::from)
+        vec(any::<u8>(), 1..size)
+            .prop_filter("Filter out [0; 1]", |v| v != &[0; 1])
+            .prop_map(Bytes::from)
     }
 
     /// Get a deterministic RNG which has a seed derived from proptest,
@@ -399,7 +401,12 @@ pub(crate) mod sample {
             if !can_decrement_without_truncation(end) {
                 let min_len = range.start_bound().map(|b| b.len());
                 let max_len = range.end_bound().map(|b| b.len());
-                return minvalue_bytes(rng, min_len, max_len);
+                let result = minvalue_bytes(rng, min_len, max_len);
+                assert!(
+                    !result.is_empty(),
+                    "calculated empty bytes for range {range:?}"
+                );
+                return result;
             } else if range.start_bound() == Included(end) {
                 return end.clone();
             } else {
@@ -429,7 +436,11 @@ pub(crate) mod sample {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Bound;
+
+    use crate::bytes_range::BytesRange;
     use crate::proptest_util::{arbitrary, sample};
+    use bytes::Bytes;
     use proptest::proptest;
     use proptest::test_runner::{RngAlgorithm, TestRng};
 
@@ -457,5 +468,16 @@ mod tests {
             assert!(key.len() <= 10);
             assert!(value.len() <= 10);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "calculated empty bytes for range")]
+    fn test_bytes_in_range() {
+        let mut rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
+        let range = BytesRange::new(
+            Bound::Unbounded,
+            Bound::Included(Bytes::from_static(&[0; 1])),
+        );
+        sample::bytes_in_range(&mut rng, &range);
     }
 }

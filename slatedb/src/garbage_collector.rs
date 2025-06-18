@@ -68,7 +68,6 @@ trait GcTask {
 pub struct GarbageCollector {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
-    tokio_handle: Handle,
     options: GarbageCollectorOptions,
     stats: Arc<GcStats>,
     system_clock: Arc<dyn SystemClock>,
@@ -82,7 +81,6 @@ impl GarbageCollector {
     ///
     /// * `manifest_store` - The manifest store to use for garbage collection.
     /// * `table_store` - The table store to use for garbage collection.
-    /// * `tokio_handle` - The Tokio runtime handle to use for async operations.
     /// * `options` - Configuration options for the garbage collector.
     /// * `stat_registry` - Registry for tracking garbage collection metrics.
     /// * `system_clock` - Clock implementation for time-based decisions.
@@ -94,7 +92,6 @@ impl GarbageCollector {
     pub(crate) fn new(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
-        tokio_handle: Handle,
         options: GarbageCollectorOptions,
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
@@ -104,7 +101,6 @@ impl GarbageCollector {
         Self {
             manifest_store,
             table_store,
-            tokio_handle,
             options,
             stats,
             system_clock,
@@ -125,11 +121,12 @@ impl GarbageCollector {
     ///   thread completes, with the final result (success or error).
     pub fn start_in_bg_thread(
         &self,
+        tokio_handle: Handle,
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
     ) {
         let this = self.clone();
         let gc_main = move || {
-            this.tokio_handle.block_on(this.start_async_task());
+            tokio_handle.block_on(this.start_async_task());
             Ok(())
         };
         spawn_bg_thread("slatedb-gc", cleanup_fn, gc_main);
@@ -1075,7 +1072,6 @@ mod tests {
         let gc = GarbageCollector::new(
             manifest_store.clone(),
             table_store.clone(),
-            Handle::current(),
             gc_opts,
             stats.clone(),
             Arc::new(DefaultSystemClock::default()),
@@ -1113,14 +1109,13 @@ mod tests {
         let gc = GarbageCollector::new(
             manifest_store.clone(),
             table_store.clone(),
-            Handle::current(),
             gc_opts,
             stats.clone(),
             Arc::new(DefaultSystemClock::default()),
             cancellation_token.clone(),
         );
 
-        gc.start_in_bg_thread(|result| assert!(result.is_ok()));
+        gc.start_in_bg_thread(Handle::current(), |result| assert!(result.is_ok()));
         gc.terminate_background_task().await;
 
         tokio::time::sleep(Duration::from_secs(2)).await;

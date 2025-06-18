@@ -27,6 +27,7 @@ use bytes::Bytes;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
+use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
@@ -41,15 +42,17 @@ use crate::db_iter::DbIterator;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::flush::WalFlushMsg;
 use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{DirtyManifest, FenceableManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushMsg;
+use crate::oracle::Oracle;
 use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
+use crate::utils::MonotonicSeq;
+use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use tracing::{info, warn};
 
@@ -60,14 +63,18 @@ pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) wal_flush_notifier: UnboundedSender<WalFlushMsg>,
     pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: DbStats,
     pub(crate) stat_registry: Arc<StatRegistry>,
+    /// A clock which is guaranteed to be monotonic. it's previous value is
+    /// stored in the manifest and WAL, will be updated after WAL replay.
     pub(crate) mono_clock: Arc<MonotonicClock>,
+    pub(crate) oracle: Arc<Oracle>,
     pub(crate) reader: Reader,
-
+    /// [`wal_buffer`] manages the in-memory WAL buffer, it manages the flushing
+    /// of the WAL buffer to the remote storage.
+    pub(crate) wal_buffer: Arc<WalBufferManager>,
     pub(crate) wal_enabled: bool,
 }
 
@@ -80,33 +87,58 @@ impl DbInner {
         _system_clock: Arc<dyn SystemClock>,
         table_store: Arc<TableStore>,
         manifest: DirtyManifest,
-        wal_flush_notifier: UnboundedSender<WalFlushMsg>,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
         stat_registry: Arc<StatRegistry>,
     ) -> Result<Self, SlateDBError> {
+        // both last_seq and last_committed_seq will be updated after WAL replay.
+        let last_l0_seq = manifest.core.last_l0_seq;
+        let last_seq = MonotonicSeq::new(last_l0_seq);
+        let last_committed_seq = MonotonicSeq::new(last_l0_seq);
+        let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
+        let oracle = Arc::new(
+            Oracle::new(last_committed_seq)
+                .with_last_seq(last_seq)
+                .with_last_remote_persisted_seq(last_remote_persisted_seq),
+        );
+
         let mono_clock = Arc::new(MonotonicClock::new(
             logical_clock,
             manifest.core.last_l0_clock_tick,
         ));
+
+        // state are mostly manifest, including IMM, L0, etc.
         let state = Arc::new(RwLock::new(DbState::new(manifest)));
+
         let db_stats = DbStats::new(stat_registry.as_ref());
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
 
         let reader = Reader {
-            table_store: Arc::clone(&table_store),
+            table_store: table_store.clone(),
             db_stats: db_stats.clone(),
-            mono_clock: Arc::clone(&mono_clock),
-            wal_enabled,
+            mono_clock: mono_clock.clone(),
+            oracle: oracle.clone(),
         };
+
+        let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
+        let wal_buffer = Arc::new(WalBufferManager::new(
+            state.clone(),
+            recent_flushed_wal_id,
+            oracle.clone(),
+            table_store.clone(),
+            mono_clock.clone(),
+            settings.l0_sst_size_bytes,
+            settings.flush_interval,
+        ));
 
         let db_inner = Self {
             state,
             settings,
+            oracle,
             wal_enabled,
             table_store,
-            wal_flush_notifier,
             memtable_flush_notifier,
+            wal_buffer,
             write_notifier,
             db_stats,
             mono_clock,
@@ -205,10 +237,10 @@ impl DbInner {
             .expect("write notifier closed");
 
         // if the write pipeline task exits then this call to rx.await will fail because tx is dropped
-        let current_table = rx.await??;
-
+        // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
+        let mut durable_watcher = rx.await??;
         if options.await_durable {
-            current_table.await_durable().await?;
+            durable_watcher.await_value().await?;
         }
 
         Ok(())
@@ -218,69 +250,58 @@ impl DbInner {
     pub(crate) async fn maybe_apply_backpressure(&self) -> Result<(), SlateDBError> {
         loop {
             let mem_size_bytes = {
-                let guard = self.state.read();
-                // Exclude active memtable and WAL to avoid a write lock.
-                let imm_wal_size = guard
-                    .state()
-                    .imm_wal
-                    .iter()
-                    .map(|imm| {
-                        let metadata = imm.table().metadata();
-                        self.table_store.estimate_encoded_size(
-                            metadata.entry_num,
-                            metadata.entries_size_in_bytes,
-                        )
-                    })
-                    .sum::<usize>();
-                let imm_memtable_size = guard
-                    .state()
-                    .imm_memtable
-                    .iter()
-                    .map(|imm| {
-                        let metadata = imm.table().metadata();
-                        self.table_store.estimate_encoded_size(
-                            metadata.entry_num,
-                            metadata.entries_size_in_bytes,
-                        )
-                    })
-                    .sum::<usize>();
-                imm_wal_size + imm_memtable_size
-            };
-            if mem_size_bytes >= self.settings.max_unflushed_bytes {
-                let (wal_table, mem_table) = {
+                let wal_size = self.wal_buffer.estimated_bytes().await?;
+                let imm_memtable_size = {
                     let guard = self.state.read();
-                    (
-                        guard.state().imm_wal.back().map(|imm| imm.table().clone()),
-                        guard.state().imm_memtable.back().cloned(),
-                    )
+                    // Exclude active memtable to avoid a write lock.
+                    guard
+                        .state()
+                        .imm_memtable
+                        .iter()
+                        .map(|imm| {
+                            let metadata = imm.table().metadata();
+                            self.table_store.estimate_encoded_size(
+                                metadata.entry_num,
+                                metadata.entries_size_in_bytes,
+                            )
+                        })
+                        .sum::<usize>()
                 };
+                wal_size + imm_memtable_size
+            };
+
+            if mem_size_bytes >= self.settings.max_unflushed_bytes {
                 warn!(
                     "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
                     mem_size_bytes, self.settings.max_unflushed_bytes,
                 );
 
-                match (wal_table, mem_table) {
-                    (Some(wal_table), Some(mem_table)) => {
-                        tokio::select! {
-                            result = wal_table.await_durable() => {
-                                result?;
-                            }
-                            result = mem_table.await_flush_to_l0() => {
-                                result?;
-                            }
-                        }
+                self.flush_immutable_memtables().await?;
+
+                let await_flush_to_l0 = async {
+                    let imm = {
+                        let guard = self.state.read();
+                        guard.state().imm_memtable.back().cloned()
+                    };
+                    match imm {
+                        Some(imm) => imm.await_flush_to_l0().await,
+                        None => std::future::pending().await,
                     }
-                    (Some(wal_table), None) => {
-                        wal_table.await_durable().await?;
+                };
+
+                let timeout_fut = tokio::time::sleep(Duration::from_secs(30));
+
+                tokio::select! {
+                    result = await_flush_to_l0 => {
+                        result?;
                     }
-                    (None, Some(mem_table)) => {
-                        mem_table.await_flush_to_l0().await?;
+                    result = self.wal_buffer.await_flush() => {
+                        result?;
                     }
-                    _ => {
-                        // No tables to flush, so backpressure is no longer needed.
-                        break;
+                    _ = timeout_fut => {
+                        warn!("Backpressure timeout: waited 30s, no memtable/WAL flushed yet");
                     }
-                }
+                };
             } else {
                 break;
             }
@@ -289,11 +310,7 @@ impl DbInner {
     }
 
     pub(crate) async fn flush_wals(&self) -> Result<(), SlateDBError> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.wal_flush_notifier
-            .send(WalFlushMsg::FlushImmutableWals { sender: Some(tx) })
-            .map_err(|_| SlateDBError::WalFlushChannelError)?;
-        rx.await?
+        self.wal_buffer.flush().await
     }
 
     // use to manually flush memtables
@@ -307,12 +324,13 @@ impl DbInner {
 
     pub(crate) async fn flush_memtables(&self) -> Result<(), SlateDBError> {
         {
+            let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
             let mut guard = self.state.write();
             if !guard.memtable().is_empty() {
-                let last_wal_id = guard.last_written_wal_id();
-                guard.freeze_memtable(last_wal_id)?;
+                guard.freeze_memtable(last_flushed_wal_id)?;
             }
         }
+
         self.flush_immutable_memtables().await
     }
 
@@ -340,6 +358,12 @@ impl DbInner {
             self.replay_memtable(replayed_table)?;
         }
 
+        // last_committed_seq is updated as WAL is replayed. after replay,
+        // the last_committed_seq is considered same as the last_remote_persisted_seq.
+        self.oracle
+            .last_remote_persisted_seq
+            .store(self.oracle.last_committed_seq.load());
+
         Ok(())
     }
 
@@ -360,7 +384,6 @@ impl DbInner {
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
     /// The handle for the flush thread.
-    wal_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     write_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     compactor: Mutex<Option<Compactor>>,
@@ -483,17 +506,10 @@ impl Db {
 
         // Shutdown the WAL flush thread.
         self.inner
-            .wal_flush_notifier
-            .send(WalFlushMsg::Shutdown)
-            .ok();
-
-        if let Some(flush_task) = {
-            let mut flush_task = self.wal_flush_task.lock();
-            flush_task.take()
-        } {
-            let result = flush_task.await.expect("Failed to join flush thread");
-            info!("flush task exited with {:?}", result);
-        }
+            .wal_buffer
+            .close()
+            .await
+            .expect("Failed to close WAL buffer");
 
         // Shutdown the memtable flush thread.
         self.inner
@@ -930,22 +946,18 @@ impl Db {
         }
     }
 
-    /// TODO: this #[allow(unused)] will be removed soon in #519.
-    #[allow(unused)]
+    #[cfg(test)]
     pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
-        let table = {
-            let guard = self.inner.state.read();
-            let snapshot = guard.snapshot();
-            if self.inner.wal_enabled {
-                snapshot.wal.clone()
-            } else {
+        if self.inner.wal_enabled {
+            self.inner.wal_buffer.await_flush().await
+        } else {
+            let table = {
+                let guard = self.inner.state.read();
+                let snapshot = guard.snapshot();
                 snapshot.memtable.clone()
-            }
-        };
-        if table.is_empty() {
-            return Ok(());
+            };
+            table.await_durable().await
         }
-        table.await_durable().await
     }
 
     pub fn metrics(&self) -> Arc<StatRegistry> {
@@ -1048,11 +1060,17 @@ mod tests {
             .unwrap();
 
         // a sanity check: the wal contains the most recent write
-        assert!(!kv_store.inner.state.write().wal().is_empty());
+        assert_ne!(
+            kv_store.inner.wal_buffer.estimated_bytes().await.unwrap(),
+            0
+        );
 
         // and a flush() should clear it
         kv_store.flush().await.unwrap();
-        assert!(kv_store.inner.state.write().wal().is_empty());
+        assert_eq!(
+            kv_store.inner.wal_buffer.estimated_bytes().await.unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1079,12 +1097,7 @@ mod tests {
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Memory
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Memory))
                 .await
                 .unwrap(),
         );
@@ -1094,12 +1107,7 @@ mod tests {
         assert_eq!(
             None,
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Memory
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Memory))
                 .await
                 .unwrap(),
         );
@@ -1141,12 +1149,7 @@ mod tests {
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Memory
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Memory))
                 .await
                 .unwrap(),
         );
@@ -1156,12 +1159,7 @@ mod tests {
         assert_eq!(
             None,
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Memory
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Memory))
                 .await
                 .unwrap(),
         );
@@ -1196,12 +1194,7 @@ mod tests {
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Remote
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Remote))
                 .await
                 .unwrap(),
         );
@@ -1211,12 +1204,7 @@ mod tests {
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Remote
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Remote))
                 .await
                 .unwrap(),
         );
@@ -1227,12 +1215,7 @@ mod tests {
         assert_eq!(
             None,
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Remote
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Remote))
                 .await
                 .unwrap(),
         );
@@ -1255,12 +1238,8 @@ mod tests {
         let write_options = WriteOptions {
             await_durable: false,
         };
-        let get_memory_options = ReadOptions {
-            durability_filter: Memory,
-        };
-        let get_remote_options = ReadOptions {
-            durability_filter: Remote,
-        };
+        let get_memory_options = ReadOptions::new().with_durability_filter(Memory);
+        let get_remote_options = ReadOptions::new().with_durability_filter(Remote);
 
         db.put_with_options(b"foo", b"bar", &put_options, &write_options)
             .await
@@ -1336,14 +1315,9 @@ mod tests {
         }
         assert_eq!(
             Some(Bytes::copy_from_slice(last_val.as_bytes())),
-            db.get_with_options(
-                b"key",
-                &ReadOptions {
-                    durability_filter: Memory
-                }
-            )
-            .await
-            .unwrap()
+            db.get_with_options(b"key", &ReadOptions::new().with_durability_filter(Memory))
+                .await
+                .unwrap()
         );
         db.flush().await.unwrap();
 
@@ -1396,12 +1370,7 @@ mod tests {
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Remote
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Remote))
                 .await
                 .unwrap(),
         );
@@ -1411,12 +1380,7 @@ mod tests {
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Remote
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Remote))
                 .await
                 .unwrap(),
         );
@@ -1427,12 +1391,7 @@ mod tests {
         assert_eq!(
             None,
             kv_store
-                .get_with_options(
-                    key,
-                    &ReadOptions {
-                        durability_filter: Remote
-                    }
-                )
+                .get_with_options(key, &ReadOptions::new().with_durability_filter(Remote))
                 .await
                 .unwrap(),
         );
@@ -1560,7 +1519,7 @@ mod tests {
             ),
             (
                 "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest",
-                0,
+                2,
             ),
             (
                 "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst",
@@ -2169,24 +2128,25 @@ mod tests {
         ));
 
         // Write data a few times such that each loop results in a memtable flush
-        let mut last_compacted = 0;
+        let mut last_wal_id = 0;
         for i in 0..3 {
             let key = [b'a' + i; 16];
             let value = [b'b' + i; 50];
             kv_store.put(&key, &value).await.unwrap();
+            kv_store.await_flush().await.unwrap();
             let key = [b'j' + i; 16];
             let value = [b'k' + i; 50];
             kv_store.put(&key, &value).await.unwrap();
             let db_state = wait_for_manifest_condition(
                 &mut stored_manifest,
-                |s| s.replay_after_wal_id > last_compacted,
+                |s| s.replay_after_wal_id > last_wal_id,
                 Duration::from_secs(30),
             )
             .await;
 
-            // 1 empty wal at startup + 2 wal per iteration.
-            assert_eq!(db_state.replay_after_wal_id, 1 + (i as u64) * 2 + 2);
-            last_compacted = db_state.replay_after_wal_id
+            // 2 wal per iteration.
+            assert_eq!(db_state.replay_after_wal_id, (i as u64) * 2 + 2);
+            last_wal_id = db_state.replay_after_wal_id
         }
 
         let manifest = stored_manifest.refresh().await.unwrap();
@@ -2230,6 +2190,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let mut options = test_db_options(0, 1, None);
         options.max_unflushed_bytes = 1;
+        options.l0_sst_size_bytes = 1;
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
             .with_fp_registry(fp_registry.clone())
@@ -2244,18 +2205,16 @@ mod tests {
         // Block WAL flush
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
 
-        // 1 imm_wal in memory
+        // 1 wal entries in memory
         db.put_with_options(b"key1", b"val1", &PutOptions::default(), &write_opts)
             .await
             .unwrap();
-
-        let snapshot = db.inner.state.read().snapshot();
 
         // Unblock WAL flush so runtime shuts down nicely even if we have a failure
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
 
         // WAL should pile up in memory since it can't be flushed
-        assert_eq!(snapshot.state.imm_wal.len(), 1);
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
     }
 
     #[tokio::test]
@@ -2311,13 +2270,13 @@ mod tests {
 
         let memtable = {
             let mut lock = kv_store.inner.state.write();
-            lock.wal()
+            lock.memtable()
                 .put(RowEntry::new_value(b"abc1111", b"value1111", 1));
-            lock.wal()
+            lock.memtable()
                 .put(RowEntry::new_value(b"abc2222", b"value2222", 2));
-            lock.wal()
+            lock.memtable()
                 .put(RowEntry::new_value(b"abc3333", b"value3333", 3));
-            lock.wal().table().clone()
+            lock.memtable().table().clone()
         };
 
         let mut iter = memtable.iter();
@@ -2455,6 +2414,9 @@ mod tests {
         // Write some data to memtable
         db.put(b"key1", b"value1").await.unwrap();
 
+        let val = db.get(b"key1").await.unwrap();
+        assert_eq!(val, Some(Bytes::from_static(b"value1")));
+
         let mut state = db.inner.state.write();
         let memtable = state.memtable();
         assert_eq!(memtable.table().last_seq(), Some(1));
@@ -2489,9 +2451,7 @@ mod tests {
         let val = kv_store
             .get_with_options(
                 "foo".as_bytes(),
-                &ReadOptions {
-                    durability_filter: Memory,
-                },
+                &ReadOptions::new().with_durability_filter(Memory),
             )
             .await
             .unwrap();
@@ -2539,9 +2499,7 @@ mod tests {
         let val = kv_store
             .get_with_options(
                 "foo".as_bytes(),
-                &ReadOptions {
-                    durability_filter: Memory,
-                },
+                &ReadOptions::new().with_durability_filter(Memory),
             )
             .await
             .unwrap();
@@ -2583,9 +2541,7 @@ mod tests {
         let val = kv_store
             .get_with_options(
                 "foo".as_bytes(),
-                &ReadOptions {
-                    durability_filter: Memory,
-                },
+                &ReadOptions::new().with_durability_filter(Memory),
             )
             .await
             .unwrap();
@@ -2692,7 +2648,9 @@ mod tests {
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
         let result = db.put(&key1, &value1).await;
+        db.await_flush().await.unwrap();
         assert!(result.is_ok(), "Failed to write key1");
+        assert_eq!(db.inner.wal_buffer.recent_flushed_wal_id(), 2);
 
         let flush_result = db.inner.flush_immutable_memtables().await;
         assert!(flush_result.is_err());
@@ -2779,6 +2737,8 @@ mod tests {
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
 
         // Close, which flushes the latest manifest to the object store
+        // TODO: it might make sense to return an error if there're unflushed wals in memory
+        // on close().
         db.close().await.unwrap();
 
         let manifest_store = ManifestStore::new(&Path::from(path), object_store.clone());
@@ -2795,9 +2755,10 @@ mod tests {
         // Get the latest manifest
         let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
 
-        // The manifest's next_wal_sst_id, which uses `wal_id_last_seen + 1`, should
-        // be the same as the next WAL SST ID based on what's currently in the object store
-        assert_eq!(manifest.core.next_wal_sst_id, next_wal_sst_id);
+        // It's possible that there exists buffered multiple wals in memory, so the next_wal_sst_id
+        // in manifest is greater than the next_wal_sst_id based on what's currently in the object
+        // store unless ALL the wals are flushed.
+        assert!(manifest.core.next_wal_sst_id > next_wal_sst_id);
     }
 
     async fn do_test_should_read_compacted_db(options: Settings) {
