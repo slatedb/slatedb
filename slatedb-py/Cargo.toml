@@ -26,7 +26,7 @@ tokio = { version = "1.40.0", features = ["fs", "macros", "sync", "rt", "rt-mult
 # - https://github.com/PyO3/pyo3/issues/340
 #
 # Work around this using:
-# 
+#
 # https://github.com/PyO3/pyo3/blob/main/guide/src/faq.md#i-cant-run-cargo-test-or-i-cant-build-in-a-cargo-workspace-im-having-linker-issues-like-symbol-not-found-or-undefined-reference-to-_pyexc_systemerror
 [features]
 extension-module = ["pyo3/extension-module"]
