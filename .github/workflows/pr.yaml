@@ -110,12 +110,16 @@ jobs:
       - name: Build and install package with test dependencies
         working-directory: ./slatedb-py
         run: |
+          python -m venv .venv
+          source .venv/bin/activate
           maturin develop
           pip install -e .[test]
 
       - name: Run Python tests
         working-directory: ./slatedb-py
-        run: pytest -xvs
+        run: |
+          source .venv/bin/activate
+          pytest -xvs
 
   microbenchmarks:
     runs-on: ubuntu-latest
