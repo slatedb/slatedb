@@ -15,7 +15,7 @@ use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::types::RowEntry;
-use crate::utils::WatchableOnceCell;
+use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 
 /// Memtable may contains multiple versions of a single user key, with a monotonically increasing sequence number.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -127,10 +127,6 @@ pub(crate) struct ImmutableMemtable {
     flushed: WatchableOnceCell<Result<(), SlateDBError>>,
 }
 
-pub(crate) struct ImmutableWal {
-    table: Arc<KVTable>,
-}
-
 #[self_referencing]
 pub(crate) struct MemTableIteratorInner<T: RangeBounds<KVTableInternalKey>> {
     map: Arc<SkipMap<KVTableInternalKey, RowEntry>>,
@@ -199,16 +195,6 @@ impl ImmutableMemtable {
 
     pub(crate) fn notify_flush_to_l0(&self, result: Result<(), SlateDBError>) {
         self.flushed.write(result);
-    }
-}
-
-impl ImmutableWal {
-    pub(crate) fn new(table: WritableKVTable) -> Self {
-        Self { table: table.table }
-    }
-
-    pub(crate) fn table(&self) -> Arc<KVTable> {
-        self.table.clone()
     }
 }
 
@@ -324,7 +310,7 @@ impl KVTable {
         iterator
     }
 
-    fn put(&self, row: RowEntry) {
+    pub(crate) fn put(&self, row: RowEntry) {
         let internal_key = KVTableInternalKey::new(row.key.clone(), row.seq);
         let previous_size = Cell::new(None);
 
@@ -356,6 +342,10 @@ impl KVTable {
             self.entries_size_in_bytes
                 .fetch_add(row_size, Ordering::Relaxed);
         }
+    }
+
+    pub(crate) fn durable_watcher(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
+        self.durable.reader()
     }
 
     pub(crate) async fn await_durable(&self) -> Result<(), SlateDBError> {
