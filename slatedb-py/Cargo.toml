@@ -1,8 +1,11 @@
 [package]
 name = "slatedb-py"
-version = "0.6.1"
-edition = "2021"
-license = "Apache-2.0"
+description = "A Python binding for SlateDB"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+homepage.workspace = true
 
 [lib]
 name = "slatedb"
