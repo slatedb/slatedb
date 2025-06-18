@@ -3106,7 +3106,6 @@ dependencies = [
  "once_cell",
  "pyo3",
  "pyo3-async-runtimes",
- "pyo3-build-config",
  "slatedb",
  "tokio",
 ]
