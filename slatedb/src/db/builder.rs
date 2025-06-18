@@ -582,7 +582,6 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     stat_registry: Arc<StatRegistry>,
     cancellation_token: CancellationToken,
     system_clock: Arc<dyn SystemClock>,
-    fp_registry: Arc<FailPointRegistry>,
 }
 
 impl<P: Into<Path>> GarbageCollectorBuilder<P> {
@@ -595,7 +594,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             stat_registry: Arc::new(StatRegistry::new()),
             cancellation_token: CancellationToken::new(),
             system_clock: Arc::new(DefaultSystemClock::default()),
-            fp_registry: Arc::new(FailPointRegistry::new()),
         }
     }
 
@@ -621,13 +619,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Sets the cancellation token to use for the garbage collector.
     pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
         self.cancellation_token = cancellation_token;
-        self
-    }
-
-    /// Sets the fail point registry to use for the garbage collector.
-    #[allow(unused)]
-    pub fn with_fp_registry(mut self, fp_registry: Arc<FailPointRegistry>) -> Self {
-        self.fp_registry = fp_registry;
         self
     }
 

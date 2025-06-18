@@ -73,6 +73,7 @@ pub(crate) struct Compactor {
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
     cancellation_token: CancellationToken,
+    #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
 }
 
