@@ -39,7 +39,9 @@ pub(crate) mod arbitrary {
     }
 
     pub(crate) fn nonempty_bytes(size: usize) -> impl Strategy<Value = Bytes> {
-        vec(any::<u8>(), 1..size).prop_map(Bytes::from)
+        vec(any::<u8>(), 1..size)
+            .prop_filter("Filter out [0; 1]", |v| v != &[0; 1])
+            .prop_map(Bytes::from)
     }
 
     /// Get a deterministic RNG which has a seed derived from proptest,
@@ -54,7 +56,7 @@ pub(crate) mod arbitrary {
     }
 
     fn nonempty_bounded_range(size: usize) -> impl Strategy<Value = BytesRange> {
-        (bytes(size), bytes(size))
+        (nonempty_bytes(size), nonempty_bytes(size))
             .prop_filter_map("Filter non-empty ranges", nonempty_range_filter)
             .prop_flat_map(|(start, end)| {
                 prop_oneof![
@@ -96,7 +98,7 @@ pub(crate) mod arbitrary {
     }
 
     fn arbitrary_single_point_bounded_range(size: usize) -> impl Strategy<Value = BytesRange> {
-        bytes(size).prop_flat_map(|a| {
+        nonempty_bytes(size).prop_flat_map(|a| {
             let a_extended = extend_bytes(&a, u8::MIN);
             prop_oneof![
                 Just(BytesRange::new(Included(a.clone()), Included(a.clone()))),
@@ -110,18 +112,6 @@ pub(crate) mod arbitrary {
                 )),
             ]
         })
-    }
-
-    /// Valid ranges which just have the single empty byte array.
-    /// Handled as a special case because an exclusive upper bounded
-    /// range with empty bytes (i.e. `..Bytes::new()`) is empty.
-    fn nonempty_range_edge_cases() -> impl Strategy<Value = BytesRange> {
-        let empty_bytes = Bytes::new();
-        prop_oneof![
-            Just(BytesRange::new(Unbounded, Included(empty_bytes.clone()))),
-            Just(BytesRange::new(Included(empty_bytes.clone()), Unbounded)),
-            Just(BytesRange::new(Excluded(empty_bytes.clone()), Unbounded)),
-        ]
     }
 
     fn min_and_max(a: Bytes, b: Bytes) -> (Bytes, Bytes) {
@@ -147,16 +137,13 @@ pub(crate) mod arbitrary {
     }
 
     pub(crate) fn empty_range(size: usize) -> impl Strategy<Value = BytesRange> {
-        prop_oneof![
-            Just(BytesRange::new(Unbounded, Excluded(Bytes::new()))),
-            bytes(size).prop_flat_map(|a| {
-                prop_oneof![
-                    Just(BytesRange::new(Excluded(a.clone()), Excluded(a.clone()))),
-                    Just(BytesRange::new(Included(a.clone()), Excluded(a.clone()))),
-                    Just(BytesRange::new(Excluded(a.clone()), Included(a.clone()))),
-                ]
-            })
-        ]
+        nonempty_bytes(size).prop_flat_map(|a| {
+            prop_oneof![
+                Just(BytesRange::new(Excluded(a.clone()), Excluded(a.clone()))),
+                Just(BytesRange::new(Included(a.clone()), Excluded(a.clone()))),
+                Just(BytesRange::new(Excluded(a.clone()), Included(a.clone()))),
+            ]
+        })
     }
 
     pub(crate) fn nonempty_range(size: usize) -> impl Strategy<Value = BytesRange> {
@@ -165,7 +152,6 @@ pub(crate) mod arbitrary {
             arbitrary_single_point_bounded_range(size),
             nonempty_partial_bounded_range(size),
             nonempty_bounded_range(size),
-            nonempty_range_edge_cases()
         ]
     }
 
@@ -415,7 +401,12 @@ pub(crate) mod sample {
             if !can_decrement_without_truncation(end) {
                 let min_len = range.start_bound().map(|b| b.len());
                 let max_len = range.end_bound().map(|b| b.len());
-                return minvalue_bytes(rng, min_len, max_len);
+                let result = minvalue_bytes(rng, min_len, max_len);
+                assert!(
+                    !result.is_empty(),
+                    "calculated empty bytes for range {range:?}"
+                );
+                return result;
             } else if range.start_bound() == Included(end) {
                 return end.clone();
             } else {
@@ -445,7 +436,11 @@ pub(crate) mod sample {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Bound;
+
+    use crate::bytes_range::BytesRange;
     use crate::proptest_util::{arbitrary, sample};
+    use bytes::Bytes;
     use proptest::proptest;
     use proptest::test_runner::{RngAlgorithm, TestRng};
 
@@ -473,5 +468,16 @@ mod tests {
             assert!(key.len() <= 10);
             assert!(value.len() <= 10);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "calculated empty bytes for range")]
+    fn test_bytes_in_range() {
+        let mut rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
+        let range = BytesRange::new(
+            Bound::Unbounded,
+            Bound::Included(Bytes::from_static(&[0; 1])),
+        );
+        sample::bytes_in_range(&mut rng, &range);
     }
 }

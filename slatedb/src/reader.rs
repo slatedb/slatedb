@@ -141,14 +141,16 @@ impl Reader {
 
         let mut l0_iters = VecDeque::new();
         for sst in &snapshot.core().l0 {
-            let iter = SstIterator::new_owned(
+            if let Some(iter) = SstIterator::new_owned(
                 range.clone(),
                 sst.clone(),
                 self.table_store.clone(),
                 sst_iter_options,
             )
-            .await?;
-            l0_iters.push_back(iter);
+            .await?
+            {
+                l0_iters.push_back(iter);
+            }
         }
 
         let mut sr_iters = VecDeque::new();
@@ -235,7 +237,7 @@ impl<'a> LevelGet<'a> {
                 self.record_filter_result(&filter_result);
 
                 if filter_result.might_contain_key() {
-                    let iter = SstIterator::for_key(
+                    let maybe_iter = SstIterator::for_key(
                         sst,
                         self.key,
                         self.table_store.clone(),
@@ -243,12 +245,15 @@ impl<'a> LevelGet<'a> {
                     )
                     .await?;
 
-                    let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
-                    if let Some(entry) = iter.next_entry().await? {
-                        if entry.key == self.key {
-                            return Ok(Some(entry));
+                    if let Some(iter) = maybe_iter {
+                        let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
+                        if let Some(entry) = iter.next_entry().await? {
+                            if entry.key == self.key {
+                                return Ok(Some(entry));
+                            }
                         }
                     }
+
                     if matches!(filter_result, FilterPositive) {
                         self.db_stats.sst_filter_false_positives.inc();
                     }
