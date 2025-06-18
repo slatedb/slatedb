@@ -547,6 +547,7 @@ mod tests {
             sst_iter_options,
         )
         .await
+        .unwrap()
         .unwrap();
 
         let read_entry1 = iter.next_entry().await.unwrap().unwrap();
