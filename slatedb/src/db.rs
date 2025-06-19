@@ -1031,6 +1031,36 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
+    #[test]
+    fn test_get_after_put() {
+        let mut runner = new_proptest_runner(None);
+        let runtime = Runtime::new().unwrap();
+
+        let table = sample::table(runner.rng(), 1000, 10);
+        let db_options = test_db_options(0, 1024, None);
+        let db = runtime.block_on(build_database_from_table(&table, db_options, true));
+
+        runner
+            .run(
+                &(arbitrary::bytes(100), arbitrary::bytes(100)),
+                |(key, value)| {
+                    runtime.block_on(async {
+                        if key.len() > 0 && value.len() < 100 {
+                            db.put(&key, &value).await.unwrap();
+                            assert_eq!(
+                                Some(Bytes::from(value)),
+                                db.get_with_options(&key, &ReadOptions::default())
+                                    .await
+                                    .unwrap()
+                            );
+                        }
+                    });
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_no_flush_interval() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
