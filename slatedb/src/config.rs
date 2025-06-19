@@ -390,7 +390,6 @@ pub enum Ttl {
 #[non_exhaustive]
 #[derive(Debug, Copy, Clone)]
 pub enum CheckpointScope {
-    #[non_exhaustive]
     All,
     Durable,
 }
