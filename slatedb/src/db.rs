@@ -1045,10 +1045,10 @@ mod tests {
                 &(arbitrary::bytes(100), arbitrary::bytes(100)),
                 |(key, value)| {
                     runtime.block_on(async {
-                        if key.len() > 0 {
+                        if !key.is_empty() {
                             db.put(&key, &value).await.unwrap();
                             assert_eq!(
-                                Some(Bytes::from(value)),
+                                Some(value),
                                 db.get_with_options(&key, &ReadOptions::default())
                                     .await
                                     .unwrap()
