@@ -233,7 +233,7 @@ pub struct ReadOptions {
 impl Default for ReadOptions {
     fn default() -> Self {
         Self {
-            durability_filter: DurabilityLevel::Remote,
+            durability_filter: DurabilityLevel::Memory,
             dirty: false,
         }
     }

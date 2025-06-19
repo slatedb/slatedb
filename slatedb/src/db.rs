@@ -1031,6 +1031,36 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
+    #[test]
+    fn test_get_after_put() {
+        let mut runner = new_proptest_runner(None);
+        let runtime = Runtime::new().unwrap();
+
+        let table = sample::table(runner.rng(), 1000, 10);
+        let db_options = test_db_options(0, 1024, None);
+        let db = runtime.block_on(build_database_from_table(&table, db_options, true));
+
+        runner
+            .run(
+                &(arbitrary::bytes(100), arbitrary::bytes(100)),
+                |(key, value)| {
+                    runtime.block_on(async {
+                        if !key.is_empty() {
+                            db.put(&key, &value).await.unwrap();
+                            assert_eq!(
+                                Some(value),
+                                db.get_with_options(&key, &ReadOptions::default())
+                                    .await
+                                    .unwrap()
+                            );
+                        }
+                    });
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_no_flush_interval() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -2458,7 +2488,13 @@ mod tests {
         assert_eq!(val, Some("bar".into()));
 
         // Validate committed read should still return None
-        let val = kv_store.get("foo".as_bytes()).await.unwrap();
+        let val = kv_store
+            .get_with_options(
+                "foo".as_bytes(),
+                &ReadOptions::new().with_durability_filter(Remote),
+            )
+            .await
+            .unwrap();
         assert_eq!(val, None);
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
@@ -2494,7 +2530,13 @@ mod tests {
             .await
             .unwrap();
 
-        let val = kv_store.get("foo".as_bytes()).await.unwrap();
+        let val = kv_store
+            .get_with_options(
+                "foo".as_bytes(),
+                &ReadOptions::new().with_durability_filter(Remote),
+            )
+            .await
+            .unwrap();
         assert_eq!(val, Some("bar".into()));
         let val = kv_store
             .get_with_options(
@@ -2536,7 +2578,13 @@ mod tests {
             .await
             .unwrap();
 
-        let val = kv_store.get("foo".as_bytes()).await.unwrap();
+        let val = kv_store
+            .get_with_options(
+                "foo".as_bytes(),
+                &ReadOptions::new().with_durability_filter(Remote),
+            )
+            .await
+            .unwrap();
         assert_eq!(val, Some("bar".into()));
         let val = kv_store
             .get_with_options(
