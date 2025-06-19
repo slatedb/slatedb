@@ -1,9 +1,11 @@
-use ::slatedb::object_store::{memory::InMemory, ObjectStore};
+use ::slatedb::admin::load_object_store_from_env;
+use ::slatedb::config::Settings;
+use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::Db;
 use once_cell::sync::OnceCell;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyDict};
 use pyo3_async_runtimes::tokio::future_into_py;
 use std::backtrace::Backtrace;
 use std::sync::Arc;
@@ -36,11 +38,32 @@ struct PySlateDB {
 #[pymethods]
 impl PySlateDB {
     #[new]
-    fn new(path: String) -> PyResult<Self> {
+    #[pyo3(signature = (path, env_file = None, *, **kwargs))]
+    fn new(
+        path: String,
+        env_file: Option<String>,
+        kwargs: Option<&Bound<PyDict>>,
+    ) -> PyResult<Self> {
         let rt = get_runtime();
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store = if let Some(env_file) = env_file {
+            load_object_store_from_env(Some(env_file)).map_err(create_value_error)?
+        } else {
+            Arc::new(InMemory::new())
+        };
         let db = rt.block_on(async {
-            Db::open(path.as_str(), object_store)
+            let settings = match kwargs.and_then(|k| k.get_item("settings").ok().flatten()) {
+                Some(settings_item) => {
+                    let settings_path = settings_item
+                        .extract::<String>()
+                        .map_err(create_value_error)?;
+                    Settings::from_file(settings_path).map_err(create_value_error)?
+                }
+                None => Settings::load().map_err(create_value_error)?,
+            };
+
+            Db::builder(path, object_store)
+                .with_settings(settings)
+                .build()
                 .await
                 .map_err(create_value_error)
         })?;
