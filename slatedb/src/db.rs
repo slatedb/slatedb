@@ -1045,7 +1045,7 @@ mod tests {
                 &(arbitrary::bytes(100), arbitrary::bytes(100)),
                 |(key, value)| {
                     runtime.block_on(async {
-                        if key.len() > 0 && value.len() < 100 {
+                        if key.len() > 0 {
                             db.put(&key, &value).await.unwrap();
                             assert_eq!(
                                 Some(Bytes::from(value)),
@@ -2488,7 +2488,13 @@ mod tests {
         assert_eq!(val, Some("bar".into()));
 
         // Validate committed read should still return None
-        let val = kv_store.get("foo".as_bytes()).await.unwrap();
+        let val = kv_store
+            .get_with_options(
+                "foo".as_bytes(),
+                &ReadOptions::new().with_durability_filter(Remote),
+            )
+            .await
+            .unwrap();
         assert_eq!(val, None);
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
@@ -2524,7 +2530,13 @@ mod tests {
             .await
             .unwrap();
 
-        let val = kv_store.get("foo".as_bytes()).await.unwrap();
+        let val = kv_store
+            .get_with_options(
+                "foo".as_bytes(),
+                &ReadOptions::new().with_durability_filter(Remote),
+            )
+            .await
+            .unwrap();
         assert_eq!(val, Some("bar".into()));
         let val = kv_store
             .get_with_options(
@@ -2566,7 +2578,13 @@ mod tests {
             .await
             .unwrap();
 
-        let val = kv_store.get("foo".as_bytes()).await.unwrap();
+        let val = kv_store
+            .get_with_options(
+                "foo".as_bytes(),
+                &ReadOptions::new().with_durability_filter(Remote),
+            )
+            .await
+            .unwrap();
         assert_eq!(val, Some("bar".into()));
         let val = kv_store
             .get_with_options(
