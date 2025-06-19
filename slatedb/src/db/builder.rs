@@ -407,6 +407,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Setup communication channels
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (wal_flush_tx, wal_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Create the database inner state
@@ -417,6 +418,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 system_clock.clone(),
                 table_store.clone(),
                 manifest.prepare_dirty()?,
+                wal_flush_tx,
                 memtable_flush_tx,
                 write_tx,
                 stat_registry,
@@ -434,10 +436,11 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Setup background tasks
         let tokio_handle = Handle::current();
-        if inner.wal_enabled {
-            inner.wal_buffer.start_background().await?;
+        let flush_task = if inner.wal_enabled {
+            Some(inner.spawn_flush_task(wal_flush_rx, &tokio_handle))
+        } else {
+            None
         };
-
         let memtable_flush_task =
             inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
         let write_task = inner.spawn_write_task(write_rx, &tokio_handle);
@@ -516,6 +519,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Create and return the Db instance
         Ok(Db {
             inner,
+            wal_flush_task: Mutex::new(flush_task),
             memtable_flush_task: Mutex::new(memtable_flush_task),
             write_task: Mutex::new(write_task),
             compactor: Mutex::new(compactor),

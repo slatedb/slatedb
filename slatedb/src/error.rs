@@ -130,9 +130,6 @@ pub enum SlateDBError {
 
     #[error("Timeout: {msg}")]
     Timeout { msg: String },
-
-    #[error("Unexpected error: {msg}")]
-    UnexpectedError { msg: String },
 }
 
 impl From<std::io::Error> for SlateDBError {

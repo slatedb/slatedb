@@ -314,8 +314,10 @@ mod tests {
             flush_interval: Some(Duration::from_millis(5000)),
             ..Settings::default()
         };
-        test_checkpoint_scope_all(db_options, |manifest| manifest.core.l0.front().unwrap().id)
-            .await;
+        test_checkpoint_scope_all(db_options, |manifest| {
+            SsTableId::Wal(manifest.core.next_wal_sst_id - 1)
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -380,10 +382,10 @@ mod tests {
             path.clone(),
             None,
         ));
-        let sst_handle = table_store.open_sst(table_id).await.unwrap();
+        let last_checkpoint_wal = table_store.open_sst(table_id).await.unwrap();
 
-        let mut sst_iter = SstIterator::for_key(
-            &sst_handle,
+        let mut wal_iter = SstIterator::for_key(
+            &last_checkpoint_wal,
             kv.0,
             Arc::clone(&table_store),
             SstIteratorOptions::default(),
@@ -392,7 +394,7 @@ mod tests {
         .unwrap()
         .expect("Expected Some(iter) but got None");
 
-        let sst_entry = sst_iter.next().await.unwrap().unwrap();
-        assert_eq!(*kv.1, sst_entry.value)
+        let wal_entry = wal_iter.next().await.unwrap().unwrap();
+        assert_eq!(*kv.1, wal_entry.value)
     }
 }
