@@ -4,7 +4,7 @@ Python stub file for slatedb module.
 This module provides a Python interface to SlateDB, a key-value database built in Rust.
 """
 
-from typing import Optional
+from typing import Optional, List, Tuple
 
 class SlateDB:
     """
@@ -14,7 +14,7 @@ class SlateDB:
     and is built with Rust for safety and performance.
     """
     
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, env_file: Optional[str] = None, **kwargs) -> None:
         """
         Create a new SlateDB instance.
         
@@ -38,6 +38,46 @@ class SlateDB:
             ValueError: If the key is empty or there's a database error
         """
         ...
+
+    def put_int(self, key: bytes, value: int) -> None:
+        """
+        Store an integer in the database.
+
+        Args:
+            key: The key as bytes (cannot be empty)
+            value: The value as an integer
+            
+        Raises:
+            ValueError: If the key is empty or there's a database error
+        """
+        ...
+    
+    def put_str(self, key: bytes, value: str) -> None:
+        """
+        Store a string in the database.
+
+        Args:
+            key: The key as bytes (cannot be empty)
+            value: The value as a string
+            
+        Raises:
+            ValueError: If the key is empty or there's a database error
+        """
+        ...
+    
+    def put_float(self, key: bytes, value: float) -> None:
+        """
+        Store a float in the database.
+
+        Args:
+            key: The key as bytes (cannot be empty)
+            value: The value as a float
+            
+        Raises:
+            ValueError: If the key is empty or there's a database error
+        """
+        ...
+    
     
     def get(self, key: bytes) -> Optional[bytes]:
         """
@@ -51,6 +91,41 @@ class SlateDB:
             
         Raises:
             ValueError: If the key is empty or there's a database error
+        """
+        ...
+
+    def get_int(self, key: bytes) -> Optional[int]:
+        """
+        Retrieve an integer by key from the database.
+        """
+        ...
+
+    def get_str(self, key: bytes) -> Optional[str]:    
+        """
+        Retrieve a string by key from the database.
+        """
+        ...
+
+    def get_float(self, key: bytes) -> Optional[float]:
+        """
+        Retrieve a float by key from the database.
+        """
+        ...
+    
+    def scan(self, prefix: bytes, end: Optional[bytes] = None) -> List[Tuple[bytes, bytes]]:
+        """
+        Scan the database for key-value pairs with a given prefix.
+
+        Args:
+            prefix: The prefix to scan for as bytes (cannot be empty)
+            end: The end key to stop at as bytes, exclusive (optional, defaults to None)
+                 if None, scan until the end of prefix+0xFF
+
+        Raises:
+            ValueError: If the prefix is empty or there's a database error
+
+        Returns:
+            A list of tuples containing the key and value as bytes, sorted by key
         """
         ...
     
