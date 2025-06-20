@@ -3,9 +3,10 @@ use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::manifest::store::DirtyManifest;
-use crate::mem_table::{ImmutableMemtable, ImmutableWal, KVTable, WritableKVTable};
+use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::ReadSnapshot;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
+use crate::wal_id::WalIdStore;
 use bytes::Bytes;
 use serde::Serialize;
 use std::cmp;
@@ -94,9 +95,16 @@ impl SsTableHandle {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn with_visible_range(&self, visible_range: BytesRange) -> Self {
         Self::new_compacted(self.id, self.info.clone(), Some(visible_range))
+    }
+
+    // Compacted (non-WAL) SSTs are never empty. They are created by compaction or
+    // memtable flushes, which should never produce empty SSTs. This method returns
+    // the start bound after applying projections.
+    pub(crate) fn compacted_effective_start_bound(&self) -> Bound<Bytes> {
+        assert!(matches!(self.id, Compacted(_)));
+        self.effective_range.start_bound().cloned()
     }
 
     // Compacted (non-WAL) SSTs are never empty. They are created by compaction or
@@ -112,6 +120,27 @@ impl SsTableHandle {
 
     pub(crate) fn range_covers_key(&self, key: &[u8]) -> bool {
         self.effective_range.contains(key)
+    }
+
+    pub(crate) fn compacted_effective_range(&self) -> &BytesRange {
+        &self.effective_range
+    }
+
+    pub(crate) fn compacted_intersection(
+        &self,
+        next_handle: Option<&SsTableHandle>,
+        range: &BytesRange,
+    ) -> Option<BytesRange> {
+        assert!(matches!(self.id, Compacted(_)));
+        if let Some(next_handle) = next_handle {
+            BytesRange::new(
+                self.compacted_effective_start_bound(),
+                Excluded(next_handle.compacted_effective_start_key().clone()),
+            )
+            .intersect(range)
+        } else {
+            self.effective_range.intersect(range)
+        }
     }
 
     pub(crate) fn intersects_range(&self, end_bound: Bound<Bytes>, range: &BytesRange) -> bool {
@@ -276,9 +305,7 @@ impl SortedRun {
 
 pub(crate) struct DbState {
     memtable: WritableKVTable,
-    wal: WritableKVTable,
     state: Arc<COWDbState>,
-    last_seq: u64,
     error: WatchableOnceCell<SlateDBError>,
 }
 
@@ -286,7 +313,6 @@ pub(crate) struct DbState {
 #[derive(Clone)]
 pub(crate) struct COWDbState {
     pub(crate) imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
-    pub(crate) imm_wal: VecDeque<Arc<ImmutableWal>>,
     pub(crate) manifest: DirtyManifest,
 }
 
@@ -372,7 +398,6 @@ impl CoreDbState {
 #[derive(Clone)]
 pub(crate) struct DbStateSnapshot {
     pub(crate) memtable: Arc<KVTable>,
-    pub(crate) wal: Arc<KVTable>,
     pub(crate) state: Arc<COWDbState>,
 }
 
@@ -381,16 +406,8 @@ impl ReadSnapshot for DbStateSnapshot {
         Arc::clone(&self.memtable)
     }
 
-    fn wal(&self) -> Arc<KVTable> {
-        Arc::clone(&self.wal)
-    }
-
     fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>> {
         &self.state.imm_memtable
-    }
-
-    fn imm_wal(&self) -> &VecDeque<Arc<ImmutableWal>> {
-        &self.state.imm_wal
     }
 
     fn core(&self) -> &CoreDbState {
@@ -400,17 +417,13 @@ impl ReadSnapshot for DbStateSnapshot {
 
 impl DbState {
     pub fn new(manifest: DirtyManifest) -> Self {
-        let last_l0_seq = manifest.core.last_l0_seq;
         Self {
             memtable: WritableKVTable::new(),
-            wal: WritableKVTable::new(),
             state: Arc::new(COWDbState {
                 imm_memtable: VecDeque::new(),
-                imm_wal: VecDeque::new(),
                 manifest,
             }),
             error: WatchableOnceCell::new(),
-            last_seq: last_l0_seq,
         }
     }
 
@@ -421,14 +434,8 @@ impl DbState {
     pub fn snapshot(&self) -> DbStateSnapshot {
         DbStateSnapshot {
             memtable: self.memtable.table().clone(),
-            wal: self.wal.table().clone(),
             state: self.state.clone(),
         }
-    }
-
-    pub fn last_written_wal_id(&self) -> u64 {
-        assert!(self.state.core().next_wal_sst_id > 0);
-        self.state.core().next_wal_sst_id - 1
     }
 
     pub fn error_reader(&self) -> WatchableOnceCellReader<SlateDBError> {
@@ -438,10 +445,6 @@ impl DbState {
     // mutations
     pub fn record_fatal_error(&mut self, error: SlateDBError) {
         self.error.write(error);
-    }
-
-    pub fn wal(&mut self) -> &mut WritableKVTable {
-        &mut self.wal
     }
 
     pub fn memtable(&mut self) -> &mut WritableKVTable {
@@ -456,7 +459,7 @@ impl DbState {
         self.state = Arc::new(state);
     }
 
-    pub fn freeze_memtable(&mut self, wal_id: u64) -> Result<(), SlateDBError> {
+    pub fn freeze_memtable(&mut self, recent_flushed_wal_id: u64) -> Result<(), SlateDBError> {
         if let Some(err) = self.error.reader().read() {
             return Err(err.clone());
         }
@@ -464,7 +467,10 @@ impl DbState {
         let mut state = self.state_copy();
         state
             .imm_memtable
-            .push_front(Arc::new(ImmutableMemtable::new(old_memtable, wal_id)));
+            .push_front(Arc::new(ImmutableMemtable::new(
+                old_memtable,
+                recent_flushed_wal_id,
+            )));
         self.update_state(state);
         Ok(())
     }
@@ -479,27 +485,6 @@ impl DbState {
         assert!(self.memtable.is_empty());
         let _ = std::mem::replace(&mut self.memtable, memtable);
         Ok(())
-    }
-
-    pub fn freeze_wal(&mut self) -> Result<(), SlateDBError> {
-        if let Some(err) = self.error.reader().read() {
-            return Err(err.clone());
-        }
-        if self.wal.table().is_empty() {
-            return Ok(());
-        }
-        let old_wal = std::mem::replace(&mut self.wal, WritableKVTable::new());
-        let mut state = self.state_copy();
-        let imm_wal = Arc::new(ImmutableWal::new(old_wal));
-        state.imm_wal.push_front(imm_wal);
-        self.update_state(state);
-        Ok(())
-    }
-
-    pub fn pop_imm_wal(&mut self) {
-        let mut state = self.state_copy();
-        state.imm_wal.pop_back();
-        self.update_state(state);
     }
 
     pub fn move_imm_memtable_to_l0(
@@ -535,28 +520,19 @@ impl DbState {
         Ok(())
     }
 
-    pub fn increment_next_wal_id(&mut self) {
+    /// increment the next wal id, and return the previous value.
+    pub fn increment_next_wal_id(&mut self) -> u64 {
         let mut state = self.state_copy();
+        let next_wal_id = state.manifest.core.next_wal_sst_id;
         state.manifest.core.next_wal_sst_id += 1;
         self.update_state(state);
+        next_wal_id
     }
 
     pub fn set_next_wal_id(&mut self, next_wal_id: u64) {
         let mut state = self.state_copy();
         state.manifest.core.next_wal_sst_id = next_wal_id;
         self.update_state(state);
-    }
-
-    /// increment_seq is called whenever a new write is performed.
-    pub fn increment_seq(&mut self) -> u64 {
-        self.last_seq += 1;
-        self.last_seq
-    }
-
-    /// update_last_seq is called when we replay the WALs to recover the
-    /// latest sequence number.
-    pub fn update_last_seq(&mut self, seq: u64) {
-        self.last_seq = seq;
     }
 
     pub fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyManifest) {
@@ -592,6 +568,14 @@ impl DbState {
         };
         state.manifest = remote_manifest;
         self.update_state(state);
+    }
+}
+
+impl WalIdStore for parking_lot::RwLock<DbState> {
+    /// increment the next wal id, and return the previous value.
+    fn next_wal_id(&self) -> u64 {
+        let mut state = self.write();
+        state.increment_next_wal_id()
     }
 }
 

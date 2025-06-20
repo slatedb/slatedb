@@ -5,3 +5,6 @@
 proptest-regressions/
 tmp
 .vscode
+
+*.pyc
+*.so

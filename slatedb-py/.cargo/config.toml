@@ -1,0 +1,15 @@
+# Can't directly depend on pyo3 on macs due to:
+#
+# - https://github.com/PyO3/pyo3/issues/2521
+# - https://github.com/PyO3/pyo3/issues/340
+#
+# Work around this using:
+#
+# https://github.com/PyO3/pyo3/blob/main/guide/src/faq.md#i-cant-run-cargo-test-or-i-cant-build-in-a-cargo-workspace-im-having-linker-issues-like-symbol-not-found-or-undefined-reference-to-_pyexc_systemerror
+#
+# But rather than define the feature for all architectures (which causes Macs
+# to fail when using --all-features), we define it only for non-macOS and
+# non-iOS targets.
+# I think you need the default to be all(not(x), not(y)) or not(any(x, y)).
+[target.'cfg(all(not(target_os = "macos"), not(target_os = "ios")))'.features]
+extension-module = ["pyo3/extension-module"]

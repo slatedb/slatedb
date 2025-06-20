@@ -7,6 +7,8 @@ use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use rand::RngCore;
 use std::future::Future;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ulid::Ulid;
@@ -247,6 +249,34 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
     // if we didn't find a mismatch yet then the prev block's key must be shorter,
     // so just use the common prefix plus the next byte in this block's key
     this_block_first_key.slice(..prev_block_last_key.len() + 1)
+}
+
+pub(crate) struct MonotonicSeq {
+    val: AtomicU64,
+}
+
+impl MonotonicSeq {
+    pub fn new(initial_value: u64) -> Self {
+        Self {
+            val: AtomicU64::new(initial_value),
+        }
+    }
+
+    pub fn next(&self) -> u64 {
+        self.val.fetch_add(1, SeqCst) + 1
+    }
+
+    pub fn store(&self, value: u64) {
+        self.val.store(value, SeqCst);
+    }
+
+    pub fn load(&self) -> u64 {
+        self.val.load(SeqCst)
+    }
+
+    pub fn store_if_greater(&self, value: u64) {
+        self.val.fetch_max(value, SeqCst);
+    }
 }
 
 // TODO replace this with our rand module
