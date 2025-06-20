@@ -81,25 +81,22 @@ where
 {
     // Wrap the future so we catch panics, then map its output into
     // calling cleanup_fn before returning the final Result<T, _>
-    let wrapped = AssertUnwindSafe(future)
-        .catch_unwind()
-        .map(move |outcome| {
-            // Normalize panic vs. normal result
-            let result = match outcome {
-                Ok(Ok(val))   => Ok(val),
-                Ok(Err(e))    => Err(e),
-                Err(panic)    => Err(BackgroundTaskPanic(Arc::new(Mutex::new(panic)))),
-            };
-            // This runs *before* the task ends, so your future’s locals
-            // are still alive here
-            cleanup_fn(&result);
-            result
-        });
+    let wrapped = AssertUnwindSafe(future).catch_unwind().map(move |outcome| {
+        // Normalize panic vs. normal result
+        let result = match outcome {
+            Ok(Ok(val)) => Ok(val),
+            Ok(Err(e)) => Err(e),
+            Err(panic) => Err(BackgroundTaskPanic(Arc::new(Mutex::new(panic)))),
+        };
+        // This runs *before* the task ends, so your future’s locals
+        // are still alive here
+        cleanup_fn(&result);
+        result
+    });
 
     // One spawn, one task: future lives until this task completes
     handle.spawn(wrapped)
 }
-
 
 /// Spawn a monitored background os thread. The thread must return a Result<T, SlateDBError>.
 /// The thread is spawned by a monitor thread. When the thread exits, the monitor thread
