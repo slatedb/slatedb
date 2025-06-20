@@ -51,7 +51,7 @@ use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::MonotonicSeq;
+use crate::utils::{MapSlateDBError, MonotonicSeq};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use tracing::{info, warn};
@@ -318,7 +318,9 @@ impl DbInner {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
             .send(MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) })
-            .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
+            .map_slatedb_err(self.state.read().error_reader(), |_| {
+                SlateDBError::MemtableFlushChannelError
+            })?;
         rx.await?
     }
 

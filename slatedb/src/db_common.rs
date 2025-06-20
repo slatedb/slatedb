@@ -4,6 +4,7 @@ use crate::db::DbInner;
 use crate::db_state::DbState;
 use crate::error::SlateDBError;
 use crate::mem_table_flush::MemtableFlushMsg;
+use crate::utils::MapSlateDBError;
 use crate::wal_replay::ReplayedMemtable;
 
 impl DbInner {
@@ -36,7 +37,9 @@ impl DbInner {
         guard.freeze_memtable(wal_id)?;
         self.memtable_flush_notifier
             .send(MemtableFlushMsg::FlushImmutableMemtables { sender: None })
-            .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
+            .map_slatedb_err(self.state.read().error_reader(), |_| {
+                SlateDBError::MemtableFlushChannelError
+            })?;
         Ok(())
     }
 

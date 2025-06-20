@@ -272,6 +272,43 @@ impl MonotonicSeq {
     }
 }
 
+/// An extension trait that adds a `.map_slatedb_err(...)` method to `Result<T, E>`.
+pub trait MapSlateDBError<T, E> {
+    /// Maps a `Result<T, E>` to a `Result<T, SlateDBError>`. If `error_reader` is set, it will
+    /// return the error in `error_reader`, otherwise maps error to SlateDBError with op.
+    ///
+    /// This is useful for converting channel errors into SlateDBErrors when the database is
+    /// in an error state but hasn't completely shut down yet. In such cases, a receiving
+    /// channel could be closed or dropped when another thread tries to write to it.
+    fn map_slatedb_err<O>(
+        self,
+        error_reader: WatchableOnceCellReader<SlateDBError>,
+        op: O,
+    ) -> Result<T, SlateDBError>
+    where
+        O: FnOnce(E) -> SlateDBError;
+}
+
+impl<T, E> MapSlateDBError<T, E> for Result<T, E> {
+    #[inline]
+    fn map_slatedb_err<O>(
+        self,
+        error_reader: WatchableOnceCellReader<SlateDBError>,
+        op: O,
+    ) -> Result<T, SlateDBError>
+    where
+        O: FnOnce(E) -> SlateDBError,
+    {
+        if let Some(err) = error_reader.read() {
+            return Err(err);
+        }
+        match self {
+            Err(e) => Err(op(e)),
+            Ok(t) => Ok(t),
+        }
+    }
+}
+
 // TODO replace this with our rand module
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 pub(crate) fn uuid() -> Uuid {
