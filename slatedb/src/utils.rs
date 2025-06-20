@@ -65,10 +65,9 @@ impl<T: Clone> WatchableOnceCellReader<T> {
     }
 }
 
-/// Spawn a monitored background tokio task. The task must return a Result<T, SlateDBError>.
-/// The task is spawned by a monitor task. When the task exits, the monitor task
-/// calls a provided cleanup fn with a reference to the returned result. If the spawned task
-/// panics, the cleanup fn is called with Err(BackgroundTaskPanic).
+/// Spawn a background tokio task. The task must return a Result<T, SlateDBError>.
+/// When the task exits, the provided cleanup fn with a reference to the returned
+/// result. If the task panics, the cleanup fn is called with Err(BackgroundTaskPanic).
 pub(crate) fn spawn_bg_task<F, T, C>(
     handle: &tokio::runtime::Handle,
     cleanup_fn: C,
@@ -79,17 +78,12 @@ where
     T: Send + 'static,
     C: FnOnce(&Result<T, SlateDBError>) + Send + 'static,
 {
-    // Wrap the future so we catch panics, then map its output into
-    // calling cleanup_fn before returning the final Result<T, _>
     let wrapped = AssertUnwindSafe(future).catch_unwind().map(move |outcome| {
-        // Normalize panic vs. normal result
         let result = match outcome {
             Ok(Ok(val)) => Ok(val),
             Ok(Err(e)) => Err(e),
             Err(panic) => Err(BackgroundTaskPanic(Arc::new(Mutex::new(panic)))),
         };
-        // This runs *before* the task ends, so your future’s locals
-        // are still alive here
         cleanup_fn(&result);
         result
     });
