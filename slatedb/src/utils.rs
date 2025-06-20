@@ -5,8 +5,10 @@ use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
+use futures::FutureExt;
 use rand::RngCore;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
@@ -77,27 +79,27 @@ where
     T: Send + 'static,
     C: FnOnce(&Result<T, SlateDBError>) + Send + 'static,
 {
-    let inner_handle = handle.clone();
-    handle.spawn(async move {
-        let jh = inner_handle.spawn(future);
-        match jh.await {
-            Ok(result) => {
-                cleanup_fn(&result);
-                result
-            }
-            Err(join_err) => {
-                // task panic'd or was cancelled
-                let err = Err(BackgroundTaskPanic(Arc::new(Mutex::new(
-                    join_err
-                        .try_into_panic()
-                        .unwrap_or_else(|_| Box::new("background task was aborted")),
-                ))));
-                cleanup_fn(&err);
-                err
-            }
-        }
-    })
+    // Wrap the future so we catch panics, then map its output into
+    // calling cleanup_fn before returning the final Result<T, _>
+    let wrapped = AssertUnwindSafe(future)
+        .catch_unwind()
+        .map(move |outcome| {
+            // Normalize panic vs. normal result
+            let result = match outcome {
+                Ok(Ok(val))   => Ok(val),
+                Ok(Err(e))    => Err(e),
+                Err(panic)    => Err(BackgroundTaskPanic(Arc::new(Mutex::new(panic)))),
+            };
+            // This runs *before* the task ends, so your future’s locals
+            // are still alive here
+            cleanup_fn(&result);
+            result
+        });
+
+    // One spawn, one task: future lives until this task completes
+    handle.spawn(wrapped)
 }
+
 
 /// Spawn a monitored background os thread. The thread must return a Result<T, SlateDBError>.
 /// The thread is spawned by a monitor thread. When the thread exits, the monitor thread
