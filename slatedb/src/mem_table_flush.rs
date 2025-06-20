@@ -216,6 +216,15 @@ impl DbInner {
             // remaining `rx` flushes and checkpoints have been drained.
             let result = core_flush_loop(&this, &mut flusher, &mut flush_rx).await;
 
+            // Record error state before closing flush_rx in drain_messages. Thus, any
+            // send() that returns a SendError (channel closed) can check the error
+            // state and propagate it. We leave the cleanup_fn to record the error state
+            // again in case core_flush_loop panics.
+            if let Err(err) = &result {
+                let mut state = this.state.write();
+                state.record_fatal_error(err.clone());
+            }
+
             // respond to any pending msgs
             let pending_error = result.clone().err().unwrap_or(BackgroundTaskShutdown);
             Self::drain_messages(&mut flush_rx, &pending_error).await;
@@ -234,7 +243,6 @@ impl DbInner {
             move |result| {
                 let err = bg_task_result_into_err(result);
                 warn!("memtable flush task exited with {:?}", err);
-                // notify any waiters that the task has exited
                 let mut state = this.state.write();
                 state.record_fatal_error(err.clone());
                 info!("notifying in-memory memtable of error");

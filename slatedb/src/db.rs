@@ -2973,7 +2973,11 @@ mod tests {
 
         // assert that db1 can no longer write.
         let err = do_put(&db1, b"1", b"1").await;
-        assert!(matches!(err, Err(SlateDBError::Fenced)));
+        assert!(
+            matches!(err, Err(SlateDBError::Fenced)),
+            "got non-fenced error: {:?}",
+            err
+        );
 
         do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
