@@ -66,7 +66,7 @@ impl<T: Clone> WatchableOnceCellReader<T> {
 }
 
 /// Spawn a background tokio task. The task must return a Result<T, SlateDBError>.
-/// When the task exits, the provided cleanup fn with a reference to the returned
+/// When the task exits, the provided cleanup fn is called with a reference to the returned
 /// result. If the task panics, the cleanup fn is called with Err(BackgroundTaskPanic).
 pub(crate) fn spawn_bg_task<F, T, C>(
     handle: &tokio::runtime::Handle,
@@ -87,15 +87,13 @@ where
         cleanup_fn(&result);
         result
     });
-
-    // One spawn, one task: future lives until this task completes
     handle.spawn(wrapped)
 }
 
-/// Spawn a monitored background os thread. The thread must return a Result<T, SlateDBError>.
-/// The thread is spawned by a monitor thread. When the thread exits, the monitor thread
-/// calls a provided cleanup fn with the returned result. If the spawned thread panics, the
-/// cleanup fn is called with Err(BackgroundTaskPanic).
+/// Spawn a background os thread for a function. The function must return a
+/// Result<T, SlateDBError>. When the thread exits, the provided cleanup fn is called with
+/// a reference to the returned result. If the function panics, the cleanup fn is called
+/// with Err(BackgroundTaskPanic).
 pub(crate) fn spawn_bg_thread<F, T, C>(
     name: &str,
     cleanup_fn: C,
@@ -106,30 +104,20 @@ where
     T: Send + 'static,
     C: FnOnce(&Result<T, SlateDBError>) + Send + 'static,
 {
-    let monitored_name = String::from(name);
-    let monitor_name = format!("{}-monitor", name);
+    let thread_name = name.to_string();
     std::thread::Builder::new()
-        .name(monitor_name)
+        .name(thread_name)
         .spawn(move || {
-            let inner = std::thread::Builder::new()
-                .name(monitored_name)
-                .spawn(f)
-                .expect("failed to create monitored thread");
-            let result = inner.join();
-            match result {
-                Err(err) => {
-                    // the thread panic'd
-                    let err = Err(BackgroundTaskPanic(Arc::new(Mutex::new(err))));
-                    cleanup_fn(&err);
-                    err
-                }
-                Ok(result) => {
-                    cleanup_fn(&result);
-                    result
-                }
-            }
+            let outcome = std::panic::catch_unwind(AssertUnwindSafe(f));
+            let result: Result<_, SlateDBError> = match outcome {
+                Ok(Ok(val)) => Ok(val),
+                Ok(Err(e)) => Err(e),
+                Err(panic_payload) => Err(BackgroundTaskPanic(Arc::new(Mutex::new(panic_payload)))),
+            };
+            cleanup_fn(&result);
+            result
         })
-        .expect("failed to create monitor thread")
+        .expect("failed to spawn monitored thread")
 }
 
 pub(crate) fn system_time_to_millis(system_time: SystemTime) -> i64 {
