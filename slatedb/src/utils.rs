@@ -78,6 +78,12 @@ where
     T: Send + 'static,
     C: FnOnce(&Result<T, SlateDBError>) + Send + 'static,
 {
+    // NOTE: It is critical that the future lives as long as the cleanup_fn.
+    //       Otherwise, there is a gap where everything owned by the futured is dropped
+    //       before the cleanup_fn runs. Since our cleanup_fn's often set error states
+    //       on the db, this would result in a gap where the db is not in an error state
+    //       but resources such as channels have been dropped or closed. See #623 for
+    //       details.
     let wrapped = AssertUnwindSafe(future).catch_unwind().map(move |outcome| {
         let result = match outcome {
             Ok(Ok(val)) => Ok(val),
@@ -104,6 +110,12 @@ where
     T: Send + 'static,
     C: FnOnce(&Result<T, SlateDBError>) + Send + 'static,
 {
+    // NOTE: It is critical that the function lives as long as the cleanup_fn.
+    //       Otherwise, there is a gap where everything owned by the function is dropped
+    //       before the cleanup_fn runs. Since our cleanup_fn's often set error states
+    //       on the db, this would result in a gap where the db is not in an error state
+    //       but resources such as channels have been dropped or closed. See #623 for
+    //       details.
     let thread_name = name.to_string();
     std::thread::Builder::new()
         .name(thread_name)
