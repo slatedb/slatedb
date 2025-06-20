@@ -332,7 +332,7 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key, spawn_bg_task,
-        spawn_bg_thread, WatchableOnceCell,
+        spawn_bg_thread, MapSlateDBError, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
@@ -627,5 +627,54 @@ mod tests {
         // a buffer of the minimal size, as Bytes doesn't expose the underlying buffer's
         // capacity. The best we can do is assert it allocated a new buffer.
         assert_ne!(clamped.as_ptr(), slice.as_ptr());
+    }
+
+    #[test]
+    fn test_map_slatedb_err_with_existing_error() {
+        let error_cell = WatchableOnceCell::new();
+        error_cell.write(SlateDBError::Fenced);
+        let error_reader = error_cell.reader();
+        let result: Result<i32, &str> = Ok(42);
+        let mapped = result.map_slatedb_err(error_reader, |_| {
+            SlateDBError::Unsupported("not used".to_string())
+        });
+        assert!(matches!(mapped, Err(SlateDBError::Fenced)));
+    }
+
+    #[test]
+    fn test_map_slatedb_err_with_ok_result() {
+        let error_cell = WatchableOnceCell::new();
+        let error_reader = error_cell.reader();
+        let result: Result<i32, &str> = Ok(42);
+        let mapped = result.map_slatedb_err(error_reader, |e| SlateDBError::UnexpectedError {
+            msg: e.to_string(),
+        });
+        assert!(matches!(mapped, Ok(42)));
+    }
+
+    #[test]
+    fn test_map_slatedb_err_with_err_result() {
+        let error_cell = WatchableOnceCell::new();
+        let error_reader = error_cell.reader();
+        let result: Result<i32, &str> = Err("test error");
+        let mapped = result.map_slatedb_err(error_reader, |e| SlateDBError::UnexpectedError {
+            msg: e.to_string(),
+        });
+        match mapped {
+            Err(SlateDBError::UnexpectedError { msg }) => assert_eq!(msg, "test error"),
+            _ => panic!("Expected UnexpectedError with 'test error' message"),
+        }
+    }
+
+    #[test]
+    fn test_map_slatedb_err_precedence() {
+        let error_cell = WatchableOnceCell::new();
+        error_cell.write(SlateDBError::Fenced);
+        let error_reader = error_cell.reader();
+        let result: Result<i32, &str> = Err("test error");
+        let mapped = result.map_slatedb_err(error_reader, |e| SlateDBError::UnexpectedError {
+            msg: e.to_string(),
+        });
+        assert!(matches!(mapped, Err(SlateDBError::Fenced)));
     }
 }
