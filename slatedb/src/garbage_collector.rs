@@ -53,9 +53,8 @@ trait GcTask {
 /// - Compacted SSTs that are no longer referenced by active manifests or checkpoints
 /// - Old manifests that are not needed for recovery or checkpoints
 ///
-/// The garbage collector can run in three modes:
+/// The garbage collector can run in two modes:
 ///
-/// - As a background thread with [`start_in_bg_thread`](GarbageCollector::start_in_bg_thread)
 /// - As an async task with [`run_async_task`](GarbageCollector::run_async_task)
 /// - As a one-time operation with [`run_gc_once`](GarbageCollector::run_gc_once)
 ///
@@ -107,13 +106,7 @@ impl GarbageCollector {
     }
 
     /// Starts the garbage collector. This method performs the actual garbage collection.
-    /// The garbage collector runs until the cancellation token is cancelled. Use
-    /// [`terminate_background_task`](GarbageCollector::terminate_background_task) to stop the
-    /// garbage collector.
-    ///
-    /// Unlike [`start_in_bg_thread`](GarbageCollector::start_in_bg_thread), this method
-    /// uses the current Tokio runtime instead of creating a new thread. This is useful
-    /// when you want to run the garbage collector within an existing async runtime.
+    /// The garbage collector runs until the cancellation token is cancelled.
     pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
         let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) = self.gc_tasks();
         let mut compacted_ticker = compacted_gc_task.ticker();

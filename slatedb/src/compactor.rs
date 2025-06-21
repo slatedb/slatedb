@@ -96,13 +96,16 @@ impl Compactor {
     }
 
     /// Starts the compactor. This method performs the actual compaction event loop.
-    /// The compactor runs until the cancellation token is cancelled. Use
-    /// [`terminate_background_task`](Compactor::terminate_background_task) to stop the
-    /// compactor.
+    /// The compactor runs until the cancellation token is cancelled. The compactor's
+    /// event loop always runs on the current runtime, while the compactor executor
+    /// runs on the provided runtime. This is to keep long-running compaction tasks
+    /// from blocking the main runtime.
     ///
-    /// Unlike [`start_in_bg_thread`](Compactor::start_in_bg_thread), this method
-    /// uses the current Tokio runtime instead of creating a new thread. This is useful
-    /// when you want to run the compactor within an existing async runtime.
+    /// ## Arguments
+    /// * `compactor_runtime` - The runtime to use for running the compactor executor.
+    ///
+    /// ## Returns
+    /// * `Result<(), SlateDBError>` - The result of the compaction event loop.
     pub async fn run_async_task(&self, compactor_runtime: Handle) -> Result<(), SlateDBError> {
         let mut db_runs_log_ticker = tokio::time::interval(Duration::from_secs(10));
         let mut manifest_poll_ticker = tokio::time::interval(self.options.poll_interval);
