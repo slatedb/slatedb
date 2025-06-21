@@ -36,7 +36,6 @@ use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::clock::{LogicalClock, SystemClock};
-use crate::compactor::Compactor;
 use crate::config::{PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions};
 use crate::db_iter::DbIterator;
 use crate::db_state::{DbState, SsTableId};
@@ -386,9 +385,8 @@ pub struct Db {
     /// The handle for the flush thread.
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     write_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
-    compactor: Mutex<Option<Compactor>>,
+    compactor_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     garbage_collector: Mutex<Option<GarbageCollector>>,
-
     cancellation_token: CancellationToken,
 }
 
@@ -479,11 +477,12 @@ impl Db {
     pub async fn close(&self) -> Result<(), SlateDBError> {
         self.cancellation_token.cancel();
 
-        if let Some(compactor) = {
-            let mut maybe_compactor = self.compactor.lock();
-            maybe_compactor.take()
+        if let Some(compactor_task) = {
+            let mut maybe_compactor_task = self.compactor_task.lock();
+            maybe_compactor_task.take()
         } {
-            compactor.terminate_background_task().await;
+            let result = compactor_task.await.expect("Failed to join compactor task");
+            info!("compactor task exited with: {:?}", result);
         }
 
         if let Some(gc) = {

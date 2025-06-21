@@ -458,7 +458,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // To keep backwards compatibility, check if the compaction_scheduler_supplier or compactor_options are set.
         // If either are set, we need to initialize the compactor.
-        let compactor = if self.compaction_scheduler_supplier.is_some()
+        let compactor_task = if self.compaction_scheduler_supplier.is_some()
             || self.settings.compactor_options.is_some()
         {
             let compactor_options = self.settings.compactor_options.unwrap_or_default();
@@ -478,11 +478,9 @@ impl<P: Into<Path>> DbBuilder<P> {
                 system_clock.clone(),
                 self.cancellation_token.clone(),
             );
-            let this_compactor = compactor.clone();
             // Spawn the compactor on the compaction runtime
-            let fut = async move { this_compactor.run_async_task(compaction_handle).await };
             // Spawn the main event loop on the main tokio runtime
-            spawn_bg_task(
+            let compactor_task = spawn_bg_task(
                 &tokio_handle,
                 move |result: &Result<(), SlateDBError>| {
                     let err = bg_task_result_into_err(result);
@@ -490,9 +488,9 @@ impl<P: Into<Path>> DbBuilder<P> {
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
                 },
-                fut,
+                async move { compactor.run_async_task(compaction_handle).await },
             );
-            Some(compactor)
+            Some(compactor_task)
         } else {
             None
         };
@@ -528,7 +526,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             inner,
             memtable_flush_task: Mutex::new(memtable_flush_task),
             write_task: Mutex::new(write_task),
-            compactor: Mutex::new(compactor),
+            compactor_task: Mutex::new(compactor_task),
             garbage_collector: Mutex::new(garbage_collector),
             cancellation_token: self.cancellation_token,
         })

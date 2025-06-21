@@ -151,11 +151,6 @@ impl Compactor {
 
         Ok(())
     }
-
-    /// Notify the compactor to terminate.
-    pub async fn terminate_background_task(self) {
-        self.cancellation_token.cancel();
-    }
 }
 
 struct CompactorEventHandler {
