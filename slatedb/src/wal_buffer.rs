@@ -45,6 +45,7 @@ use crate::{
 pub(crate) struct WalBufferManager {
     inner: Arc<parking_lot::RwLock<WalBufferManagerInner>>,
     wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
+    handle_fatal: Box<dyn Fn(SlateDBError) + Send + Sync>,
     quit_once: WatchableOnceCell<Result<(), SlateDBError>>,
     mono_clock: Arc<MonotonicClock>,
     table_store: Arc<TableStore>,
@@ -73,6 +74,7 @@ struct WalBufferManagerInner {
 impl WalBufferManager {
     pub fn new(
         wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
+        handle_fatal: Box<dyn Fn(SlateDBError) + Send + Sync>,
         recent_flushed_wal_id: u64,
         oracle: Arc<Oracle>,
         table_store: Arc<TableStore>,
@@ -94,6 +96,7 @@ impl WalBufferManager {
         Self {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
             wal_id_incrementor,
+            handle_fatal,
             quit_once: WatchableOnceCell::new(),
             table_store,
             mono_clock,
@@ -279,9 +282,13 @@ impl WalBufferManager {
                         Some(work) => work.result_tx,
                     };
                     let result = self.do_flush().await;
-                    // notify the result of do_flush to the caller if needed.
+                    // only notify the result when the flush is successful. and if it
+                    // finally failed, we'll set the error in quit_once. the caller
+                    // of flush() will finally receive the error.
                     if let Some(result_tx) = result_tx {
-                        result_tx.send(result.clone()).ok();
+                        if result.is_ok() {
+                            result_tx.send(result.clone()).ok();
+                        }
                     }
                     result
                 }
@@ -321,6 +328,7 @@ impl WalBufferManager {
         // In both cases, we need to notify all the flushing WALs to be finished with fatal error or shutdown error.
         // If we got a fatal error, we need to set it in quit_once to notify the database to enter fatal state.
         if let Err(e) = &result {
+            (self.handle_fatal)(e.clone());
             self.quit_once.write(Err(e.clone()));
         }
         // notify all the flushing wals to be finished with fatal error or shutdown error. we need ensure all the wal
@@ -498,6 +506,7 @@ mod tests {
         let oracle = Arc::new(Oracle::new(MonotonicSeq::new(0)));
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
+            Box::new(|_| {}),
             0, // recent_flushed_wal_id
             oracle,
             table_store.clone(),

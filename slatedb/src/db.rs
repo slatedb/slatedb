@@ -121,8 +121,12 @@ impl DbInner {
         };
 
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
+        let state_clone = state.clone();
         let wal_buffer = Arc::new(WalBufferManager::new(
             state.clone(),
+            Box::new(move |err| {
+                state_clone.write().record_fatal_error(err);
+            }),
             recent_flushed_wal_id,
             oracle.clone(),
             table_store.clone(),
@@ -238,7 +242,9 @@ impl DbInner {
 
         // if the write pipeline task exits then this call to rx.await will fail because tx is dropped
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
+
         let mut durable_watcher = rx.await??;
+
         if options.await_durable {
             durable_watcher.await_value().await?;
         }
