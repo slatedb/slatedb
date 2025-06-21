@@ -998,7 +998,7 @@ mod tests {
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::test_utils::{assert_iterator, TestClock};
+    use crate::test_utils::{assert_iterator, OnDemandCompactionSchedulerSupplier, TestClock};
     use crate::types::RowEntry;
     use crate::{proptest_util, test_utils, KeyValue};
     use futures::{future, future::join_all, StreamExt};
@@ -2812,32 +2812,36 @@ mod tests {
     async fn do_test_should_read_compacted_db(options: Settings) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
-        let fp_registry = Arc::new(FailPointRegistry::new());
-        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-            SizeTieredCompactionSchedulerOptions::default(),
-        ));
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new());
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_compaction_scheduler_supplier(compaction_scheduler)
-            .with_fp_registry(fp_registry.clone())
+            .with_compaction_scheduler_supplier(compaction_scheduler.clone())
             .build()
             .await
             .unwrap();
         let ms = ManifestStore::new(&Path::from(path), object_store.clone());
         let mut sm = StoredManifest::load(Arc::new(ms)).await.unwrap();
 
-        fail_parallel::cfg(fp_registry.clone(), "compactor-main-loop", "pause").unwrap();
         // write enough to fill up a few l0 SSTs
         for i in 0..4 {
             db.put(&[b'a' + i; 32], &[1u8 + i; 32]).await.unwrap();
             db.put(&[b'm' + i; 32], &[13u8 + i; 32]).await.unwrap();
         }
-        fail_parallel::cfg(fp_registry.clone(), "compactor-main-loop", "off").unwrap();
         // wait for compactor to compact them
         wait_for_manifest_condition(
             &mut sm,
-            |s| s.l0_last_compacted.is_some() && s.l0.is_empty(),
+            |s| {
+                // compact after writing values. include in loop since the on demand scheduler
+                // only runs once per `should_compact`, and memtables might still be getting
+                // flushed (await_durable in the put()'s above only wait for the writes to hit
+                // the WAL before returning).
+                compaction_scheduler
+                    .scheduler
+                    .should_compact
+                    .store(true, Ordering::SeqCst);
+                s.l0_last_compacted.is_some() && s.l0.is_empty()
+            },
             Duration::from_secs(10),
         )
         .await;
@@ -2846,16 +2850,26 @@ mod tests {
             db.inner.state.read().state().core().l0.len(),
             db.inner.state.read().state().core().compacted.len()
         );
-        fail_parallel::cfg(fp_registry.clone(), "compactor-main-loop", "pause").unwrap();
+
         // write more l0s and wait for compaction
         for i in 0..4 {
             db.put(&[b'f' + i; 32], &[6u8 + i; 32]).await.unwrap();
             db.put(&[b's' + i; 32], &[19u8 + i; 32]).await.unwrap();
         }
-        fail_parallel::cfg(fp_registry.clone(), "compactor-main-loop", "off").unwrap();
+        // wait for compactor to compact them
         wait_for_manifest_condition(
             &mut sm,
-            |s| s.l0_last_compacted.is_some() && s.l0.is_empty(),
+            |s| {
+                // compact after writing values. include in loop since the on demand scheduler
+                // only runs once per `should_compact`, and memtables might still be getting
+                // flushed (await_durable in the put()'s above only wait for the writes to hit
+                // the WAL before returning).
+                compaction_scheduler
+                    .scheduler
+                    .should_compact
+                    .store(true, Ordering::SeqCst);
+                s.l0_last_compacted.is_some() && s.l0.is_empty()
+            },
             Duration::from_secs(10),
         )
         .await;
@@ -3430,6 +3444,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         while start.elapsed() < timeout {
             let manifest = sm.refresh().await.unwrap();
+            eprintln!("manifest: {:#?}", manifest.core);
             if cond(&manifest.core) {
                 return manifest.core.clone();
             }

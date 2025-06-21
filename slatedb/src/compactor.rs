@@ -3,8 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::UNIX_EPOCH;
 
-use fail_parallel::fail_point;
-use fail_parallel::FailPointRegistry;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -72,8 +70,6 @@ pub(crate) struct Compactor {
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
     cancellation_token: CancellationToken,
-    #[allow(dead_code)]
-    fp_registry: Arc<FailPointRegistry>,
 }
 
 impl Compactor {
@@ -86,7 +82,6 @@ impl Compactor {
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
         cancellation_token: CancellationToken,
-        fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
         let stats = Arc::new(CompactionStats::new(stat_registry));
         Self {
@@ -97,7 +92,6 @@ impl Compactor {
             stats,
             cancellation_token,
             system_clock,
-            fp_registry,
         }
     }
 
@@ -134,10 +128,6 @@ impl Compactor {
         // Stop the loop when the executor is shut down *and* all remaining
         // `worker_rx` messages have been drained.
         while !(self.cancellation_token.is_cancelled() && worker_rx.is_empty()) {
-            fail_point!(Arc::clone(&self.fp_registry), "compactor-main-loop", |_| {
-                Err(SlateDBError::InvalidCompaction)
-            });
-
             tokio::select! {
                 biased;
                 // check the cancellation token first to avoid starting new compaction tasks when the runtime is shutting down
@@ -425,7 +415,6 @@ pub mod stats {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
-    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
@@ -457,6 +446,7 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
+    use crate::test_utils::OnDemandCompactionSchedulerSupplier;
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
     use crate::SlateDBError;
@@ -1153,75 +1143,6 @@ mod tests {
 
         fn is_stopped(&self) -> bool {
             false
-        }
-    }
-
-    #[allow(unused)] // only used with feature(wal_disable)
-    #[derive(Clone)]
-    struct OnDemandCompactionScheduler {
-        should_compact: Arc<AtomicBool>,
-    }
-
-    #[allow(unused)] // only used with feature(wal_disable)
-    impl OnDemandCompactionScheduler {
-        fn new() -> Self {
-            Self {
-                should_compact: Arc::new(AtomicBool::new(false)),
-            }
-        }
-    }
-
-    impl CompactionScheduler for OnDemandCompactionScheduler {
-        fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction> {
-            if !self.should_compact.load(SeqCst) {
-                return vec![];
-            }
-
-            // this compactor will only compact if there are L0s,
-            // it won't compact only lower levels for simplicity
-            let db_state = state.db_state();
-            if db_state.l0.is_empty() {
-                return vec![];
-            }
-
-            self.should_compact.store(false, SeqCst);
-
-            // always compact into sorted run 0
-            let next_sr_id = 0;
-
-            // Create a compaction of all SSTs from L0 and all sorted runs
-            let mut sources: Vec<SourceId> = db_state
-                .l0
-                .iter()
-                .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
-                .collect();
-
-            // Add SSTs from all sorted runs
-            for sr in &db_state.compacted {
-                sources.push(SourceId::SortedRun(sr.id));
-            }
-
-            vec![Compaction::new(sources, next_sr_id)]
-        }
-    }
-
-    #[allow(unused)] // only used with feature(wal_disable)
-    struct OnDemandCompactionSchedulerSupplier {
-        scheduler: OnDemandCompactionScheduler,
-    }
-
-    #[allow(unused)] // only used with feature(wal_disable)
-    impl OnDemandCompactionSchedulerSupplier {
-        fn new() -> Self {
-            Self {
-                scheduler: OnDemandCompactionScheduler::new(),
-            }
-        }
-    }
-
-    impl CompactionSchedulerSupplier for OnDemandCompactionSchedulerSupplier {
-        fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler + Send + Sync> {
-            Box::new(self.scheduler.clone())
         }
     }
 }
