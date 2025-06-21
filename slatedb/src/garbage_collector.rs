@@ -952,7 +952,7 @@ mod tests {
         // Always sleep 1ms to make sure we get ULIDs that are sortable.
         // Without this, the ULIDs could have the same millisecond timestamp
         // and then ULID sorting is based on the random part.
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
         let sst_id = SsTableId::Compacted(crate::utils::ulid());
         let mut sst = table_store.table_builder();
