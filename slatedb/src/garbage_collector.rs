@@ -19,14 +19,12 @@ use crate::garbage_collector::stats::GcStats;
 use crate::manifest::store::{DirtyManifest, ManifestStore, StoredManifest};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::spawn_bg_thread;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
 use manifest_gc::ManifestGcTask;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::runtime::Handle;
 use tokio::time::Interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
@@ -256,6 +254,7 @@ mod tests {
 
     use chrono::{DateTime, Utc};
     use object_store::{local::LocalFileSystem, path::Path};
+    use tokio::runtime::Handle;
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
@@ -1092,7 +1091,8 @@ mod tests {
         let fut = async move { gc.run_async_task().await };
         let jh = spawn_bg_task(&Handle::current(), |result| assert!(result.is_ok()), fut);
         cancellation_token.cancel();
-        jh.await.unwrap();
+        let result = jh.await.unwrap();
+        assert!(result.is_ok(), "result: {:#?}", result);
 
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(cancellation_token.is_cancelled());

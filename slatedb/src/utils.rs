@@ -99,46 +99,6 @@ where
     })
 }
 
-/// Spawn a monitored background os thread. The thread must return a Result<T, SlateDBError>.
-/// The thread is spawned by a monitor thread. When the thread exits, the monitor thread
-/// calls a provided cleanup fn with the returned result. If the spawned thread panics, the
-/// cleanup fn is called with Err(BackgroundTaskPanic).
-pub(crate) fn spawn_bg_thread<F, T, C>(
-    name: &str,
-    cleanup_fn: C,
-    f: F,
-) -> std::thread::JoinHandle<Result<T, SlateDBError>>
-where
-    F: FnOnce() -> Result<T, SlateDBError> + Send + 'static,
-    T: Send + 'static,
-    C: FnOnce(&Result<T, SlateDBError>) + Send + 'static,
-{
-    let monitored_name = String::from(name);
-    let monitor_name = format!("{}-monitor", name);
-    std::thread::Builder::new()
-        .name(monitor_name)
-        .spawn(move || {
-            let inner = std::thread::Builder::new()
-                .name(monitored_name)
-                .spawn(f)
-                .expect("failed to create monitored thread");
-            let result = inner.join();
-            match result {
-                Err(err) => {
-                    // the thread panic'd
-                    let err = Err(BackgroundTaskPanic(Arc::new(Mutex::new(err))));
-                    cleanup_fn(&err);
-                    err
-                }
-                Ok(result) => {
-                    cleanup_fn(&result);
-                    result
-                }
-            }
-        })
-        .expect("failed to create monitor thread")
-}
-
 pub(crate) fn system_time_to_millis(system_time: SystemTime) -> i64 {
     system_time.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
 }
@@ -302,7 +262,7 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key, spawn_bg_task,
-        spawn_bg_thread, WatchableOnceCell,
+        WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
@@ -417,49 +377,6 @@ mod tests {
         let task = spawn_bg_task(&handle, move |err| captor2.capture(err), async { Ok(()) });
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
-        assert!(matches!(result, Ok(())));
-        assert!(matches!(captor.captured(), Some(Ok(()))));
-    }
-
-    #[test]
-    fn test_should_cleanup_when_thread_exits_with_error() {
-        let captor = Arc::new(ResultCaptor::new());
-        let captor2 = captor.clone();
-
-        let thread = spawn_bg_thread(
-            "test",
-            move |err| captor2.capture(err),
-            || Err(SlateDBError::Fenced),
-        );
-
-        let result: Result<(), SlateDBError> = thread.join().expect("join failure");
-        assert!(matches!(result, Err(SlateDBError::Fenced)));
-        assert!(matches!(captor.captured(), Some(Err(SlateDBError::Fenced))));
-    }
-
-    #[test]
-    fn test_should_cleanup_when_thread_panics() {
-        let captor = Arc::new(ResultCaptor::new());
-        let captor2 = captor.clone();
-
-        let thread = spawn_bg_thread("test", move |err| captor2.capture(err), || panic!("oops"));
-
-        let result: Result<(), SlateDBError> = thread.join().expect("join failure");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
-        assert!(matches!(
-            captor.captured(),
-            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
-        ));
-    }
-
-    #[test]
-    fn test_should_cleanup_when_thread_exits() {
-        let captor = Arc::new(ResultCaptor::new());
-        let captor2 = captor.clone();
-
-        let thread = spawn_bg_thread("test", move |err| captor2.capture(err), || Ok(()));
-
-        let result: Result<(), SlateDBError> = thread.join().expect("join failure");
         assert!(matches!(result, Ok(())));
         assert!(matches!(captor.captured(), Some(Ok(()))));
     }
