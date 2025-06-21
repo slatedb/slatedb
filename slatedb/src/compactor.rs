@@ -22,13 +22,12 @@ use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::spawn_bg_thread;
 
 pub trait CompactionSchedulerSupplier: Send + Sync {
-    fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler>;
+    fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler + Send + Sync>;
 }
 
-pub trait CompactionScheduler {
+pub trait CompactionScheduler: Send + Sync {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
 }
 
@@ -102,28 +101,6 @@ impl Compactor {
         }
     }
 
-    /// Starts the compactor in a background thread.
-    ///
-    /// This method launches the compactor in a dedicated background thread
-    /// and returns immediately. The compactor will run until its cancellation
-    /// token is cancelled. Use [`terminate_background_task`](Compactor::terminate_background_task)
-    /// to stop the compactor.
-    ///
-    /// # Arguments
-    ///
-    /// * `tokio_handle` - The tokio handle to use in the background thread.
-    /// * `cleanup_fn` - A function that will be called when the compactor
-    ///   thread completes, with the final result (success or error).
-    pub fn start_in_bg_thread(
-        &self,
-        tokio_handle: Handle,
-        cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
-    ) {
-        let this = self.clone();
-        let compactor_main = move || tokio_handle.block_on(this.run_async_task());
-        spawn_bg_thread("slatedb-compactor", cleanup_fn, compactor_main);
-    }
-
     /// Starts the compactor. This method performs the actual compaction event loop.
     /// The compactor runs until the cancellation token is cancelled. Use
     /// [`terminate_background_task`](Compactor::terminate_background_task) to stop the
@@ -195,8 +172,8 @@ struct CompactorEventHandler {
     state: CompactorState,
     manifest: FenceableManifest,
     options: Arc<CompactorOptions>,
-    scheduler: Box<dyn CompactionScheduler>,
-    executor: Box<dyn CompactionExecutor>,
+    scheduler: Box<dyn CompactionScheduler + Send + Sync>,
+    executor: Box<dyn CompactionExecutor + Send + Sync>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
 }
@@ -205,8 +182,8 @@ impl CompactorEventHandler {
     async fn new(
         manifest_store: Arc<ManifestStore>,
         options: Arc<CompactorOptions>,
-        scheduler: Box<dyn CompactionScheduler>,
-        executor: Box<dyn CompactionExecutor>,
+        scheduler: Box<dyn CompactionScheduler + Send + Sync>,
+        executor: Box<dyn CompactionExecutor + Send + Sync>,
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
@@ -1243,7 +1220,7 @@ mod tests {
     }
 
     impl CompactionSchedulerSupplier for OnDemandCompactionSchedulerSupplier {
-        fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler> {
+        fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler + Send + Sync> {
             Box::new(self.scheduler.clone())
         }
     }

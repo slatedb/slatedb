@@ -2893,7 +2893,7 @@ mod tests {
         assert!(neg_lookup.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_read_from_compacted_db() {
         do_test_should_read_compacted_db(test_db_options(
             0,
@@ -2908,7 +2908,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_read_from_compacted_db_no_filters() {
         do_test_should_read_compacted_db(test_db_options(
             u32::MAX,

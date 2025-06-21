@@ -140,6 +140,7 @@ use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::bg_task_result_into_err;
+use crate::utils::spawn_bg_task;
 
 /// A builder for creating a new Db instance.
 ///
@@ -478,14 +479,17 @@ impl<P: Into<Path>> DbBuilder<P> {
                 self.cancellation_token.clone(),
                 self.fp_registry.clone(),
             );
-            compactor.start_in_bg_thread(
-                compaction_handle,
+            let this_compactor = compactor.clone();
+            let fut = async move { this_compactor.run_async_task().await };
+            spawn_bg_task(
+                &compaction_handle,
                 move |result: &Result<(), SlateDBError>| {
                     let err = bg_task_result_into_err(result);
                     warn!("compactor thread exited with {:?}", err);
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
                 },
+                fut,
             );
             Some(compactor)
         } else {
