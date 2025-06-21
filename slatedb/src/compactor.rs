@@ -544,7 +544,10 @@ mod tests {
         db.put(&[b'a'; 16], &[b'a'; 32]).await.unwrap();
         db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
         db.flush().await.unwrap();
-        scheduler.scheduler.should_compact.store(true, Ordering::SeqCst);
+        scheduler
+            .scheduler
+            .should_compact
+            .store(true, Ordering::SeqCst);
         let db_state = await_compaction(&db, manifest_store.clone()).await.unwrap();
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.l0.len(), 0, "{:?}", db_state.l0);
@@ -576,7 +579,10 @@ mod tests {
         let tombstone = iter.next_entry().await.unwrap();
         assert!(tombstone.unwrap().value.is_tombstone());
 
-        scheduler.scheduler.should_compact.store(true, Ordering::SeqCst);
+        scheduler
+            .scheduler
+            .should_compact
+            .store(true, Ordering::SeqCst);
         let db_state = await_compacted_compaction(manifest_store.clone(), db_state.compacted)
             .await
             .unwrap();
