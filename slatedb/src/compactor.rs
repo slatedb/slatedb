@@ -109,13 +109,13 @@ impl Compactor {
     /// Unlike [`start_in_bg_thread`](Compactor::start_in_bg_thread), this method
     /// uses the current Tokio runtime instead of creating a new thread. This is useful
     /// when you want to run the compactor within an existing async runtime.
-    pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
+    pub async fn run_async_task(&self, compactor_runtime: Handle) -> Result<(), SlateDBError> {
         let mut db_runs_log_ticker = tokio::time::interval(Duration::from_secs(10));
         let mut manifest_poll_ticker = tokio::time::interval(self.options.poll_interval);
         let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = self.scheduler_supplier.compaction_scheduler();
         let executor = Box::new(TokioCompactionExecutor::new(
-            Handle::current(),
+            compactor_runtime,
             self.options.clone(),
             worker_tx,
             self.table_store.clone(),

@@ -480,9 +480,11 @@ impl<P: Into<Path>> DbBuilder<P> {
                 self.fp_registry.clone(),
             );
             let this_compactor = compactor.clone();
-            let fut = async move { this_compactor.run_async_task().await };
+            // Spawn the compactor on the compaction runtime
+            let fut = async move { this_compactor.run_async_task(compaction_handle).await };
+            // Spawn the main event loop on the main tokio runtime
             spawn_bg_task(
-                &compaction_handle,
+                &tokio_handle,
                 move |result: &Result<(), SlateDBError>| {
                     let err = bg_task_result_into_err(result);
                     warn!("compactor thread exited with {:?}", err);
