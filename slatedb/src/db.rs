@@ -239,9 +239,7 @@ impl DbInner {
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
         let mut durable_watcher = rx
             .await?
-            .map_slatedb_err(self.state.read().error_reader(), |_| {
-                SlateDBError::BackgroundTaskShutdown
-            })?;
+            .map_slatedb_err(self.state.read().error_reader(), |e| e)?;
         if options.await_durable {
             durable_watcher.await_value().await?;
         }
