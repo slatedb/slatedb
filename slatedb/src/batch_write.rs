@@ -91,7 +91,18 @@ impl DbInner {
         // get the durable watcher. we'll await on current WAL table to be flushed if wal is enabled.
         // otherwise, we'll use the memtable's durable watcher.
         let durable_watcher = if self.wal_enabled {
-            let current_wal = self.wal_buffer.maybe_trigger_flush().await?;
+            let current_wal = match self.wal_buffer.maybe_trigger_flush().await {
+                Ok(current_wal) => current_wal,
+                Err(err) => {
+                    // maybe_trigger_flush returns an error when the WAL buffer is in a fatal error state
+                    // (excluding BackgroundTaskShutdown). This indicates the flushing error is not
+                    // recoverable, we should `record_fatal_error` to notify others.
+                    if !matches!(err, SlateDBError::BackgroundTaskShutdown) {
+                        self.state.write().record_fatal_error(err.clone());
+                    }
+                    return Err(err);
+                }
+            };
             // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
             // in another Pull Request.
             current_wal.durable_watcher()

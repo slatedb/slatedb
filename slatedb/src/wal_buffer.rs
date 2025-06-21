@@ -57,6 +57,8 @@ struct WalBufferManagerInner {
     /// When the current WAL is ready to be flushed, it'll be moved to the `immutable_wals`.
     /// The flusher will try flush all the immutable wals to remote storage.
     immutable_wals: VecDeque<(u64, Arc<KVTable>)>,
+    /// The fatal error that occurred during the flush operation.
+    fatal: Option<SlateDBError>,
     /// The channel to send the flush work to the background worker.
     flush_tx: Option<mpsc::Sender<WalFlushWork>>,
     /// task handle of the background worker.
@@ -90,6 +92,7 @@ impl WalBufferManager {
             flush_tx: None,
             background_task: None,
             oracle,
+            fatal: None,
         };
         Self {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
@@ -181,8 +184,6 @@ impl WalBufferManager {
     /// Append row entries to the current WAL. return the last seq number of the WAL.
     /// TODO: validate the seq number is always increasing.
     pub async fn append(&self, entries: &[RowEntry]) -> Result<Option<u64>, SlateDBError> {
-        // TODO: check if the wal buffer is in a fatal error state.
-
         let inner = self.inner.read();
         for entry in entries {
             inner.current_wal.put(entry.clone());
@@ -194,10 +195,18 @@ impl WalBufferManager {
     /// is not very strict, we have to ensure a write batch into a single WAL file.
     ///
     /// It's the caller's duty to call `maybe_trigger_flush` after calling `append`.
+    ///
+    /// If the wal buffer is in a fatal error state, it'll return the error immediately. The caller should
+    /// handle the error and record the fatal error in the db state.
     pub async fn maybe_trigger_flush(&self) -> Result<Arc<KVTable>, SlateDBError> {
         // check the size of the current wal
         let (current_wal, need_flush, flush_tx) = {
             let inner = self.inner.read();
+
+            if let Some(err) = inner.fatal.clone() {
+                return Err(err);
+            }
+
             let current_wal_size = self.table_store.estimate_encoded_size(
                 inner.current_wal.metadata().entry_num,
                 inner.current_wal.metadata().entries_size_in_bytes,
@@ -321,6 +330,7 @@ impl WalBufferManager {
         // In both cases, we need to notify all the flushing WALs to be finished with fatal error or shutdown error.
         // If we got a fatal error, we need to set it in quit_once to notify the database to enter fatal state.
         if let Err(e) = &result {
+            self.inner.write().fatal = Some(e.clone());
             self.quit_once.write(Err(e.clone()));
         }
         // notify all the flushing wals to be finished with fatal error or shutdown error. we need ensure all the wal
