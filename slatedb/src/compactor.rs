@@ -410,7 +410,6 @@ pub mod stats {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
-    use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
@@ -441,7 +440,6 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
-    use crate::test_utils::OnDemandCompactionSchedulerSupplier;
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
     use crate::SlateDBError;
@@ -519,6 +517,10 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_tombstones_in_l0() {
+        use std::sync::atomic::Ordering;
+
+        use crate::test_utils::OnDemandCompactionSchedulerSupplier;
+
         let os = Arc::new(InMemory::new());
         let logical_clock = Arc::new(TestClock::new());
 
@@ -542,7 +544,7 @@ mod tests {
         db.put(&[b'a'; 16], &[b'a'; 32]).await.unwrap();
         db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
         db.flush().await.unwrap();
-        scheduler.scheduler.should_compact.store(true, SeqCst);
+        scheduler.scheduler.should_compact.store(true, Ordering::SeqCst);
         let db_state = await_compaction(&db, manifest_store.clone()).await.unwrap();
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.l0.len(), 0, "{:?}", db_state.l0);
@@ -574,7 +576,7 @@ mod tests {
         let tombstone = iter.next_entry().await.unwrap();
         assert!(tombstone.unwrap().value.is_tombstone());
 
-        scheduler.scheduler.should_compact.store(true, SeqCst);
+        scheduler.scheduler.should_compact.store(true, Ordering::SeqCst);
         let db_state = await_compacted_compaction(manifest_store.clone(), db_state.compacted)
             .await
             .unwrap();
