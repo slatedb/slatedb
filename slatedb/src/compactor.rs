@@ -120,7 +120,7 @@ impl Compactor {
         cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
     ) {
         let this = self.clone();
-        let compactor_main = move || tokio_handle.block_on(this.start_async_task());
+        let compactor_main = move || tokio_handle.block_on(this.run_async_task());
         spawn_bg_thread("slatedb-compactor", cleanup_fn, compactor_main);
     }
 
@@ -132,7 +132,7 @@ impl Compactor {
     /// Unlike [`start_in_bg_thread`](Compactor::start_in_bg_thread), this method
     /// uses the current Tokio runtime instead of creating a new thread. This is useful
     /// when you want to run the compactor within an existing async runtime.
-    pub async fn start_async_task(&self) -> Result<(), SlateDBError> {
+    pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
         let mut db_runs_log_ticker = tokio::time::interval(Duration::from_secs(10));
         let mut manifest_poll_ticker = tokio::time::interval(self.options.poll_interval);
         let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
