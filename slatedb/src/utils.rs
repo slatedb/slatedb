@@ -129,7 +129,7 @@ where
             cleanup_fn(&result);
             result
         })
-        .expect("failed to spawn monitored thread")
+        .expect("failed to spawn thread")
 }
 
 pub(crate) fn system_time_to_millis(system_time: SystemTime) -> i64 {

@@ -37,7 +37,7 @@ impl DbInner {
         guard.freeze_memtable(wal_id)?;
         self.memtable_flush_notifier
             .send(MemtableFlushMsg::FlushImmutableMemtables { sender: None })
-            .map_slatedb_err(self.state.read().error_reader(), |_| {
+            .map_slatedb_err(guard.error_reader(), |_| {
                 SlateDBError::MemtableFlushChannelError
             })?;
         Ok(())
