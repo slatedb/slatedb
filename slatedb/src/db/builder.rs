@@ -140,7 +140,6 @@ use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::bg_task_result_into_err;
-use crate::utils::spawn_bg_task;
 
 /// A builder for creating a new Db instance.
 ///
@@ -508,18 +507,12 @@ impl<P: Into<Path>> DbBuilder<P> {
                     system_clock.clone(),
                     self.cancellation_token.clone(),
                 );
-                let this_gc = gc.clone();
-                let fut = async move { this_gc.run_async_task().await };
-                spawn_bg_task(
-                    &gc_handle,
-                    move |result| {
-                        let err = bg_task_result_into_err(result);
-                        warn!("GC thread exited with {:?}", err);
-                        let mut state = cleanup_inner.state.write();
-                        state.record_fatal_error(err.clone())
-                    },
-                    fut,
-                );
+                gc.start_in_bg_thread(gc_handle, move |result| {
+                    let err = bg_task_result_into_err(result);
+                    warn!("GC thread exited with {:?}", err);
+                    let mut state = cleanup_inner.state.write();
+                    state.record_fatal_error(err.clone())
+                });
                 Some(gc)
             } else {
                 None
