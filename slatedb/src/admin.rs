@@ -132,9 +132,7 @@ impl Admin {
         .with_cancellation_token(ct)
         .build();
 
-        let jh = tracker.spawn(async move {
-            gc.run_async_task().await
-        });
+        let jh = tracker.spawn(async move { gc.run_async_task().await });
         tracker.close();
         tracker.wait().await;
         jh.await.unwrap().map_err(Into::into)
