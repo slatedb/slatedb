@@ -5,8 +5,10 @@ use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
+use futures::FutureExt;
 use rand::RngCore;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
@@ -63,10 +65,9 @@ impl<T: Clone> WatchableOnceCellReader<T> {
     }
 }
 
-/// Spawn a monitored background tokio task. The task must return a Result<T, SlateDBError>.
-/// The task is spawned by a monitor task. When the task exits, the monitor task
-/// calls a provided cleanup fn with a reference to the returned result. If the spawned task
-/// panics, the cleanup fn is called with Err(BackgroundTaskPanic).
+/// Spawn a background tokio task. The task must return a Result<T, SlateDBError>.
+/// When the task exits, the provided cleanup fn is called with a reference to the returned
+/// result. If the task panics, the cleanup fn is called with Err(BackgroundTaskPanic).
 pub(crate) fn spawn_bg_task<F, T, C>(
     handle: &tokio::runtime::Handle,
     cleanup_fn: C,
@@ -77,32 +78,28 @@ where
     T: Send + 'static,
     C: FnOnce(&Result<T, SlateDBError>) + Send + 'static,
 {
-    let inner_handle = handle.clone();
-    handle.spawn(async move {
-        let jh = inner_handle.spawn(future);
-        match jh.await {
-            Ok(result) => {
-                cleanup_fn(&result);
-                result
-            }
-            Err(join_err) => {
-                // task panic'd or was cancelled
-                let err = Err(BackgroundTaskPanic(Arc::new(Mutex::new(
-                    join_err
-                        .try_into_panic()
-                        .unwrap_or_else(|_| Box::new("background task was aborted")),
-                ))));
-                cleanup_fn(&err);
-                err
-            }
-        }
-    })
+    // NOTE: It is critical that the future lives as long as the cleanup_fn.
+    //       Otherwise, there is a gap where everything owned by the futured is dropped
+    //       before the cleanup_fn runs. Since our cleanup_fn's often set error states
+    //       on the db, this would result in a gap where the db is not in an error state
+    //       but resources such as channels have been dropped or closed. See #623 for
+    //       details.
+    let wrapped = AssertUnwindSafe(future).catch_unwind().map(move |outcome| {
+        let result = match outcome {
+            Ok(Ok(val)) => Ok(val),
+            Ok(Err(e)) => Err(e),
+            Err(panic) => Err(BackgroundTaskPanic(Arc::new(Mutex::new(panic)))),
+        };
+        cleanup_fn(&result);
+        result
+    });
+    handle.spawn(wrapped)
 }
 
-/// Spawn a monitored background os thread. The thread must return a Result<T, SlateDBError>.
-/// The thread is spawned by a monitor thread. When the thread exits, the monitor thread
-/// calls a provided cleanup fn with the returned result. If the spawned thread panics, the
-/// cleanup fn is called with Err(BackgroundTaskPanic).
+/// Spawn a background os thread for a function. The function must return a
+/// Result<T, SlateDBError>. When the thread exits, the provided cleanup fn is called with
+/// a reference to the returned result. If the function panics, the cleanup fn is called
+/// with Err(BackgroundTaskPanic).
 pub(crate) fn spawn_bg_thread<F, T, C>(
     name: &str,
     cleanup_fn: C,
@@ -113,30 +110,26 @@ where
     T: Send + 'static,
     C: FnOnce(&Result<T, SlateDBError>) + Send + 'static,
 {
-    let monitored_name = String::from(name);
-    let monitor_name = format!("{}-monitor", name);
+    // NOTE: It is critical that the function lives as long as the cleanup_fn.
+    //       Otherwise, there is a gap where everything owned by the function is dropped
+    //       before the cleanup_fn runs. Since our cleanup_fn's often set error states
+    //       on the db, this would result in a gap where the db is not in an error state
+    //       but resources such as channels have been dropped or closed. See #623 for
+    //       details.
+    let thread_name = name.to_string();
     std::thread::Builder::new()
-        .name(monitor_name)
+        .name(thread_name)
         .spawn(move || {
-            let inner = std::thread::Builder::new()
-                .name(monitored_name)
-                .spawn(f)
-                .expect("failed to create monitored thread");
-            let result = inner.join();
-            match result {
-                Err(err) => {
-                    // the thread panic'd
-                    let err = Err(BackgroundTaskPanic(Arc::new(Mutex::new(err))));
-                    cleanup_fn(&err);
-                    err
-                }
-                Ok(result) => {
-                    cleanup_fn(&result);
-                    result
-                }
-            }
+            let outcome = std::panic::catch_unwind(AssertUnwindSafe(f));
+            let result: Result<_, SlateDBError> = match outcome {
+                Ok(Ok(val)) => Ok(val),
+                Ok(Err(e)) => Err(e),
+                Err(panic_payload) => Err(BackgroundTaskPanic(Arc::new(Mutex::new(panic_payload)))),
+            };
+            cleanup_fn(&result);
+            result
         })
-        .expect("failed to create monitor thread")
+        .expect("failed to spawn thread")
 }
 
 pub(crate) fn system_time_to_millis(system_time: SystemTime) -> i64 {
@@ -279,6 +272,43 @@ impl MonotonicSeq {
     }
 }
 
+/// An extension trait that adds a `.map_slatedb_err(...)` method to `Result<T, E>`.
+pub trait MapSlateDBError<T, E> {
+    /// Maps a `Result<T, E>` to a `Result<T, SlateDBError>`. If `error_reader` is set, it will
+    /// return the error in `error_reader`, otherwise maps error to SlateDBError with op.
+    ///
+    /// This is useful for converting channel errors into SlateDBErrors when the database is
+    /// in an error state but hasn't completely shut down yet. In such cases, a receiving
+    /// channel could be closed or dropped when another thread tries to write to it.
+    fn map_slatedb_err<O>(
+        self,
+        error_reader: WatchableOnceCellReader<SlateDBError>,
+        op: O,
+    ) -> Result<T, SlateDBError>
+    where
+        O: FnOnce(E) -> SlateDBError;
+}
+
+impl<T, E> MapSlateDBError<T, E> for Result<T, E> {
+    #[inline]
+    fn map_slatedb_err<O>(
+        self,
+        error_reader: WatchableOnceCellReader<SlateDBError>,
+        op: O,
+    ) -> Result<T, SlateDBError>
+    where
+        O: FnOnce(E) -> SlateDBError,
+    {
+        if let Some(err) = error_reader.read() {
+            return Err(err);
+        }
+        match self {
+            Err(e) => Err(op(e)),
+            Ok(t) => Ok(t),
+        }
+    }
+}
+
 // TODO replace this with our rand module
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 pub(crate) fn uuid() -> Uuid {
@@ -302,7 +332,7 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key, spawn_bg_task,
-        spawn_bg_thread, WatchableOnceCell,
+        spawn_bg_thread, MapSlateDBError, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
@@ -597,5 +627,54 @@ mod tests {
         // a buffer of the minimal size, as Bytes doesn't expose the underlying buffer's
         // capacity. The best we can do is assert it allocated a new buffer.
         assert_ne!(clamped.as_ptr(), slice.as_ptr());
+    }
+
+    #[test]
+    fn test_map_slatedb_err_with_existing_error() {
+        let error_cell = WatchableOnceCell::new();
+        error_cell.write(SlateDBError::Fenced);
+        let error_reader = error_cell.reader();
+        let result: Result<i32, &str> = Ok(42);
+        let mapped = result.map_slatedb_err(error_reader, |_| {
+            SlateDBError::Unsupported("not used".to_string())
+        });
+        assert!(matches!(mapped, Err(SlateDBError::Fenced)));
+    }
+
+    #[test]
+    fn test_map_slatedb_err_with_ok_result() {
+        let error_cell = WatchableOnceCell::new();
+        let error_reader = error_cell.reader();
+        let result: Result<i32, &str> = Ok(42);
+        let mapped = result.map_slatedb_err(error_reader, |e| SlateDBError::UnexpectedError {
+            msg: e.to_string(),
+        });
+        assert!(matches!(mapped, Ok(42)));
+    }
+
+    #[test]
+    fn test_map_slatedb_err_with_err_result() {
+        let error_cell = WatchableOnceCell::new();
+        let error_reader = error_cell.reader();
+        let result: Result<i32, &str> = Err("test error");
+        let mapped = result.map_slatedb_err(error_reader, |e| SlateDBError::UnexpectedError {
+            msg: e.to_string(),
+        });
+        match mapped {
+            Err(SlateDBError::UnexpectedError { msg }) => assert_eq!(msg, "test error"),
+            _ => panic!("Expected UnexpectedError with 'test error' message"),
+        }
+    }
+
+    #[test]
+    fn test_map_slatedb_err_precedence() {
+        let error_cell = WatchableOnceCell::new();
+        error_cell.write(SlateDBError::Fenced);
+        let error_reader = error_cell.reader();
+        let result: Result<i32, &str> = Err("test error");
+        let mapped = result.map_slatedb_err(error_reader, |e| SlateDBError::UnexpectedError {
+            msg: e.to_string(),
+        });
+        assert!(matches!(mapped, Err(SlateDBError::Fenced)));
     }
 }

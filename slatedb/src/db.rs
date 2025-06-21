@@ -51,7 +51,7 @@ use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::MonotonicSeq;
+use crate::utils::{MapSlateDBError, MonotonicSeq};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use tracing::{info, warn};
@@ -236,9 +236,10 @@ impl DbInner {
             .send(batch_msg)
             .expect("write notifier closed");
 
-        // if the write pipeline task exits then this call to rx.await will fail because tx is dropped
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
-        let mut durable_watcher = rx.await??;
+        let mut durable_watcher = rx
+            .await?
+            .map_slatedb_err(self.state.read().error_reader(), |e| e)?;
         if options.await_durable {
             durable_watcher.await_value().await?;
         }
@@ -318,7 +319,9 @@ impl DbInner {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier
             .send(MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) })
-            .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
+            .map_slatedb_err(self.state.read().error_reader(), |_| {
+                SlateDBError::MemtableFlushChannelError
+            })?;
         rx.await?
     }
 
@@ -2973,7 +2976,11 @@ mod tests {
 
         // assert that db1 can no longer write.
         let err = do_put(&db1, b"1", b"1").await;
-        assert!(matches!(err, Err(SlateDBError::Fenced)));
+        assert!(
+            matches!(err, Err(SlateDBError::Fenced)),
+            "got non-fenced error: {:?}",
+            err
+        );
 
         do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
