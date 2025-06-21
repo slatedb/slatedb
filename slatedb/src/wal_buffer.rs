@@ -239,12 +239,16 @@ impl WalBufferManager {
     }
 
     pub async fn flush(&self) -> Result<(), SlateDBError> {
-        let flush_tx = self
-            .inner
-            .read()
-            .flush_tx
-            .clone()
-            .expect("flush_tx not initialized, please call start_background first.");
+        let flush_tx = {
+            let inner = self.inner.read();
+            if let Some(err) = inner.fatal.clone() {
+                return Err(err);
+            }
+            inner
+                .flush_tx
+                .clone()
+                .expect("flush_tx not initialized, please call start_background first.")
+        };
         let (result_tx, result_rx) = oneshot::channel();
         flush_tx
             .send(WalFlushWork {
