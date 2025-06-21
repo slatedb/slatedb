@@ -1,4 +1,6 @@
 use crate::clock::LogicalClock;
+use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
+use crate::compactor_state::{Compaction, CompactorState, SourceId};
 use crate::config::{PutOptions, WriteOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
@@ -10,7 +12,8 @@ use rand::{Rng, RngCore};
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::Arc;
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
@@ -260,4 +263,69 @@ pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> Encod
         encoded_sst_builder.add(row).unwrap();
     }
     encoded_sst_builder.build().unwrap()
+}
+
+#[derive(Clone)]
+pub(crate) struct OnDemandCompactionScheduler {
+    pub(crate) should_compact: Arc<AtomicBool>,
+}
+
+impl OnDemandCompactionScheduler {
+    fn new() -> Self {
+        Self {
+            should_compact: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl CompactionScheduler for OnDemandCompactionScheduler {
+    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction> {
+        if !self.should_compact.load(Ordering::SeqCst) {
+            return vec![];
+        }
+
+        // this compactor will only compact if there are L0s,
+        // it won't compact only lower levels for simplicity
+        let db_state = state.db_state();
+        if db_state.l0.is_empty() {
+            return vec![];
+        }
+
+        self.should_compact.store(false, Ordering::SeqCst);
+
+        // always compact into sorted run 0
+        let next_sr_id = 0;
+
+        // Create a compaction of all SSTs from L0 and all sorted runs
+        let mut sources: Vec<SourceId> = db_state
+            .l0
+            .iter()
+            .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+            .collect();
+
+        // Add SSTs from all sorted runs
+        for sr in &db_state.compacted {
+            sources.push(SourceId::SortedRun(sr.id));
+        }
+
+        vec![Compaction::new(sources, next_sr_id)]
+    }
+}
+
+pub(crate) struct OnDemandCompactionSchedulerSupplier {
+    pub(crate) scheduler: OnDemandCompactionScheduler,
+}
+
+impl OnDemandCompactionSchedulerSupplier {
+    pub(crate) fn new() -> Self {
+        Self {
+            scheduler: OnDemandCompactionScheduler::new(),
+        }
+    }
+}
+
+impl CompactionSchedulerSupplier for OnDemandCompactionSchedulerSupplier {
+    fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler + Send + Sync> {
+        Box::new(self.scheduler.clone())
+    }
 }

@@ -48,7 +48,7 @@ impl TokioCompactionExecutor {
     pub(crate) fn new(
         handle: tokio::runtime::Handle,
         options: Arc<CompactorOptions>,
-        worker_tx: crossbeam_channel::Sender<WorkerToOrchestratorMsg>,
+        worker_tx: tokio::sync::mpsc::UnboundedSender<WorkerToOrchestratorMsg>,
         table_store: Arc<TableStore>,
         stats: Arc<CompactionStats>,
     ) -> Self {
@@ -87,7 +87,7 @@ struct TokioCompactionTask {
 pub(crate) struct TokioCompactionExecutorInner {
     options: Arc<CompactorOptions>,
     handle: tokio::runtime::Handle,
-    worker_tx: crossbeam_channel::Sender<WorkerToOrchestratorMsg>,
+    worker_tx: tokio::sync::mpsc::UnboundedSender<WorkerToOrchestratorMsg>,
     table_store: Arc<TableStore>,
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
     stats: Arc<CompactionStats>,

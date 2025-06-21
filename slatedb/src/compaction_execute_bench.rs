@@ -295,10 +295,10 @@ impl CompactionExecuteBench {
                 destination_sr_id,
             )
         });
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let compactor_options = CompactorOptions::default();
-        let registry = StatRegistry::new();
-        let stats = Arc::new(CompactionStats::new(&registry));
+        let registry = Arc::new(StatRegistry::new());
+        let stats = Arc::new(CompactionStats::new(registry.clone()));
         let executor = TokioCompactionExecutor::new(
             Handle::current(),
             Arc::new(compactor_options),
@@ -330,7 +330,7 @@ impl CompactionExecuteBench {
         info!("start compaction job");
         tokio::task::spawn_blocking(move || executor.start_compaction(job));
         let WorkerToOrchestratorMsg::CompactionFinished { id: _, result } =
-            rx.recv().expect("recv failed");
+            rx.recv().await.expect("recv failed");
         match result {
             Ok(_) => {
                 info!("compaction finished in {:?}", start.elapsed());
