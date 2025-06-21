@@ -132,13 +132,12 @@ impl Admin {
         .with_cancellation_token(ct)
         .build();
 
-        tracker.spawn(async move {
-            gc.run_async_task().await;
+        let jh = tracker.spawn(async move {
+            gc.run_async_task().await
         });
         tracker.close();
         tracker.wait().await;
-
-        Ok(())
+        jh.await.unwrap().map_err(Into::into)
     }
 
     /// Creates a checkpoint of the db stored in the object store at the specified path using the
