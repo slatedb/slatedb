@@ -108,31 +108,6 @@ impl GarbageCollector {
         }
     }
 
-    /// Starts the garbage collector in a background thread.
-    ///
-    /// This method launches the garbage collector in a dedicated background thread
-    /// and returns immediately. The garbage collector will run until its cancellation
-    /// token is cancelled. Use [`terminate_background_task`](GarbageCollector::terminate_background_task)
-    /// to stop the garbage collector.
-    ///
-    /// # Arguments
-    ///
-    /// * `tokio_handle` - The tokio handle to use in the background thread.
-    /// * `cleanup_fn` - A function that will be called when the garbage collector
-    ///   thread completes, with the final result (success or error).
-    pub fn start_in_bg_thread(
-        &self,
-        tokio_handle: Handle,
-        cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
-    ) {
-        let this = self.clone();
-        let gc_main = move || {
-            tokio_handle.block_on(this.run_async_task());
-            Ok(())
-        };
-        spawn_bg_thread("slatedb-gc", cleanup_fn, gc_main);
-    }
-
     /// Starts the garbage collector. This method performs the actual garbage collection.
     /// The garbage collector runs until the cancellation token is cancelled. Use
     /// [`terminate_background_task`](GarbageCollector::terminate_background_task) to stop the
@@ -141,14 +116,12 @@ impl GarbageCollector {
     /// Unlike [`start_in_bg_thread`](GarbageCollector::start_in_bg_thread), this method
     /// uses the current Tokio runtime instead of creating a new thread. This is useful
     /// when you want to run the garbage collector within an existing async runtime.
-    pub async fn run_async_task(&self) {
-        let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
-
+    pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
         let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) = self.gc_tasks();
-
         let mut compacted_ticker = compacted_gc_task.ticker();
         let mut wal_ticker = wal_gc_task.ticker();
         let mut manifest_ticker = manifest_gc_task.ticker();
+        let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
 
         info!(
             "Starting Garbage Collector with [manifest: {:#?}], [wal: {:#?}], [compacted: {:#?}]",
@@ -185,6 +158,8 @@ impl GarbageCollector {
             self.stats.gc_wal_count.value.load(Ordering::SeqCst),
             self.stats.gc_compacted_count.value.load(Ordering::SeqCst)
         );
+
+        Ok(())
     }
 
     /// Run the garbage collector once.
@@ -202,11 +177,6 @@ impl GarbageCollector {
         self.run_gc_task(&mut compacted_gc_task).await;
 
         self.stats.gc_count.inc();
-    }
-
-    /// Notify the garbage collector to terminate.
-    pub async fn terminate_background_task(self) {
-        self.cancellation_token.cancel();
     }
 
     fn gc_tasks(&self) -> (WalGcTask, CompactedGcTask, ManifestGcTask) {
@@ -295,6 +265,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::types::RowEntry;
+    use crate::utils::spawn_bg_task;
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
         manifest::store::{ManifestStore, StoredManifest},
@@ -1118,8 +1089,10 @@ mod tests {
             cancellation_token.clone(),
         );
 
-        gc.start_in_bg_thread(Handle::current(), |result| assert!(result.is_ok()));
-        gc.terminate_background_task().await;
+        let fut = async move { gc.run_async_task().await };
+        let jh = spawn_bg_task(&Handle::current(), |result| assert!(result.is_ok()), fut);
+        cancellation_token.cancel();
+        jh.await.unwrap();
 
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(cancellation_token.is_cancelled());
