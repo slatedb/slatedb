@@ -354,13 +354,9 @@ impl WalBufferManager {
 
         for (wal_id, wal) in flushing_wals.iter() {
             let result = self.do_flush_one_wal(*wal_id, wal.clone()).await;
-            // a kv table can be retried to flush multiple times, but WatchableOnceCell is only set once.
-            // let's notify Ok(()) as soon as possible, while the error will be notified when it goes into
-            // fatal state.
-            if result.is_ok() {
-                wal.notify_durable(result.clone());
+            if let Err(e) = &result {
+                return Err(e.clone());
             }
-            result?;
 
             // increment the last flushed wal id, and last flushed seq
             {
@@ -370,6 +366,11 @@ impl WalBufferManager {
                     inner.oracle.last_remote_persisted_seq.store_if_greater(seq);
                 }
             }
+
+            // a kv table can be retried to flush multiple times, but WatchableOnceCell is only set once.
+            // let's notify Ok(()) as soon as possible, while the error will be notified when it goes into
+            // fatal state.
+            wal.notify_durable(result.clone());
         }
 
         self.maybe_release_immutable_wals().await;
