@@ -172,9 +172,8 @@ impl DbReaderInner {
                 lifetime: Some(options.checkpoint_lifetime),
                 ..CheckpointOptions::default()
             };
-            manifest
-                .write_checkpoint(rand.thread_rng().gen_uuid(), &options)
-                .await?
+            let checkpoint_id = rand.thread_rng().gen_uuid();
+            manifest.write_checkpoint(checkpoint_id, &options).await?
         };
         Ok(checkpoint)
     }
@@ -546,7 +545,7 @@ impl DbReader {
             options,
             Arc::new(DefaultLogicalClock::default()),
             Arc::new(DefaultSystemClock::default()),
-            Arc::new(DbRand::new(rand::random())),
+            Arc::new(DbRand::default()),
         )
         .await
     }

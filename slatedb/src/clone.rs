@@ -184,9 +184,10 @@ async fn get_or_create_parent_checkpoint(
             None => return Err(CheckpointMissing(checkpoint_id)),
         },
         None => {
+            let checkpoint_id = rand.thread_rng().gen_uuid();
             manifest
                 .write_checkpoint(
-                    rand.thread_rng().gen_uuid(),
+                    checkpoint_id,
                     &CheckpointOptions {
                         lifetime: Some(Duration::from_secs(300)),
                         source: None,
@@ -488,12 +489,14 @@ mod tests {
             StoredManifest::create_new_db(parent_manifest_store, CoreDbState::new())
                 .await
                 .unwrap();
+        let uuid_1 = rand.thread_rng().gen_uuid();
         let checkpoint_1 = parent_sm
-            .write_checkpoint(rand.thread_rng().gen_uuid(), &CheckpointOptions::default())
+            .write_checkpoint(uuid_1, &CheckpointOptions::default())
             .await
             .unwrap();
+        let uuid_2 = rand.thread_rng().gen_uuid();
         let checkpoint_2 = parent_sm
-            .write_checkpoint(rand.thread_rng().gen_uuid(), &CheckpointOptions::default())
+            .write_checkpoint(uuid_2, &CheckpointOptions::default())
             .await
             .unwrap();
 
