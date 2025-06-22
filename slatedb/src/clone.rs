@@ -5,6 +5,8 @@ use crate::error::SlateDBError;
 use crate::error::SlateDBError::CheckpointMissing;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::paths::PathResolver;
+use crate::rand::DbRand;
+use crate::utils::IdGenerator;
 use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -18,6 +20,7 @@ pub(crate) async fn create_clone<P: Into<Path>>(
     object_store: Arc<dyn ObjectStore>,
     parent_checkpoint: Option<Uuid>,
     fp_registry: Arc<FailPointRegistry>,
+    rand: Arc<DbRand>,
 ) -> Result<(), SlateDBError> {
     let clone_path = clone_path.into();
     let parent_path = parent_path.into();
@@ -43,6 +46,7 @@ pub(crate) async fn create_clone<P: Into<Path>>(
         parent_path.to_string(),
         parent_checkpoint,
         object_store.clone(),
+        rand,
         fp_registry.clone(),
     )
     .await?;
@@ -71,6 +75,7 @@ async fn create_clone_manifest(
     parent_path: String,
     parent_checkpoint_id: Option<Uuid>,
     object_store: Arc<dyn ObjectStore>,
+    rand: Arc<DbRand>,
     #[allow(unused)] fp_registry: Arc<FailPointRegistry>,
 ) -> Result<StoredManifest, SlateDBError> {
     let clone_manifest = match StoredManifest::try_load(clone_manifest_store.clone()).await? {
@@ -100,8 +105,12 @@ async fn create_clone_manifest(
         None => {
             let mut parent_manifest =
                 load_initialized_manifest(parent_manifest_store.clone()).await?;
-            let parent_checkpoint =
-                get_or_create_parent_checkpoint(&mut parent_manifest, parent_checkpoint_id).await?;
+            let parent_checkpoint = get_or_create_parent_checkpoint(
+                &mut parent_manifest,
+                parent_checkpoint_id,
+                rand.clone(),
+            )
+            .await?;
             let parent_manifest_at_checkpoint = parent_manifest_store
                 .read_manifest(parent_checkpoint.manifest_id)
                 .await?;
@@ -111,6 +120,7 @@ async fn create_clone_manifest(
                 &parent_manifest_at_checkpoint,
                 parent_path.clone(),
                 parent_checkpoint.id,
+                rand,
             )
             .await?
         }
@@ -144,7 +154,7 @@ async fn create_clone_manifest(
         {
             external_db_manifest
                 .write_checkpoint(
-                    Some(final_checkpoint_id),
+                    final_checkpoint_id,
                     &CheckpointOptions {
                         lifetime: None,
                         source: Some(external_db.source_checkpoint_id),
@@ -166,6 +176,7 @@ async fn create_clone_manifest(
 async fn get_or_create_parent_checkpoint(
     manifest: &mut StoredManifest,
     maybe_checkpoint_id: Option<Uuid>,
+    rand: Arc<DbRand>,
 ) -> Result<Checkpoint, SlateDBError> {
     let checkpoint = match maybe_checkpoint_id {
         Some(checkpoint_id) => match manifest.db_state().find_checkpoint(checkpoint_id) {
@@ -175,7 +186,7 @@ async fn get_or_create_parent_checkpoint(
         None => {
             manifest
                 .write_checkpoint(
-                    None,
+                    rand.thread_rng().gen_uuid(),
                     &CheckpointOptions {
                         lifetime: Some(Duration::from_secs(300)),
                         source: None,
@@ -308,7 +319,9 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
     use crate::proptest_util::{rng, sample};
+    use crate::rand::DbRand;
     use crate::test_utils;
+    use crate::utils::IdGenerator;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -339,6 +352,7 @@ mod tests {
             object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
+            Arc::new(DbRand::default()),
         )
         .await
         .unwrap();
@@ -402,6 +416,7 @@ mod tests {
             object_store.clone(),
             Some(checkpoint.id),
             Arc::new(FailPointRegistry::new()),
+            Arc::new(DbRand::default()),
         )
         .await
         .unwrap();
@@ -421,6 +436,7 @@ mod tests {
         let object_store = Arc::new(InMemory::new());
         let parent_path = Path::from("/tmp/test_parent");
         let clone_path = Path::from("/tmp/test_clone");
+        let rand = Arc::new(DbRand::default());
 
         // Create the parent with empty state
         let parent_db = Db::open(parent_path.clone(), object_store.clone())
@@ -436,6 +452,7 @@ mod tests {
             &Manifest::initial(CoreDbState::new()),
             parent_path.to_string(),
             non_existent_source_checkpoint_id,
+            rand.clone(),
         )
         .await
         .unwrap();
@@ -447,6 +464,7 @@ mod tests {
             object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
+            rand.clone(),
         )
         .await
         .unwrap_err();
@@ -461,6 +479,7 @@ mod tests {
         let object_store = Arc::new(InMemory::new());
         let parent_path = Path::from("/tmp/test_parent");
         let clone_path = Path::from("/tmp/test_clone");
+        let rand = Arc::new(DbRand::default());
 
         // Create the parent with empty state
         let parent_manifest_store =
@@ -470,11 +489,11 @@ mod tests {
                 .await
                 .unwrap();
         let checkpoint_1 = parent_sm
-            .write_checkpoint(None, &CheckpointOptions::default())
+            .write_checkpoint(rand.thread_rng().gen_uuid(), &CheckpointOptions::default())
             .await
             .unwrap();
         let checkpoint_2 = parent_sm
-            .write_checkpoint(None, &CheckpointOptions::default())
+            .write_checkpoint(rand.thread_rng().gen_uuid(), &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -485,6 +504,7 @@ mod tests {
             &Manifest::initial(CoreDbState::new()),
             parent_path.to_string(),
             checkpoint_1.id,
+            rand.clone(),
         )
         .await
         .unwrap();
@@ -496,6 +516,7 @@ mod tests {
             object_store.clone(),
             Some(checkpoint_2.id),
             Arc::new(FailPointRegistry::new()),
+            rand.clone(),
         )
         .await
         .unwrap_err();
@@ -509,6 +530,7 @@ mod tests {
         let original_parent_path = Path::from("/tmp/test_parent");
         let updated_parent_path = Path::from("/tmp/test_parent/new");
         let clone_path = Path::from("/tmp/test_clone");
+        let rand = Arc::new(DbRand::default());
 
         // Setup an uninitialized manifest pointing to a different parent
         let parent_manifest = Manifest::initial(CoreDbState::new());
@@ -518,6 +540,7 @@ mod tests {
             &parent_manifest,
             original_parent_path.to_string(),
             uuid::Uuid::new_v4(),
+            rand.clone(),
         )
         .await
         .unwrap();
@@ -535,6 +558,7 @@ mod tests {
             object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
+            rand.clone(),
         )
         .await
         .unwrap_err();
@@ -550,6 +574,7 @@ mod tests {
         let object_store = Arc::new(InMemory::new());
         let parent_path = "/tmp/test_parent";
         let clone_path = "/tmp/test_clone";
+        let rand = Arc::new(DbRand::default());
 
         let parent_db = Db::open(parent_path, object_store.clone()).await.unwrap();
         parent_db.close().await.unwrap();
@@ -560,6 +585,7 @@ mod tests {
             object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
+            rand.clone(),
         )
         .await
         .unwrap();
@@ -574,6 +600,7 @@ mod tests {
             object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
+            rand.clone(),
         )
         .await?;
 
@@ -591,6 +618,7 @@ mod tests {
         let object_store = Arc::new(InMemory::new());
         let parent_path = Path::from("/tmp/test_parent");
         let clone_path = Path::from("/tmp/test_clone");
+        let rand = Arc::new(DbRand::default());
 
         let parent_db = Db::open(parent_path.clone(), object_store.clone())
             .await
@@ -620,6 +648,7 @@ mod tests {
             object_store.clone(),
             None,
             Arc::clone(&fp_registry),
+            rand.clone(),
         )
         .await
         .unwrap_err();
@@ -632,6 +661,7 @@ mod tests {
             object_store.clone(),
             None,
             Arc::clone(&fp_registry),
+            rand.clone(),
         )
         .await
         .unwrap();
@@ -643,6 +673,7 @@ mod tests {
         let object_store = Arc::new(InMemory::new());
         let parent_path = Path::from("/tmp/test_parent");
         let clone_path = Path::from("/tmp/test_clone");
+        let rand = Arc::new(DbRand::default());
 
         let parent_db = Db::open(parent_path.clone(), object_store.clone()).await?;
         let mut rng = rng::new_test_rng(None);
@@ -665,6 +696,7 @@ mod tests {
             object_store.clone(),
             Some(checkpoint.id),
             Arc::clone(&fp_registry),
+            rand.clone(),
         )
         .await
         .unwrap_err();
@@ -690,6 +722,7 @@ mod tests {
             object_store.clone(),
             Some(checkpoint.id),
             Arc::clone(&fp_registry),
+            rand.clone(),
         )
         .await
         .unwrap_err();
@@ -718,6 +751,7 @@ mod tests {
             object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
+            Arc::new(DbRand::default()),
         )
         .await;
         assert!(matches!(result, Err(SlateDBError::Unsupported(..))));
