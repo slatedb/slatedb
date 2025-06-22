@@ -186,7 +186,9 @@ impl Admin {
             .await?;
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         let checkpoint_id = self.rand.thread_rng().gen_uuid();
-        let checkpoint = stored_manifest.write_checkpoint(checkpoint_id, options).await?;
+        let checkpoint = stored_manifest
+            .write_checkpoint(checkpoint_id, options)
+            .await?;
         Ok(CheckpointCreateResult {
             id: checkpoint.id,
             manifest_id: checkpoint.manifest_id,
