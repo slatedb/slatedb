@@ -46,6 +46,7 @@ use crate::manifest::store::{DirtyManifest, FenceableManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::oracle::Oracle;
+use crate::rand::DbRand;
 use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
@@ -69,6 +70,7 @@ pub(crate) struct DbInner {
     /// A clock which is guaranteed to be monotonic. it's previous value is
     /// stored in the manifest and WAL, will be updated after WAL replay.
     pub(crate) mono_clock: Arc<MonotonicClock>,
+    pub(crate) rand: Arc<DbRand>,
     pub(crate) oracle: Arc<Oracle>,
     pub(crate) reader: Reader,
     /// [`wal_buffer`] manages the in-memory WAL buffer, it manages the flushing
@@ -84,6 +86,7 @@ impl DbInner {
         logical_clock: Arc<dyn LogicalClock>,
         // TODO replace all system clock usage with this
         _system_clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
         manifest: DirtyManifest,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
@@ -141,6 +144,7 @@ impl DbInner {
             write_notifier,
             db_stats,
             mono_clock,
+            rand,
             stat_registry,
             reader,
         };

@@ -417,6 +417,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 self.settings.clone(),
                 logical_clock,
                 system_clock.clone(),
+                rand.clone(),
                 table_store.clone(),
                 manifest.prepare_dirty()?,
                 memtable_flush_tx,
