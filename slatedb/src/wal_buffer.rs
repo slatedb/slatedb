@@ -73,6 +73,7 @@ struct WalBufferManagerInner {
 }
 
 impl WalBufferManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
         db_state: Option<Arc<RwLock<DbState>>>,
