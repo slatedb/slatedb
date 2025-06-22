@@ -1066,7 +1066,7 @@ mod tests {
 
     fn new_checkpoint(manifest_id: u64) -> Checkpoint {
         Checkpoint {
-            id: crate::utils::uuid(),
+            id: uuid::Uuid::new_v4(),
             manifest_id,
             expire_time: None,
             create_time: now_rounded_to_nearest_sec(),
@@ -1190,7 +1190,7 @@ mod tests {
             .await
             .unwrap();
 
-        let checkpoint_id = crate::utils::uuid();
+        let checkpoint_id = uuid::Uuid::new_v4();
         let result = sm
             .refresh_checkpoint(checkpoint_id, Duration::from_secs(100))
             .await;
@@ -1235,7 +1235,7 @@ mod tests {
             .await
             .unwrap();
 
-        let missing_checkpoint_id = crate::utils::uuid();
+        let missing_checkpoint_id = uuid::Uuid::new_v4();
         let replaced_checkpoint = sm
             .replace_checkpoint(missing_checkpoint_id, &CheckpointOptions::default())
             .await
@@ -1272,7 +1272,7 @@ mod tests {
             .await
             .unwrap();
 
-        let checkpoint_id = crate::utils::uuid();
+        let checkpoint_id = uuid::Uuid::new_v4();
         let manifest_id = sm.id;
         sm.delete_checkpoint(checkpoint_id).await.unwrap();
         sm.refresh().await.unwrap();

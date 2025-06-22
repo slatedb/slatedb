@@ -521,7 +521,7 @@ mod tests {
         // mimic an externally added checkpoint
         let mut dirty = new_dirty_manifest();
         let checkpoint = Checkpoint {
-            id: crate::utils::uuid(),
+            id: uuid::Uuid::new_v4(),
             manifest_id: 1,
             expire_time: None,
             create_time: DefaultSystemClock::default().now(),

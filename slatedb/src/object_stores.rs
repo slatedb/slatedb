@@ -72,7 +72,7 @@ mod tests {
             &main_store
         ));
         assert!(Arc::ptr_eq(
-            &stores.store_for(&SsTableId::Compacted(crate::utils::ulid())),
+            &stores.store_for(&SsTableId::Compacted(ulid::Ulid::new())),
             &main_store
         ));
     }
@@ -97,7 +97,7 @@ mod tests {
             &wal_store
         ));
         assert!(Arc::ptr_eq(
-            &stores.store_for(&SsTableId::Compacted(crate::utils::ulid())),
+            &stores.store_for(&SsTableId::Compacted(ulid::Ulid::new())),
             &main_store
         ));
     }

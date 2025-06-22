@@ -196,7 +196,7 @@ mod tests {
             .await
             .unwrap();
 
-        let source_checkpoint_id = crate::utils::uuid();
+        let source_checkpoint_id = uuid::Uuid::new_v4();
         let result = admin
             .create_checkpoint(&CheckpointOptions {
                 source: Some(source_checkpoint_id),
@@ -280,7 +280,7 @@ mod tests {
             .unwrap();
 
         let result = admin
-            .refresh_checkpoint(crate::utils::uuid(), Some(Duration::from_secs(1000)))
+            .refresh_checkpoint(uuid::Uuid::new_v4(), Some(Duration::from_secs(1000)))
             .await;
 
         assert!(matches!(result, Err(SlateDBError::InvalidDBState)));
