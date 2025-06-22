@@ -46,6 +46,7 @@ use crate::{
 pub(crate) struct WalBufferManager {
     inner: Arc<parking_lot::RwLock<WalBufferManagerInner>>,
     wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
+    // If set, WAL buffer will call `record_fatal_error` if it fails
     db_state: Option<Arc<RwLock<DbState>>>,
     quit_once: WatchableOnceCell<Result<(), SlateDBError>>,
     mono_clock: Arc<MonotonicClock>,
