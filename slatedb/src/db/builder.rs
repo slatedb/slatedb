@@ -123,6 +123,7 @@ use crate::clock::SystemClock;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::default_block_cache;
+use crate::config::CompactorOptions;
 use crate::config::GarbageCollectorOptions;
 use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
@@ -139,6 +140,7 @@ use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::bg_task_result_into_err;
+use crate::utils::spawn_bg_task;
 
 /// A builder for creating a new Db instance.
 ///
@@ -442,9 +444,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
         let write_task = inner.spawn_write_task(write_rx, &tokio_handle);
 
-        // Setup compactor if needed
-        let mut compactor = None;
-
         // Not to pollute the cache during compaction or GC
         let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
@@ -459,33 +458,42 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // To keep backwards compatibility, check if the compaction_scheduler_supplier or compactor_options are set.
         // If either are set, we need to initialize the compactor.
-        if self.compaction_scheduler_supplier.is_some() || self.settings.compactor_options.is_some()
+        let compactor_task = if self.compaction_scheduler_supplier.is_some()
+            || self.settings.compactor_options.is_some()
         {
             let compactor_options = self.settings.compactor_options.unwrap_or_default();
-            let compaction_handle = self.compaction_runtime.unwrap_or_else(|| Handle::current());
+            let compaction_handle = self
+                .compaction_runtime
+                .unwrap_or_else(|| tokio_handle.clone());
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
                 .unwrap_or_else(|| Arc::new(SizeTieredCompactionSchedulerSupplier::default()));
             let cleanup_inner = inner.clone();
-            compactor = Some(
-                Compactor::new(
-                    manifest_store.clone(),
-                    uncached_table_store.clone(),
-                    compactor_options.clone(),
-                    scheduler_supplier,
-                    compaction_handle,
-                    inner.stat_registry.as_ref(),
-                    move |result: &Result<(), SlateDBError>| {
-                        let err = bg_task_result_into_err(result);
-                        warn!("compactor thread exited with {:?}", err);
-                        let mut state = cleanup_inner.state.write();
-                        state.record_fatal_error(err.clone())
-                    },
-                    system_clock.clone(),
-                )
-                .await?,
-            )
-        }
+            let compactor = Compactor::new(
+                manifest_store.clone(),
+                uncached_table_store.clone(),
+                compactor_options.clone(),
+                scheduler_supplier,
+                inner.stat_registry.clone(),
+                system_clock.clone(),
+                self.cancellation_token.clone(),
+            );
+            // Spawn the compactor on the compaction runtime
+            // Spawn the main event loop on the main tokio runtime
+            let compactor_task = spawn_bg_task(
+                &tokio_handle,
+                move |result: &Result<(), SlateDBError>| {
+                    let err = bg_task_result_into_err(result);
+                    warn!("compactor thread exited with {:?}", err);
+                    let mut state = cleanup_inner.state.write();
+                    state.record_fatal_error(err.clone())
+                },
+                async move { compactor.run_async_task(compaction_handle).await },
+            );
+            Some(compactor_task)
+        } else {
+            None
+        };
 
         // To keep backwards compatibility, check if the gc_runtime or garbage_collector_options are set.
         // If either are set, we need to initialize the garbage collector.
@@ -518,7 +526,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             inner,
             memtable_flush_task: Mutex::new(memtable_flush_task),
             write_task: Mutex::new(write_task),
-            compactor: Mutex::new(compactor),
+            compactor_task: Mutex::new(compactor_task),
             garbage_collector: Mutex::new(garbage_collector),
             cancellation_token: self.cancellation_token,
         })
@@ -573,7 +581,6 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     stat_registry: Arc<StatRegistry>,
     cancellation_token: CancellationToken,
     system_clock: Arc<dyn SystemClock>,
-    fp_registry: Arc<FailPointRegistry>,
 }
 
 impl<P: Into<Path>> GarbageCollectorBuilder<P> {
@@ -586,7 +593,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             stat_registry: Arc::new(StatRegistry::new()),
             cancellation_token: CancellationToken::new(),
             system_clock: Arc::new(DefaultSystemClock::default()),
-            fp_registry: Arc::new(FailPointRegistry::new()),
         }
     }
 
@@ -615,13 +621,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         self
     }
 
-    /// Sets the fail point registry to use for the garbage collector.
-    #[allow(unused)]
-    pub fn with_fp_registry(mut self, fp_registry: Arc<FailPointRegistry>) -> Self {
-        self.fp_registry = fp_registry;
-        self
-    }
-
     /// Sets the WAL object store to use for the garbage collector.
     #[allow(unused)]
     pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
@@ -646,6 +645,89 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             manifest_store,
             table_store,
             self.options,
+            self.stat_registry,
+            self.system_clock,
+            self.cancellation_token,
+        )
+    }
+}
+
+/// Builder for creating new Compactor instances.
+///
+/// This provides a fluent API for configuring a Compactor object.
+pub struct CompactorBuilder<P: Into<Path>> {
+    path: P,
+    main_object_store: Arc<dyn ObjectStore>,
+    tokio_handle: Handle,
+    options: CompactorOptions,
+    scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    stat_registry: Arc<StatRegistry>,
+    cancellation_token: CancellationToken,
+    system_clock: Arc<dyn SystemClock>,
+}
+
+#[allow(unused)]
+impl<P: Into<Path>> CompactorBuilder<P> {
+    pub fn new(path: P, main_object_store: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            path,
+            main_object_store,
+            tokio_handle: Handle::current(),
+            options: CompactorOptions::default(),
+            scheduler_supplier: Arc::new(SizeTieredCompactionSchedulerSupplier::default()),
+            stat_registry: Arc::new(StatRegistry::new()),
+            cancellation_token: CancellationToken::new(),
+            system_clock: Arc::new(DefaultSystemClock::default()),
+        }
+    }
+
+    /// Sets the tokio handle to use for background tasks.
+    #[allow(unused)]
+    pub fn with_tokio_handle(mut self, tokio_handle: Handle) -> Self {
+        self.tokio_handle = tokio_handle;
+        self
+    }
+
+    /// Sets the options to use for the garbage collector.
+    pub fn with_options(mut self, options: CompactorOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Sets the stats registry to use for the garbage collector.
+    #[allow(unused)]
+    pub fn with_stat_registry(mut self, stat_registry: Arc<StatRegistry>) -> Self {
+        self.stat_registry = stat_registry;
+        self
+    }
+
+    /// Sets the system clock to use for the garbage collector.
+    pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
+        self.system_clock = system_clock;
+        self
+    }
+
+    /// Sets the cancellation token to use for the garbage collector.
+    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
+        self.cancellation_token = cancellation_token;
+        self
+    }
+
+    /// Builds and returns a Compactor instance.
+    pub fn build(self) -> Compactor {
+        let path: Path = self.path.into();
+        let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(self.main_object_store.clone(), None),
+            SsTableFormat::default(), // read only SSTs can use default
+            path,
+            None, // no need for cache in GC
+        ));
+        Compactor::new(
+            manifest_store,
+            table_store,
+            self.options,
+            self.scheduler_supplier,
             self.stat_registry,
             self.system_clock,
             self.cancellation_token,

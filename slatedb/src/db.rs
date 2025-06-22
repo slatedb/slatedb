@@ -36,7 +36,6 @@ use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::clock::{LogicalClock, SystemClock};
-use crate::compactor::Compactor;
 use crate::config::{PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions};
 use crate::db_iter::DbIterator;
 use crate::db_state::{DbState, SsTableId};
@@ -389,9 +388,8 @@ pub struct Db {
     /// The handle for the flush thread.
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     write_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
-    compactor: Mutex<Option<Compactor>>,
+    compactor_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     garbage_collector: Mutex<Option<GarbageCollector>>,
-
     cancellation_token: CancellationToken,
 }
 
@@ -482,11 +480,12 @@ impl Db {
     pub async fn close(&self) -> Result<(), SlateDBError> {
         self.cancellation_token.cancel();
 
-        if let Some(compactor) = {
-            let mut maybe_compactor = self.compactor.lock();
-            maybe_compactor.take()
+        if let Some(compactor_task) = {
+            let mut maybe_compactor_task = self.compactor_task.lock();
+            maybe_compactor_task.take()
         } {
-            compactor.close().await;
+            let result = compactor_task.await.expect("Failed to join compactor task");
+            info!("compactor task exited with: {:?}", result);
         }
 
         if let Some(gc) = {
@@ -1001,7 +1000,7 @@ mod tests {
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::test_utils::{assert_iterator, TestClock};
+    use crate::test_utils::{assert_iterator, OnDemandCompactionSchedulerSupplier, TestClock};
     use crate::types::RowEntry;
     use crate::{proptest_util, test_utils, KeyValue};
     use futures::{future, future::join_all, StreamExt};
@@ -2815,14 +2814,11 @@ mod tests {
     async fn do_test_should_read_compacted_db(options: Settings) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
-
-        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-            SizeTieredCompactionSchedulerOptions::default(),
-        ));
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new());
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compaction_scheduler_supplier(compaction_scheduler.clone())
             .build()
             .await
             .unwrap();
@@ -2837,7 +2833,17 @@ mod tests {
         // wait for compactor to compact them
         wait_for_manifest_condition(
             &mut sm,
-            |s| s.l0_last_compacted.is_some() && s.l0.is_empty(),
+            |s| {
+                // compact after writing values. include in loop since the on demand scheduler
+                // only runs once per `should_compact`, and memtables might still be getting
+                // flushed (await_durable in the put()'s above only wait for the writes to hit
+                // the WAL before returning).
+                compaction_scheduler
+                    .scheduler
+                    .should_compact
+                    .store(true, Ordering::SeqCst);
+                s.l0_last_compacted.is_some() && s.l0.is_empty()
+            },
             Duration::from_secs(10),
         )
         .await;
@@ -2846,14 +2852,26 @@ mod tests {
             db.inner.state.read().state().core().l0.len(),
             db.inner.state.read().state().core().compacted.len()
         );
+
         // write more l0s and wait for compaction
         for i in 0..4 {
             db.put(&[b'f' + i; 32], &[6u8 + i; 32]).await.unwrap();
             db.put(&[b's' + i; 32], &[19u8 + i; 32]).await.unwrap();
         }
+        // wait for compactor to compact them
         wait_for_manifest_condition(
             &mut sm,
-            |s| s.l0_last_compacted.is_some() && s.l0.is_empty(),
+            |s| {
+                // compact after writing values. include in loop since the on demand scheduler
+                // only runs once per `should_compact`, and memtables might still be getting
+                // flushed (await_durable in the put()'s above only wait for the writes to hit
+                // the WAL before returning).
+                compaction_scheduler
+                    .scheduler
+                    .should_compact
+                    .store(true, Ordering::SeqCst);
+                s.l0_last_compacted.is_some() && s.l0.is_empty()
+            },
             Duration::from_secs(10),
         )
         .await;
@@ -2891,7 +2909,7 @@ mod tests {
         assert!(neg_lookup.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_read_from_compacted_db() {
         do_test_should_read_compacted_db(test_db_options(
             0,
@@ -2906,7 +2924,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_read_from_compacted_db_no_filters() {
         do_test_should_read_compacted_db(test_db_options(
             u32::MAX,
@@ -3428,6 +3446,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         while start.elapsed() < timeout {
             let manifest = sm.refresh().await.unwrap();
+            eprintln!("manifest: {:#?}", manifest.core);
             if cond(&manifest.core) {
                 return manifest.core.clone();
             }

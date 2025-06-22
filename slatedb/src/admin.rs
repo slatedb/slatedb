@@ -133,7 +133,7 @@ impl Admin {
         .build();
 
         tracker.spawn(async move {
-            gc.start_async_task().await;
+            gc.run_async_task().await;
         });
         tracker.close();
         tracker.wait().await;
