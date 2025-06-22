@@ -11,12 +11,13 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::oracle::Oracle;
+use crate::rand::DbRand;
 use crate::reader::{ReadSnapshot, Reader};
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::{DefaultStoreProvider, StoreProvider};
 use crate::tablestore::TableStore;
-use crate::utils::{MonotonicSeq, WatchableOnceCell};
+use crate::utils::{IdGenerator, MonotonicSeq, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{utils, Checkpoint, DbIterator};
 use bytes::Bytes;
@@ -50,6 +51,7 @@ struct DbReaderInner {
     oracle: Arc<Oracle>,
     reader: Reader,
     error_watcher: WatchableOnceCell<SlateDBError>,
+    rand: Arc<DbRand>,
 }
 
 struct ManifestPoller {
@@ -94,6 +96,7 @@ impl DbReaderInner {
         checkpoint_id: Option<Uuid>,
         logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
     ) -> Result<Self, SlateDBError> {
         let mut manifest = StoredManifest::load(Arc::clone(&manifest_store)).await?;
         if !manifest.db_state().initialized {
@@ -101,7 +104,8 @@ impl DbReaderInner {
         }
 
         let checkpoint =
-            Self::get_or_create_checkpoint(&mut manifest, checkpoint_id, &options).await?;
+            Self::get_or_create_checkpoint(&mut manifest, checkpoint_id, &options, rand.clone())
+                .await?;
 
         let replay_new_wals = checkpoint_id.is_none();
         let initial_state = Arc::new(
@@ -147,6 +151,7 @@ impl DbReaderInner {
             oracle,
             reader,
             error_watcher: WatchableOnceCell::new(),
+            rand,
         })
     }
 
@@ -154,6 +159,7 @@ impl DbReaderInner {
         manifest: &mut StoredManifest,
         checkpoint_id: Option<Uuid>,
         options: &DbReaderOptions,
+        rand: Arc<DbRand>,
     ) -> Result<Checkpoint, SlateDBError> {
         let checkpoint = if let Some(checkpoint_id) = checkpoint_id {
             manifest
@@ -166,7 +172,9 @@ impl DbReaderInner {
                 lifetime: Some(options.checkpoint_lifetime),
                 ..CheckpointOptions::default()
             };
-            manifest.write_checkpoint(None, &options).await?
+            manifest
+                .write_checkpoint(rand.thread_rng().gen_uuid(), &options)
+                .await?
         };
         Ok(checkpoint)
     }
@@ -212,8 +220,9 @@ impl DbReaderInner {
             lifetime: Some(self.options.checkpoint_lifetime),
             ..CheckpointOptions::default()
         };
+        let new_checkpoint_id = self.rand.thread_rng().gen_uuid();
         stored_manifest
-            .replace_checkpoint(current_checkpoint_id, &options)
+            .replace_checkpoint(current_checkpoint_id, new_checkpoint_id, &options)
             .await
     }
 
@@ -537,6 +546,7 @@ impl DbReader {
             options,
             Arc::new(DefaultLogicalClock::default()),
             Arc::new(DefaultSystemClock::default()),
+            Arc::new(DbRand::new(rand::random())),
         )
         .await
     }
@@ -547,6 +557,7 @@ impl DbReader {
         options: DbReaderOptions,
         logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
@@ -560,6 +571,7 @@ impl DbReader {
                 checkpoint_id,
                 logical_clock,
                 system_clock,
+                rand,
             )
             .await?,
         );
@@ -838,6 +850,7 @@ mod tests {
     use crate::paths::PathResolver;
     use crate::proptest_util::rng::new_test_rng;
     use crate::proptest_util::sample;
+    use crate::rand::DbRand;
     use crate::sst::SsTableFormat;
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
@@ -906,6 +919,7 @@ mod tests {
             DbReaderOptions::default(),
             test_provider.logical_clock.clone(),
             test_provider.system_clock.clone(),
+            test_provider.rand.clone(),
         )
         .await
         .unwrap();
@@ -965,6 +979,7 @@ mod tests {
             &parent_manifest,
             parent_path,
             source_checkpoint_id,
+            Arc::new(DbRand::default()),
         )
         .await
         .unwrap();
@@ -1153,18 +1168,21 @@ mod tests {
         fp_registry: Arc<FailPointRegistry>,
         logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
     }
 
     impl TestProvider {
         fn new(path: Path, object_store: Arc<dyn ObjectStore>) -> Self {
             let logical_clock = Arc::new(DefaultLogicalClock::new());
             let system_clock = Arc::new(DefaultSystemClock::new());
+            let rand = Arc::new(DbRand::default());
             TestProvider {
                 object_store,
                 path,
                 fp_registry: Arc::new(FailPointRegistry::new()),
                 logical_clock,
                 system_clock,
+                rand,
             }
         }
     }
@@ -1188,6 +1206,7 @@ mod tests {
                 options,
                 self.logical_clock.clone() as Arc<dyn LogicalClock>,
                 self.system_clock.clone() as Arc<dyn SystemClock>,
+                self.rand.clone(),
             )
             .await
         }

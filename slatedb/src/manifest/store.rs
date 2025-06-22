@@ -1166,7 +1166,10 @@ mod tests {
             ..CheckpointOptions::default()
         };
 
-        let checkpoint = sm.write_checkpoint(uuid::Uuid::new_v4(), &options).await.unwrap();
+        let checkpoint = sm
+            .write_checkpoint(uuid::Uuid::new_v4(), &options)
+            .await
+            .unwrap();
         let expire_time = checkpoint.expire_time.unwrap();
 
         let refreshed_checkpoint = sm
@@ -1216,7 +1219,11 @@ mod tests {
             .unwrap();
 
         let replaced_checkpoint = sm
-            .replace_checkpoint(checkpoint.id, uuid::Uuid::new_v4(), &CheckpointOptions::default())
+            .replace_checkpoint(
+                checkpoint.id,
+                uuid::Uuid::new_v4(),
+                &CheckpointOptions::default(),
+            )
             .await
             .unwrap();
         assert_ne!(checkpoint.id, replaced_checkpoint.id);
@@ -1237,7 +1244,11 @@ mod tests {
 
         let missing_checkpoint_id = uuid::Uuid::new_v4();
         let replaced_checkpoint = sm
-            .replace_checkpoint(uuid::Uuid::new_v4(), missing_checkpoint_id, &CheckpointOptions::default())
+            .replace_checkpoint(
+                uuid::Uuid::new_v4(),
+                missing_checkpoint_id,
+                &CheckpointOptions::default(),
+            )
             .await
             .unwrap();
 
