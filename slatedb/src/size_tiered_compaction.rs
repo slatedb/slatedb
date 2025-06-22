@@ -467,7 +467,7 @@ mod tests {
             ],
         ));
         state
-            .submit_compaction(create_sr_compaction(vec![3, 2, 1, 0]))
+            .submit_compaction(uuid::Uuid::new_v4(), create_sr_compaction(vec![3, 2, 1, 0]))
             .unwrap();
 
         // when:
@@ -551,7 +551,7 @@ mod tests {
             ],
         ));
         state
-            .submit_compaction(create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]))
+            .submit_compaction(uuid::Uuid::new_v4(), create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]))
             .unwrap();
 
         // when:
@@ -581,7 +581,7 @@ mod tests {
             ],
         ));
         state
-            .submit_compaction(create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]))
+            .submit_compaction(uuid::Uuid::new_v4(), create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]))
             .unwrap();
 
         // when:

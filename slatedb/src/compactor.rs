@@ -241,9 +241,10 @@ impl CompactorEventHandler {
     async fn write_manifest(&mut self) -> Result<(), SlateDBError> {
         // write the checkpoint first so that it points to the manifest with the ssts
         // being removed
+        let checkpoint_id = self.rand.thread_rng().gen_uuid();
         self.manifest
             .write_checkpoint(
-                None,
+                checkpoint_id,
                 &CheckpointOptions {
                     // TODO(rohan): for now, just write a checkpoint with 15-minute expiry
                     //              so that it's extremely unlikely for the gc to delete ssts

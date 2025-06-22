@@ -8,6 +8,7 @@ use crate::error::SlateDBError::{
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
+use crate::rand::DbRand;
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
@@ -164,10 +165,9 @@ impl FenceableManifest {
 
     pub(crate) async fn write_checkpoint(
         &mut self,
-        checkpoint_id: Option<Uuid>,
+        checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let checkpoint_id = checkpoint_id.unwrap_or(crate::utils::uuid());
         self.maybe_apply_manifest_update(|stored_manifest| {
             stored_manifest
                 .apply_new_checkpoint_to_db_state(checkpoint_id, options)
@@ -268,8 +268,9 @@ impl StoredManifest {
         parent_manifest: &Manifest,
         parent_path: String,
         source_checkpoint_id: Uuid,
+        rand: Arc<DbRand>,
     ) -> Result<Self, SlateDBError> {
-        let manifest = Manifest::cloned(parent_manifest, parent_path, source_checkpoint_id);
+        let manifest = Manifest::cloned(parent_manifest, parent_path, source_checkpoint_id, rand);
         Self::init(clone_manifest_store, manifest).await
     }
 
@@ -372,10 +373,9 @@ impl StoredManifest {
 
     pub(crate) async fn write_checkpoint(
         &mut self,
-        checkpoint_id: Option<Uuid>,
+        checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let checkpoint_id = checkpoint_id.unwrap_or(crate::utils::uuid());
         self.maybe_apply_manifest_update(|stored_manifest| {
             stored_manifest
                 .apply_new_checkpoint_to_db_state(checkpoint_id, options)
@@ -417,9 +417,9 @@ impl StoredManifest {
     pub(crate) async fn replace_checkpoint(
         &mut self,
         old_checkpoint_id: Uuid,
+        new_checkpoint_id: Uuid,
         new_checkpoint_options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let new_checkpoint_id = crate::utils::uuid();
         self.maybe_apply_manifest_update(|stored_manifest| {
             let new_checkpoint =
                 stored_manifest.new_checkpoint(new_checkpoint_id, new_checkpoint_options)?;
@@ -925,7 +925,7 @@ mod tests {
             .unwrap();
 
         let result = compactor1
-            .write_checkpoint(None, &CheckpointOptions::default())
+            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
             .await;
 
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
@@ -1138,12 +1138,12 @@ mod tests {
             .unwrap();
 
         let checkpoint1 = sm
-            .write_checkpoint(None, &CheckpointOptions::default())
+            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 
         let _ = sm
-            .write_checkpoint(None, &CheckpointOptions::default())
+            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -1166,7 +1166,7 @@ mod tests {
             ..CheckpointOptions::default()
         };
 
-        let checkpoint = sm.write_checkpoint(None, &options).await.unwrap();
+        let checkpoint = sm.write_checkpoint(uuid::Uuid::new_v4(), &options).await.unwrap();
         let expire_time = checkpoint.expire_time.unwrap();
 
         let refreshed_checkpoint = sm
@@ -1211,12 +1211,12 @@ mod tests {
             .unwrap();
 
         let checkpoint = sm
-            .write_checkpoint(None, &CheckpointOptions::default())
+            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 
         let replaced_checkpoint = sm
-            .replace_checkpoint(checkpoint.id, &CheckpointOptions::default())
+            .replace_checkpoint(checkpoint.id, uuid::Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
         assert_ne!(checkpoint.id, replaced_checkpoint.id);
@@ -1237,7 +1237,7 @@ mod tests {
 
         let missing_checkpoint_id = uuid::Uuid::new_v4();
         let replaced_checkpoint = sm
-            .replace_checkpoint(missing_checkpoint_id, &CheckpointOptions::default())
+            .replace_checkpoint(uuid::Uuid::new_v4(), missing_checkpoint_id, &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -1256,7 +1256,7 @@ mod tests {
             .unwrap();
 
         let checkpoint = sm
-            .write_checkpoint(None, &CheckpointOptions::default())
+            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 
