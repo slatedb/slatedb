@@ -1,5 +1,6 @@
 use std::{collections::VecDeque, future::Future, pin::Pin, sync::Arc, time::Duration};
 
+use parking_lot::RwLock;
 use tokio::{
     select,
     sync::{mpsc, oneshot},
@@ -8,7 +9,7 @@ use tokio::{
 
 use crate::{
     clock::MonotonicClock,
-    db_state::SsTableId,
+    db_state::{DbState, SsTableId},
     iter::KeyValueIterator,
     mem_table::KVTable,
     oracle::Oracle,
@@ -45,7 +46,7 @@ use crate::{
 pub(crate) struct WalBufferManager {
     inner: Arc<parking_lot::RwLock<WalBufferManagerInner>>,
     wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
-    handle_fatal: Box<dyn Fn(SlateDBError) + Send + Sync>,
+    db_state: Option<Arc<RwLock<DbState>>>,
     quit_once: WatchableOnceCell<Result<(), SlateDBError>>,
     mono_clock: Arc<MonotonicClock>,
     table_store: Arc<TableStore>,
@@ -74,7 +75,7 @@ struct WalBufferManagerInner {
 impl WalBufferManager {
     pub fn new(
         wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
-        handle_fatal: Box<dyn Fn(SlateDBError) + Send + Sync>,
+        db_state: Option<Arc<RwLock<DbState>>>,
         recent_flushed_wal_id: u64,
         oracle: Arc<Oracle>,
         table_store: Arc<TableStore>,
@@ -96,7 +97,7 @@ impl WalBufferManager {
         Self {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
             wal_id_incrementor,
-            handle_fatal,
+            db_state,
             quit_once: WatchableOnceCell::new(),
             table_store,
             mono_clock,
@@ -328,7 +329,9 @@ impl WalBufferManager {
         // In both cases, we need to notify all the flushing WALs to be finished with fatal error or shutdown error.
         // If we got a fatal error, we need to set it in quit_once to notify the database to enter fatal state.
         if let Err(e) = &result {
-            (self.handle_fatal)(e.clone());
+            if let Some(db_state) = self.db_state.clone() {
+                db_state.write().record_fatal_error(e.clone());
+            }
             self.quit_once.write(Err(e.clone()));
         }
         // notify all the flushing wals to be finished with fatal error or shutdown error. we need ensure all the wal
@@ -506,7 +509,7 @@ mod tests {
         let oracle = Arc::new(Oracle::new(MonotonicSeq::new(0)));
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
-            Box::new(|_| {}),
+            None,
             0, // recent_flushed_wal_id
             oracle,
             table_store.clone(),

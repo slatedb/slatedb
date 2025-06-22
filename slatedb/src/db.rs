@@ -121,12 +121,9 @@ impl DbInner {
         };
 
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
-        let state_clone = state.clone();
         let wal_buffer = Arc::new(WalBufferManager::new(
             state.clone(),
-            Box::new(move |err| {
-                state_clone.write().record_fatal_error(err);
-            }),
+            Some(state.clone()),
             recent_flushed_wal_id,
             oracle.clone(),
             table_store.clone(),
