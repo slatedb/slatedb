@@ -7,6 +7,8 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 
 use crate::clone;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
+use crate::rand::DbRand;
+use crate::utils::IdGenerator;
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -33,6 +35,8 @@ pub struct Admin {
     pub(crate) object_stores: ObjectStores,
     /// The system clock to use for operations.
     pub(crate) system_clock: Arc<dyn SystemClock>,
+    /// The random number generator to use for randomness.
+    pub(crate) rand: Arc<DbRand>,
 }
 
 impl Admin {
@@ -181,7 +185,8 @@ impl Admin {
             .validate_no_wal_object_store_configured()
             .await?;
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
-        let checkpoint = stored_manifest.write_checkpoint(None, options).await?;
+        let checkpoint_id = self.rand.thread_rng().gen_uuid();
+        let checkpoint = stored_manifest.write_checkpoint(checkpoint_id, options).await?;
         Ok(CheckpointCreateResult {
             id: checkpoint.id,
             manifest_id: checkpoint.manifest_id,
@@ -292,6 +297,7 @@ impl Admin {
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
             parent_checkpoint,
             Arc::new(FailPointRegistry::new()),
+            self.rand.clone(),
         )
         .await?;
         Ok(())

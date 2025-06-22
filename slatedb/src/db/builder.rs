@@ -543,6 +543,7 @@ pub struct AdminBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     system_clock: Arc<dyn SystemClock>,
+    rand: Arc<DbRand>,
 }
 
 impl<P: Into<Path>> AdminBuilder<P> {
@@ -553,6 +554,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
             main_object_store,
             wal_object_store: None,
             system_clock: Arc::new(DefaultSystemClock::new()),
+            rand: Arc::new(DbRand::default()),
         }
     }
 
@@ -562,12 +564,19 @@ impl<P: Into<Path>> AdminBuilder<P> {
         self
     }
 
+    /// Sets the random number generator to use for randomness.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.rand = Arc::new(DbRand::new(seed));
+        self
+    }
+
     /// Builds and returns an Admin instance.
     pub fn build(self) -> Admin {
         Admin {
             path: self.path.into(),
             object_stores: ObjectStores::new(self.main_object_store, self.wal_object_store),
             system_clock: self.system_clock,
+            rand: self.rand,
         }
     }
 }
