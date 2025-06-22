@@ -58,7 +58,7 @@ trait GcTask {
 /// The garbage collector can run in three modes:
 ///
 /// - As a background thread with [`start_in_bg_thread`](GarbageCollector::start_in_bg_thread)
-/// - As an async task with [`start_async_task`](GarbageCollector::start_async_task)
+/// - As an async task with [`run_async_task`](GarbageCollector::run_async_task)
 /// - As a one-time operation with [`run_gc_once`](GarbageCollector::run_gc_once)
 ///
 /// The garbage collector uses configurable intervals and minimum age thresholds for each
@@ -117,6 +117,7 @@ impl GarbageCollector {
     ///
     /// # Arguments
     ///
+    /// * `tokio_handle` - The tokio handle to use in the background thread.
     /// * `cleanup_fn` - A function that will be called when the garbage collector
     ///   thread completes, with the final result (success or error).
     pub fn start_in_bg_thread(
@@ -126,19 +127,21 @@ impl GarbageCollector {
     ) {
         let this = self.clone();
         let gc_main = move || {
-            tokio_handle.block_on(this.start_async_task());
+            tokio_handle.block_on(this.run_async_task());
             Ok(())
         };
         spawn_bg_thread("slatedb-gc", cleanup_fn, gc_main);
     }
 
     /// Starts the garbage collector. This method performs the actual garbage collection.
-    /// The garbage collector runs until the cancellation token is cancelled.
+    /// The garbage collector runs until the cancellation token is cancelled. Use
+    /// [`terminate_background_task`](GarbageCollector::terminate_background_task) to stop the
+    /// garbage collector.
     ///
     /// Unlike [`start_in_bg_thread`](GarbageCollector::start_in_bg_thread), this method
-    /// uses the provided Tokio runtime instead of creating a new thread. This is useful
+    /// uses the current Tokio runtime instead of creating a new thread. This is useful
     /// when you want to run the garbage collector within an existing async runtime.
-    pub async fn start_async_task(&self) {
+    pub async fn run_async_task(&self) {
         let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
 
         let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) = self.gc_tasks();

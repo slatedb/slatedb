@@ -324,7 +324,7 @@ impl SizeTieredCompactionSchedulerSupplier {
 }
 
 impl CompactionSchedulerSupplier for SizeTieredCompactionSchedulerSupplier {
-    fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler> {
+    fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler + Send + Sync> {
         Box::new(SizeTieredCompactionScheduler::new(self.options.clone()))
     }
 }
