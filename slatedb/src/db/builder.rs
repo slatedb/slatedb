@@ -475,6 +475,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 uncached_table_store.clone(),
                 compactor_options.clone(),
                 scheduler_supplier,
+                rand.clone(),
                 inner.stat_registry.clone(),
                 system_clock.clone(),
                 self.cancellation_token.clone(),
@@ -662,6 +663,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     tokio_handle: Handle,
     options: CompactorOptions,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    rand: Arc<DbRand>,
     stat_registry: Arc<StatRegistry>,
     cancellation_token: CancellationToken,
     system_clock: Arc<dyn SystemClock>,
@@ -676,6 +678,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             tokio_handle: Handle::current(),
             options: CompactorOptions::default(),
             scheduler_supplier: Arc::new(SizeTieredCompactionSchedulerSupplier::default()),
+            rand: Arc::new(DbRand::default()),
             stat_registry: Arc::new(StatRegistry::new()),
             cancellation_token: CancellationToken::new(),
             system_clock: Arc::new(DefaultSystemClock::default()),
@@ -689,28 +692,34 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
-    /// Sets the options to use for the garbage collector.
+    /// Sets the options to use for the compactor.
     pub fn with_options(mut self, options: CompactorOptions) -> Self {
         self.options = options;
         self
     }
 
-    /// Sets the stats registry to use for the garbage collector.
+    /// Sets the stats registry to use for the compactor.
     #[allow(unused)]
     pub fn with_stat_registry(mut self, stat_registry: Arc<StatRegistry>) -> Self {
         self.stat_registry = stat_registry;
         self
     }
 
-    /// Sets the system clock to use for the garbage collector.
+    /// Sets the system clock to use for the compactor.
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = system_clock;
         self
     }
 
-    /// Sets the cancellation token to use for the garbage collector.
+    /// Sets the cancellation token to use for the compactor.
     pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
         self.cancellation_token = cancellation_token;
+        self
+    }
+
+    /// Sets the random number generator to use for the compactor.
+    pub fn with_rand(mut self, rand: Arc<DbRand>) -> Self {
+        self.rand = rand;
         self
     }
 
@@ -729,6 +738,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             table_store,
             self.options,
             self.scheduler_supplier,
+            self.rand,
             self.stat_registry,
             self.system_clock,
             self.cancellation_token,

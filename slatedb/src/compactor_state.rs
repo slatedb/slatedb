@@ -118,6 +118,7 @@ impl CompactorState {
 
     pub(crate) fn submit_compaction(
         &mut self,
+        id: Uuid,
         compaction: Compaction,
     ) -> Result<Uuid, SlateDBError> {
         // todo: validate the compaction here
@@ -145,7 +146,6 @@ impl CompactorState {
             }
         }
         info!("accepted submitted compaction: {:?}", compaction);
-        let id = crate::utils::uuid();
         self.compactions.insert(id, compaction);
         Ok(id)
     }
@@ -292,7 +292,10 @@ mod tests {
 
         // when:
         state
-            .submit_compaction(build_l0_compaction(&state.db_state().l0, 0))
+            .submit_compaction(
+                uuid::Uuid::new_v4(),
+                build_l0_compaction(&state.db_state().l0, 0),
+            )
             .unwrap();
 
         // then:
@@ -307,7 +310,9 @@ mod tests {
         let (_, _, mut state) = build_test_state(rt.handle());
         let before_compaction = state.db_state().clone();
         let compaction = build_l0_compaction(&before_compaction.l0, 0);
-        let id = state.submit_compaction(compaction).unwrap();
+        let id = state
+            .submit_compaction(uuid::Uuid::new_v4(), compaction)
+            .unwrap();
 
         // when:
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
@@ -352,7 +357,9 @@ mod tests {
         let (_, _, mut state) = build_test_state(rt.handle());
         let before_compaction = state.db_state().clone();
         let compaction = build_l0_compaction(&before_compaction.l0, 0);
-        let id = state.submit_compaction(compaction).unwrap();
+        let id = state
+            .submit_compaction(uuid::Uuid::new_v4(), compaction)
+            .unwrap();
 
         // when:
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
@@ -406,10 +413,13 @@ mod tests {
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
         let id = state
-            .submit_compaction(Compaction::new(
-                vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
-                0,
-            ))
+            .submit_compaction(
+                uuid::Uuid::new_v4(),
+                Compaction::new(
+                    vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
+                    0,
+                ),
+            )
             .unwrap();
         state.finish_compaction(
             id,
@@ -469,13 +479,16 @@ mod tests {
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
         let id = state
-            .submit_compaction(Compaction::new(
-                original_l0s
-                    .iter()
-                    .map(|h| Sst(h.id.unwrap_compacted_id()))
-                    .collect(),
-                0,
-            ))
+            .submit_compaction(
+                uuid::Uuid::new_v4(),
+                Compaction::new(
+                    original_l0s
+                        .iter()
+                        .map(|h| Sst(h.id.unwrap_compacted_id()))
+                        .collect(),
+                    0,
+                ),
+            )
             .unwrap();
         state.finish_compaction(
             id,

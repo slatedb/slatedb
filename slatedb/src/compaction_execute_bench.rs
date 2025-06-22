@@ -30,6 +30,7 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable;
+use crate::utils::IdGenerator;
 
 pub struct CompactionExecuteBench {
     path: Path,
@@ -74,8 +75,7 @@ impl CompactionExecuteBench {
         ));
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
-        let rand = self.rand.clone();
-        rand.thread_rng().fill_bytes(key_start.as_mut_slice());
+        self.rand.thread_rng().fill_bytes(key_start.as_mut_slice());
         let mut futures = FuturesUnordered::<JoinHandle<Result<(), SlateDBError>>>::new();
         for i in 0..num_ssts {
             while futures.len() >= 4 {
@@ -195,6 +195,7 @@ impl CompactionExecuteBench {
         num_ssts: usize,
         table_store: &Arc<TableStore>,
         is_dest_last_run: bool,
+        rand: Arc<DbRand>,
     ) -> Result<CompactionJob, SlateDBError> {
         let sst_ids: Vec<SsTableId> = (0u32..num_ssts as u32)
             .map(CompactionExecuteBench::sst_id)
@@ -231,7 +232,7 @@ impl CompactionExecuteBench {
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
             .collect();
         Ok(CompactionJob {
-            id: crate::utils::uuid(),
+            id: rand.thread_rng().gen_uuid(),
             destination: 0,
             ssts,
             sorted_runs: vec![],
@@ -244,6 +245,7 @@ impl CompactionExecuteBench {
         manifest: &StoredManifest,
         compaction: &Compaction,
         is_dest_last_run: bool,
+        rand: Arc<DbRand>,
     ) -> CompactionJob {
         let state = manifest.db_state();
         let srs_by_id: HashMap<_, _> = state
@@ -263,7 +265,7 @@ impl CompactionExecuteBench {
             .collect();
         info!("loaded compaction job");
         CompactionJob {
-            id: crate::utils::uuid(),
+            id: rand.thread_rng().gen_uuid(),
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,
@@ -304,6 +306,7 @@ impl CompactionExecuteBench {
             Arc::new(compactor_options),
             tx,
             table_store.clone(),
+            self.rand.clone(),
             stats.clone(),
         );
         let os = self.object_store.clone();
@@ -314,7 +317,12 @@ impl CompactionExecuteBench {
         let job = match &compaction {
             Some(compaction) => {
                 info!("load job from existing compaction");
-                CompactionExecuteBench::load_compaction_as_job(&manifest, compaction, false)
+                CompactionExecuteBench::load_compaction_as_job(
+                    &manifest,
+                    compaction,
+                    false,
+                    self.rand.clone(),
+                )
             }
             None => {
                 CompactionExecuteBench::load_compaction_job(
@@ -322,6 +330,7 @@ impl CompactionExecuteBench {
                     num_ssts,
                     &table_store,
                     false,
+                    self.rand.clone(),
                 )
                 .await?
             }

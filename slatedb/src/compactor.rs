@@ -17,9 +17,11 @@ use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::rand::DbRand;
 pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
+use crate::utils::IdGenerator;
 
 pub trait CompactionSchedulerSupplier: Send + Sync {
     fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler + Send + Sync>;
@@ -67,6 +69,7 @@ pub(crate) struct Compactor {
     table_store: Arc<TableStore>,
     options: Arc<CompactorOptions>,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
     cancellation_token: CancellationToken,
@@ -79,6 +82,7 @@ impl Compactor {
         table_store: Arc<TableStore>,
         options: CompactorOptions,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+        rand: Arc<DbRand>,
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
         cancellation_token: CancellationToken,
@@ -89,6 +93,7 @@ impl Compactor {
             table_store,
             options: Arc::new(options),
             scheduler_supplier,
+            rand,
             stats,
             cancellation_token,
             system_clock,
@@ -113,6 +118,7 @@ impl Compactor {
             self.options.clone(),
             worker_tx,
             self.table_store.clone(),
+            self.rand.clone(),
             self.stats.clone(),
         ));
         let mut handler = CompactorEventHandler::new(
@@ -120,6 +126,7 @@ impl Compactor {
             self.options.clone(),
             scheduler,
             executor,
+            self.rand.clone(),
             self.stats.clone(),
             self.system_clock.clone(),
         )
@@ -159,6 +166,7 @@ struct CompactorEventHandler {
     options: Arc<CompactorOptions>,
     scheduler: Box<dyn CompactionScheduler + Send + Sync>,
     executor: Box<dyn CompactionExecutor + Send + Sync>,
+    rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
 }
@@ -169,6 +177,7 @@ impl CompactorEventHandler {
         options: Arc<CompactorOptions>,
         scheduler: Box<dyn CompactionScheduler + Send + Sync>,
         executor: Box<dyn CompactionExecutor + Send + Sync>,
+        rand: Arc<DbRand>,
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
@@ -183,6 +192,7 @@ impl CompactorEventHandler {
             options,
             scheduler,
             executor,
+            rand,
             stats,
             system_clock,
         })
@@ -347,12 +357,16 @@ impl CompactorEventHandler {
     }
 
     fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
-        let result = self.state.submit_compaction(compaction.clone());
-        let Ok(id) = result.as_ref() else {
-            warn!("invalid compaction: {:?}", result);
-            return Ok(());
-        };
-        self.start_compaction(*id, compaction);
+        let id = self.rand.thread_rng().gen_uuid();
+        let result = self.state.submit_compaction(id, compaction.clone());
+        match result {
+            Ok(_) => {
+                self.start_compaction(id, compaction);
+            }
+            Err(err) => {
+                warn!("invalid compaction: {:?}", err);
+            }
+        }
         Ok(())
     }
 
@@ -755,6 +769,7 @@ mod tests {
             let scheduler = Box::new(MockScheduler::new());
             let executor = Box::new(MockExecutor::new());
             let (real_executor_tx, real_executor_rx) = tokio::sync::mpsc::unbounded_channel();
+            let rand = Arc::new(DbRand::default());
             let stats_registry = Arc::new(StatRegistry::new());
             let compactor_stats = Arc::new(CompactionStats::new(stats_registry.clone()));
             let real_executor = Box::new(TokioCompactionExecutor::new(
@@ -762,6 +777,7 @@ mod tests {
                 compactor_options.clone(),
                 real_executor_tx,
                 table_store,
+                rand.clone(),
                 compactor_stats.clone(),
             ));
             let handler = CompactorEventHandler::new(
@@ -769,6 +785,7 @@ mod tests {
                 compactor_options.clone(),
                 scheduler.clone(),
                 executor.clone(),
+                rand.clone(),
                 compactor_stats.clone(),
                 Arc::new(DefaultSystemClock::new()),
             )
