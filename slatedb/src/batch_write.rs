@@ -27,6 +27,7 @@
 
 use log::{info, warn};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::runtime::Handle;
 
 use crate::types::{RowEntry, ValueDeletable};
@@ -101,6 +102,8 @@ impl DbInner {
 
         // update the last_committed_seq, so the writes will be visible to the readers.
         self.oracle.last_committed_seq.store(seq);
+
+        tokio::time::sleep(Duration::from_millis(1000)).await;
 
         // maybe freeze the memtable.
         {

@@ -2234,6 +2234,7 @@ mod tests {
             await_durable: false,
         };
 
+        // Helper function to wait for a condition to be true.
         let wait_for = async move |condition: Box<dyn Fn() -> bool>| {
             for _ in 0..300 {
                 if condition() {
@@ -2251,15 +2252,14 @@ mod tests {
             .await
             .unwrap();
 
-        // Wait for put to end up in the WAL buffer. Since the put() returns immediately
-        // (before the batch_write.rs loop inserts into the WAL buffer), we need to wait.
+        // Wait for put to end up in the WAL buffer
         let this_wal_buffer = db.inner.wal_buffer.clone();
         wait_for(Box::new(move || {
             this_wal_buffer.buffered_wal_entries_count() > 0
         }))
         .await;
 
-        // Verify that there is now 1 WAL entry in memory
+        // Verify that there is now 1 WAL entry in memory.
         assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
 
         // Put another WAL entry, which should trigger backpressure. Do this in a separate
@@ -2278,8 +2278,11 @@ mod tests {
         }))
         .await;
 
-        // Verify that backpressure is applied
-        assert!(db_stats.backpressure_count.value.load(Ordering::SeqCst) > 0);
+        // Verify that backpressure is applied. This will happen exactly once because
+        // the second iteration of `maybe_apply_backpressure` will block for 30s until
+        // either the current WAL is flushed (can't be because of the fail point) or the
+        // memtable gets flushed (can't be )
+        assert_eq!(db_stats.backpressure_count.value.load(Ordering::SeqCst), 1);
 
         // Shutdown the background task
         join_handle.abort();
