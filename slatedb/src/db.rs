@@ -24,7 +24,6 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
@@ -79,7 +78,7 @@ pub(crate) struct DbInner {
 }
 
 impl DbInner {
-    #[allow(clippy::too_many_arguments, dead_code)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         settings: Settings,
         logical_clock: Arc<dyn LogicalClock>,
@@ -90,33 +89,6 @@ impl DbInner {
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
         stat_registry: Arc<StatRegistry>,
-    ) -> Result<Self, SlateDBError> {
-        Self::new_with_fp_registry(
-            settings,
-            logical_clock,
-            _system_clock,
-            table_store,
-            manifest,
-            memtable_flush_notifier,
-            write_notifier,
-            stat_registry,
-            Arc::new(FailPointRegistry::new()),
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn new_with_fp_registry(
-        settings: Settings,
-        logical_clock: Arc<dyn LogicalClock>,
-        // TODO replace all system clock usage with this
-        _system_clock: Arc<dyn SystemClock>,
-        table_store: Arc<TableStore>,
-        manifest: DirtyManifest,
-        memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
-        write_notifier: UnboundedSender<WriteBatchMsg>,
-        stat_registry: Arc<StatRegistry>,
-        fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
@@ -148,7 +120,7 @@ impl DbInner {
         };
 
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
-        let wal_buffer = Arc::new(WalBufferManager::new_with_fp_registry(
+        let wal_buffer = Arc::new(WalBufferManager::new(
             state.clone(),
             Some(state.clone()),
             recent_flushed_wal_id,
@@ -157,7 +129,6 @@ impl DbInner {
             mono_clock.clone(),
             settings.l0_sst_size_bytes,
             settings.flush_interval,
-            fp_registry.clone(),
         ));
 
         let db_inner = Self {
