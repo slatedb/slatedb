@@ -8,3 +8,4 @@ tmp
 
 *.pyc
 *.so
+slatedb-py/dist
