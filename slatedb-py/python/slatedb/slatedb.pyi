@@ -4,7 +4,7 @@ Python stub file for slatedb module.
 This module provides a Python interface to SlateDB, a key-value database built in Rust.
 """
 
-from typing import Optional
+from typing import Optional, List, Tuple
 
 class SlateDB:
     """
@@ -14,7 +14,7 @@ class SlateDB:
     and is built with Rust for safety and performance.
     """
     
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, env_file: Optional[str] = None, **kwargs) -> None:
         """
         Create a new SlateDB instance.
         
@@ -38,6 +38,7 @@ class SlateDB:
             ValueError: If the key is empty or there's a database error
         """
         ...
+
     
     def get(self, key: bytes) -> Optional[bytes]:
         """
@@ -51,6 +52,24 @@ class SlateDB:
             
         Raises:
             ValueError: If the key is empty or there's a database error
+        """
+        ...
+
+    
+    def scan(self, start: bytes, end: Optional[bytes] = None) -> List[Tuple[bytes, bytes]]:
+        """
+        Scan the database for key-value pairs with a given prefix.
+
+        Args:
+            start: The start key to scan from as bytes (cannot be empty)
+            end: The end key to stop at as bytes, exclusive (optional, defaults to None)
+                 if None, scan until the end of start+0xFF
+
+        Raises:
+            ValueError: If the start key is empty or there's a database error
+
+        Returns:
+            A list of tuples containing the key and value as bytes, sorted by key
         """
         ...
     
