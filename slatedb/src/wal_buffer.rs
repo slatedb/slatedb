@@ -1,5 +1,6 @@
 use std::{collections::VecDeque, future::Future, pin::Pin, sync::Arc, time::Duration};
 
+use fail_parallel::{fail_point, FailPointRegistry};
 use parking_lot::RwLock;
 use tokio::{
     select,
@@ -53,6 +54,8 @@ pub(crate) struct WalBufferManager {
     table_store: Arc<TableStore>,
     max_wal_bytes_size: usize,
     max_flush_interval: Option<Duration>,
+    #[allow(dead_code)]
+    fp_registry: Arc<FailPointRegistry>,
 }
 
 struct WalBufferManagerInner {
@@ -74,7 +77,7 @@ struct WalBufferManagerInner {
 }
 
 impl WalBufferManager {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, dead_code)]
     pub fn new(
         wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
         db_state: Option<Arc<RwLock<DbState>>>,
@@ -84,6 +87,31 @@ impl WalBufferManager {
         mono_clock: Arc<MonotonicClock>,
         max_wal_bytes_size: usize,
         max_flush_interval: Option<Duration>,
+    ) -> Self {
+        Self::new_with_fp_registry(
+            wal_id_incrementor,
+            db_state,
+            recent_flushed_wal_id,
+            oracle,
+            table_store,
+            mono_clock,
+            max_wal_bytes_size,
+            max_flush_interval,
+            Arc::new(FailPointRegistry::new()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_fp_registry(
+        wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
+        db_state: Option<Arc<RwLock<DbState>>>,
+        recent_flushed_wal_id: u64,
+        oracle: Arc<Oracle>,
+        table_store: Arc<TableStore>,
+        mono_clock: Arc<MonotonicClock>,
+        max_wal_bytes_size: usize,
+        max_flush_interval: Option<Duration>,
+        fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
         let current_wal = Arc::new(KVTable::new());
         let immutable_wals = VecDeque::new();
@@ -105,6 +133,7 @@ impl WalBufferManager {
             mono_clock,
             max_wal_bytes_size,
             max_flush_interval,
+            fp_registry,
         }
     }
 
@@ -355,6 +384,7 @@ impl WalBufferManager {
     }
 
     async fn do_flush(&self) -> Result<(), SlateDBError> {
+        fail_point!(Arc::clone(&self.fp_registry), "wal-buffer-flush");
         self.freeze_current_wal().await?;
         let flushing_wals = self.flushing_wals();
 

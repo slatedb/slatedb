@@ -24,6 +24,7 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
@@ -78,7 +79,7 @@ pub(crate) struct DbInner {
 }
 
 impl DbInner {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, dead_code)]
     pub async fn new(
         settings: Settings,
         logical_clock: Arc<dyn LogicalClock>,
@@ -89,6 +90,33 @@ impl DbInner {
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
         stat_registry: Arc<StatRegistry>,
+    ) -> Result<Self, SlateDBError> {
+        Self::new_with_fp_registry(
+            settings,
+            logical_clock,
+            _system_clock,
+            table_store,
+            manifest,
+            memtable_flush_notifier,
+            write_notifier,
+            stat_registry,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_with_fp_registry(
+        settings: Settings,
+        logical_clock: Arc<dyn LogicalClock>,
+        // TODO replace all system clock usage with this
+        _system_clock: Arc<dyn SystemClock>,
+        table_store: Arc<TableStore>,
+        manifest: DirtyManifest,
+        memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
+        write_notifier: UnboundedSender<WriteBatchMsg>,
+        stat_registry: Arc<StatRegistry>,
+        fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
@@ -120,7 +148,7 @@ impl DbInner {
         };
 
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
-        let wal_buffer = Arc::new(WalBufferManager::new(
+        let wal_buffer = Arc::new(WalBufferManager::new_with_fp_registry(
             state.clone(),
             Some(state.clone()),
             recent_flushed_wal_id,
@@ -129,6 +157,7 @@ impl DbInner {
             mono_clock.clone(),
             settings.l0_sst_size_bytes,
             settings.flush_interval,
+            fp_registry.clone(),
         ));
 
         let db_inner = Self {
@@ -2219,6 +2248,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_apply_wal_memory_backpressure() {
         let fp_registry = Arc::new(FailPointRegistry::new());
+        // Block WAL flush
+        fail_parallel::cfg(fp_registry.clone(), "wal-buffer-flush", "pause").unwrap();
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let mut options = test_db_options(0, 1, None);
@@ -2236,16 +2267,13 @@ mod tests {
 
         // Helper function to wait for a condition to be true.
         let wait_for = async move |condition: Box<dyn Fn() -> bool>| {
-            for _ in 0..300 {
+            for _ in 0..3000 {
                 if condition() {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         };
-
-        // Block WAL flush
-        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
 
         // 1 wal entry in memory
         db.put_with_options(b"key1", b"val1", &PutOptions::default(), &write_opts)
@@ -2289,7 +2317,7 @@ mod tests {
         let _ = join_handle.await;
 
         // Unblock WAL flush so runtime shuts down nicely even if we have a failure
-        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "wal-buffer-flush", "off").unwrap();
     }
 
     #[tokio::test]
@@ -3489,7 +3517,6 @@ mod tests {
         let start = tokio::time::Instant::now();
         while start.elapsed() < timeout {
             let manifest = sm.refresh().await.unwrap();
-            eprintln!("manifest: {:#?}", manifest.core);
             if cond(&manifest.core) {
                 return manifest.core.clone();
             }
