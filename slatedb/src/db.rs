@@ -2248,8 +2248,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_apply_wal_memory_backpressure() {
         let fp_registry = Arc::new(FailPointRegistry::new());
-        // Block WAL flush
-        fail_parallel::cfg(fp_registry.clone(), "wal-buffer-flush", "pause").unwrap();
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let mut options = test_db_options(0, 1, None);
@@ -2264,6 +2262,8 @@ mod tests {
         let write_opts = WriteOptions {
             await_durable: false,
         };
+
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
 
         // Helper function to wait for a condition to be true.
         let wait_for = async move |condition: Box<dyn Fn() -> bool>| {
@@ -2312,12 +2312,12 @@ mod tests {
         // memtable gets flushed (can't be )
         assert_eq!(db_stats.backpressure_count.value.load(Ordering::SeqCst), 1);
 
+        // Unblock so put_with_options in join_handle can complete and join_handle.await returns
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+
         // Shutdown the background task
         join_handle.abort();
         let _ = join_handle.await;
-
-        // Unblock WAL flush so runtime shuts down nicely even if we have a failure
-        fail_parallel::cfg(fp_registry.clone(), "wal-buffer-flush", "off").unwrap();
     }
 
     #[tokio::test]
