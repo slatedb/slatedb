@@ -413,7 +413,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Create the database inner state
         let inner = Arc::new(
-            DbInner::new_with_fp_registry(
+            DbInner::new(
                 self.settings.clone(),
                 logical_clock,
                 system_clock.clone(),
