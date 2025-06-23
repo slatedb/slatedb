@@ -229,9 +229,6 @@ impl WalBufferManager {
     // await the pending wals to be flushed to remote storage.
     pub async fn await_flush(&self) -> Result<(), SlateDBError> {
         let current_wal = self.inner.read().current_wal.clone();
-        if current_wal.is_empty() {
-            return Ok(());
-        }
         current_wal.await_durable().await
     }
 

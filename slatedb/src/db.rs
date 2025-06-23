@@ -273,6 +273,7 @@ impl DbInner {
             };
 
             if mem_size_bytes >= self.settings.max_unflushed_bytes {
+                self.db_stats.backpressure_count.inc();
                 warn!(
                     "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
                     mem_size_bytes, self.settings.max_unflushed_bytes,
@@ -2222,31 +2223,70 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let mut options = test_db_options(0, 1, None);
         options.max_unflushed_bytes = 1;
-        options.l0_sst_size_bytes = 1;
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
             .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
-
+        let db_stats = db.inner.db_stats.clone();
         let write_opts = WriteOptions {
             await_durable: false,
+        };
+
+        let wait_for = async move |condition: Box<dyn Fn() -> bool>| {
+            for _ in 0..300 {
+                if condition() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         };
 
         // Block WAL flush
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
 
-        // 1 wal entries in memory
+        // 1 wal entry in memory
         db.put_with_options(b"key1", b"val1", &PutOptions::default(), &write_opts)
             .await
             .unwrap();
 
+        // Wait for put to end up in the WAL buffer. Since the put() returns immediately
+        // (before the batch_write.rs loop inserts into the WAL buffer), we need to wait.
+        let this_wal_buffer = db.inner.wal_buffer.clone();
+        wait_for(Box::new(move || {
+            this_wal_buffer.buffered_wal_entries_count() > 0
+        }))
+        .await;
+
+        // Verify that there is now 1 WAL entry in memory
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+
+        // Put another WAL entry, which should trigger backpressure. Do this in a separate
+        // task since the put() is blocked until the WAL is flushed, which isn't happening
+        // due to the fail point.
+        let join_handle = tokio::spawn(async move {
+            db.put_with_options(b"key2", b"val2", &PutOptions::default(), &write_opts)
+                .await
+                .unwrap();
+        });
+
+        let this_stats = db_stats.clone();
+        // Wait up to 30s for backpressure to be applied to the second write.
+        wait_for(Box::new(move || {
+            this_stats.backpressure_count.value.load(Ordering::SeqCst) > 0
+        }))
+        .await;
+
+        // Verify that backpressure is applied
+        assert!(db_stats.backpressure_count.value.load(Ordering::SeqCst) > 0);
+
+        // Shutdown the background task
+        join_handle.abort();
+        let _ = join_handle.await;
+
         // Unblock WAL flush so runtime shuts down nicely even if we have a failure
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
-
-        // WAL should pile up in memory since it can't be flushed
-        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
     }
 
     #[tokio::test]
