@@ -298,7 +298,7 @@ impl DbInner {
                     result = await_flush_to_l0 => {
                         result?;
                     }
-                    result = self.wal_buffer.await_flush() => {
+                    result = self.wal_buffer.await_next_flush() => {
                         result?;
                     }
                     _ = timeout_fut => {
@@ -946,20 +946,6 @@ impl Db {
             self.inner.flush_wals().await
         } else {
             self.inner.flush_memtables().await
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
-        if self.inner.wal_enabled {
-            self.inner.wal_buffer.await_flush().await
-        } else {
-            let table = {
-                let guard = self.inner.state.read();
-                let snapshot = guard.snapshot();
-                snapshot.memtable.clone()
-            };
-            table.await_durable().await
         }
     }
 
@@ -2166,7 +2152,6 @@ mod tests {
             let key = [b'a' + i; 16];
             let value = [b'b' + i; 50];
             kv_store.put(&key, &value).await.unwrap();
-            kv_store.await_flush().await.unwrap();
             let key = [b'j' + i; 16];
             let value = [b'k' + i; 50];
             kv_store.put(&key, &value).await.unwrap();
@@ -2740,7 +2725,6 @@ mod tests {
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
         let result = db.put(&key1, &value1).await;
-        db.await_flush().await.unwrap();
         assert!(result.is_ok(), "Failed to write key1");
         assert_eq!(db.inner.wal_buffer.recent_flushed_wal_id(), 2);
 
