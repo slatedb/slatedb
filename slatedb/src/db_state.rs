@@ -602,7 +602,7 @@ mod tests {
         let mut updated_state = new_dirty_manifest();
         updated_state.core = db_state.state.core().clone();
         let checkpoint = Checkpoint {
-            id: crate::utils::uuid(),
+            id: uuid::Uuid::new_v4(),
             manifest_id: 1,
             expire_time: None,
             create_time: DefaultSystemClock::default().now(),
@@ -659,10 +659,8 @@ mod tests {
                 .freeze_memtable(i as u64)
                 .expect("db in error state");
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
-            let handle = SsTableHandle::new(
-                SsTableId::Compacted(crate::utils::ulid()),
-                dummy_info.clone(),
-            );
+            let handle =
+                SsTableHandle::new(SsTableId::Compacted(ulid::Ulid::new()), dummy_info.clone());
             db_state.move_imm_memtable_to_l0(imm, handle).unwrap();
         }
     }
@@ -719,7 +717,7 @@ mod tests {
 
     fn create_compacted_sst_handle(first_key: Option<Bytes>) -> SsTableHandle {
         let sst_info = create_sst_info(first_key);
-        let sst_id = SsTableId::Compacted(crate::utils::ulid());
+        let sst_id = SsTableId::Compacted(ulid::Ulid::new());
         SsTableHandle::new(sst_id, sst_info.clone())
     }
 

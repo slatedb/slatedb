@@ -376,7 +376,7 @@ mod tests {
 
     fn new_checkpoint(manifest_id: u64, expire_time: Option<SystemTime>) -> Checkpoint {
         Checkpoint {
-            id: crate::utils::uuid(),
+            id: uuid::Uuid::new_v4(),
             manifest_id,
             expire_time,
             create_time: DefaultSystemClock::default().now(),
@@ -984,7 +984,7 @@ mod tests {
         // and then ULID sorting is based on the random part.
         std::thread::sleep(std::time::Duration::from_millis(1));
 
-        let sst_id = SsTableId::Compacted(crate::utils::ulid());
+        let sst_id = SsTableId::Compacted(ulid::Ulid::new());
         let mut sst = table_store.table_builder();
         sst.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
         let table = sst.build().unwrap();

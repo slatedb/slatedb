@@ -5,7 +5,7 @@ use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::manifest::store::FenceableManifest;
-use crate::utils::{bg_task_result_into_err, spawn_bg_task};
+use crate::utils::{bg_task_result_into_err, spawn_bg_task, IdGenerator};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -45,7 +45,7 @@ impl MemtableFlusher {
             let rguard_state = self.db_inner.state.read();
             rguard_state.state().manifest.clone()
         };
-        let id = crate::utils::uuid();
+        let id = self.db_inner.rand.thread_rng().gen_uuid();
         let checkpoint = self.manifest.new_checkpoint(id, options)?;
         let manifest_id = checkpoint.manifest_id;
         dirty.core.checkpoints.push(checkpoint);
@@ -103,7 +103,7 @@ impl MemtableFlusher {
                 rguard.state().imm_memtable.back().cloned()
             }
         } {
-            let id = SsTableId::Compacted(crate::utils::ulid());
+            let id = SsTableId::Compacted(self.db_inner.rand.thread_rng().gen_ulid());
             let sst_handle = self
                 .db_inner
                 .flush_imm_table(&id, imm_memtable.table(), true)
