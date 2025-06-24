@@ -211,6 +211,7 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
     this_block_first_key.slice(..prev_block_last_key.len() + 1)
 }
 
+#[derive(Debug)]
 pub(crate) struct MonotonicSeq {
     val: AtomicU64,
 }

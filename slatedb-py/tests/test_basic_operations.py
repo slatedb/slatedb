@@ -63,6 +63,13 @@ def test_empty_values(db):
     with pytest.raises(ValueError, match="key cannot be empty"):
         db.delete(b"")
 
+    with pytest.raises(ValueError, match="start cannot be empty"):
+        db.scan(b"", b"key3")
+
+    with pytest.raises(ValueError, match="start cannot be empty"):
+        db.scan(b"", None)
+
+        
 def test_large_values(db):
     """Test operations with large values."""
     large_value = b"x" * 1024 * 1024  # 1MB
@@ -74,6 +81,17 @@ def test_binary_data(db):
     binary_data = bytes(range(256))
     db.put(b"binary", binary_data)
     assert db.get(b"binary") == binary_data
+
+def test_scan(db):
+    """Test scan operations."""
+    db.put(b"key1", b"value1")
+    db.put(b"key2", b"value2")
+    db.put(b"key3", b"value3")
+    assert list(db.scan(b"key1", b"key4")) == [(b"key1", b"value1"), (b"key2", b"value2"), (b"key3", b"value3")]
+    assert list(db.scan(b"key1", b"key3")) == [(b"key1", b"value1"), (b"key2", b"value2")]
+    assert list(db.scan(b"key1", b"key2")) == [(b"key1", b"value1")]
+    assert list(db.scan(b"key1", None)) == [(b"key1", b"value1")]
+    assert list(db.scan(b"key")) == [(b"key1", b"value1"), (b"key2", b"value2"), (b"key3", b"value3")]
 
 def test_invalid_inputs(db):
     """Test invalid inputs."""
