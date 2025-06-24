@@ -91,6 +91,7 @@ mod paths;
 mod proptest_util;
 mod rand;
 mod reader;
+mod retention_iterator;
 mod row_codec;
 mod sorted_run_iterator;
 mod sst;

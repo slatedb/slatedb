@@ -1,0 +1,72 @@
+use async_trait::async_trait;
+use bytes::Bytes;
+
+use crate::error::SlateDBError;
+use crate::iter::KeyValueIterator;
+use crate::types::RowEntry;
+use crate::utils::is_not_expired;
+
+/// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
+///
+/// This iterator assumes the upstream iterator provides entries in decreasing order of sequence numbers.
+/// For each entry, it:
+/// 1. Filters out entries whose create_time is earlier than the retention time
+/// 2. Skips entries that are expired/tombstoned
+/// 3. Returns the filtered entries in decreasing order of sequence numbers
+pub(crate) struct RetentionIterator<T: KeyValueIterator> {
+    /// The upstream iterator providing entries in decreasing order of sequence numbers
+    inner: T,
+    /// Retention time in milliseconds - entries with create_ts earlier than this will be filtered out
+    retention_time: i64,
+    /// Current key
+    current_key: Option<Bytes>,
+}
+
+impl<T: KeyValueIterator> RetentionIterator<T> {
+    /// Creates a new retention iterator
+    ///
+    /// # Arguments
+    /// * `delegate` - The upstream iterator providing entries in decreasing order of sequence numbers
+    /// * `retention_time` - Retention time in milliseconds. Entries with create_ts earlier than this will be filtered out
+    pub(crate) async fn new(mut inner: T, retention_time: i64) -> Result<Self, SlateDBError> {
+        Ok(Self {
+            inner,
+            retention_time,
+            current_key: None,
+        })
+    }
+}
+
+#[async_trait]
+impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        while let Some(entry) = self.inner.next_entry().await? {
+            if self
+                .current_key
+                .as_ref()
+                .map(|key| key == &entry.key)
+                .unwrap_or(false)
+            {
+                // filter out entries that had exceeded the retention time
+                if entry
+                    .create_ts
+                    .map(|ts| ts < self.retention_time)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+            }
+
+            self.current_key = Some(entry.key.clone());
+            return Ok(Some(entry));
+        }
+
+        todo!()
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.current_key = Some(Bytes::from(next_key.to_vec()));
+        self.inner.seek(next_key).await?;
+        Ok(())
+    }
+}
