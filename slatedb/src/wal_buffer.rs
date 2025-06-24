@@ -452,7 +452,7 @@ impl WalBufferManager {
             }
         }
 
-        inner.immutable_wals.drain(..releaseable_count).into_iter();
+        inner.immutable_wals.drain(..releaseable_count);
     }
 
     pub async fn close(&self) -> Result<(), SlateDBError> {
