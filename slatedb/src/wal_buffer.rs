@@ -141,14 +141,11 @@ impl WalBufferManager {
 
     #[cfg(test)]
     pub fn buffered_wal_entries_count(&self) -> usize {
-        let flushing_wal_entries_count = self
-            .inner
-            .read()
-            .immutable_wals
-            .iter()
+        let guard = self.inner.read();
+        let flushing_wal_entries_count = guard.immutable_wals.iter()
             .map(|(_, wal)| wal.metadata().entry_num)
             .sum::<usize>();
-        let current_wal_entries_count = self.inner.read().current_wal.metadata().entry_num;
+        let current_wal_entries_count = guard.current_wal.metadata().entry_num;
         current_wal_entries_count + flushing_wal_entries_count
     }
 
@@ -453,7 +450,7 @@ impl WalBufferManager {
             }
         }
 
-        inner.immutable_wals.drain(..releaseable_count);
+        inner.immutable_wals.drain(..releaseable_count).into_iter();
     }
 
     pub async fn close(&self) -> Result<(), SlateDBError> {

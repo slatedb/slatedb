@@ -2240,7 +2240,7 @@ mod tests {
         let wait_for = async move |condition: Box<dyn Fn() -> bool>| {
             for _ in 0..3000 {
                 if condition() {
-                    break;
+                    return;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
