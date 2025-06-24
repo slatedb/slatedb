@@ -274,6 +274,7 @@ impl DbInner {
             };
 
             if mem_size_bytes >= self.settings.max_unflushed_bytes {
+                self.db_stats.backpressure_count.inc();
                 warn!(
                     "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
                     mem_size_bytes, self.settings.max_unflushed_bytes,
@@ -298,7 +299,7 @@ impl DbInner {
                     result = await_flush_to_l0 => {
                         result?;
                     }
-                    result = self.wal_buffer.await_flush() => {
+                    result = self.wal_buffer.await_next_flush() => {
                         result?;
                     }
                     _ = timeout_fut => {
@@ -948,20 +949,6 @@ impl Db {
             self.inner.flush_wals().await
         } else {
             self.inner.flush_memtables().await
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
-        if self.inner.wal_enabled {
-            self.inner.wal_buffer.await_flush().await
-        } else {
-            let table = {
-                let guard = self.inner.state.read();
-                let snapshot = guard.snapshot();
-                snapshot.memtable.clone()
-            };
-            table.await_durable().await
         }
     }
 
@@ -2168,7 +2155,6 @@ mod tests {
             let key = [b'a' + i; 16];
             let value = [b'b' + i; 50];
             kv_store.put(&key, &value).await.unwrap();
-            kv_store.await_flush().await.unwrap();
             let key = [b'j' + i; 16];
             let value = [b'k' + i; 50];
             kv_store.put(&key, &value).await.unwrap();
@@ -2225,31 +2211,72 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let mut options = test_db_options(0, 1, None);
         options.max_unflushed_bytes = 1;
-        options.l0_sst_size_bytes = 1;
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
             .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
-
+        let db_stats = db.inner.db_stats.clone();
         let write_opts = WriteOptions {
             await_durable: false,
         };
 
-        // Block WAL flush
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
 
-        // 1 wal entries in memory
+        // Helper function to wait for a condition to be true.
+        let wait_for = async move |condition: Box<dyn Fn() -> bool>| {
+            for _ in 0..3000 {
+                if condition() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+
+        // 1 wal entry in memory
         db.put_with_options(b"key1", b"val1", &PutOptions::default(), &write_opts)
             .await
             .unwrap();
 
-        // Unblock WAL flush so runtime shuts down nicely even if we have a failure
+        // Wait for put to end up in the WAL buffer
+        let this_wal_buffer = db.inner.wal_buffer.clone();
+        wait_for(Box::new(move || {
+            this_wal_buffer.buffered_wal_entries_count() > 0
+        }))
+        .await;
+
+        // Verify that there is now 1 WAL entry in memory.
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+
+        // Put another WAL entry, which should trigger backpressure. Do this in a separate
+        // task since the put() is blocked until the WAL is flushed, which isn't happening
+        // due to the fail point.
+        let join_handle = tokio::spawn(async move {
+            db.put_with_options(b"key2", b"val2", &PutOptions::default(), &write_opts)
+                .await
+                .unwrap();
+        });
+
+        let this_stats = db_stats.clone();
+        // Wait up to 30s for backpressure to be applied to the second write.
+        wait_for(Box::new(move || {
+            this_stats.backpressure_count.value.load(Ordering::SeqCst) > 0
+        }))
+        .await;
+
+        // Verify that backpressure is applied. This will happen exactly once because
+        // the second iteration of `maybe_apply_backpressure` will block for 30s until
+        // either the current WAL is flushed (can't be because of the fail point) or the
+        // memtable gets flushed (can't be )
+        assert_eq!(db_stats.backpressure_count.value.load(Ordering::SeqCst), 1);
+
+        // Unblock so put_with_options in join_handle can complete and join_handle.await returns
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
 
-        // WAL should pile up in memory since it can't be flushed
-        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        // Shutdown the background task
+        join_handle.abort();
+        let _ = join_handle.await;
     }
 
     #[tokio::test]
@@ -2701,7 +2728,6 @@ mod tests {
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
         let result = db.put(&key1, &value1).await;
-        db.await_flush().await.unwrap();
         assert!(result.is_ok(), "Failed to write key1");
         assert_eq!(db.inner.wal_buffer.recent_flushed_wal_id(), 2);
 
@@ -3453,7 +3479,6 @@ mod tests {
         let start = tokio::time::Instant::now();
         while start.elapsed() < timeout {
             let manifest = sm.refresh().await.unwrap();
-            eprintln!("manifest: {:#?}", manifest.core);
             if cond(&manifest.core) {
                 return manifest.core.clone();
             }

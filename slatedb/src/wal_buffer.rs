@@ -141,14 +141,13 @@ impl WalBufferManager {
 
     #[cfg(test)]
     pub fn buffered_wal_entries_count(&self) -> usize {
-        let flushing_wal_entries_count = self
-            .inner
-            .read()
+        let guard = self.inner.read();
+        let flushing_wal_entries_count = guard
             .immutable_wals
             .iter()
             .map(|(_, wal)| wal.metadata().entry_num)
             .sum::<usize>();
-        let current_wal_entries_count = self.inner.read().current_wal.metadata().entry_num;
+        let current_wal_entries_count = guard.current_wal.metadata().entry_num;
         current_wal_entries_count + flushing_wal_entries_count
     }
 
@@ -227,12 +226,9 @@ impl WalBufferManager {
         Ok(current_wal)
     }
 
-    // await the pending wals to be flushed to remote storage.
-    pub async fn await_flush(&self) -> Result<(), SlateDBError> {
+    // Waits for the current WAL to be flushed (even if it's empty)
+    pub(crate) async fn await_next_flush(&self) -> Result<(), SlateDBError> {
         let current_wal = self.inner.read().current_wal.clone();
-        if current_wal.is_empty() {
-            return Ok(());
-        }
         current_wal.await_durable().await
     }
 
@@ -520,8 +516,8 @@ mod tests {
             oracle,
             table_store.clone(),
             mono_clock,
-            1000,                         // max_wal_bytes_size
-            Some(Duration::from_secs(1)), // max_flush_interval
+            1000,                            // max_wal_bytes_size
+            Some(Duration::from_millis(10)), // max_flush_interval
         ));
         wal_buffer.start_background().await.unwrap();
         (wal_buffer, table_store, test_clock)
@@ -581,13 +577,13 @@ mod tests {
         assert!(iter.next_entry().await.unwrap().is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_size_based_flush_triggering() {
         let (wal_buffer, _, _) = setup_wal_buffer().await;
 
         // Append entries until we exceed the size threshold
         let mut seq = 1;
-        while wal_buffer.estimated_bytes().await.unwrap() < 1024 * 16 {
+        while wal_buffer.estimated_bytes().await.unwrap() < 115 * 10 {
             let entry = RowEntry::new(
                 Bytes::from(format!("key{}", seq)),
                 ValueDeletable::Value(Bytes::from(format!("value{}", seq))),
@@ -596,13 +592,18 @@ mod tests {
                 None,
             );
             wal_buffer.append(&[entry]).await.unwrap();
-            wal_buffer.maybe_trigger_flush().await.unwrap();
+            wal_buffer
+                .maybe_trigger_flush()
+                .await
+                .unwrap()
+                .await_durable()
+                .await
+                .unwrap();
             seq += 1;
         }
 
         // Wait for background flush
-        wal_buffer.await_flush().await.unwrap();
-        assert_eq!(wal_buffer.recent_flushed_wal_id(), 17);
+        assert_eq!(wal_buffer.recent_flushed_wal_id(), 10);
     }
 
     #[tokio::test]
