@@ -142,7 +142,9 @@ impl WalBufferManager {
     #[cfg(test)]
     pub fn buffered_wal_entries_count(&self) -> usize {
         let guard = self.inner.read();
-        let flushing_wal_entries_count = guard.immutable_wals.iter()
+        let flushing_wal_entries_count = guard
+            .immutable_wals
+            .iter()
             .map(|(_, wal)| wal.metadata().entry_num)
             .sum::<usize>();
         let current_wal_entries_count = guard.current_wal.metadata().entry_num;
