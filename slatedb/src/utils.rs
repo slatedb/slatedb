@@ -240,18 +240,28 @@ impl MonotonicSeq {
     }
 }
 
-// TODO replace this with our rand module
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-pub(crate) fn uuid() -> Uuid {
-    let mut random_bytes = [0; 16];
-    rand::thread_rng().fill_bytes(&mut random_bytes);
-    uuid::Builder::from_random_bytes(random_bytes).into_uuid()
+/// Trait for generating UUIDs and ULIDs from a random number generator.
+pub trait IdGenerator {
+    fn gen_uuid(&mut self) -> Uuid;
+    fn gen_ulid(&mut self) -> Ulid;
 }
 
-// TODO replace this with our rand module
-#[allow(clippy::disallowed_methods)]
-pub(crate) fn ulid() -> Ulid {
-    Ulid::with_source(&mut rand::thread_rng())
+impl<R: RngCore> IdGenerator for R {
+    /// Generates a random UUID using the provided RNG.
+    fn gen_uuid(&mut self) -> Uuid {
+        let mut bytes = [0u8; 16];
+        self.fill_bytes(&mut bytes);
+        // set version = 4
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        // set variant = RFC4122
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    /// Generates a random ULID using the provided RNG.
+    fn gen_ulid(&mut self) -> Ulid {
+        Ulid::with_source(self)
+    }
 }
 
 #[cfg(test)]

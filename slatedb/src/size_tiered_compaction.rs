@@ -467,7 +467,7 @@ mod tests {
             ],
         ));
         state
-            .submit_compaction(create_sr_compaction(vec![3, 2, 1, 0]))
+            .submit_compaction(uuid::Uuid::new_v4(), create_sr_compaction(vec![3, 2, 1, 0]))
             .unwrap();
 
         // when:
@@ -551,7 +551,10 @@ mod tests {
             ],
         ));
         state
-            .submit_compaction(create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]))
+            .submit_compaction(
+                uuid::Uuid::new_v4(),
+                create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]),
+            )
             .unwrap();
 
         // when:
@@ -581,7 +584,10 @@ mod tests {
             ],
         ));
         state
-            .submit_compaction(create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]))
+            .submit_compaction(
+                uuid::Uuid::new_v4(),
+                create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]),
+            )
             .unwrap();
 
         // when:
@@ -633,7 +639,7 @@ mod tests {
             filter_len: 0,
             compression_codec: None,
         };
-        SsTableHandle::new(SsTableId::Compacted(crate::utils::ulid()), info)
+        SsTableHandle::new(SsTableId::Compacted(ulid::Ulid::new()), info)
     }
 
     fn create_sr2(id: u32, size: u64) -> SortedRun {
