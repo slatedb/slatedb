@@ -228,7 +228,9 @@ impl CompactorEventHandler {
         let this_executor = self.executor.clone();
         tokio::task::spawn_blocking(move || {
             this_executor.stop();
-        });
+        })
+        .await
+        .map_err(|_| SlateDBError::CompactionExecutorFailed)
     }
 
     fn is_executor_stopped(&self) -> bool {
