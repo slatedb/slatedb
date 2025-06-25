@@ -363,7 +363,7 @@ impl DbInner {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
-            cache_blocks: true,
+            cache_blocks: false,
             eager_spawn: true,
         };
 
