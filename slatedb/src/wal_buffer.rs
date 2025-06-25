@@ -10,6 +10,7 @@ use tokio::{
 use crate::{
     clock::MonotonicClock,
     db_state::{DbState, SsTableId},
+    db_stats::DbStats,
     iter::KeyValueIterator,
     mem_table::KVTable,
     oracle::Oracle,
@@ -412,6 +413,8 @@ impl WalBufferManager {
     }
 
     async fn do_flush_one_wal(&self, wal_id: u64, wal: Arc<KVTable>) -> Result<(), SlateDBError> {
+        self.db_stats.wal_buffer_flushes.inc();
+
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = wal.iter();
         while let Some(entry) = iter.next_entry().await? {
