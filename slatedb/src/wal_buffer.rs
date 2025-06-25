@@ -10,6 +10,7 @@ use tokio::{
 use crate::{
     clock::MonotonicClock,
     db_state::{DbState, SsTableId},
+    db_stats::DbStats,
     iter::KeyValueIterator,
     mem_table::KVTable,
     oracle::Oracle,
@@ -48,6 +49,7 @@ pub(crate) struct WalBufferManager {
     wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
     // If set, WAL buffer will call `record_fatal_error` if it fails
     db_state: Option<Arc<RwLock<DbState>>>,
+    db_stats: Arc<DbStats>,
     quit_once: WatchableOnceCell<Result<(), SlateDBError>>,
     mono_clock: Arc<MonotonicClock>,
     table_store: Arc<TableStore>,
@@ -78,6 +80,7 @@ impl WalBufferManager {
     pub fn new(
         wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
         db_state: Option<Arc<RwLock<DbState>>>,
+        db_stats: Arc<DbStats>,
         recent_flushed_wal_id: u64,
         oracle: Arc<Oracle>,
         table_store: Arc<TableStore>,
@@ -100,6 +103,7 @@ impl WalBufferManager {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
             wal_id_incrementor,
             db_state,
+            db_stats,
             quit_once: WatchableOnceCell::new(),
             table_store,
             mono_clock,
