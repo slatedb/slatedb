@@ -283,29 +283,47 @@ impl DbInner {
                     mem_size_bytes, self.settings.max_unflushed_bytes,
                 );
 
-                self.flush_immutable_memtables().await?;
+                let maybe_oldest_unflushed_memtable = {
+                    let guard = self.state.read();
+                    guard.state().imm_memtable.back().cloned()
+                };
 
-                let await_flush_to_l0 = async {
-                    let imm = {
-                        let guard = self.state.read();
-                        guard.state().imm_memtable.back().cloned()
-                    };
-                    match imm {
-                        Some(imm) => imm.await_flush_to_l0().await,
-                        None => std::future::pending().await,
+                let maybe_oldest_unflushed_wal = self.wal_buffer.oldest_unflushed_wal().await;
+
+                // There is a window of time after mem_size_bytes is larger than max_unflushed_bytes
+                // but before we get the memtable and wal table. During that time, if the memtable and/or
+                // wal table are fully flushed out, we should short circuit since the select! will always
+                // time out.
+                if maybe_oldest_unflushed_memtable.is_none() && maybe_oldest_unflushed_wal.is_none()
+                {
+                    continue;
+                }
+
+                let await_flush_memtable = async {
+                    if let Some(oldest_unflushed_memtable) = maybe_oldest_unflushed_memtable {
+                        oldest_unflushed_memtable.await_flush_to_l0().await
+                    } else {
+                        std::future::pending().await
                     }
                 };
+
+                let await_flush_wal = async {
+                    if let Some(oldest_unflushed_wal) = maybe_oldest_unflushed_wal {
+                        oldest_unflushed_wal.await_durable().await
+                    } else {
+                        std::future::pending().await
+                    }
+                };
+
+                self.flush_immutable_memtables().await?;
 
                 let timeout_fut = tokio::time::sleep(Duration::from_secs(30));
 
                 tokio::select! {
-                    result = await_flush_to_l0 => {
-                        result?;
-                    }
-                    result = self.wal_buffer.await_next_flush() => {
-                        result?;
-                    }
+                    result = await_flush_memtable => result?,
+                    result = await_flush_wal => result?,
                     _ = timeout_fut => {
+                        eprintln!("Backpressure timeout: waited 30s, no memtable/WAL flushed yet");
                         warn!("Backpressure timeout: waited 30s, no memtable/WAL flushed yet");
                     }
                 };

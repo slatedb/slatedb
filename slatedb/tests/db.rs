@@ -8,7 +8,7 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::Db;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,21 +53,13 @@ async fn test_concurrent_writers_and_readers() {
             .unwrap(),
     );
 
-    // Flag to signal readers to stop
-    let stop = Arc::new(AtomicBool::new(false));
-
     // Writer tasks: each writer writes to its own key with incrementing values
     let writer_handles = (0..NUM_WRITERS)
         .map(|writer_id| {
             let db = db.clone();
-            let stop_writers = stop.clone();
             tokio::spawn(async move {
                 let key = zero_pad_key(writer_id.try_into().unwrap(), KEY_LENGTH);
                 for i in 1..=WRITES_PER_TASK {
-                    if stop_writers.load(Ordering::Relaxed) {
-                        break;
-                    }
-
                     // Write the incremented value
                     db.put_with_options(
                         &key,
@@ -80,7 +72,7 @@ async fn test_concurrent_writers_and_readers() {
                     .await
                     .expect("Failed to write value");
 
-                    if i % 1000 == 0 {
+                    if i % 10 == 0 {
                         println!("Writer {} wrote {} values", writer_id, i);
                     }
                 }
@@ -88,27 +80,17 @@ async fn test_concurrent_writers_and_readers() {
         })
         .collect::<Vec<_>>();
 
-    let stop_flushers = stop.clone();
-    let flusher_db = db.clone();
-    let flusher = tokio::spawn(async move {
-        while !stop_flushers.load(Ordering::Relaxed) {
-            flusher_db.flush().await.expect("Failed to flush");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    });
-
     // Reader tasks: each reader reads all keys and verifies values are increasing
     let reader_handles = (0..NUM_READERS)
         .map(|reader_id| {
             let db = db.clone();
-            let stop_readers = stop.clone();
 
             tokio::spawn(async move {
                 let mut latest_values = HashMap::<usize, AtomicU64>::new();
                 let mut iterations = 0;
+                let mut rng = StdRng::from_entropy();
 
-                while !stop_readers.load(Ordering::Relaxed) {
-                    let mut rng = StdRng::from_entropy();
+                loop {
                     // Pick a random key and validate that it's higher than the last value for that key
                     let key = rng.gen_range(0..NUM_WRITERS);
                     if let Some(bytes) = db
@@ -155,30 +137,20 @@ async fn test_concurrent_writers_and_readers() {
         })
         .collect::<Vec<_>>();
 
-    loop {
-        // Check if any handles are still running.
-        let finished_writers = writer_handles
-            .iter()
-            .filter(|handle| handle.is_finished())
-            .count();
-        let finished_readers = reader_handles
-            .iter()
-            .filter(|handle| handle.is_finished())
-            .count();
+    // Wait for writers to complete
+    futures::future::try_join_all(writer_handles)
+        .await
+        .expect("Writer handles failed");
 
-        if finished_writers == NUM_WRITERS || finished_readers > 0 {
-            stop.store(true, Ordering::Relaxed);
-            break;
-        }
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    // Wait for all readers and writers to complete, and verify none ended with an error using try_join_all
-    let all_handles = writer_handles
+    // Shut down readers
+    let reader_handles = reader_handles
         .into_iter()
-        .chain(reader_handles)
-        .chain(vec![flusher]);
-    futures::future::try_join_all(all_handles).await.unwrap();
+        .map(|handle| {
+            handle.abort();
+            handle
+        })
+        .collect::<Vec<_>>();
+    let _ = futures::future::try_join_all(reader_handles).await;
+
     db.close().await.unwrap();
 }

@@ -112,8 +112,8 @@ impl Compactor {
         let mut db_runs_log_ticker = tokio::time::interval(Duration::from_secs(10));
         let mut manifest_poll_ticker = tokio::time::interval(self.options.poll_interval);
         let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = self.scheduler_supplier.compaction_scheduler();
-        let executor = Box::new(TokioCompactionExecutor::new(
+        let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler());
+        let executor = Arc::new(TokioCompactionExecutor::new(
             compactor_runtime,
             self.options.clone(),
             worker_tx,
@@ -142,7 +142,7 @@ impl Compactor {
                     // Stop the executor. Don't return because there might
                     // still be messages in `worker_rx`. Let the loop continue
                     // to drain them until empty.
-                    handler.stop_executor();
+                    handler.stop_executor().await;
                 }
                 _ = db_runs_log_ticker.tick() => {
                     handler.handle_log_ticker();
@@ -164,8 +164,8 @@ struct CompactorEventHandler {
     state: CompactorState,
     manifest: FenceableManifest,
     options: Arc<CompactorOptions>,
-    scheduler: Box<dyn CompactionScheduler + Send + Sync>,
-    executor: Box<dyn CompactionExecutor + Send + Sync>,
+    scheduler: Arc<dyn CompactionScheduler + Send + Sync>,
+    executor: Arc<dyn CompactionExecutor + Send + Sync>,
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
@@ -175,8 +175,8 @@ impl CompactorEventHandler {
     async fn new(
         manifest_store: Arc<ManifestStore>,
         options: Arc<CompactorOptions>,
-        scheduler: Box<dyn CompactionScheduler + Send + Sync>,
-        executor: Box<dyn CompactionExecutor + Send + Sync>,
+        scheduler: Arc<dyn CompactionScheduler + Send + Sync>,
+        executor: Arc<dyn CompactionExecutor + Send + Sync>,
         rand: Arc<DbRand>,
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
@@ -224,8 +224,11 @@ impl CompactorEventHandler {
         }
     }
 
-    fn stop_executor(&self) {
-        self.executor.stop();
+    async fn stop_executor(&self) {
+        let this_executor = self.executor.clone();
+        tokio::task::spawn_blocking(move || {
+            this_executor.stop();
+        });
     }
 
     fn is_executor_stopped(&self) -> bool {
@@ -746,9 +749,9 @@ mod tests {
         manifest_store: Arc<ManifestStore>,
         options: Settings,
         db: Db,
-        scheduler: Box<MockScheduler>,
-        executor: Box<MockExecutor>,
-        real_executor: Box<dyn CompactionExecutor>,
+        scheduler: Arc<MockScheduler>,
+        executor: Arc<MockExecutor>,
+        real_executor: Arc<dyn CompactionExecutor>,
         real_executor_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerToOrchestratorMsg>,
         stats_registry: Arc<StatRegistry>,
         handler: CompactorEventHandler,
@@ -767,13 +770,13 @@ mod tests {
                 .await
                 .unwrap();
 
-            let scheduler = Box::new(MockScheduler::new());
-            let executor = Box::new(MockExecutor::new());
+            let scheduler = Arc::new(MockScheduler::new());
+            let executor = Arc::new(MockExecutor::new());
             let (real_executor_tx, real_executor_rx) = tokio::sync::mpsc::unbounded_channel();
             let rand = Arc::new(DbRand::default());
             let stats_registry = Arc::new(StatRegistry::new());
             let compactor_stats = Arc::new(CompactionStats::new(stats_registry.clone()));
-            let real_executor = Box::new(TokioCompactionExecutor::new(
+            let real_executor = Arc::new(TokioCompactionExecutor::new(
                 Handle::current(),
                 compactor_options.clone(),
                 real_executor_tx,
