@@ -356,6 +356,8 @@ pub fn load_object_store_from_env(
         "aws" => load_aws(),
         #[cfg(feature = "azure")]
         "azure" => load_azure(),
+        #[cfg(feature = "opendal")]
+        "oss" => load_oss(),
         _ => Err(format!("Unknown CLOUD_PROVIDER: '{}'", provider).into()),
     }
 }
@@ -438,4 +440,24 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
         .with_access_key(key)
         .with_container_name(container);
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
+}
+
+#[cfg(feature = "opendal")]
+pub fn load_oss() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+    use opendal::Operator;
+
+    let endpoint = env::var("OSS_ENDPOINT").expect("OSS_ENDPOINT must be set");
+    let access_key_id = env::var("OSS_ACCESS_KEY_ID").expect("OSS_ACCESS_KEY_ID must be set");
+    let access_key_secret =
+        env::var("OSS_ACCESS_KEY_SECRET").expect("OSS_ACCESS_KEY_SECRET must be set");
+    let bucket = env::var("OSS_BUCKET").expect("OSS_BUCKET must be set");
+
+    let builder = opendal::services::Oss::default()
+        .endpoint(&endpoint)
+        .access_key_id(&access_key_id)
+        .access_key_secret(&access_key_secret)
+        .bucket(&bucket);
+
+    let op = Operator::new(builder)?.finish();
+    Ok(Arc::new(object_store_opendal::OpendalStore::new(op)) as Arc<dyn ObjectStore>)
 }

@@ -30,6 +30,8 @@ log = { version = "0.4.22", features = ["std"] }
 lz4_flex = { version = "0.11.3", optional = true }
 moka = { version = "0.12.8", features = ["future"], optional = true }
 object_store = "0.12.0"
+object_store_opendal = { version = "0.52.1", optional = true }
+opendal = { version="0.53.3", optional = true, default-features = false }
 once_cell = "1.19.0"
 ouroboros = "0.18"
 parking_lot = "0.12.3"
@@ -66,11 +68,12 @@ tokio = { version = "1.40.0", features = ["rt-multi-thread"] }
 tokio-test = "0.4.4"
 
 [features]
-default = ["aws", "moka"]
+default = ["aws", "moka", "opendal"]
 aws = ["object_store/aws"]
 azure = ["object_store/azure"]
 bencher = ["aws", "azure", "wal_disable", "moka"]
 compression = ["snappy"]
+opendal = ["dep:object_store_opendal", "opendal/services-s3", "opendal/services-oss"]
 snappy = ["dep:snap"]
 zlib = ["dep:flate2"]
 lz4 = ["dep:lz4_flex"]
