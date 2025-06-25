@@ -79,7 +79,7 @@ where
     C: FnOnce(&Result<T, SlateDBError>) + Send + 'static,
 {
     // NOTE: It is critical that the future lives as long as the cleanup_fn.
-    //       Otherwise, there is a gap where everything owned by the futured is dropped
+    //       Otherwise, there is a gap where everything owned by the future is dropped
     //       before the cleanup_fn runs. Since our cleanup_fn's often set error states
     //       on the db, this would result in a gap where the db is not in an error state
     //       but resources such as channels have been dropped or closed. See #623 for
