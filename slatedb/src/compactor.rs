@@ -142,7 +142,7 @@ impl Compactor {
                     // Stop the executor. Don't return because there might
                     // still be messages in `worker_rx`. Let the loop continue
                     // to drain them until empty.
-                    handler.stop_executor().await;
+                    handler.stop_executor().await?;
                 }
                 _ = db_runs_log_ticker.tick() => {
                     handler.handle_log_ticker();
@@ -224,7 +224,7 @@ impl CompactorEventHandler {
         }
     }
 
-    async fn stop_executor(&self) {
+    async fn stop_executor(&self) -> Result<(), SlateDBError> {
         let this_executor = self.executor.clone();
         tokio::task::spawn_blocking(move || {
             this_executor.stop();
