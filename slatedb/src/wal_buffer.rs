@@ -225,10 +225,26 @@ impl WalBufferManager {
         Ok(current_wal)
     }
 
-    // Waits for the current WAL to be flushed (even if it's empty)
-    pub(crate) async fn await_next_flush(&self) -> Result<(), SlateDBError> {
-        let current_wal = self.inner.read().current_wal.clone();
-        current_wal.await_durable().await
+    /// Waits for a WAL to be flushed. If there are immutable WALs, it will
+    /// wait for the oldest immutable WAL to be flushed. Otherwise, it will
+    /// wait for the current WAL to be flushed. If both are empty, it will
+    /// still block on the current WAL to ensure that the WAL buffer is not
+    /// empty.
+    pub(crate) async fn oldest_unflushed_wal(&self) -> Option<Arc<KVTable>> {
+        let (current_wal, oldest_immutable_wal) = {
+            let guard = self.inner.read();
+            let current_wal = guard.current_wal.clone();
+            let maybe_oldest_immutable_wal =
+                guard.immutable_wals.front().map(|(_, wal)| wal).cloned();
+            (current_wal, maybe_oldest_immutable_wal)
+        };
+        if let Some(oldest_immutable_wal) = oldest_immutable_wal {
+            Some(oldest_immutable_wal)
+        } else if !current_wal.is_empty() {
+            Some(current_wal)
+        } else {
+            None
+        }
     }
 
     pub async fn flush(&self) -> Result<(), SlateDBError> {
