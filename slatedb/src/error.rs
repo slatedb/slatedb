@@ -54,9 +54,6 @@ pub enum SlateDBError {
     #[error("Invalid Compaction")]
     InvalidCompaction,
 
-    #[error("Compaction executor failed")]
-    CompactionExecutorFailed,
-
     #[error(
         "Invalid clock tick, most be monotonic. Last tick: {}, Next tick: {}",
         last_tick,
