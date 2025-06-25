@@ -48,6 +48,7 @@ pub(crate) struct WalBufferManager {
     wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
     // If set, WAL buffer will call `record_fatal_error` if it fails
     db_state: Option<Arc<RwLock<DbState>>>,
+    db_stats: DbStats,
     quit_once: WatchableOnceCell<Result<(), SlateDBError>>,
     mono_clock: Arc<MonotonicClock>,
     table_store: Arc<TableStore>,
@@ -78,6 +79,7 @@ impl WalBufferManager {
     pub fn new(
         wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
         db_state: Option<Arc<RwLock<DbState>>>,
+        db_stats: DbStats,
         recent_flushed_wal_id: u64,
         oracle: Arc<Oracle>,
         table_store: Arc<TableStore>,
@@ -100,6 +102,7 @@ impl WalBufferManager {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
             wal_id_incrementor,
             db_state,
+            db_stats,
             quit_once: WatchableOnceCell::new(),
             table_store,
             mono_clock,
@@ -222,6 +225,11 @@ impl WalBufferManager {
                 .await
                 .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
         }
+
+        let estimated_bytes = self.estimated_bytes().await?;
+        self.db_stats
+            .wal_buffer_estimated_bytes
+            .set(estimated_bytes as i64);
         Ok(current_wal)
     }
 
@@ -489,6 +497,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils::TestClock;
     use crate::types::{RowEntry, ValueDeletable};
@@ -526,6 +535,7 @@ mod tests {
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
             None,
+            DbStats::new(&StatRegistry::new()),
             0, // recent_flushed_wal_id
             oracle,
             table_store.clone(),
