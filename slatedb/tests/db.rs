@@ -145,9 +145,8 @@ async fn test_concurrent_writers_and_readers() {
     // Shut down readers
     let reader_handles = reader_handles
         .into_iter()
-        .map(|handle| {
+        .inspect(|handle| {
             handle.abort();
-            handle
         })
         .collect::<Vec<_>>();
     let _ = futures::future::try_join_all(reader_handles).await;
