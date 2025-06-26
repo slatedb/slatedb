@@ -220,7 +220,6 @@ impl WalBufferManager {
                 .expect("flush_tx not initialized, please call start_background first.")
                 .send(WalFlushWork { result_tx: None })
                 .await
-                // TODO use map_slatedb_err
                 .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
         }
         Ok(current_wal)
@@ -261,7 +260,6 @@ impl WalBufferManager {
                 result_tx: Some(result_tx),
             })
             .await
-            // TODO use map_slatedb_err
             .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
         let mut quit_rx = self.quit_once.reader();
         // TODO: it's good to have a timeout here.
