@@ -194,6 +194,11 @@ impl TokioCompactionExecutorInner {
         })
     }
 
+    // Allow send() because we are treating the executor like an external
+    // component. They can do what they want. The send().expect() will raise
+    // a SendErr, which will be caught in the cleanup_fn and set if there's
+    // not already an error (i.e. if the DB is not already shut down).
+    #[allow(clippy::disallowed_methods)]
     fn start_compaction(self: &Arc<Self>, compaction: CompactionJob) {
         let mut tasks = self.tasks.lock();
         if self.is_stopped.load(atomic::Ordering::SeqCst) {
