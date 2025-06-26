@@ -425,6 +425,10 @@ impl FsCacheEvictor {
         }
     }
 
+    // Allow send() here because we should never see a closed channel. The evictor owns both the
+    // sender and receiver. It doesn't close the channel, and both sender and receiver are dropped
+    // when the evictor is dropped.
+    #[allow(clippy::disallowed_methods)]
     pub async fn track_entry_accessed(&self, path: std::path::PathBuf, bytes: usize, evict: bool) {
         if !self.started().await {
             return;

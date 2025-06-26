@@ -87,15 +87,6 @@ pub enum SlateDBError {
         message: String,
     },
 
-    #[error("Error flushing immutable wals: channel closed")]
-    WalFlushChannelError,
-
-    #[error("Error flushing memtables: channel closed")]
-    MemtableFlushChannelError,
-
-    #[error("Error creating checkpoint: channel closed")]
-    CheckpointChannelError,
-
     #[error("Read channel error: {0}")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
 
