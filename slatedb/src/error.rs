@@ -54,6 +54,9 @@ pub enum SlateDBError {
     #[error("Invalid Compaction")]
     InvalidCompaction,
 
+    #[error("Compaction executor failed")]
+    CompactionExecutorFailed,
+
     #[error(
         "Invalid clock tick, most be monotonic. Last tick: {}, Next tick: {}",
         last_tick,
@@ -83,15 +86,6 @@ pub enum SlateDBError {
         known_bits: u8,
         message: String,
     },
-
-    #[error("Error flushing immutable wals: channel closed")]
-    WalFlushChannelError,
-
-    #[error("Error flushing memtables: channel closed")]
-    MemtableFlushChannelError,
-
-    #[error("Error creating checkpoint: channel closed")]
-    CheckpointChannelError,
 
     #[error("Read channel error: {0}")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),

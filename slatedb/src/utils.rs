@@ -5,12 +5,15 @@ use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
+use futures::FutureExt;
 use rand::RngCore;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
 use uuid::Uuid;
 
@@ -63,10 +66,9 @@ impl<T: Clone> WatchableOnceCellReader<T> {
     }
 }
 
-/// Spawn a monitored background tokio task. The task must return a Result<T, SlateDBError>.
-/// The task is spawned by a monitor task. When the task exits, the monitor task
-/// calls a provided cleanup fn with a reference to the returned result. If the spawned task
-/// panics, the cleanup fn is called with Err(BackgroundTaskPanic).
+/// Spawn a background tokio task. The task must return a Result<T, SlateDBError>.
+/// When the task exits, the provided cleanup fn is called with a reference to the returned
+/// result. If the task panics, the cleanup fn is called with Err(BackgroundTaskPanic).
 pub(crate) fn spawn_bg_task<F, T, C>(
     handle: &tokio::runtime::Handle,
     cleanup_fn: C,
@@ -77,26 +79,22 @@ where
     T: Send + 'static,
     C: FnOnce(&Result<T, SlateDBError>) + Send + 'static,
 {
-    let inner_handle = handle.clone();
-    handle.spawn(async move {
-        let jh = inner_handle.spawn(future);
-        match jh.await {
-            Ok(result) => {
-                cleanup_fn(&result);
-                result
-            }
-            Err(join_err) => {
-                // task panic'd or was cancelled
-                let err = Err(BackgroundTaskPanic(Arc::new(Mutex::new(
-                    join_err
-                        .try_into_panic()
-                        .unwrap_or_else(|_| Box::new("background task was aborted")),
-                ))));
-                cleanup_fn(&err);
-                err
-            }
-        }
-    })
+    // NOTE: It is critical that the future lives as long as the cleanup_fn.
+    //       Otherwise, there is a gap where everything owned by the future is dropped
+    //       before the cleanup_fn runs. Since our cleanup_fn's often set error states
+    //       on the db, this would result in a gap where the db is not in an error state
+    //       but resources such as channels have been dropped or closed. See #623 for
+    //       details.
+    let wrapped = AssertUnwindSafe(future).catch_unwind().map(move |outcome| {
+        let result = match outcome {
+            Ok(Ok(val)) => Ok(val),
+            Ok(Err(e)) => Err(e),
+            Err(panic) => Err(BackgroundTaskPanic(Arc::new(Mutex::new(panic)))),
+        };
+        cleanup_fn(&result);
+        result
+    });
+    handle.spawn(wrapped)
 }
 
 pub(crate) fn system_time_to_millis(system_time: SystemTime) -> i64 {
@@ -237,6 +235,41 @@ impl MonotonicSeq {
 
     pub fn store_if_greater(&self, value: u64) {
         self.val.fetch_max(value, SeqCst);
+    }
+}
+
+/// An extension trait that adds a `.send_safely(...)` method to tokio's `UnboundedSender<T>`.
+pub trait SendSafely<T> {
+    /// Attempts to send a message to the channel, and if the channel is closed, returns the error
+    /// in `error_reader` if it is set, otherwise panics.
+    ///
+    /// This is useful for handling shutdown race conditions where the receiver's channel is dropped
+    /// before the sender is shut down.`
+    fn send_safely(
+        &self,
+        error_reader: WatchableOnceCellReader<SlateDBError>,
+        message: T,
+    ) -> Result<(), SlateDBError>;
+}
+
+#[allow(clippy::panic, clippy::disallowed_methods)]
+impl<T> SendSafely<T> for UnboundedSender<T> {
+    #[inline]
+    fn send_safely(
+        &self,
+        error_reader: WatchableOnceCellReader<SlateDBError>,
+        message: T,
+    ) -> Result<(), SlateDBError> {
+        match self.send(message) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if let Some(err) = error_reader.read() {
+                    Err(err)
+                } else {
+                    panic!("Failed to send message to unbounded channel: {}", e);
+                }
+            }
+        }
     }
 }
 

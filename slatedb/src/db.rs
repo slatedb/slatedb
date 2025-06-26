@@ -50,7 +50,7 @@ use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::MonotonicSeq;
+use crate::utils::{MonotonicSeq, SendSafely};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use tracing::{info, warn};
@@ -125,6 +125,7 @@ impl DbInner {
         let wal_buffer = Arc::new(WalBufferManager::new(
             state.clone(),
             Some(state.clone()),
+            db_stats.clone(),
             recent_flushed_wal_id,
             oracle.clone(),
             table_store.clone(),
@@ -236,10 +237,8 @@ impl DbInner {
 
         self.maybe_apply_backpressure().await?;
         self.write_notifier
-            .send(batch_msg)
-            .expect("write notifier closed");
+            .send_safely(self.state.read().error_reader(), batch_msg)?;
 
-        // if the write pipeline task exits then this call to rx.await will fail because tx is dropped
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
         let mut durable_watcher = rx.await??;
@@ -340,9 +339,10 @@ impl DbInner {
     // use to manually flush memtables
     async fn flush_immutable_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.memtable_flush_notifier
-            .send(MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) })
-            .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
+        self.memtable_flush_notifier.send_safely(
+            self.state.read().error_reader(),
+            MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) },
+        )?;
         rx.await?
     }
 
@@ -521,7 +521,13 @@ impl Db {
         }
 
         // Shutdown the write batch thread.
-        self.inner.write_notifier.send(WriteBatchMsg::Shutdown).ok();
+        self.inner
+            .write_notifier
+            .send_safely(
+                self.inner.state.read().error_reader(),
+                WriteBatchMsg::Shutdown,
+            )
+            .ok();
 
         if let Some(write_task) = {
             let mut write_task = self.write_task.lock();
@@ -541,7 +547,10 @@ impl Db {
         // Shutdown the memtable flush thread.
         self.inner
             .memtable_flush_notifier
-            .send(MemtableFlushMsg::Shutdown)
+            .send_safely(
+                self.inner.state.read().error_reader(),
+                MemtableFlushMsg::Shutdown,
+            )
             .ok();
 
         if let Some(memtable_flush_task) = {
@@ -3044,7 +3053,11 @@ mod tests {
 
         // assert that db1 can no longer write.
         let err = do_put(&db1, b"1", b"1").await;
-        assert!(matches!(err, Err(SlateDBError::Fenced)));
+        assert!(
+            matches!(err, Err(SlateDBError::Fenced)),
+            "got non-fenced error: {:?}",
+            err
+        );
 
         do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);

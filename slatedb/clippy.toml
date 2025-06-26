@@ -59,4 +59,5 @@ disallowed-methods = [
     { path = "std::thread::spawn", reason = "Use tokio::spawn instead" },
     { path = "std::thread::spawn_blocking", reason = "Use tokio::spawn_blocking instead" },
     { path = "std::thread::sleep", reason = "Use tokio::time::sleep instead" },
+    { path = "tokio::sync::mpsc::UnboundedSender::send", reason = "Use crate::utils::SendSafely instead" },
 ]
