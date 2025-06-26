@@ -17,7 +17,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::{DefaultStoreProvider, StoreProvider};
 use crate::tablestore::TableStore;
-use crate::utils::{IdGenerator, MonotonicSeq, WatchableOnceCell};
+use crate::utils::{IdGenerator, MonotonicSeq, SendSafely, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{utils, Checkpoint, DbIterator};
 use bytes::Bytes;
@@ -824,7 +824,10 @@ impl DbReader {
     ///
     pub async fn close(&self) -> Result<(), SlateDBError> {
         if let Some(poller) = &self.manifest_poller {
-            poller.thread_tx.send(Shutdown).ok();
+            poller
+                .thread_tx
+                .send_safely(self.inner.error_watcher.reader(), Shutdown)
+                .ok();
             if let Some(join_handle) = {
                 let mut guard = poller.join_handle.lock();
                 guard.take()

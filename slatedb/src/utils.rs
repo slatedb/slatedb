@@ -13,6 +13,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
 use uuid::Uuid;
 
@@ -273,39 +274,37 @@ impl MonotonicSeq {
     }
 }
 
-/// An extension trait that adds a `.map_slatedb_err(...)` method to `Result<T, E>`.
-pub trait MapSlateDBError<T, E> {
-    /// Maps a `Result<T, E>` to a `Result<T, SlateDBError>`. If `error_reader` is set, it will
-    /// return the error in `error_reader`, otherwise maps error to SlateDBError with op.
+/// An extension trait that adds a `.send_safely(...)` method to tokio's `UnboundedSender<T>`.
+pub trait SendSafely<T> {
+    /// Attempts to send a message to the channel, and if the channel is closed, returns the error
+    /// in `error_reader` if it is set, otherwise panics.
     ///
-    /// This is useful for converting channel errors into SlateDBErrors when the database is
-    /// in an error state but hasn't completely shut down yet. In such cases, a receiving
-    /// channel could be closed or dropped when another thread tries to write to it.
-    fn map_slatedb_err<O>(
-        self,
+    /// This is useful for handling shutdown race conditions where the receiver's channel is dropped
+    /// before the sender is shut down.`
+    fn send_safely(
+        &self,
         error_reader: WatchableOnceCellReader<SlateDBError>,
-        op: O,
-    ) -> Result<T, SlateDBError>
-    where
-        O: FnOnce(E) -> SlateDBError;
+        message: T,
+    ) -> Result<(), SlateDBError>;
 }
 
-impl<T, E> MapSlateDBError<T, E> for Result<T, E> {
+#[allow(clippy::panic, clippy::disallowed_methods)]
+impl<T> SendSafely<T> for UnboundedSender<T> {
     #[inline]
-    fn map_slatedb_err<O>(
-        self,
+    fn send_safely(
+        &self,
         error_reader: WatchableOnceCellReader<SlateDBError>,
-        op: O,
-    ) -> Result<T, SlateDBError>
-    where
-        O: FnOnce(E) -> SlateDBError,
-    {
-        if let Some(err) = error_reader.read() {
-            return Err(err);
-        }
-        match self {
-            Err(e) => Err(op(e)),
-            Ok(t) => Ok(t),
+        message: T,
+    ) -> Result<(), SlateDBError> {
+        match self.send(message) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if let Some(err) = error_reader.read() {
+                    Err(err)
+                } else {
+                    panic!("Failed to send message to unbounded channel: {}", e);
+                }
+            }
         }
     }
 }
@@ -343,7 +342,7 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key, spawn_bg_task,
-        spawn_bg_thread, MapSlateDBError, WatchableOnceCell,
+        spawn_bg_thread, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
@@ -638,54 +637,5 @@ mod tests {
         // a buffer of the minimal size, as Bytes doesn't expose the underlying buffer's
         // capacity. The best we can do is assert it allocated a new buffer.
         assert_ne!(clamped.as_ptr(), slice.as_ptr());
-    }
-
-    #[test]
-    fn test_map_slatedb_err_with_existing_error() {
-        let error_cell = WatchableOnceCell::new();
-        error_cell.write(SlateDBError::Fenced);
-        let error_reader = error_cell.reader();
-        let result: Result<i32, &str> = Ok(42);
-        let mapped = result.map_slatedb_err(error_reader, |_| {
-            SlateDBError::Unsupported("not used".to_string())
-        });
-        assert!(matches!(mapped, Err(SlateDBError::Fenced)));
-    }
-
-    #[test]
-    fn test_map_slatedb_err_with_ok_result() {
-        let error_cell = WatchableOnceCell::new();
-        let error_reader = error_cell.reader();
-        let result: Result<i32, &str> = Ok(42);
-        let mapped = result.map_slatedb_err(error_reader, |e| SlateDBError::UnexpectedError {
-            msg: e.to_string(),
-        });
-        assert!(matches!(mapped, Ok(42)));
-    }
-
-    #[test]
-    fn test_map_slatedb_err_with_err_result() {
-        let error_cell = WatchableOnceCell::new();
-        let error_reader = error_cell.reader();
-        let result: Result<i32, &str> = Err("test error");
-        let mapped = result.map_slatedb_err(error_reader, |e| SlateDBError::UnexpectedError {
-            msg: e.to_string(),
-        });
-        match mapped {
-            Err(SlateDBError::UnexpectedError { msg }) => assert_eq!(msg, "test error"),
-            _ => panic!("Expected UnexpectedError with 'test error' message"),
-        }
-    }
-
-    #[test]
-    fn test_map_slatedb_err_precedence() {
-        let error_cell = WatchableOnceCell::new();
-        error_cell.write(SlateDBError::Fenced);
-        let error_reader = error_cell.reader();
-        let result: Result<i32, &str> = Err("test error");
-        let mapped = result.map_slatedb_err(error_reader, |e| SlateDBError::UnexpectedError {
-            msg: e.to_string(),
-        });
-        assert!(matches!(mapped, Err(SlateDBError::Fenced)));
     }
 }
