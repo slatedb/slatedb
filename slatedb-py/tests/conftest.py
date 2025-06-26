@@ -17,6 +17,14 @@ def db_path(temp_dir):
     return os.path.join(temp_dir, "test_db")
 
 @pytest.fixture
+def env_file(temp_dir):
+    env_file = os.path.join(temp_dir, ".env")
+    with open(env_file, "w") as f: 
+        f.write("CLOUD_PROVIDER=local\n")
+        f.write("LOCAL_PATH=/\n")
+    yield env_file
+
+@pytest.fixture
 def db(db_path):
     """Create a SlateDB instance."""
     db = SlateDB(db_path)
