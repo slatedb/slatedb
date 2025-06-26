@@ -323,7 +323,6 @@ impl DbInner {
                     result = await_flush_memtable => result?,
                     result = await_flush_wal => result?,
                     _ = timeout_fut => {
-                        eprintln!("Backpressure timeout: waited 30s, no memtable/WAL flushed yet");
                         warn!("Backpressure timeout: waited 30s, no memtable/WAL flushed yet");
                     }
                 };
@@ -380,6 +379,7 @@ impl DbInner {
                 .await?;
 
         while let Some(replayed_table) = replay_iter.next().await? {
+            self.maybe_apply_backpressure().await?;
             self.replay_memtable(replayed_table)?;
         }
 
@@ -388,7 +388,6 @@ impl DbInner {
         self.oracle
             .last_remote_persisted_seq
             .store(self.oracle.last_committed_seq.load());
-
         Ok(())
     }
 
