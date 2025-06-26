@@ -55,4 +55,5 @@ disallowed-methods = [
     { path = "uuid::Uuid::new_v6", reason = "Only our utils.rs may touch this" },
     { path = "uuid::Uuid::new_v7", reason = "Only our utils.rs may touch this" },
     { path = "uuid::Uuid::new_v8", reason = "Only our utils.rs may touch this" },
+    { path = "tokio::sync::mpsc::UnboundedSender::send", reason = "Use crate::utils::SendSafely instead" },
 ]
