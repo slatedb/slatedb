@@ -3108,6 +3108,7 @@ dependencies = [
  "pyo3-async-runtimes",
  "slatedb",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
