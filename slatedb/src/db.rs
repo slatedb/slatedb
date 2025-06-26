@@ -41,7 +41,6 @@ use crate::db_iter::DbIterator;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{DirtyManifest, FenceableManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushMsg;
@@ -411,7 +410,7 @@ pub struct Db {
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     write_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     compactor_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
-    garbage_collector: Mutex<Option<GarbageCollector>>,
+    garbage_collector_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     cancellation_token: CancellationToken,
 }
 
@@ -510,11 +509,14 @@ impl Db {
             info!("compactor task exited with: {:?}", result);
         }
 
-        if let Some(gc) = {
-            let mut maybe_gc = self.garbage_collector.lock();
-            maybe_gc.take()
+        if let Some(garbage_collector_task) = {
+            let mut maybe_garbage_collector_task = self.garbage_collector_task.lock();
+            maybe_garbage_collector_task.take()
         } {
-            gc.terminate_background_task().await;
+            let result = garbage_collector_task
+                .await
+                .expect("Failed to join garbage collector task");
+            info!("garbage collector task exited with: {:?}", result);
         }
 
         // Shutdown the write batch thread.

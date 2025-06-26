@@ -97,42 +97,6 @@ where
     handle.spawn(wrapped)
 }
 
-/// Spawn a background os thread for a function. The function must return a
-/// Result<T, SlateDBError>. When the thread exits, the provided cleanup fn is called with
-/// a reference to the returned result. If the function panics, the cleanup fn is called
-/// with Err(BackgroundTaskPanic).
-pub(crate) fn spawn_bg_thread<F, T, C>(
-    name: &str,
-    cleanup_fn: C,
-    f: F,
-) -> std::thread::JoinHandle<Result<T, SlateDBError>>
-where
-    F: FnOnce() -> Result<T, SlateDBError> + Send + 'static,
-    T: Send + 'static,
-    C: FnOnce(&Result<T, SlateDBError>) + Send + 'static,
-{
-    // NOTE: It is critical that the function lives as long as the cleanup_fn.
-    //       Otherwise, there is a gap where everything owned by the function is dropped
-    //       before the cleanup_fn runs. Since our cleanup_fn's often set error states
-    //       on the db, this would result in a gap where the db is not in an error state
-    //       but resources such as channels have been dropped or closed. See #623 for
-    //       details.
-    let thread_name = name.to_string();
-    std::thread::Builder::new()
-        .name(thread_name)
-        .spawn(move || {
-            let outcome = std::panic::catch_unwind(AssertUnwindSafe(f));
-            let result: Result<_, SlateDBError> = match outcome {
-                Ok(Ok(val)) => Ok(val),
-                Ok(Err(e)) => Err(e),
-                Err(panic_payload) => Err(BackgroundTaskPanic(Arc::new(Mutex::new(panic_payload)))),
-            };
-            cleanup_fn(&result);
-            result
-        })
-        .expect("failed to spawn thread")
-}
-
 pub(crate) fn system_time_to_millis(system_time: SystemTime) -> i64 {
     system_time.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
 }
@@ -342,7 +306,7 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key, spawn_bg_task,
-        spawn_bg_thread, WatchableOnceCell,
+        WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
@@ -457,49 +421,6 @@ mod tests {
         let task = spawn_bg_task(&handle, move |err| captor2.capture(err), async { Ok(()) });
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
-        assert!(matches!(result, Ok(())));
-        assert!(matches!(captor.captured(), Some(Ok(()))));
-    }
-
-    #[test]
-    fn test_should_cleanup_when_thread_exits_with_error() {
-        let captor = Arc::new(ResultCaptor::new());
-        let captor2 = captor.clone();
-
-        let thread = spawn_bg_thread(
-            "test",
-            move |err| captor2.capture(err),
-            || Err(SlateDBError::Fenced),
-        );
-
-        let result: Result<(), SlateDBError> = thread.join().expect("join failure");
-        assert!(matches!(result, Err(SlateDBError::Fenced)));
-        assert!(matches!(captor.captured(), Some(Err(SlateDBError::Fenced))));
-    }
-
-    #[test]
-    fn test_should_cleanup_when_thread_panics() {
-        let captor = Arc::new(ResultCaptor::new());
-        let captor2 = captor.clone();
-
-        let thread = spawn_bg_thread("test", move |err| captor2.capture(err), || panic!("oops"));
-
-        let result: Result<(), SlateDBError> = thread.join().expect("join failure");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
-        assert!(matches!(
-            captor.captured(),
-            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
-        ));
-    }
-
-    #[test]
-    fn test_should_cleanup_when_thread_exits() {
-        let captor = Arc::new(ResultCaptor::new());
-        let captor2 = captor.clone();
-
-        let thread = spawn_bg_thread("test", move |err| captor2.capture(err), || Ok(()));
-
-        let result: Result<(), SlateDBError> = thread.join().expect("join failure");
         assert!(matches!(result, Ok(())));
         assert!(matches!(captor.captured(), Some(Ok(()))));
     }
