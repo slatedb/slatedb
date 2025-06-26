@@ -480,9 +480,8 @@ impl<P: Into<Path>> DbBuilder<P> {
                 system_clock.clone(),
                 self.cancellation_token.clone(),
             );
-            // Spawn the compactor on the compaction runtime
-            // Spawn the main event loop on the main tokio runtime
             let compactor_task = spawn_bg_task(
+                // Spawn the main event loop on the main tokio runtime
                 &tokio_handle,
                 move |result: &Result<(), SlateDBError>| {
                     let err = bg_task_result_into_err(result);
@@ -490,6 +489,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
                 },
+                // Spawn the compactor on the compaction runtime
                 async move { compactor.run_async_task(compaction_handle).await },
             );
             Some(compactor_task)
@@ -499,7 +499,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // To keep backwards compatibility, check if the gc_runtime or garbage_collector_options are set.
         // If either are set, we need to initialize the garbage collector.
-        let garbage_collector =
+        let garbage_collector_task =
             if self.settings.garbage_collector_options.is_some() || self.gc_runtime.is_some() {
                 let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
                 let gc_handle = self.gc_runtime.unwrap_or_else(|| tokio_handle.clone());
@@ -512,13 +512,17 @@ impl<P: Into<Path>> DbBuilder<P> {
                     system_clock.clone(),
                     self.cancellation_token.clone(),
                 );
-                gc.start_in_bg_thread(gc_handle, move |result| {
-                    let err = bg_task_result_into_err(result);
-                    warn!("GC thread exited with {:?}", err);
-                    let mut state = cleanup_inner.state.write();
-                    state.record_fatal_error(err.clone())
-                });
-                Some(gc)
+                let garbage_collector_task = spawn_bg_task(
+                    &gc_handle,
+                    move |result| {
+                        let err = bg_task_result_into_err(result);
+                        warn!("GC thread exited with {:?}", err);
+                        let mut state = cleanup_inner.state.write();
+                        state.record_fatal_error(err.clone())
+                    },
+                    async move { gc.run_async_task().await },
+                );
+                Some(garbage_collector_task)
             } else {
                 None
             };
@@ -529,7 +533,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             memtable_flush_task: Mutex::new(memtable_flush_task),
             write_task: Mutex::new(write_task),
             compactor_task: Mutex::new(compactor_task),
-            garbage_collector: Mutex::new(garbage_collector),
+            garbage_collector_task: Mutex::new(garbage_collector_task),
             cancellation_token: self.cancellation_token,
         })
     }
