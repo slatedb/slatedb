@@ -126,6 +126,7 @@ impl DbInner {
         let wal_buffer = Arc::new(WalBufferManager::new(
             state.clone(),
             Some(state.clone()),
+            db_stats.clone(),
             recent_flushed_wal_id,
             oracle.clone(),
             table_store.clone(),
