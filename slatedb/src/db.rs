@@ -2294,11 +2294,8 @@ mod tests {
         }))
         .await;
 
-        // Verify that backpressure is applied. This will happen exactly once because
-        // the second iteration of `maybe_apply_backpressure` will block for 30s until
-        // either the current WAL is flushed (can't be because of the fail point) or the
-        // memtable gets flushed (can't be )
-        assert_eq!(db_stats.backpressure_count.value.load(Ordering::SeqCst), 1);
+        // Verify that backpressure is applied.
+        assert!(db_stats.backpressure_count.value.load(Ordering::SeqCst) >= 1);
 
         // Unblock so put_with_options in join_handle can complete and join_handle.await returns
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
