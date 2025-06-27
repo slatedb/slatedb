@@ -432,9 +432,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             inner.fence_writers(&mut manifest, next_wal_id).await?;
         }
 
-        // Replay WAL
-        inner.replay_wal().await?;
-
         // Setup background tasks
         let tokio_handle = Handle::current();
         if inner.wal_enabled {
@@ -526,6 +523,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             } else {
                 None
             };
+
+        // Replay WAL
+        inner.replay_wal().await?;
 
         // Create and return the Db instance
         Ok(Db {
