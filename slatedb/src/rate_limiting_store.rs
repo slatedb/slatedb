@@ -37,7 +37,7 @@ struct TokenBucket {
 
 impl TokenBucket {
     /// Interval between token refills in milliseconds.
-    const TICK_MS: u64 = 100;
+    const TICK_MS: Duration = Duration::from_millis(100);
 
     fn new(rate: u32, clock: Arc<dyn SystemClock>) -> Arc<Self> {
         let capacity = rate;
@@ -52,7 +52,7 @@ impl TokenBucket {
             let mut last = clock.now();
             let mut leftover_ms = 0u64;
             loop {
-                tokio::time::sleep(Duration::from_millis(Self::TICK_MS)).await;
+                tokio::time::sleep(Self::TICK_MS).await;
                 let now = clock.now();
                 let elapsed_ms = now.duration_since(last).unwrap_or_default().as_millis() as u64;
                 last = now;
@@ -130,6 +130,12 @@ pub struct RateLimitingRulesBuilder {
     limits: HashMap<Operation, u32>,
     total: Option<u32>,
     cost_fn: Option<Arc<dyn Fn(Operation) -> u32 + Send + Sync>>,
+}
+
+impl Default for RateLimitingRulesBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RateLimitingRulesBuilder {
@@ -229,6 +235,7 @@ pub(crate) struct RateLimitingStore<T: ObjectStore> {
 
 impl<T: ObjectStore> RateLimitingStore<T> {
     /// Create a new [`RateLimitingStore`] wrapping `inner` with the provided [`RateLimitingRules`].
+    #[allow(dead_code)]
     pub fn new(inner: T, rules: Arc<RateLimitingRules>) -> Self {
         Self::new_with_clock(inner, rules, Arc::new(DefaultSystemClock::new()))
     }
