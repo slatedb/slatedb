@@ -434,4 +434,80 @@ mod tests {
             .unwrap();
         assert!(start.elapsed() >= Duration::from_secs(1));
     }
+
+    #[tokio::test]
+    async fn test_total_rate_limit() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let rules = Arc::new(RateLimitingRulesBuilder::new().total_limit(1).build());
+        let rate_store = RateLimitingStore::new(store, rules);
+
+        let start = Instant::now();
+        rate_store
+            .put(&Path::from("a"), PutPayload::from("1"))
+            .await
+            .unwrap();
+        rate_store.get(&Path::from("a")).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn test_cost_function() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let rules = Arc::new(
+            RateLimitingRulesBuilder::new()
+                .total_limit(2)
+                .cost_fn(|_| 2)
+                .build(),
+        );
+        let rate_store = RateLimitingStore::new(store, rules);
+
+        let start = Instant::now();
+        rate_store
+            .put(&Path::from("a"), PutPayload::from("1"))
+            .await
+            .unwrap();
+        rate_store.get(&Path::from("a")).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn test_multipart_part_limit() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let rules = Arc::new(
+            RateLimitingRulesBuilder::new()
+                .limit(Operation::MultipartPutPart, 1)
+                .build(),
+        );
+        let rate_store = RateLimitingStore::new(store, rules);
+
+        let mut upload = rate_store.put_multipart(&Path::from("a")).await.unwrap();
+
+        let start = Instant::now();
+        upload.put_part(PutPayload::from("1")).await.unwrap();
+        upload.put_part(PutPayload::from("2")).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn test_total_overrides_per_op_limit() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let rules = Arc::new(
+            RateLimitingRulesBuilder::new()
+                .limit(Operation::Put, 10)
+                .total_limit(1)
+                .build(),
+        );
+        let rate_store = RateLimitingStore::new(store, rules);
+
+        let start = Instant::now();
+        rate_store
+            .put(&Path::from("a"), PutPayload::from("1"))
+            .await
+            .unwrap();
+        rate_store
+            .put(&Path::from("b"), PutPayload::from("2"))
+            .await
+            .unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(1));
+    }
 }
