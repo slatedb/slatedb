@@ -368,13 +368,11 @@ impl<P: Into<Path>> DbBuilder<P> {
         let wal_object_store = match self.wal_object_store {
             Some(store) => {
                 if let Some(rules) = rate_rules.as_ref() {
-                    Some(
-                        Arc::new(RateLimitingStore::new_with_clock(
-                            store,
-                            Arc::clone(rules),
-                            system_clock.clone(),
-                        )) as Arc<dyn ObjectStore>,
-                    )
+                    Some(Arc::new(RateLimitingStore::new_with_clock(
+                        store,
+                        Arc::clone(rules),
+                        system_clock.clone(),
+                    )) as Arc<dyn ObjectStore>)
                 } else {
                     Some(store)
                 }
