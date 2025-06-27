@@ -136,6 +136,7 @@ use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
+use crate::rate_limiting_store::{RateLimitingRules, RateLimitingStore};
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
@@ -154,6 +155,7 @@ pub struct DbBuilder<P: Into<Path>> {
     block_cache: Option<Arc<dyn DbCache>>,
     logical_clock: Option<Arc<dyn LogicalClock>>,
     system_clock: Option<Arc<dyn SystemClock>>,
+    rate_limiting_rules: Option<RateLimitingRules>,
     gc_runtime: Option<Handle>,
     compaction_runtime: Option<Handle>,
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
@@ -174,6 +176,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             block_cache: None,
             logical_clock: None,
             system_clock: None,
+            rate_limiting_rules: None,
             gc_runtime: None,
             compaction_runtime: None,
             compaction_scheduler_supplier: None,
@@ -217,6 +220,12 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// scheduling operations such as compaction and garbage collection.
     pub fn with_system_clock(mut self, clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = Some(clock);
+        self
+    }
+
+    /// Sets the rate limiting rules for object store operations.
+    pub fn with_rate_limiting_rules(mut self, rules: RateLimitingRules) -> Self {
+        self.rate_limiting_rules = Some(rules);
         self
     }
 
@@ -343,11 +352,38 @@ impl<P: Into<Path>> DbBuilder<P> {
                 }
             };
 
+        // Apply rate limiting to the object stores if configured
+        let rate_rules = self.rate_limiting_rules.map(Arc::new);
+
+        let main_object_store = if let Some(rules) = rate_rules.as_ref() {
+            Arc::new(RateLimitingStore::new_with_clock(
+                maybe_cached_main_object_store.clone(),
+                Arc::clone(rules),
+                system_clock.clone(),
+            )) as Arc<dyn ObjectStore>
+        } else {
+            maybe_cached_main_object_store.clone()
+        };
+
+        let wal_object_store = match self.wal_object_store {
+            Some(store) => {
+                if let Some(rules) = rate_rules.as_ref() {
+                    Some(
+                        Arc::new(RateLimitingStore::new_with_clock(
+                            store,
+                            Arc::clone(rules),
+                            system_clock.clone(),
+                        )) as Arc<dyn ObjectStore>,
+                    )
+                } else {
+                    Some(store)
+                }
+            }
+            None => None,
+        };
+
         // Setup the manifest store and load latest manifest
-        let manifest_store = Arc::new(ManifestStore::new(
-            &path,
-            maybe_cached_main_object_store.clone(),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&path, main_object_store.clone()));
         let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
 
         // Validate WAL object store configuration
@@ -376,10 +412,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            ObjectStores::new(
-                maybe_cached_main_object_store.clone(),
-                self.wal_object_store.clone(),
-            ),
+            ObjectStores::new(main_object_store.clone(), wal_object_store.clone()),
             sst_format.clone(),
             path_resolver.clone(),
             self.fp_registry.clone(),
@@ -444,10 +477,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Not to pollute the cache during compaction or GC
         let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
-            ObjectStores::new(
-                self.main_object_store.clone(),
-                self.wal_object_store.clone(),
-            ),
+            ObjectStores::new(main_object_store.clone(), wal_object_store.clone()),
             sst_format,
             path_resolver,
             self.fp_registry.clone(),

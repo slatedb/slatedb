@@ -38,6 +38,9 @@ pub use db_reader::DbReader;
 pub use error::{SettingsError, SlateDBError};
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
+pub use rate_limiting_store::{
+    Operation as RateLimitOperation, RateLimitingRules, RateLimitingRulesBuilder,
+};
 pub use types::KeyValue;
 
 pub mod admin;
@@ -90,6 +93,7 @@ mod paths;
 #[cfg(test)]
 mod proptest_util;
 mod rand;
+mod rate_limiting_store;
 mod reader;
 mod row_codec;
 mod sorted_run_iterator;
