@@ -25,29 +25,35 @@ use object_store::{
     PutMultipartOpts, PutOptions, PutPayload, PutResult, Result, UploadPart,
 };
 
+/// Trait for rate limiting policies.
+#[async_trait]
+pub trait RateLimitingPolicy: Send + Sync + 'static {
+    /// Acquire resources for the specified operation at the given cost.
+    async fn acquire(&self, op: Operation, cost: u32);
+}
+
 /// Simple token bucket implemented using a counting semaphore.
 ///
 /// Tokens are replenished periodically on a background task and calls await
 /// permits from the [`Semaphore`].
 #[derive(Debug)]
-struct TokenBucket {
-    semaphore: Semaphore,
-    capacity: u32,
+pub struct TokenBucket {
+    semaphore: Arc<Semaphore>,
 }
 
+#[allow(dead_code)]
 impl TokenBucket {
     /// Interval between token refills in milliseconds.
     const TICK_MS: Duration = Duration::from_millis(100);
 
-    fn new(rate: u32, clock: Arc<dyn SystemClock>) -> Arc<Self> {
-        let capacity = rate;
-        let bucket = Arc::new(Self {
-            semaphore: Semaphore::new(capacity as usize),
-            capacity,
-        });
+    pub fn new(rate: u32) -> Self {
+        Self::new_with_clock(rate, Arc::new(DefaultSystemClock::default()))
+    }
 
+    pub fn new_with_clock(rate: u32, clock: Arc<dyn SystemClock>) -> Self {
+        let semaphore = Arc::new(Semaphore::new(rate as usize));
         let per_sec = rate as u64;
-        let bucket_clone = Arc::clone(&bucket);
+        let this_sem = semaphore.clone();
         tokio::spawn(async move {
             let mut last = clock.now();
             let mut leftover_ms = 0u64;
@@ -59,17 +65,20 @@ impl TokenBucket {
                 let total_ms = leftover_ms + elapsed_ms * per_sec;
                 let add = (total_ms / 1_000) as u32;
                 leftover_ms = total_ms % 1_000;
-                let available = bucket_clone.semaphore.available_permits() as u32;
-                if add > 0 && available < bucket_clone.capacity {
-                    let to_add = add.min(bucket_clone.capacity - available) as usize;
-                    bucket_clone.semaphore.add_permits(to_add);
+                let available = this_sem.available_permits() as u32;
+                if add > 0 && available < rate {
+                    let to_add = add.min(rate - available) as usize;
+                    this_sem.add_permits(to_add);
                 }
             }
         });
 
-        bucket
+        Self { semaphore }
     }
+}
 
+#[async_trait]
+impl RateLimitingPolicy for TokenBucket {
     async fn acquire(&self, op: Operation, cost: u32) {
         if self.semaphore.available_permits() < cost as usize {
             warn!(?op, "rate limited");
@@ -109,8 +118,8 @@ pub enum Operation {
 
 /// Configuration for rate limiting behavior.
 pub struct RateLimitingRules {
-    pub(crate) limits: HashMap<Operation, u32>,
-    pub(crate) total: Option<u32>,
+    pub(crate) limits: HashMap<Operation, Arc<dyn RateLimitingPolicy>>,
+    pub(crate) total: Option<Arc<dyn RateLimitingPolicy>>,
     pub(crate) cost_fn: Box<dyn Fn(Operation) -> u32 + Send + Sync>,
 }
 
@@ -126,8 +135,8 @@ impl Default for RateLimitingRules {
 
 /// Builder for [`RateLimitingRules`].
 pub struct RateLimitingRulesBuilder {
-    limits: HashMap<Operation, u32>,
-    total: Option<u32>,
+    limits: HashMap<Operation, Arc<dyn RateLimitingPolicy>>,
+    total: Option<Arc<dyn RateLimitingPolicy>>,
     cost_fn: Option<Box<dyn Fn(Operation) -> u32 + Send + Sync>>,
 }
 
@@ -147,20 +156,15 @@ impl RateLimitingRulesBuilder {
     }
 
     /// Set a per-second limit for a specific operation.
-    pub fn limit(mut self, op: Operation, per_sec: u32) -> Self {
-        assert!(
-            self.limits.insert(op, per_sec).is_none(),
-            "limit for {:?} already set",
-            op
-        );
+    pub fn limit(mut self, op: Operation, policy: Box<dyn RateLimitingPolicy>) -> Self {
+        self.limits.insert(op, policy.into());
         self
     }
 
     /// Set a total per-second limit for all operations combined. This rule
     /// is evaluated after per-operation limits.
-    pub fn total_limit(mut self, per_sec: u32) -> Self {
-        assert!(self.total.is_none(), "total limit already set");
-        self.total = Some(per_sec);
+    pub fn total_limit(mut self, policy: Box<dyn RateLimitingPolicy>) -> Self {
+        self.total = Some(policy.into());
         self
     }
 
@@ -185,9 +189,9 @@ impl RateLimitingRulesBuilder {
 /// Shared state used by [`RateLimitingStore`].
 pub(crate) struct RateLimitingState {
     /// Per-operation token buckets.
-    limits: HashMap<Operation, Arc<TokenBucket>>,
+    limits: HashMap<Operation, Arc<dyn RateLimitingPolicy>>,
     /// Optional token bucket for the total allowed rate.
-    total: Option<Arc<TokenBucket>>,
+    total: Option<Arc<dyn RateLimitingPolicy>>,
     /// Function that determines the cost of each call.
     cost_fn: Box<dyn Fn(Operation) -> u32 + Send + Sync>,
 }
@@ -199,26 +203,21 @@ impl std::fmt::Debug for RateLimitingState {
 }
 
 impl RateLimitingState {
-    pub(crate) fn new(rules: RateLimitingRules, clock: Arc<dyn SystemClock>) -> Self {
-        let mut limits = HashMap::new();
-        for (op, rate) in &rules.limits {
-            limits.insert(*op, TokenBucket::new(*rate, Arc::clone(&clock)));
-        }
-        let total = rules.total.map(|r| TokenBucket::new(r, clock));
+    pub(crate) fn new(rules: RateLimitingRules) -> Self {
         Self {
-            limits,
-            total,
+            limits: rules.limits,
+            total: rules.total,
             cost_fn: Box::new(rules.cost_fn),
         }
     }
 
     async fn acquire(&self, op: Operation) {
         let cost = (self.cost_fn)(op);
-        if let Some(total) = &self.total {
-            total.acquire(op, cost).await;
-        }
         if let Some(limit) = self.limits.get(&op) {
             limit.acquire(op, cost).await;
+        }
+        if let Some(total) = &self.total {
+            total.acquire(op, cost).await;
         }
     }
 }
@@ -236,13 +235,8 @@ pub(crate) struct RateLimitingStore<T: ObjectStore> {
 
 impl<T: ObjectStore> RateLimitingStore<T> {
     /// Create a new [`RateLimitingStore`] wrapping `inner` with the provided [`RateLimitingRules`].
-    #[allow(dead_code)]
     pub fn new(inner: T, rules: RateLimitingRules) -> Self {
-        Self::new_with_clock(inner, rules, Arc::new(DefaultSystemClock::new()))
-    }
-
-    pub fn new_with_clock(inner: T, rules: RateLimitingRules, clock: Arc<dyn SystemClock>) -> Self {
-        let state = Arc::new(RateLimitingState::new(rules, clock));
+        let state = Arc::new(RateLimitingState::new(rules));
         Self {
             inner: Arc::new(inner),
             state,
@@ -421,7 +415,7 @@ mod tests {
     async fn test_put_rate_limit() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let rules = RateLimitingRulesBuilder::new()
-            .limit(Operation::Put, 1)
+            .limit(Operation::Put, Box::new(TokenBucket::new(1)))
             .build();
         let rate_store = RateLimitingStore::new(store, rules);
 
@@ -440,7 +434,9 @@ mod tests {
     #[tokio::test]
     async fn test_total_rate_limit() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let rules = RateLimitingRulesBuilder::new().total_limit(1).build();
+        let rules = RateLimitingRulesBuilder::new()
+            .total_limit(Box::new(TokenBucket::new(1)))
+            .build();
         let rate_store = RateLimitingStore::new(store, rules);
 
         let start = Instant::now();
@@ -456,7 +452,7 @@ mod tests {
     async fn test_cost_function() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let rules = RateLimitingRulesBuilder::new()
-            .total_limit(2)
+            .total_limit(Box::new(TokenBucket::new(2)))
             .cost_fn(|_| 2)
             .build();
         let rate_store = RateLimitingStore::new(store, rules);
@@ -474,7 +470,7 @@ mod tests {
     async fn test_multipart_part_limit() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let rules = RateLimitingRulesBuilder::new()
-            .limit(Operation::MultipartPutPart, 1)
+            .limit(Operation::MultipartPutPart, Box::new(TokenBucket::new(1)))
             .build();
         let rate_store = RateLimitingStore::new(store, rules);
 
@@ -490,8 +486,8 @@ mod tests {
     async fn test_total_overrides_per_op_limit() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let rules = RateLimitingRulesBuilder::new()
-            .limit(Operation::Put, 10)
-            .total_limit(1)
+            .limit(Operation::Put, Box::new(TokenBucket::new(10)))
+            .total_limit(Box::new(TokenBucket::new(1)))
             .build();
         let rate_store = RateLimitingStore::new(store, rules);
 

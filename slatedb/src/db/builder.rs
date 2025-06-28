@@ -362,10 +362,9 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Apply rate limiting to the object stores if configured
         let main_object_store = if let Some(rules) = self.main_object_store_rate_limit {
-            Arc::new(RateLimitingStore::new_with_clock(
+            Arc::new(RateLimitingStore::new(
                 maybe_cached_main_object_store,
                 rules,
-                system_clock.clone(),
             ))
         } else {
             maybe_cached_main_object_store
@@ -373,11 +372,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         let wal_object_store: Option<Arc<dyn ObjectStore>> =
             match (self.wal_object_store, self.wal_object_store_rate_limit) {
-                (Some(store), Some(rules)) => Some(Arc::new(RateLimitingStore::new_with_clock(
-                    store,
-                    rules,
-                    system_clock.clone(),
-                ))),
+                (Some(store), Some(rules)) => Some(Arc::new(RateLimitingStore::new(store, rules))),
                 (store, _) => store,
             };
 
