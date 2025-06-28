@@ -155,7 +155,8 @@ pub struct DbBuilder<P: Into<Path>> {
     block_cache: Option<Arc<dyn DbCache>>,
     logical_clock: Option<Arc<dyn LogicalClock>>,
     system_clock: Option<Arc<dyn SystemClock>>,
-    rate_limiting_rules: Option<RateLimitingRules>,
+    main_object_store_rate_limits: Option<RateLimitingRules>,
+    wal_object_store_rate_limits: Option<RateLimitingRules>,
     gc_runtime: Option<Handle>,
     compaction_runtime: Option<Handle>,
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
@@ -176,7 +177,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             block_cache: None,
             logical_clock: None,
             system_clock: None,
-            rate_limiting_rules: None,
+            main_object_store_rate_limits: None,
+            wal_object_store_rate_limits: None,
             gc_runtime: None,
             compaction_runtime: None,
             compaction_scheduler_supplier: None,
@@ -222,10 +224,16 @@ impl<P: Into<Path>> DbBuilder<P> {
         self.system_clock = Some(clock);
         self
     }
+    
+    /// Sets the rate limiting rules for main object store operations.
+    pub fn with_main_object_store_rate_limits(mut self, rules: RateLimitingRules) -> Self {
+        self.main_object_store_rate_limits = Some(rules);
+        self
+    }
 
-    /// Sets the rate limiting rules for object store operations.
-    pub fn with_rate_limiting_rules(mut self, rules: RateLimitingRules) -> Self {
-        self.rate_limiting_rules = Some(rules);
+    /// Sets the rate limiting rules for WAL object store operations.
+    pub fn with_wal_object_store_rate_limits(mut self, rules: RateLimitingRules) -> Self {
+        self.wal_object_store_rate_limits = Some(rules);
         self
     }
 
@@ -353,31 +361,25 @@ impl<P: Into<Path>> DbBuilder<P> {
             };
 
         // Apply rate limiting to the object stores if configured
-        let rate_rules = self.rate_limiting_rules.map(Arc::new);
-
-        let main_object_store = if let Some(rules) = rate_rules.as_ref() {
+        let main_object_store = if let Some(rules) = self.main_object_store_rate_limits {
             Arc::new(RateLimitingStore::new_with_clock(
-                maybe_cached_main_object_store.clone(),
-                Arc::clone(rules),
+                maybe_cached_main_object_store,
+                rules,
                 system_clock.clone(),
-            )) as Arc<dyn ObjectStore>
+            ))
         } else {
-            maybe_cached_main_object_store.clone()
+            maybe_cached_main_object_store
         };
 
-        let wal_object_store = match self.wal_object_store {
-            Some(store) => {
-                if let Some(rules) = rate_rules.as_ref() {
-                    Some(Arc::new(RateLimitingStore::new_with_clock(
-                        store,
-                        Arc::clone(rules),
-                        system_clock.clone(),
-                    )) as Arc<dyn ObjectStore>)
-                } else {
-                    Some(store)
-                }
+        let wal_object_store: Option<Arc<dyn ObjectStore>> = match (self.wal_object_store, self.wal_object_store_rate_limits) {
+            (Some(store), Some(rules)) => {
+                Some(Arc::new(RateLimitingStore::new_with_clock(
+                    store,
+                    rules,
+                    system_clock.clone(),
+                )))
             }
-            None => None,
+            (store, _) => store,
         };
 
         // Setup the manifest store and load latest manifest

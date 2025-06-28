@@ -108,11 +108,10 @@ pub enum Operation {
 }
 
 /// Configuration for rate limiting behavior.
-#[derive(Clone)]
 pub struct RateLimitingRules {
     pub(crate) limits: HashMap<Operation, u32>,
     pub(crate) total: Option<u32>,
-    pub(crate) cost_fn: Arc<dyn Fn(Operation) -> u32 + Send + Sync>,
+    pub(crate) cost_fn: Box<dyn Fn(Operation) -> u32 + Send + Sync>,
 }
 
 impl Default for RateLimitingRules {
@@ -120,7 +119,7 @@ impl Default for RateLimitingRules {
         Self {
             limits: HashMap::new(),
             total: None,
-            cost_fn: Arc::new(|_| 1u32),
+            cost_fn: Box::new(|_| 1u32),
         }
     }
 }
@@ -129,7 +128,7 @@ impl Default for RateLimitingRules {
 pub struct RateLimitingRulesBuilder {
     limits: HashMap<Operation, u32>,
     total: Option<u32>,
-    cost_fn: Option<Arc<dyn Fn(Operation) -> u32 + Send + Sync>>,
+    cost_fn: Option<Box<dyn Fn(Operation) -> u32 + Send + Sync>>,
 }
 
 impl Default for RateLimitingRulesBuilder {
@@ -168,7 +167,7 @@ impl RateLimitingRulesBuilder {
     where
         F: Fn(Operation) -> u32 + Send + Sync + 'static,
     {
-        self.cost_fn = Some(Arc::new(f));
+        self.cost_fn = Some(Box::new(f));
         self
     }
 
@@ -176,7 +175,7 @@ impl RateLimitingRulesBuilder {
         RateLimitingRules {
             limits: self.limits,
             total: self.total,
-            cost_fn: self.cost_fn.unwrap_or_else(|| Arc::new(|_| 1u32)),
+            cost_fn: self.cost_fn.unwrap_or_else(|| Box::new(|_| 1u32)),
         }
     }
 }
@@ -188,7 +187,7 @@ pub(crate) struct RateLimitingState {
     /// Optional token bucket for the total allowed rate.
     total: Option<Arc<TokenBucket>>,
     /// Function that determines the cost of each call.
-    cost_fn: Arc<dyn Fn(Operation) -> u32 + Send + Sync>,
+    cost_fn: Box<dyn Fn(Operation) -> u32 + Send + Sync>,
 }
 
 impl std::fmt::Debug for RateLimitingState {
@@ -198,7 +197,7 @@ impl std::fmt::Debug for RateLimitingState {
 }
 
 impl RateLimitingState {
-    pub(crate) fn new(rules: Arc<RateLimitingRules>, clock: Arc<dyn SystemClock>) -> Self {
+    pub(crate) fn new(rules: RateLimitingRules, clock: Arc<dyn SystemClock>) -> Self {
         let mut limits = HashMap::new();
         for (op, rate) in &rules.limits {
             limits.insert(*op, TokenBucket::new(*rate, Arc::clone(&clock)));
@@ -207,7 +206,7 @@ impl RateLimitingState {
         Self {
             limits,
             total,
-            cost_fn: Arc::clone(&rules.cost_fn),
+            cost_fn: Box::new(rules.cost_fn),
         }
     }
 
@@ -236,13 +235,13 @@ pub(crate) struct RateLimitingStore<T: ObjectStore> {
 impl<T: ObjectStore> RateLimitingStore<T> {
     /// Create a new [`RateLimitingStore`] wrapping `inner` with the provided [`RateLimitingRules`].
     #[allow(dead_code)]
-    pub fn new(inner: T, rules: Arc<RateLimitingRules>) -> Self {
+    pub fn new(inner: T, rules: RateLimitingRules) -> Self {
         Self::new_with_clock(inner, rules, Arc::new(DefaultSystemClock::new()))
     }
 
     pub fn new_with_clock(
         inner: T,
-        rules: Arc<RateLimitingRules>,
+        rules: RateLimitingRules,
         clock: Arc<dyn SystemClock>,
     ) -> Self {
         let state = Arc::new(RateLimitingState::new(rules, clock));
@@ -423,11 +422,9 @@ mod tests {
     #[tokio::test]
     async fn test_put_rate_limit() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let rules = Arc::new(
-            RateLimitingRulesBuilder::new()
-                .limit(Operation::Put, 1)
-                .build(),
-        );
+        let rules = RateLimitingRulesBuilder::new()
+            .limit(Operation::Put, 1)
+            .build();
         let rate_store = RateLimitingStore::new(store, rules);
 
         let start = Instant::now();
@@ -445,7 +442,7 @@ mod tests {
     #[tokio::test]
     async fn test_total_rate_limit() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let rules = Arc::new(RateLimitingRulesBuilder::new().total_limit(1).build());
+        let rules = RateLimitingRulesBuilder::new().total_limit(1).build();
         let rate_store = RateLimitingStore::new(store, rules);
 
         let start = Instant::now();
@@ -460,12 +457,10 @@ mod tests {
     #[tokio::test]
     async fn test_cost_function() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let rules = Arc::new(
-            RateLimitingRulesBuilder::new()
-                .total_limit(2)
-                .cost_fn(|_| 2)
-                .build(),
-        );
+        let rules = RateLimitingRulesBuilder::new()
+            .total_limit(2)
+            .cost_fn(|_| 2)
+            .build();
         let rate_store = RateLimitingStore::new(store, rules);
 
         let start = Instant::now();
@@ -480,11 +475,9 @@ mod tests {
     #[tokio::test]
     async fn test_multipart_part_limit() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let rules = Arc::new(
-            RateLimitingRulesBuilder::new()
-                .limit(Operation::MultipartPutPart, 1)
-                .build(),
-        );
+        let rules = RateLimitingRulesBuilder::new()
+            .limit(Operation::MultipartPutPart, 1)
+            .build();
         let rate_store = RateLimitingStore::new(store, rules);
 
         let mut upload = rate_store.put_multipart(&Path::from("a")).await.unwrap();
@@ -498,12 +491,10 @@ mod tests {
     #[tokio::test]
     async fn test_total_overrides_per_op_limit() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let rules = Arc::new(
-            RateLimitingRulesBuilder::new()
-                .limit(Operation::Put, 10)
-                .total_limit(1)
-                .build(),
-        );
+        let rules = RateLimitingRulesBuilder::new()
+            .limit(Operation::Put, 10)
+            .total_limit(1)
+            .build();
         let rate_store = RateLimitingStore::new(store, rules);
 
         let start = Instant::now();
