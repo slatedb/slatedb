@@ -156,8 +156,10 @@ impl RateLimitingRulesBuilder {
         self
     }
 
-    /// Set a total per-second limit for all operations combined.
+    /// Set a total per-second limit for all operations combined. This rule
+    /// is evaluated after per-operation limits.
     pub fn total_limit(mut self, per_sec: u32) -> Self {
+        assert!(self.total.is_none(), "total limit already set");
         self.total = Some(per_sec);
         self
     }
