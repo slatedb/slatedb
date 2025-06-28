@@ -1,9 +1,144 @@
 //! A rate limiting wrapper for [`ObjectStore`] implementations.
 //!
-//! [`RateLimitingStore`] uses a simple token bucket implementation to
-//! throttle calls to an underlying [`ObjectStore`].  Limits are provided
-//! via [`RateLimitingRules`] which can be built using
-//! [`RateLimitingRulesBuilder`].
+//! # Overview
+//!
+//! The `rate_limiting_store` module provides a wrapper for any [`ObjectStore`] implementation.
+//! It enforces rate limits on operations. This is particularly useful in scenarios where:
+//!
+//! - You need to prevent overwhelming downstream services
+//! - You must comply with API rate limits imposed by cloud storage providers
+//! - You want to control costs associated with object store operations
+//!
+//! # Components
+//!
+//! The rate limiting system consists of several key components:
+//!
+//! - [`RateLimitingStore`]: A wrapper around any [`ObjectStore`] that intercepts and rate limits operations
+//! - [`RateLimitingPolicy`]: A trait for implementing rate limiting algorithms
+//! - [`TokenBucket`]: A simple implementation of the token bucket algorithm for rate limiting
+//! - [`Operation`]: An enum representing all object store operations that can be rate limited
+//! - [`RateLimitingRules`]: Configuration for rate limiting behavior
+//! - [`RateLimitingRulesBuilder`]: A builder to create rate limiting rules with a fluent API
+//!
+//! # Rate Limiting Approach
+//!
+//! This module uses a token bucket algorithm to implement rate limiting. Each operation consumes
+//! tokens based on its configured cost, and tokens are replenished at a fixed rate. When tokens
+//! are exhausted, operations will be delayed until sufficient tokens are available.
+//!
+//! # Examples
+//!
+//! ## Basic Usage
+//!
+//! ```rust
+//! use slatedb::rate_limiting_store::{RateLimitingStore, RateLimitingRulesBuilder, TokenBucket, Operation};
+//! use object_store::memory::InMemory;
+//! use object_store::{ObjectStore, path::Path, PutPayload};
+//!
+//! # async fn example() -> object_store::Result<()> {
+//! // Create an in-memory object store
+//! let store = InMemory::new();
+//!
+//! // Configure rate limiting rules - limit to 10 operations per second
+//! let rules = RateLimitingRulesBuilder::new()
+//!     .total_limit(Box::new(TokenBucket::new(10)))
+//!     .build();
+//!
+//! // Create a rate-limited store wrapper
+//! let rate_limited_store = RateLimitingStore::new(store, rules);
+//!
+//! // Use it like any other object store - operations will be rate limited
+//! rate_limited_store.put(&Path::from("example.txt"), PutPayload::from("content")).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Per-Operation Rate Limiting
+//!
+//! ```rust
+//! use slatedb::rate_limiting_store::{RateLimitingStore, RateLimitingRulesBuilder, TokenBucket, Operation};
+//! use object_store::memory::InMemory;
+//!
+//! # fn example() {
+//! let store = InMemory::new();
+//!
+//! // Set different limits for different operations
+//! let rules = RateLimitingRulesBuilder::new()
+//!     .limit(Operation::Put, Box::new(TokenBucket::new(5)))   // 5 puts/sec
+//!     .limit(Operation::Get, Box::new(TokenBucket::new(20)))  // 20 gets/sec
+//!     .limit(Operation::List, Box::new(TokenBucket::new(2)))  // 2 lists/sec
+//!     .build();
+//!
+//! let rate_limited_store = RateLimitingStore::new(store, rules);
+//! # }
+//! ```
+//!
+//! ## Custom Operation Costs
+//!
+//! ```rust
+//! use slatedb::rate_limiting_store::{RateLimitingStore, RateLimitingRulesBuilder, TokenBucket, Operation};
+//! use object_store::memory::InMemory;
+//!
+//! # fn example() {
+//! let store = InMemory::new();
+//!
+//! // Set a total limit with custom costs per operation type
+//! let rules = RateLimitingRulesBuilder::new()
+//!     .total_limit(Box::new(TokenBucket::new(100)))
+//!     .cost_fn(|op| match op {
+//!         Operation::Put => 10,          // Puts are expensive (10 tokens)
+//!         Operation::Get => 2,           // Gets are less expensive (2 tokens)
+//!         Operation::List => 20,         // List operations are very expensive (20 tokens)
+//!         _ => 1,                        // All other operations cost 1 token
+//!     })
+//!     .build();
+//!
+//! let rate_limited_store = RateLimitingStore::new(store, rules);
+//! # }
+//! ```
+//!
+//! ## Combining Per-Operation and Total Limits
+//!
+//! ```rust
+//! use slatedb::rate_limiting_store::{RateLimitingStore, RateLimitingRulesBuilder, TokenBucket, Operation};
+//! use object_store::memory::InMemory;
+//!
+//! # fn example() {
+//! let store = InMemory::new();
+//!
+//! // Set both per-operation and total limits
+//! let rules = RateLimitingRulesBuilder::new()
+//!     .limit(Operation::Put, Box::new(TokenBucket::new(10)))   // Max 10 puts/sec
+//!     .limit(Operation::Get, Box::new(TokenBucket::new(50)))   // Max 50 gets/sec
+//!     .total_limit(Box::new(TokenBucket::new(30)))            // But max 30 ops/sec total
+//!     .build();
+//!
+//! // Total limit will take precedence when both limits would be exceeded
+//! let rate_limited_store = RateLimitingStore::new(store, rules);
+//! # }
+//! ```
+//!
+//! # Custom Rate Limiting Policies
+//!
+//! You can implement your own rate limiting policy by implementing the [`RateLimitingPolicy`] trait:
+//!
+//! ```rust
+//! use slatedb::rate_limiting_store::{RateLimitingPolicy, Operation};
+//! use async_trait::async_trait;
+//! use std::fmt::Debug;
+//!
+//! #[derive(Debug)]
+//! struct MyCustomPolicy {
+//!     // Your policy state
+//! }
+//!
+//! #[async_trait]
+//! impl RateLimitingPolicy for MyCustomPolicy {
+//!     async fn acquire(&self, op: Operation, cost: u32) {
+//!         // Your custom rate limiting logic here
+//!     }
+//! }
+//! ```
 
 use std::collections::HashMap;
 use std::ops::Range;
