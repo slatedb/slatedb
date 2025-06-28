@@ -224,7 +224,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         self.system_clock = Some(clock);
         self
     }
-    
+
     /// Sets the rate limiting rules for main object store operations.
     pub fn with_main_object_store_rate_limits(mut self, rules: RateLimitingRules) -> Self {
         self.main_object_store_rate_limits = Some(rules);
@@ -371,16 +371,15 @@ impl<P: Into<Path>> DbBuilder<P> {
             maybe_cached_main_object_store
         };
 
-        let wal_object_store: Option<Arc<dyn ObjectStore>> = match (self.wal_object_store, self.wal_object_store_rate_limits) {
-            (Some(store), Some(rules)) => {
-                Some(Arc::new(RateLimitingStore::new_with_clock(
+        let wal_object_store: Option<Arc<dyn ObjectStore>> =
+            match (self.wal_object_store, self.wal_object_store_rate_limits) {
+                (Some(store), Some(rules)) => Some(Arc::new(RateLimitingStore::new_with_clock(
                     store,
                     rules,
                     system_clock.clone(),
-                )))
-            }
-            (store, _) => store,
-        };
+                ))),
+                (store, _) => store,
+            };
 
         // Setup the manifest store and load latest manifest
         let manifest_store = Arc::new(ManifestStore::new(&path, main_object_store.clone()));

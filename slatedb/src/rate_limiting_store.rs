@@ -239,11 +239,7 @@ impl<T: ObjectStore> RateLimitingStore<T> {
         Self::new_with_clock(inner, rules, Arc::new(DefaultSystemClock::new()))
     }
 
-    pub fn new_with_clock(
-        inner: T,
-        rules: RateLimitingRules,
-        clock: Arc<dyn SystemClock>,
-    ) -> Self {
+    pub fn new_with_clock(inner: T, rules: RateLimitingRules, clock: Arc<dyn SystemClock>) -> Self {
         let state = Arc::new(RateLimitingState::new(rules, clock));
         Self {
             inner: Arc::new(inner),
