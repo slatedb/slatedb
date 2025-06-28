@@ -1067,12 +1067,27 @@ mod tests {
                 |(key, value)| {
                     runtime.block_on(async {
                         if !key.is_empty() {
-                            db.put(&key, &value).await.unwrap();
+                            db.put_with_options(
+                                &key,
+                                &value,
+                                &PutOptions::default(),
+                                &WriteOptions {
+                                    await_durable: false,
+                                },
+                            )
+                            .await
+                            .unwrap();
                             assert_eq!(
                                 Some(value),
-                                db.get_with_options(&key, &ReadOptions::default())
-                                    .await
-                                    .unwrap()
+                                db.get_with_options(
+                                    &key,
+                                    &ReadOptions {
+                                        durability_filter: Memory,
+                                        dirty: false,
+                                    }
+                                )
+                                .await
+                                .unwrap()
                             );
                         }
                     });
