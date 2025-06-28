@@ -6,6 +6,7 @@ use object_store::{Attributes, GetRange, GetResultPayload, PutResult};
 use object_store::{ListResult, MultipartUpload, PutMultipartOpts, PutOptions, PutPayload};
 use std::{ops::Range, sync::Arc};
 
+use crate::cached_object_store::admission::AdmissionPicker;
 use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
 use crate::error::SlateDBError;
 
@@ -14,6 +15,7 @@ pub(crate) struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
     pub(crate) part_size_bytes: usize, // expected to be aligned with mb or kb
     pub(crate) cache_storage: Arc<dyn LocalCacheStorage>,
+    pub(crate) admission_picker: AdmissionPicker,
     stats: Arc<CachedObjectStoreStats>,
 }
 
@@ -33,6 +35,7 @@ impl CachedObjectStore {
             part_size_bytes,
             cache_storage,
             stats,
+            admission_picker: AdmissionPicker::default(),
         }))
     }
 
@@ -148,29 +151,32 @@ impl CachedObjectStore {
         let entry = self
             .cache_storage
             .entry(&result.meta.location, self.part_size_bytes);
-        entry.save_head((&result.meta, &result.attributes)).await?;
-
-        let mut buffer = BytesMut::new();
-        let mut part_number = usize::try_from(result.range.start / part_size_bytes_u64)
-            .expect("Part number exceeds u32 on a 32-bit system. Try increasing part size.");
         let object_size = result.meta.size;
 
-        let mut stream = result.into_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            buffer.extend_from_slice(&chunk);
+        if self.admission_picker.pick(entry.as_ref()).admitted() {
+            entry.save_head((&result.meta, &result.attributes)).await?;
 
-            while buffer.len() >= self.part_size_bytes {
-                let to_write = buffer.split_to(self.part_size_bytes);
-                entry.save_part(part_number, to_write.into()).await?;
-                part_number += 1;
+            let mut buffer = BytesMut::new();
+            let mut part_number = usize::try_from(result.range.start / part_size_bytes_u64)
+                .expect("Part number exceeds u32 on a 32-bit system. Try increasing part size.");
+
+            let mut stream = result.into_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                buffer.extend_from_slice(&chunk);
+
+                while buffer.len() >= self.part_size_bytes {
+                    let to_write = buffer.split_to(self.part_size_bytes);
+                    entry.save_part(part_number, to_write.into()).await?;
+                    part_number += 1;
+                }
             }
-        }
 
-        // if the last part is not fully filled, save it as the last part.
-        if !buffer.is_empty() {
-            entry.save_part(part_number, buffer.into()).await?;
-            return Ok(object_size);
+            // if the last part is not fully filled, save it as the last part.
+            if !buffer.is_empty() {
+                entry.save_part(part_number, buffer.into()).await?;
+                return Ok(object_size);
+            }
         }
 
         Ok(object_size)

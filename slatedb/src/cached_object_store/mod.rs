@@ -5,6 +5,7 @@ pub use storage_fs::FsCacheStorage;
 
 pub mod stats;
 
+mod admission;
 mod object_store;
 mod storage;
 mod storage_fs;
