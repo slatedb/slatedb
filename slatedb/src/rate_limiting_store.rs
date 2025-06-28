@@ -27,7 +27,7 @@ use object_store::{
 
 /// Trait for rate limiting policies.
 #[async_trait]
-pub trait RateLimitingPolicy: Send + Sync + 'static {
+pub trait RateLimitingPolicy: std::fmt::Debug + Send + Sync + 'static {
     /// Acquire resources for the specified operation at the given cost.
     async fn acquire(&self, op: Operation, cost: u32);
 }
@@ -123,12 +123,33 @@ pub struct RateLimitingRules {
     pub(crate) cost_fn: Box<dyn Fn(Operation) -> u32 + Send + Sync>,
 }
 
+impl std::fmt::Debug for RateLimitingRules {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RateLimitingRules")
+            .field("limits", &self.limits)
+            .field("total", &self.total)
+            .finish()
+    }
+}
+
 impl Default for RateLimitingRules {
     fn default() -> Self {
         Self {
             limits: HashMap::new(),
             total: None,
             cost_fn: Box::new(|_| 1u32),
+        }
+    }
+}
+
+impl RateLimitingRules {
+    pub(crate) async fn acquire(&self, op: Operation) {
+        let cost = (self.cost_fn)(op);
+        if let Some(limit) = self.limits.get(&op) {
+            limit.acquire(op, cost).await;
+        }
+        if let Some(total) = &self.total {
+            total.acquire(op, cost).await;
         }
     }
 }
@@ -186,42 +207,6 @@ impl RateLimitingRulesBuilder {
     }
 }
 
-/// Shared state used by [`RateLimitingStore`].
-pub(crate) struct RateLimitingState {
-    /// Per-operation token buckets.
-    limits: HashMap<Operation, Arc<dyn RateLimitingPolicy>>,
-    /// Optional token bucket for the total allowed rate.
-    total: Option<Arc<dyn RateLimitingPolicy>>,
-    /// Function that determines the cost of each call.
-    cost_fn: Box<dyn Fn(Operation) -> u32 + Send + Sync>,
-}
-
-impl std::fmt::Debug for RateLimitingState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RateLimitingState").finish()
-    }
-}
-
-impl RateLimitingState {
-    pub(crate) fn new(rules: RateLimitingRules) -> Self {
-        Self {
-            limits: rules.limits,
-            total: rules.total,
-            cost_fn: Box::new(rules.cost_fn),
-        }
-    }
-
-    async fn acquire(&self, op: Operation) {
-        let cost = (self.cost_fn)(op);
-        if let Some(limit) = self.limits.get(&op) {
-            limit.acquire(op, cost).await;
-        }
-        if let Some(total) = &self.total {
-            total.acquire(op, cost).await;
-        }
-    }
-}
-
 /// Store wrapper that rate limits calls to the inner [`ObjectStore`].
 ///
 /// Each call incurs a "cost" which by default is `1`.  Before delegating an
@@ -230,16 +215,15 @@ impl RateLimitingState {
 #[derive(Debug)]
 pub(crate) struct RateLimitingStore<T: ObjectStore> {
     inner: Arc<T>,
-    state: Arc<RateLimitingState>,
+    rules: Arc<RateLimitingRules>,
 }
 
 impl<T: ObjectStore> RateLimitingStore<T> {
     /// Create a new [`RateLimitingStore`] wrapping `inner` with the provided [`RateLimitingRules`].
     pub fn new(inner: T, rules: RateLimitingRules) -> Self {
-        let state = Arc::new(RateLimitingState::new(rules));
         Self {
             inner: Arc::new(inner),
-            state,
+            rules: Arc::new(rules),
         }
     }
 }
@@ -253,7 +237,7 @@ impl<T: ObjectStore> std::fmt::Display for RateLimitingStore<T> {
 #[async_trait]
 impl<T: ObjectStore> ObjectStore for RateLimitingStore<T> {
     async fn put(&self, location: &Path, payload: PutPayload) -> Result<PutResult> {
-        self.state.acquire(Operation::Put).await;
+        self.rules.acquire(Operation::Put).await;
         self.inner.put(location, payload).await
     }
 
@@ -263,16 +247,16 @@ impl<T: ObjectStore> ObjectStore for RateLimitingStore<T> {
         payload: PutPayload,
         opts: PutOptions,
     ) -> Result<PutResult> {
-        self.state.acquire(Operation::PutOpts).await;
+        self.rules.acquire(Operation::PutOpts).await;
         self.inner.put_opts(location, payload, opts).await
     }
 
     async fn put_multipart(&self, location: &Path) -> Result<Box<dyn MultipartUpload>> {
-        self.state.acquire(Operation::PutMultipart).await;
+        self.rules.acquire(Operation::PutMultipart).await;
         let upload = self.inner.put_multipart(location).await?;
         Ok(Box::new(RateLimitedUpload {
             upload,
-            state: Arc::clone(&self.state),
+            rules: Arc::clone(&self.rules),
         }))
     }
 
@@ -281,50 +265,50 @@ impl<T: ObjectStore> ObjectStore for RateLimitingStore<T> {
         location: &Path,
         opts: PutMultipartOpts,
     ) -> Result<Box<dyn MultipartUpload>> {
-        self.state.acquire(Operation::PutMultipartOpts).await;
+        self.rules.acquire(Operation::PutMultipartOpts).await;
         let upload = self.inner.put_multipart_opts(location, opts).await?;
         Ok(Box::new(RateLimitedUpload {
             upload,
-            state: Arc::clone(&self.state),
+            rules: Arc::clone(&self.rules),
         }))
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
-        self.state.acquire(Operation::Get).await;
+        self.rules.acquire(Operation::Get).await;
         self.inner.get(location).await
     }
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
-        self.state.acquire(Operation::GetOpts).await;
+        self.rules.acquire(Operation::GetOpts).await;
         self.inner.get_opts(location, options).await
     }
 
     async fn get_range(&self, location: &Path, range: Range<u64>) -> Result<Bytes> {
-        self.state.acquire(Operation::GetRange).await;
+        self.rules.acquire(Operation::GetRange).await;
         self.inner.get_range(location, range).await
     }
 
     async fn get_ranges(&self, location: &Path, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        self.state.acquire(Operation::GetRanges).await;
+        self.rules.acquire(Operation::GetRanges).await;
         self.inner.get_ranges(location, ranges).await
     }
 
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {
-        self.state.acquire(Operation::Head).await;
+        self.rules.acquire(Operation::Head).await;
         self.inner.head(location).await
     }
 
     async fn delete(&self, location: &Path) -> Result<()> {
-        self.state.acquire(Operation::Delete).await;
+        self.rules.acquire(Operation::Delete).await;
         self.inner.delete(location).await
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, Result<ObjectMeta>> {
         let prefix = prefix.cloned();
         let inner = Arc::clone(&self.inner);
-        let state = Arc::clone(&self.state);
+        let rules = Arc::clone(&self.rules);
         once(async move {
-            state.acquire(Operation::List).await;
+            rules.acquire(Operation::List).await;
             inner.list(prefix.as_ref())
         })
         .flatten()
@@ -339,9 +323,9 @@ impl<T: ObjectStore> ObjectStore for RateLimitingStore<T> {
         let prefix = prefix.cloned();
         let offset = offset.clone();
         let inner = Arc::clone(&self.inner);
-        let state = Arc::clone(&self.state);
+        let rules = Arc::clone(&self.rules);
         once(async move {
-            state.acquire(Operation::ListWithOffset).await;
+            rules.acquire(Operation::ListWithOffset).await;
             inner.list_with_offset(prefix.as_ref(), &offset)
         })
         .flatten()
@@ -349,27 +333,27 @@ impl<T: ObjectStore> ObjectStore for RateLimitingStore<T> {
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
-        self.state.acquire(Operation::ListWithDelimiter).await;
+        self.rules.acquire(Operation::ListWithDelimiter).await;
         self.inner.list_with_delimiter(prefix).await
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
-        self.state.acquire(Operation::Copy).await;
+        self.rules.acquire(Operation::Copy).await;
         self.inner.copy(from, to).await
     }
 
     async fn rename(&self, from: &Path, to: &Path) -> Result<()> {
-        self.state.acquire(Operation::Rename).await;
+        self.rules.acquire(Operation::Rename).await;
         self.inner.rename(from, to).await
     }
 
     async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
-        self.state.acquire(Operation::CopyIfNotExists).await;
+        self.rules.acquire(Operation::CopyIfNotExists).await;
         self.inner.copy_if_not_exists(from, to).await
     }
 
     async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
-        self.state.acquire(Operation::RenameIfNotExists).await;
+        self.rules.acquire(Operation::RenameIfNotExists).await;
         self.inner.rename_if_not_exists(from, to).await
     }
 }
@@ -378,27 +362,27 @@ impl<T: ObjectStore> ObjectStore for RateLimitingStore<T> {
 #[derive(Debug)]
 struct RateLimitedUpload {
     upload: Box<dyn MultipartUpload>,
-    state: Arc<RateLimitingState>,
+    rules: Arc<RateLimitingRules>,
 }
 
 #[async_trait]
 impl MultipartUpload for RateLimitedUpload {
     fn put_part(&mut self, data: PutPayload) -> UploadPart {
         let part = self.upload.put_part(data);
-        let state = Arc::clone(&self.state);
+        let rules = Arc::clone(&self.rules);
         Box::pin(async move {
-            state.acquire(Operation::MultipartPutPart).await;
+            rules.acquire(Operation::MultipartPutPart).await;
             part.await
         })
     }
 
     async fn complete(&mut self) -> Result<PutResult> {
-        self.state.acquire(Operation::MultipartComplete).await;
+        self.rules.acquire(Operation::MultipartComplete).await;
         self.upload.complete().await
     }
 
     async fn abort(&mut self) -> Result<()> {
-        self.state.acquire(Operation::MultipartAbort).await;
+        self.rules.acquire(Operation::MultipartAbort).await;
         self.upload.abort().await
     }
 }
