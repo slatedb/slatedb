@@ -500,9 +500,10 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::{path::Path, ObjectStore, PutPayload};
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use tokio::time::Instant;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_put_rate_limit() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let rules = RateLimitingRulesBuilder::new()
@@ -522,7 +523,7 @@ mod tests {
         assert!(start.elapsed() >= Duration::from_secs(1));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_total_rate_limit() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let rules = RateLimitingRulesBuilder::new()
@@ -539,7 +540,7 @@ mod tests {
         assert!(start.elapsed() >= Duration::from_secs(1));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_cost_function() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let rules = RateLimitingRulesBuilder::new()
@@ -557,7 +558,7 @@ mod tests {
         assert!(start.elapsed() >= Duration::from_secs(1));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_multipart_part_limit() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let rules = RateLimitingRulesBuilder::new()
@@ -573,7 +574,7 @@ mod tests {
         assert!(start.elapsed() >= Duration::from_secs(1));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_total_overrides_per_op_limit() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let rules = RateLimitingRulesBuilder::new()
