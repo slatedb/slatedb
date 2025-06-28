@@ -31,57 +31,37 @@
 //! ## Basic Usage
 //!
 //! ```rust
-//! use slatedb::rate_limiting_store::{RateLimitingStore, RateLimitingRulesBuilder, TokenBucket, Operation};
-//! use object_store::memory::InMemory;
-//! use object_store::{ObjectStore, path::Path, PutPayload};
-//!
-//! # async fn example() -> object_store::Result<()> {
-//! // Create an in-memory object store
-//! let store = InMemory::new();
-//!
+//! # use slatedb::{RateLimitingRulesBuilder, TokenBucket};
+//! # #[tokio::main]
+//! # async fn main() {
 //! // Configure rate limiting rules - limit to 10 operations per second
 //! let rules = RateLimitingRulesBuilder::new()
 //!     .total_limit(Box::new(TokenBucket::new(10)))
 //!     .build();
-//!
-//! // Create a rate-limited store wrapper
-//! let rate_limited_store = RateLimitingStore::new(store, rules);
-//!
-//! // Use it like any other object store - operations will be rate limited
-//! rate_limited_store.put(&Path::from("example.txt"), PutPayload::from("content")).await?;
-//! # Ok(())
 //! # }
 //! ```
 //!
 //! ## Per-Operation Rate Limiting
 //!
 //! ```rust
-//! use slatedb::rate_limiting_store::{RateLimitingStore, RateLimitingRulesBuilder, TokenBucket, Operation};
-//! use object_store::memory::InMemory;
-//!
-//! # fn example() {
-//! let store = InMemory::new();
-//!
+//! # use slatedb::{RateLimitingRulesBuilder, TokenBucket, Operation};
+//! # #[tokio::main]
+//! # async fn main() {
 //! // Set different limits for different operations
 //! let rules = RateLimitingRulesBuilder::new()
 //!     .limit(Operation::Put, Box::new(TokenBucket::new(5)))   // 5 puts/sec
 //!     .limit(Operation::Get, Box::new(TokenBucket::new(20)))  // 20 gets/sec
 //!     .limit(Operation::List, Box::new(TokenBucket::new(2)))  // 2 lists/sec
 //!     .build();
-//!
-//! let rate_limited_store = RateLimitingStore::new(store, rules);
 //! # }
 //! ```
 //!
 //! ## Custom Operation Costs
 //!
 //! ```rust
-//! use slatedb::rate_limiting_store::{RateLimitingStore, RateLimitingRulesBuilder, TokenBucket, Operation};
-//! use object_store::memory::InMemory;
-//!
-//! # fn example() {
-//! let store = InMemory::new();
-//!
+//! # use slatedb::{RateLimitingRulesBuilder, TokenBucket, Operation};
+//! # #[tokio::main]
+//! # async fn main() {
 //! // Set a total limit with custom costs per operation type
 //! let rules = RateLimitingRulesBuilder::new()
 //!     .total_limit(Box::new(TokenBucket::new(100)))
@@ -92,29 +72,21 @@
 //!         _ => 1,                        // All other operations cost 1 token
 //!     })
 //!     .build();
-//!
-//! let rate_limited_store = RateLimitingStore::new(store, rules);
 //! # }
 //! ```
 //!
 //! ## Combining Per-Operation and Total Limits
 //!
 //! ```rust
-//! use slatedb::rate_limiting_store::{RateLimitingStore, RateLimitingRulesBuilder, TokenBucket, Operation};
-//! use object_store::memory::InMemory;
-//!
-//! # fn example() {
-//! let store = InMemory::new();
-//!
+//! # use slatedb::{RateLimitingRulesBuilder, TokenBucket, Operation};
+//! # #[tokio::main]
+//! # async fn main() {
 //! // Set both per-operation and total limits
 //! let rules = RateLimitingRulesBuilder::new()
 //!     .limit(Operation::Put, Box::new(TokenBucket::new(10)))   // Max 10 puts/sec
 //!     .limit(Operation::Get, Box::new(TokenBucket::new(50)))   // Max 50 gets/sec
-//!     .total_limit(Box::new(TokenBucket::new(30)))            // But max 30 ops/sec total
+//!     .total_limit(Box::new(TokenBucket::new(30)))             // But max 30 ops/sec total
 //!     .build();
-//!
-//! // Total limit will take precedence when both limits would be exceeded
-//! let rate_limited_store = RateLimitingStore::new(store, rules);
 //! # }
 //! ```
 //!
@@ -123,9 +95,9 @@
 //! You can implement your own rate limiting policy by implementing the [`RateLimitingPolicy`] trait:
 //!
 //! ```rust
-//! use slatedb::rate_limiting_store::{RateLimitingPolicy, Operation};
-//! use async_trait::async_trait;
-//! use std::fmt::Debug;
+//! # use slatedb::{RateLimitingPolicy, Operation};
+//! # use async_trait::async_trait;
+//! # use std::fmt::Debug;
 //!
 //! #[derive(Debug)]
 //! struct MyCustomPolicy {

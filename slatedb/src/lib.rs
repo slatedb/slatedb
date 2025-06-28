@@ -39,7 +39,7 @@ pub use error::{SettingsError, SlateDBError};
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rate_limiting_store::{
-    Operation as RateLimitOperation, RateLimitingRules, RateLimitingRulesBuilder,
+    Operation, RateLimitingPolicy, RateLimitingRules, RateLimitingRulesBuilder, TokenBucket,
 };
 pub use types::KeyValue;
 

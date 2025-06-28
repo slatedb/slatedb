@@ -361,14 +361,15 @@ impl<P: Into<Path>> DbBuilder<P> {
             };
 
         // Apply rate limiting to the object stores if configured
-        let main_object_store = if let Some(rules) = self.main_object_store_rate_limit {
-            Arc::new(RateLimitingStore::new(
-                maybe_cached_main_object_store,
-                rules,
-            ))
-        } else {
-            maybe_cached_main_object_store
-        };
+        let maybe_cached_and_rate_limited_main_object_store =
+            if let Some(rules) = self.main_object_store_rate_limit {
+                Arc::new(RateLimitingStore::new(
+                    maybe_cached_main_object_store,
+                    rules,
+                ))
+            } else {
+                maybe_cached_main_object_store
+            };
 
         let wal_object_store: Option<Arc<dyn ObjectStore>> =
             match (self.wal_object_store, self.wal_object_store_rate_limit) {
@@ -377,7 +378,10 @@ impl<P: Into<Path>> DbBuilder<P> {
             };
 
         // Setup the manifest store and load latest manifest
-        let manifest_store = Arc::new(ManifestStore::new(&path, main_object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &path,
+            maybe_cached_and_rate_limited_main_object_store.clone(),
+        ));
         let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
 
         // Validate WAL object store configuration
@@ -406,7 +410,10 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            ObjectStores::new(main_object_store.clone(), wal_object_store.clone()),
+            ObjectStores::new(
+                maybe_cached_and_rate_limited_main_object_store.clone(),
+                wal_object_store.clone(),
+            ),
             sst_format.clone(),
             path_resolver.clone(),
             self.fp_registry.clone(),
@@ -471,7 +478,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Not to pollute the cache during compaction or GC
         let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
-            ObjectStores::new(main_object_store.clone(), wal_object_store.clone()),
+            ObjectStores::new(self.main_object_store.clone(), wal_object_store.clone()),
             sst_format,
             path_resolver,
             self.fp_registry.clone(),
