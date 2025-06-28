@@ -155,8 +155,8 @@ pub struct DbBuilder<P: Into<Path>> {
     block_cache: Option<Arc<dyn DbCache>>,
     logical_clock: Option<Arc<dyn LogicalClock>>,
     system_clock: Option<Arc<dyn SystemClock>>,
-    main_object_store_rate_limits: Option<RateLimitingRules>,
-    wal_object_store_rate_limits: Option<RateLimitingRules>,
+    main_object_store_rate_limit: Option<RateLimitingRules>,
+    wal_object_store_rate_limit: Option<RateLimitingRules>,
     gc_runtime: Option<Handle>,
     compaction_runtime: Option<Handle>,
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
@@ -177,8 +177,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             block_cache: None,
             logical_clock: None,
             system_clock: None,
-            main_object_store_rate_limits: None,
-            wal_object_store_rate_limits: None,
+            main_object_store_rate_limit: None,
+            wal_object_store_rate_limit: None,
             gc_runtime: None,
             compaction_runtime: None,
             compaction_scheduler_supplier: None,
@@ -226,14 +226,14 @@ impl<P: Into<Path>> DbBuilder<P> {
     }
 
     /// Sets the rate limiting rules for main object store operations.
-    pub fn with_main_object_store_rate_limits(mut self, rules: RateLimitingRules) -> Self {
-        self.main_object_store_rate_limits = Some(rules);
+    pub fn with_main_object_store_rate_limit(mut self, rules: RateLimitingRules) -> Self {
+        self.main_object_store_rate_limit = Some(rules);
         self
     }
 
     /// Sets the rate limiting rules for WAL object store operations.
-    pub fn with_wal_object_store_rate_limits(mut self, rules: RateLimitingRules) -> Self {
-        self.wal_object_store_rate_limits = Some(rules);
+    pub fn with_wal_object_store_rate_limit(mut self, rules: RateLimitingRules) -> Self {
+        self.wal_object_store_rate_limit = Some(rules);
         self
     }
 
@@ -361,7 +361,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             };
 
         // Apply rate limiting to the object stores if configured
-        let main_object_store = if let Some(rules) = self.main_object_store_rate_limits {
+        let main_object_store = if let Some(rules) = self.main_object_store_rate_limit {
             Arc::new(RateLimitingStore::new_with_clock(
                 maybe_cached_main_object_store,
                 rules,
@@ -372,7 +372,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
 
         let wal_object_store: Option<Arc<dyn ObjectStore>> =
-            match (self.wal_object_store, self.wal_object_store_rate_limits) {
+            match (self.wal_object_store, self.wal_object_store_rate_limit) {
                 (Some(store), Some(rules)) => Some(Arc::new(RateLimitingStore::new_with_clock(
                     store,
                     rules,
