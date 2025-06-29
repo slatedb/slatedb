@@ -1,5 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -7,7 +8,6 @@ use bytes::Bytes;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::RowEntry;
-use crate::utils::is_not_expired;
 
 /// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
 ///
@@ -19,10 +19,8 @@ use crate::utils::is_not_expired;
 pub(crate) struct RetentionIterator<T: KeyValueIterator> {
     /// The upstream iterator providing entries in decreasing order of sequence numbers
     inner: T,
-    /// Retention time in milliseconds - entries with create_ts earlier than this will be filtered out
-    retention_time: i64,
-    /// Current key
-    current_key: Option<Bytes>,
+    retention_time: Duration,
+    buffer: RetentionBuffer,
 }
 
 impl<T: KeyValueIterator> RetentionIterator<T> {
@@ -31,11 +29,11 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
     /// # Arguments
     /// * `delegate` - The upstream iterator providing entries in decreasing order of sequence numbers
     /// * `retention_time` - Retention time in milliseconds. Entries with create_ts earlier than this will be filtered out
-    pub(crate) async fn new(mut inner: T, retention_time: i64) -> Result<Self, SlateDBError> {
+    pub(crate) async fn new(mut inner: T, retention_time: Duration) -> Result<Self, SlateDBError> {
         Ok(Self {
             inner,
             retention_time,
-            current_key: None,
+            buffer: RetentionBuffer::new(),
         })
     }
 }
@@ -43,33 +41,19 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
 #[async_trait]
 impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        while let Some(entry) = self.inner.next_entry().await? {
-            if self
-                .current_key
-                .as_ref()
-                .map(|key| key == &entry.key)
-                .unwrap_or(false)
-            {
-                // filter out entries that had exceeded the retention time
-                if entry
-                    .create_ts
-                    .map(|ts| ts < self.retention_time)
-                    .unwrap_or(false)
-                {
-                    continue;
+        if self.buffer.need_push() {
+            while let Some(entry) = self.inner.next_entry().await? {
+                let has_more = self.buffer.push(entry)?;
+                if !has_more {
+                    break;
                 }
             }
-
-            self.current_key = Some(entry.key.clone());
-            return Ok(Some(entry));
         }
 
-        todo!()
+        Ok(self.buffer.pop())
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        self.current_key = Some(Bytes::from(next_key.to_vec()));
-        self.inner.seek(next_key).await?;
         Ok(())
     }
 }
@@ -89,6 +73,11 @@ impl RetentionBuffer {
             current_versions: BTreeMap::new(),
             next_entry: None,
         }
+    }
+
+    /// Before having a different key, we need to push more entries to the buffer.
+    fn need_push(&self) -> bool {
+        self.next_entry.is_none()
     }
 
     /// Appends an entry to the buffer.
@@ -123,6 +112,8 @@ impl RetentionBuffer {
         match self.current_versions.pop_first() {
             Some((_, entry)) => Some(entry),
             None => {
+                // promote the next entry to current versions, and return None, to
+                // tell the caller to call `append` to add more entries.
                 let next_entry = self.next_entry.take();
                 if let Some(entry) = next_entry {
                     self.current_versions.insert(Reverse(entry.seq), entry);
