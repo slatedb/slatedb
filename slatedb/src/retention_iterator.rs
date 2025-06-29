@@ -39,6 +39,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
     }
 
     pub(crate) fn current_timestamp(&self) -> i64 {
+        // TODO: take the clock
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -49,27 +50,39 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
 #[async_trait]
 impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        if self.buffer.need_push() {
-            while let Some(entry) = self.inner.next_entry().await? {
-                let current_timestamp = self.current_timestamp();
-                let has_more = self.buffer.push_if(entry, |entry| {
-                    entry
-                        .create_ts
-                        .map(|create_ts| {
-                            create_ts + self.retention_time.as_secs() as i64 > current_timestamp
-                        })
-                        .unwrap_or(true)
-                })?;
-                if !has_more {
-                    break;
+        loop {
+            match self.buffer.state() {
+                RetentionBufferState::NeedPush => {
+                    let entry = match self.inner.next_entry().await? {
+                        Some(entry) => entry,
+                        None => {
+                            self.buffer.mark_end_of_input();
+                            continue;
+                        }
+                    };
+
+                    let current_timestamp = self.current_timestamp();
+                    self.buffer.push_if(entry, |entry| {
+                        entry
+                            .create_ts
+                            .map(|create_ts| {
+                                create_ts + self.retention_time.as_secs() as i64 > current_timestamp
+                            })
+                            .unwrap_or(true)
+                    })?;
                 }
+                RetentionBufferState::NeedPop => match self.buffer.pop() {
+                    Some(entry) => return Ok(Some(entry)),
+                    None => continue,
+                },
+                RetentionBufferState::EndOfInput => return Ok(self.buffer.pop()),
             }
         }
-
-        Ok(self.buffer.pop())
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.buffer.clear();
+        self.inner.seek(next_key).await?;
         Ok(())
     }
 }
@@ -81,6 +94,13 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
 struct RetentionBuffer {
     current_versions: BTreeMap<Reverse<u64>, RowEntry>,
     next_entry: Option<RowEntry>,
+    end_of_input: bool,
+}
+
+enum RetentionBufferState {
+    NeedPush,
+    NeedPop,
+    EndOfInput,
 }
 
 impl RetentionBuffer {
@@ -88,12 +108,31 @@ impl RetentionBuffer {
         Self {
             current_versions: BTreeMap::new(),
             next_entry: None,
+            end_of_input: false,
         }
     }
 
-    /// Before having a different key, we need to push more entries to the buffer.
-    fn need_push(&self) -> bool {
-        self.next_entry.is_none()
+    fn state(&self) -> RetentionBufferState {
+        if self.end_of_input {
+            RetentionBufferState::EndOfInput
+        } else if self.next_entry.is_some() {
+            RetentionBufferState::NeedPop
+        } else {
+            RetentionBufferState::NeedPush
+        }
+    }
+
+    fn clear(&mut self) {
+        self.current_versions.clear();
+        self.next_entry = None;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.current_versions.is_empty() && self.next_entry.is_none()
+    }
+
+    fn mark_end_of_input(&mut self) {
+        self.end_of_input = true;
     }
 
     /// Appends an entry to the buffer.
