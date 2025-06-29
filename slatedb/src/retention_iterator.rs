@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
@@ -78,7 +79,7 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
 /// When used in [`RetentionIterator::next_entry`], this buffer first collects all
 /// versions of the current key before returning the first row entry.
 struct RetentionBuffer {
-    current_versions: BTreeMap<u64, RowEntry>,
+    current_versions: BTreeMap<Reverse<u64>, RowEntry>,
     next_entry: Option<RowEntry>,
 }
 
@@ -100,13 +101,13 @@ impl RetentionBuffer {
             Some(entry) => entry.key.clone(),
             None => {
                 // If current versions are empty, this is the first entry
-                self.current_versions.insert(entry.seq, entry);
+                self.current_versions.insert(Reverse(entry.seq), entry);
                 return Ok(true);
             }
         };
 
         if entry.key == current_key {
-            self.current_versions.insert(entry.seq, entry);
+            self.current_versions.insert(Reverse(entry.seq), entry);
             return Ok(true);
         }
 
@@ -123,8 +124,8 @@ impl RetentionBuffer {
             Some((_, entry)) => Some(entry),
             None => {
                 let next_entry = self.next_entry.take();
-                if let Some(entry) = &next_entry {
-                    self.current_versions.insert(entry.seq, entry);
+                if let Some(entry) = next_entry {
+                    self.current_versions.insert(Reverse(entry.seq), entry);
                 }
                 return None;
             }
