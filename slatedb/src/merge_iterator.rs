@@ -60,6 +60,7 @@ impl Ord for MergeIteratorHeapEntry<'_> {
 pub(crate) struct MergeIterator<'a> {
     current: Option<MergeIteratorHeapEntry<'a>>,
     iterators: BinaryHeap<Reverse<MergeIteratorHeapEntry<'a>>>,
+    dedup: bool,
 }
 
 impl<'a> MergeIterator<'a> {
@@ -79,7 +80,13 @@ impl<'a> MergeIterator<'a> {
         Ok(Self {
             current: heap.pop().map(|r| r.0),
             iterators: heap,
+            dedup: true,
         })
+    }
+
+    pub(crate) fn with_dedup(mut self, dedup: bool) -> Self {
+        self.dedup = dedup;
+        self
     }
 
     fn peek(&self) -> Option<&RowEntry> {
@@ -103,6 +110,10 @@ impl<'a> MergeIterator<'a> {
 #[async_trait]
 impl KeyValueIterator for MergeIterator<'_> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        if !self.dedup {
+            return self.advance().await;
+        }
+
         let mut current_kv = match self.advance().await? {
             Some(kv) => kv,
             None => return Ok(None),
