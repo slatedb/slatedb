@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use bytes::Bytes;
 
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
@@ -83,14 +82,13 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
         // Filter older versions based on retention time
         let mut filtered_versions = versions
             .into_iter()
-            .skip(1) // Skip the first since we already extracted the latest
             .filter(|(_, entry)| {
                 entry
                     .create_ts
                     .map(|create_ts| {
                         // Keep version if: create_ts + retention_time >= current_timestamp
                         // (i.e., version is still within retention period)
-                        create_ts + (retention_time.as_secs() as i64) < current_timestamp
+                        create_ts + (retention_time.as_secs() as i64) >= current_timestamp
                     })
                     .unwrap_or(true) // If no create_ts, keep the version
             })
@@ -242,11 +240,6 @@ impl RetentionBuffer {
         self.end_of_input = false;
     }
 
-    /// Checks if the buffer is completely empty
-    fn is_empty(&self) -> bool {
-        self.current_versions.is_empty() && self.next_entry.is_none()
-    }
-
     /// Marks that the upstream iterator has reached end of input
     ///
     /// This triggers state transitions to handle the final processing of remaining entries.
@@ -313,8 +306,11 @@ impl RetentionBuffer {
                 if let Some(entry) = next_entry {
                     self.current_versions.insert(Reverse(entry.seq), entry);
                     self.processed = false;
+                } else if self.end_of_input {
+                    // No next entry and at end of input - we're done
+                    return None;
                 }
-                return None;
+                None
             }
         }
     }
@@ -323,10 +319,5 @@ impl RetentionBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ValueDeletable;
-
-    #[test]
-    fn test_retention_buffer() -> Result<(), SlateDBError> {
-        todo!()
-    }
+    use crate::types::{RowEntry, ValueDeletable};
 }
