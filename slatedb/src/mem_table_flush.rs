@@ -5,7 +5,7 @@ use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::manifest::store::FenceableManifest;
-use crate::utils::{bg_task_result_into_err, spawn_bg_task};
+use crate::utils::{bg_task_result_into_err, spawn_bg_task, IdGenerator};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -45,7 +45,7 @@ impl MemtableFlusher {
             let rguard_state = self.db_inner.state.read();
             rguard_state.state().manifest.clone()
         };
-        let id = crate::utils::uuid();
+        let id = self.db_inner.rand.thread_rng().gen_uuid();
         let checkpoint = self.manifest.new_checkpoint(id, options)?;
         let manifest_id = checkpoint.manifest_id;
         dirty.core.checkpoints.push(checkpoint);
@@ -103,7 +103,7 @@ impl MemtableFlusher {
                 rguard.state().imm_memtable.back().cloned()
             }
         } {
-            let id = SsTableId::Compacted(crate::utils::ulid());
+            let id = SsTableId::Compacted(self.db_inner.rand.thread_rng().gen_ulid());
             let sst_handle = self
                 .db_inner
                 .flush_imm_table(&id, imm_memtable.table(), true)
@@ -216,6 +216,15 @@ impl DbInner {
             // remaining `rx` flushes and checkpoints have been drained.
             let result = core_flush_loop(&this, &mut flusher, &mut flush_rx).await;
 
+            // Record error state before closing flush_rx in drain_messages. Thus, any
+            // send() that returns a SendError (channel closed) can check the error
+            // state and propagate it. We leave the cleanup_fn to record the error state
+            // again in case core_flush_loop panics.
+            if let Err(err) = &result {
+                let mut state = this.state.write();
+                state.record_fatal_error(err.clone());
+            }
+
             // respond to any pending msgs
             let pending_error = result.clone().err().unwrap_or(BackgroundTaskShutdown);
             Self::drain_messages(&mut flush_rx, &pending_error).await;
@@ -234,7 +243,6 @@ impl DbInner {
             move |result| {
                 let err = bg_task_result_into_err(result);
                 warn!("memtable flush task exited with {:?}", err);
-                // notify any waiters that the task has exited
                 let mut state = this.state.write();
                 state.record_fatal_error(err.clone());
                 info!("notifying in-memory memtable of error");

@@ -41,16 +41,16 @@ use crate::db_iter::DbIterator;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{DirtyManifest, FenceableManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::oracle::Oracle;
+use crate::rand::DbRand;
 use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::MonotonicSeq;
+use crate::utils::{MonotonicSeq, SendSafely};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use tracing::{info, warn};
@@ -69,6 +69,7 @@ pub(crate) struct DbInner {
     /// A clock which is guaranteed to be monotonic. it's previous value is
     /// stored in the manifest and WAL, will be updated after WAL replay.
     pub(crate) mono_clock: Arc<MonotonicClock>,
+    pub(crate) rand: Arc<DbRand>,
     pub(crate) oracle: Arc<Oracle>,
     pub(crate) reader: Reader,
     /// [`wal_buffer`] manages the in-memory WAL buffer, it manages the flushing
@@ -84,6 +85,7 @@ impl DbInner {
         logical_clock: Arc<dyn LogicalClock>,
         // TODO replace all system clock usage with this
         _system_clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
         manifest: DirtyManifest,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
@@ -123,6 +125,7 @@ impl DbInner {
         let wal_buffer = Arc::new(WalBufferManager::new(
             state.clone(),
             Some(state.clone()),
+            db_stats.clone(),
             recent_flushed_wal_id,
             oracle.clone(),
             table_store.clone(),
@@ -142,6 +145,7 @@ impl DbInner {
             write_notifier,
             db_stats,
             mono_clock,
+            rand,
             stat_registry,
             reader,
         };
@@ -233,10 +237,8 @@ impl DbInner {
 
         self.maybe_apply_backpressure().await?;
         self.write_notifier
-            .send(batch_msg)
-            .expect("write notifier closed");
+            .send_safely(self.state.read().error_reader(), batch_msg)?;
 
-        // if the write pipeline task exits then this call to rx.await will fail because tx is dropped
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
         let mut durable_watcher = rx.await??;
@@ -273,33 +275,51 @@ impl DbInner {
             };
 
             if mem_size_bytes >= self.settings.max_unflushed_bytes {
+                self.db_stats.backpressure_count.inc();
                 warn!(
                     "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
                     mem_size_bytes, self.settings.max_unflushed_bytes,
                 );
 
-                self.flush_immutable_memtables().await?;
+                let maybe_oldest_unflushed_memtable = {
+                    let guard = self.state.read();
+                    guard.state().imm_memtable.back().cloned()
+                };
 
-                let await_flush_to_l0 = async {
-                    let imm = {
-                        let guard = self.state.read();
-                        guard.state().imm_memtable.back().cloned()
-                    };
-                    match imm {
-                        Some(imm) => imm.await_flush_to_l0().await,
-                        None => std::future::pending().await,
+                let maybe_oldest_unflushed_wal = self.wal_buffer.oldest_unflushed_wal().await;
+
+                // There is a window of time after mem_size_bytes is larger than max_unflushed_bytes
+                // but before we get the memtable and wal table. During that time, if the memtable and/or
+                // wal table are fully flushed out, we should short circuit since the select! will always
+                // time out.
+                if maybe_oldest_unflushed_memtable.is_none() && maybe_oldest_unflushed_wal.is_none()
+                {
+                    continue;
+                }
+
+                let await_flush_memtable = async {
+                    if let Some(oldest_unflushed_memtable) = maybe_oldest_unflushed_memtable {
+                        oldest_unflushed_memtable.await_flush_to_l0().await
+                    } else {
+                        std::future::pending().await
                     }
                 };
+
+                let await_flush_wal = async {
+                    if let Some(oldest_unflushed_wal) = maybe_oldest_unflushed_wal {
+                        oldest_unflushed_wal.await_durable().await
+                    } else {
+                        std::future::pending().await
+                    }
+                };
+
+                self.flush_immutable_memtables().await?;
 
                 let timeout_fut = tokio::time::sleep(Duration::from_secs(30));
 
                 tokio::select! {
-                    result = await_flush_to_l0 => {
-                        result?;
-                    }
-                    result = self.wal_buffer.await_flush() => {
-                        result?;
-                    }
+                    result = await_flush_memtable => result?,
+                    result = await_flush_wal => result?,
                     _ = timeout_fut => {
                         warn!("Backpressure timeout: waited 30s, no memtable/WAL flushed yet");
                     }
@@ -318,9 +338,10 @@ impl DbInner {
     // use to manually flush memtables
     async fn flush_immutable_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.memtable_flush_notifier
-            .send(MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) })
-            .map_err(|_| SlateDBError::MemtableFlushChannelError)?;
+        self.memtable_flush_notifier.send_safely(
+            self.state.read().error_reader(),
+            MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) },
+        )?;
         rx.await?
     }
 
@@ -340,7 +361,7 @@ impl DbInner {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
-            cache_blocks: true,
+            cache_blocks: false,
             eager_spawn: true,
         };
 
@@ -357,6 +378,7 @@ impl DbInner {
                 .await?;
 
         while let Some(replayed_table) = replay_iter.next().await? {
+            self.maybe_apply_backpressure().await?;
             self.replay_memtable(replayed_table)?;
         }
 
@@ -365,7 +387,6 @@ impl DbInner {
         self.oracle
             .last_remote_persisted_seq
             .store(self.oracle.last_committed_seq.load());
-
         Ok(())
     }
 
@@ -389,7 +410,7 @@ pub struct Db {
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     write_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     compactor_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
-    garbage_collector: Mutex<Option<GarbageCollector>>,
+    garbage_collector_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     cancellation_token: CancellationToken,
 }
 
@@ -488,15 +509,24 @@ impl Db {
             info!("compactor task exited with: {:?}", result);
         }
 
-        if let Some(gc) = {
-            let mut maybe_gc = self.garbage_collector.lock();
-            maybe_gc.take()
+        if let Some(garbage_collector_task) = {
+            let mut maybe_garbage_collector_task = self.garbage_collector_task.lock();
+            maybe_garbage_collector_task.take()
         } {
-            gc.terminate_background_task().await;
+            let result = garbage_collector_task
+                .await
+                .expect("Failed to join garbage collector task");
+            info!("garbage collector task exited with: {:?}", result);
         }
 
         // Shutdown the write batch thread.
-        self.inner.write_notifier.send(WriteBatchMsg::Shutdown).ok();
+        self.inner
+            .write_notifier
+            .send_safely(
+                self.inner.state.read().error_reader(),
+                WriteBatchMsg::Shutdown,
+            )
+            .ok();
 
         if let Some(write_task) = {
             let mut write_task = self.write_task.lock();
@@ -516,7 +546,10 @@ impl Db {
         // Shutdown the memtable flush thread.
         self.inner
             .memtable_flush_notifier
-            .send(MemtableFlushMsg::Shutdown)
+            .send_safely(
+                self.inner.state.read().error_reader(),
+                MemtableFlushMsg::Shutdown,
+            )
             .ok();
 
         if let Some(memtable_flush_task) = {
@@ -948,20 +981,6 @@ impl Db {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) async fn await_flush(&self) -> Result<(), SlateDBError> {
-        if self.inner.wal_enabled {
-            self.inner.wal_buffer.await_flush().await
-        } else {
-            let table = {
-                let guard = self.inner.state.read();
-                let snapshot = guard.snapshot();
-                snapshot.memtable.clone()
-            };
-            table.await_durable().await
-        }
-    }
-
     pub fn metrics(&self) -> Arc<StatRegistry> {
         self.inner.stat_registry.clone()
     }
@@ -1048,12 +1067,27 @@ mod tests {
                 |(key, value)| {
                     runtime.block_on(async {
                         if !key.is_empty() {
-                            db.put(&key, &value).await.unwrap();
+                            db.put_with_options(
+                                &key,
+                                &value,
+                                &PutOptions::default(),
+                                &WriteOptions {
+                                    await_durable: false,
+                                },
+                            )
+                            .await
+                            .unwrap();
                             assert_eq!(
                                 Some(value),
-                                db.get_with_options(&key, &ReadOptions::default())
-                                    .await
-                                    .unwrap()
+                                db.get_with_options(
+                                    &key,
+                                    &ReadOptions {
+                                        durability_filter: Memory,
+                                        dirty: false,
+                                    }
+                                )
+                                .await
+                                .unwrap()
                             );
                         }
                     });
@@ -2165,7 +2199,6 @@ mod tests {
             let key = [b'a' + i; 16];
             let value = [b'b' + i; 50];
             kv_store.put(&key, &value).await.unwrap();
-            kv_store.await_flush().await.unwrap();
             let key = [b'j' + i; 16];
             let value = [b'k' + i; 50];
             kv_store.put(&key, &value).await.unwrap();
@@ -2222,31 +2255,69 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let mut options = test_db_options(0, 1, None);
         options.max_unflushed_bytes = 1;
-        options.l0_sst_size_bytes = 1;
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
             .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
-
+        let db_stats = db.inner.db_stats.clone();
         let write_opts = WriteOptions {
             await_durable: false,
         };
 
-        // Block WAL flush
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
 
-        // 1 wal entries in memory
+        // Helper function to wait for a condition to be true.
+        let wait_for = async move |condition: Box<dyn Fn() -> bool>| {
+            for _ in 0..3000 {
+                if condition() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+
+        // 1 wal entry in memory
         db.put_with_options(b"key1", b"val1", &PutOptions::default(), &write_opts)
             .await
             .unwrap();
 
-        // Unblock WAL flush so runtime shuts down nicely even if we have a failure
+        // Wait for put to end up in the WAL buffer
+        let this_wal_buffer = db.inner.wal_buffer.clone();
+        wait_for(Box::new(move || {
+            this_wal_buffer.buffered_wal_entries_count() > 0
+        }))
+        .await;
+
+        // Verify that there is now 1 WAL entry in memory.
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+
+        // Put another WAL entry, which should trigger backpressure. Do this in a separate
+        // task since the put() is blocked until the WAL is flushed, which isn't happening
+        // due to the fail point.
+        let join_handle = tokio::spawn(async move {
+            db.put_with_options(b"key2", b"val2", &PutOptions::default(), &write_opts)
+                .await
+                .unwrap();
+        });
+
+        let this_stats = db_stats.clone();
+        // Wait up to 30s for backpressure to be applied to the second write.
+        wait_for(Box::new(move || {
+            this_stats.backpressure_count.value.load(Ordering::SeqCst) > 0
+        }))
+        .await;
+
+        // Verify that backpressure is applied.
+        assert!(db_stats.backpressure_count.value.load(Ordering::SeqCst) >= 1);
+
+        // Unblock so put_with_options in join_handle can complete and join_handle.await returns
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
 
-        // WAL should pile up in memory since it can't be flushed
-        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        // Shutdown the background task
+        join_handle.abort();
+        let _ = join_handle.await;
     }
 
     #[tokio::test]
@@ -2698,7 +2769,6 @@ mod tests {
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
         let result = db.put(&key1, &value1).await;
-        db.await_flush().await.unwrap();
         assert!(result.is_ok(), "Failed to write key1");
         assert_eq!(db.inner.wal_buffer.recent_flushed_wal_id(), 2);
 
@@ -2994,7 +3064,11 @@ mod tests {
 
         // assert that db1 can no longer write.
         let err = do_put(&db1, b"1", b"1").await;
-        assert!(matches!(err, Err(SlateDBError::Fenced)));
+        assert!(
+            matches!(err, Err(SlateDBError::Fenced)),
+            "got non-fenced error: {:?}",
+            err
+        );
 
         do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
@@ -3446,7 +3520,6 @@ mod tests {
         let start = tokio::time::Instant::now();
         while start.elapsed() < timeout {
             let manifest = sm.refresh().await.unwrap();
-            eprintln!("manifest: {:#?}", manifest.core);
             if cond(&manifest.core) {
                 return manifest.core.clone();
             }

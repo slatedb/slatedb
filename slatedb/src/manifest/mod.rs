@@ -2,10 +2,13 @@ use std::cmp::{max, min};
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::ops::Bound;
+use std::sync::Arc;
 
 use crate::bytes_range::BytesRange;
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
+use crate::rand::DbRand;
+use crate::utils::IdGenerator;
 use bytes::Bytes;
 use serde::Serialize;
 use uuid::Uuid;
@@ -37,6 +40,7 @@ impl Manifest {
         parent_manifest: &Manifest,
         parent_path: String,
         source_checkpoint_id: Uuid,
+        rand: Arc<DbRand>,
     ) -> Self {
         let mut parent_external_sst_ids = HashSet::<SsTableId>::new();
         let mut clone_external_dbs = vec![];
@@ -46,7 +50,7 @@ impl Manifest {
             clone_external_dbs.push(ExternalDb {
                 path: parent_external_db.path.clone(),
                 source_checkpoint_id: parent_external_db.source_checkpoint_id,
-                final_checkpoint_id: Some(crate::utils::uuid()),
+                final_checkpoint_id: Some(rand.thread_rng().gen_uuid()),
                 sst_ids: parent_external_db.sst_ids.clone(),
             });
         }
@@ -63,7 +67,7 @@ impl Manifest {
         clone_external_dbs.push(ExternalDb {
             path: parent_path,
             source_checkpoint_id,
-            final_checkpoint_id: Some(crate::utils::uuid()),
+            final_checkpoint_id: Some(rand.thread_rng().gen_uuid()),
             sst_ids: parent_owned_sst_ids,
         });
 
@@ -218,6 +222,7 @@ mod tests {
 
     use crate::config::CheckpointOptions;
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::rand::DbRand;
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -242,7 +247,7 @@ mod tests {
                 .await
                 .unwrap();
         let checkpoint = parent_manifest
-            .write_checkpoint(None, &CheckpointOptions::default())
+            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -253,6 +258,7 @@ mod tests {
             parent_manifest.manifest(),
             parent_path.to_string(),
             checkpoint.id,
+            Arc::new(DbRand::default()),
         )
         .await
         .unwrap();
@@ -294,7 +300,7 @@ mod tests {
                 .unwrap();
 
         let checkpoint = manifest
-            .write_checkpoint(None, &CheckpointOptions::default())
+            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 

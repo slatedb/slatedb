@@ -129,7 +129,7 @@ mod tests {
             9,
             Some(200),
             None,
-        ));
+        ))?;
         assert!(has_more);
 
         has_more = buffer.push(RowEntry::new(
@@ -138,7 +138,7 @@ mod tests {
             8,
             Some(300),
             None,
-        ));
+        ))?;
         assert!(!has_more);
 
         Ok(())

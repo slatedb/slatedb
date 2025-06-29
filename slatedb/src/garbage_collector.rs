@@ -19,14 +19,12 @@ use crate::garbage_collector::stats::GcStats;
 use crate::manifest::store::{DirtyManifest, ManifestStore, StoredManifest};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::spawn_bg_thread;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
 use manifest_gc::ManifestGcTask;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::runtime::Handle;
 use tokio::time::Interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
@@ -55,9 +53,8 @@ trait GcTask {
 /// - Compacted SSTs that are no longer referenced by active manifests or checkpoints
 /// - Old manifests that are not needed for recovery or checkpoints
 ///
-/// The garbage collector can run in three modes:
+/// The garbage collector can run in two modes:
 ///
-/// - As a background thread with [`start_in_bg_thread`](GarbageCollector::start_in_bg_thread)
 /// - As an async task with [`run_async_task`](GarbageCollector::run_async_task)
 /// - As a one-time operation with [`run_gc_once`](GarbageCollector::run_gc_once)
 ///
@@ -108,47 +105,14 @@ impl GarbageCollector {
         }
     }
 
-    /// Starts the garbage collector in a background thread.
-    ///
-    /// This method launches the garbage collector in a dedicated background thread
-    /// and returns immediately. The garbage collector will run until its cancellation
-    /// token is cancelled. Use [`terminate_background_task`](GarbageCollector::terminate_background_task)
-    /// to stop the garbage collector.
-    ///
-    /// # Arguments
-    ///
-    /// * `tokio_handle` - The tokio handle to use in the background thread.
-    /// * `cleanup_fn` - A function that will be called when the garbage collector
-    ///   thread completes, with the final result (success or error).
-    pub fn start_in_bg_thread(
-        &self,
-        tokio_handle: Handle,
-        cleanup_fn: impl FnOnce(&Result<(), SlateDBError>) + Send + 'static,
-    ) {
-        let this = self.clone();
-        let gc_main = move || {
-            tokio_handle.block_on(this.run_async_task());
-            Ok(())
-        };
-        spawn_bg_thread("slatedb-gc", cleanup_fn, gc_main);
-    }
-
     /// Starts the garbage collector. This method performs the actual garbage collection.
-    /// The garbage collector runs until the cancellation token is cancelled. Use
-    /// [`terminate_background_task`](GarbageCollector::terminate_background_task) to stop the
-    /// garbage collector.
-    ///
-    /// Unlike [`start_in_bg_thread`](GarbageCollector::start_in_bg_thread), this method
-    /// uses the current Tokio runtime instead of creating a new thread. This is useful
-    /// when you want to run the garbage collector within an existing async runtime.
-    pub async fn run_async_task(&self) {
-        let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
-
+    /// The garbage collector runs until the cancellation token is cancelled.
+    pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
         let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) = self.gc_tasks();
-
         let mut compacted_ticker = compacted_gc_task.ticker();
         let mut wal_ticker = wal_gc_task.ticker();
         let mut manifest_ticker = manifest_gc_task.ticker();
+        let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
 
         info!(
             "Starting Garbage Collector with [manifest: {:#?}], [wal: {:#?}], [compacted: {:#?}]",
@@ -185,6 +149,8 @@ impl GarbageCollector {
             self.stats.gc_wal_count.value.load(Ordering::SeqCst),
             self.stats.gc_compacted_count.value.load(Ordering::SeqCst)
         );
+
+        Ok(())
     }
 
     /// Run the garbage collector once.
@@ -202,11 +168,6 @@ impl GarbageCollector {
         self.run_gc_task(&mut compacted_gc_task).await;
 
         self.stats.gc_count.inc();
-    }
-
-    /// Notify the garbage collector to terminate.
-    pub async fn terminate_background_task(self) {
-        self.cancellation_token.cancel();
     }
 
     fn gc_tasks(&self) -> (WalGcTask, CompactedGcTask, ManifestGcTask) {
@@ -286,6 +247,7 @@ mod tests {
 
     use chrono::{DateTime, Utc};
     use object_store::{local::LocalFileSystem, path::Path};
+    use tokio::runtime::Handle;
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
@@ -295,6 +257,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::types::RowEntry;
+    use crate::utils::spawn_bg_task;
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
         manifest::store::{ManifestStore, StoredManifest},
@@ -376,7 +339,7 @@ mod tests {
 
     fn new_checkpoint(manifest_id: u64, expire_time: Option<SystemTime>) -> Checkpoint {
         Checkpoint {
-            id: crate::utils::uuid(),
+            id: uuid::Uuid::new_v4(),
             manifest_id,
             expire_time,
             create_time: DefaultSystemClock::default().now(),
@@ -982,9 +945,9 @@ mod tests {
         // Always sleep 1ms to make sure we get ULIDs that are sortable.
         // Without this, the ULIDs could have the same millisecond timestamp
         // and then ULID sorting is based on the random part.
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
-        let sst_id = SsTableId::Compacted(crate::utils::ulid());
+        let sst_id = SsTableId::Compacted(ulid::Ulid::new());
         let mut sst = table_store.table_builder();
         sst.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
         let table = sst.build().unwrap();
@@ -1118,8 +1081,11 @@ mod tests {
             cancellation_token.clone(),
         );
 
-        gc.start_in_bg_thread(Handle::current(), |result| assert!(result.is_ok()));
-        gc.terminate_background_task().await;
+        let fut = async move { gc.run_async_task().await };
+        let jh = spawn_bg_task(&Handle::current(), |result| assert!(result.is_ok()), fut);
+        cancellation_token.cancel();
+        let result = jh.await.unwrap();
+        assert!(result.is_ok(), "result: {:#?}", result);
 
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(cancellation_token.is_cancelled());

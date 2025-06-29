@@ -2,6 +2,7 @@ use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
 use crate::mem_table_flush::MemtableFlushMsg;
+use crate::utils::SendSafely;
 use serde::Serialize;
 use std::time::SystemTime;
 use uuid::Uuid;
@@ -41,13 +42,13 @@ impl Db {
         }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.inner
-            .memtable_flush_notifier
-            .send(MemtableFlushMsg::CreateCheckpoint {
+        self.inner.memtable_flush_notifier.send_safely(
+            self.inner.state.read().error_reader(),
+            MemtableFlushMsg::CreateCheckpoint {
                 options: options.clone(),
                 sender: tx,
-            })
-            .map_err(|_| SlateDBError::CheckpointChannelError)?;
+            },
+        )?;
 
         rx.await?
     }
@@ -196,7 +197,7 @@ mod tests {
             .await
             .unwrap();
 
-        let source_checkpoint_id = crate::utils::uuid();
+        let source_checkpoint_id = uuid::Uuid::new_v4();
         let result = admin
             .create_checkpoint(&CheckpointOptions {
                 source: Some(source_checkpoint_id),
@@ -280,7 +281,7 @@ mod tests {
             .unwrap();
 
         let result = admin
-            .refresh_checkpoint(crate::utils::uuid(), Some(Duration::from_secs(1000)))
+            .refresh_checkpoint(uuid::Uuid::new_v4(), Some(Duration::from_secs(1000)))
             .await;
 
         assert!(matches!(result, Err(SlateDBError::InvalidDBState)));

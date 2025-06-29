@@ -14,6 +14,7 @@ use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::merge_iterator::MergeIterator;
+use crate::rand::DbRand;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
@@ -21,7 +22,7 @@ use crate::tablestore::TableStore;
 use crate::compactor::stats::CompactionStats;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
-use crate::utils::spawn_bg_task;
+use crate::utils::{spawn_bg_task, IdGenerator};
 use tracing::error;
 use uuid::Uuid;
 
@@ -50,6 +51,7 @@ impl TokioCompactionExecutor {
         options: Arc<CompactorOptions>,
         worker_tx: tokio::sync::mpsc::UnboundedSender<WorkerToOrchestratorMsg>,
         table_store: Arc<TableStore>,
+        rand: Arc<DbRand>,
         stats: Arc<CompactionStats>,
     ) -> Self {
         Self {
@@ -58,6 +60,7 @@ impl TokioCompactionExecutor {
                 handle,
                 worker_tx,
                 table_store,
+                rand,
                 tasks: Arc::new(Mutex::new(HashMap::new())),
                 stats,
                 is_stopped: AtomicBool::new(false),
@@ -90,6 +93,7 @@ pub(crate) struct TokioCompactionExecutorInner {
     worker_tx: tokio::sync::mpsc::UnboundedSender<WorkerToOrchestratorMsg>,
     table_store: Arc<TableStore>,
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
+    rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     is_stopped: AtomicBool,
 }
@@ -136,7 +140,7 @@ impl TokioCompactionExecutorInner {
         let mut output_ssts = Vec::new();
         let mut current_writer = self
             .table_store
-            .table_writer(SsTableId::Compacted(crate::utils::ulid()));
+            .table_writer(SsTableId::Compacted(self.rand.thread_rng().gen_ulid()));
         let mut current_size = 0usize;
 
         while let Some(raw_kv) = all_iter.next_entry().await? {
@@ -174,7 +178,7 @@ impl TokioCompactionExecutorInner {
                 let finished_writer = mem::replace(
                     &mut current_writer,
                     self.table_store
-                        .table_writer(SsTableId::Compacted(crate::utils::ulid())),
+                        .table_writer(SsTableId::Compacted(self.rand.thread_rng().gen_ulid())),
                 );
                 output_ssts.push(finished_writer.close().await?);
                 self.stats.bytes_compacted.add(current_size as u64);
@@ -190,6 +194,11 @@ impl TokioCompactionExecutorInner {
         })
     }
 
+    // Allow send() because we are treating the executor like an external
+    // component. They can do what they want. The send().expect() will raise
+    // a SendErr, which will be caught in the cleanup_fn and set if there's
+    // not already an error (i.e. if the DB is not already shut down).
+    #[allow(clippy::disallowed_methods)]
     fn start_compaction(self: &Arc<Self>, compaction: CompactionJob) {
         let mut tasks = self.tasks.lock();
         if self.is_stopped.load(atomic::Ordering::SeqCst) {

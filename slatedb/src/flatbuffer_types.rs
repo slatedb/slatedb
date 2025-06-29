@@ -582,13 +582,13 @@ mod tests {
         let mut core = CoreDbState::new();
         core.checkpoints = vec![
             checkpoint::Checkpoint {
-                id: crate::utils::uuid(),
+                id: uuid::Uuid::new_v4(),
                 manifest_id: 1,
                 expire_time: None,
                 create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(100),
             },
             checkpoint::Checkpoint {
-                id: crate::utils::uuid(),
+                id: uuid::Uuid::new_v4(),
                 manifest_id: 2,
                 expire_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)),
                 create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
@@ -612,18 +612,18 @@ mod tests {
         manifest.external_dbs = vec![
             ExternalDb {
                 path: "/path/to/external/first".to_string(),
-                source_checkpoint_id: crate::utils::uuid(),
-                final_checkpoint_id: Some(crate::utils::uuid()),
+                source_checkpoint_id: uuid::Uuid::new_v4(),
+                final_checkpoint_id: Some(uuid::Uuid::new_v4()),
                 sst_ids: vec![
-                    SsTableId::Compacted(crate::utils::ulid()),
-                    SsTableId::Compacted(crate::utils::ulid()),
+                    SsTableId::Compacted(ulid::Ulid::new()),
+                    SsTableId::Compacted(ulid::Ulid::new()),
                 ],
             },
             ExternalDb {
                 path: "/path/to/external/second".to_string(),
-                source_checkpoint_id: crate::utils::uuid(),
-                final_checkpoint_id: Some(crate::utils::uuid()),
-                sst_ids: vec![SsTableId::Compacted(crate::utils::ulid())],
+                source_checkpoint_id: uuid::Uuid::new_v4(),
+                final_checkpoint_id: Some(uuid::Uuid::new_v4()),
+                sst_ids: vec![SsTableId::Compacted(ulid::Ulid::new())],
             },
         ];
         let codec = FlatBufferManifestCodec {};
@@ -640,7 +640,7 @@ mod tests {
     fn test_should_encode_decode_ssts_with_visible_ranges() {
         fn new_sst_handle(first_key: &[u8], visible_range: Option<BytesRange>) -> SsTableHandle {
             SsTableHandle::new_compacted(
-                SsTableId::Compacted(crate::utils::ulid()),
+                SsTableId::Compacted(ulid::Ulid::new()),
                 SsTableInfo {
                     first_key: Some(Bytes::copy_from_slice(first_key)),
                     ..Default::default()
