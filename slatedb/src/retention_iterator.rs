@@ -312,6 +312,7 @@ impl RetentionBuffer {
                 let next_entry = self.next_entry.take();
                 if let Some(entry) = next_entry {
                     self.current_versions.insert(Reverse(entry.seq), entry);
+                    self.processed = false;
                 }
                 return None;
             }
