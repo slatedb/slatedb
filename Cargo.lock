@@ -918,9 +918,9 @@ dependencies = [
 
 [[package]]
 name = "foyer"
-version = "0.17.3"
+version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "635c7077026867cb5e5ea576c461f29b1c4151fce7a9d7cc3a1b1a9902d95c65"
+checksum = "0618db36554a0a5db538d7ff04427571b1f668d3e86a764aabe17985c02ea14c"
 dependencies = [
  "anyhow",
  "equivalent",
@@ -937,11 +937,10 @@ dependencies = [
 
 [[package]]
 name = "foyer-common"
-version = "0.17.3"
+version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ed2316785e80137c7b91bb74dab1dc1967c3272df05825397b73ae8fc527041"
+checksum = "dbf63fd16ba6227de0004472156048338ad7544280d1200c27e4b4a82ca6f075"
 dependencies = [
- "ahash",
  "bincode",
  "bytes",
  "cfg-if",
@@ -953,6 +952,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.12",
  "tokio",
+ "twox-hash 2.1.0",
 ]
 
 [[package]]
@@ -966,11 +966,10 @@ dependencies = [
 
 [[package]]
 name = "foyer-memory"
-version = "0.17.3"
+version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "090cf5b89d49fd61e7da9bfae3a1aef605f03196d542b2f8171c74f3add013f4"
+checksum = "3ae8a1c8e263f91cf3abca38bbf6b8f82f34b6cf20fa3a249c90ebfa795e5631"
 dependencies = [
- "ahash",
  "arc-swap",
  "bitflags 2.9.0",
  "cmsketch",
@@ -991,11 +990,10 @@ dependencies = [
 
 [[package]]
 name = "foyer-storage"
-version = "0.17.3"
+version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "095e857c97d6339d4a4a6424b88d08fe08ad0366bfbfaf65d6ddf55baf3d2a38"
+checksum = "d387ab178f8bcb03fe4981766c9f436007234d8ca73080e3ad2c370d8d75113b"
 dependencies = [
- "ahash",
  "allocator-api2",
  "anyhow",
  "array-util",
