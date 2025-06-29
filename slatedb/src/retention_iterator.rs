@@ -70,3 +70,36 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
         Ok(())
     }
 }
+
+/// A buffer that collects multiple versions of the same key from an iterator.
+///
+/// When used in [`RetentionIterator::next_entry`], this buffer first collects all
+/// versions of the current key before returning the first row entry.
+struct RetentionBuffer {
+    current_versions: Vec<RowEntry>,
+    next_entry: Option<RowEntry>,
+}
+
+impl RetentionBuffer {
+    fn new() -> Self {
+        Self {
+            current_versions: Vec::new(),
+            next_entry: None,
+        }
+    }
+
+    /// Appends an entry to the buffer.
+    ///
+    /// Returns `true` if the entry has the same key as the current versions being collected.
+    /// Returns `false` if the key is different, indicating the caller should call `pop()`
+    /// to retrieve the next entry.
+    fn append(&mut self, entry: RowEntry) -> Result<bool, SlateDBError> {
+        todo!()
+    }
+
+    /// When current versions are empty, puts the next entry into current versions
+    /// and requires caller to call `append` to add more entries.
+    fn pop(&mut self) -> Option<RowEntry> {
+        todo!()
+    }
+}
