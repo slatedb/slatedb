@@ -85,24 +85,50 @@ struct RetentionBuffer {
 impl RetentionBuffer {
     fn new() -> Self {
         Self {
-            current_versions: Vec::new(),
+            current_versions: BTreeMap::new(),
             next_entry: None,
         }
     }
 
     /// Appends an entry to the buffer.
     ///
-    /// Returns `true` if the entry has the same key as the current versions being collected.
+    /// Returns `true` if the entry has the same key as the current versions being collected, or the current versions are empty.
     /// Returns `false` if the key is different, indicating the caller should call `pop()`
     /// to retrieve the next entry.
     fn push(&mut self, entry: RowEntry) -> Result<bool, SlateDBError> {
-        todo!()
+        let current_key = match self.current_versions.values().next() {
+            Some(entry) => entry.key.clone(),
+            None => {
+                // If current versions are empty, this is the first entry
+                self.current_versions.insert(entry.seq, entry);
+                return Ok(true);
+            }
+        };
+
+        if entry.key == current_key {
+            self.current_versions.insert(entry.seq, entry);
+            return Ok(true);
+        }
+
+        // Different key, store as next entry and return false
+        self.next_entry = Some(entry);
+        Ok(false)
     }
 
+    /// Pop the latest sequence number of the current key.
     /// When current versions are empty, puts the next entry into current versions
     /// and requires caller to call `append` to add more entries.
     fn pop(&mut self) -> Option<RowEntry> {
-        todo!()
+        match self.current_versions.pop_first() {
+            Some((_, entry)) => Some(entry),
+            None => {
+                let next_entry = self.next_entry.take();
+                if let Some(entry) = &next_entry {
+                    self.current_versions.insert(entry.seq, entry);
+                }
+                return None;
+            }
+        }
     }
 }
 
