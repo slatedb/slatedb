@@ -1,6 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -8,6 +8,7 @@ use bytes::Bytes;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::RowEntry;
+use crate::utils::is_not_expired;
 
 /// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
 ///
@@ -36,6 +37,13 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             buffer: RetentionBuffer::new(),
         })
     }
+
+    pub(crate) fn current_timestamp(&self) -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap() as i64
+    }
 }
 
 #[async_trait]
@@ -43,7 +51,15 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if self.buffer.need_push() {
             while let Some(entry) = self.inner.next_entry().await? {
-                let has_more = self.buffer.push(entry)?;
+                let current_timestamp = self.current_timestamp();
+                let has_more = self.buffer.push_if(entry, |entry| {
+                    entry
+                        .create_ts
+                        .map(|create_ts| {
+                            create_ts + self.retention_time.as_secs() as i64 > current_timestamp
+                        })
+                        .unwrap_or(true)
+                })?;
                 if !has_more {
                     break;
                 }
@@ -85,7 +101,11 @@ impl RetentionBuffer {
     /// Returns `true` if the entry has the same key as the current versions being collected, or the current versions are empty.
     /// Returns `false` if the key is different, indicating the caller should call `pop()`
     /// to retrieve the next entry.
-    fn push(&mut self, entry: RowEntry) -> Result<bool, SlateDBError> {
+    fn push_if(
+        &mut self,
+        entry: RowEntry,
+        f: impl FnOnce(&RowEntry) -> bool,
+    ) -> Result<bool, SlateDBError> {
         let current_key = match self.current_versions.values().next() {
             Some(entry) => entry.key.clone(),
             None => {
@@ -95,14 +115,18 @@ impl RetentionBuffer {
             }
         };
 
-        if entry.key == current_key {
-            self.current_versions.insert(Reverse(entry.seq), entry);
-            return Ok(true);
+        // Different key, store as next entry and return false
+        if entry.key != current_key {
+            self.next_entry = Some(entry);
+            return Ok(false);
         }
 
-        // Different key, store as next entry and return false
-        self.next_entry = Some(entry);
-        Ok(false)
+        // if the entry has the same key as the current versions being collected, and this entry passed the filter,
+        // we can append it to the current versions.
+        if f(&entry) {
+            self.current_versions.insert(Reverse(entry.seq), entry);
+        }
+        Ok(true)
     }
 
     /// Pop the latest sequence number of the current key.
@@ -132,31 +156,40 @@ mod tests {
     #[test]
     fn test_retention_buffer() -> Result<(), SlateDBError> {
         let mut buffer = RetentionBuffer::new();
-        let mut has_more = buffer.push(RowEntry::new(
-            Bytes::copy_from_slice(b"key1"),
-            ValueDeletable::Value(Bytes::copy_from_slice(b"value1:10")),
-            10,
-            Some(100),
-            None,
-        ))?;
+        let mut has_more = buffer.push_if(
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key1"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value1:10")),
+                10,
+                Some(100),
+                None,
+            ),
+            |_| true,
+        )?;
         assert!(has_more);
 
-        has_more = buffer.push(RowEntry::new(
-            Bytes::copy_from_slice(b"key1"),
-            ValueDeletable::Value(Bytes::copy_from_slice(b"value1:9")),
-            9,
-            Some(200),
-            None,
-        ))?;
+        has_more = buffer.push_if(
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key1"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value1:9")),
+                9,
+                Some(200),
+                None,
+            ),
+            |_| true,
+        )?;
         assert!(has_more);
 
-        has_more = buffer.push(RowEntry::new(
-            Bytes::copy_from_slice(b"key2"),
-            ValueDeletable::Value(Bytes::copy_from_slice(b"value2:8")),
-            8,
-            Some(300),
-            None,
-        ))?;
+        has_more = buffer.push_if(
+            RowEntry::new(
+                Bytes::copy_from_slice(b"key2"),
+                ValueDeletable::Value(Bytes::copy_from_slice(b"value2:8")),
+                8,
+                Some(300),
+                None,
+            ),
+            |_| true,
+        )?;
         assert!(!has_more);
 
         Ok(())
