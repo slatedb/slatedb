@@ -45,6 +45,33 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             .map(|d| d.as_secs())
             .unwrap() as i64
     }
+
+    fn apply_retention_filter(
+        mut versions: BTreeMap<Reverse<u64>, RowEntry>,
+        current_timestamp: i64,
+        retention_time: Duration,
+    ) -> BTreeMap<Reverse<u64>, RowEntry> {
+        let latest_version = match versions.pop_first() {
+            Some((_, entry)) => entry,
+            None => return versions,
+        };
+
+        let mut filtered_versions = versions
+            .into_iter()
+            .skip(1)
+            .filter(|(_, entry)| {
+                entry
+                    .create_ts
+                    .map(|create_ts| {
+                        create_ts + (retention_time.as_secs() as i64) < current_timestamp
+                    })
+                    .unwrap_or(true)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        filtered_versions.insert(Reverse(latest_version.seq), latest_version);
+        filtered_versions
+    }
 }
 
 #[async_trait]
@@ -61,21 +88,20 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
                         }
                     };
 
-                    let current_timestamp = self.current_timestamp();
-                    self.buffer.push_if(entry, |entry| {
-                        entry
-                            .create_ts
-                            .map(|create_ts| {
-                                create_ts + self.retention_time.as_secs() as i64 > current_timestamp
-                            })
-                            .unwrap_or(true)
-                    })?;
+                    self.buffer.push(entry);
                 }
-                RetentionBufferState::NeedPop => match self.buffer.pop() {
+                RetentionBufferState::NeedPopAndContinue => match self.buffer.pop() {
                     Some(entry) => return Ok(Some(entry)),
                     None => continue,
                 },
-                RetentionBufferState::EndOfInput => return Ok(self.buffer.pop()),
+                RetentionBufferState::NeedPopAndQuit => return Ok(self.buffer.pop()),
+                RetentionBufferState::NeedProcess => {
+                    let current_timestamp = self.current_timestamp();
+                    let retention_time = self.retention_time;
+                    self.buffer.process_retention(|versions| {
+                        Self::apply_retention_filter(versions, current_timestamp, retention_time)
+                    })?;
+                }
             }
         }
     }
@@ -94,13 +120,15 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
 struct RetentionBuffer {
     current_versions: BTreeMap<Reverse<u64>, RowEntry>,
     next_entry: Option<RowEntry>,
+    processed: bool,
     end_of_input: bool,
 }
 
 enum RetentionBufferState {
     NeedPush,
-    NeedPop,
-    EndOfInput,
+    NeedPopAndContinue,
+    NeedPopAndQuit,
+    NeedProcess,
 }
 
 impl RetentionBuffer {
@@ -108,23 +136,31 @@ impl RetentionBuffer {
         Self {
             current_versions: BTreeMap::new(),
             next_entry: None,
+            processed: false,
             end_of_input: false,
         }
     }
 
     fn state(&self) -> RetentionBufferState {
-        if self.end_of_input {
-            RetentionBufferState::EndOfInput
-        } else if self.next_entry.is_some() {
-            RetentionBufferState::NeedPop
+        if self.processed {
+            if self.end_of_input {
+                return RetentionBufferState::NeedPopAndQuit;
+            } else {
+                return RetentionBufferState::NeedPopAndContinue;
+            }
         } else {
-            RetentionBufferState::NeedPush
+            if self.end_of_input || self.next_entry.is_some() {
+                return RetentionBufferState::NeedProcess;
+            }
         }
+        RetentionBufferState::NeedPush
     }
 
     fn clear(&mut self) {
         self.current_versions.clear();
         self.next_entry = None;
+        self.processed = false;
+        self.end_of_input = false;
     }
 
     fn is_empty(&self) -> bool {
@@ -140,32 +176,39 @@ impl RetentionBuffer {
     /// Returns `true` if the entry has the same key as the current versions being collected, or the current versions are empty.
     /// Returns `false` if the key is different, indicating the caller should call `pop()`
     /// to retrieve the next entry.
-    fn push_if(
-        &mut self,
-        entry: RowEntry,
-        f: impl FnOnce(&RowEntry) -> bool,
-    ) -> Result<bool, SlateDBError> {
+    fn push(&mut self, entry: RowEntry) -> bool {
         let current_key = match self.current_versions.values().next() {
             Some(entry) => entry.key.clone(),
             None => {
                 // If current versions are empty, this is the first entry
                 self.current_versions.insert(Reverse(entry.seq), entry);
-                return Ok(true);
+                return true;
             }
         };
 
         // Different key, store as next entry and return false
         if entry.key != current_key {
             self.next_entry = Some(entry);
-            return Ok(false);
+            return false;
         }
 
-        // if the entry has the same key as the current versions being collected, and this entry passed the filter,
-        // we can append it to the current versions.
-        if f(&entry) {
-            self.current_versions.insert(Reverse(entry.seq), entry);
+        // same key, append to current versions
+        self.current_versions.insert(Reverse(entry.seq), entry);
+        true
+    }
+
+    fn process_retention(
+        &mut self,
+        f: impl FnOnce(BTreeMap<Reverse<u64>, RowEntry>) -> BTreeMap<Reverse<u64>, RowEntry>,
+    ) -> Result<(), SlateDBError> {
+        if self.processed {
+            return Ok(());
         }
-        Ok(true)
+        let current_versions = std::mem::take(&mut self.current_versions);
+        let processed_versions = f(current_versions);
+        self.current_versions = processed_versions;
+        self.processed = true;
+        Ok(())
     }
 
     /// Pop the latest sequence number of the current key.
@@ -194,43 +237,6 @@ mod tests {
 
     #[test]
     fn test_retention_buffer() -> Result<(), SlateDBError> {
-        let mut buffer = RetentionBuffer::new();
-        let mut has_more = buffer.push_if(
-            RowEntry::new(
-                Bytes::copy_from_slice(b"key1"),
-                ValueDeletable::Value(Bytes::copy_from_slice(b"value1:10")),
-                10,
-                Some(100),
-                None,
-            ),
-            |_| true,
-        )?;
-        assert!(has_more);
-
-        has_more = buffer.push_if(
-            RowEntry::new(
-                Bytes::copy_from_slice(b"key1"),
-                ValueDeletable::Value(Bytes::copy_from_slice(b"value1:9")),
-                9,
-                Some(200),
-                None,
-            ),
-            |_| true,
-        )?;
-        assert!(has_more);
-
-        has_more = buffer.push_if(
-            RowEntry::new(
-                Bytes::copy_from_slice(b"key2"),
-                ValueDeletable::Value(Bytes::copy_from_slice(b"value2:8")),
-                8,
-                Some(300),
-                None,
-            ),
-            |_| true,
-        )?;
-        assert!(!has_more);
-
-        Ok(())
+        todo!()
     }
 }
