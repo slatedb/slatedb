@@ -73,6 +73,11 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
         current_timestamp: i64,
         retention_time: Duration,
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
+        if versions.len() == 1 {
+            // TODO: handle expiry
+            // TODO: if it's the only version, and tombstone, filter it out
+        }
+
         // Always preserve the latest version regardless of age
         let latest_version = match versions.pop_first() {
             Some((_, entry)) => entry,
