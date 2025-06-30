@@ -84,10 +84,3 @@ jobs:
           else
             cargo publish
           fi
-
-      # Publish Python bindings to PyPI using maturin
-      - name: Publish Python bindings to PyPI
-        uses: PyO3/maturin-action@v1
-        with:
-          command: publish
-          working-directory: ./slatedb-py
