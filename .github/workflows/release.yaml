@@ -40,12 +40,9 @@ jobs:
         run: cargo set-version ${{ github.event.inputs.version }}
 
       # Set pyproject.toml version
-      - name: Set exact version
-        uses: ciiiii/toml-editor@1.0.0
-        with:
-          file: slatedb-py/pyproject.toml
-          key: project.version
-          value: ${{ github.event.inputs.version }}
+      - name: Set Python package version
+        run: |
+          sed -i "s/^version = \".*\"/version = \"${{ github.event.inputs.version }}\"/" slatedb-py/pyproject.toml
 
       # Commit changes
       - name: Commit version bump
