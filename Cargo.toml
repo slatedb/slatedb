@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.6.1"
 edition = "2021"
 repository = "https://github.com/slatedb/slatedb"
 license = "Apache-2.0"
@@ -19,4 +19,4 @@ readme = "README.md"
 lto = true
 
 [workspace.dependencies]
-slatedb = { path = "slatedb" }
+slatedb = { path = "slatedb", version = "0.6.1" }
