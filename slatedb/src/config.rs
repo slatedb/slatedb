@@ -971,7 +971,7 @@ impl Default for ObjectStoreCacheOptions {
         Self {
             root_folder: None,
             #[cfg(target_pointer_width = "32")]
-            max_cache_size_bytes: Some(4 * 1024 * 1024 * 1024),
+            max_cache_size_bytes: Some(usize::MAX),
             #[cfg(not(target_pointer_width = "32"))]
             max_cache_size_bytes: Some(16 * 1024 * 1024 * 1024),
             part_size_bytes: 4 * 1024 * 1024,
