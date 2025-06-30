@@ -88,5 +88,4 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: publish
-          args: --release
           working-directory: ./slatedb-py
