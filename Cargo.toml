@@ -17,3 +17,6 @@ readme = "README.md"
 
 [profile.bench]
 lto = true
+
+[workspace.dependencies]
+slatedb = { path = "slatedb" }
