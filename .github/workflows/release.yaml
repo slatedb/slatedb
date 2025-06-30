@@ -65,13 +65,23 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         working-directory: slatedb
-        run: cargo publish
+        run: |
+          if curl -sSf "https://crates.io/api/v1/crates/slatedb/${{ github.event.inputs.version }}" >/dev/null; then
+            echo "✔ slate v${{ github.event.inputs.version }} already published, skipping"
+          else
+            cargo publish
+          fi
 
       - name: Publish SlateDB CLI to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         working-directory: slatedb-cli
-        run: cargo publish
+        run:  |
+          if curl -sSf "https://crates.io/api/v1/crates/slatedb-cli/${{ github.event.inputs.version }}" >/dev/null; then
+            echo "✔ slate-cli v${{ github.event.inputs.version }} already published, skipping"
+          else
+            cargo publish
+          fi
 
       # Publish Python bindings to PyPI using maturin
       - name: Publish Python bindings to PyPI
