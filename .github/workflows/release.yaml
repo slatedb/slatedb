@@ -86,6 +86,8 @@ jobs:
       # Publish Python bindings to PyPI using maturin
       - name: Publish Python bindings to PyPI
         uses: PyO3/maturin-action@v1
+        permissions:
+          id-token: write
         with:
           command: publish
           working-directory: ./slatedb-py
