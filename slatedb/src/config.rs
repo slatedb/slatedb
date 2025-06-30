@@ -823,13 +823,13 @@ pub struct CompactorOptions {
 /// Default options for the compactor. Currently, only a
 /// `SizeTieredCompactionScheduler` compaction strategy is implemented.
 impl Default for CompactorOptions {
-    /// Returns a `CompactorOptions` with a 5 second poll interval and a 1GB max
+    /// Returns a `CompactorOptions` with a 5 second poll interval and a 256MiB max
     /// SSTable size.
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(5),
             manifest_update_timeout: Duration::from_secs(300),
-            max_sst_size: 1024 * 1024 * 1024,
+            max_sst_size: 256 * 1024 * 1024,
             max_concurrent_compactions: 4,
         }
     }
