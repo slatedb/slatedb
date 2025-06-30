@@ -10,14 +10,13 @@ on:
 
 permissions:
   contents: write
+  # Required for PyO3/maturin-action@v1
+  id-token: write
 
 jobs:
   release:
     name: Release SlateDB
     runs-on: ubuntu-latest
-    # Required for PyO3/maturin-action@v1
-    permissions:
-      id-token: write
 
     steps:
       # Verify the version is a valid SemVer version
