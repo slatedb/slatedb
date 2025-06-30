@@ -3011,7 +3011,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "atomic",
@@ -3067,7 +3067,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-bencher"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -3084,7 +3084,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-cli"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "clap",
  "humantime",
@@ -3101,7 +3101,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-py"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "once_cell",
  "pyo3",
