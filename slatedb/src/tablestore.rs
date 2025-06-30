@@ -581,7 +581,6 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
-    #[cfg(feature = "moka")]
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, build_test_sst};
     use crate::types::{RowEntry, ValueDeletable};
