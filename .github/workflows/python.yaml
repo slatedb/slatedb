@@ -41,9 +41,8 @@ jobs:
           sudo dpkg --add-architecture armel
           sudo dpkg --add-architecture armhf
           sudo dpkg --add-architecture ppc64el
-          sudo dpkg --add-architecture s390x
           sudo apt-get update
-          sudo apt-get install -y crossbuild-essential-i386 crossbuild-essential-arm64 crossbuild-essential-armel crossbuild-essential-armhf crossbuild-essential-ppc64el crossbuild-essential-s390x gcc-multilib g++-multilib
+          sudo apt-get install -y crossbuild-essential-i386 crossbuild-essential-arm64 crossbuild-essential-armel crossbuild-essential-armhf crossbuild-essential-ppc64el gcc-multilib g++-multilib
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
