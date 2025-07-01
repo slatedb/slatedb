@@ -24,7 +24,7 @@ fail-parallel = "0.5.1"
 figment = { version = "0.10.19", features = ["env", "json", "toml", "yaml"] }
 flate2 = { version = "1.0.33", optional = true }
 flatbuffers = "24.3.25"
-foyer = { version = "0.17.3", features = ["serde"], optional = true }
+foyer = { version = "0.17.4", features = ["serde"], optional = true }
 futures = "0.3.30"
 log = { version = "0.4.22", features = ["std"] }
 lz4_flex = { version = "0.11.3", optional = true }
