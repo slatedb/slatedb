@@ -34,15 +34,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
-      - name: Install dependencies
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo dpkg --add-architecture arm64
-          sudo dpkg --add-architecture armel
-          sudo dpkg --add-architecture armhf
-          sudo dpkg --add-architecture ppc64el
-          sudo apt-get update
-          sudo apt-get install -y crossbuild-essential-i386 crossbuild-essential-arm64 crossbuild-essential-armel crossbuild-essential-armhf crossbuild-essential-ppc64el gcc-multilib g++-multilib
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -50,7 +41,7 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          manylinux: 2_28
+          manylinux: auto
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
