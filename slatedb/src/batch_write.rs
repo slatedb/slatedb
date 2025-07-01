@@ -26,9 +26,9 @@
 //! be contention between `get`s, which holds a lock, and the write loop._
 
 use log::{info, warn};
-use tracing::instrument;
 use std::sync::Arc;
 use tokio::runtime::Handle;
+use tracing::instrument;
 
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{spawn_bg_task, WatchableOnceCellReader};
