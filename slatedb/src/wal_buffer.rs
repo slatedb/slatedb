@@ -16,7 +16,7 @@ use crate::{
     oracle::Oracle,
     tablestore::TableStore,
     types::RowEntry,
-    utils::{spawn_bg_task, WatchableOnceCell, WatchableOnceCellReader},
+    utils::{spawn_bg_task, SendSafely, WatchableOnceCell, WatchableOnceCellReader},
     wal_id::WalIdStore,
     SlateDBError,
 };
@@ -219,10 +219,14 @@ impl WalBufferManager {
             )
         };
         if need_flush {
+            let db_state = self.db_state.as_ref().expect("db_state not initialized");
             flush_tx
                 .as_ref()
                 .expect("flush_tx not initialized, please call start_background first.")
-                .send(WalFlushWork { result_tx: None })
+                .send_safely(
+                    db_state.write().error_reader(),
+                    WalFlushWork { result_tx: None },
+                )
                 .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
         }
 
@@ -263,8 +267,11 @@ impl WalBufferManager {
             .clone()
             .expect("flush_tx not initialized, please call start_background first.");
         let (result_tx, result_rx) = oneshot::channel();
+        let db_state = self.db_state.as_ref().expect("db_state not initialized");
         flush_tx
-            .send(WalFlushWork {
+            .send_safely(
+                db_state.write().error_reader(),
+                WalFlushWork {
                 result_tx: Some(result_tx),
             })
             .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;

@@ -531,7 +531,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         Ok(Db {
             inner,
             memtable_flush_task: Mutex::new(memtable_flush_task),
-            write_task: Mutex::new(write_task),
+            write_task: Mutex::new(Some(write_task)),
             compactor_task: Mutex::new(compactor_task),
             garbage_collector_task: Mutex::new(garbage_collector_task),
             cancellation_token: self.cancellation_token,
