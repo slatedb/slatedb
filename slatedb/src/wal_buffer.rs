@@ -63,7 +63,7 @@ struct WalBufferManagerInner {
     /// The flusher will try flush all the immutable wals to remote storage.
     immutable_wals: VecDeque<(u64, Arc<KVTable>)>,
     /// The channel to send the flush work to the background worker.
-    flush_tx: Option<mpsc::Sender<WalFlushWork>>,
+    flush_tx: Option<mpsc::UnboundedSender<WalFlushWork>>,
     /// task handle of the background worker.
     background_task: Option<JoinHandle<Result<(), SlateDBError>>>,
     /// Whenever a WAL is applied to Memtable and successfully flushed to remote storage,
@@ -119,7 +119,7 @@ impl WalBufferManager {
             });
         }
 
-        let (flush_tx, flush_rx) = mpsc::channel(1);
+        let (flush_tx, flush_rx) = mpsc::unbounded_channel();
         {
             let mut inner = self.inner.write();
             inner.flush_tx = Some(flush_tx);
@@ -223,7 +223,6 @@ impl WalBufferManager {
                 .as_ref()
                 .expect("flush_tx not initialized, please call start_background first.")
                 .send(WalFlushWork { result_tx: None })
-                .await
                 .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
         }
 
@@ -268,7 +267,6 @@ impl WalBufferManager {
             .send(WalFlushWork {
                 result_tx: Some(result_tx),
             })
-            .await
             .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
         let mut quit_rx = self.quit_once.reader();
         // TODO: it's good to have a timeout here.
@@ -287,7 +285,7 @@ impl WalBufferManager {
 
     async fn do_background_work(
         self: Arc<Self>,
-        mut work_rx: mpsc::Receiver<WalFlushWork>,
+        mut work_rx: mpsc::UnboundedReceiver<WalFlushWork>,
         mut quit_rx: WatchableOnceCellReader<Result<(), SlateDBError>>,
         max_flush_interval: Option<Duration>,
     ) -> Result<(), SlateDBError> {
