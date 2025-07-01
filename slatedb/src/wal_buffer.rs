@@ -6,6 +6,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
+use tracing::error;
 
 use crate::{
     clock::MonotonicClock,
@@ -398,6 +399,7 @@ impl WalBufferManager {
                 // a KV table can be retried to flush multiple times, but WatchableOnceCell is only set once.
                 // we do NOT call `wal.notify_durable` as soon as encountered any error here, but notify
                 // the error when we're sure enters fatal state in `do_cleanup`.
+                error!("failed to flush wal {wal_id}: {e}");
                 return Err(e.clone());
             }
 
