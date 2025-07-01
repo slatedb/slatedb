@@ -328,111 +328,101 @@ mod tests {
     use crate::types::RowEntry;
     use rstest::rstest;
 
-    struct ExpectedState {
-        current_versions_len: usize,
-        has_next_entry: bool,
-        processed: bool,
-        end_of_input: bool,
-        state: RetentionBufferState,
+    struct RetentionBufferTestCase {
+        name: &'static str,
+        build: fn() -> RetentionBuffer,
+        expected_current_versions_len: usize,
+        expected_has_next_entry: bool,
+        expected_processed: bool,
+        expected_end_of_input: bool,
+        expected_state: RetentionBufferState,
     }
 
     // Table-driven test for complex scenarios
     #[rstest]
-    #[case::empty_buffer(
-        "empty_buffer",
-        || RetentionBuffer::new(),
-        ExpectedState {
-            current_versions_len: 0,
-            has_next_entry: false,
-            processed: false,
-            end_of_input: false,
-            state: RetentionBufferState::NeedPush,
-        }
-    )]
-    #[case::single_entry(
-        "single_entry",
-        || {
+    #[case(RetentionBufferTestCase {
+        name: "empty_buffer",
+        build: || RetentionBuffer::new(),
+        expected_current_versions_len: 0,
+        expected_has_next_entry: false,
+        expected_processed: false,
+        expected_end_of_input: false,
+        expected_state: RetentionBufferState::NeedPush,
+    })]
+    #[case(RetentionBufferTestCase {
+        name: "single_entry",
+        build: || {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer
         },
-        ExpectedState {
-            current_versions_len: 1,
-            has_next_entry: false,
-            processed: false,
-            end_of_input: false,
-            state: RetentionBufferState::NeedPush,
-        }
-    )]
-    #[case::key_transition(
-        "key_transition",
-        || {
+        expected_current_versions_len: 1,
+        expected_has_next_entry: false,
+        expected_processed: false,
+        expected_end_of_input: false,
+        expected_state: RetentionBufferState::NeedPush,
+    })]
+    #[case(RetentionBufferTestCase {
+        name: "key_transition",
+        build: || {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer.push(RowEntry::new_value(b"key2", b"value2", 2));
             buffer
         },
-        ExpectedState {
-            current_versions_len: 1,
-            has_next_entry: true,
-            processed: false,
-            end_of_input: false,
-            state: RetentionBufferState::NeedProcess,
-        }
-    )]
-    #[case::processed_state(
-        "processed_state",
-        || {
+        expected_current_versions_len: 1,
+        expected_has_next_entry: true,
+        expected_processed: false,
+        expected_end_of_input: false,
+        expected_state: RetentionBufferState::NeedProcess,
+    })]
+    #[case(RetentionBufferTestCase {
+        name: "processed_state",
+        build: || {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer.process_retention(|versions| versions).unwrap();
             buffer
         },
-        ExpectedState {
-            current_versions_len: 1,
-            has_next_entry: false,
-            processed: true,
-            end_of_input: false,
-            state: RetentionBufferState::NeedPopAndContinue,
-        }
-    )]
-    #[case::end_of_input_processed(
-        "end_of_input_processed",
-        || {
+        expected_current_versions_len: 1,
+        expected_has_next_entry: false,
+        expected_processed: true,
+        expected_end_of_input: false,
+        expected_state: RetentionBufferState::NeedPopAndContinue,
+    })]
+    #[case(RetentionBufferTestCase {
+        name: "end_of_input_processed",
+        build: || {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer.mark_end_of_input();
             buffer.process_retention(|versions| versions).unwrap();
             buffer
         },
-        ExpectedState {
-            current_versions_len: 1,
-            has_next_entry: false,
-            processed: true,
-            end_of_input: true,
-            state: RetentionBufferState::NeedPopAndQuit,
-        }
-    )]
-    #[case::multiple_versions_same_key(
-        "multiple_versions_same_key",
-        || {
+        expected_current_versions_len: 1,
+        expected_has_next_entry: false,
+        expected_processed: true,
+        expected_end_of_input: true,
+        expected_state: RetentionBufferState::NeedPopAndQuit,
+    })]
+    #[case(RetentionBufferTestCase {
+        name: "multiple_versions_same_key",
+        build: || {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer.push(RowEntry::new_value(b"key1", b"value2", 2));
             buffer.push(RowEntry::new_value(b"key1", b"value3", 3));
             buffer
         },
-        ExpectedState {
-            current_versions_len: 3,
-            has_next_entry: false,
-            processed: false,
-            end_of_input: false,
-            state: RetentionBufferState::NeedPush,
-        }
-    )]
-    #[case::pop_operation(
-        "pop_operation",
-        || {
+        expected_current_versions_len: 3,
+        expected_has_next_entry: false,
+        expected_processed: false,
+        expected_end_of_input: false,
+        expected_state: RetentionBufferState::NeedPush,
+    })]
+    #[case(RetentionBufferTestCase {
+        name: "pop_operation",
+        build: || {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer.push(RowEntry::new_value(b"key1", b"value2", 2));
@@ -440,17 +430,15 @@ mod tests {
             buffer.pop(); // Execute pop operation in the build function
             buffer
         },
-        ExpectedState {
-            current_versions_len: 1,
-            has_next_entry: false,
-            processed: true,
-            end_of_input: false,
-            state: RetentionBufferState::NeedPopAndContinue,
-        }
-    )]
-    #[case::clear_operation(
-        "clear_operation",
-        || {
+        expected_current_versions_len: 1,
+        expected_has_next_entry: false,
+        expected_processed: true,
+        expected_end_of_input: false,
+        expected_state: RetentionBufferState::NeedPopAndContinue,
+    })]
+    #[case(RetentionBufferTestCase {
+        name: "clear_operation",
+        build: || {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer.push(RowEntry::new_value(b"key2", b"value2", 2));
@@ -459,86 +447,76 @@ mod tests {
             buffer.clear(); // Execute clear operation in the build function
             buffer
         },
-        ExpectedState {
-            current_versions_len: 0,
-            has_next_entry: false,
-            processed: false,
-            end_of_input: false,
-            state: RetentionBufferState::NeedPush,
-        }
-    )]
-    #[case::tombstone_entries(
-        "tombstone_entries",
-        || {
+        expected_current_versions_len: 0,
+        expected_has_next_entry: false,
+        expected_processed: false,
+        expected_end_of_input: false,
+        expected_state: RetentionBufferState::NeedPush,
+    })]
+    #[case(RetentionBufferTestCase {
+        name: "tombstone_entries",
+        build: || {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer.push(RowEntry::new_tombstone(b"key1", 2));
             buffer
         },
-        ExpectedState {
-            current_versions_len: 2,
-            has_next_entry: false,
-            processed: false,
-            end_of_input: false,
-            state: RetentionBufferState::NeedPush,
-        }
-    )]
-    #[case::merge_entries(
-        "merge_entries",
-        || {
+        expected_current_versions_len: 2,
+        expected_has_next_entry: false,
+        expected_processed: false,
+        expected_end_of_input: false,
+        expected_state: RetentionBufferState::NeedPush,
+    })]
+    #[case(RetentionBufferTestCase {
+        name: "merge_entries",
+        build: || {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer.push(RowEntry::new_merge(b"key1", b"merge1", 2));
             buffer.push(RowEntry::new_tombstone(b"key1", 3));
             buffer
         },
-        ExpectedState {
-            current_versions_len: 3,
-            has_next_entry: false,
-            processed: false,
-            end_of_input: false,
-            state: RetentionBufferState::NeedPush,
-        }
-    )]
-    fn test_retention_buffer_table_driven(
-        #[case] name: &str,
-        #[case] build: fn() -> RetentionBuffer,
-        #[case] expected_state: ExpectedState,
-    ) {
-        let buffer = build();
+        expected_current_versions_len: 3,
+        expected_has_next_entry: false,
+        expected_processed: false,
+        expected_end_of_input: false,
+        expected_state: RetentionBufferState::NeedPush,
+    })]
+    fn test_retention_buffer_table_driven(#[case] test_case: RetentionBufferTestCase) {
+        let buffer = (test_case.build)();
 
         // Verify expected state
         assert_eq!(
             buffer.current_versions.len(),
-            expected_state.current_versions_len,
+            test_case.expected_current_versions_len,
             "Test case '{}': current_versions_len mismatch",
-            name
+            test_case.name
         );
         assert_eq!(
             buffer.next_entry.is_some(),
-            expected_state.has_next_entry,
+            test_case.expected_has_next_entry,
             "Test case '{}': has_next_entry mismatch",
-            name
+            test_case.name
         );
         assert_eq!(
-            buffer.processed, expected_state.processed,
+            buffer.processed, test_case.expected_processed,
             "Test case '{}': processed mismatch",
-            name
+            test_case.name
         );
         assert_eq!(
-            buffer.end_of_input, expected_state.end_of_input,
+            buffer.end_of_input, test_case.expected_end_of_input,
             "Test case '{}': end_of_input mismatch",
-            name
+            test_case.name
         );
 
         // Check state using proper comparison
         let current_state = buffer.state();
         assert_eq!(
             std::mem::discriminant(&current_state),
-            std::mem::discriminant(&expected_state.state),
+            std::mem::discriminant(&test_case.expected_state),
             "Test case '{}': state mismatch, expected {:?}, got {:?}",
-            name,
-            expected_state.state,
+            test_case.name,
+            test_case.expected_state,
             current_state
         );
     }
