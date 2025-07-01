@@ -272,8 +272,9 @@ impl WalBufferManager {
             .send_safely(
                 db_state.write().error_reader(),
                 WalFlushWork {
-                result_tx: Some(result_tx),
-            })
+                    result_tx: Some(result_tx),
+                },
+            )
             .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
         let mut quit_rx = self.quit_once.reader();
         // TODO: it's good to have a timeout here.
@@ -502,6 +503,9 @@ struct WalFlushWork {
 mod tests {
     use super::*;
     use crate::clock::MonotonicClock;
+    use crate::db_state::CoreDbState;
+    use crate::manifest::store::DirtyManifest;
+    use crate::manifest::Manifest;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -540,9 +544,13 @@ mod tests {
         let test_clock = Arc::new(TestClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
         let oracle = Arc::new(Oracle::new(MonotonicSeq::new(0)));
+        let db_state = Arc::new(RwLock::new(DbState::new(DirtyManifest::new(
+            0,
+            Manifest::initial(CoreDbState::new()),
+        ))));
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
-            None,
+            Some(db_state),
             DbStats::new(&StatRegistry::new()),
             0, // recent_flushed_wal_id
             oracle,
