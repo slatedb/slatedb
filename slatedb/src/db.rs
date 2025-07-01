@@ -158,6 +158,7 @@ impl DbInner {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
+        self.db_stats.get_requests.inc();
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
         self.reader
@@ -170,6 +171,7 @@ impl DbInner {
         range: BytesRange,
         options: &ScanOptions,
     ) -> Result<DbIterator<'a>, SlateDBError> {
+        self.db_stats.scan_requests.inc();
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
         self.reader
@@ -227,10 +229,12 @@ impl DbInner {
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
         self.check_error()?;
-
         if batch.ops.is_empty() {
             return Ok(());
         }
+        // record write batch and number of operations
+        self.db_stats.write_batch_count.inc();
+        self.db_stats.write_ops.add(batch.ops.len() as u64);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
