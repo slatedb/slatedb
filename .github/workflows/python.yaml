@@ -36,8 +36,9 @@ jobs:
           python-version: 3.x
       - name: Install dependencies
         run: |
+          sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib g++-multilib libc6-dev:i386 libstdc++6:i386
+          sudo apt-get install -y crossbuild-essential-i386 crossbuild-essential-arm64 crossbuild-essential-armel crossbuild-essential-armhf crossbuild-essential-ppc64el crossbuild-essential-s390x gcc-multilib g++-multilib
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
