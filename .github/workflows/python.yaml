@@ -36,6 +36,13 @@ jobs:
           python-version: 3.x
       - name: Build wheels
         uses: PyO3/maturin-action@v1
+        env:
+          CC_aarch64_unknown_linux_gnu: aarch64-unknown-linux-gnu-gcc
+          AR_aarch64_unknown_linux_gnu: aarch64-unknown-linux-gnu-ar
+          RANLIB_aarch64_unknown_linux_gnu: aarch64-unknown-linux-gnu-ranlib
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-unknown-linux-gnu-gcc
+          # ensure the ARM assembler defines __ARM_ARCH
+          CFLAGS_aarch64_unknown_linux_gnu: "-march=armv8-a -D__ARM_ARCH=8"
         with:
           working-directory: ./slatedb-py
           target: ${{ matrix.platform.target }}
