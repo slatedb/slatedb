@@ -521,266 +521,262 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_retention_iterator_table_driven() {
-        use crate::test_utils::TestIterator;
-        use std::time::Duration;
+    struct RetentionIteratorTestCase {
+        name: &'static str,
+        input_entries: Vec<RowEntry>,
+        retention_time: Duration,
+        current_timestamp: i64,
+        expected_entries: Vec<RowEntry>,
+    }
 
-        struct RetentionTestCase {
-            name: &'static str,
-            input_entries: Vec<RowEntry>,
-            retention_time: Duration,
-            current_timestamp: i64,
-            expected_entries: Vec<RowEntry>,
+    // Table-driven test for retention iterator scenarios
+    #[rstest]
+    #[case(RetentionIteratorTestCase {
+        name: "empty_iterator",
+        input_entries: vec![],
+        retention_time: Duration::from_secs(3600), // 1 hour
+        current_timestamp: 1000,
+        expected_entries: vec![],
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "single_entry_within_retention",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950), // 50 seconds ago
+        ],
+        retention_time: Duration::from_secs(3600), // 1 hour
+        current_timestamp: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950)
+        ],
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "single_entry_outside_retention",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 seconds ago
+        ],
+        retention_time: Duration::from_secs(3600), // 1 hour
+        current_timestamp: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
+        ],
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "multiple_versions_same_key_within_retention",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950), // Latest
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900), // Within retention
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
+        ],
+        retention_time: Duration::from_secs(3600), // 1 hour
+        current_timestamp: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
+        ],
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "multiple_versions_same_key_mixed_retention",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950), // Latest (always kept)
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // Outside retention
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
+        ],
+        retention_time: Duration::from_secs(3600), // 1 hour
+        current_timestamp: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
+        ],
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "single_key_with_retention_filtering",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest (always kept)
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // Outside retention
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100), // Outside retention
+        ],
+        retention_time: Duration::from_secs(300), // 5 minutes
+        current_timestamp: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest always kept
+        ],
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "tombstone_entries",
+        input_entries: vec![
+            RowEntry::new_tombstone(b"key1", 3).with_create_ts(950), // Latest
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // Outside retention
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
+        ],
+        retention_time: Duration::from_secs(3600), // 1 hour
+        current_timestamp: 1000,
+        expected_entries: vec![
+            RowEntry::new_tombstone(b"key1", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
+        ],
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "merge_entries",
+        input_entries: vec![
+            RowEntry::new_merge(b"key1", b"merge3", 3).with_create_ts(950), // Latest
+            RowEntry::new_merge(b"key1", b"merge2", 2).with_create_ts(500), // Outside retention
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
+        ],
+        retention_time: Duration::from_secs(3600), // 1 hour
+        current_timestamp: 1000,
+        expected_entries: vec![
+            RowEntry::new_merge(b"key1", b"merge3", 3).with_create_ts(950),
+            RowEntry::new_merge(b"key1", b"merge2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
+        ],
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "entries_without_create_ts",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3), // No create_ts
+            RowEntry::new_value(b"key1", b"value2", 2), // No create_ts
+            RowEntry::new_value(b"key1", b"value1", 1), // No create_ts
+        ],
+        retention_time: Duration::from_secs(3600), // 1 hour
+        current_timestamp: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3),
+            RowEntry::new_value(b"key1", b"value2", 2),
+            RowEntry::new_value(b"key1", b"value1", 1),
+        ],
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "mixed_create_ts_presence",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950), // With create_ts
+            RowEntry::new_value(b"key1", b"value2", 2),                     // No create_ts
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // Outside retention
+        ],
+        retention_time: Duration::from_secs(3600), // 1 hour
+        current_timestamp: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2), // No create_ts, always kept
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
+        ],
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "zero_retention_time",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Current time
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(999),  // 1 second ago
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(998), // 2 seconds ago
+        ],
+        retention_time: Duration::from_secs(0), // No retention
+        current_timestamp: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest always kept
+        ],
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "entries_outside_retention_window",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Current time (always kept)
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // 500 seconds ago
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100), // 900 seconds ago
+        ],
+        retention_time: Duration::from_secs(300), // 5 minutes retention
+        current_timestamp: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest always kept
+        ],
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "very_long_retention_time",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(100), // Very old
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(50),  // Very old
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(10),  // Very old
+        ],
+        retention_time: Duration::from_secs(1000), // Very long retention
+        current_timestamp: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(100),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(50),
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(10),
+        ],
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "exact_retention_boundary",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Current time
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(640), // Exactly at boundary
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(639), // Just outside
+        ],
+        retention_time: Duration::from_secs(360), // 6 minutes
+        current_timestamp: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(640), // At boundary, kept
+        ],
+    })]
+    #[tokio::test]
+    async fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
+        use crate::test_utils::TestIterator;
+
+        // Test the apply_retention_filter function directly since TestIterator doesn't support create_ts
+        let mut versions = std::collections::BTreeMap::new();
+        for entry in test_case.input_entries.iter() {
+            versions.insert(Reverse(entry.seq), entry.clone());
         }
 
-        let test_cases = vec![
-            RetentionTestCase {
-                name: "empty_iterator",
-                input_entries: vec![],
-                retention_time: Duration::from_secs(3600), // 1 hour
-                current_timestamp: 1000,
-                expected_entries: vec![],
-            },
-            RetentionTestCase {
-                name: "single_entry_within_retention",
-                input_entries: vec![
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950), // 50 seconds ago
-                ],
-                retention_time: Duration::from_secs(3600), // 1 hour
-                current_timestamp: 1000,
-                expected_entries: vec![
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950)
-                ],
-            },
-            RetentionTestCase {
-                name: "single_entry_outside_retention",
-                input_entries: vec![
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 seconds ago
-                ],
-                retention_time: Duration::from_secs(3600), // 1 hour
-                current_timestamp: 1000,
-                expected_entries: vec![
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
-                ],
-            },
-            RetentionTestCase {
-                name: "multiple_versions_same_key_within_retention",
-                input_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950), // Latest
-                    RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900), // Within retention
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
-                ],
-                retention_time: Duration::from_secs(3600), // 1 hour
-                current_timestamp: 1000,
-                expected_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
-                    RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
-                ],
-            },
-            RetentionTestCase {
-                name: "multiple_versions_same_key_mixed_retention",
-                input_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950), // Latest (always kept)
-                    RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // Outside retention
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
-                ],
-                retention_time: Duration::from_secs(3600), // 1 hour
-                current_timestamp: 1000,
-                expected_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
-                    RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
-                ],
-            },
-            RetentionTestCase {
-                name: "single_key_with_retention_filtering",
-                input_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest (always kept)
-                    RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // Outside retention
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100), // Outside retention
-                ],
-                retention_time: Duration::from_secs(300), // 5 minutes
-                current_timestamp: 1000,
-                expected_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest always kept
-                ],
-            },
-            RetentionTestCase {
-                name: "tombstone_entries",
-                input_entries: vec![
-                    RowEntry::new_tombstone(b"key1", 3).with_create_ts(950), // Latest
-                    RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // Outside retention
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
-                ],
-                retention_time: Duration::from_secs(3600), // 1 hour
-                current_timestamp: 1000,
-                expected_entries: vec![
-                    RowEntry::new_tombstone(b"key1", 3).with_create_ts(950),
-                    RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
-                ],
-            },
-            RetentionTestCase {
-                name: "merge_entries",
-                input_entries: vec![
-                    RowEntry::new_merge(b"key1", b"merge3", 3).with_create_ts(950), // Latest
-                    RowEntry::new_merge(b"key1", b"merge2", 2).with_create_ts(500), // Outside retention
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
-                ],
-                retention_time: Duration::from_secs(3600), // 1 hour
-                current_timestamp: 1000,
-                expected_entries: vec![
-                    RowEntry::new_merge(b"key1", b"merge3", 3).with_create_ts(950),
-                    RowEntry::new_merge(b"key1", b"merge2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
-                ],
-            },
-            RetentionTestCase {
-                name: "entries_without_create_ts",
-                input_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3), // No create_ts
-                    RowEntry::new_value(b"key1", b"value2", 2), // No create_ts
-                    RowEntry::new_value(b"key1", b"value1", 1), // No create_ts
-                ],
-                retention_time: Duration::from_secs(3600), // 1 hour
-                current_timestamp: 1000,
-                expected_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3),
-                    RowEntry::new_value(b"key1", b"value2", 2),
-                    RowEntry::new_value(b"key1", b"value1", 1),
-                ],
-            },
-            RetentionTestCase {
-                name: "mixed_create_ts_presence",
-                input_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950), // With create_ts
-                    RowEntry::new_value(b"key1", b"value2", 2),                     // No create_ts
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // Outside retention
-                ],
-                retention_time: Duration::from_secs(3600), // 1 hour
-                current_timestamp: 1000,
-                expected_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
-                    RowEntry::new_value(b"key1", b"value2", 2), // No create_ts, always kept
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
-                ],
-            },
-            RetentionTestCase {
-                name: "zero_retention_time",
-                input_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Current time
-                    RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(999),  // 1 second ago
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(998), // 2 seconds ago
-                ],
-                retention_time: Duration::from_secs(0), // No retention
-                current_timestamp: 1000,
-                expected_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest always kept
-                ],
-            },
-            RetentionTestCase {
-                name: "entries_outside_retention_window",
-                input_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Current time (always kept)
-                    RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // 500 seconds ago
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100), // 900 seconds ago
-                ],
-                retention_time: Duration::from_secs(300), // 5 minutes retention
-                current_timestamp: 1000,
-                expected_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest always kept
-                ],
-            },
-            RetentionTestCase {
-                name: "very_long_retention_time",
-                input_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(100), // Very old
-                    RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(50),  // Very old
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(10),  // Very old
-                ],
-                retention_time: Duration::from_secs(1000), // Very long retention
-                current_timestamp: 1000,
-                expected_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(100),
-                    RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(50),
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(10),
-                ],
-            },
-            RetentionTestCase {
-                name: "exact_retention_boundary",
-                input_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Current time
-                    RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(640), // Exactly at boundary
-                    RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(639), // Just outside
-                ],
-                retention_time: Duration::from_secs(360), // 6 minutes
-                current_timestamp: 1000,
-                expected_entries: vec![
-                    RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000),
-                    RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(640), // At boundary, kept
-                ],
-            },
-        ];
+        let filtered_versions = RetentionIterator::<TestIterator>::apply_retention_filter(
+            versions,
+            test_case.current_timestamp,
+            test_case.retention_time,
+        );
 
-        for test_case in test_cases {
-            // Test the apply_retention_filter function directly since TestIterator doesn't support create_ts
-            let mut versions = std::collections::BTreeMap::new();
-            for entry in test_case.input_entries.iter() {
-                versions.insert(Reverse(entry.seq), entry.clone());
-            }
+        // Convert filtered versions back to expected order
+        let mut actual_entries = Vec::new();
+        for (_, entry) in filtered_versions.iter() {
+            actual_entries.push(entry.clone());
+        }
 
-            let filtered_versions = RetentionIterator::<TestIterator>::apply_retention_filter(
-                versions,
-                test_case.current_timestamp,
-                test_case.retention_time,
-            );
+        // Sort by sequence number (descending) to match expected order
+        actual_entries.sort_by(|a, b| b.seq.cmp(&a.seq));
 
-            // Convert filtered versions back to expected order
-            let mut actual_entries = Vec::new();
-            for (_, entry) in filtered_versions.iter() {
-                actual_entries.push(entry.clone());
-            }
+        assert_eq!(
+            actual_entries.len(),
+            test_case.expected_entries.len(),
+            "Test case '{}': Expected {} entries, got {}",
+            test_case.name,
+            test_case.expected_entries.len(),
+            actual_entries.len()
+        );
 
-            // Sort by sequence number (descending) to match expected order
-            actual_entries.sort_by(|a, b| b.seq.cmp(&a.seq));
-
+        for (i, (actual, expected)) in actual_entries
+            .iter()
+            .zip(test_case.expected_entries.iter())
+            .enumerate()
+        {
             assert_eq!(
-                actual_entries.len(),
-                test_case.expected_entries.len(),
-                "Test case '{}': Expected {} entries, got {}",
-                test_case.name,
-                test_case.expected_entries.len(),
-                actual_entries.len()
+                actual.key, expected.key,
+                "Test case '{}': Entry {} key mismatch",
+                test_case.name, i
             );
-
-            for (i, (actual, expected)) in actual_entries
-                .iter()
-                .zip(test_case.expected_entries.iter())
-                .enumerate()
-            {
-                assert_eq!(
-                    actual.key, expected.key,
-                    "Test case '{}': Entry {} key mismatch",
-                    test_case.name, i
-                );
-                assert_eq!(
-                    actual.value, expected.value,
-                    "Test case '{}': Entry {} value mismatch",
-                    test_case.name, i
-                );
-                assert_eq!(
-                    actual.seq, expected.seq,
-                    "Test case '{}': Entry {} sequence number mismatch",
-                    test_case.name, i
-                );
-                assert_eq!(
-                    actual.create_ts, expected.create_ts,
-                    "Test case '{}': Entry {} create timestamp mismatch",
-                    test_case.name, i
-                );
-            }
+            assert_eq!(
+                actual.value, expected.value,
+                "Test case '{}': Entry {} value mismatch",
+                test_case.name, i
+            );
+            assert_eq!(
+                actual.seq, expected.seq,
+                "Test case '{}': Entry {} sequence number mismatch",
+                test_case.name, i
+            );
+            assert_eq!(
+                actual.create_ts, expected.create_ts,
+                "Test case '{}': Entry {} create timestamp mismatch",
+                test_case.name, i
+            );
         }
     }
 }
