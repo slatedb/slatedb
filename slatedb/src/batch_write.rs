@@ -1,19 +1,19 @@
 //! # Batch Write
 //!
-//! This module adds batch write functionality to `DbInner`. Prior to this feature,
-//! writes were performed directly in `DbInner`'s `put_with_options` and
+//! This module adds batch write functionality to DbInner. Prior to this feature,
+//! writes were performed directly in DbInner's `put_with_options` and
 //! `delete_with_options` methods. For each operation, a lock was acquired on the
-//! `db_state` to mutate the WAL or memtable. This worked fine for single writes,
+//! db_state to mutate the WAL or memtable. This worked fine for single writes,
 //! but for batch writes, which take longer, it could create contention on the lock
 //! because. This is dangerous in an async runtime because it can block the
 //! threads, leading to starvation.
 //!
 //! This module spawns a separate task to handle batch writes. The task receives
-//! a `WriteBatchMsg`, which contains a `WriteBatchRequest`. The `WriteBatchRequest`
+//! a `WriteBatchMsg``, which contains a `WriteBatchRequest``. The `WriteBatchRequest`
 //! contains a `WriteBatch` containing Put/Delete operations and a `oneshot::Sender`.
 //! The `Sender` is used to send the table that the batch was written to back to the
 //! caller so the caller can `.await` the result. The result is that callers safely
-//! `.await` on their writes rather than holding a lock on the `db_state`.
+//! `.await` on their writes rather than holding a lock on the db_state.
 //!
 //! Centralizing the writes in a single event loop also provides a single location to
 //! assign sequence numbers when we implement MVCC.
@@ -22,7 +22,7 @@
 //! [a good write-up](https://github.com/cockroachdb/pebble/blob/master/docs/rocksdb.md#commit-pipeline)
 //! describing its benefits.
 //!
-//! _Note: The `write_batch` loop still holds a lock on the `db_state`. There can still
+//! _Note: The `write_batch` loop still holds a lock on the db_state. There can still
 //! be contention between `get`s, which holds a lock, and the write loop._
 
 use log::{info, warn};
@@ -116,7 +116,7 @@ impl DbInner {
         self: &Arc<Self>,
         mut rx: tokio::sync::mpsc::UnboundedReceiver<WriteBatchMsg>,
         tokio_handle: &Handle,
-    ) -> tokio::task::JoinHandle<Result<(), SlateDBError>> {
+    ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
         let this = Arc::clone(self);
         let mut is_stopped = false;
         let fut = async move {
@@ -136,7 +136,7 @@ impl DbInner {
         };
 
         let this = Arc::clone(self);
-        spawn_bg_task(
+        Some(spawn_bg_task(
             tokio_handle,
             move |result| {
                 let err = match result {
@@ -154,6 +154,6 @@ impl DbInner {
                 state.record_fatal_error(err.clone());
             },
             fut,
-        )
+        ))
     }
 }
