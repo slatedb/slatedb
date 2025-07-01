@@ -23,9 +23,10 @@ use crate::compactor::stats::CompactionStats;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
 use crate::utils::{spawn_bg_task, IdGenerator};
-use tracing::error;
+use tracing::{error, instrument};
 use uuid::Uuid;
 
+#[derive(Debug)]
 pub(crate) struct CompactionJob {
     pub(crate) id: Uuid,
     pub(crate) destination: u32,
@@ -132,6 +133,7 @@ impl TokioCompactionExecutorInner {
         MergeIterator::new([l0_merge_iter, sr_merge_iter]).await
     }
 
+    #[instrument(level = "debug", skip(self))]
     async fn execute_compaction(
         &self,
         compaction: CompactionJob,

@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Interval;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, instrument};
 use wal_gc::WalGcTask;
 
 mod compacted_gc;
@@ -191,7 +191,8 @@ impl GarbageCollector {
         (wal_gc_task, compacted_gc_task, manifest_gc_task)
     }
 
-    async fn run_gc_task<T: GcTask>(&self, task: &mut T) {
+    #[instrument(level = "debug", skip(self))]
+    async fn run_gc_task<T: GcTask + std::fmt::Debug>(&self, task: &mut T) {
         debug!(
             "Scheduled garbage collection attempt for {}.",
             task.resource()
