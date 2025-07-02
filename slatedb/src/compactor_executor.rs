@@ -243,16 +243,17 @@ impl TokioCompactionExecutorInner {
                 _ => raw_kv,
             };
 
+            // Update progress
+            let key_len = kv.key.len() as u64;
+            let value_len = kv.value.len() as u64;
+            progress_logger.log_progress(key_len + value_len, false);
+
             if compaction.is_dest_last_run && kv.value.is_tombstone() {
                 continue;
             }
 
-            // Add to SST
-            let key_len = kv.key.len() as u64;
-            let value_len = kv.value.len() as u64;
             current_writer.add(kv).await?;
             current_size += key_len as usize + value_len as usize;
-            progress_logger.log_progress(key_len + value_len, false);
 
             if current_size > self.options.max_sst_size {
                 current_size = 0;
