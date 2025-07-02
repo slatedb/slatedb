@@ -37,13 +37,6 @@ pub(crate) struct CompactionJob {
 
 impl std::fmt::Debug for CompactionJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let estimated_sst_size = self.ssts.iter().map(|sst| sst.estimate_size()).sum::<u64>();
-        let estimated_sr_size = self
-            .sorted_runs
-            .iter()
-            .map(|sr| sr.estimate_size())
-            .sum::<u64>();
-        let estimated_total_size = estimated_sst_size + estimated_sr_size;
         f.debug_struct("CompactionJob")
             .field("id", &self.id)
             .field("destination", &self.destination)
@@ -51,8 +44,21 @@ impl std::fmt::Debug for CompactionJob {
             .field("sorted_runs", &self.sorted_runs)
             .field("compaction_ts", &self.compaction_ts)
             .field("is_dest_last_run", &self.is_dest_last_run)
-            .field("estimated_source_bytes", &estimated_total_size)
+            .field("estimated_source_bytes", &self.estimated_source_bytes())
             .finish()
+    }
+}
+
+impl CompactionJob {
+    /// Estimates the total size of the source SSTs and sorted runs.
+    pub(crate) fn estimated_source_bytes(&self) -> u64 {
+        let sst_size = self.ssts.iter().map(|sst| sst.estimate_size()).sum::<u64>();
+        let sr_size = self
+            .sorted_runs
+            .iter()
+            .map(|sr| sr.estimate_size())
+            .sum::<u64>();
+        sst_size + sr_size
     }
 }
 
