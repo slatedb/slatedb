@@ -63,11 +63,7 @@ impl CompactionProgressLogger {
 
     /// Overwrites the progress for a compaction job with the latest processed bytes.
     pub fn update_progress(&mut self, id: Uuid, bytes_processed: u64) {
-        if let Some((_, total_bytes)) = self
-            .processed_bytes
-            .get(&id)
-            .map(|entry| *entry.value())
-        {
+        if let Some((_, total_bytes)) = self.processed_bytes.get(&id).map(|entry| *entry.value()) {
             self.processed_bytes
                 .insert(id, (bytes_processed, total_bytes));
         } else {
@@ -191,6 +187,7 @@ impl Compactor {
             self.table_store.clone(),
             self.rand.clone(),
             self.stats.clone(),
+            self.system_clock.clone(),
         ));
         let mut handler = CompactorEventHandler::new(
             self.manifest_store.clone(),
@@ -883,6 +880,7 @@ mod tests {
                 table_store,
                 rand.clone(),
                 compactor_stats.clone(),
+                Arc::new(DefaultSystemClock::new()),
             ));
             let handler = CompactorEventHandler::new(
                 manifest_store.clone(),

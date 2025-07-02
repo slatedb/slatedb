@@ -2,12 +2,13 @@ use std::collections::{HashMap, VecDeque};
 use std::mem;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::future::join_all;
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
+use crate::clock::SystemClock;
 use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor::WorkerToOrchestratorMsg::CompactionFinished;
 use crate::config::CompactorOptions;
@@ -81,6 +82,7 @@ impl TokioCompactionExecutor {
         table_store: Arc<TableStore>,
         rand: Arc<DbRand>,
         stats: Arc<CompactionStats>,
+        clock: Arc<dyn SystemClock>,
     ) -> Self {
         Self {
             inner: Arc::new(TokioCompactionExecutorInner {
@@ -91,6 +93,7 @@ impl TokioCompactionExecutor {
                 rand,
                 tasks: Arc::new(Mutex::new(HashMap::new())),
                 stats,
+                clock,
                 is_stopped: AtomicBool::new(false),
             }),
         }
@@ -123,6 +126,7 @@ pub(crate) struct TokioCompactionExecutorInner {
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
+    clock: Arc<dyn SystemClock>,
     is_stopped: AtomicBool,
 }
 
@@ -173,7 +177,7 @@ impl TokioCompactionExecutorInner {
             .table_writer(SsTableId::Compacted(self.rand.thread_rng().gen_ulid()));
         let mut current_size = 0usize;
         let mut total_bytes_processed = 0u64;
-        let mut last_progress_report = Instant::now();
+        let mut last_progress_report = self.clock.now();
 
         while let Some(raw_kv) = all_iter.next_entry().await? {
             // filter out any expired entries -- eventually we can consider
@@ -200,14 +204,19 @@ impl TokioCompactionExecutorInner {
             let value_len = kv.value.len() as u64;
 
             total_bytes_processed += key_len + value_len;
-            if last_progress_report.elapsed() > Duration::from_secs(1) {
+            let duration_since_last_report = self
+                .clock
+                .now()
+                .duration_since(last_progress_report)
+                .unwrap_or(Duration::from_secs(0));
+            if duration_since_last_report > Duration::from_secs(1) {
                 self.worker_tx
                     .send(WorkerToOrchestratorMsg::CompactionProgress {
                         id: compaction.id,
                         bytes_processed: total_bytes_processed,
                     })
                     .expect("failed to send compaction progress");
-                last_progress_report = Instant::now();
+                last_progress_report = self.clock.now();
             }
 
             self.worker_tx
