@@ -153,7 +153,7 @@ impl CompactionProgressLogger {
     pub fn log_progress(&mut self, bytes_processed: u64, is_done: bool) {
         self.total_processed_bytes += bytes_processed;
 
-        if self.estimated_total_bytes > 0 && self.last_log_print.elapsed() >= self.log_interval {
+        if is_done || self.last_log_print.elapsed() >= self.log_interval {
             self.last_log_print = Instant::now();
             let current_percentage =
                 (self.total_processed_bytes * 100 / self.estimated_total_bytes) as u32;
