@@ -5,7 +5,7 @@ use atomic::{Atomic, Ordering};
 use bytemuck::NoUninit;
 use tracing::warn;
 
-pub trait ReadableStat: Send + Sync {
+pub trait ReadableStat: Send + Sync + std::fmt::Debug {
     fn get(&self) -> i64;
 }
 
@@ -30,6 +30,15 @@ impl StatRegistry {
         guard.keys().copied().collect()
     }
 
+    /// Returns a snapshot of all stats currently registered in the registry.
+    pub fn snapshot(&self) -> Vec<(&'static str, Arc<dyn ReadableStat>)> {
+        let guard = self.stats.lock().expect("lock poisoned");
+        guard
+            .iter()
+            .map(|(&name, stat)| (name, stat.clone()))
+            .collect()
+    }
+
     pub(crate) fn register(&self, name: &'static str, stat: Arc<dyn ReadableStat>) {
         let mut guard = self.stats.lock().expect("lock poisoned");
         debug_assert!(!guard.contains_key(name));
@@ -44,9 +53,15 @@ impl StatRegistry {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Counter {
     pub(crate) value: Arc<Atomic<u64>>,
+}
+
+impl std::fmt::Debug for Counter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.value.load(Ordering::Relaxed))
+    }
 }
 
 impl ReadableStat for Counter {
@@ -73,9 +88,15 @@ impl Default for Counter {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Gauge<T: std::fmt::Debug + NoUninit> {
     value: Arc<Atomic<T>>,
+}
+
+impl<T: std::fmt::Debug + NoUninit> std::fmt::Debug for Gauge<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.value.load(Ordering::Relaxed))
+    }
 }
 
 impl ReadableStat for Gauge<i32> {
