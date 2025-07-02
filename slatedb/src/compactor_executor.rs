@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::mem;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use parking_lot::Mutex;
@@ -125,6 +126,49 @@ pub(crate) struct TokioCompactionExecutorInner {
     is_stopped: AtomicBool,
 }
 
+/// Struct responsible for tracking and logging compaction progress
+pub(crate) struct CompactionProgressLogger {
+    /// Total estimated bytes to be processed
+    estimated_total_bytes: u64,
+    /// Total bytes processed so far
+    total_processed_bytes: u64,
+    /// Last time a log message was printed
+    last_log_print: Instant,
+    /// Minimum interval between log messages
+    log_interval: Duration,
+}
+
+impl CompactionProgressLogger {
+    /// Creates a new progress logger
+    pub fn new(estimated_total_bytes: u64, log_interval: Duration) -> Self {
+        Self {
+            estimated_total_bytes,
+            total_processed_bytes: 0,
+            last_log_print: Instant::now(),
+            log_interval,
+        }
+    }
+
+    /// Updates progress by the given amount of bytes and logs if necessary
+    pub fn log_progress(&mut self, bytes_processed: u64, is_done: bool) {
+        self.total_processed_bytes += bytes_processed;
+
+        if self.estimated_total_bytes > 0 && self.last_log_print.elapsed() >= self.log_interval {
+            self.last_log_print = Instant::now();
+            let current_percentage =
+                (self.total_processed_bytes * 100 / self.estimated_total_bytes) as u32;
+
+            debug!(
+                current_percentage = format!("{current_percentage}%"),
+                processed_bytes = self.total_processed_bytes,
+                estimated_total_bytes = self.estimated_total_bytes,
+                is_done,
+                "compaction progress"
+            );
+        }
+    }
+}
+
 impl TokioCompactionExecutorInner {
     async fn load_iterators<'a>(
         &self,
@@ -171,9 +215,12 @@ impl TokioCompactionExecutorInner {
             .table_store
             .table_writer(SsTableId::Compacted(self.rand.thread_rng().gen_ulid()));
         let mut current_size = 0usize;
-        let estimated_total_bytes = compaction.estimated_source_bytes();
-        let mut total_processed_bytes = 0u64;
-        let mut last_log_print = std::time::Instant::now();
+
+        // Initialize the progress logger
+        let mut progress_logger = CompactionProgressLogger::new(
+            compaction.estimated_source_bytes(),
+            Duration::from_secs(10),
+        );
 
         while let Some(raw_kv) = all_iter.next_entry().await? {
             // filter out any expired entries -- eventually we can consider
@@ -205,21 +252,7 @@ impl TokioCompactionExecutorInner {
             let value_len = kv.value.len() as u64;
             current_writer.add(kv).await?;
             current_size += key_len as usize + value_len as usize;
-
-            // Update progress tracking
-            total_processed_bytes += key_len + value_len;
-
-            if estimated_total_bytes > 0 && last_log_print.elapsed().as_secs() > 10 {
-                last_log_print = std::time::Instant::now();
-                let current_percentage =
-                    (total_processed_bytes * 100 / estimated_total_bytes) as u32;
-                debug!(
-                    current_percentage = format!("{current_percentage}%"),
-                    processed_bytes = total_processed_bytes,
-                    estimated_total_bytes,
-                    "compaction progress"
-                );
-            }
+            progress_logger.log_progress(key_len + value_len, false);
 
             if current_size > self.options.max_sst_size {
                 current_size = 0;
@@ -233,12 +266,7 @@ impl TokioCompactionExecutorInner {
             }
         }
 
-        debug!(
-            current_percentage = "100%",
-            processed_bytes = total_processed_bytes,
-            estimated_total_bytes,
-            "compaction finished"
-        );
+        progress_logger.log_progress(0, true);
 
         if current_size > 0 {
             output_ssts.push(current_writer.close().await?);
