@@ -171,6 +171,9 @@ impl TokioCompactionExecutorInner {
             .table_store
             .table_writer(SsTableId::Compacted(self.rand.thread_rng().gen_ulid()));
         let mut current_size = 0usize;
+        let estimated_total_bytes = compaction.estimated_source_bytes();
+        let mut total_processed_bytes = 0u64;
+        let mut last_log_print = std::time::Instant::now();
 
         while let Some(raw_kv) = all_iter.next_entry().await? {
             // filter out any expired entries -- eventually we can consider
@@ -198,10 +201,26 @@ impl TokioCompactionExecutorInner {
             }
 
             // Add to SST
-            let key_len = kv.key.len();
-            let value_len = kv.value.len();
+            let key_len = kv.key.len() as u64;
+            let value_len = kv.value.len() as u64;
             current_writer.add(kv).await?;
-            current_size += key_len + value_len;
+            current_size += key_len as usize + value_len as usize;
+
+            // Update progress tracking
+            total_processed_bytes += key_len + value_len;
+
+            if estimated_total_bytes > 0 && last_log_print.elapsed().as_secs() > 10 {
+                last_log_print = std::time::Instant::now();
+                let current_percentage =
+                    (total_processed_bytes * 100 / estimated_total_bytes) as u32;
+                debug!(
+                    current_percentage = format!("{current_percentage}%"),
+                    processed_bytes = total_processed_bytes,
+                    estimated_total_bytes,
+                    "compaction progress"
+                );
+            }
+
             if current_size > self.options.max_sst_size {
                 current_size = 0;
                 let finished_writer = mem::replace(
@@ -213,6 +232,14 @@ impl TokioCompactionExecutorInner {
                 self.stats.bytes_compacted.add(current_size as u64);
             }
         }
+
+        debug!(
+            current_percentage = "100%",
+            processed_bytes = total_processed_bytes,
+            estimated_total_bytes,
+            "compaction finished"
+        );
+
         if current_size > 0 {
             output_ssts.push(current_writer.close().await?);
             self.stats.bytes_compacted.add(current_size as u64);
