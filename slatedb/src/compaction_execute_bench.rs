@@ -338,14 +338,19 @@ impl CompactionExecuteBench {
         let start = tokio::time::Instant::now();
         info!("start compaction job");
         tokio::task::spawn_blocking(move || executor.start_compaction(job));
-        let WorkerToOrchestratorMsg::CompactionFinished { id: _, result } =
-            rx.recv().await.expect("recv failed");
-        match result {
-            Ok(_) => {
-                info!("compaction finished in {:?}", start.elapsed());
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                WorkerToOrchestratorMsg::CompactionFinished { id: _, result } => match result {
+                    Ok(_) => {
+                        info!(elapsed = ?start.elapsed(), "compaction finished");
+                    }
+                    Err(err) => return Err(err),
+                },
+                // Ignore compactor progress reports
+                _ => {}
             }
-            Err(err) => return Err(err),
         }
+
         Ok(())
     }
 

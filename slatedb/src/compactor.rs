@@ -3,8 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::UNIX_EPOCH;
 
+use crossbeam_skiplist::SkipMap;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 use tracing::instrument;
 use tracing::{error, info, warn};
 use ulid::Ulid;
@@ -32,10 +34,75 @@ pub trait CompactionScheduler: Send + Sync {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
 }
 
+/// Tracks progress of various compactions. Progress is updated from the executor with
+/// [`CompactionProgressLogger::update_progress`]. This isn't guaranteed to be fully accurate.
+///
+/// **WARN: This will definitely be inaccurate if compression is used.**
+pub(crate) struct CompactionProgressLogger {
+    /// Tracks the number of bytes processed and total bytes (all source SSTs and sorted runs)
+    /// for each compaction job. Can be an estimate.
+    ///
+    /// (processed_bytes, total_bytes)
+    processed_bytes: SkipMap<Uuid, (u64, u64)>,
+}
+
+impl CompactionProgressLogger {
+    pub fn new() -> Self {
+        Self {
+            processed_bytes: SkipMap::new(),
+        }
+    }
+
+    pub fn add_job(&mut self, id: Uuid, bytes: u64) {
+        self.processed_bytes.insert(id, (0, bytes));
+    }
+
+    pub fn remove_job(&mut self, id: Uuid) {
+        self.processed_bytes.remove(&id);
+    }
+
+    /// Overwrites the progress for a compaction job with the latest processed bytes.
+    pub fn update_progress(&mut self, id: Uuid, bytes_processed: u64) {
+        if let Some((_, total_bytes)) = self
+            .processed_bytes
+            .get(&id)
+            .map(|entry| entry.value().clone())
+        {
+            self.processed_bytes
+                .insert(id, (bytes_processed, total_bytes));
+        } else {
+            warn!(%id, "compaction progress tracker missing for job");
+        }
+    }
+
+    /// Outputs the progress of each compaction job to debug.
+    pub fn log_progress(&self) {
+        for entry in self.processed_bytes.iter() {
+            let id = entry.key();
+            let (processed_bytes, total_bytes) = entry.value();
+            let percentage = (processed_bytes * 100 / total_bytes) as u32;
+            debug!(
+                id = %id,
+                current_percentage = format!("{percentage}%"),
+                processed_bytes = processed_bytes,
+                estimated_total_bytes = total_bytes,
+                "compaction progress"
+            );
+        }
+    }
+}
+
 pub(crate) enum WorkerToOrchestratorMsg {
     CompactionFinished {
         id: Uuid,
         result: Result<SortedRun, SlateDBError>,
+    },
+    /// Sent when an [`CompactionExecutor`] wishes to alert the compactor of progress. This
+    /// information is only used for reporting purposes, and can be an estimate.
+    CompactionProgress {
+        id: Uuid,
+        /// The total number of bytes processed so far.
+        bytes_processed: u64,
     },
 }
 
@@ -173,6 +240,7 @@ struct CompactorEventHandler {
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
+    progress_logger: CompactionProgressLogger,
 }
 
 impl CompactorEventHandler {
@@ -199,11 +267,13 @@ impl CompactorEventHandler {
             rand,
             stats,
             system_clock,
+            progress_logger: CompactionProgressLogger::new(),
         })
     }
 
     fn handle_log_ticker(&self) {
         self.log_compaction_state();
+        self.progress_logger.log_progress();
     }
 
     async fn handle_ticker(&mut self) {
@@ -215,15 +285,22 @@ impl CompactorEventHandler {
     }
 
     async fn handle_worker_rx(&mut self, msg: WorkerToOrchestratorMsg) {
-        let WorkerToOrchestratorMsg::CompactionFinished { id, result } = msg;
-        match result {
-            Ok(sr) => self
-                .finish_compaction(id, sr)
-                .await
-                .expect("fatal error finishing compaction"),
-            Err(err) => {
-                error!("error executing compaction: {:#?}", err);
-                self.finish_failed_compaction(id);
+        match msg {
+            WorkerToOrchestratorMsg::CompactionFinished { id, result } => match result {
+                Ok(sr) => self
+                    .finish_compaction(id, sr)
+                    .await
+                    .expect("fatal error finishing compaction"),
+                Err(err) => {
+                    error!("error executing compaction: {:#?}", err);
+                    self.finish_failed_compaction(id);
+                }
+            },
+            WorkerToOrchestratorMsg::CompactionProgress {
+                id,
+                bytes_processed,
+            } => {
+                self.progress_logger.update_progress(id, bytes_processed);
             }
         }
     }
@@ -344,6 +421,8 @@ impl CompactorEventHandler {
             compaction_ts: db_state.last_l0_clock_tick,
             is_dest_last_run,
         };
+        self.progress_logger
+            .add_job(id, job.estimated_source_bytes());
         let this_executor = self.executor.clone();
         tokio::task::spawn_blocking(move || {
             this_executor.start_compaction(job);
@@ -355,6 +434,7 @@ impl CompactorEventHandler {
     // state writers
     fn finish_failed_compaction(&mut self, id: Uuid) {
         self.state.finish_failed_compaction(id);
+        self.progress_logger.remove_job(id);
     }
 
     #[instrument(level = "debug", skip_all, fields(id = %id))]
@@ -364,6 +444,7 @@ impl CompactorEventHandler {
         output_sr: SortedRun,
     ) -> Result<(), SlateDBError> {
         self.state.finish_compaction(id, output_sr);
+        self.progress_logger.remove_job(id);
         self.log_compaction_state();
         self.write_manifest_safely().await?;
         self.maybe_schedule_compactions().await?;
