@@ -16,9 +16,9 @@ doc = false
 [dependencies]
 # See .cargo/config.toml for details on why pyo3/extension-module is only
 # enabled on non-macOS and non-iOS targets.
-pyo3 = { version = "0.25.1" }
-pyo3-async-runtimes = { version = "0.25.0", features = ["tokio-runtime"] }
-slatedb = { path = "../slatedb" }
-once_cell = "1.19"
-tokio = { version = "1.40.0", features = ["fs", "macros", "sync", "rt", "rt-multi-thread", "signal"] }
-uuid = { version = "1.12.0", features = ["v4", "serde"] }
+pyo3 = { workspace = true }
+pyo3-async-runtimes = { workspace = true, features = ["tokio-runtime"] }
+slatedb = { workspace = true }
+once_cell = { workspace = true }
+tokio = { workspace = true, features = ["fs", "macros", "sync", "rt", "rt-multi-thread", "signal"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
