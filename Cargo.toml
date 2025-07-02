@@ -72,6 +72,7 @@ zstd = "0.13.2"
 # dev dependencies
 bincode = "1"
 criterion = "0.5.1"
+ctor = "0.4.2"
 filetime = "0.2"
 insta = "1.39.0"
 pprof = "0.14.0"

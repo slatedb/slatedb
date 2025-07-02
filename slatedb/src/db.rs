@@ -1054,6 +1054,7 @@ mod tests {
         kv_store.delete(key).await.unwrap();
         assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();
+        panic!();
     }
 
     #[test]
