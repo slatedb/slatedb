@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::{sync::Arc, time::Duration};
 use tokio::time::Interval;
-use tracing::{debug, error};
+use tracing::error;
 
 use super::{GcStats, GcTask, DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 

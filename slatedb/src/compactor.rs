@@ -380,7 +380,7 @@ impl CompactorEventHandler {
     #[instrument(level = "debug", skip_all, fields(id = tracing::field::Empty))]
     async fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
         let id = self.rand.thread_rng().gen_uuid();
-        tracing::Span::current().record("id", &tracing::field::display(&id));
+        tracing::Span::current().record("id", tracing::field::display(&id));
         let result = self.state.submit_compaction(id, compaction.clone());
         match result {
             Ok(_) => {
