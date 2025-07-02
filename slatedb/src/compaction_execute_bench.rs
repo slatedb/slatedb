@@ -15,6 +15,7 @@ use tracing::{error, info};
 use ulid::Ulid;
 
 use crate::bytes_generator::OrderedBytesGenerator;
+use crate::clock::DefaultSystemClock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
@@ -308,6 +309,7 @@ impl CompactionExecuteBench {
             table_store.clone(),
             self.rand.clone(),
             stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
         );
         let os = self.object_store.clone();
         info!("load compaction job");
