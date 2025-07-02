@@ -9,6 +9,7 @@ use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::{Rng, RngCore};
+use tracing_subscriber::fmt::format::FmtSpan;
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
@@ -342,6 +343,7 @@ fn init_tracing() {
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
         tracing_subscriber::fmt()
             .with_env_filter(filter)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
             .with_test_writer()
             .init();
     });
