@@ -48,8 +48,8 @@ use crate::{
 pub(crate) struct WalBufferManager {
     inner: Arc<parking_lot::RwLock<WalBufferManagerInner>>,
     wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
-    // If set, WAL buffer will call `record_fatal_error` if it fails
-    db_state: Option<Arc<RwLock<DbState>>>,
+    // WAL buffer will call `record_fatal_error` if it fails
+    db_state: Arc<RwLock<DbState>>,
     db_stats: DbStats,
     quit_once: WatchableOnceCell<Result<(), SlateDBError>>,
     mono_clock: Arc<MonotonicClock>,
@@ -80,7 +80,7 @@ impl WalBufferManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
-        db_state: Option<Arc<RwLock<DbState>>>,
+        db_state: Arc<RwLock<DbState>>,
         db_stats: DbStats,
         recent_flushed_wal_id: u64,
         oracle: Arc<Oracle>,
@@ -220,12 +220,11 @@ impl WalBufferManager {
             )
         };
         if need_flush {
-            let db_state = self.db_state.as_ref().expect("db_state not initialized");
             flush_tx
                 .as_ref()
                 .expect("flush_tx not initialized, please call start_background first.")
                 .send_safely(
-                    db_state.write().error_reader(),
+                    self.db_state.write().error_reader(),
                     WalFlushWork { result_tx: None },
                 )
                 .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
@@ -268,10 +267,9 @@ impl WalBufferManager {
             .clone()
             .expect("flush_tx not initialized, please call start_background first.");
         let (result_tx, result_rx) = oneshot::channel();
-        let db_state = self.db_state.as_ref().expect("db_state not initialized");
         flush_tx
             .send_safely(
-                db_state.write().error_reader(),
+                self.db_state.write().error_reader(),
                 WalFlushWork {
                     result_tx: Some(result_tx),
                 },
@@ -359,9 +357,7 @@ impl WalBufferManager {
         // In both cases, we need to notify all the flushing WALs to be finished with fatal error or shutdown error.
         // If we got a fatal error, we need to set it in quit_once to notify the database to enter fatal state.
         if let Err(e) = &result {
-            if let Some(db_state) = self.db_state.clone() {
-                db_state.write().record_fatal_error(e.clone());
-            }
+            self.db_state.write().record_fatal_error(e.clone());
             self.quit_once.write(Err(e.clone()));
         }
         // notify all the flushing wals to be finished with fatal error or shutdown error. we need ensure all the wal
@@ -552,7 +548,7 @@ mod tests {
         ))));
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
-            Some(db_state),
+            db_state,
             DbStats::new(&StatRegistry::new()),
             0, // recent_flushed_wal_id
             oracle,
