@@ -66,7 +66,7 @@ impl CompactionProgressLogger {
         if let Some((_, total_bytes)) = self
             .processed_bytes
             .get(&id)
-            .map(|entry| entry.value().clone())
+            .map(|entry| *entry.value())
         {
             self.processed_bytes
                 .insert(id, (bytes_processed, total_bytes));
