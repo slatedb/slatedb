@@ -52,7 +52,7 @@ pub(crate) struct WriteBatchRequest {
 
 impl DbInner {
     #[allow(clippy::panic)]
-    #[instrument(level = "trace", skip(self, batch), fields(batch_size = batch.ops.len()))]
+    #[instrument(level = "trace", skip_all, fields(batch_size = batch.ops.len()))]
     async fn write_batch(
         &self,
         batch: WriteBatch,

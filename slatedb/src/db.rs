@@ -53,7 +53,7 @@ use crate::tablestore::TableStore;
 use crate::utils::{MonotonicSeq, SendSafely};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
-use tracing::{info, warn};
+use tracing::{info, trace, warn};
 
 pub mod builder;
 pub use builder::DbBuilder;
@@ -277,6 +277,12 @@ impl DbInner {
                 };
                 wal_size + imm_memtable_size
             };
+
+            trace!(
+                "checking backpressure: mem_size_bytes={}, max_unflushed_bytes={}",
+                mem_size_bytes,
+                self.settings.max_unflushed_bytes,
+            );
 
             if mem_size_bytes >= self.settings.max_unflushed_bytes {
                 self.db_stats.backpressure_count.inc();

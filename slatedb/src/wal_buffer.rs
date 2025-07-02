@@ -6,7 +6,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
-use tracing::instrument;
+use tracing::{debug, instrument, trace};
 
 use crate::{
     clock::MonotonicClock,
@@ -168,7 +168,6 @@ impl WalBufferManager {
     }
 
     /// Returns the total size of all unflushed WALs in bytes.
-    #[instrument(level = "trace", skip_all, ret)]
     pub async fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
         let inner = self.inner.read();
         let current_wal_size = self.table_store.estimate_encoded_size(
@@ -212,6 +211,11 @@ impl WalBufferManager {
             let current_wal_size = self.table_store.estimate_encoded_size(
                 inner.current_wal.metadata().entry_num,
                 inner.current_wal.metadata().entries_size_in_bytes,
+            );
+            trace!(
+                "checking flush trigger: current_wal_size={}, max_wal_bytes_size={}",
+                current_wal_size,
+                self.max_wal_bytes_size,
             );
             let need_flush = current_wal_size >= self.max_wal_bytes_size;
             (
@@ -258,7 +262,7 @@ impl WalBufferManager {
         }
     }
 
-    #[instrument(level = "trace", skip_all)]
+    #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
     pub async fn flush(&self) -> Result<(), SlateDBError> {
         let flush_tx = self
             .inner
@@ -381,7 +385,7 @@ impl WalBufferManager {
         flushing_wals
     }
 
-    #[instrument(level = "trace", skip_all)]
+    #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
     async fn do_flush(&self) -> Result<(), SlateDBError> {
         self.freeze_current_wal().await?;
         let flushing_wals = self.flushing_wals();
@@ -460,7 +464,6 @@ impl WalBufferManager {
     }
 
     /// Recycle the immutable WALs that are applied to the memtable and flushed to the remote storage.
-    #[instrument(level = "trace", skip_all)]
     async fn maybe_release_immutable_wals(&self) {
         let mut inner = self.inner.write();
 
@@ -484,6 +487,7 @@ impl WalBufferManager {
             }
         }
 
+        debug!("draining immutable wals: ..{}", releaseable_count);
         inner.immutable_wals.drain(..releaseable_count);
     }
 
