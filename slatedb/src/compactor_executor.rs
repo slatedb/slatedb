@@ -210,6 +210,11 @@ impl TokioCompactionExecutorInner {
                 .duration_since(last_progress_report)
                 .unwrap_or(Duration::from_secs(0));
             if duration_since_last_report > Duration::from_secs(1) {
+                // Allow send() because we are treating the executor like an external
+                // component. They can do what they want. The send().expect() will raise
+                // a SendErr, which will be caught in the cleanup_fn and set if there's
+                // not already an error (i.e. if the DB is not already shut down).
+                #[allow(clippy::disallowed_methods)]
                 self.worker_tx
                     .send(WorkerToOrchestratorMsg::CompactionProgress {
                         id: compaction.id,
@@ -218,13 +223,6 @@ impl TokioCompactionExecutorInner {
                     .expect("failed to send compaction progress");
                 last_progress_report = self.clock.now();
             }
-
-            self.worker_tx
-                .send(WorkerToOrchestratorMsg::CompactionProgress {
-                    id: compaction.id,
-                    bytes_processed: total_bytes_processed,
-                })
-                .expect("failed to send compaction progress");
 
             if compaction.is_dest_last_run && kv.value.is_tombstone() {
                 continue;
@@ -255,11 +253,6 @@ impl TokioCompactionExecutorInner {
         })
     }
 
-    // Allow send() because we are treating the executor like an external
-    // component. They can do what they want. The send().expect() will raise
-    // a SendErr, which will be caught in the cleanup_fn and set if there's
-    // not already an error (i.e. if the DB is not already shut down).
-    #[allow(clippy::disallowed_methods)]
     fn start_compaction(self: &Arc<Self>, compaction: CompactionJob) {
         let mut tasks = self.tasks.lock();
         if self.is_stopped.load(atomic::Ordering::SeqCst) {
@@ -281,6 +274,11 @@ impl TokioCompactionExecutorInner {
                     let mut tasks = this_cleanup.tasks.lock();
                     tasks.remove(&dst);
                 }
+                // Allow send() because we are treating the executor like an external
+                // component. They can do what they want. The send().expect() will raise
+                // a SendErr, which will be caught in the cleanup_fn and set if there's
+                // not already an error (i.e. if the DB is not already shut down).
+                #[allow(clippy::disallowed_methods)]
                 this_cleanup
                     .worker_tx
                     .send(CompactionFinished { id, result })
