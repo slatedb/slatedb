@@ -213,9 +213,9 @@ impl WalBufferManager {
                 inner.current_wal.metadata().entries_size_in_bytes,
             );
             trace!(
-                "checking flush trigger: current_wal_size={}, max_wal_bytes_size={}",
-                current_wal_size,
-                self.max_wal_bytes_size,
+                ?current_wal_size,
+                max_wal_bytes_size = ?self.max_wal_bytes_size,
+                "checking flush trigger",
             );
             let need_flush = current_wal_size >= self.max_wal_bytes_size;
             (

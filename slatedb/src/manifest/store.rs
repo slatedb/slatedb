@@ -597,7 +597,7 @@ impl ManifestStore {
         }
 
         let manifest_path = &self.get_manifest_path(id);
-        debug!("Deleting manifest: {}", manifest_path);
+        debug!(?manifest_path, "deleting manifest");
         self.object_store.delete(manifest_path).await?;
         Ok(())
     }

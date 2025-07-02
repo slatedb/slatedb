@@ -279,9 +279,9 @@ impl DbInner {
             };
 
             trace!(
-                "checking backpressure: mem_size_bytes={}, max_unflushed_bytes={}",
                 mem_size_bytes,
-                self.settings.max_unflushed_bytes,
+                max_unflushed_bytes = self.settings.max_unflushed_bytes,
+                "checking backpressure",
             );
 
             if mem_size_bytes >= self.settings.max_unflushed_bytes {
