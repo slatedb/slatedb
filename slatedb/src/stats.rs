@@ -1,3 +1,74 @@
+//! # Statistics Module
+//!
+//! Rather than integrate with observability platforms such as Prometheus or InfluxDB,
+//! SlateDB exposes metrics through [`Db::metrics`]. Applications can get the registry
+//! and poll it periodically to expose SlateDB metrics to their observability systems.
+//!
+//! This module provides a flexible and thread-safe metrics collection system for tracking
+//! and monitoring various runtime statistics in SlateDB.
+//!
+//! ## Components
+//!
+//! * [`ReadableStat`]: Core trait implemented by all metric types, providing a way to read
+//!   the current value as an `i64`.
+//!
+//! * [`StatRegistry`]: Central repository for registering and looking up metrics by name.
+//!   Provides atomic, thread-safe access to all registered metrics.
+//!
+//! * [`Counter`]: Atomic counter for tracking incrementing values.
+//!
+//! * [`Gauge<T>`]: Generic value holder for any type that implements `NoUninit + Debug`.
+//!   Special implementations exist for common types like `i64`, `u64`, `i32`, and `bool`.
+//!   Gauges for numeric types provide additional operations like [`add()`], [`sub()`], etc.
+//!
+//! * [`stat_name!`]: Macro for standardizing metric name formats by combining a prefix
+//!   and suffix with a separator.
+//!
+//! ## Thread Safety
+//!
+//! All metric types are designed to be thread-safe.
+//!
+//! ## Usage Examples
+//!
+//! See [`crate::compactor::stats`] for examples of how to use the metrics in a SlateDB
+//! component.
+//!
+//! ### Creating and registering a Counter
+//!
+//! ```
+//! use std::sync::Arc;
+//! use slatedb::stats::{Counter, StatRegistry};
+//!
+//! let registry = StatRegistry::new();
+//! let operations_counter = Arc::new(Counter::default());
+//! registry.register("operations", operations_counter.clone());
+//!
+//! // Later, increment the counter
+//! operations_counter.inc();
+//! ```
+//!
+//! ### Creating and using a Gauge
+//!
+//! ```
+//! use slatedb::stats::Gauge;
+//!
+//! let memory_usage = Gauge::<u64>::default();
+//! memory_usage.set(1024 * 1024); // Set to 1MB
+//!
+//! // Later, update the gauge
+//! memory_usage.set(2 * 1024 * 1024); // Update to 2MB
+//! ```
+//!
+//! ### Using the stat_name! macro
+//!
+//! ```
+//! use slatedb::stat_name;
+//!
+//! let metric_name = stat_name!("cache", "hits");
+//! assert_eq!(metric_name, "cache/hits");
+//! ```
+//!
+//! [`Db::metrics`]: crate::db::Db::metrics
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -20,25 +91,19 @@ impl StatRegistry {
         }
     }
 
+    /// Get a metric with a specific name, or `None` if no metric was registered
+    /// for the name.
     pub fn lookup(&self, name: &'static str) -> Option<Arc<dyn ReadableStat>> {
         let guard = self.stats.lock().expect("lock poisoned");
         guard.get(name).cloned()
     }
 
-    pub fn all_stats(&self) -> Vec<&'static str> {
+    pub fn names(&self) -> Vec<&'static str> {
         let guard = self.stats.lock().expect("lock poisoned");
         guard.keys().copied().collect()
     }
 
-    /// Returns a snapshot of all stats currently registered in the registry.
-    pub fn snapshot(&self) -> Vec<(&'static str, Arc<dyn ReadableStat>)> {
-        let guard = self.stats.lock().expect("lock poisoned");
-        guard
-            .iter()
-            .map(|(&name, stat)| (name, stat.clone()))
-            .collect()
-    }
-
+    /// Register a new metric with the registry.
     pub(crate) fn register(&self, name: &'static str, stat: Arc<dyn ReadableStat>) {
         let mut guard = self.stats.lock().expect("lock poisoned");
         debug_assert!(!guard.contains_key(name));
@@ -206,7 +271,7 @@ mod tests {
         let stat3 = Arc::new(Gauge::<i32>::default());
         registry.register("stat3", stat3);
 
-        let names = registry.all_stats();
+        let names = registry.names();
         assert_eq!(names, vec!["stat1", "stat2", "stat3"]);
     }
 
