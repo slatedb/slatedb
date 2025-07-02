@@ -26,7 +26,6 @@ use crate::utils::{spawn_bg_task, IdGenerator};
 use tracing::{error, instrument};
 use uuid::Uuid;
 
-#[derive(Debug)]
 pub(crate) struct CompactionJob {
     pub(crate) id: Uuid,
     pub(crate) destination: u32,
@@ -34,6 +33,27 @@ pub(crate) struct CompactionJob {
     pub(crate) sorted_runs: Vec<SortedRun>,
     pub(crate) compaction_ts: i64,
     pub(crate) is_dest_last_run: bool,
+}
+
+impl std::fmt::Debug for CompactionJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let estimated_sst_size = self.ssts.iter().map(|sst| sst.estimate_size()).sum::<u64>();
+        let estimated_sr_size = self
+            .sorted_runs
+            .iter()
+            .map(|sr| sr.estimate_size())
+            .sum::<u64>();
+        let estimated_total_size = estimated_sst_size + estimated_sr_size;
+        f.debug_struct("CompactionJob")
+            .field("id", &self.id)
+            .field("destination", &self.destination)
+            .field("ssts", &self.ssts)
+            .field("sorted_runs", &self.sorted_runs)
+            .field("compaction_ts", &self.compaction_ts)
+            .field("is_dest_last_run", &self.is_dest_last_run)
+            .field("estimated_source_bytes", &estimated_total_size)
+            .finish()
+    }
 }
 
 pub(crate) trait CompactionExecutor {
