@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Interval;
-use tracing::error;
+use tracing::{debug, error};
 
 use super::{GcStats, GcTask, DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 

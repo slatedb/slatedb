@@ -83,7 +83,7 @@ impl GcTask for ManifestGcTask {
                     error!("Error deleting manifest: {}", e);
                 } else {
                     self.stats.gc_manifest_count.inc();
-                }
+            }
             }
         }
 

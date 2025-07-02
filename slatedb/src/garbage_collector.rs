@@ -191,12 +191,8 @@ impl GarbageCollector {
         (wal_gc_task, compacted_gc_task, manifest_gc_task)
     }
 
-    #[instrument(level = "debug", skip(self))]
+    #[instrument(level = "debug", skip_all, fields(resource = task.resource()))]
     async fn run_gc_task<T: GcTask + std::fmt::Debug>(&self, task: &mut T) {
-        debug!(
-            "Scheduled garbage collection attempt for {}.",
-            task.resource()
-        );
         if let Err(e) = self.remove_expired_checkpoints().await {
             error!("Error removing expired checkpoints: {}", e);
         } else if let Err(e) = task.collect(self.system_clock.now().into()).await {
