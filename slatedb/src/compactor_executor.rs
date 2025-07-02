@@ -23,7 +23,7 @@ use crate::compactor::stats::CompactionStats;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
 use crate::utils::{spawn_bg_task, IdGenerator};
-use tracing::{error, instrument};
+use tracing::{debug, error, instrument};
 use uuid::Uuid;
 
 pub(crate) struct CompactionJob {
@@ -153,11 +153,12 @@ impl TokioCompactionExecutorInner {
         MergeIterator::new([l0_merge_iter, sr_merge_iter]).await
     }
 
-    #[instrument(level = "debug", skip(self))]
+    #[instrument(level = "debug", skip_all, fields(id = %compaction.id))]
     async fn execute_compaction(
         &self,
         compaction: CompactionJob,
     ) -> Result<SortedRun, SlateDBError> {
+        debug!("executing compaction: {:?}", compaction);
         let mut all_iter = self.load_iterators(&compaction).await?;
         let mut output_ssts = Vec::new();
         let mut current_writer = self
