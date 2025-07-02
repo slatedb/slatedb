@@ -35,10 +35,10 @@ pub trait CompactionScheduler: Send + Sync {
 }
 
 /// Tracks progress of various compactions. Progress is updated from the executor with
-/// [`CompactionProgressLogger::update_progress`]. This isn't guaranteed to be fully accurate.
+/// [`CompactionProgressTracker::update_progress`]. This isn't guaranteed to be fully accurate.
 ///
 /// **WARN: This will definitely be inaccurate if compression is used.**
-pub(crate) struct CompactionProgressLogger {
+pub(crate) struct CompactionProgressTracker {
     /// Tracks the number of bytes processed and total bytes (all source SSTs and sorted runs)
     /// for each compaction job. Can be an estimate.
     ///
@@ -46,7 +46,7 @@ pub(crate) struct CompactionProgressLogger {
     processed_bytes: SkipMap<Uuid, (u64, u64)>,
 }
 
-impl CompactionProgressLogger {
+impl CompactionProgressTracker {
     pub fn new() -> Self {
         Self {
             processed_bytes: SkipMap::new(),
@@ -237,7 +237,7 @@ struct CompactorEventHandler {
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
-    progress_logger: CompactionProgressLogger,
+    progress_tracker: CompactionProgressTracker,
 }
 
 impl CompactorEventHandler {
@@ -264,13 +264,13 @@ impl CompactorEventHandler {
             rand,
             stats,
             system_clock,
-            progress_logger: CompactionProgressLogger::new(),
+            progress_tracker: CompactionProgressTracker::new(),
         })
     }
 
     fn handle_log_ticker(&self) {
         self.log_compaction_state();
-        self.progress_logger.log_progress();
+        self.progress_tracker.log_progress();
     }
 
     async fn handle_ticker(&mut self) {
@@ -297,7 +297,7 @@ impl CompactorEventHandler {
                 id,
                 bytes_processed,
             } => {
-                self.progress_logger.update_progress(id, bytes_processed);
+                self.progress_tracker.update_progress(id, bytes_processed);
             }
         }
     }
@@ -418,7 +418,7 @@ impl CompactorEventHandler {
             compaction_ts: db_state.last_l0_clock_tick,
             is_dest_last_run,
         };
-        self.progress_logger
+        self.progress_tracker
             .add_job(id, job.estimated_source_bytes());
         let this_executor = self.executor.clone();
         tokio::task::spawn_blocking(move || {
@@ -431,7 +431,7 @@ impl CompactorEventHandler {
     // state writers
     fn finish_failed_compaction(&mut self, id: Uuid) {
         self.state.finish_failed_compaction(id);
-        self.progress_logger.remove_job(id);
+        self.progress_tracker.remove_job(id);
     }
 
     #[instrument(level = "debug", skip_all, fields(id = %id))]
@@ -441,7 +441,7 @@ impl CompactorEventHandler {
         output_sr: SortedRun,
     ) -> Result<(), SlateDBError> {
         self.state.finish_compaction(id, output_sr);
-        self.progress_logger.remove_job(id);
+        self.progress_tracker.remove_job(id);
         self.log_compaction_state();
         self.write_manifest_safely().await?;
         self.maybe_schedule_compactions().await?;
