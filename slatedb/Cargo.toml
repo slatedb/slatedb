@@ -54,6 +54,7 @@ thread_local = { workspace = true }
 [dev-dependencies]
 bincode = { workspace = true }
 criterion = { workspace = true, features = ["async_tokio", "html_reports"] }
+ctor = { workspace = true }
 fail-parallel = { workspace = true, features = ["failpoints"] }
 figment = { workspace = true, features = ["test"] }
 filetime = { workspace = true }
@@ -64,6 +65,7 @@ rstest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-test = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 
 [features]
 default = ["aws", "foyer"]

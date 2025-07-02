@@ -20,6 +20,14 @@ pub(crate) struct WalGcTask {
     wal_options: Option<GarbageCollectorDirectoryOptions>,
 }
 
+impl std::fmt::Debug for WalGcTask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WalGcTask")
+            .field("wal_options", &self.wal_options)
+            .finish()
+    }
+}
+
 impl WalGcTask {
     pub fn new(
         manifest_store: Arc<ManifestStore>,

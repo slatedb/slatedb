@@ -17,6 +17,14 @@ pub(crate) struct CompactedGcTask {
     compacted_options: Option<GarbageCollectorDirectoryOptions>,
 }
 
+impl std::fmt::Debug for CompactedGcTask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompactedGcTask")
+            .field("compacted_options", &self.compacted_options)
+            .finish()
+    }
+}
+
 impl CompactedGcTask {
     pub fn new(
         manifest_store: Arc<ManifestStore>,

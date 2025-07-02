@@ -6,6 +6,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
+use tracing::{debug, instrument, trace};
 
 use crate::{
     clock::MonotonicClock,
@@ -211,6 +212,11 @@ impl WalBufferManager {
                 inner.current_wal.metadata().entry_num,
                 inner.current_wal.metadata().entries_size_in_bytes,
             );
+            trace!(
+                ?current_wal_size,
+                max_wal_bytes_size = ?self.max_wal_bytes_size,
+                "checking flush trigger",
+            );
             let need_flush = current_wal_size >= self.max_wal_bytes_size;
             (
                 inner.current_wal.clone(),
@@ -256,6 +262,7 @@ impl WalBufferManager {
         }
     }
 
+    #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
     pub async fn flush(&self) -> Result<(), SlateDBError> {
         let flush_tx = self
             .inner
@@ -378,6 +385,7 @@ impl WalBufferManager {
         flushing_wals
     }
 
+    #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
     async fn do_flush(&self) -> Result<(), SlateDBError> {
         self.freeze_current_wal().await?;
         let flushing_wals = self.flushing_wals();
@@ -479,6 +487,7 @@ impl WalBufferManager {
             }
         }
 
+        debug!("draining immutable wals: ..{}", releaseable_count);
         inner.immutable_wals.drain(..releaseable_count);
     }
 

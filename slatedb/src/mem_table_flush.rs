@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot::Sender;
-use tracing::{error, info, warn};
+use tracing::{error, info, instrument, warn};
 
 #[derive(Debug)]
 pub(crate) enum MemtableFlushMsg {
@@ -88,6 +88,7 @@ impl MemtableFlusher {
         }
     }
 
+    #[instrument(level = "trace", skip_all)]
     async fn flush_imm_memtables_to_l0(&mut self) -> Result<(), SlateDBError> {
         while let Some(imm_memtable) = {
             let rguard = self.db_inner.state.read();

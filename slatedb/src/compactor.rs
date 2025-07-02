@@ -5,6 +5,7 @@ use std::time::UNIX_EPOCH;
 
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument;
 use tracing::{error, info, warn};
 use ulid::Ulid;
 use uuid::Uuid;
@@ -356,6 +357,7 @@ impl CompactorEventHandler {
         self.state.finish_failed_compaction(id);
     }
 
+    #[instrument(level = "debug", skip_all, fields(id = %id))]
     async fn finish_compaction(
         &mut self,
         id: Uuid,
@@ -375,8 +377,10 @@ impl CompactorEventHandler {
         Ok(())
     }
 
+    #[instrument(level = "debug", skip_all, fields(id = tracing::field::Empty))]
     async fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
         let id = self.rand.thread_rng().gen_uuid();
+        tracing::Span::current().record("id", tracing::field::display(&id));
         let result = self.state.submit_compaction(id, compaction.clone());
         match result {
             Ok(_) => {
