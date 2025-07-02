@@ -200,10 +200,10 @@ impl TokioCompactionExecutorInner {
                 _ => raw_kv,
             };
 
-            let key_len = kv.key.len() as u64;
-            let value_len = kv.value.len() as u64;
+            let key_len = kv.key.len();
+            let value_len = kv.value.len();
 
-            total_bytes_processed += key_len + value_len;
+            total_bytes_processed += key_len as u64 + value_len as u64;
             let duration_since_last_report = self
                 .clock
                 .now()
@@ -229,7 +229,7 @@ impl TokioCompactionExecutorInner {
             }
 
             current_writer.add(kv).await?;
-            current_size += key_len as usize + value_len as usize;
+            current_size += key_len + value_len;
 
             if current_size > self.options.max_sst_size {
                 current_size = 0;
