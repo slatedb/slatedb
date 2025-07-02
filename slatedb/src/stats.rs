@@ -33,41 +33,6 @@
 //! See [`crate::compactor::stats`] for examples of how to use the metrics in a SlateDB
 //! component.
 //!
-//! ### Creating and registering a Counter
-//!
-//! ```
-//! use std::sync::Arc;
-//! use slatedb::stats::{Counter, StatRegistry};
-//!
-//! let registry = StatRegistry::new();
-//! let operations_counter = Arc::new(Counter::default());
-//! registry.register("operations", operations_counter.clone());
-//!
-//! // Later, increment the counter
-//! operations_counter.inc();
-//! ```
-//!
-//! ### Creating and using a Gauge
-//!
-//! ```
-//! use slatedb::stats::Gauge;
-//!
-//! let memory_usage = Gauge::<u64>::default();
-//! memory_usage.set(1024 * 1024); // Set to 1MB
-//!
-//! // Later, update the gauge
-//! memory_usage.set(2 * 1024 * 1024); // Update to 2MB
-//! ```
-//!
-//! ### Using the stat_name! macro
-//!
-//! ```
-//! use slatedb::stat_name;
-//!
-//! let metric_name = stat_name!("cache", "hits");
-//! assert_eq!(metric_name, "cache/hits");
-//! ```
-//!
 //! [`Db::metrics`]: crate::db::Db::metrics
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
