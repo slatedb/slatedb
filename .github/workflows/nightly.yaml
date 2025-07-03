@@ -57,6 +57,12 @@ jobs:
           sudo snap install aws-cli --classic
 
       - name: System information
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TIGRIS_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TIGRIS_AWS_SECRET_ACCESS_KEY }}
+          AWS_BUCKET: ${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}
+          AWS_REGION: auto
+          AWS_ENDPOINT: https://t3.storage.dev
         run: |
           echo "=== CPU ==="
           lscpu
@@ -67,7 +73,15 @@ jobs:
           echo -e "\n=== Workspace Directory ==="
           du -sh ${{ github.workspace }}
           echo -e "\n=== Network ==="
-          traceroute "${{ secrets.AWS_ENDPOINT }}"
+          traceroute https://t3.storage.dev
+          # generate 1 gig file with random data
+          dd if=/dev/urandom of=/tmp/1gig bs=1G count=1
+          echo "Uploading 1 gig file"
+          time aws s3 cp /tmp/1gig s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}/1gig
+          echo "Downloading 1 gig file"
+          time aws s3 cp s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}/1gig /tmp/1gig
+          echo "Deleting 1 gig file"
+          time aws s3 rm s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}/1gig
 
       - name: Run benchmark
         env:
