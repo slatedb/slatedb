@@ -52,6 +52,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          sudo add-apt-repository universe
           sudo apt-get update
           sudo apt-get install -y traceroute awscli
 
