@@ -25,14 +25,6 @@ pub(crate) struct RetentionIterator<T: KeyValueIterator> {
 
 impl<T: KeyValueIterator> RetentionIterator<T> {
     /// Creates a new retention iterator with the specified retention policy
-    ///
-    /// # Arguments
-    /// * `inner` - The upstream iterator providing entries in decreasing order of sequence numbers
-    /// * `retention_time` - Retention time duration. Entries with create_ts earlier than
-    ///   (current_time - retention_time) will be filtered out, except for the latest version
-    ///
-    /// # Returns
-    /// A configured retention iterator ready to filter entries based on the retention policy
     pub(crate) async fn new(inner: T, retention_time: Duration) -> Result<Self, SlateDBError> {
         Ok(Self {
             inner,
@@ -59,22 +51,14 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
     /// - Always preserves the latest version (highest sequence number)
     /// - Filters out older versions that exceed the retention period
     /// - Uses `create_ts` to determine if a version should be retained
-    ///
-    /// # Arguments
-    /// * `versions` - A BTreeMap of versions for the same key, ordered by sequence number (newest first)
-    /// * `current_timestamp` - Current time in seconds since Unix epoch
-    /// * `retention_time` - Retention duration in seconds
-    ///
-    /// # Returns
-    /// A filtered BTreeMap containing only versions that meet the retention criteria
     fn apply_retention_filter(
         mut versions: BTreeMap<Reverse<u64>, RowEntry>,
         current_timestamp: i64,
         retention_time: Duration,
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
+        // If there's only one version, we should do nothing
         if versions.len() == 1 {
-            // TODO: handle expiry
-            // TODO: if it's the only version, and tombstone, filter it out
+            return versions;
         }
 
         // Always preserve the latest version regardless of age
@@ -94,7 +78,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                         // (i.e., version is still within retention period)
                         create_ts + (retention_time.as_secs() as i64) >= current_timestamp
                     })
-                    .unwrap_or(true) // If no create_ts, keep the version
+                    .unwrap_or(true)
             })
             .collect::<BTreeMap<_, _>>();
 
