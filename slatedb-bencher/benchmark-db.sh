@@ -132,6 +132,8 @@ if [ "$CLOUD_PROVIDER" = "local" ]; then
     echo "Using local path: $LOCAL_PATH"
 fi
 
+traceroute t3.storage.dev
+
 for put_percentage in 20 40 60 80 100; do
   for concurrency in 128; do
     log_file="$OUT/logs/${put_percentage}_${concurrency}.log"
