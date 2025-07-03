@@ -75,15 +75,23 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 break;
             }
 
-            // convert the expired version to tombstone
+            // filter out any expired entries -- eventually we can consider
+            // abstracting this away into generic, pluggable compaction filters
+            // but for now we do it inline
             let entry = match entry.expire_ts.as_ref() {
-                Some(expire_ts) if *expire_ts <= current_timestamp => RowEntry {
-                    key: entry.key,
-                    value: Tombstone,
-                    seq: entry.seq,
-                    expire_ts: None,
-                    create_ts: entry.create_ts,
-                },
+                Some(expire_ts) if *expire_ts <= current_timestamp => {
+                    // insert a tombstone instead of just filtering out the
+                    // value in the iterator because this may otherwise "revive"
+                    // an older version of the KV pair that has a larger TTL in
+                    // a lower level of the LSM tree
+                    RowEntry {
+                        key: entry.key,
+                        value: Tombstone,
+                        seq: entry.seq,
+                        expire_ts: None,
+                        create_ts: entry.create_ts,
+                    }
+                }
                 _ => entry,
             };
 
