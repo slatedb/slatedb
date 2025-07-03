@@ -67,7 +67,7 @@ jobs:
           echo -e "\n=== Workspace Directory ==="
           du -sh ${{ github.workspace }}
           echo -e "\n=== Network ==="
-          traceroute "$AWS_ENDPOINT"
+          traceroute "${{ secrets.AWS_ENDPOINT }}"
 
       - name: Run benchmark
         env:
