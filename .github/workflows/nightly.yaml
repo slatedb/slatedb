@@ -73,8 +73,7 @@ jobs:
           echo -e "\n=== Workspace Directory ==="
           du -sh ${{ github.workspace }}
           echo -e "\n=== Network ==="
-          traceroute https://t3.storage.dev
-          # generate 1 gig file with random data
+          traceroute t3.storage.dev
           dd if=/dev/urandom of=/tmp/1gig bs=1G count=1
           echo "Uploading 1 gig file"
           time aws s3 cp /tmp/1gig s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}/1gig
