@@ -67,7 +67,8 @@ impl SystemMonitor {
                 let total_swap = system.total_swap() / 1024 / 1024;
                 let free_swap = system.free_swap() / 1024 / 1024;
                 let used_swap = system.used_swap() / 1024 / 1024;
-                let bencher_memory = system.process(Pid::from(bencher_pid)).unwrap().memory() / 1024 / 1024;
+                let bencher_memory =
+                    system.process(Pid::from(bencher_pid)).unwrap().memory() / 1024 / 1024;
                 info!(
                     bencher_memory,
                     total_memory,
@@ -108,7 +109,9 @@ impl SystemMonitor {
                 for (interface_name, data) in networks.list() {
                     let received_mebibytes_since_last_refresh = data.received() / 1024 / 1024;
                     let transmitted_mebibytes_since_last_refresh = data.transmitted() / 1024 / 1024;
-                    if received_mebibytes_since_last_refresh == 0 && transmitted_mebibytes_since_last_refresh == 0 {
+                    if received_mebibytes_since_last_refresh == 0
+                        && transmitted_mebibytes_since_last_refresh == 0
+                    {
                         continue;
                     }
                     let received_mebibytes_per_second =
