@@ -107,6 +107,9 @@ impl SystemMonitor {
                 for (interface_name, data) in networks.list() {
                     let received_mebibytes_since_last_refresh = data.received() / 1024 / 1024;
                     let transmitted_mebibytes_since_last_refresh = data.transmitted() / 1024 / 1024;
+                    if received_mebibytes_since_last_refresh == 0 && transmitted_mebibytes_since_last_refresh == 0 {
+                        continue;
+                    }
                     let received_mebibytes_per_second =
                         received_mebibytes_since_last_refresh as f64 / elapsed.as_secs_f64();
                     let transmitted_mebibytes_per_second =
