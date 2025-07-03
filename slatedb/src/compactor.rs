@@ -62,6 +62,10 @@ impl CompactionProgressTracker {
         self.processed_bytes.insert(id, (0, total_bytes));
     }
 
+    /// Removes a compaction job from the tracker.
+    ///
+    /// # Arguments
+    /// * `id` - The ID of the compaction job.
     pub fn remove_job(&mut self, id: Uuid) {
         self.processed_bytes.remove(&id);
     }
