@@ -378,10 +378,9 @@ pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 /// | AWS_BUCKET | The bucket to use within S3 | Yes |
 /// | AWS_REGION | The AWS region to use | Yes |
 /// | AWS_ENDPOINT | The endpoint to use for S3 (disables https) | No |
-/// | AWS_DYNAMODB_TABLE | The DynamoDB table to use for locking | No |
 #[cfg(feature = "aws")]
 pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
-    use object_store::aws::{DynamoCommit, S3ConditionalPut};
+    use object_store::aws::S3ConditionalPut;
 
     let key = env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID must be set");
     let secret =
@@ -390,8 +389,8 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     let bucket = env::var("AWS_BUCKET").expect("AWS_BUCKET must be set");
     let region = env::var("AWS_REGION").expect("AWS_REGION must be set");
     let endpoint = env::var("AWS_ENDPOINT").ok();
-    let dynamodb_table = env::var("AWS_DYNAMODB_TABLE").ok();
     let builder = object_store::aws::AmazonS3Builder::new()
+        .with_conditional_put(S3ConditionalPut::ETagMatch)
         .with_access_key_id(key)
         .with_secret_access_key(secret)
         .with_bucket_name(bucket)
@@ -401,12 +400,6 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
         builder.with_token(token)
     } else {
         builder
-    };
-
-    let builder = if let Some(dynamodb_table) = dynamodb_table {
-        builder.with_conditional_put(S3ConditionalPut::Dynamo(DynamoCommit::new(dynamodb_table)))
-    } else {
-        builder.with_conditional_put(S3ConditionalPut::ETagMatch)
     };
 
     let builder = if let Some(endpoint) = endpoint {
