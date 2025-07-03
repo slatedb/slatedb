@@ -48,9 +48,14 @@ generate_dat() {
 
     echo "Parsing stats for $input_file -> $output_file"
 
-    cat "$input_file" | \
-      grep 'stats dump' | \
-      sed 's/.*elapsed \([^,]*\), put\/s: \([^,]*\), get\/s: \([^,]*\).*/\1 \2 \3/' > "$output_file"
+    # Extract elapsed time, puts/s, and gets/s using awk to handle additional fields like MiB/s and hit rate
+    awk '/stats dump/ {
+        if (match($0, /elapsed ([0-9.]+)/, a) &&
+            match($0, /put\/s: ([0-9.]+)/, b) &&
+            match($0, /get\/s: ([0-9.]+)/, c)) {
+            printf "%s %s %s\n", a[1], b[1], c[1];
+        }
+    }' "$input_file" > "$output_file"
 }
 
 generate_plot() {
