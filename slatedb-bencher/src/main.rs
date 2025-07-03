@@ -36,7 +36,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let object_store = admin::load_object_store_from_env(args.env_file)?;
 
     // Start system monitoring in background
-    let _monitor_handle = system_monitor::start_monitoring();
+    let mut monitor = system_monitor::SystemMonitor::new();
+    monitor.start();
 
     if args.clean {
         create_cleanup_lock(object_store.clone(), &path).await?;
@@ -50,6 +51,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             exec_benchmark_compaction(path.clone(), object_store.clone(), subcommand_args).await;
         }
     }
+
+    monitor.stop();
 
     if args.clean {
         cleanup_data(object_store, &path).await?;
