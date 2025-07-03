@@ -48,15 +48,12 @@ impl SystemMonitor {
                 system.refresh_cpu_usage();
 
                 let global_cpu_usage = system.global_cpu_usage();
-                let mut cpu_info = format!("CPU Usage: {:.1}% (global)", global_cpu_usage);
-
-                for (idx, cpu) in system.cpus().iter().enumerate() {
-                    if idx < 4 {
-                        // Only show first few cores to avoid excessive logging
-                        cpu_info.push_str(&format!(" | Core {}: {:.1}%", idx, cpu.cpu_usage()));
-                    }
-                }
-                info!("{}", cpu_info);
+                let cpu_core_usage = system
+                    .cpus()
+                    .iter()
+                    .map(|cpu| cpu.cpu_usage().round())
+                    .collect::<Vec<_>>();
+                info!(global_cpu_usage, ?cpu_core_usage, "cpu usage");
 
                 system.refresh_memory();
                 system.refresh_processes_specifics(

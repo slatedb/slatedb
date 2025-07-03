@@ -137,7 +137,9 @@ if [ "$CLOUD_PROVIDER" = "local" ]; then
     echo "Using local path: $LOCAL_PATH"
 fi
 
-traceroute t3.storage.dev
+if [ -n "${AWS_ENDPOINT:-}" ]; then
+    traceroute $AWS_ENDPOINT
+fi
 
 for put_percentage in 20 40 60 80 100; do
   for concurrency in 128; do
