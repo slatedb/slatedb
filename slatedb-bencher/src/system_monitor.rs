@@ -4,7 +4,7 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use sysinfo::{Disks, Networks, System};
+use sysinfo::{Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::time::Instant;
 use tracing::info;
 
@@ -59,6 +59,11 @@ impl SystemMonitor {
                 info!("{}", cpu_info);
 
                 system.refresh_memory();
+                system.refresh_processes_specifics(
+                    ProcessesToUpdate::Some(&[bencher_pid]),
+                    true,
+                    ProcessRefreshKind::nothing().with_memory(),
+                );
 
                 let total_memory_mb = system.total_memory() / 1024 / 1024;
                 let used_memory_mb = system.used_memory() / 1024 / 1024;
@@ -67,8 +72,10 @@ impl SystemMonitor {
                 let total_swap_mb = system.total_swap() / 1024 / 1024;
                 let free_swap_mb = system.free_swap() / 1024 / 1024;
                 let used_swap_mb = system.used_swap() / 1024 / 1024;
-                let bencher_memory_mb =
-                    system.process(bencher_pid).map(|p| p.memory() / 1024 / 1024).unwrap_or(0);
+                let bencher_memory_mb = system
+                    .process(bencher_pid)
+                    .map(|p| p.memory() / 1024 / 1024)
+                    .unwrap_or(0);
                 info!(
                     bencher_memory_mb,
                     total_memory_mb,
@@ -97,9 +104,7 @@ impl SystemMonitor {
                     let disk_name = disk.name().to_str().unwrap();
                     info!(
                         disk_name,
-                        read_mb_per_second,
-                        write_mb_per_second,
-                        "disk usage (MiB/s)",
+                        read_mb_per_second, write_mb_per_second, "disk usage (MiB/s)",
                     );
                 }
 
@@ -111,8 +116,7 @@ impl SystemMonitor {
                 for (interface_name, data) in networks.list() {
                     let received_mb_since_last_refresh = data.received() / 1024 / 1024;
                     let transmitted_mb_since_last_refresh = data.transmitted() / 1024 / 1024;
-                    if received_mb_since_last_refresh == 0
-                        && transmitted_mb_since_last_refresh == 0
+                    if received_mb_since_last_refresh == 0 && transmitted_mb_since_last_refresh == 0
                     {
                         continue;
                     }
@@ -123,9 +127,7 @@ impl SystemMonitor {
 
                     info!(
                         interface_name,
-                        received_mb_per_second,
-                        transmitted_mb_per_second,
-                        "network usage (MiB/s)",
+                        received_mb_per_second, transmitted_mb_per_second, "network usage (MiB/s)",
                     );
                 }
 
