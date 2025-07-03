@@ -4,7 +4,7 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use sysinfo::{Disks, Networks, System};
+use sysinfo::{Disks, Networks, Pid, System};
 use tokio::time::Instant;
 use tracing::info;
 
@@ -38,6 +38,7 @@ impl SystemMonitor {
 
         self.handle = Some(thread::spawn(move || {
             let mut system = System::new();
+            let bencher_pid = sysinfo::get_current_pid().unwrap();
             let mut disks = Disks::new_with_refreshed_list();
             let mut networks = Networks::new_with_refreshed_list();
             let mut last_disk_refresh = Instant::now();
@@ -59,15 +60,16 @@ impl SystemMonitor {
 
                 system.refresh_memory();
 
-                let total_memory = system.total_memory() / 1024 / 1024; // Convert to MB
-                let used_memory = system.used_memory() / 1024 / 1024; // Convert to MB
-                let free_memory = system.free_memory() / 1024 / 1024; // Convert to MB
-                let available_memory = system.available_memory() / 1024 / 1024; // Convert to MB
-                let total_swap = system.total_swap() / 1024 / 1024; // Convert to MB
-                let free_swap = system.free_swap() / 1024 / 1024; // Convert to MB
-                let used_swap = system.used_swap() / 1024 / 1024; // Convert to MB
-                let memory_usage = (used_memory as f64 / total_memory as f64) * 100.0;
+                let total_memory = system.total_memory() / 1024 / 1024;
+                let used_memory = system.used_memory() / 1024 / 1024;
+                let free_memory = system.free_memory() / 1024 / 1024;
+                let available_memory = system.available_memory() / 1024 / 1024;
+                let total_swap = system.total_swap() / 1024 / 1024;
+                let free_swap = system.free_swap() / 1024 / 1024;
+                let used_swap = system.used_swap() / 1024 / 1024;
+                let bencher_memory = system.process(Pid::from(bencher_pid)).unwrap().memory() / 1024 / 1024;
                 info!(
+                    bencher_memory,
                     total_memory,
                     used_memory,
                     free_memory,
@@ -75,7 +77,6 @@ impl SystemMonitor {
                     total_swap,
                     free_swap,
                     used_swap,
-                    memory_usage,
                     "memory usage (MiB)"
                 );
 
@@ -123,7 +124,6 @@ impl SystemMonitor {
                     );
                 }
 
-                // Sleep for a bit, but check running flag periodically to allow for quick shutdown
                 for _ in 0..10 {
                     if !running.load(Ordering::SeqCst) {
                         break;
