@@ -74,13 +74,14 @@ jobs:
           du -sh ${{ github.workspace }}
           echo -e "\n=== Network ==="
           traceroute t3.storage.dev
+          echo -e "Generating 1 gig file"
           dd if=/dev/urandom of=/tmp/1gig bs=1G count=1
-          echo "Uploading 1 gig file"
-          time aws s3 cp /tmp/1gig s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}/1gig
-          echo "Downloading 1 gig file"
-          time aws s3 cp s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}/1gig /tmp/1gig
-          echo "Deleting 1 gig file"
-          time aws s3 rm s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}/1gig
+          echo -e "Uploading 1 gig file"
+          time aws s3 cp --endpoint-url $AWS_ENDPOINT /tmp/1gig s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}/1gig
+          echo -e "Downloading 1 gig file"
+          time aws s3 cp --endpoint-url $AWS_ENDPOINT s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}/1gig /tmp/1gig
+          echo -e "Deleting 1 gig file"
+          time aws s3 rm --endpoint-url $AWS_ENDPOINT s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}/1gig
 
       - name: Run benchmark
         env:
@@ -92,7 +93,7 @@ jobs:
           AWS_ENDPOINT: https://t3.storage.dev
           SLATEDB_BENCH_CLEAN: true
         run: |
-          aws s3 rm s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }} --recursive
+          aws s3 rm --endpoint-url $AWS_ENDPOINT s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }} --recursive
           ./slatedb-bencher/benchmark-db.sh
 
       - name: Update benchmark result
