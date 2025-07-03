@@ -53,8 +53,13 @@ impl CompactionProgressTracker {
         }
     }
 
-    pub fn add_job(&mut self, id: Uuid, bytes: u64) {
-        self.processed_bytes.insert(id, (0, bytes));
+    /// Adds a new compaction job to the tracker.
+    ///
+    /// # Arguments
+    /// * `id` - The ID of the compaction job.
+    /// * `total_bytes` - The total number of bytes to be processed for the compaction job.
+    pub fn add_job(&mut self, id: Uuid, total_bytes: u64) {
+        self.processed_bytes.insert(id, (0, total_bytes));
     }
 
     pub fn remove_job(&mut self, id: Uuid) {
@@ -62,6 +67,10 @@ impl CompactionProgressTracker {
     }
 
     /// Overwrites the progress for a compaction job with the latest processed bytes.
+    ///
+    /// # Arguments
+    /// * `id` - The ID of the compaction job.
+    /// * `bytes_processed` - The total number of bytes processed so far.
     pub fn update_progress(&mut self, id: Uuid, bytes_processed: u64) {
         if let Some((_, total_bytes)) = self.processed_bytes.get(&id).map(|entry| *entry.value()) {
             self.processed_bytes
