@@ -63,10 +63,14 @@ jobs:
 
       - name: Run benchmark
         env:
-          CLOUD_PROVIDER: local
-          LOCAL_PATH: ${{ github.workspace }}/benchmark-data
+          CLOUD_PROVIDER: aws
+          AWS_ACCESS_KEY_ID: ${{ secrets.TIGRIS_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TIGRIS_AWS_SECRET_ACCESS_KEY }}
+          AWS_BUCKET: ${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}
+          AWS_REGION: auto
+          AWS_ENDPOINT: https://t3.storage.dev
           SLATEDB_BENCH_CLEAN: true
-        run: mkdir -p ${{ github.workspace }}/benchmark-data && ./slatedb-bencher/benchmark-db.sh
+        run: ./slatedb-bencher/benchmark-db.sh
 
       - name: Update benchmark result
         uses: benchmark-action/github-action-benchmark@v1
