@@ -458,7 +458,11 @@ async fn dump_stats(stats: Arc<StatsRecorder>) {
                 let put_bytes_rate = puts_bytes_since as f32 / interval.as_secs() as f32;
                 let get_rate = gets_since as f32 / interval.as_secs() as f32;
                 let get_bytes_rate = gets_bytes_since as f32 / interval.as_secs() as f32;
-                let get_hit_pct = gets_hits_since as f32 / gets_since as f32;
+                let get_hit_pct = if gets_since > 0 {
+                    gets_hits_since as f32 / gets_since as f32
+                } else {
+                    0.0
+                };
 
                 info!(
                     "stats dump [elapsed {:?}, put/s: {:.3} ({:.3} MiB/s), get/s: {:.3} ({:.3} MiB/s), get db hit rate: {:.2}%, window: {:?}, total puts: {}, total gets: {}]",
