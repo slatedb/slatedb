@@ -133,7 +133,7 @@ if [ "$CLOUD_PROVIDER" = "local" ]; then
 fi
 
 for put_percentage in 20 40 60 80 100; do
-  for concurrency in 1 4; do
+  for concurrency in 32 64; do
     log_file="$OUT/logs/${put_percentage}_${concurrency}.log"
     dat_file="$OUT/dats/${put_percentage}_${concurrency}.dat"
     svg_file="$OUT/plots/${put_percentage}_${concurrency}.svg"

@@ -127,7 +127,6 @@ pub struct DbBench {
 }
 
 impl DbBench {
-    // Ignore too many args
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         key_gen_supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>>,
