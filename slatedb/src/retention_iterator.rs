@@ -1,12 +1,12 @@
+use async_trait::async_trait;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use async_trait::async_trait;
-
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::RowEntry;
+use crate::types::ValueDeletable::Tombstone;
 
 /// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
 ///
@@ -61,29 +61,43 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             return versions;
         }
 
-        // Always preserve the latest version regardless of age
-        let latest_version = match versions.pop_first() {
-            Some((_, entry)) => entry,
-            None => return versions,
-        };
+        let mut filtered_versions = BTreeMap::new();
+        for (idx, (_, entry)) in versions.into_iter().enumerate() {
+            // always keep the latest version
+            let retention_timeout = entry
+                .create_ts
+                .map(|create_ts| create_ts + (retention_time.as_secs() as i64) >= current_timestamp)
+                .unwrap_or(true);
+            if retention_timeout && idx > 0 {
+                break;
+            }
 
-        // Filter older versions based on retention time
-        let mut filtered_versions = versions
-            .into_iter()
-            .filter(|(_, entry)| {
-                entry
-                    .create_ts
-                    .map(|create_ts| {
-                        // Keep version if: create_ts + retention_time >= current_timestamp
-                        // (i.e., version is still within retention period)
-                        create_ts + (retention_time.as_secs() as i64) >= current_timestamp
-                    })
-                    .unwrap_or(true)
-            })
-            .collect::<BTreeMap<_, _>>();
+            // convert the expired version to tombstone
+            let entry = match entry.expire_ts.as_ref() {
+                Some(expire_ts) if *expire_ts <= current_timestamp => RowEntry {
+                    key: entry.key,
+                    value: Tombstone,
+                    seq: entry.seq,
+                    expire_ts: None,
+                    create_ts: entry.create_ts,
+                },
+                _ => entry,
+            };
 
-        // Re-insert the latest version at the front
-        filtered_versions.insert(Reverse(latest_version.seq), latest_version);
+            filtered_versions.insert(Reverse(entry.seq), entry);
+        }
+
+        // remove the tombstones in the tail
+        while filtered_versions
+            .iter()
+            .last()
+            .map(|(_, entry)| entry.value.is_tombstone())
+            .unwrap_or(false)
+            && filtered_versions.len() > 1
+        {
+            filtered_versions.pop_last();
+        }
+
         filtered_versions
     }
 }

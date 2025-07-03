@@ -15,6 +15,7 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::rand::DbRand;
+use crate::retention_iterator::RetentionIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
@@ -102,7 +103,7 @@ impl TokioCompactionExecutorInner {
     async fn load_iterators<'a>(
         &self,
         compaction: &'a CompactionJob,
-    ) -> Result<MergeIterator<'a>, SlateDBError> {
+    ) -> Result<RetentionIterator<MergeIterator<'a>>, SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 4,
             blocks_to_fetch: 256,
@@ -129,7 +130,11 @@ impl TokioCompactionExecutorInner {
             sr_iters.push_back(iter);
         }
         let sr_merge_iter = MergeIterator::new(sr_iters).await?.with_dedup(false);
-        MergeIterator::new([l0_merge_iter, sr_merge_iter]).await
+
+        let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter]).await?;
+        let retention_iter =
+            RetentionIterator::new(merge_iter, self.options.retention_time).await?;
+        Ok(retention_iter)
     }
 
     async fn execute_compaction(
@@ -164,6 +169,7 @@ impl TokioCompactionExecutorInner {
                 _ => raw_kv,
             };
 
+            // it contains multiple versions now, we can only skip the last tombstone
             if compaction.is_dest_last_run && kv.value.is_tombstone() {
                 continue;
             }

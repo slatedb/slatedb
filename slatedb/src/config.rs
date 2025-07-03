@@ -818,6 +818,11 @@ pub struct CompactorOptions {
 
     /// The maximum number of concurrent compactions to execute at once
     pub max_concurrent_compactions: usize,
+
+    /// The retention time for the multi-version compaction.
+    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(serialize_with = "serialize_duration")]
+    pub retention_time: Duration,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -831,6 +836,7 @@ impl Default for CompactorOptions {
             manifest_update_timeout: Duration::from_secs(300),
             max_sst_size: 1024 * 1024 * 1024,
             max_concurrent_compactions: 4,
+            retention_time: Duration::from_secs(3600 * 6), // 6 hours
         }
     }
 }
