@@ -47,7 +47,7 @@ impl SystemMonitor {
             while running.load(Ordering::SeqCst) {
                 system.refresh_cpu_usage();
 
-                let global_cpu_usage = system.global_cpu_usage();
+                let global_cpu_usage = system.global_cpu_usage().round();
                 let cpu_core_usage = system
                     .cpus()
                     .iter()

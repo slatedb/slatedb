@@ -465,7 +465,7 @@ async fn dump_stats(stats: Arc<StatsRecorder>) {
                 };
 
                 info!(
-                    "stats dump [elapsed {:?}, put/s: {:.3} ({:.3} MiB/s), get/s: {:.3} ({:.3} MiB/s), get db hit rate: {:.2}%, window: {:?}, total puts: {}, total gets: {}]",
+                    "stats dump [elapsed {:?}, put/s: {:.3} ({:.3} MiB/s), get/s: {:.3} ({:.3} MiB/s), get db hit rate: {:.6}%, window: {:?}, total puts: {}, total gets: {}]",
                     range.end.duration_since(first_dump_start.unwrap()).as_secs_f64(),
                     put_rate,
                     put_bytes_rate / 1_048_576.0,
