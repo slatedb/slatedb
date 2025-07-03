@@ -4,7 +4,7 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use sysinfo::{Disks, Networks, Pid, System};
+use sysinfo::{Disks, Networks, System};
 use tokio::time::Instant;
 use tracing::info;
 
@@ -60,24 +60,24 @@ impl SystemMonitor {
 
                 system.refresh_memory();
 
-                let total_memory = system.total_memory() / 1024 / 1024;
-                let used_memory = system.used_memory() / 1024 / 1024;
-                let free_memory = system.free_memory() / 1024 / 1024;
-                let available_memory = system.available_memory() / 1024 / 1024;
-                let total_swap = system.total_swap() / 1024 / 1024;
-                let free_swap = system.free_swap() / 1024 / 1024;
-                let used_swap = system.used_swap() / 1024 / 1024;
-                let bencher_memory =
-                    system.process(Pid::from(bencher_pid)).unwrap().memory() / 1024 / 1024;
+                let total_memory_mb = system.total_memory() / 1024 / 1024;
+                let used_memory_mb = system.used_memory() / 1024 / 1024;
+                let free_memory_mb = system.free_memory() / 1024 / 1024;
+                let available_memory_mb = system.available_memory() / 1024 / 1024;
+                let total_swap_mb = system.total_swap() / 1024 / 1024;
+                let free_swap_mb = system.free_swap() / 1024 / 1024;
+                let used_swap_mb = system.used_swap() / 1024 / 1024;
+                let bencher_memory_mb =
+                    system.process(bencher_pid).map(|p| p.memory() / 1024 / 1024).unwrap_or(0);
                 info!(
-                    bencher_memory,
-                    total_memory,
-                    used_memory,
-                    free_memory,
-                    available_memory,
-                    total_swap,
-                    free_swap,
-                    used_swap,
+                    bencher_memory_mb,
+                    total_memory_mb,
+                    used_memory_mb,
+                    free_memory_mb,
+                    available_memory_mb,
+                    total_swap_mb,
+                    free_swap_mb,
+                    used_swap_mb,
                     "memory usage (MiB)"
                 );
 
@@ -88,16 +88,18 @@ impl SystemMonitor {
 
                 for disk in disks.list() {
                     let usage = disk.usage();
-                    let read_mebibytes_since_last_refresh = usage.read_bytes / 1024 / 1024;
-                    let write_mebibytes_since_last_refresh = usage.written_bytes / 1024 / 1024;
-                    let read_mebibytes_per_second =
-                        read_mebibytes_since_last_refresh as f64 / elapsed.as_secs_f64();
-                    let write_mebibytes_per_second =
-                        write_mebibytes_since_last_refresh as f64 / elapsed.as_secs_f64();
+                    let read_mb_since_last_refresh = usage.read_bytes / 1024 / 1024;
+                    let write_mb_since_last_refresh = usage.written_bytes / 1024 / 1024;
+                    let read_mb_per_second =
+                        read_mb_since_last_refresh as f64 / elapsed.as_secs_f64();
+                    let write_mb_per_second =
+                        write_mb_since_last_refresh as f64 / elapsed.as_secs_f64();
                     let disk_name = disk.name().to_str().unwrap();
                     info!(
                         disk_name,
-                        read_mebibytes_per_second, write_mebibytes_per_second, "disk usage (MiB/s)",
+                        read_mb_per_second,
+                        write_mb_per_second,
+                        "disk usage (MiB/s)",
                     );
                 }
 
@@ -107,22 +109,22 @@ impl SystemMonitor {
                 last_network_refresh = now;
 
                 for (interface_name, data) in networks.list() {
-                    let received_mebibytes_since_last_refresh = data.received() / 1024 / 1024;
-                    let transmitted_mebibytes_since_last_refresh = data.transmitted() / 1024 / 1024;
-                    if received_mebibytes_since_last_refresh == 0
-                        && transmitted_mebibytes_since_last_refresh == 0
+                    let received_mb_since_last_refresh = data.received() / 1024 / 1024;
+                    let transmitted_mb_since_last_refresh = data.transmitted() / 1024 / 1024;
+                    if received_mb_since_last_refresh == 0
+                        && transmitted_mb_since_last_refresh == 0
                     {
                         continue;
                     }
-                    let received_mebibytes_per_second =
-                        received_mebibytes_since_last_refresh as f64 / elapsed.as_secs_f64();
-                    let transmitted_mebibytes_per_second =
-                        transmitted_mebibytes_since_last_refresh as f64 / elapsed.as_secs_f64();
+                    let received_mb_per_second =
+                        received_mb_since_last_refresh as f64 / elapsed.as_secs_f64();
+                    let transmitted_mb_per_second =
+                        transmitted_mb_since_last_refresh as f64 / elapsed.as_secs_f64();
 
                     info!(
                         interface_name,
-                        received_mebibytes_per_second,
-                        transmitted_mebibytes_per_second,
+                        received_mb_per_second,
+                        transmitted_mb_per_second,
                         "network usage (MiB/s)",
                     );
                 }
