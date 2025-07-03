@@ -138,7 +138,10 @@ if [ "$CLOUD_PROVIDER" = "local" ]; then
 fi
 
 if [ -n "${AWS_ENDPOINT:-}" ]; then
-    traceroute $AWS_ENDPOINT
+    # first remove “http://” if present, then “https://”
+    ep="${AWS_ENDPOINT#http://}"
+    ep="${ep#https://}"
+    traceroute "$ep"
 fi
 
 for put_percentage in 20 40 60 80 100; do
@@ -150,9 +153,9 @@ for put_percentage in 20 40 60 80 100; do
     run_bench "$put_percentage" "$concurrency" "$log_file"
     generate_dat "$log_file" "$dat_file"
     if has_gnuplot; then
-      generate_plot "$dat_file" "$svg_file"
+        generate_plot "$dat_file" "$svg_file"
     else
-      echo "gnuplot is missing, so skipping plot generation"
+        echo "gnuplot is missing, so skipping plot generation"
     fi
   done
 done
