@@ -23,6 +23,7 @@ use tracing::{error, info, warn};
 
 mod args;
 mod db;
+mod system_monitor;
 
 const CLEANUP_NAME: &str = ".clean_benchmark_data";
 
@@ -33,6 +34,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args = BencherArgs::parse();
     let path = Path::from(args.path);
     let object_store = admin::load_object_store_from_env(args.env_file)?;
+
+    // Start system monitoring in background
+    let _monitor_handle = system_monitor::start_monitoring();
 
     if args.clean {
         create_cleanup_lock(object_store.clone(), &path).await?;
