@@ -223,6 +223,7 @@ impl Task {
         let mut puts_bytes = 0u64;
         let mut gets = 0u64;
         let mut gets_bytes = 0u64;
+        let mut gets_hits = 0u64;
         let duration = self.duration.unwrap_or(Duration::MAX);
         let num_keys = self.num_keys.unwrap_or(u64::MAX);
         let start = Instant::now();
@@ -241,6 +242,7 @@ impl Task {
             } else {
                 let val = self.db.get(key).await.unwrap();
                 gets += 1;
+                gets_hits += val.is_some() as u64;
                 gets_bytes += key.len() as u64 + val.map(|v| v.len() as u64).unwrap_or(0);
             }
             if last_report.elapsed() >= REPORT_INTERVAL {
@@ -248,11 +250,12 @@ impl Task {
                 self.stats_recorder
                     .record_puts(last_report, puts, puts_bytes);
                 self.stats_recorder
-                    .record_gets(last_report, gets, gets_bytes);
+                    .record_gets(last_report, gets, gets_bytes, gets_hits);
                 puts = 0;
                 gets = 0;
                 puts_bytes = 0;
                 gets_bytes = 0;
+                gets_hits = 0;
             }
         }
     }
@@ -266,6 +269,7 @@ struct Window {
     gets: u64,
     puts_bytes: u64,
     gets_bytes: u64,
+    gets_hits: u64,
 }
 
 struct StatsRecorderInner {
@@ -273,6 +277,7 @@ struct StatsRecorderInner {
     gets: u64,
     puts_bytes: u64,
     gets_bytes: u64,
+    gets_hits: u64,
     windows: VecDeque<Window>,
 }
 
@@ -288,6 +293,7 @@ impl StatsRecorderInner {
                 gets: 0,
                 puts_bytes: 0,
                 gets_bytes: 0,
+                gets_hits: 0,
             });
             return;
         };
@@ -298,6 +304,7 @@ impl StatsRecorderInner {
                 gets: 0,
                 puts_bytes: 0,
                 gets_bytes: 0,
+                gets_hits: 0,
             });
             while windows.len() > 180 {
                 windows.pop_back();
@@ -316,14 +323,16 @@ impl StatsRecorderInner {
         self.puts_bytes += bytes;
     }
 
-    fn record_gets(&mut self, now: Instant, gets: u64, bytes: u64) {
+    fn record_gets(&mut self, now: Instant, gets: u64, bytes: u64, hits: u64) {
         Self::maybe_roll_window(now, &mut self.windows);
         if let Some(front) = self.windows.front_mut() {
             front.gets += gets;
             front.gets_bytes += bytes;
+            front.gets_hits += hits;
         }
         self.gets += gets;
         self.gets_bytes += bytes;
+        self.gets_hits += hits;
     }
 
     fn puts(&self) -> u64 {
@@ -340,11 +349,12 @@ impl StatsRecorderInner {
     fn sum_windows(
         windows: &VecDeque<Window>,
         lookback: Duration,
-    ) -> Option<(Range<Instant>, u64, u64, u64, u64)> {
+    ) -> Option<(Range<Instant>, u64, u64, u64, u64, u64)> {
         let mut puts = 0;
         let mut gets = 0;
         let mut puts_bytes = 0;
         let mut gets_bytes = 0;
+        let mut gets_hits = 0;
         let mut windows_iter = windows.iter();
         // Don't count the active window, but use its start point as the end of the range.
         let active_window = windows_iter.next();
@@ -358,13 +368,17 @@ impl StatsRecorderInner {
             gets += window.gets;
             puts_bytes += window.puts_bytes;
             gets_bytes += window.gets_bytes;
+            gets_hits += window.gets_hits;
             range.start = window.range.start;
         }
-        Some((range, puts, gets, puts_bytes, gets_bytes))
+        Some((range, puts, gets, puts_bytes, gets_bytes, gets_hits))
     }
 
-    fn operations_since(&self, lookback: Duration) -> Option<(Range<Instant>, u64, u64, u64, u64)> {
-        Self::sum_windows(&self.windows, lookback).map(|r| (r.0, r.1, r.2, r.3, r.4))
+    fn operations_since(
+        &self,
+        lookback: Duration,
+    ) -> Option<(Range<Instant>, u64, u64, u64, u64, u64)> {
+        Self::sum_windows(&self.windows, lookback).map(|r| (r.0, r.1, r.2, r.3, r.4, r.5))
     }
 }
 
@@ -380,6 +394,7 @@ impl StatsRecorder {
                 gets: 0,
                 puts_bytes: 0,
                 gets_bytes: 0,
+                gets_hits: 0,
                 windows: VecDeque::new(),
             }),
         }
@@ -390,9 +405,9 @@ impl StatsRecorder {
         guard.record_puts(now, records, bytes);
     }
 
-    fn record_gets(&self, now: Instant, records: u64, bytes: u64) {
+    fn record_gets(&self, now: Instant, records: u64, bytes: u64, hits: u64) {
         let mut guard = self.inner.lock().expect("lock failed");
-        guard.record_gets(now, records, bytes);
+        guard.record_gets(now, records, bytes, hits);
     }
 
     fn puts(&self) -> u64 {
@@ -405,7 +420,10 @@ impl StatsRecorder {
         guard.gets()
     }
 
-    fn operations_since(&self, lookback: Duration) -> Option<(Range<Instant>, u64, u64, u64, u64)> {
+    fn operations_since(
+        &self,
+        lookback: Duration,
+    ) -> Option<(Range<Instant>, u64, u64, u64, u64, u64)> {
         let guard = self.inner.lock().expect("lock failed");
         guard.operations_since(lookback)
     }
@@ -418,8 +436,14 @@ async fn dump_stats(stats: Arc<StatsRecorder>) {
         tokio::time::sleep(REPORT_INTERVAL).await;
 
         let operations_since = stats.operations_since(STAT_DUMP_LOOKBACK);
-        if let Some((range, puts_since, gets_since, puts_bytes_since, gets_bytes_since)) =
-            operations_since
+        if let Some((
+            range,
+            puts_since,
+            gets_since,
+            puts_bytes_since,
+            gets_bytes_since,
+            gets_hits_since,
+        )) = operations_since
         {
             let interval = range.end - range.start;
             let puts = stats.puts();
@@ -434,14 +458,16 @@ async fn dump_stats(stats: Arc<StatsRecorder>) {
                 let put_bytes_rate = puts_bytes_since as f32 / interval.as_secs() as f32;
                 let get_rate = gets_since as f32 / interval.as_secs() as f32;
                 let get_bytes_rate = gets_bytes_since as f32 / interval.as_secs() as f32;
+                let get_hit_pct = gets_hits_since as f32 / gets_since as f32;
 
                 info!(
-                    "stats dump [elapsed {:?}, put/s: {:.3} ({:.3} MiB/s), get/s: {:.3} ({:.3} MiB/s), window: {:?}, total puts: {}, total gets: {}]",
+                    "stats dump [elapsed {:?}, put/s: {:.3} ({:.3} MiB/s), get/s: {:.3} ({:.3} MiB/s), get db hit rate: {:.2}%, window: {:?}, total puts: {}, total gets: {}]",
                     range.end.duration_since(first_dump_start.unwrap()).as_secs_f64(),
                     put_rate,
                     put_bytes_rate / 1_048_576.0,
                     get_rate,
                     get_bytes_rate / 1_048_576.0,
+                    get_hit_pct * 100f32,
                     range.end - range.start,
                     puts,
                     gets,
