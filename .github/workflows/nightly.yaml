@@ -50,6 +50,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y traceroute
+
       - name: System information
         run: |
           echo "=== CPU ==="
@@ -60,11 +65,8 @@ jobs:
           df -h
           echo -e "\n=== Workspace Directory ==="
           du -sh ${{ github.workspace }}
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y traceroute
+          echo -e "\n=== Network ==="
+          traceroute "$AWS_ENDPOINT"
 
       - name: Run benchmark
         env:
