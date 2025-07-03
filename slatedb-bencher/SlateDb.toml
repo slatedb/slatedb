@@ -2,3 +2,6 @@ flush_interval = "20ms"
 
 [object_store_cache_options]
 root_folder = "/tmp/slatedb-cache"
+
+[compactor_options]
+poll_interval = "100ms"
