@@ -132,8 +132,12 @@ impl TokioCompactionExecutorInner {
         let sr_merge_iter = MergeIterator::new(sr_iters).await?.with_dedup(false);
 
         let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter]).await?;
-        let retention_iter =
-            RetentionIterator::new(merge_iter, self.options.retention_time).await?;
+        let retention_iter = RetentionIterator::new(
+            merge_iter,
+            self.options.retention_time,
+            compaction.is_dest_last_run,
+        )
+        .await?;
         Ok(retention_iter)
     }
 

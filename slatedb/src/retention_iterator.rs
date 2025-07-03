@@ -21,14 +21,21 @@ pub(crate) struct RetentionIterator<T: KeyValueIterator> {
     retention_time: Duration,
     /// Buffer for collecting and processing multiple versions of the same key
     buffer: RetentionBuffer,
+    /// Whether to filter out tombstones
+    filter_tombstone: bool,
 }
 
 impl<T: KeyValueIterator> RetentionIterator<T> {
     /// Creates a new retention iterator with the specified retention policy
-    pub(crate) async fn new(inner: T, retention_time: Duration) -> Result<Self, SlateDBError> {
+    pub(crate) async fn new(
+        inner: T,
+        retention_time: Duration,
+        filter_tombstone: bool,
+    ) -> Result<Self, SlateDBError> {
         Ok(Self {
             inner,
             retention_time,
+            filter_tombstone,
             buffer: RetentionBuffer::new(),
         })
     }
@@ -52,15 +59,11 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
     /// - Filters out older versions that exceed the retention period
     /// - Uses `create_ts` to determine if a version should be retained
     fn apply_retention_filter(
-        mut versions: BTreeMap<Reverse<u64>, RowEntry>,
+        versions: BTreeMap<Reverse<u64>, RowEntry>,
         current_timestamp: i64,
         retention_time: Duration,
+        filter_tombstone: bool,
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
-        // If there's only one version, we should do nothing
-        if versions.len() == 1 {
-            return versions;
-        }
-
         let mut filtered_versions = BTreeMap::new();
         for (idx, (_, entry)) in versions.into_iter().enumerate() {
             // always keep the latest version
@@ -88,14 +91,16 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
         }
 
         // remove the tombstones in the tail
-        while filtered_versions
-            .iter()
-            .last()
-            .map(|(_, entry)| entry.value.is_tombstone())
-            .unwrap_or(false)
-            && filtered_versions.len() > 1
-        {
-            filtered_versions.pop_last();
+        if filter_tombstone {
+            while filtered_versions
+                .iter()
+                .last()
+                .map(|(_, entry)| entry.value.is_tombstone())
+                .unwrap_or(false)
+                && filtered_versions.len() > 1
+            {
+                filtered_versions.pop_last();
+            }
         }
 
         filtered_versions
@@ -145,7 +150,12 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
                     let current_timestamp = self.current_timestamp();
                     let retention_time = self.retention_time;
                     self.buffer.process_retention(|versions| {
-                        Self::apply_retention_filter(versions, current_timestamp, retention_time)
+                        Self::apply_retention_filter(
+                            versions,
+                            current_timestamp,
+                            retention_time,
+                            self.filter_tombstone,
+                        )
                     })?;
                 }
             }
@@ -730,6 +740,7 @@ mod tests {
             versions,
             test_case.current_timestamp,
             test_case.retention_time,
+            true,
         );
 
         // Convert filtered versions back to expected order
