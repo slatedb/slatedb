@@ -152,32 +152,7 @@ impl TokioCompactionExecutorInner {
             .table_writer(SsTableId::Compacted(self.rand.thread_rng().gen_ulid()));
         let mut current_size = 0usize;
 
-        while let Some(raw_kv) = all_iter.next_entry().await? {
-            // filter out any expired entries -- eventually we can consider
-            // abstracting this away into generic, pluggable compaction filters
-            // but for now we do it inline
-            let kv = match raw_kv.expire_ts {
-                Some(expire_ts) if expire_ts <= compaction.compaction_ts => {
-                    // insert a tombstone instead of just filtering out the
-                    // value in the iterator because this may otherwise "revive"
-                    // an older version of the KV pair that has a larger TTL in
-                    // a lower level of the LSM tree
-                    RowEntry {
-                        key: raw_kv.key,
-                        value: Tombstone,
-                        seq: raw_kv.seq,
-                        expire_ts: None,
-                        create_ts: raw_kv.create_ts,
-                    }
-                }
-                _ => raw_kv,
-            };
-
-            // it contains multiple versions now, we can only skip the last tombstone
-            if compaction.is_dest_last_run && kv.value.is_tombstone() {
-                continue;
-            }
-
+        while let Some(kv) = all_iter.next_entry().await? {
             // Add to SST
             let key_len = kv.key.len();
             let value_len = kv.value.len();
