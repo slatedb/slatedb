@@ -61,6 +61,11 @@ jobs:
           echo -e "\n=== Workspace Directory ==="
           du -sh ${{ github.workspace }}
 
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y traceroute
+
       - name: Run benchmark
         env:
           CLOUD_PROVIDER: aws
