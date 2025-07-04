@@ -97,7 +97,7 @@ pub(crate) struct BenchmarkDbArgs {
     #[arg(
         long,
         help = "The key generator to use.",
-        default_value_t = KeyGeneratorType::Random
+        default_value_t = KeyGeneratorType::FixedSet
     )]
     pub(crate) key_generator: KeyGeneratorType,
 

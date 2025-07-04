@@ -45,6 +45,13 @@ impl SystemMonitor {
             let mut last_network_refresh = Instant::now();
 
             while running.load(Ordering::SeqCst) {
+                for _ in 0..10 {
+                    if !running.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_secs(1));
+                }
+
                 system.refresh_cpu_usage();
 
                 let global_cpu_usage = system.global_cpu_usage().round();
@@ -126,13 +133,6 @@ impl SystemMonitor {
                         interface_name,
                         received_mb_per_second, transmitted_mb_per_second, "network usage (MiB/s)",
                     );
-                }
-
-                for _ in 0..10 {
-                    if !running.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    thread::sleep(Duration::from_secs(1));
                 }
             }
 
