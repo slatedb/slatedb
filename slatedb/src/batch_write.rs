@@ -28,6 +28,7 @@
 use log::{info, warn};
 use std::sync::Arc;
 use tokio::runtime::Handle;
+use tracing::instrument;
 
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{spawn_bg_task, WatchableOnceCellReader};
@@ -51,6 +52,7 @@ pub(crate) struct WriteBatchRequest {
 
 impl DbInner {
     #[allow(clippy::panic)]
+    #[instrument(level = "trace", skip_all, fields(batch_size = batch.ops.len()))]
     async fn write_batch(
         &self,
         batch: WriteBatch,

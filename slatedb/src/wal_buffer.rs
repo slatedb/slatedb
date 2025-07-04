@@ -9,7 +9,7 @@ use tokio::{
     },
     task::JoinHandle,
 };
-use tracing::{error, warn};
+use tracing::{debug, error, instrument, trace, warn};
 
 use crate::{
     clock::MonotonicClock,
@@ -20,7 +20,7 @@ use crate::{
     oracle::Oracle,
     tablestore::TableStore,
     types::RowEntry,
-    utils::{spawn_bg_task, SendSafely, WatchableOnceCell, WatchableOnceCellReader},
+    utils::{spawn_bg_task, WatchableOnceCell, WatchableOnceCellReader},
     wal_id::WalIdStore,
     SlateDBError,
 };
@@ -215,6 +215,11 @@ impl WalBufferManager {
                 inner.current_wal.metadata().entry_num,
                 inner.current_wal.metadata().entries_size_in_bytes,
             );
+            trace!(
+                ?current_wal_size,
+                max_wal_bytes_size = ?self.max_wal_bytes_size,
+                "checking flush trigger",
+            );
             let need_flush = current_wal_size >= self.max_wal_bytes_size;
             (
                 inner.current_wal.clone(),
@@ -265,6 +270,7 @@ impl WalBufferManager {
         }
     }
 
+    #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
     pub async fn flush(&self) -> Result<(), SlateDBError> {
         let flush_tx = self
             .inner
@@ -385,6 +391,7 @@ impl WalBufferManager {
         flushing_wals
     }
 
+    #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
     async fn do_flush(&self) -> Result<(), SlateDBError> {
         self.freeze_current_wal().await?;
         let flushing_wals = self.flushing_wals();
@@ -487,6 +494,7 @@ impl WalBufferManager {
             }
         }
 
+        debug!("draining immutable wals: ..{}", releaseable_count);
         inner.immutable_wals.drain(..releaseable_count);
     }
 

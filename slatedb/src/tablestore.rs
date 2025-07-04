@@ -6,11 +6,11 @@ use bytes::Bytes;
 use chrono::Utc;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::join_all, StreamExt};
-use log::{debug, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use tokio::io::AsyncWriteExt;
+use tracing::{debug, warn};
 use ulid::Ulid;
 
 use crate::db_cache::{CachedEntry, DbCache};
@@ -253,6 +253,7 @@ impl TableStore {
     pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
+        debug!(%path, "deleting SST");
         object_store.delete(&path).await.map_err(SlateDBError::from)
     }
 

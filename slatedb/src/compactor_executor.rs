@@ -23,7 +23,7 @@ use crate::compactor::stats::CompactionStats;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
 use crate::utils::{spawn_bg_task, IdGenerator};
-use tracing::error;
+use tracing::{debug, error, instrument};
 use uuid::Uuid;
 
 pub(crate) struct CompactionJob {
@@ -33,6 +33,27 @@ pub(crate) struct CompactionJob {
     pub(crate) sorted_runs: Vec<SortedRun>,
     pub(crate) compaction_ts: i64,
     pub(crate) is_dest_last_run: bool,
+}
+
+impl std::fmt::Debug for CompactionJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let estimated_sst_size = self.ssts.iter().map(|sst| sst.estimate_size()).sum::<u64>();
+        let estimated_sr_size = self
+            .sorted_runs
+            .iter()
+            .map(|sr| sr.estimate_size())
+            .sum::<u64>();
+        let estimated_total_size = estimated_sst_size + estimated_sr_size;
+        f.debug_struct("CompactionJob")
+            .field("id", &self.id)
+            .field("destination", &self.destination)
+            .field("ssts", &self.ssts)
+            .field("sorted_runs", &self.sorted_runs)
+            .field("compaction_ts", &self.compaction_ts)
+            .field("is_dest_last_run", &self.is_dest_last_run)
+            .field("estimated_source_bytes", &estimated_total_size)
+            .finish()
+    }
 }
 
 pub(crate) trait CompactionExecutor {
@@ -132,10 +153,12 @@ impl TokioCompactionExecutorInner {
         MergeIterator::new([l0_merge_iter, sr_merge_iter]).await
     }
 
+    #[instrument(level = "debug", skip_all, fields(id = %compaction.id))]
     async fn execute_compaction(
         &self,
         compaction: CompactionJob,
     ) -> Result<SortedRun, SlateDBError> {
+        debug!(?compaction, "executing compaction");
         let mut all_iter = self.load_iterators(&compaction).await?;
         let mut output_ssts = Vec::new();
         let mut current_writer = self

@@ -1,3 +1,39 @@
+//! # Statistics Module
+//!
+//! Rather than integrate with observability platforms such as Prometheus or InfluxDB,
+//! SlateDB exposes metrics through [`Db::metrics`]. Applications can get the registry
+//! and poll it periodically to expose SlateDB metrics to their observability systems.
+//!
+//! This module provides a flexible and thread-safe metrics collection system for tracking
+//! and monitoring various runtime statistics in SlateDB.
+//!
+//! ## Components
+//!
+//! * [`ReadableStat`]: Core trait implemented by all metric types, providing a way to read
+//!   the current value as an `i64`.
+//!
+//! * [`StatRegistry`]: Central repository for registering and looking up metrics by name.
+//!   Provides atomic, thread-safe access to all registered metrics.
+//!
+//! * [`Counter`]: Atomic counter for tracking incrementing values.
+//!
+//! * [`Gauge<T>`]: Generic value holder for any type that implements `NoUninit + Debug`.
+//!   Special implementations exist for common types like `i64`, `u64`, `i32`, and `bool`.
+//!   Gauges for numeric types provide additional operations like [`add()`], [`sub()`], etc.
+//!
+//! * [`stat_name!`]: Macro for standardizing metric name formats by combining a prefix
+//!   and suffix with a separator.
+//!
+//! ## Thread Safety
+//!
+//! All metric types are designed to be thread-safe.
+//!
+//! ## Usage Examples
+//!
+//! See [`crate::compactor::stats`] for examples of how to use the metrics in a SlateDB
+//! component.
+//!
+//! [`Db::metrics`]: crate::db::Db::metrics
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -5,7 +41,7 @@ use atomic::{Atomic, Ordering};
 use bytemuck::NoUninit;
 use tracing::warn;
 
-pub trait ReadableStat: Send + Sync {
+pub trait ReadableStat: Send + Sync + std::fmt::Debug {
     fn get(&self) -> i64;
 }
 
@@ -20,16 +56,19 @@ impl StatRegistry {
         }
     }
 
+    /// Get a metric with a specific name, or `None` if no metric was registered
+    /// for the name.
     pub fn lookup(&self, name: &'static str) -> Option<Arc<dyn ReadableStat>> {
         let guard = self.stats.lock().expect("lock poisoned");
         guard.get(name).cloned()
     }
 
-    pub fn all_stats(&self) -> Vec<&'static str> {
+    pub fn names(&self) -> Vec<&'static str> {
         let guard = self.stats.lock().expect("lock poisoned");
         guard.keys().copied().collect()
     }
 
+    /// Register a new metric with the registry.
     pub(crate) fn register(&self, name: &'static str, stat: Arc<dyn ReadableStat>) {
         let mut guard = self.stats.lock().expect("lock poisoned");
         debug_assert!(!guard.contains_key(name));
@@ -44,9 +83,15 @@ impl StatRegistry {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Counter {
     pub(crate) value: Arc<Atomic<u64>>,
+}
+
+impl std::fmt::Debug for Counter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.value.load(Ordering::Relaxed))
+    }
 }
 
 impl ReadableStat for Counter {
@@ -73,9 +118,15 @@ impl Default for Counter {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Gauge<T: std::fmt::Debug + NoUninit> {
     value: Arc<Atomic<T>>,
+}
+
+impl<T: std::fmt::Debug + NoUninit> std::fmt::Debug for Gauge<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.value.load(Ordering::Relaxed))
+    }
 }
 
 impl ReadableStat for Gauge<i32> {
@@ -185,7 +236,7 @@ mod tests {
         let stat3 = Arc::new(Gauge::<i32>::default());
         registry.register("stat3", stat3);
 
-        let names = registry.all_stats();
+        let names = registry.names();
         assert_eq!(names, vec!["stat1", "stat2", "stat3"]);
     }
 
