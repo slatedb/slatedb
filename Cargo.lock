@@ -2011,9 +2011,9 @@ dependencies = [
 
 [[package]]
 name = "object_store"
-version = "0.12.2"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7781f96d79ed0f961a7021424ab01840efbda64ae7a505aaea195efc91eaaec4"
+checksum = "e9ce831b09395f933addbc56d894d889e4b226eba304d4e7adbab591e26daf1e"
 dependencies = [
  "async-trait",
  "base64",
@@ -2031,7 +2031,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "quick-xml",
- "rand 0.9.0",
+ "rand 0.8.5",
  "reqwest",
  "ring",
  "serde",
@@ -2042,8 +2042,6 @@ dependencies = [
  "tracing",
  "url",
  "walkdir",
- "wasm-bindgen-futures",
- "web-time",
 ]
 
 [[package]]

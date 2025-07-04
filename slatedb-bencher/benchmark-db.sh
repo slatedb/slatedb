@@ -22,7 +22,8 @@ has_gnuplot() {
 run_bench() {
   local put_percentage="$1"
   local concurrency="$2"
-  local log_file="$3"
+  local num_keys="$3"
+  local log_file="$4"
 
   local clean_flag=""
   if [ -n "${SLATEDB_BENCH_CLEAN:-}" ]; then
@@ -37,6 +38,7 @@ run_bench() {
     --block-cache-size 134217728 \
     --put-percentage $put_percentage \
     --concurrency $concurrency \
+    --key-count $num_keys \
   "
 
   $bench_cmd | tee "$log_file"
@@ -142,8 +144,9 @@ for put_percentage in 20 40 60 80 100; do
     log_file="$OUT/logs/${put_percentage}_${concurrency}.log"
     dat_file="$OUT/dats/${put_percentage}_${concurrency}.dat"
     svg_file="$OUT/plots/${put_percentage}_${concurrency}.svg"
+    num_keys=$((put_percentage * 1000))
 
-    run_bench "$put_percentage" "$concurrency" "$log_file"
+    run_bench "$put_percentage" "$concurrency" "$num_keys" "$log_file"
     generate_dat "$log_file" "$dat_file"
     if has_gnuplot; then
         generate_plot "$dat_file" "$svg_file"
