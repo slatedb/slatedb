@@ -395,7 +395,7 @@ impl WalBufferManager {
                 // a KV table can be retried to flush multiple times, but WatchableOnceCell is only set once.
                 // we do NOT call `wal.notify_durable` as soon as encountered any error here, but notify
                 // the error when we're sure enters fatal state in `do_cleanup`.
-                error!("failed to flush wal {wal_id}: {e}");
+                error!(wal_id = %wal_id, "failed to flush WAL: {e}");
                 return Err(e.clone());
             }
 
