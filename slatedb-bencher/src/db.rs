@@ -7,7 +7,7 @@
 //!
 //! - Configurable key/value sizes
 //! - Configurable `WriteOptions`
-//! - A pluggable key generator strategy (defaults to random)
+//! - A pluggable key generator strategy (defaults to fixed keyset)
 //! - Configurable `DbOptions`` (for common variables)
 //! - Charts with gnuplots
 //! - Mixed read/write workloads
