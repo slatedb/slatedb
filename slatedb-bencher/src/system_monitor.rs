@@ -54,11 +54,11 @@ impl SystemMonitor {
 
                 system.refresh_cpu_usage();
 
-                let global_cpu_usage = system.global_cpu_usage().round();
+                let global_cpu_usage = f32::trunc(system.global_cpu_usage() * 100.0) / 100.0;
                 let cpu_core_usage = system
                     .cpus()
                     .iter()
-                    .map(|cpu| cpu.cpu_usage().round())
+                    .map(|cpu| f32::trunc(cpu.cpu_usage() * 10.0) / 10.0)
                     .collect::<Vec<_>>();
                 info!(global_cpu_usage, ?cpu_core_usage, "cpu usage");
 
