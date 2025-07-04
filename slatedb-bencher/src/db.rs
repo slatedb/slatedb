@@ -45,7 +45,7 @@ use rand_xorshift::XorShiftRng;
 use slatedb::config::{PutOptions, WriteOptions};
 use slatedb::Db;
 use tokio::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 /// How frequently to dump stats to the console.
 const STAT_DUMP_INTERVAL: Duration = Duration::from_secs(10);
@@ -233,16 +233,25 @@ impl Task {
             if random.gen_range(0..100) < self.put_percentage {
                 let mut value = vec![0; self.val_len];
                 random.fill_bytes(value.as_mut_slice());
-                self.db
+                match self
+                    .db
                     .put_with_options(key, value, &PutOptions::default(), &self.write_options)
                     .await
-                    .unwrap();
-                puts += 1;
-                puts_bytes += self.val_len as u64;
+                {
+                    Ok(_) => {
+                        puts += 1;
+                        puts_bytes += self.val_len as u64;
+                    }
+                    Err(e) => warn!("put failed: {}", e),
+                }
             } else {
-                let val = self.db.get(key).await.unwrap();
-                gets += 1;
-                gets_bytes += key.len() as u64 + val.map(|v| v.len() as u64).unwrap_or(0);
+                match self.db.get(key).await {
+                    Ok(val) => {
+                        gets += 1;
+                        gets_bytes += key.len() as u64 + val.map(|v| v.len() as u64).unwrap_or(0);
+                    }
+                    Err(e) => warn!("get failed: {}", e),
+                }
             }
             if last_report.elapsed() >= REPORT_INTERVAL {
                 last_report = Instant::now();
