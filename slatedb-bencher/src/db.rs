@@ -248,6 +248,7 @@ impl Task {
                 match self.db.get(key).await {
                     Ok(val) => {
                         gets += 1;
+                        gets_hits += val.is_some() as u64;
                         gets_bytes += key.len() as u64 + val.map(|v| v.len() as u64).unwrap_or(0);
                     }
                     Err(e) => warn!("get failed: {}", e),
@@ -473,7 +474,7 @@ async fn dump_stats(stats: Arc<StatsRecorder>) {
                 };
 
                 info!(
-                    "stats dump [elapsed {:?}, put/s: {:.3} ({:.3} MiB/s), get/s: {:.3} ({:.3} MiB/s), get db hit rate: {:.3}%, window: {:?}, total puts: {}, total gets: {}]",
+                    "stats dump [elapsed {:?}, put/s: {:.3} ({:.3} MiB/s), get/s: {:.3} ({:.3} MiB/s), get db hit ratio: {:.3}%, window: {:?}, total puts: {}, total gets: {}]",
                     range.end.duration_since(first_dump_start.unwrap()).as_secs_f64(),
                     put_rate,
                     put_bytes_rate / 1_048_576.0,
