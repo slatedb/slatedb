@@ -1,4 +1,4 @@
-flush_interval = "100ms"
+flush_interval = "500ms"
 
 [object_store_cache_options]
 root_folder = "/tmp/slatedb-cache"
