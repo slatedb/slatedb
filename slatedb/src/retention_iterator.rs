@@ -58,13 +58,14 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
         let mut filtered_versions = BTreeMap::new();
         for (idx, (_, entry)) in versions.into_iter().enumerate() {
-            // always keep the latest version
-            let retention_timeout = entry
+            // always keep the latest version (idx == 0), for older versions, check if they are within retention window
+            let in_retention_window = entry
                 .create_ts
                 .map(|create_ts| create_ts + (retention_time.as_secs() as i64) >= current_timestamp)
                 .unwrap_or(true);
-            if retention_timeout && idx > 0 {
-                break;
+            let should_keep = idx == 0 || in_retention_window;
+            if !should_keep {
+                continue;
             }
 
             // filter out any expired entries -- eventually we can consider
