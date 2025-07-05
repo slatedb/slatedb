@@ -9,7 +9,7 @@ use tokio::{
     },
     task::JoinHandle,
 };
-use tracing::{error, instrument, trace, warn};
+use tracing::{debug, error, instrument, trace, warn};
 
 use crate::{
     clock::MonotonicClock,
@@ -234,7 +234,7 @@ impl WalBufferManager {
                 .try_send(WalFlushWork { result_tx: None })
                 .or_else(|err| match err {
                     TrySendError::Full(_) => {
-                        warn!("wal flush channel is full, skipping flush work");
+                        debug!("wal flush channel is full, skipping flush work");
                         Ok(())
                     }
                     TrySendError::Closed(_) => Err(SlateDBError::BackgroundTaskShutdown),
