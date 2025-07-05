@@ -21,8 +21,6 @@ use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 
 use crate::compactor::stats::CompactionStats;
-use crate::types::RowEntry;
-use crate::types::ValueDeletable::Tombstone;
 use crate::utils::{spawn_bg_task, IdGenerator};
 use tracing::error;
 use uuid::Uuid;
@@ -136,6 +134,7 @@ impl TokioCompactionExecutorInner {
             merge_iter,
             self.options.retention_time,
             compaction.is_dest_last_run,
+            compaction.compaction_ts,
         )
         .await?;
         Ok(retention_iter)

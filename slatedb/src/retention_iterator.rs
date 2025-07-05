@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
@@ -18,38 +18,30 @@ pub(crate) struct RetentionIterator<T: KeyValueIterator> {
     inner: T,
     /// Retention time duration. Entries with create_ts older than (current_time - retention_time)
     /// will be filtered out (except the latest version)
-    retention_time: Duration,
+    retention_timeout: Duration,
     /// Buffer for collecting and processing multiple versions of the same key
     buffer: RetentionBuffer,
     /// Whether to filter out tombstones
     filter_tombstone: bool,
+    /// The current timestamp in seconds since Unix epoch
+    start_timestamp: i64,
 }
 
 impl<T: KeyValueIterator> RetentionIterator<T> {
     /// Creates a new retention iterator with the specified retention policy
     pub(crate) async fn new(
         inner: T,
-        retention_time: Duration,
+        retention_timeout: Duration,
         filter_tombstone: bool,
+        start_timestamp: i64,
     ) -> Result<Self, SlateDBError> {
         Ok(Self {
             inner,
-            retention_time,
+            retention_timeout,
             filter_tombstone,
+            start_timestamp,
             buffer: RetentionBuffer::new(),
         })
-    }
-
-    /// Gets the current timestamp in seconds since Unix epoch
-    ///
-    /// This is used as the reference point for retention calculations.
-    /// TODO: Consider injecting a clock dependency for better testability
-    pub(crate) fn current_timestamp(&self) -> i64 {
-        // TODO: take the clock
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap() as i64
     }
 
     /// Applies retention filtering to a collection of versions for the same key
@@ -155,8 +147,8 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
                 }
                 RetentionBufferState::NeedProcess => {
                     // Apply retention filtering to collected versions
-                    let current_timestamp = self.current_timestamp();
-                    let retention_time = self.retention_time;
+                    let current_timestamp = self.start_timestamp;
+                    let retention_time = self.retention_timeout;
                     self.buffer.process_retention(|versions| {
                         Self::apply_retention_filter(
                             versions,
