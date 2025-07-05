@@ -15,6 +15,7 @@ use tracing::{error, info};
 use ulid::Ulid;
 
 use crate::bytes_generator::OrderedBytesGenerator;
+use crate::clock::DefaultSystemClock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
@@ -308,6 +309,7 @@ impl CompactionExecuteBench {
             table_store.clone(),
             self.rand.clone(),
             stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
         );
         let os = self.object_store.clone();
         info!("load compaction job");
@@ -338,13 +340,15 @@ impl CompactionExecuteBench {
         let start = tokio::time::Instant::now();
         info!("start compaction job");
         tokio::task::spawn_blocking(move || executor.start_compaction(job));
-        let WorkerToOrchestratorMsg::CompactionFinished { id: _, result } =
-            rx.recv().await.expect("recv failed");
-        match result {
-            Ok(_) => {
-                info!("compaction finished in {:?}", start.elapsed());
+        while let Some(msg) = rx.recv().await {
+            if let WorkerToOrchestratorMsg::CompactionFinished { id: _, result } = msg {
+                match result {
+                    Ok(_) => {
+                        info!(elapsed = ?start.elapsed(), "compaction finished");
+                    }
+                    Err(err) => return Err(err),
+                }
             }
-            Err(err) => return Err(err),
         }
         Ok(())
     }
