@@ -33,7 +33,7 @@ run_bench() {
   local bench_cmd="cargo run -r --package slatedb-bencher -- \
     --path /slatedb-bencher_${put_percentage}_${concurrency} $clean_flag db \
     --db-options-path $DIR/Slatedb.toml \
-    --duration 60 \
+    --duration 120 \
     --val-len 8192 \
     --block-cache-size 134217728 \
     --put-percentage $put_percentage \
