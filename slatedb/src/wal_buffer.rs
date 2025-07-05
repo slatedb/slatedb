@@ -9,7 +9,7 @@ use tokio::{
     },
     task::JoinHandle,
 };
-use tracing::{debug, error, instrument, trace, warn};
+use tracing::{error, instrument, trace, warn};
 
 use crate::{
     clock::MonotonicClock,
@@ -494,8 +494,10 @@ impl WalBufferManager {
             }
         }
 
-        debug!("draining immutable wals: ..{}", releaseable_count);
-        inner.immutable_wals.drain(..releaseable_count);
+        if releaseable_count > 0 {
+            trace!("draining immutable wals: ..{}", releaseable_count);
+            inner.immutable_wals.drain(..releaseable_count);
+        }
     }
 
     pub async fn close(&self) -> Result<(), SlateDBError> {
