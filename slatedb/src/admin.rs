@@ -390,9 +390,7 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     let key = env::var("AWS_ACCESS_KEY_ID").ok();
     let secret = env::var("AWS_SECRET_ACCESS_KEY").ok();
     let session_token = env::var("AWS_SESSION_TOKEN").ok();
-
     let endpoint = env::var("AWS_ENDPOINT").ok();
-    let dynamodb_table = env::var("AWS_DYNAMODB_TABLE").ok();
 
     // Start building the S3 object store builder with required params.
     let mut builder = object_store::aws::AmazonS3Builder::new()
