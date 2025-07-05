@@ -23,6 +23,7 @@ use tracing::{error, info, warn};
 
 mod args;
 mod db;
+mod system_monitor;
 
 const CLEANUP_NAME: &str = ".clean_benchmark_data";
 
@@ -33,6 +34,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args = BencherArgs::parse();
     let path = Path::from(args.path);
     let object_store = admin::load_object_store_from_env(args.env_file)?;
+
+    // Start system monitoring in background
+    let mut monitor = system_monitor::SystemMonitor::new(Some(tokio::runtime::Handle::current()));
+    monitor.start();
 
     if args.clean {
         create_cleanup_lock(object_store.clone(), &path).await?;
@@ -46,6 +51,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             exec_benchmark_compaction(path.clone(), object_store.clone(), subcommand_args).await;
         }
     }
+
+    monitor.stop();
 
     if args.clean {
         cleanup_data(object_store, &path).await?;
@@ -75,6 +82,7 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
         args.num_rows,
         args.duration.map(|d| Duration::from_secs(d as u64)),
         args.put_percentage,
+        args.get_hit_percentage,
         db.clone(),
     );
     bencher.run().await;

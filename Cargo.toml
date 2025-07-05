@@ -58,6 +58,7 @@ serde_json = "1.0"
 siphasher = "1"
 slatedb = { path = "slatedb", version = "0.7.0" }
 snap = "1.1.1"
+sysinfo = "0.35.2"
 thiserror = "1.0.63"
 tokio = "1.40.0"
 tokio-util = { version = "0.7.15", default-features = false }

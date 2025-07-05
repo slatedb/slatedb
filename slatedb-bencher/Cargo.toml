@@ -28,3 +28,4 @@ slatedb = { workspace = true, features = ["aws", "azure", "bencher", "wal_disabl
 tokio = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tracing-subscriber = { workspace = true }
+sysinfo = { workspace = true }

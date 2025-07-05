@@ -13,6 +13,7 @@ use slatedb::{
     },
     SettingsError,
 };
+use tracing::info;
 
 use crate::db::{FixedSetKeyGenerator, KeyGenerator, RandomKeyGenerator};
 
@@ -97,7 +98,7 @@ pub(crate) struct BenchmarkDbArgs {
     #[arg(
         long,
         help = "The key generator to use.",
-        default_value_t = KeyGeneratorType::Random
+        default_value_t = KeyGeneratorType::FixedSet
     )]
     pub(crate) key_generator: KeyGeneratorType,
 
@@ -141,6 +142,13 @@ pub(crate) struct BenchmarkDbArgs {
         default_value_t = 20
     )]
     pub(crate) put_percentage: u32,
+
+    #[arg(
+        long,
+        help = "The percentage of gets that will return a value.",
+        default_value_t = 95
+    )]
+    pub(crate) get_hit_percentage: u32,
 }
 
 impl BenchmarkDbArgs {
@@ -149,9 +157,11 @@ impl BenchmarkDbArgs {
         let key_count = self.key_count;
         let supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>> = match self.key_generator {
             KeyGeneratorType::Random => {
+                info!(key_len, "using random key generator");
                 Box::new(move || Box::new(RandomKeyGenerator::new(key_len)))
             }
             KeyGeneratorType::FixedSet => {
+                info!(key_len, key_count, "using fixed set key generator");
                 Box::new(move || Box::new(FixedSetKeyGenerator::new(key_len, key_count)))
             }
         };
