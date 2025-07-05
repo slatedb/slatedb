@@ -193,6 +193,7 @@ struct RetentionBuffer {
 
 /// This enum drives the behavior of the retention iterator's main loop, determining what action
 /// should be taken next.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
 enum RetentionBufferState {
     /// Need to fetch and push the next entry from upstream iterator.
@@ -232,10 +233,9 @@ impl RetentionBuffer {
             } else {
                 return RetentionBufferState::NeedPopAndContinue;
             }
-        } else {
-            if self.end_of_input || self.next_entry.is_some() {
-                return RetentionBufferState::NeedProcess;
-            }
+        }
+        if self.end_of_input || self.next_entry.is_some() {
+            return RetentionBufferState::NeedProcess;
         }
         RetentionBufferState::NeedPush
     }
