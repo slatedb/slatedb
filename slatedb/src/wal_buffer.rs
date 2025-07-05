@@ -3,10 +3,13 @@ use std::{collections::VecDeque, future::Future, pin::Pin, sync::Arc, time::Dura
 use parking_lot::RwLock;
 use tokio::{
     select,
-    sync::{mpsc, oneshot},
+    sync::{
+        mpsc::{self, error::TrySendError},
+        oneshot,
+    },
     task::JoinHandle,
 };
-use tracing::{debug, instrument, trace};
+use tracing::{error, instrument, trace, warn};
 
 use crate::{
     clock::MonotonicClock,
@@ -48,8 +51,8 @@ use crate::{
 pub(crate) struct WalBufferManager {
     inner: Arc<parking_lot::RwLock<WalBufferManagerInner>>,
     wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
-    // If set, WAL buffer will call `record_fatal_error` if it fails
-    db_state: Option<Arc<RwLock<DbState>>>,
+    // WAL buffer will call `record_fatal_error` if it fails
+    db_state: Arc<RwLock<DbState>>,
     db_stats: DbStats,
     quit_once: WatchableOnceCell<Result<(), SlateDBError>>,
     mono_clock: Arc<MonotonicClock>,
@@ -80,7 +83,7 @@ impl WalBufferManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
-        db_state: Option<Arc<RwLock<DbState>>>,
+        db_state: Arc<RwLock<DbState>>,
         db_stats: DbStats,
         recent_flushed_wal_id: u64,
         oracle: Arc<Oracle>,
@@ -120,7 +123,7 @@ impl WalBufferManager {
             });
         }
 
-        let (flush_tx, flush_rx) = mpsc::channel(1);
+        let (flush_tx, flush_rx) = mpsc::channel(128);
         {
             let mut inner = self.inner.write();
             inner.flush_tx = Some(flush_tx);
@@ -228,9 +231,14 @@ impl WalBufferManager {
             flush_tx
                 .as_ref()
                 .expect("flush_tx not initialized, please call start_background first.")
-                .send(WalFlushWork { result_tx: None })
-                .await
-                .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
+                .try_send(WalFlushWork { result_tx: None })
+                .or_else(|err| match err {
+                    TrySendError::Full(_) => {
+                        warn!("wal flush channel is full, skipping flush work");
+                        Ok(())
+                    }
+                    TrySendError::Closed(_) => Err(SlateDBError::BackgroundTaskShutdown),
+                })?;
         }
 
         let estimated_bytes = self.estimated_bytes().await?;
@@ -359,9 +367,7 @@ impl WalBufferManager {
         // In both cases, we need to notify all the flushing WALs to be finished with fatal error or shutdown error.
         // If we got a fatal error, we need to set it in quit_once to notify the database to enter fatal state.
         if let Err(e) = &result {
-            if let Some(db_state) = self.db_state.clone() {
-                db_state.write().record_fatal_error(e.clone());
-            }
+            self.db_state.write().record_fatal_error(e.clone());
             self.quit_once.write(Err(e.clone()));
         }
         // notify all the flushing wals to be finished with fatal error or shutdown error. we need ensure all the wal
@@ -400,6 +406,7 @@ impl WalBufferManager {
                 // a KV table can be retried to flush multiple times, but WatchableOnceCell is only set once.
                 // we do NOT call `wal.notify_durable` as soon as encountered any error here, but notify
                 // the error when we're sure enters fatal state in `do_cleanup`.
+                error!(wal_id = %wal_id, "failed to flush WAL");
                 return Err(e.clone());
             }
 
@@ -487,8 +494,10 @@ impl WalBufferManager {
             }
         }
 
-        debug!("draining immutable wals: ..{}", releaseable_count);
-        inner.immutable_wals.drain(..releaseable_count);
+        if releaseable_count > 0 {
+            trace!("draining immutable wals: ..{}", releaseable_count);
+            inner.immutable_wals.drain(..releaseable_count);
+        }
     }
 
     pub async fn close(&self) -> Result<(), SlateDBError> {
@@ -506,6 +515,9 @@ struct WalFlushWork {
 mod tests {
     use super::*;
     use crate::clock::MonotonicClock;
+    use crate::db_state::CoreDbState;
+    use crate::manifest::store::DirtyManifest;
+    use crate::manifest::Manifest;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -544,9 +556,13 @@ mod tests {
         let test_clock = Arc::new(TestClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
         let oracle = Arc::new(Oracle::new(MonotonicSeq::new(0)));
+        let db_state = Arc::new(RwLock::new(DbState::new(DirtyManifest::new(
+            0,
+            Manifest::initial(CoreDbState::new()),
+        ))));
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
-            None,
+            db_state,
             DbStats::new(&StatRegistry::new()),
             0, // recent_flushed_wal_id
             oracle,

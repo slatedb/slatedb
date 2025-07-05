@@ -2,11 +2,13 @@ use std::collections::{HashMap, VecDeque};
 use std::mem;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::future::join_all;
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
+use crate::clock::SystemClock;
 use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor::WorkerToOrchestratorMsg::CompactionFinished;
 use crate::config::CompactorOptions;
@@ -37,13 +39,6 @@ pub(crate) struct CompactionJob {
 
 impl std::fmt::Debug for CompactionJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let estimated_sst_size = self.ssts.iter().map(|sst| sst.estimate_size()).sum::<u64>();
-        let estimated_sr_size = self
-            .sorted_runs
-            .iter()
-            .map(|sr| sr.estimate_size())
-            .sum::<u64>();
-        let estimated_total_size = estimated_sst_size + estimated_sr_size;
         f.debug_struct("CompactionJob")
             .field("id", &self.id)
             .field("destination", &self.destination)
@@ -51,8 +46,21 @@ impl std::fmt::Debug for CompactionJob {
             .field("sorted_runs", &self.sorted_runs)
             .field("compaction_ts", &self.compaction_ts)
             .field("is_dest_last_run", &self.is_dest_last_run)
-            .field("estimated_source_bytes", &estimated_total_size)
+            .field("estimated_source_bytes", &self.estimated_source_bytes())
             .finish()
+    }
+}
+
+impl CompactionJob {
+    /// Estimates the total size of the source SSTs and sorted runs.
+    pub(crate) fn estimated_source_bytes(&self) -> u64 {
+        let sst_size = self.ssts.iter().map(|sst| sst.estimate_size()).sum::<u64>();
+        let sr_size = self
+            .sorted_runs
+            .iter()
+            .map(|sr| sr.estimate_size())
+            .sum::<u64>();
+        sst_size + sr_size
     }
 }
 
@@ -74,6 +82,7 @@ impl TokioCompactionExecutor {
         table_store: Arc<TableStore>,
         rand: Arc<DbRand>,
         stats: Arc<CompactionStats>,
+        clock: Arc<dyn SystemClock>,
     ) -> Self {
         Self {
             inner: Arc::new(TokioCompactionExecutorInner {
@@ -84,6 +93,7 @@ impl TokioCompactionExecutor {
                 rand,
                 tasks: Arc::new(Mutex::new(HashMap::new())),
                 stats,
+                clock,
                 is_stopped: AtomicBool::new(false),
             }),
         }
@@ -116,6 +126,7 @@ pub(crate) struct TokioCompactionExecutorInner {
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
+    clock: Arc<dyn SystemClock>,
     is_stopped: AtomicBool,
 }
 
@@ -165,6 +176,8 @@ impl TokioCompactionExecutorInner {
             .table_store
             .table_writer(SsTableId::Compacted(self.rand.thread_rng().gen_ulid()));
         let mut current_size = 0usize;
+        let mut total_bytes_processed = 0u64;
+        let mut last_progress_report = self.clock.now();
 
         while let Some(raw_kv) = all_iter.next_entry().await? {
             // filter out any expired entries -- eventually we can consider
@@ -187,15 +200,37 @@ impl TokioCompactionExecutorInner {
                 _ => raw_kv,
             };
 
+            let key_len = kv.key.len();
+            let value_len = kv.value.len();
+
+            total_bytes_processed += key_len as u64 + value_len as u64;
+            let duration_since_last_report = self
+                .clock
+                .now()
+                .duration_since(last_progress_report)
+                .unwrap_or(Duration::from_secs(0));
+            if duration_since_last_report > Duration::from_secs(1) {
+                // Allow send() because we are treating the executor like an external
+                // component. They can do what they want. The send().expect() will raise
+                // a SendErr, which will be caught in the cleanup_fn and set if there's
+                // not already an error (i.e. if the DB is not already shut down).
+                #[allow(clippy::disallowed_methods)]
+                self.worker_tx
+                    .send(WorkerToOrchestratorMsg::CompactionProgress {
+                        id: compaction.id,
+                        bytes_processed: total_bytes_processed,
+                    })
+                    .expect("failed to send compaction progress");
+                last_progress_report = self.clock.now();
+            }
+
             if compaction.is_dest_last_run && kv.value.is_tombstone() {
                 continue;
             }
 
-            // Add to SST
-            let key_len = kv.key.len();
-            let value_len = kv.value.len();
             current_writer.add(kv).await?;
             current_size += key_len + value_len;
+
             if current_size > self.options.max_sst_size {
                 current_size = 0;
                 let finished_writer = mem::replace(
@@ -207,6 +242,7 @@ impl TokioCompactionExecutorInner {
                 self.stats.bytes_compacted.add(current_size as u64);
             }
         }
+
         if current_size > 0 {
             output_ssts.push(current_writer.close().await?);
             self.stats.bytes_compacted.add(current_size as u64);
@@ -217,11 +253,6 @@ impl TokioCompactionExecutorInner {
         })
     }
 
-    // Allow send() because we are treating the executor like an external
-    // component. They can do what they want. The send().expect() will raise
-    // a SendErr, which will be caught in the cleanup_fn and set if there's
-    // not already an error (i.e. if the DB is not already shut down).
-    #[allow(clippy::disallowed_methods)]
     fn start_compaction(self: &Arc<Self>, compaction: CompactionJob) {
         let mut tasks = self.tasks.lock();
         if self.is_stopped.load(atomic::Ordering::SeqCst) {
@@ -243,6 +274,11 @@ impl TokioCompactionExecutorInner {
                     let mut tasks = this_cleanup.tasks.lock();
                     tasks.remove(&dst);
                 }
+                // Allow send() because we are treating the executor like an external
+                // component. They can do what they want. The send().expect() will raise
+                // a SendErr, which will be caught in the cleanup_fn and set if there's
+                // not already an error (i.e. if the DB is not already shut down).
+                #[allow(clippy::disallowed_methods)]
                 this_cleanup
                     .worker_tx
                     .send(CompactionFinished { id, result })
