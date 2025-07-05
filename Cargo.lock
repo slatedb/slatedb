@@ -620,6 +620,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctor"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4735f265ba6a1188052ca32d461028a7d1125868be18e287e756019da7607b5"
+dependencies = [
+ "ctor-proc-macro",
+ "dtor",
+]
+
+[[package]]
+name = "ctor-proc-macro"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f211af61d8efdd104f96e57adf5e426ba1bc3ed7a4ead616e15e5881fd79c4d"
+
+[[package]]
 name = "darling"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -715,6 +731,21 @@ name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+
+[[package]]
+name = "dtor"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97cbdf2ad6846025e8e25df05171abfb30e3ababa12ee0a0e44b9bbe570633a8"
+dependencies = [
+ "dtor-proc-macro",
+]
+
+[[package]]
+name = "dtor-proc-macro"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7454e41ff9012c00d53cf7f475c5e3afa3b91b7c90568495495e8d9bf47a1055"
 
 [[package]]
 name = "duration-str"
@@ -918,9 +949,9 @@ dependencies = [
 
 [[package]]
 name = "foyer"
-version = "0.17.3"
+version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "635c7077026867cb5e5ea576c461f29b1c4151fce7a9d7cc3a1b1a9902d95c65"
+checksum = "0618db36554a0a5db538d7ff04427571b1f668d3e86a764aabe17985c02ea14c"
 dependencies = [
  "anyhow",
  "equivalent",
@@ -937,11 +968,10 @@ dependencies = [
 
 [[package]]
 name = "foyer-common"
-version = "0.17.3"
+version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ed2316785e80137c7b91bb74dab1dc1967c3272df05825397b73ae8fc527041"
+checksum = "dbf63fd16ba6227de0004472156048338ad7544280d1200c27e4b4a82ca6f075"
 dependencies = [
- "ahash",
  "bincode",
  "bytes",
  "cfg-if",
@@ -953,6 +983,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.12",
  "tokio",
+ "twox-hash 2.1.0",
 ]
 
 [[package]]
@@ -966,11 +997,10 @@ dependencies = [
 
 [[package]]
 name = "foyer-memory"
-version = "0.17.3"
+version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "090cf5b89d49fd61e7da9bfae3a1aef605f03196d542b2f8171c74f3add013f4"
+checksum = "3ae8a1c8e263f91cf3abca38bbf6b8f82f34b6cf20fa3a249c90ebfa795e5631"
 dependencies = [
- "ahash",
  "arc-swap",
  "bitflags 2.9.0",
  "cmsketch",
@@ -991,11 +1021,10 @@ dependencies = [
 
 [[package]]
 name = "foyer-storage"
-version = "0.17.3"
+version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "095e857c97d6339d4a4a6424b88d08fe08ad0366bfbfaf65d6ddf55baf3d2a38"
+checksum = "d387ab178f8bcb03fe4981766c9f436007234d8ca73080e3ad2c370d8d75113b"
 dependencies = [
- "ahash",
  "allocator-api2",
  "anyhow",
  "array-util",
@@ -1954,9 +1983,9 @@ dependencies = [
 
 [[package]]
 name = "object_store"
-version = "0.12.0"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9ce831b09395f933addbc56d894d889e4b226eba304d4e7adbab591e26daf1e"
+checksum = "7781f96d79ed0f961a7021424ab01840efbda64ae7a505aaea195efc91eaaec4"
 dependencies = [
  "async-trait",
  "base64",
@@ -1974,7 +2003,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "quick-xml",
- "rand 0.8.5",
+ "rand 0.9.0",
  "reqwest",
  "ring",
  "serde",
@@ -1985,6 +2014,8 @@ dependencies = [
  "tracing",
  "url",
  "walkdir",
+ "wasm-bindgen-futures",
+ "web-time",
 ]
 
 [[package]]
@@ -3011,7 +3042,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "atomic",
@@ -3024,6 +3055,7 @@ dependencies = [
  "criterion",
  "crossbeam-channel",
  "crossbeam-skiplist",
+ "ctor",
  "dotenvy",
  "duration-str",
  "fail-parallel",
@@ -3059,6 +3091,7 @@ dependencies = [
  "tokio-test",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "ulid",
  "uuid",
  "walkdir",
@@ -3067,7 +3100,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-bencher"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -3084,7 +3117,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-cli"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "clap",
  "humantime",
@@ -3101,7 +3134,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-py"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "once_cell",
  "pyo3",

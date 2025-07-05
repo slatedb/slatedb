@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: write
+  # Required for PyO3/maturin-action@v1
+  id-token: write
 
 jobs:
   release:
@@ -40,12 +42,9 @@ jobs:
         run: cargo set-version ${{ github.event.inputs.version }}
 
       # Set pyproject.toml version
-      - name: Set exact version
-        uses: ciiiii/toml-editor@1.0.0
-        with:
-          file: slatedb-py/pyproject.toml
-          key: project.version
-          value: ${{ github.event.inputs.version }}
+      - name: Set Python package version
+        run: |
+          sed -i "s/^version = \".*\"/version = \"${{ github.event.inputs.version }}\"/" slatedb-py/pyproject.toml
 
       # Commit changes
       - name: Commit version bump
@@ -68,18 +67,20 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         working-directory: slatedb
-        run: cargo publish
+        run: |
+          if cargo add slatedb@${{ github.event.inputs.version }} --dry-run >/dev/null 2>&1; then
+            echo "✔ slate v${{ github.event.inputs.version }} already published, skipping"
+          else
+            cargo publish
+          fi
 
       - name: Publish SlateDB CLI to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         working-directory: slatedb-cli
-        run: cargo publish
-
-      # Publish Python bindings to PyPI using maturin
-      - name: Publish Python bindings to PyPI
-        uses: PyO3/maturin-action@v1
-        with:
-          command: publish
-          args: --release
-          working-directory: ./slatedb-py
+        run:  |
+          if cargo add slatedb-cli@${{ github.event.inputs.version }} --dry-run >/dev/null 2>&1; then
+            echo "✔ slate-cli v${{ github.event.inputs.version }} already published, skipping"
+          else
+            cargo publish
+          fi

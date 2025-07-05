@@ -25,6 +25,8 @@ pub(crate) struct RetentionIterator<T: KeyValueIterator> {
     filter_tombstone: bool,
     /// The current timestamp in seconds since Unix epoch
     start_timestamp: i64,
+    /// The total number of bytes processed so far
+    total_bytes_processed: u64,
 }
 
 impl<T: KeyValueIterator> RetentionIterator<T> {
@@ -41,6 +43,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             filter_tombstone,
             start_timestamp,
             buffer: RetentionBuffer::new(),
+            total_bytes_processed: 0,
         })
     }
 
@@ -105,6 +108,10 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
 
         filtered_versions
     }
+
+    pub(crate) fn total_bytes_processed(&self) -> u64 {
+        self.total_bytes_processed
+    }
 }
 
 #[async_trait]
@@ -123,7 +130,11 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
                 RetentionBufferState::NeedPush => {
                     // Fetch next entry from upstream iterator
                     let entry = match self.inner.next_entry().await? {
-                        Some(entry) => entry,
+                        Some(entry) => {
+                            self.total_bytes_processed +=
+                                entry.key.len() as u64 + entry.value.len() as u64;
+                            entry
+                        }
                         None => {
                             // No more entries from upstream, mark end of input
                             self.buffer.mark_end_of_input();

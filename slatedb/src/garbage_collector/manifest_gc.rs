@@ -16,6 +16,14 @@ pub(crate) struct ManifestGcTask {
     manifest_options: Option<GarbageCollectorDirectoryOptions>,
 }
 
+impl std::fmt::Debug for ManifestGcTask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManifestGcTask")
+            .field("manifest_options", &self.manifest_options)
+            .finish()
+    }
+}
+
 impl ManifestGcTask {
     pub fn new(
         manifest_store: Arc<ManifestStore>,

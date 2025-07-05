@@ -13,7 +13,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::EnvFilter;
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
@@ -328,4 +330,21 @@ impl CompactionSchedulerSupplier for OnDemandCompactionSchedulerSupplier {
     fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler + Send + Sync> {
         Box::new(self.scheduler.clone())
     }
+}
+
+// A flag so we only initialize logging once.
+static INIT_LOGGING: Once = Once::new();
+
+/// Initialize logging for tests so we get log output. Uses `RUST_LOG` environment
+/// variable to set the log level, or defaults to `debug` if not set.
+#[ctor::ctor]
+fn init_tracing() {
+    INIT_LOGGING.call_once(|| {
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_test_writer()
+            .init();
+    });
 }
