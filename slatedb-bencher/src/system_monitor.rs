@@ -12,16 +12,19 @@ use tracing::info;
 pub struct SystemMonitor {
     /// Handle to the monitoring thread
     handle: Option<JoinHandle<()>>,
+    /// Optional Tokio runtime handle for collecting runtime metrics
+    runtime_handle: Option<tokio::runtime::Handle>,
     /// Flag to signal the monitoring thread to stop
     running: Arc<AtomicBool>,
 }
 
 impl SystemMonitor {
     /// Creates a new `SystemMonitor`.
-    pub fn new() -> Self {
+    pub fn new(runtime_handle: Option<tokio::runtime::Handle>) -> Self {
         SystemMonitor {
             handle: None,
             running: Arc::new(AtomicBool::new(false)),
+            runtime_handle,
         }
     }
 
@@ -36,6 +39,7 @@ impl SystemMonitor {
         self.running.store(true, Ordering::SeqCst);
         let running = Arc::clone(&self.running);
 
+        let runtime_handle = self.runtime_handle.clone();
         self.handle = Some(thread::spawn(move || {
             let mut system = System::new();
             let bencher_pid = sysinfo::get_current_pid().unwrap();
@@ -133,6 +137,14 @@ impl SystemMonitor {
                         interface_name,
                         received_mb_per_second, transmitted_mb_per_second, "network usage (MiB/s)",
                     );
+                }
+
+                if let Some(handle) = &runtime_handle {
+                    let metrics = handle.metrics();
+                    let num_workers = metrics.num_workers();
+                    let num_alive_tasks = metrics.num_alive_tasks();
+                    let global_queue_depth = metrics.global_queue_depth();
+                    info!(num_workers, num_alive_tasks, global_queue_depth, "tokio runtime metrics");
                 }
             }
 

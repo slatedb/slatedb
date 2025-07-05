@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let object_store = admin::load_object_store_from_env(args.env_file)?;
 
     // Start system monitoring in background
-    let mut monitor = system_monitor::SystemMonitor::new();
+    let mut monitor = system_monitor::SystemMonitor::new(Some(tokio::runtime::Handle::current()));
     monitor.start();
 
     if args.clean {
