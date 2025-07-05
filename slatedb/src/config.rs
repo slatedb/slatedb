@@ -822,7 +822,7 @@ pub struct CompactorOptions {
     /// The retention time for the multi-version compaction.
     #[serde(deserialize_with = "deserialize_duration")]
     #[serde(serialize_with = "serialize_duration")]
-    pub retention_time: Duration,
+    pub retention_timeout: Duration,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -836,7 +836,7 @@ impl Default for CompactorOptions {
             manifest_update_timeout: Duration::from_secs(300),
             max_sst_size: 256 * 1024 * 1024,
             max_concurrent_compactions: 4,
-            retention_time: Duration::from_secs(3600 * 6), // 6 hours
+            retention_timeout: Duration::from_secs(3600 * 6), // 6 hours
         }
     }
 }

@@ -1986,7 +1986,7 @@ mod tests {
                         max_sst_size: 256,
                         max_concurrent_compactions: 1,
                         manifest_update_timeout: Duration::from_secs(300),
-                        retention_time: Duration::from_secs(3600 * 6),
+                        retention_timeout: Duration::from_secs(3600 * 6),
                     }),
                 ))
                 .with_compaction_scheduler_supplier(compaction_scheduler)
@@ -3000,7 +3000,7 @@ mod tests {
                 max_sst_size: 256,
                 max_concurrent_compactions: 1,
                 manifest_update_timeout: Duration::from_secs(300),
-                retention_time: Duration::from_secs(3600 * 6),
+                retention_timeout: Duration::from_secs(3600 * 6),
             }),
         ))
         .await;
@@ -3016,7 +3016,7 @@ mod tests {
                 manifest_update_timeout: Duration::from_secs(300),
                 max_sst_size: 256,
                 max_concurrent_compactions: 1,
-                retention_time: Duration::from_secs(3600 * 6),
+                retention_timeout: Duration::from_secs(3600 * 6),
             }),
         ))
         .await
