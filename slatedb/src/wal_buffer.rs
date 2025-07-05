@@ -9,7 +9,7 @@ use tokio::{
     },
     task::JoinHandle,
 };
-use tracing::{debug, error, instrument, trace, warn};
+use tracing::{debug, error, instrument, trace};
 
 use crate::{
     clock::MonotonicClock,
