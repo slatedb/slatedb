@@ -144,7 +144,12 @@ impl SystemMonitor {
                     let num_workers = metrics.num_workers();
                     let num_alive_tasks = metrics.num_alive_tasks();
                     let global_queue_depth = metrics.global_queue_depth();
-                    info!(num_workers, num_alive_tasks, global_queue_depth, "tokio runtime metrics");
+                    info!(
+                        num_workers,
+                        num_alive_tasks,
+                        global_queue_depth,
+                        "tokio runtime metrics",
+                    );
                 }
             }
 
