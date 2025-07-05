@@ -142,6 +142,13 @@ pub(crate) struct BenchmarkDbArgs {
         default_value_t = 20
     )]
     pub(crate) put_percentage: u32,
+
+    #[arg(
+        long,
+        help = "The percentage of gets that will return a value.",
+        default_value_t = 95
+    )]
+    pub(crate) get_hit_percentage: u32,
 }
 
 impl BenchmarkDbArgs {

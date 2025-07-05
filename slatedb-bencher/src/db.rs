@@ -62,13 +62,22 @@ const WINDOW_SIZE: Duration = Duration::from_secs(10);
 
 /// A key generator trait that generates keys for the benchmarker.
 pub trait KeyGenerator: Send {
+    /// Generate and return the next key that should be used in the workload.
+    /// Implementations **must** push the generated key onto an internal
+    /// `used_keys` vector so that it can later be sampled by [`Self::used_key`].
     fn next_key(&mut self) -> Bytes;
+
+    /// Return one of the previously generated keys **at random**. If no keys
+    /// have been generated yet, this method will fall back to calling
+    /// [`Self::next_key`] to ensure that a valid key is always returned.
+    fn used_key(&mut self) -> Bytes;
 }
 
 /// A key generator that generates random keys of a fixed length.
 pub struct RandomKeyGenerator {
     key_len_bytes: usize,
     rng: XorShiftRng,
+    used_keys: Vec<Bytes>,
 }
 
 impl RandomKeyGenerator {
@@ -76,6 +85,7 @@ impl RandomKeyGenerator {
         Self {
             key_len_bytes: key_bytes,
             rng: rand_xorshift::XorShiftRng::from_entropy(),
+            used_keys: Vec::new(),
         }
     }
 }
@@ -84,13 +94,25 @@ impl KeyGenerator for RandomKeyGenerator {
     fn next_key(&mut self) -> Bytes {
         let mut bytes = vec![0u8; self.key_len_bytes];
         self.rng.fill_bytes(bytes.as_mut_slice());
-        Bytes::copy_from_slice(bytes.as_slice())
+        let key = Bytes::copy_from_slice(bytes.as_slice());
+        // Track the generated key so that it can be sampled later.
+        self.used_keys.push(key.clone());
+        key
+    }
+
+    fn used_key(&mut self) -> Bytes {
+        if self.used_keys.is_empty() {
+            return self.next_key();
+        }
+        let idx = self.rng.gen_range(0..self.used_keys.len());
+        self.used_keys[idx].clone()
     }
 }
 
 pub struct FixedSetKeyGenerator {
     keys: Vec<Bytes>,
     rng: XorShiftRng,
+    used_keys: Vec<Bytes>,
 }
 
 impl FixedSetKeyGenerator {
@@ -103,6 +125,7 @@ impl FixedSetKeyGenerator {
         Self {
             keys,
             rng: rand_xorshift::XorShiftRng::from_entropy(),
+            used_keys: Vec::new(),
         }
     }
 }
@@ -110,7 +133,17 @@ impl FixedSetKeyGenerator {
 impl KeyGenerator for FixedSetKeyGenerator {
     fn next_key(&mut self) -> Bytes {
         let index = self.rng.gen_range(0..self.keys.len());
-        self.keys[index].clone()
+        let key = self.keys[index].clone();
+        self.used_keys.push(key.clone());
+        key
+    }
+
+    fn used_key(&mut self) -> Bytes {
+        if self.used_keys.is_empty() {
+            return self.next_key();
+        }
+        let idx = self.rng.gen_range(0..self.used_keys.len());
+        self.used_keys[idx].clone()
     }
 }
 
@@ -123,6 +156,7 @@ pub struct DbBench {
     num_rows: Option<u64>,
     duration: Option<Duration>,
     put_percentage: u32,
+    get_hit_percentage: u32,
     db: Arc<Db>,
 }
 
@@ -136,6 +170,7 @@ impl DbBench {
         num_rows: Option<u64>,
         duration: Option<Duration>,
         put_percentage: u32,
+        get_hit_percentage: u32,
         db: Arc<Db>,
     ) -> Self {
         Self {
@@ -146,6 +181,7 @@ impl DbBench {
             num_rows,
             duration,
             put_percentage,
+            get_hit_percentage,
             db,
         }
     }
@@ -166,6 +202,7 @@ impl DbBench {
                 self.num_rows,
                 self.duration,
                 self.put_percentage,
+                self.get_hit_percentage,
                 stats_recorder.clone(),
                 self.db.clone(),
             );
@@ -185,6 +222,7 @@ struct Task {
     num_keys: Option<u64>,
     duration: Option<Duration>,
     put_percentage: u32,
+    get_hit_percentage: u32,
     stats_recorder: Arc<StatsRecorder>,
     db: Arc<Db>,
 }
@@ -198,6 +236,7 @@ impl Task {
         num_keys: Option<u64>,
         duration: Option<Duration>,
         put_percentage: u32,
+        get_hit_percentage: u32,
         stats_recorder: Arc<StatsRecorder>,
         db: Arc<Db>,
     ) -> Self {
@@ -208,6 +247,7 @@ impl Task {
             num_keys,
             duration,
             put_percentage,
+            get_hit_percentage,
             stats_recorder,
             db,
         }
@@ -229,8 +269,8 @@ impl Task {
         let start = Instant::now();
         let mut last_report = start;
         while self.stats_recorder.puts() < num_keys && start.elapsed() < duration {
-            let key = &self.key_generator.next_key();
             if random.gen_range(0..100) < self.put_percentage {
+                let key = self.key_generator.next_key();
                 let mut value = vec![0; self.val_len];
                 random.fill_bytes(value.as_mut_slice());
                 match self
@@ -245,7 +285,12 @@ impl Task {
                     Err(e) => warn!("put failed: {}", e),
                 }
             } else {
-                match self.db.get(key).await {
+                let key = if random.gen_range(0..100) < self.get_hit_percentage {
+                    self.key_generator.used_key()
+                } else {
+                    self.key_generator.next_key()
+                };
+                match self.db.get(&key).await {
                     Ok(val) => {
                         gets += 1;
                         gets_hits += val.is_some() as u64;
