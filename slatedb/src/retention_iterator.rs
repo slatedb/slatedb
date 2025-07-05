@@ -98,7 +98,6 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 .last()
                 .map(|(_, entry)| entry.value.is_tombstone())
                 .unwrap_or(false)
-                && filtered_versions.len() > 1
             {
                 filtered_versions.pop_last();
             }
