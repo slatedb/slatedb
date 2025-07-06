@@ -12,7 +12,7 @@ use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
 use radix_trie::{Trie, TrieCommon};
 use rand::seq::IteratorRandom;
-use rand::{distributions::Alphanumeric, Rng};
+use rand::{distr::Alphanumeric, Rng};
 use tokio::fs::File;
 use tokio::{
     fs::{self, OpenOptions},

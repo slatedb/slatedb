@@ -578,7 +578,7 @@ mod tests {
         while total_wal_entries < entries.len() {
             let wal_entries = min(
                 entries.len() - total_wal_entries,
-                rng.gen_range(0..max_wal_entries),
+                rng.random_range(0..max_wal_entries),
             );
             next_seq = write_wal(
                 next_wal_id,

@@ -84,7 +84,7 @@ impl RandomKeyGenerator {
     pub fn new(key_bytes: usize) -> Self {
         Self {
             key_len_bytes: key_bytes,
-            rng: rand_xorshift::XorShiftRng::from_entropy(),
+            rng: rand_xorshift::XorShiftRng::from_os_rng(),
             used_keys: Vec::new(),
         }
     }
@@ -104,7 +104,7 @@ impl KeyGenerator for RandomKeyGenerator {
         if self.used_keys.is_empty() {
             return self.next_key();
         }
-        let idx = self.rng.gen_range(0..self.used_keys.len());
+        let idx = self.rng.random_range(0..self.used_keys.len());
         self.used_keys[idx].clone()
     }
 }
@@ -124,7 +124,7 @@ impl FixedSetKeyGenerator {
         }
         Self {
             keys,
-            rng: rand_xorshift::XorShiftRng::from_entropy(),
+            rng: rand_xorshift::XorShiftRng::from_os_rng(),
             used_keys: Vec::new(),
         }
     }
@@ -132,7 +132,7 @@ impl FixedSetKeyGenerator {
 
 impl KeyGenerator for FixedSetKeyGenerator {
     fn next_key(&mut self) -> Bytes {
-        let index = self.rng.gen_range(0..self.keys.len());
+        let index = self.rng.random_range(0..self.keys.len());
         let key = self.keys[index].clone();
         self.used_keys.push(key.clone());
         key
@@ -142,7 +142,7 @@ impl KeyGenerator for FixedSetKeyGenerator {
         if self.used_keys.is_empty() {
             return self.next_key();
         }
-        let idx = self.rng.gen_range(0..self.used_keys.len());
+        let idx = self.rng.random_range(0..self.used_keys.len());
         self.used_keys[idx].clone()
     }
 }
@@ -258,7 +258,7 @@ impl Task {
     /// This method runs a loop, generating a key (and value if needed), and
     /// then either puts the key/value pair or gets the key.
     async fn run(&mut self) {
-        let mut random = rand_xorshift::XorShiftRng::from_entropy();
+        let mut random = rand_xorshift::XorShiftRng::from_os_rng();
         let mut puts = 0u64;
         let mut puts_bytes = 0u64;
         let mut gets = 0u64;
@@ -269,7 +269,7 @@ impl Task {
         let start = Instant::now();
         let mut last_report = start;
         while self.stats_recorder.puts() < num_keys && start.elapsed() < duration {
-            if random.gen_range(0..100) < self.put_percentage {
+            if random.random_range(0..100) < self.put_percentage {
                 let key = self.key_generator.next_key();
                 let mut value = vec![0; self.val_len];
                 random.fill_bytes(value.as_mut_slice());
@@ -285,7 +285,7 @@ impl Task {
                     Err(e) => warn!("put failed: {}", e),
                 }
             } else {
-                let key = if random.gen_range(0..100) < self.get_hit_percentage {
+                let key = if random.random_range(0..100) < self.get_hit_percentage {
                     self.key_generator.used_key()
                 } else {
                     self.key_generator.next_key()
