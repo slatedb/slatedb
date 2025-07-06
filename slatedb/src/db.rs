@@ -257,9 +257,9 @@ impl DbInner {
     #[inline]
     pub(crate) async fn maybe_apply_backpressure(&self) -> Result<(), SlateDBError> {
         loop {
-            let mem_size_bytes = {
-                let wal_size = self.wal_buffer.estimated_bytes().await?;
-                let imm_memtable_size = {
+            let (wal_size_bytes, imm_memtable_size_bytes) = {
+                let wal_size_bytes = self.wal_buffer.estimated_bytes().await?;
+                let imm_memtable_size_bytes = {
                     let guard = self.state.read();
                     // Exclude active memtable to avoid a write lock.
                     guard
@@ -275,20 +275,26 @@ impl DbInner {
                         })
                         .sum::<usize>()
                 };
-                wal_size + imm_memtable_size
+                (wal_size_bytes, imm_memtable_size_bytes)
             };
+            let total_mem_size_bytes = wal_size_bytes + imm_memtable_size_bytes;
 
             trace!(
-                mem_size_bytes,
+                total_mem_size_bytes,
+                wal_size_bytes,
+                imm_memtable_size_bytes,
                 max_unflushed_bytes = self.settings.max_unflushed_bytes,
                 "checking backpressure",
             );
 
-            if mem_size_bytes >= self.settings.max_unflushed_bytes {
+            if total_mem_size_bytes >= self.settings.max_unflushed_bytes {
                 self.db_stats.backpressure_count.inc();
                 warn!(
-                    "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
-                    mem_size_bytes, self.settings.max_unflushed_bytes,
+                    total_mem_size_bytes,
+                    wal_size_bytes,
+                    imm_memtable_size_bytes,
+                    max_unflushed_bytes = self.settings.max_unflushed_bytes,
+                    "Unflushed memtable size exceeds max_unflushed_bytes. Applying backpressure.",
                 );
 
                 let maybe_oldest_unflushed_memtable = {
