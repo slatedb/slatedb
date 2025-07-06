@@ -374,42 +374,43 @@ pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 ///
 /// | Env Variable | Doc | Required |
 /// |--------------|-----|----------|
-/// | AWS_ACCESS_KEY_ID | The access key for a role with permissions to access the store | Yes |
-/// | AWS_SECRET_ACCESS_KEY | The access key secret for the above ID | Yes |
+/// | AWS_ACCESS_KEY_ID | The access key for a role with permissions to access the store | No |
+/// | AWS_SECRET_ACCESS_KEY | The access key secret for the above ID | No |
 /// | AWS_SESSION_TOKEN | The session token for the above ID | No |
 /// | AWS_BUCKET | The bucket to use within S3 | Yes |
 /// | AWS_REGION | The AWS region to use | Yes |
 /// | AWS_ENDPOINT | The endpoint to use for S3 (disables https) | No |
-/// | AWS_DYNAMODB_TABLE | The DynamoDB table to use for locking | No |
 #[cfg(feature = "aws")]
 pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
-    use object_store::aws::{DynamoCommit, S3ConditionalPut};
+    use object_store::aws::S3ConditionalPut;
 
-    let key = env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID must be set");
-    let secret =
-        env::var("AWS_SECRET_ACCESS_KEY").expect("Expected AWS_SECRET_ACCESS_KEY must be set");
-    let session_token = env::var("AWS_SESSION_TOKEN").ok();
+    // Mandatory environment variables
     let bucket = env::var("AWS_BUCKET").expect("AWS_BUCKET must be set");
     let region = env::var("AWS_REGION").expect("AWS_REGION must be set");
+
+    // Optional environment variables (credentials / session token)
+    let key = env::var("AWS_ACCESS_KEY_ID").ok();
+    let secret = env::var("AWS_SECRET_ACCESS_KEY").ok();
+    let session_token = env::var("AWS_SESSION_TOKEN").ok();
     let endpoint = env::var("AWS_ENDPOINT").ok();
-    let dynamodb_table = env::var("AWS_DYNAMODB_TABLE").ok();
-    let builder = object_store::aws::AmazonS3Builder::new()
-        .with_access_key_id(key)
-        .with_secret_access_key(secret)
+
+    // Start building the S3 object store builder with required params.
+    let mut builder = object_store::aws::AmazonS3Builder::new()
+        .with_conditional_put(S3ConditionalPut::ETagMatch)
         .with_bucket_name(bucket)
         .with_region(region);
 
-    let builder = if let Some(token) = session_token {
-        builder.with_token(token)
-    } else {
-        builder
-    };
+    // If explicit credentials are supplied, configure them; otherwise rely on the AWS SDK
+    // default credential provider chain (which covers IMDS / IRSA).
+    if let (Some(access_key), Some(secret_key)) = (key, secret) {
+        builder = builder
+            .with_access_key_id(access_key)
+            .with_secret_access_key(secret_key);
 
-    let builder = if let Some(dynamodb_table) = dynamodb_table {
-        builder.with_conditional_put(S3ConditionalPut::Dynamo(DynamoCommit::new(dynamodb_table)))
-    } else {
-        builder.with_conditional_put(S3ConditionalPut::ETagMatch)
-    };
+        if let Some(token) = session_token {
+            builder = builder.with_token(token);
+        }
+    }
 
     let builder = if let Some(endpoint) = endpoint {
         builder.with_allow_http(true).with_endpoint(endpoint)

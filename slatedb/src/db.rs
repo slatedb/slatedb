@@ -53,7 +53,7 @@ use crate::tablestore::TableStore;
 use crate::utils::{MonotonicSeq, SendSafely};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
-use tracing::{info, warn};
+use tracing::{info, trace, warn};
 
 pub mod builder;
 pub use builder::DbBuilder;
@@ -124,7 +124,7 @@ impl DbInner {
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
         let wal_buffer = Arc::new(WalBufferManager::new(
             state.clone(),
-            Some(state.clone()),
+            state.clone(),
             db_stats.clone(),
             recent_flushed_wal_id,
             oracle.clone(),
@@ -158,6 +158,7 @@ impl DbInner {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
+        self.db_stats.get_requests.inc();
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
         self.reader
@@ -170,6 +171,7 @@ impl DbInner {
         range: BytesRange,
         options: &ScanOptions,
     ) -> Result<DbIterator<'a>, SlateDBError> {
+        self.db_stats.scan_requests.inc();
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
         self.reader
@@ -227,10 +229,12 @@ impl DbInner {
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
         self.check_error()?;
-
         if batch.ops.is_empty() {
             return Ok(());
         }
+        // record write batch and number of operations
+        self.db_stats.write_batch_count.inc();
+        self.db_stats.write_ops.add(batch.ops.len() as u64);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
@@ -253,9 +257,9 @@ impl DbInner {
     #[inline]
     pub(crate) async fn maybe_apply_backpressure(&self) -> Result<(), SlateDBError> {
         loop {
-            let mem_size_bytes = {
-                let wal_size = self.wal_buffer.estimated_bytes().await?;
-                let imm_memtable_size = {
+            let (wal_size_bytes, imm_memtable_size_bytes) = {
+                let wal_size_bytes = self.wal_buffer.estimated_bytes().await?;
+                let imm_memtable_size_bytes = {
                     let guard = self.state.read();
                     // Exclude active memtable to avoid a write lock.
                     guard
@@ -271,14 +275,26 @@ impl DbInner {
                         })
                         .sum::<usize>()
                 };
-                wal_size + imm_memtable_size
+                (wal_size_bytes, imm_memtable_size_bytes)
             };
+            let total_mem_size_bytes = wal_size_bytes + imm_memtable_size_bytes;
 
-            if mem_size_bytes >= self.settings.max_unflushed_bytes {
+            trace!(
+                total_mem_size_bytes,
+                wal_size_bytes,
+                imm_memtable_size_bytes,
+                max_unflushed_bytes = self.settings.max_unflushed_bytes,
+                "checking backpressure",
+            );
+
+            if total_mem_size_bytes >= self.settings.max_unflushed_bytes {
                 self.db_stats.backpressure_count.inc();
                 warn!(
-                    "Unflushed memtable and WAL size {} >= max_unflushed_bytes {}. Applying backpressure.",
-                    mem_size_bytes, self.settings.max_unflushed_bytes,
+                    total_mem_size_bytes,
+                    wal_size_bytes,
+                    imm_memtable_size_bytes,
+                    max_unflushed_bytes = self.settings.max_unflushed_bytes,
+                    "Unflushed memtable size exceeds max_unflushed_bytes. Applying backpressure.",
                 );
 
                 let maybe_oldest_unflushed_memtable = {
