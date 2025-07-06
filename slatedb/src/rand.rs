@@ -56,7 +56,7 @@ impl DbRand {
     }
 
     /// Grab this thread’s RNG. Initializes the RNG if it hasn't been initialized yet.
-    pub(crate) fn thread_rng(&self) -> std::cell::RefMut<'_, impl RngCore> {
+    pub(crate) fn rng(&self) -> std::cell::RefMut<'_, impl RngCore> {
         self.thread_rng
             .get_or(|| {
                 let seed = self.seed_counter.fetch_add(1, Ordering::Relaxed);
@@ -92,8 +92,8 @@ mod tests {
 
         // Generate some random numbers
         for _ in 0..10 {
-            values1.push(rng1.thread_rng().next_u64());
-            values2.push(rng2.thread_rng().next_u64());
+            values1.push(rng1.rng().next_u64());
+            values2.push(rng2.rng().next_u64());
         }
 
         println!("values1: {:?}", values1);
@@ -112,8 +112,8 @@ mod tests {
 
         // Generate some random numbers
         for _ in 0..10 {
-            values1.push(rng1.thread_rng().next_u64());
-            values2.push(rng2.thread_rng().next_u64());
+            values1.push(rng1.rng().next_u64());
+            values2.push(rng2.rng().next_u64());
         }
 
         println!("values1: {:?}", values1);
@@ -140,7 +140,7 @@ mod tests {
                     // Get the pointer to this thread's RNG and return it as a
                     // usize. This is used to verify that each thread has a
                     // different RNG.
-                    let ptr = &mut *(rand.thread_rng().borrow_mut()) as *mut _;
+                    let ptr = &mut *(rand.rng().borrow_mut()) as *mut _;
                     ptr as usize
                 })
             })
