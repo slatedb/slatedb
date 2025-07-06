@@ -353,6 +353,8 @@ pub fn load_object_store_from_env(
         "aws" => load_aws(),
         #[cfg(feature = "azure")]
         "azure" => load_azure(),
+        #[cfg(feature = "opendal")]
+        "opendal" => load_opendal(),
         _ => Err(format!("Unknown CLOUD_PROVIDER: '{}'", provider).into()),
     }
 }
@@ -436,4 +438,48 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
         .with_access_key(key)
         .with_container_name(container);
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
+}
+
+/// Loads an OpenDAL Object store instance.
+///
+/// | Env Variable | Doc | Required |
+/// |--------------|-----|----------|
+/// | OPENDAL_SCHEME | The OpenDAL scheme to use | Yes |
+/// | OPENDAL_* | The OpenDAL configuration | Yes |
+/// full list of schemes: https://docs.rs/opendal/latest/opendal/enum.Scheme.html
+/// for example, to use s3-compatible storage, you can set:
+/// ```bash
+/// OPENDAL_SCHEME=s3
+/// OPENDAL_ENDPOINT=http://localhost:9000
+/// OPENDAL_ACCESS_KEY_ID=minioadmin
+/// OPENDAL_SECRET_ACCESS_KEY=minioadmin
+/// OPENDAL_BUCKET=test
+/// OPENDAL_REGION=us-east-1
+/// OPENDAL_ROOT=/tmp
+/// ```
+/// full list of config: https://docs.rs/opendal/latest/opendal/services/s3/config/struct.S3Config.html
+/// for example, to use oss, you can set:
+/// ```bash
+/// OPENDAL_SCHEME=oss
+/// OPENDAL_ENDPOINT=http://oss-cn-shanghai.aliyuncs.com
+/// OPENDAL_ACCESS_KEY_ID=your-access-key-id
+/// OPENDAL_ACCESS_KEY_SECRET=your-access-key-secret
+/// OPENDAL_BUCKET=your-bucket-name
+/// OPENDAL_ROOT=/your/root/path
+/// ```
+/// full list of config: https://docs.rs/opendal/latest/opendal/services/oss/config/struct.OssConfig.html
+#[cfg(feature = "opendal")]
+pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+    use opendal::{Operator, Scheme};
+    use std::collections::HashMap;
+    use std::str::FromStr;
+
+    let scheme =
+        Scheme::from_str(&env::var("OPENDAL_SCHEME").expect("OPENDAL_SCHEME must be set"))?;
+    let iter = env::vars()
+        .filter_map(|(k, v)| k.strip_prefix("OPENDAL_").map(|k| (k.to_lowercase(), v)))
+        .collect::<HashMap<String, String>>();
+
+    let op = Operator::via_iter(scheme, iter)?;
+    Ok(Arc::new(object_store_opendal::OpendalStore::new(op)) as Arc<dyn ObjectStore>)
 }
