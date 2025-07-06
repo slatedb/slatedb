@@ -7,7 +7,7 @@
 //!
 //! - Configurable key/value sizes
 //! - Configurable `WriteOptions`
-//! - A pluggable key generator strategy (defaults to random)
+//! - A pluggable key generator strategy (defaults to fixed keyset)
 //! - Configurable `DbOptions`` (for common variables)
 //! - Charts with gnuplots
 //! - Mixed read/write workloads
@@ -45,7 +45,7 @@ use rand_xorshift::XorShiftRng;
 use slatedb::config::{PutOptions, WriteOptions};
 use slatedb::Db;
 use tokio::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 /// How frequently to dump stats to the console.
 const STAT_DUMP_INTERVAL: Duration = Duration::from_secs(10);
@@ -62,13 +62,22 @@ const WINDOW_SIZE: Duration = Duration::from_secs(10);
 
 /// A key generator trait that generates keys for the benchmarker.
 pub trait KeyGenerator: Send {
+    /// Generate and return the next key that should be used in the workload.
+    /// Implementations **must** push the generated key onto an internal
+    /// `used_keys` vector so that it can later be sampled by [`Self::used_key`].
     fn next_key(&mut self) -> Bytes;
+
+    /// Return one of the previously generated keys **at random**. If no keys
+    /// have been generated yet, this method will fall back to calling
+    /// [`Self::next_key`] to ensure that a valid key is always returned.
+    fn used_key(&mut self) -> Bytes;
 }
 
 /// A key generator that generates random keys of a fixed length.
 pub struct RandomKeyGenerator {
     key_len_bytes: usize,
     rng: XorShiftRng,
+    used_keys: Vec<Bytes>,
 }
 
 impl RandomKeyGenerator {
@@ -76,6 +85,7 @@ impl RandomKeyGenerator {
         Self {
             key_len_bytes: key_bytes,
             rng: rand_xorshift::XorShiftRng::from_entropy(),
+            used_keys: Vec::new(),
         }
     }
 }
@@ -84,13 +94,25 @@ impl KeyGenerator for RandomKeyGenerator {
     fn next_key(&mut self) -> Bytes {
         let mut bytes = vec![0u8; self.key_len_bytes];
         self.rng.fill_bytes(bytes.as_mut_slice());
-        Bytes::copy_from_slice(bytes.as_slice())
+        let key = Bytes::copy_from_slice(bytes.as_slice());
+        // Track the generated key so that it can be sampled later.
+        self.used_keys.push(key.clone());
+        key
+    }
+
+    fn used_key(&mut self) -> Bytes {
+        if self.used_keys.is_empty() {
+            return self.next_key();
+        }
+        let idx = self.rng.gen_range(0..self.used_keys.len());
+        self.used_keys[idx].clone()
     }
 }
 
 pub struct FixedSetKeyGenerator {
     keys: Vec<Bytes>,
     rng: XorShiftRng,
+    used_keys: Vec<Bytes>,
 }
 
 impl FixedSetKeyGenerator {
@@ -103,6 +125,7 @@ impl FixedSetKeyGenerator {
         Self {
             keys,
             rng: rand_xorshift::XorShiftRng::from_entropy(),
+            used_keys: Vec::new(),
         }
     }
 }
@@ -110,7 +133,17 @@ impl FixedSetKeyGenerator {
 impl KeyGenerator for FixedSetKeyGenerator {
     fn next_key(&mut self) -> Bytes {
         let index = self.rng.gen_range(0..self.keys.len());
-        self.keys[index].clone()
+        let key = self.keys[index].clone();
+        self.used_keys.push(key.clone());
+        key
+    }
+
+    fn used_key(&mut self) -> Bytes {
+        if self.used_keys.is_empty() {
+            return self.next_key();
+        }
+        let idx = self.rng.gen_range(0..self.used_keys.len());
+        self.used_keys[idx].clone()
     }
 }
 
@@ -123,11 +156,11 @@ pub struct DbBench {
     num_rows: Option<u64>,
     duration: Option<Duration>,
     put_percentage: u32,
+    get_hit_percentage: u32,
     db: Arc<Db>,
 }
 
 impl DbBench {
-    // Ignore too many args
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         key_gen_supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>>,
@@ -137,6 +170,7 @@ impl DbBench {
         num_rows: Option<u64>,
         duration: Option<Duration>,
         put_percentage: u32,
+        get_hit_percentage: u32,
         db: Arc<Db>,
     ) -> Self {
         Self {
@@ -147,6 +181,7 @@ impl DbBench {
             num_rows,
             duration,
             put_percentage,
+            get_hit_percentage,
             db,
         }
     }
@@ -167,6 +202,7 @@ impl DbBench {
                 self.num_rows,
                 self.duration,
                 self.put_percentage,
+                self.get_hit_percentage,
                 stats_recorder.clone(),
                 self.db.clone(),
             );
@@ -186,6 +222,7 @@ struct Task {
     num_keys: Option<u64>,
     duration: Option<Duration>,
     put_percentage: u32,
+    get_hit_percentage: u32,
     stats_recorder: Arc<StatsRecorder>,
     db: Arc<Db>,
 }
@@ -199,6 +236,7 @@ impl Task {
         num_keys: Option<u64>,
         duration: Option<Duration>,
         put_percentage: u32,
+        get_hit_percentage: u32,
         stats_recorder: Arc<StatsRecorder>,
         db: Arc<Db>,
     ) -> Self {
@@ -209,6 +247,7 @@ impl Task {
             num_keys,
             duration,
             put_percentage,
+            get_hit_percentage,
             stats_recorder,
             db,
         }
@@ -221,31 +260,56 @@ impl Task {
     async fn run(&mut self) {
         let mut random = rand_xorshift::XorShiftRng::from_entropy();
         let mut puts = 0u64;
+        let mut puts_bytes = 0u64;
         let mut gets = 0u64;
+        let mut gets_bytes = 0u64;
+        let mut gets_hits = 0u64;
         let duration = self.duration.unwrap_or(Duration::MAX);
         let num_keys = self.num_keys.unwrap_or(u64::MAX);
         let start = Instant::now();
         let mut last_report = start;
         while self.stats_recorder.puts() < num_keys && start.elapsed() < duration {
-            let key = &self.key_generator.next_key();
             if random.gen_range(0..100) < self.put_percentage {
+                let key = self.key_generator.next_key();
                 let mut value = vec![0; self.val_len];
                 random.fill_bytes(value.as_mut_slice());
-                self.db
+                match self
+                    .db
                     .put_with_options(key, value, &PutOptions::default(), &self.write_options)
                     .await
-                    .unwrap();
-                puts += 1;
+                {
+                    Ok(_) => {
+                        puts += 1;
+                        puts_bytes += self.val_len as u64;
+                    }
+                    Err(e) => warn!("put failed: {}", e),
+                }
             } else {
-                self.db.get(key).await.unwrap();
-                gets += 1;
+                let key = if random.gen_range(0..100) < self.get_hit_percentage {
+                    self.key_generator.used_key()
+                } else {
+                    self.key_generator.next_key()
+                };
+                match self.db.get(&key).await {
+                    Ok(val) => {
+                        gets += 1;
+                        gets_hits += val.is_some() as u64;
+                        gets_bytes += key.len() as u64 + val.map(|v| v.len() as u64).unwrap_or(0);
+                    }
+                    Err(e) => warn!("get failed: {}", e),
+                }
             }
             if last_report.elapsed() >= REPORT_INTERVAL {
                 last_report = Instant::now();
-                self.stats_recorder.record_puts(last_report, puts);
-                self.stats_recorder.record_gets(last_report, gets);
+                self.stats_recorder
+                    .record_puts(last_report, puts, puts_bytes);
+                self.stats_recorder
+                    .record_gets(last_report, gets, gets_bytes, gets_hits);
                 puts = 0;
                 gets = 0;
+                puts_bytes = 0;
+                gets_bytes = 0;
+                gets_hits = 0;
             }
         }
     }
@@ -257,11 +321,17 @@ struct Window {
     range: Range<Instant>,
     puts: u64,
     gets: u64,
+    puts_bytes: u64,
+    gets_bytes: u64,
+    gets_hits: u64,
 }
 
 struct StatsRecorderInner {
     puts: u64,
     gets: u64,
+    puts_bytes: u64,
+    gets_bytes: u64,
+    gets_hits: u64,
     windows: VecDeque<Window>,
 }
 
@@ -275,6 +345,9 @@ impl StatsRecorderInner {
                 range: now..now + WINDOW_SIZE,
                 puts: 0,
                 gets: 0,
+                puts_bytes: 0,
+                gets_bytes: 0,
+                gets_hits: 0,
             });
             return;
         };
@@ -283,6 +356,9 @@ impl StatsRecorderInner {
                 range: front.range.end..front.range.end + WINDOW_SIZE,
                 puts: 0,
                 gets: 0,
+                puts_bytes: 0,
+                gets_bytes: 0,
+                gets_hits: 0,
             });
             while windows.len() > 180 {
                 windows.pop_back();
@@ -291,20 +367,26 @@ impl StatsRecorderInner {
         }
     }
 
-    fn record_puts(&mut self, now: Instant, puts: u64) {
+    fn record_puts(&mut self, now: Instant, puts: u64, bytes: u64) {
         Self::maybe_roll_window(now, &mut self.windows);
         if let Some(front) = self.windows.front_mut() {
             front.puts += puts;
+            front.puts_bytes += bytes;
         }
         self.puts += puts;
+        self.puts_bytes += bytes;
     }
 
-    fn record_gets(&mut self, now: Instant, gets: u64) {
+    fn record_gets(&mut self, now: Instant, gets: u64, bytes: u64, hits: u64) {
         Self::maybe_roll_window(now, &mut self.windows);
         if let Some(front) = self.windows.front_mut() {
             front.gets += gets;
+            front.gets_bytes += bytes;
+            front.gets_hits += hits;
         }
         self.gets += gets;
+        self.gets_bytes += bytes;
+        self.gets_hits += hits;
     }
 
     fn puts(&self) -> u64 {
@@ -321,9 +403,12 @@ impl StatsRecorderInner {
     fn sum_windows(
         windows: &VecDeque<Window>,
         lookback: Duration,
-    ) -> Option<(Range<Instant>, u64, u64)> {
+    ) -> Option<(Range<Instant>, u64, u64, u64, u64, u64)> {
         let mut puts = 0;
         let mut gets = 0;
+        let mut puts_bytes = 0;
+        let mut gets_bytes = 0;
+        let mut gets_hits = 0;
         let mut windows_iter = windows.iter();
         // Don't count the active window, but use its start point as the end of the range.
         let active_window = windows_iter.next();
@@ -335,13 +420,19 @@ impl StatsRecorderInner {
         for window in windows_iter.filter(|w| w.range.start >= range.end - lookback) {
             puts += window.puts;
             gets += window.gets;
+            puts_bytes += window.puts_bytes;
+            gets_bytes += window.gets_bytes;
+            gets_hits += window.gets_hits;
             range.start = window.range.start;
         }
-        Some((range, puts, gets))
+        Some((range, puts, gets, puts_bytes, gets_bytes, gets_hits))
     }
 
-    fn operations_since(&self, lookback: Duration) -> Option<(Range<Instant>, u64, u64)> {
-        Self::sum_windows(&self.windows, lookback).map(|r| (r.0, r.1, r.2))
+    fn operations_since(
+        &self,
+        lookback: Duration,
+    ) -> Option<(Range<Instant>, u64, u64, u64, u64, u64)> {
+        Self::sum_windows(&self.windows, lookback).map(|r| (r.0, r.1, r.2, r.3, r.4, r.5))
     }
 }
 
@@ -355,19 +446,22 @@ impl StatsRecorder {
             inner: Mutex::new(StatsRecorderInner {
                 puts: 0,
                 gets: 0,
+                puts_bytes: 0,
+                gets_bytes: 0,
+                gets_hits: 0,
                 windows: VecDeque::new(),
             }),
         }
     }
 
-    fn record_puts(&self, now: Instant, records: u64) {
+    fn record_puts(&self, now: Instant, records: u64, bytes: u64) {
         let mut guard = self.inner.lock().expect("lock failed");
-        guard.record_puts(now, records);
+        guard.record_puts(now, records, bytes);
     }
 
-    fn record_gets(&self, now: Instant, records: u64) {
+    fn record_gets(&self, now: Instant, records: u64, bytes: u64, hits: u64) {
         let mut guard = self.inner.lock().expect("lock failed");
-        guard.record_gets(now, records);
+        guard.record_gets(now, records, bytes, hits);
     }
 
     fn puts(&self) -> u64 {
@@ -380,7 +474,10 @@ impl StatsRecorder {
         guard.gets()
     }
 
-    fn operations_since(&self, lookback: Duration) -> Option<(Range<Instant>, u64, u64)> {
+    fn operations_since(
+        &self,
+        lookback: Duration,
+    ) -> Option<(Range<Instant>, u64, u64, u64, u64, u64)> {
         let guard = self.inner.lock().expect("lock failed");
         guard.operations_since(lookback)
     }
@@ -393,7 +490,15 @@ async fn dump_stats(stats: Arc<StatsRecorder>) {
         tokio::time::sleep(REPORT_INTERVAL).await;
 
         let operations_since = stats.operations_since(STAT_DUMP_LOOKBACK);
-        if let Some((range, puts_since, gets_since)) = operations_since {
+        if let Some((
+            range,
+            puts_since,
+            gets_since,
+            puts_bytes_since,
+            gets_bytes_since,
+            gets_hits_since,
+        )) = operations_since
+        {
             let interval = range.end - range.start;
             let puts = stats.puts();
             let gets = stats.gets();
@@ -404,12 +509,23 @@ async fn dump_stats(stats: Arc<StatsRecorder>) {
             first_dump_start = first_dump_start.or(Some(range.start));
             if should_print {
                 let put_rate = puts_since as f32 / interval.as_secs() as f32;
+                let put_bytes_rate = puts_bytes_since as f32 / interval.as_secs() as f32;
                 let get_rate = gets_since as f32 / interval.as_secs() as f32;
+                let get_bytes_rate = gets_bytes_since as f32 / interval.as_secs() as f32;
+                let get_hit_pct = if gets_since > 0 {
+                    gets_hits_since as f32 / gets_since as f32
+                } else {
+                    0.0
+                };
+
                 info!(
-                    "stats dump [elapsed {:?}, put/s: {:.3}, get/s: {:.3}, window: {:?}, total puts: {}, total gets: {}]",
+                    "stats dump [elapsed {:?}, put/s: {:.3} ({:.3} MiB/s), get/s: {:.3} ({:.3} MiB/s), get db hit ratio: {:.3}%, window: {:?}, total puts: {}, total gets: {}]",
                     range.end.duration_since(first_dump_start.unwrap()).as_secs_f64(),
                     put_rate,
+                    put_bytes_rate / 1_048_576.0,
                     get_rate,
+                    get_bytes_rate / 1_048_576.0,
+                    get_hit_pct * 100f32,
                     range.end - range.start,
                     puts,
                     gets,

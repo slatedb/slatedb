@@ -22,7 +22,8 @@ has_gnuplot() {
 run_bench() {
   local put_percentage="$1"
   local concurrency="$2"
-  local log_file="$3"
+  local num_keys="$3"
+  local log_file="$4"
 
   local clean_flag=""
   if [ -n "${SLATEDB_BENCH_CLEAN:-}" ]; then
@@ -37,6 +38,7 @@ run_bench() {
     --block-cache-size 134217728 \
     --put-percentage $put_percentage \
     --concurrency $concurrency \
+    --key-count $num_keys \
   "
 
   $bench_cmd | tee "$log_file"
@@ -48,9 +50,14 @@ generate_dat() {
 
     echo "Parsing stats for $input_file -> $output_file"
 
-    cat "$input_file" | \
-      grep 'stats dump' | \
-      sed 's/.*elapsed \([^,]*\), put\/s: \([^,]*\), get\/s: \([^,]*\).*/\1 \2 \3/' > "$output_file"
+    # Extract elapsed time, puts/s, and gets/s using awk to handle additional fields like MiB/s and hit rate
+    awk '/stats dump/ {
+        if (match($0, /elapsed ([0-9.]+)/, a) &&
+            match($0, /put\/s: ([0-9.]+)/, b) &&
+            match($0, /get\/s: ([0-9.]+)/, c)) {
+            printf "%s %s %s\n", a[1], b[1], c[1];
+        }
+    }' "$input_file" > "$output_file"
 }
 
 generate_plot() {
@@ -133,17 +140,18 @@ if [ "$CLOUD_PROVIDER" = "local" ]; then
 fi
 
 for put_percentage in 20 40 60 80 100; do
-  for concurrency in 1 4; do
+  for concurrency in 1 32; do
     log_file="$OUT/logs/${put_percentage}_${concurrency}.log"
     dat_file="$OUT/dats/${put_percentage}_${concurrency}.dat"
     svg_file="$OUT/plots/${put_percentage}_${concurrency}.svg"
+    num_keys=$((put_percentage * 1000))
 
-    run_bench "$put_percentage" "$concurrency" "$log_file"
+    run_bench "$put_percentage" "$concurrency" "$num_keys" "$log_file"
     generate_dat "$log_file" "$dat_file"
     if has_gnuplot; then
-      generate_plot "$dat_file" "$svg_file"
+        generate_plot "$dat_file" "$svg_file"
     else
-      echo "gnuplot is missing, so skipping plot generation"
+        echo "gnuplot is missing, so skipping plot generation"
     fi
   done
 done
