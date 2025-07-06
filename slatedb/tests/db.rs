@@ -92,7 +92,7 @@ async fn test_concurrent_writers_and_readers() {
 
                 loop {
                     // Pick a random key and validate that it's higher than the last value for that key
-                    let key = rng.gen_range(0..NUM_WRITERS);
+                    let key = rng.random_range(0..NUM_WRITERS);
                     if let Some(bytes) = db
                         .get(zero_pad_key(key.try_into().unwrap(), KEY_LENGTH))
                         .await
