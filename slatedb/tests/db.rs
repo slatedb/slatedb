@@ -88,7 +88,7 @@ async fn test_concurrent_writers_and_readers() {
             tokio::spawn(async move {
                 let mut latest_values = HashMap::<usize, AtomicU64>::new();
                 let mut iterations = 0;
-                let mut rng = StdRng::from_entropy();
+                let mut rng = StdRng::from_os_rng();
 
                 loop {
                     // Pick a random key and validate that it's higher than the last value for that key
