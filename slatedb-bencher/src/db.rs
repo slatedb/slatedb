@@ -60,6 +60,11 @@ const REPORT_INTERVAL: Duration = Duration::from_millis(100);
 /// The size of each window.
 const WINDOW_SIZE: Duration = Duration::from_secs(10);
 
+/// Maximum number of randomly generated keys to keep track of for reuse in
+/// [`RandomKeyGenerator`]. Once this limit is reached, newly generated keys
+/// will replace a randomly selected existing key.
+const MAX_RANDOM_USED_KEYS: usize = 10_000;
+
 /// A key generator trait that generates keys for the benchmarker.
 pub trait KeyGenerator: Send {
     /// Generate and return the next key that should be used in the workload.
@@ -95,8 +100,15 @@ impl KeyGenerator for RandomKeyGenerator {
         let mut bytes = vec![0u8; self.key_len_bytes];
         self.rng.fill_bytes(bytes.as_mut_slice());
         let key = Bytes::copy_from_slice(bytes.as_slice());
-        // Track the generated key so that it can be sampled later.
-        self.used_keys.push(key.clone());
+        // Track the generated key so that it can be sampled later. Keep the
+        // list bounded to `MAX_RANDOM_USED_KEYS` entries by randomly replacing
+        // an existing key once the limit is reached.
+        if self.used_keys.len() < MAX_RANDOM_USED_KEYS {
+            self.used_keys.push(key.clone());
+        } else {
+            let idx = self.rng.random_range(0..self.used_keys.len());
+            self.used_keys[idx] = key.clone();
+        }
         key
     }
 
