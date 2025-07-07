@@ -127,6 +127,10 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 - [ ] Merge operator ([#328](https://github.com/slatedb/slatedb/issues/328))
 - [x] Clones ([#49](https://github.com/slatedb/slatedb/issues/49))
 
+## Projects
+
+Check out [CONTRIBUTING.md](CONTRIBUTING.md) for fun (and useful) projects to work on.
+
 ## Adopters
 
 See who's using SlateDB.
